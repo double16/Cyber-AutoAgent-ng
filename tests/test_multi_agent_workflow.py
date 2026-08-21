@@ -385,6 +385,62 @@ def test_successful_artifact_outcomes_are_retained_as_task_evidence(monkeypatch)
     assert any(event["type"] == "task_durable_evidence_retained" for event in controller.runtime.callback_handler.events)
 
 
+def test_controller_seeds_secret_candidate_only_from_target_scoped_tool_outcomes(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    task = Task(
+        task_uid="task",
+        title="Inspect config",
+        objective="Inspect target configuration",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, tasks=[task])
+    )
+    stored = []
+    monkeypatch.setattr(
+        workflow_mod,
+        "detect_secret_exposures",
+        lambda _ref: [SimpleNamespace(kind="connection_string", digest="a" * 64)],
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "store_finding",
+        lambda **payload: stored.append(payload) or '{"finding_ref":"finding:seeded"}',
+    )
+    outcome = ToolOutcome(
+        1,
+        "request",
+        "http_request",
+        True,
+        False,
+        "",
+        "",
+        artifact_refs=("artifact:artifacts/config.txt",),
+        structured_input={"url": "http://target.test/api/config"},
+    )
+
+    controller._seed_secret_exposure_candidates(plan, task, [outcome])
+    controller._seed_secret_exposure_candidates(
+        plan,
+        task,
+        [ToolOutcome(2, "read", "read_artifact", True, False, "", "", artifact_refs=outcome.artifact_refs)],
+    )
+
+    assert len(stored) == 1
+    assert stored[0]["target"] == "http://target.test/api/config"
+    assert stored[0]["evidence_assertions"][0]["digest"] == "a" * 64
+    assert any(event["type"] == "secret_exposure_candidate_created" for event in controller.runtime.callback_handler.events)
+
+
 def test_candidate_dependent_phase_closes_without_speculative_task_creation(monkeypatch):
     plan = OperationPlan(
         objective="assess",
@@ -4637,6 +4693,62 @@ def test_rejected_acceptance_does_not_use_missing_acceptance_recovery():
     assert not any(
         event.get("reason") == "missing_acceptance" for event in controller.runtime.callback_handler.events
     )
+
+
+def test_acceptance_correction_turn_limits_tools_to_read_then_accept():
+    task = Task(task_uid="acceptance-correction", title="Correct acceptance", objective="Assess endpoint", phase=1,
+                status="active")
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    calls = []
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        calls.append((prompt, run_policy, {workflow_mod.get_tool_name(tool) for tool in tools}))
+        if len(calls) == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="invalid acceptance",
+                outcomes=[ToolOutcome(
+                    1,
+                    "acceptance",
+                    "record_task_acceptance",
+                    False,
+                    False,
+                    '{"status":"unknown"}',
+                    "unknown enum value",
+                )],
+            )
+        state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id="criterion-1",
+            status="satisfied",
+            disposition="observation",
+            summary="Assessment is complete.",
+            evidence_refs=("memory:assessment",),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(
+            text="corrected acceptance",
+            outcomes=[ToolOutcome(
+                2,
+                "acceptance",
+                "record_task_acceptance",
+                True,
+                False,
+                '{"status":"satisfied"}',
+                "acceptance stored",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, *_args: '{"prompt":"assess endpoint","tools":[]}',
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(calls) == 2
+    assert calls[1][1].required_tool_names == {"record_task_acceptance"}
+    assert calls[1][2] <= {"read_artifact", "record_task_acceptance"}
 
 
 def test_task_executor_appends_selected_memories_from_prompt_spec():

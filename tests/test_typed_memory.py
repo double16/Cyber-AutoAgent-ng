@@ -651,6 +651,7 @@ def test_store_finding_schema_requires_artifacts():
         "literal_text",
         "byte_sequence",
         "json_value",
+        "secret_exposure",
     ]
     assert assertion_schema["properties"]["encoding"]["enum"] == ["hex", "base64"]
     assert assertion_schema["properties"]["operator"]["enum"] == ["exists", "equals", "contains"]

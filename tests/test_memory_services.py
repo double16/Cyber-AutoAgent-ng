@@ -2953,6 +2953,49 @@ def test_acceptance_disposition_aliases_are_normalized(value, expected):
     assert mod._normalize_acceptance_disposition_alias(value) == expected
 
 
+def test_detect_secret_exposures_returns_only_redaction_safe_fingerprints(fake_memory_client):
+    artifact = Path(mod._operation_output_root()) / "artifacts" / "target-config.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    secret = "postgres://user:password@db.example.test:5432/app"
+    artifact.write_text(f"HTTP/1.1 200 OK\n\n{{\"database\":\"{secret}\"}}", encoding="utf-8")
+
+    exposures = mod.detect_secret_exposures("artifact:artifacts/target-config.txt")
+
+    assert any(exposure.kind == "connection_string" for exposure in exposures)
+    assert secret not in str(exposures)
+    assert all(len(exposure.digest) == 64 for exposure in exposures)
+
+
+def test_detect_secret_exposures_ignores_redacted_and_short_placeholder_values(fake_memory_client):
+    artifact = Path(mod._operation_output_root()) / "artifacts" / "redacted-config.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text('api_key="redacted"\npassword=example\ntoken=short', encoding="utf-8")
+
+    assert mod.detect_secret_exposures("artifact:artifacts/redacted-config.txt") == []
+
+
+def test_secret_exposure_assertion_validates_without_persisting_raw_value(fake_memory_client):
+    artifact = Path(mod._operation_output_root()) / "artifacts" / "key-config.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    secret = "AIzaSyD2wIxpYCuNI0Zjt8kChs2hLTS5abVQfRQ"
+    artifact.write_text(f'{{"googlemaps":"{secret}"}}', encoding="utf-8")
+    exposure = mod.detect_secret_exposures("artifact:artifacts/key-config.txt")[0]
+
+    assertions = mod._validated_evidence_assertions(
+        [{
+            "artifact": "artifact:artifacts/key-config.txt",
+            "type": "secret_exposure",
+            "kind": exposure.kind,
+            "digest": exposure.digest,
+        }],
+        ["artifact:artifacts/key-config.txt"],
+        require_one=True,
+    )
+
+    assert assertions[0]["digest"] == exposure.digest
+    assert secret not in str(assertions)
+
+
 def test_bound_acceptance_tool_normalizes_aliases_before_validation(fake_memory_client):
     _client, store = fake_memory_client
     manifest = _write_inventory_manifest()

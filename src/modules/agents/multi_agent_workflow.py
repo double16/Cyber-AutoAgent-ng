@@ -92,6 +92,7 @@ from modules.tools.memory import (
     build_record_finding_validation_tool,
     build_record_task_acceptance_tool,
     canonical_artifact_reference,
+    detect_secret_exposures,
     finalize_finding_validation,
     finalize_objective_validation,
     finding_validation_outcome,
@@ -2611,6 +2612,7 @@ class MultiAgentWorkflowController:
                 "Use the controller-supplied durable evidence. Read at most one listed artifact if needed, then "
                 "call record_task_acceptance with a changed submission."
             ),
+            recovery_allowed_tool_names={"read_artifact", "record_task_acceptance"},
         )
         evaluator_synthesis_recovery_policy = AgentRunPolicy(
             min_tool_calls=0,
@@ -2890,7 +2892,8 @@ class MultiAgentWorkflowController:
                         if get_tool_name(tool) in current_policy.recovery_allowed_tool_names
                     ]
                     if (
-                        missing_acceptance_recovery_active
+                        acceptance_recovery_active
+                        or missing_acceptance_recovery_active
                         or evidence_prerequisite_recovery_active
                     )
                     else None
@@ -3021,6 +3024,7 @@ class MultiAgentWorkflowController:
                         )
                         break
                 if not execution_prerequisite_recovery_active and not output_prerequisite_recovery_active:
+                    self._seed_secret_exposure_candidates(plan, task, cycle_result.outcomes)
                     replay_failure, deferred_acceptance_failure_ids = (
                         self._reconcile_pending_controller_acceptance(
                             plan,
@@ -11450,6 +11454,81 @@ tools and durable evidence before relying on it."""
         self._clear_pending_controller_acceptance(task)
         self._emit_controller_acceptance_replay(task, outcome, "")
         return None
+
+    def _seed_secret_exposure_candidates(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        outcomes: List[ToolOutcome],
+    ) -> None:
+        """Persist redaction-safe candidates for secrets exposed by target-owned outcomes.
+
+        Tool outcomes are controller-scoped to the assigned target.  The
+        detector itself is protocol-neutral; it only receives artifacts after
+        this method establishes task and target provenance.
+        """
+
+        selected_targets = [
+            target
+            for target in plan.targets
+            if task.target_scope != "subset" or target.target_id in task.target_ids
+        ]
+        if len(selected_targets) != 1:
+            return
+        fallback_target = selected_targets[0].value
+        for outcome in outcomes:
+            if not outcome.success or outcome.tool_name in {"read_artifact", "retrieve_offloaded_content"}:
+                continue
+            submitted = outcome.structured_input or {}
+            target = str(submitted.get("url") or fallback_target)
+            for artifact_ref in outcome.artifact_refs:
+                for exposure in detect_secret_exposures(artifact_ref):
+                    try:
+                        result = json.loads(
+                            store_finding(
+                                title=f"Exposed {exposure.kind.replace('_', ' ')}",
+                                claim=(
+                                    "A secret-shaped value was exposed in a target-owned response or artifact; "
+                                    "independent validation is required before confirmation."
+                                ),
+                                severity="HIGH",
+                                target=target,
+                                technique="secret exposure",
+                                expected_result="The secret value is not exposed to the assigned requester.",
+                                observed_result=(
+                                    "A target-owned artifact contains a redaction-safe secret exposure fingerprint."
+                                ),
+                                reproduction_steps=[
+                                    "Retrieve the assigned target location using the recorded authorized method.",
+                                    "Inspect the resulting artifact for the independently fingerprinted exposure.",
+                                ],
+                                artifacts=[artifact_ref],
+                                evidence_assertions=[
+                                    {
+                                        "artifact": artifact_ref,
+                                        "type": "secret_exposure",
+                                        "kind": exposure.kind,
+                                        "digest": exposure.digest,
+                                    }
+                                ],
+                            )
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError) as error:
+                        self._emit_workflow_event({
+                            "type": "secret_exposure_candidate_skipped",
+                            "task_uid": task.task_uid,
+                            "artifact_ref": artifact_ref,
+                            "secret_kind": exposure.kind,
+                            "reason": self._short(str(error)),
+                        })
+                        continue
+                    self._emit_workflow_event({
+                        "type": "secret_exposure_candidate_created",
+                        "task_uid": task.task_uid,
+                        "artifact_ref": artifact_ref,
+                        "secret_kind": exposure.kind,
+                        "finding_ref": result.get("finding_ref", ""),
+                    })
 
     def _reconcile_pending_controller_acceptance(
         self,

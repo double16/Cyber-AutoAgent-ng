@@ -7,7 +7,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-
 _JSON_ESCAPES = frozenset('"\\/bfnrtu')
 _CODE_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
 
@@ -196,13 +195,14 @@ def _quoted_fenced_json_candidate(value: Any) -> str | None:
 def parse_json_response_with_metadata(text: str, *, require_object: bool = False) -> JSONParseResult:
     """Parse one unambiguous JSON value from a structured response.
 
-    A full valid response is preferred. Otherwise, exactly one balanced JSON value may
-    be extracted from surrounding prose or a Markdown code fence. This deliberately
-    rejects multiple values so a controller never guesses which decision to trust.
+    A full valid response is preferred. Otherwise, balanced JSON values may be
+    extracted from surrounding prose or a Markdown code fence. Invalid extracted
+    candidates are ignored; valid candidates must all resolve to the same value so a
+    controller never guesses which decision to trust.
     """
 
     if not isinstance(text, str):
-        raise ValueError("agent response must be text")
+        raise TypeError("agent response must be text")
 
     stripped = text.strip()
     try:
@@ -217,19 +217,28 @@ def parse_json_response_with_metadata(text: str, *, require_object: bool = False
                 parsed = json.loads(repair_json_text(quoted_fence))
             extracted = True
             repaired = True
-    except json.JSONDecodeError as initial_error:
+    except json.JSONDecodeError:
         candidates = _balanced_json_candidates(text)
-        if len(candidates) != 1:
-            if not candidates:
-                raise initial_error
+        valid_candidates: list[tuple[Any, bool]] = []
+        for candidate in candidates:
+            try:
+                parsed_candidate = json.loads(candidate.strip())
+                candidate_repaired = False
+            except json.JSONDecodeError:
+                try:
+                    parsed_candidate = json.loads(repair_json_text(candidate))
+                    candidate_repaired = True
+                except json.JSONDecodeError:
+                    continue
+            valid_candidates.append((parsed_candidate, candidate_repaired))
+
+        if not valid_candidates:
+            raise
+
+        parsed, repaired = valid_candidates[0]
+        if any(candidate != parsed for candidate, _ in valid_candidates[1:]):
             raise ValueError("response contained multiple JSON values")
-        candidate = candidates[0].strip()
-        try:
-            parsed = json.loads(candidate)
-            repaired = False
-        except json.JSONDecodeError:
-            parsed = json.loads(repair_json_text(candidate))
-            repaired = True
+        repaired = any(candidate_repaired for _, candidate_repaired in valid_candidates)
         extracted = True
     if require_object and not isinstance(parsed, dict):
         raise ValueError("agent response must be a JSON object")

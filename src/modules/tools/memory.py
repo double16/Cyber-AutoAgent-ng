@@ -91,6 +91,55 @@ from modules.tools.semantic_enum import normalize_semantic_enum
 # Set up logging
 logger = get_logger("Tools.Memory")
 
+
+@dataclass(frozen=True)
+class SecretExposure:
+    """A secret-shaped value found in a target-owned evidence artifact.
+
+    The value itself is deliberately excluded from the returned record. The
+    artifact remains the sole location that retains the value while the digest
+    lets independent validation prove the same exposure without copying it to
+    workflow state, telemetry, or reports.
+    """
+
+    kind: str
+    digest: str
+
+
+_SECRET_EXPOSURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("private_key", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")),
+    ("connection_string", re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s\"']+", re.I)),
+    ("jwt", re.compile(r"\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")),
+    ("provider_api_key", re.compile(r"\b(?:AIza[\w-]{20,}|sk-[\w-]{20,}|AKIA[0-9A-Z]{16})\b")),
+    ("named_secret", re.compile(
+        r"(?im)\b(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)\b\s*[:=]\s*[\"']?([^\s\"',}]{8,})"
+    )),
+)
+
+
+def detect_secret_exposures(artifact_ref: str) -> List[SecretExposure]:
+    """Return broad, redaction-safe secret matches from one canonical artifact.
+
+    Callers must establish that the artifact is target-owned before using these
+    matches to create a finding candidate. This helper intentionally makes no
+    protocol or target-scope inference.
+    """
+
+    reference = canonical_artifact_reference(artifact_ref)
+    try:
+        text = Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    matches: set[tuple[str, str]] = set()
+    for kind, pattern in _SECRET_EXPOSURE_PATTERNS:
+        for match in pattern.finditer(text):
+            value = match.group(1) if kind == "named_secret" and match.lastindex else match.group(0)
+            value = value.strip()
+            if len(value) < 8 or re.fullmatch(r"(?:redacted|masked|example|changeme|\*+)", value, re.I):
+                continue
+            matches.add((kind, hashlib.sha256(value.encode("utf-8")).hexdigest()))
+    return [SecretExposure(kind=kind, digest=digest) for kind, digest in sorted(matches)]
+
 # Global configuration and client
 _MEMORY_CONFIG: Optional[Dict[str, str]] = None
 _MEMORY_CLIENT: Optional["QdrantMemoryClient"] = None
@@ -3031,6 +3080,13 @@ def _assertion_matches_artifact(assertion: Dict[str, Any], reference: str) -> bo
                 if isinstance(actual, (str, list, dict))
                 else False
             )
+        if assertion_type == "secret_exposure":
+            kind = str(assertion.get("kind") or "")
+            digest = str(assertion.get("digest") or "")
+            return any(
+                exposure.kind == kind and exposure.digest == digest
+                for exposure in detect_secret_exposures(reference)
+            )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
         return False
     return False
@@ -3069,8 +3125,10 @@ def _validated_evidence_assertions(
         if reference not in allowed_artifacts:
             raise ValueError("evidence assertion artifact must be among the cited artifacts")
         assertion_type = str(assertion.get("type") or ("literal_text" if "marker" in assertion else "")).strip()
-        if assertion_type not in {"literal_text", "byte_sequence", "json_value"}:
-            raise ValueError("evidence assertion type must be literal_text, byte_sequence, or json_value")
+        if assertion_type not in {"literal_text", "byte_sequence", "json_value", "secret_exposure"}:
+            raise ValueError(
+                "evidence assertion type must be literal_text, byte_sequence, json_value, or secret_exposure"
+            )
         normalized: Dict[str, Any] = {"artifact": reference, "type": assertion_type}
         if assertion_type == "literal_text":
             value = _clean_memory_text(assertion.get("value", assertion.get("marker")), "evidence assertion value")
@@ -3085,7 +3143,7 @@ def _validated_evidence_assertions(
             if encoding not in {"hex", "base64"} or not value:
                 raise ValueError("byte_sequence evidence assertion requires value and encoding hex or base64")
             normalized.update({"encoding": encoding, "value": value})
-        else:
+        elif assertion_type == "json_value":
             pointer = str(assertion.get("pointer") or "")
             operator = str(assertion.get("operator") or "").lower().strip()
             if operator not in {"exists", "equals", "contains"}:
@@ -3095,6 +3153,12 @@ def _validated_evidence_assertions(
             normalized.update({"pointer": pointer, "operator": operator})
             if "expected" in assertion:
                 normalized["expected"] = assertion["expected"]
+        else:
+            kind = str(assertion.get("kind") or "").strip()
+            digest = str(assertion.get("digest") or "").lower().strip()
+            if not kind or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("secret_exposure evidence assertion requires kind and SHA-256 digest")
+            normalized.update({"kind": kind, "digest": digest})
         if not _assertion_matches_artifact(normalized, reference):
             raise ValueError(f"evidence assertion was not satisfied by {reference}")
         if normalized not in validated:
@@ -3493,7 +3557,7 @@ def _record_source_task_finding_receipt(
                             "artifact": {"type": "string"},
                             "type": {
                                 "type": "string",
-                                "enum": ["literal_text", "byte_sequence", "json_value"],
+                                "enum": ["literal_text", "byte_sequence", "json_value", "secret_exposure"],
                             },
                             "marker": {"type": "string"},
                             "value": {},
@@ -3501,6 +3565,8 @@ def _record_source_task_finding_receipt(
                             "pointer": {"type": "string"},
                             "operator": {"type": "string", "enum": ["exists", "equals", "contains"]},
                             "expected": {},
+                            "kind": {"type": "string"},
+                            "digest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
                         },
                         "oneOf": [
                             {"required": ["artifact", "marker"]},
@@ -3515,6 +3581,10 @@ def _record_source_task_finding_receipt(
                             {
                                 "properties": {"type": {"const": "json_value"}},
                                 "required": ["artifact", "type", "pointer", "operator"],
+                            },
+                            {
+                                "properties": {"type": {"const": "secret_exposure"}},
+                                "required": ["artifact", "type", "kind", "digest"],
                             },
                         ],
                     },
@@ -3727,7 +3797,11 @@ def _load_finding_validation_guards() -> List[Dict[str, Any]]:
             or not isinstance(claim_terms, list)
             or not all(isinstance(term, str) and term.strip() for term in claim_terms)
             or (not confirmation_requirement and sum(bool(value) for value in (all_of, any_of, json_shape)) != 1)
-            or (confirmation_requirement and confirmation_requirement not in {"response_comparison", "rate_limit_probe"})
+            or (
+                confirmation_requirement
+                and confirmation_requirement
+                not in {"response_comparison", "rate_limit_probe", "secret_exposure_revalidation"}
+            )
             or (json_shape and json_shape not in {"flat_json_object"})
         ):
             raise ValueError(f"finding validation guard rule {rule_id or '<unknown>'} is invalid")
@@ -3883,6 +3957,20 @@ def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -
                     raise ValueError("rate-limit probe contains throttling or lockout evidence")
                 normalized_attempts.append(signature)
             derived[rule_id] = {"attempt_count": len(normalized_attempts), "attempts": normalized_attempts}
+        elif requirement["kind"] == "secret_exposure_revalidation":
+            reexposure_ref = check.get("reexposure_artifact", "")
+            candidate_assertions = list(candidate.get("evidence_assertions") or [])
+            secret_assertions = [
+                {**assertion, "artifact": reexposure_ref}
+                for assertion in candidate_assertions
+                if isinstance(assertion, dict) and assertion.get("type") == "secret_exposure"
+            ]
+            if not secret_assertions or not all(
+                _assertion_matches_artifact(assertion, reexposure_ref)
+                for assertion in secret_assertions
+            ):
+                raise ValueError("secret exposure revalidation requires the same exposure in a fresh artifact")
+            derived[rule_id] = {"reexposure_artifact": _validated_artifact_paths([reexposure_ref], require_one=True)[0]}
     return {
         "manifest": manifest_ref,
         "requirements": requirements,

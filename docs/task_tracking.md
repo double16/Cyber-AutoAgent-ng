@@ -306,6 +306,12 @@ unfinished validations remain visible in the final report under **Findings Requi
 report agents can inspect operation artifacts with the read-only `read_artifact` tool, limited by
 `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation).
 
+Target-owned artifacts are also checked for broad secret-exposure patterns. The detector retains only a secret type
+and SHA-256 fingerprint in workflow state; raw values remain solely in the evidence artifact. A match from a
+successful, target-scoped tool outcome creates a validation-required finding candidate. Local context, user input,
+and unproven artifacts do not qualify. Independent validation must re-establish exposure without using the secret to
+access another system.
+
 Operation-objective candidates use a separate lifecycle. `store_objective_candidate` creates an
 `objective_validation` task, and `record_objective_validation` records confirmed, rejected, or inconclusive objective
 status with confidence and artifacts. Candidate registration rejects values absent from the cited artifact and values
