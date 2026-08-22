@@ -2199,6 +2199,47 @@ class MultiAgentWorkflowController:
                 capabilities.update(_SHELL_EXECUTION_CAPABILITIES.get(command, frozenset()))
         return capabilities
 
+    def _task_creator_capability_context(self) -> str:
+        """Render controller-derived procedure capabilities for the task creator."""
+
+        capabilities = sorted(self._available_task_execution_capabilities())
+        if not capabilities:
+            return (
+                "\nNo executor procedure capabilities are currently available. Do not invent a procedure "
+                "method; create only eligible snapshot work.\n"
+            )
+        return (
+            "\nExecutor procedure capabilities (controller-derived): "
+            f"{json.dumps(capabilities)}. Every procedure `methods` entry must use one of these exact values; "
+            "tool names such as `shell` and `file_read` are not procedure capabilities.\n"
+        )
+
+    def _validate_task_creation_feasibility(
+        self,
+        phase: PlanPhase,
+        batches: List[TaskCreationBatch],
+    ) -> None:
+        """Fail before model retries when no controller-approved task basis can execute."""
+
+        available_capabilities = sorted(self._available_task_execution_capabilities())
+        snapshot_batch_available = any(batch.snapshot_ref for batch in batches)
+        if available_capabilities or snapshot_batch_available:
+            return
+        payload = {
+            "type": "task_creation_feasibility",
+            "phase": phase.id,
+            "outcome": "blocked",
+            "code": "no_execution_path",
+            "available_capabilities": available_capabilities,
+            "blocked_requirements": ["executor_procedure_capability", "eligible_snapshot"],
+            "snapshot_batch_available": snapshot_batch_available,
+        }
+        self._emit_workflow_event(payload)
+        raise WorkflowInvariantError(
+            f"Task creation has no executable basis for phase {phase.id}: "
+            "no executor procedure capabilities or eligible snapshot batch are available"
+        )
+
     def _validate_generated_task_proposals(self, phase: PlanPhase, proposals: List[Any]) -> None:
         """Reject proposals that cannot satisfy controller-owned execution prerequisites."""
 
@@ -2263,7 +2304,7 @@ class MultiAgentWorkflowController:
 
         feedback = []
         procedure = task.acceptance.basis.procedure
-        if procedure is not None:
+        if procedure is not None and self._task_planning_role(task) != "synthesis":
             available_capabilities = self._available_task_execution_capabilities()
             missing = [
                 method
@@ -7543,6 +7584,7 @@ review existing memories. Return only the requested JSON decision."""
             self.state.list_tasks(phase=phase.id, status=["active", "pending"])
         )
         batches = self._task_creation_batches(plan, phase, system_prompt)
+        self._validate_task_creation_feasibility(phase, batches)
         run_policy = AgentRunPolicy(
             required_tool_names={"create_tasks"},
             terminal_after_required_tools=True,
@@ -8060,6 +8102,7 @@ review existing memories. Return only the requested JSON decision."""
                 "task summaries, and inferred vulnerability names are not substitutes.\n"
             )
         phase_task_contract_context = self._phase_task_contract_prompt(phase)
+        capability_context = self._task_creator_capability_context()
         procedure_rules = f"""- For bounded procedure work, supply non-empty `methods`, `snapshot_refs: []`, and one or more positive integer
   `limits`; the only `limits` keys are {", ".join(DISCOVERY_PROCEDURE_LIMIT_KEYS)}. Python supplies source references,
   stop condition, gap policy, and evidence requirements. Set `output_kind: "inventory_manifest"` only for canonical
@@ -8116,6 +8159,7 @@ immutable acceptance contract. Never emit `acceptance`, `phase`, `status`, `targ
 
 Acceptance basis rules:
 {procedure_rules if not snapshot_only else snapshot_rules}
+{capability_context}
 Route atomicity:
 - An ordinary HTTP procedure proposal must name exactly one endpoint route. Submit separate proposals for distinct
   routes, even when they test the same vulnerability class. A multi-route proposal is allowed only for a genuine,
@@ -8245,6 +8289,19 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
                 "- FIX: For every procedure proposal add a non-empty `methods` array and positive integer "
                 "`limits`; use `snapshot_refs` only for an existing frozen artifact.\n"
             )
+        if "task_preflight:execution_capability" in lower_reason:
+            available_capabilities = sorted(self._available_task_execution_capabilities())
+            if available_capabilities:
+                common_fixes += (
+                    "- FIX: Replace every unavailable procedure method with one of these exact controller-approved "
+                    f"capabilities: {json.dumps(available_capabilities)}. Tool names such as `shell` are not "
+                    "procedure capabilities.\n"
+                )
+            else:
+                common_fixes += (
+                    "- FIX: No executor procedure capability is currently available. Do not invent a replacement "
+                    "method; submit only eligible snapshot work.\n"
+                )
         if "requires at least one discovery procedure limit" in lower_reason:
             common_fixes += (
                 "- FIX: For every procedure proposal either omit `limits` to use the bounded defaults or supply "

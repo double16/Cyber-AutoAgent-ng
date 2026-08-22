@@ -11,7 +11,7 @@ from modules.config.models.agent_profiles import (
     reset_agent_settings_registry,
 )
 from modules.handlers.max_token_recovery import MaxTokenClassification
-from modules.handlers.report_generator import _format_parameter_adjustments_appendix
+from modules.handlers.report_generator import _format_parameter_adjustments_section
 
 
 def test_multi_agent_adaptation_e2e_scenario():
@@ -61,8 +61,14 @@ def test_multi_agent_adaptation_e2e_scenario():
     assert promoted_3 is True
     assert registry.get_settings("task_evaluator").max_tokens == 6144
 
-    # Generate Appendix C and verify all adaptations are present
-    appendix_c = _format_parameter_adjustments_appendix(registry)
-    assert "## APPENDIX C: MODEL & AGENT PARAMETER ADJUSTMENTS" in appendix_c
-    assert "| `plan_creator` | `reasoning_level` | `medium` | `none` | reasoning loop recovery success | True |" in appendix_c
-    assert "| `task_evaluator` | `max_tokens` | `4096` | `6144` | 3-strike token exhaustion escalation | True |" in appendix_c
+    # Render the Appendix A subsection and verify all adaptations are present.
+    adjustments = _format_parameter_adjustments_section(registry)
+    assert "### Model & Agent Parameter Adjustments" in adjustments
+    assert (
+        "| `plan_creator` | `reasoning_level` | `medium` | `none` | "
+        "reasoning loop recovery success | True |" in adjustments
+    )
+    assert (
+        "| `task_evaluator` | `max_tokens` | `4096` | `6144` | "
+        "3-strike token exhaustion escalation | True |" in adjustments
+    )

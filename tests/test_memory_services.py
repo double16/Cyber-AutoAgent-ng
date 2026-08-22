@@ -1161,6 +1161,51 @@ def test_task_proposal_explicit_limits_override_defaults():
     assert proposal.limits.max_duration_minutes is None
 
 
+def test_task_proposal_scalar_positive_limit_normalizes_to_max_requests():
+    payload = task_proposal("Check", "Check target")
+    payload["limits"] = 7
+
+    proposal = mod.TaskProposal.model_validate(payload)
+
+    assert proposal.limits.max_requests == 7
+    assert proposal.limits.max_duration_minutes is None
+
+
+def test_create_tasks_tool_accepts_scalar_positive_limits(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Check", status="active")],
+    )
+    proposal = task_proposal("Check", "Check target")
+    proposal["limits"] = 7
+
+    result = json.loads(mod.build_create_tasks_tool()(tasks=[proposal]))
+
+    assert result["created_count"] == 1
+    assert store.tasks[0].acceptance.basis.procedure.limits["max_requests"] == 7
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "7"])
+def test_task_proposal_rejects_invalid_scalar_limit_values(value):
+    payload = task_proposal("Check", "Check target")
+    payload["limits"] = value
+
+    with pytest.raises(ValueError):
+        mod.TaskProposal.model_validate(payload)
+
+
+def test_snapshot_task_proposal_discards_scalar_limits():
+    payload = task_proposal("Review", "Review stored evidence", evidence_kind="memory")
+    payload.update({"methods": [], "limits": 7, "snapshot_refs": ["memory:m1"]})
+
+    proposal = mod.TaskProposal.model_validate(payload)
+
+    assert proposal.limits.model_dump(exclude_none=True) == {}
+
+
 def test_snapshot_task_proposal_discards_default_limits():
     payload = task_proposal("Review", "Review stored evidence", evidence_kind="memory")
     payload.update({"methods": [], "snapshot_refs": ["memory:m1"]})

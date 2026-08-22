@@ -409,6 +409,9 @@ basis, source references, unique criteria, and evidence requirements. The rules 
 - provide exactly one criterion description; Python generates its ID and evidence requirement in the frozen contract
 - provide procedure methods and positive limits, or provide existing snapshot references; snapshot-only limits and
   output kinds are ignored
+- use only controller-advertised canonical procedure capabilities in `methods` (for example `request`, `crawl`, or
+  `analyze`), never raw tool names such as `shell`; when no such capability or eligible snapshot exists, Python
+  blocks task creation before model retries
 - omit `target_ids` for all targets or provide exact IDs for a subset
 - do not create duplicates; Python also skips proposals with an exact frozen contract match
 - do not reduce task coverage based only on likelihood or convenience

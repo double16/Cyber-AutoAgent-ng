@@ -303,7 +303,7 @@ class AgentSettingsRegistry:
         """Update the reasoning level for an agent role following a recovery event.
 
         Always updates the active profile so immediate retries and subsequent calls use target_level.
-        If permanent=True, additionally logs a parameter adjustment record for Appendix C.
+        If permanent=True, additionally logs a parameter adjustment record for Appendix A.
         """
         with self._lock:
             canonical = normalize_agent_type(agent_type)

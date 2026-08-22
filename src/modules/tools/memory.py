@@ -4796,7 +4796,8 @@ class TaskProposal(_StrictTaskWireModel):
             if "objective" in normalized:
                 normalized.pop("description")
 
-        # Handle limits as list
+        # Normalize a common local-model shorthand while keeping the canonical
+        # wire representation an object.
         limits = normalized.get("limits")
         if isinstance(limits, list):
             logger.info("Normalizing task proposal limits -> dict")
@@ -4805,6 +4806,9 @@ class TaskProposal(_StrictTaskWireModel):
                 normalized["limits"] = dict(DEFAULT_TASK_PROPOSAL_LIMITS)
             else:
                 normalized["limits"] = {}
+        elif isinstance(limits, int) and not isinstance(limits, bool):
+            normalized["limits"] = {"max_requests": limits}
+            logger.info("Normalized scalar task proposal limits -> max_requests")
         elif isinstance(limits, dict):
             # Remove common hallucinations in limits
             for extra_limit in ["discovery_procedure_limits", "scope"]:

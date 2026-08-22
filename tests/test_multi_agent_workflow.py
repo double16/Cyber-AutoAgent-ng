@@ -8858,8 +8858,10 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
         captured["prompt"] = prompt
         state.store_task(Task(task_uid="created", title="Created", objective="run", phase=1, status="pending"))
 
+    runtime = _runtime()
+    runtime.config.available_tools = ["curl"]
     controller = MultiAgentWorkflowController(
-        runtime=_runtime(),
+        runtime=runtime,
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=state,
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
@@ -8883,6 +8885,7 @@ def test_task_creator_uses_controller_prompt_with_complete_plan_and_contract():
     assert "Canonical inventory manifest contract" in captured["prompt"]
     assert "Workflow maps, reports, and arbitrary JSON outputs are artifact evidence" in captured["prompt"]
     assert "unsupported top-level `description` fields" in captured["prompt"]
+    assert 'Executor procedure capabilities (controller-derived): ["analyze", "request"]' in captured["prompt"]
     example = captured["prompt"].split("```json\n", 1)[1].split("\n```", 1)[0]
     example_task = json.loads(example)["tasks"][0]
     assert "basis_kind" not in example_task
@@ -9318,6 +9321,96 @@ def test_task_creator_repair_prompt_explains_missing_procedure_limits():
 
     assert "omit `limits` to use the bounded defaults" in repair
     assert '"limits": {"max_requests": 50}' in repair
+
+
+def test_task_creator_repair_prompt_explains_unavailable_execution_capability():
+    runtime = _runtime()
+    runtime.config.available_tools = ["katana"]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+
+    repair = controller._task_creator_repair_prompt(
+        "task_preflight:execution_capability: no available runtime capability for shell (shell)",
+        "",
+    )
+
+    assert '["analyze", "crawl"]' in repair
+    assert "Tool names such as `shell` are not procedure capabilities" in repair
+
+
+def test_task_creation_fails_before_model_retry_without_execution_path(monkeypatch):
+    runtime = _runtime()
+    runtime.config.available_tools = []
+    calls = []
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        work_runner=lambda *_args: calls.append("task_creator"),
+        executor_session_factory=retained_work_runner(lambda *_args: calls.append("task_creator")),
+    )
+    monkeypatch.setattr(controller, "_available_task_execution_capabilities", lambda: set())
+
+    with pytest.raises(WorkflowInvariantError, match="no executable basis"):
+        controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert calls == []
+    assert {
+        "type": "task_creation_feasibility",
+        "phase": 1,
+        "outcome": "blocked",
+        "code": "no_execution_path",
+        "available_capabilities": [],
+        "blocked_requirements": ["executor_procedure_capability", "eligible_snapshot"],
+        "snapshot_batch_available": False,
+    } in runtime.callback_handler.events
+
+
+def test_controller_owned_synthesis_skips_executor_capability_drift_check():
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(
+            kind="procedure",
+            description="Controller-owned synthesis",
+            source_refs=["plan:phase-1"],
+            procedure={
+                "methods": ["controller_synthesis"],
+                "limits": {"max_items": 1},
+                "stop_condition": "first_limit_reached",
+                "gap_policy": "record_unassessed",
+                "output_kind": "artifact",
+            },
+        ),
+        criteria=[
+            AcceptanceCriterion(
+                id="synthesis-outcome",
+                description="Store the synthesized artifact",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )
+        ],
+    )
+    task = Task(
+        task_uid="synthesis",
+        title="Synthesize",
+        objective="Merge outputs",
+        phase=1,
+        status="active",
+        acceptance=acceptance,
+        recovery_context={
+            "task_preflight_validated": True,
+            "phase_task_contract": {"task_role": "synthesis"},
+        },
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+
+    assert controller._task_pre_execution_feedback(task) == []
 
 
 def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():

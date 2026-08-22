@@ -2727,7 +2727,8 @@ Narrative context:
         + _format_operation_tasks(sections.get("operation_tasks"))
         + "\n\n### Methodology Limitations\n\n"
         + _completion_status_notice(sections.get("completion_status", {})).strip()
-        + "\n"
+        + "\n\n"
+        + _format_parameter_adjustments_section()
     )
     methodology_file = os.path.join(output_path, "report_methodology.md")
     with open(methodology_file, "w") as f:
@@ -2860,30 +2861,11 @@ Canonical operation data:
         f.write(next_steps_content)
     report_parts_files.append(next_steps_file)
 
-    # Deterministically generate Appendix C: Model & Agent Parameter Adjustments
-    param_adjustments_content = _format_parameter_adjustments_appendix()
-    param_adjustments_file = os.path.join(output_path, "report_parameter_adjustments.md")
-    with open(param_adjustments_file, "w") as f:
-        f.write(param_adjustments_content)
-    report_parts_files.append(param_adjustments_file)
-
-    # Appendix C is deterministic and visible in report progress, but it must
-    # not count as an additional LLM budget/accounting step.
-    report_step_index += 1
-    _emit_report_progress(
-        callback_handler,
-        operation_id,
-        report_step_index,
-        report_step_total,
-        "parameter_adjustments",
-        "Appendix C: Model & Agent Parameter Adjustments",
-    )
-
     return report_step_index
 
 
-def _format_parameter_adjustments_appendix(registry: Optional[Any] = None) -> str:
-    """Render Appendix C: Model & Agent Parameter Adjustments into deterministic Markdown."""
+def _format_parameter_adjustments_section(registry: Optional[Any] = None) -> str:
+    """Render the model and agent parameter-adjustment subsection of Appendix A."""
     from modules.config.models.agent_profiles import get_agent_settings_registry
 
     reg = registry or get_agent_settings_registry()
@@ -2891,9 +2873,7 @@ def _format_parameter_adjustments_appendix(registry: Optional[Any] = None) -> st
     adjustments = reg.export_adjustment_records()
 
     parts = [
-        _PAGE_BREAK,
-        '<a name="appendix-c-model-agent-parameter-adjustments"></a>\n',
-        "## APPENDIX C: MODEL & AGENT PARAMETER ADJUSTMENTS\n\n",
+        "### Model & Agent Parameter Adjustments\n\n",
         "This appendix documents initial baseline model parameters, runtime parameter adaptations "
         "(such as reasoning loop recovery and token limit escalations), and provider capability fallback events.\n\n",
         "### Agent Role Configurations\n\n",
@@ -2959,8 +2939,7 @@ def _assemble_security_assessment_report(
         final_f.write("- [Target Coverage](#target-coverage)\n")
         final_f.write("- [Execution History](#execution-history)\n")
         final_f.write("- [Appendix A: Assessment Methodology](#appendix-a-assessment-methodology)\n")
-        final_f.write("- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n")
-        final_f.write("- [Appendix C: Model & Agent Parameter Adjustments](#appendix-c-model-agent-parameter-adjustments)\n\n")
+        final_f.write("- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n\n")
         final_f.write(completion_notice)
 
         for part_file in report_parts_files:
@@ -3035,6 +3014,8 @@ def _format_deterministic_methodology(
         )
         + "\n\n*Efficiency = 100 × model inferences ÷ (model inferences + correction loops), including every "
         + "max-token exhaustion.*\n"
+        + "\n"
+        + _format_parameter_adjustments_section()
     )
 
 
@@ -3188,7 +3169,6 @@ def generate_deterministic_fallback_report(
             str(sections.get("execution_history") or "## EXECUTION HISTORY\n\nNo task history was recorded.") + "\n\n",
             _format_deterministic_methodology(sections, model_metrics),
             _format_next_steps_appendix(next_steps),
-            _format_parameter_adjustments_appendix(),
             f"\n- Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n",
             f"- Operation ID: {operation_id}\n",
         ]
@@ -3416,9 +3396,8 @@ def generate_security_report(
             [finding for _index, finding in report_findings]
         )
         sections["taxonomy_coverage"] = taxonomy_coverage
-        # Three model-authored global sections plus deterministic Appendix C,
-        # followed by any finding/validation-failure sections.
-        report_step_total = 4 + len(report_findings) + len(report_validation_failures)
+        # Three model-authored global sections followed by any finding/validation-failure sections.
+        report_step_total = 3 + len(report_findings) + len(report_validation_failures)
         report_step_index = 0
 
         # Part 1: Executive Summary
