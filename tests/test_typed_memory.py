@@ -338,6 +338,30 @@ def test_store_finding_persists_internal_task_bound_evidence_receipts(memory_cli
     assert stored[2:5] == (task.task_uid, "artifact:response.txt", "admin data")
 
 
+def test_finding_fingerprint_ignores_model_authored_title_variants():
+    first = mod._finding_fingerprint(
+        "Exposed connection string",
+        "A connection string is exposed by /api/config",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+    second = mod._finding_fingerprint(
+        "PostgreSQL Connection String Exposure",
+        "A connection string is exposed by /api/config",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+    distinct = mod._finding_fingerprint(
+        "Google Maps key exposure",
+        "An API key is exposed by /api/config",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+
+    assert first == second
+    assert first != distinct
+
+
 def test_typed_evidence_assertions_validate_binary_and_json_artifacts(tmp_path: Path):
     binary = tmp_path / "capture.bin"
     binary.write_bytes(b"prefix\x00\xffproofsuffix")
@@ -814,6 +838,40 @@ def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, o
     assert validation["outcome"] == "confirmed"
     assert validation["evidence_artifacts"] == ["artifact:response.txt"]
     assert acceptance_results[0].disposition == "existing_finding"
+
+
+@pytest.mark.parametrize(
+    ("reproduction_steps", "evidence_artifacts", "expected_error"),
+    [
+        ("Replay request", [], "reproduction_steps must be an array of strings"),
+        (["Replay request"], {}, "evidence_artifacts must be an array of artifact reference strings"),
+        (
+            ["Replay request"],
+            ["artifact:response.txt", {}],
+            "evidence_artifacts must be an array of artifact reference strings",
+        ),
+    ],
+)
+def test_record_finding_validation_rejects_malformed_payload_before_lookup(
+    reproduction_steps,
+    evidence_artifacts,
+    expected_error,
+    operation_ids,
+):
+    plan_store = MagicMock()
+    with patch("src.modules.tools.memory._get_database_store", return_value=plan_store), pytest.raises(
+        ValueError, match=expected_error
+    ):
+        record_finding_validation(
+            "finding-1",
+            "confirmed",
+            "Confirmed",
+            reproduction_steps,
+            "direct",
+            evidence_artifacts,
+        )
+
+    plan_store.get_finding.assert_not_called()
 
 
 def test_differential_confirmation_requires_control(tmp_path: Path, operation_ids):

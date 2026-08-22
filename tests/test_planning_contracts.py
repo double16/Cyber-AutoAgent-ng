@@ -7,7 +7,13 @@ from modules.operation_plugins.planning_contracts import (
     load_phase_task_contract,
     validate_phase_task_proposals,
 )
-from modules.tools.memory import TaskProposal, _TASK_PROPOSAL_INPUT_SCHEMA
+from modules.tools.memory import (
+    _TASK_PROPOSAL_INPUT_SCHEMA,
+    OperationPlan,
+    PlanPhase,
+    TaskProposal,
+    _proposal_acceptance_contract,
+)
 
 
 def _proposal(workstream, role="mapping", depends=(), reason=None, output_kind="artifact"):
@@ -46,6 +52,51 @@ def test_web_contract_accepts_distinct_mapping_tasks_and_inventory_synthesis():
             ),
         ],
     )
+
+
+def test_controller_owned_synthesis_proposal_requires_no_runtime_method():
+    proposal = TaskProposal.model_validate(
+        {
+            "title": "Synthesize canonical inventory",
+            "objective": "Merge the completed mapping outputs into the canonical inventory manifest",
+            "methods": [],
+            "limits": {"max_requests": 1},
+            "criteria": [{"description": "Store the canonical inventory manifest"}],
+            "workstream": "inventory_synthesis",
+            "task_role": "synthesis",
+            "depends_on_workstreams": ["entrypoint_technology", "bounded_crawl", "client_side_api"],
+            "output_kind": "inventory_manifest",
+        }
+    )
+
+    acceptance = _proposal_acceptance_contract(
+        proposal,
+        OperationPlan(
+            objective="Assess",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(id=1, title="Mapping", status="active")],
+        ),
+    )
+
+    assert proposal.methods == []
+    assert acceptance.basis.procedure.methods == ("controller_synthesis",)
+    assert acceptance.criteria[0].execution_requirements == ()
+
+
+def test_controller_owned_synthesis_rejects_invented_runtime_method():
+    with pytest.raises(ValueError, match="controller-owned synthesis"):
+        TaskProposal.model_validate(
+            {
+                "title": "Synthesize canonical inventory",
+                "objective": "Merge the completed mapping outputs into the canonical inventory manifest",
+                "methods": ["synthesis"],
+                "limits": {"max_requests": 1},
+                "criteria": [{"description": "Store the canonical inventory manifest"}],
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+            }
+        )
 
 
 @pytest.mark.parametrize(
@@ -179,6 +230,17 @@ def test_synthesis_must_depend_on_every_mapping_workstream():
                 "synthesis_output_kind": "unknown",
             },
             "synthesis_output_kind",
+        ),
+        (
+            {
+                "phase_id": 1,
+                "mode": "fanout_with_synthesis",
+                "min_mapping_tasks": 1,
+                "mapping_workstreams": ["a"],
+                "synthesis_workstream": "s",
+                "synthesis_execution": "runtime",
+            },
+            "synthesis_execution",
         ),
     ],
 )

@@ -2000,12 +2000,12 @@ def main():
                 try:
                     callback = getattr(agent, "_cyber_callback_handler", None)
                     recovery_hook = getattr(agent, "_cyber_failure_recovery_hook", None)
+                    journal = getattr(callback, "tool_outcome_journal", None)
 
                     def run_retained_executor(
                         prompt: str,
                         run_policy: Optional[AgentRunPolicy] = None,
                     ) -> TaskExecutorCycleResult:
-                        journal = getattr(callback, "tool_outcome_journal", None)
                         snapshot = journal.snapshot() if journal is not None else 0
                         try:
                             run_result, result_message = run_workflow_agent(agent, prompt, run_policy)
@@ -2057,6 +2057,9 @@ def main():
                             ),
                         )
 
+                    run_retained_executor.live_outcomes = (
+                        lambda: journal.entries() if journal is not None else []
+                    )
                     yield run_retained_executor
                 finally:
                     try:

@@ -39,3 +39,4 @@ planning:
         - auth_workflow
       synthesis_workstream: inventory_synthesis
       synthesis_output_kind: inventory_manifest
+      synthesis_execution: controller

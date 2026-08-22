@@ -165,6 +165,7 @@ def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
     assert "### Key Findings" in executive
     assert "### Claim Status" in executive
     assert "#### Evidence" in detail
+    assert "#### Impact Grounding" in detail
     assert "#### Attack Path Analysis\n\nNot established from supplied evidence" in detail
     assert "| 2 | Task | done | https://example.test | 1/1 |" in tasks
     assert "Unverified \\[claim\\]" in executive
@@ -173,6 +174,24 @@ def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
         {"phases": [{"id": 1, "title": "Mapping", "status": "done", "criteria": "Inventory routes"}]}
     )
     assert "| 1 | done | **Mapping:** Inventory routes |" in plan
+
+
+def test_finding_narrative_uses_recorded_validation_steps_and_impact_evidence():
+    finding = {
+        "title": "Configuration exposure",
+        "severity": "HIGH",
+        "content": "The endpoint returned configuration data.",
+        "metadata": {
+            "reproduction_steps": ["Request /api/config", "Observe the response"],
+            "impact_evidence_artifacts": ["artifact:artifacts/impact.txt"],
+        },
+    }
+
+    detail = _format_finding_with_narrative(finding, 0, "#### Impact\n\nDemonstrated impact.")
+
+    assert "1. Request /api/config" in detail
+    assert "2. Observe the response" in detail
+    assert "#### Impact Grounding" not in detail
 
 
 def test_report_progress_counts_only_llm_authored_sections():

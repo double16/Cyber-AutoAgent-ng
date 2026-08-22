@@ -118,7 +118,7 @@ current draft; rejection sends feedback to `plan_creator` for revision. The
 the final configured review fails the workflow so an unapproved plan is never persisted or executed.
 
 Task prompt generation uses the same bounded pattern. `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` defaults to
-two critic reviews and accepts `0` to disable critique. After JSON retries, malformed or unavailable builder/critic
+three critic reviews and accepts `0` to disable critique. After JSON retries, malformed or unavailable builder/critic
 output and non-scope prompt defects that survive one bounded repair use a deterministic controller task template.
 The template has no model-selected optional tools or shell commands, and selects only canonical memory references.
 The controller emits `task_prompt_fallback` for that recovery. Only a valid critic response explicitly identifying a

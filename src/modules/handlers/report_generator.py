@@ -1152,7 +1152,22 @@ def _format_finding_with_narrative(item: Dict[str, Any], index: int, narrative: 
     status = _escape_markdown_text(item.get("validation_status") or metadata.get("validation_status") or "verified")
     content = _format_markdown_xml_html_tags(str(item.get("content") or "No finding detail was recorded.").strip())
     parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
-    steps = _compact_text(parsed.get("steps") or metadata.get("steps"), 1200) or "Not established from supplied evidence"
+    recorded_steps = (
+        parsed.get("steps") or metadata.get("steps") or metadata.get("reproduction_steps")
+    )
+    if isinstance(recorded_steps, list):
+        recorded_steps = "\n".join(
+            f"{step_index}. {step}"
+            for step_index, step in enumerate(recorded_steps, 1)
+            if str(step).strip()
+        )
+    steps = _compact_text(recorded_steps, 1200) or "Not established from supplied evidence"
+    impact_grounding = ""
+    if not metadata.get("impact_evidence_artifacts"):
+        impact_grounding = (
+            "\n\n#### Impact Grounding\n\n"
+            "No independent impact artifact was recorded. Any impact beyond the demonstrated exposure is potential."
+        )
     return (
         f"### {title}\n\n"
         f"- **Severity:** {severity}\n"
@@ -1164,6 +1179,7 @@ def _format_finding_with_narrative(item: Dict[str, Any], index: int, narrative: 
         + steps
         + "\n\n"
         + narrative.strip()
+        + impact_grounding
         + "\n\n#### Attack Path Analysis\n\nNot established from supplied evidence\n\n"
         + _format_taxonomy_mappings(metadata.get("taxonomy", {}), metadata.get("taxonomy_annotation"))
     )

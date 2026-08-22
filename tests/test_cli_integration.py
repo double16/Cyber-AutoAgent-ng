@@ -2526,6 +2526,16 @@ def test_cli_main_worker_session_reuses_and_cleans_role_agent(
 ):
     callback = CliCallback()
     fake_agent = CallableCliAgent()
+    journal = ToolOutcomeJournal()
+    journal.append(
+        tool_use_id="prior-tool",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        tool_input={"command": "true"},
+        output="complete",
+    )
+    fake_agent._cyber_callback_handler = SimpleNamespace(tool_outcome_journal=journal)
     config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
     runner_result = cyberautoagent.AgentRunResult("task_executor_done", "worker finished")
     run_count = 0
@@ -2548,6 +2558,8 @@ def test_cli_main_worker_session_reuses_and_cleans_role_agent(
         session_factory = config_manager.workflow_controller.call_args.kwargs["executor_session_factory"]
         policy = cyberautoagent.AgentRunPolicy(min_tool_calls=1, terminal_after_required_tools=True)
         with session_factory(role, ["shell"], "role system") as run_executor:
+            assert callable(run_executor.live_outcomes)
+            assert [outcome.tool_use_id for outcome in run_executor.live_outcomes()] == ["prior-tool"]
             first_result = run_executor("first pass", policy)
             second_result = run_executor("critic guidance", policy)
             assert first_result.text == "first summary"

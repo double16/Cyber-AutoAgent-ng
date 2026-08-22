@@ -384,6 +384,9 @@ class TaskCreationBatch:
 
 def extract_json_object(text: str) -> Dict[str, Any]:
     """Parse a JSON object from an agent response."""
+
+    if not isinstance(text, str):
+        raise ValueError("agent response must be text")
     return parse_json_response(text, require_object=True)
 
 
@@ -1480,7 +1483,7 @@ class MultiAgentWorkflowController:
     def _task_prompt_refinement_iteration_count(self) -> int:
         config_manager = self.runtime.config_manager
         if config_manager:
-            return max(0, config_manager.getenv_int("CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS", 2))
+            return max(0, config_manager.getenv_int("CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS", 3))
         return 1
 
     def _task_execution_cycle_count(self) -> int:
@@ -2202,9 +2205,16 @@ class MultiAgentWorkflowController:
         contract = self._phase_task_contract(phase)
         if contract is not None and contract.phase_id != phase.id:
             raise ValueError("task_preflight:phase_alignment: active phase contract does not match the active phase")
+        if contract is not None and contract.mode == "fanout_with_synthesis":
+            if contract.synthesis_execution != "controller":
+                raise ValueError(
+                    "task_preflight:contract_unsatisfiable: synthesis contract requires unsupported execution mode"
+                )
         available_capabilities = self._available_task_execution_capabilities()
         for proposal in proposals:
             if getattr(proposal, "inferred_basis_kind", "") != "procedure":
+                continue
+            if getattr(proposal, "task_role", "") == "synthesis":
                 continue
             methods = list(getattr(proposal, "methods", []) or [])
             if not methods:
@@ -2340,6 +2350,28 @@ class MultiAgentWorkflowController:
         )
 
         tool_outcomes: List[ToolOutcome] = []
+        active_live_outcomes_reader: Optional[Callable[[], List[ToolOutcome]]] = None
+
+        def resolve_acceptance_execution_evidence(
+            current_task: Task,
+            criterion: AcceptanceCriterion,
+        ) -> Dict[str, List[str]]:
+            """Resolve evidence from completed outcomes, including the active executor cycle.
+
+            A task executor can call ``record_task_acceptance`` immediately after an
+            evidence-producing tool. That tool outcome is already present in the
+            executor's journal, but the controller has not yet received the cycle
+            result to append it to ``tool_outcomes``. Include the task-local live
+            journal snapshot so acceptance evaluates the completed call itself.
+            """
+
+            outcomes = list(tool_outcomes)
+            if active_live_outcomes_reader is not None:
+                for outcome in active_live_outcomes_reader():
+                    if not any(existing.tool_use_id == outcome.tool_use_id for existing in outcomes):
+                        outcomes.append(outcome)
+            return self._resolve_controller_execution_evidence(plan, current_task, criterion, outcomes)
+
         selected_tools = prompt_spec.get("tools", [])
         selected_tools = list(selected_tools) if isinstance(selected_tools, list) else []
         tools = build_role_tools(
@@ -2363,14 +2395,7 @@ class MultiAgentWorkflowController:
                 acceptance_tool = build_record_task_acceptance_tool(
                     task.task_uid,
                     task,
-                    execution_evidence_resolver=lambda current_task, criterion: (
-                        self._resolve_controller_execution_evidence(
-                            plan,
-                            current_task,
-                            criterion,
-                            tool_outcomes,
-                        )
-                    ),
+                    execution_evidence_resolver=resolve_acceptance_execution_evidence,
                 )
                 tools.append(acceptance_tool)
         execution_prompt = str(prompt_spec.get("prompt") or task.objective)
@@ -2822,12 +2847,20 @@ class MultiAgentWorkflowController:
                 policy: Optional[AgentRunPolicy],
                 tool_override: Optional[List[Any]] = None,
             ) -> Any:
-                with scoped_shell_command_validator(
-                    lambda commands: self._validate_task_shell_commands(plan, task, commands)
-                ):
-                    if tool_override is None:
-                        return executor(prompt, policy)
-                    return executor(prompt, policy, tool_override)
+                nonlocal active_live_outcomes_reader
+                live_outcomes_reader = getattr(executor, "live_outcomes", None)
+                active_live_outcomes_reader = (
+                    live_outcomes_reader if callable(live_outcomes_reader) else None
+                )
+                try:
+                    with scoped_shell_command_validator(
+                        lambda commands: self._validate_task_shell_commands(plan, task, commands)
+                    ):
+                        if tool_override is None:
+                            return executor(prompt, policy)
+                        return executor(prompt, policy, tool_override)
+                finally:
+                    active_live_outcomes_reader = None
 
             actor_prompt = execution_prompt
             maximum_actor_cycles = (
@@ -3286,6 +3319,17 @@ class MultiAgentWorkflowController:
                 if acceptance_recovery_active and successful_acceptance_calls:
                     acceptance_recovery_active = False
                 if repeated_tool_failure is not None:
+                    if repeated_tool_failure.tool_name == "record_finding_validation":
+                        replacement = self._create_reasoning_loop_replacement_task(task, tool_outcomes)
+                        if replacement is not None:
+                            self._queue_replacement_task(task, replacement, "finding_validation_submission_repair")
+                            self._log_workflow(
+                                "task validation submission superseded original=%s replacement=%s cycle=%s",
+                                self._task_label(task),
+                                self._task_label(replacement),
+                                cycle,
+                            )
+                            return
                     decision = WorkflowDecision(
                         status="partial_failure",
                         reason=(
@@ -3448,6 +3492,17 @@ class MultiAgentWorkflowController:
                     repeated_acceptance = repeated_acceptance or recovery_repeated_acceptance
                     repeated_tool_failure = repeated_correctable_failure(recovery_result.outcomes)
                     if repeated_tool_failure is not None:
+                        if repeated_tool_failure.tool_name == "record_finding_validation":
+                            replacement = self._create_reasoning_loop_replacement_task(task, tool_outcomes)
+                            if replacement is not None:
+                                self._queue_replacement_task(task, replacement, "finding_validation_submission_repair")
+                                self._log_workflow(
+                                    "task validation recovery superseded original=%s replacement=%s cycle=%s",
+                                    self._task_label(task),
+                                    self._task_label(replacement),
+                                    cycle,
+                                )
+                                return
                         decision = WorkflowDecision(
                             status="partial_failure",
                             reason=(
@@ -4470,6 +4525,9 @@ class MultiAgentWorkflowController:
         required_tool = self._validation_tool_name(task) or "record_task_acceptance"
         procedure = task.acceptance.basis.procedure
         procedure_methods = list(procedure.methods) if procedure is not None else []
+        inherited_receipts, inherited_details, inherited_producers, inherited_lineage = (
+            self._replacement_execution_receipts(task, criterion)
+        )
         recovery_context = {
             "parent_task_uid": task.task_uid,
             "trigger": "bounded_reasoning_loop",
@@ -4478,6 +4536,11 @@ class MultiAgentWorkflowController:
             "procedure_methods": procedure_methods,
             "durable_evidence_refs": durable_evidence,
         }
+        if inherited_receipts:
+            recovery_context["execution_evidence_receipts"] = inherited_receipts
+            recovery_context["controller_execution_evidence"] = inherited_details
+            recovery_context["execution_receipt_producers"] = inherited_producers
+            recovery_context["inherited_execution_receipts"] = inherited_lineage
         replacement = Task(
             task_uid=str(uuid.uuid4()),
             title=f"{task.title} (reasoning-loop recovery)",
@@ -4491,7 +4554,7 @@ class MultiAgentWorkflowController:
             status="pending",
             status_reason=(
                 f"Replacement for {task.task_uid} after bounded reasoning-loop recovery. "
-                f"Complete criterion {criterion.id} with one focused evidence action and {required_tool}."
+                f"Complete criterion {criterion.id} using retained durable evidence and {required_tool}."
             ),
             evidence=durable_evidence,
             kind=task.kind,
@@ -4503,6 +4566,68 @@ class MultiAgentWorkflowController:
             target_ids=list(task.target_ids),
         )
         return self.state.store_task(replacement)
+
+    def _replacement_execution_receipts(
+        self,
+        task: Task,
+        criterion: AcceptanceCriterion,
+    ) -> tuple[
+        Dict[str, List[str]],
+        Dict[str, Dict[str, Any]],
+        Dict[str, List[Dict[str, Any]]],
+        Dict[str, Dict[str, str]],
+    ]:
+        """Return parent receipts that exactly match a replacement's frozen execution bindings.
+
+        Reasoning-loop replacements stay within the current operation and resolve an
+        unchanged criterion. A parent receipt may therefore be reused only when the
+        controller persisted the exact requirement and subject that the replacement
+        inherits. Arbitrary task evidence and cross-task artifacts remain ineligible.
+        """
+
+        parent = next(
+            (candidate for candidate in self.state.list_tasks() if candidate.task_uid == task.task_uid),
+            task,
+        )
+        context = dict(parent.recovery_context)
+        raw_receipts = context.get("execution_evidence_receipts")
+        raw_details = context.get("controller_execution_evidence")
+        raw_producers = context.get("execution_receipt_producers")
+        if not isinstance(raw_receipts, dict) or not isinstance(raw_details, dict):
+            return {}, {}, {}, {}
+
+        receipts: Dict[str, List[str]] = {}
+        details: Dict[str, Dict[str, Any]] = {}
+        producers: Dict[str, List[Dict[str, Any]]] = {}
+        lineage: Dict[str, Dict[str, str]] = {}
+        for requirement in criterion.execution_requirements:
+            references = raw_receipts.get(requirement.id)
+            detail = raw_details.get(requirement.id)
+            if not isinstance(references, list) or not references or not isinstance(detail, dict):
+                continue
+            if detail.get("subject_ref") != requirement.subject_ref:
+                continue
+            artifact_refs = detail.get("artifact_refs")
+            if not isinstance(artifact_refs, list):
+                continue
+            validated_refs = [reference for reference in references if reference in artifact_refs]
+            if not validated_refs:
+                continue
+            inherited_detail = dict(detail)
+            inherited_detail["receipt_mode"] = "inherited_parent_receipt"
+            inherited_detail["parent_task_uid"] = parent.task_uid
+            inherited_detail["source_task_uid"] = str(detail.get("source_task_uid") or parent.task_uid)
+            receipts[requirement.id] = list(dict.fromkeys(validated_refs))
+            details[requirement.id] = inherited_detail
+            parent_producers = raw_producers.get(requirement.id) if isinstance(raw_producers, dict) else []
+            if isinstance(parent_producers, list):
+                producers[requirement.id] = parent_producers
+            lineage[requirement.id] = {
+                "parent_task_uid": parent.task_uid,
+                "source_task_uid": inherited_detail["source_task_uid"],
+                "subject_ref": requirement.subject_ref,
+            }
+        return receipts, details, producers, lineage
 
     def _task_executor_critic_guidance(
         self,
@@ -6178,6 +6303,13 @@ Return exactly one decision for each candidate.
         self._emit_workflow_event(payload)
 
     def _build_task_prompt(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> Dict[str, Any]:
+        if task.phase != phase.id:
+            raise TaskPromptBuildError(
+                f"Task phase {task.phase} does not match active phase {phase.id}",
+                repairable=False,
+                feedback=["task phase must match the active phase metadata"],
+                failure_source="task_scope_validation",
+            )
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
         cycle_total = max(1, self.task_prompt_refinement_iterations)
         repair_context_feedback: List[str] = []
@@ -7404,6 +7536,7 @@ review existing memories. Return only the requested JSON decision."""
         return f"{system_prompt}\n\n## Module Termination Policy\n{termination_policy}"
 
     def _create_tasks(self, plan: OperationPlan, phase: PlanPhase) -> TaskCreationOutcome:
+        self._validate_phase_task_contract_execution(phase)
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
         before_count = len(self.state.list_tasks(phase=phase.id))
         before_actionable_count = len(
@@ -8112,6 +8245,11 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
                 "- FIX: For every procedure proposal add a non-empty `methods` array and positive integer "
                 "`limits`; use `snapshot_refs` only for an existing frozen artifact.\n"
             )
+        if "requires at least one discovery procedure limit" in lower_reason:
+            common_fixes += (
+                "- FIX: For every procedure proposal either omit `limits` to use the bounded defaults or supply "
+                "at least one positive integer limit, e.g., `\"limits\": {\"max_requests\": 50}`.\n"
+            )
         if "field required" in lower_reason and "title" in lower_reason:
             common_fixes += "- FIX: Every task needs a non-empty `title`; `name` is accepted as a title alias.\n"
         if "field required" in lower_reason and "criteria" in lower_reason:
@@ -8306,6 +8444,8 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
         system_prompt: str,
     ) -> Iterator[AgentExecutorSession]:
         if self.executor_session_factory:
+            active_live_outcomes_reader: Optional[Callable[[], List[ToolOutcome]]] = None
+
             def run_executor(
                 prompt: str,
                 run_policy: Optional[AgentRunPolicy],
@@ -8313,11 +8453,21 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
             ) -> Any:
                 """Run one executor actor cycle without retaining prior tool transcripts."""
 
-                if cycle_tools is not None:
-                    with self.executor_session_factory(role, cycle_tools, system_prompt) as fresh_session_runner:
-                        return fresh_session_runner(prompt, run_policy)
-                with self.executor_session_factory(role, tools, system_prompt) as session_runner:
-                    return session_runner(prompt, run_policy)
+                nonlocal active_live_outcomes_reader
+                selected_tools = tools if cycle_tools is None else cycle_tools
+                with self.executor_session_factory(role, selected_tools, system_prompt) as session_runner:
+                    live_outcomes_reader = getattr(session_runner, "live_outcomes", None)
+                    active_live_outcomes_reader = (
+                        live_outcomes_reader if callable(live_outcomes_reader) else None
+                    )
+                    try:
+                        return session_runner(prompt, run_policy)
+                    finally:
+                        active_live_outcomes_reader = None
+
+            run_executor.live_outcomes = lambda: (
+                active_live_outcomes_reader() if active_live_outcomes_reader is not None else []
+            )
 
             yield run_executor
             return
@@ -8391,6 +8541,37 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
         module = str(getattr(self.runtime.config, "module", "") or "")
         return load_phase_task_contract(module, phase.id)
 
+    def _validate_phase_task_contract_execution(self, phase: PlanPhase) -> None:
+        """Fail fast when a module contract cannot be represented by task creation."""
+
+        try:
+            contract = self._phase_task_contract(phase)
+            if contract is None:
+                return
+            if contract.phase_id != phase.id:
+                raise ValueError("active phase contract does not match the active phase")
+            if contract.mode == "fanout_with_synthesis" and contract.synthesis_execution != "controller":
+                raise ValueError("synthesis contract requires unsupported execution mode")
+        except ValueError as error:
+            self._emit_workflow_event(
+                {
+                    "type": "phase_task_contract_validation",
+                    "phase": phase.id,
+                    "outcome": "rejected",
+                    "code": "contract_unsatisfiable",
+                    "reason": self._short(error, 500),
+                }
+            )
+            raise WorkflowInvariantError(f"Task contract is not executable for phase {phase.id}: {error}") from error
+        self._emit_workflow_event(
+            {
+                "type": "phase_task_contract_validation",
+                "phase": phase.id,
+                "outcome": "accepted",
+                "code": "controller_owned_synthesis" if contract is not None else "not_applicable",
+            }
+        )
+
     def _phase_task_contract_prompt(self, phase: PlanPhase) -> str:
         """Render the active declarative contract without interpreting task prose."""
 
@@ -8403,7 +8584,8 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
             synthesis = (
                 f"\n- Include exactly one `task_role: \"synthesis\"` proposal with `workstream: "
                 f"\"{contract.synthesis_workstream}\"`, `output_kind: \"{contract.synthesis_output_kind}\"`, "
-                "and `depends_on_workstreams` containing every submitted mapping workstream."
+                "and `depends_on_workstreams` containing every submitted mapping workstream. This is controller-owned "
+                "synthesis: set `methods: []`; do not invent a synthesis tool or runtime method."
             )
         direct_exception = ""
         if contract.allow_direct_single_step:
@@ -11154,6 +11336,14 @@ tools and durable evidence before relying on it."""
                 ),
                 "subject_ref": requirement.subject_ref,
                 "tool_use_ids": sorted({outcome.tool_use_id for outcome, _capabilities in matched}),
+                "producers": [
+                    {
+                        "tool_name": outcome.tool_name,
+                        "tool_use_id": outcome.tool_use_id,
+                        "capabilities": sorted(capabilities),
+                    }
+                    for outcome, capabilities in matched
+                ],
             }
 
         if resolved:
@@ -11169,6 +11359,10 @@ tools and durable evidence before relying on it."""
                 controller_details[requirement_id] = details[requirement_id]
             context["execution_evidence_receipts"] = receipts
             context["controller_execution_evidence"] = controller_details
+            context["execution_receipt_producers"] = {
+                requirement_id: details[requirement_id]["producers"]
+                for requirement_id in resolved
+            }
             self.state.store_task(replace(current_task, recovery_context=context))
         self._emit_controller_execution_evidence(task, criterion, resolved, details, expected_capabilities)
         return resolved

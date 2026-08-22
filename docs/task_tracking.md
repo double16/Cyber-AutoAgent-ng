@@ -244,7 +244,7 @@ Final report generation receives the workflow completion status before it runs. 
 that findings, observations, validation counts, and target coverage are partial. The progress value itself is reported
 unchanged from budget utilization.
 
-Task prompt refinement is controlled by `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS`, which defaults to two
+Task prompt refinement is controlled by `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS`, which defaults to three
 critic reviews. Setting it to `0` uses the initial builder output without critique. After the configured JSON retries,
 an unavailable or malformed builder/critic response, or a non-scope prompt defect that survives one bounded repair,
 uses a controller-owned deterministic task template. That template selects no model-proposed optional tools or shell

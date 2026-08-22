@@ -63,8 +63,9 @@ durable evidence for that task rather than deciding that a finding is verified.
 The `web`, `web_recon`, and `ctf` modules optionally declare phase-task contracts under
 `planning.phase_task_contracts`. These contracts require multiple distinct phase-1 workstreams and, for selected
 modules, one synthesis task. They are validated during task creation and persist planning metadata without requiring
-a database migration. See [Module Task Planning Contracts](module-task-planning.md) for the fields, bundled module
-behavior, and runtime limitations.
+a database migration. Synthesis contracts must declare `synthesis_execution: controller`; this uses `methods: []` and
+does not require a module-provided runtime synthesis tool. See [Module Task Planning Contracts](module-task-planning.md)
+for the fields, bundled module behavior, and runtime limitations.
 
 ## Discovery and inheritance
 

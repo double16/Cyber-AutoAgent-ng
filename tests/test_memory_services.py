@@ -1132,12 +1132,14 @@ def test_task_proposal_criterion_ids_are_scoped_to_each_task():
     assert second_contract.criteria[0].id == "criterion-1"
 
 
-def test_task_proposal_limits_require_positive_value():
+def test_task_proposal_empty_limits_use_bounded_defaults():
     payload = task_proposal("Check", "Check target")
     payload["limits"] = {}
 
-    with pytest.raises(ValueError, match="requires at least one discovery procedure limit"):
-        mod.TaskProposal.model_validate(payload)
+    proposal = mod.TaskProposal.model_validate(payload)
+
+    assert proposal.limits.max_requests == 50
+    assert proposal.limits.max_duration_minutes == 10
 
 
 def test_task_proposal_defaults_omitted_limits():

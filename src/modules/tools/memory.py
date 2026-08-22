@@ -3015,6 +3015,31 @@ def _validated_artifact_paths(artifacts: Any, *, require_one: bool = False) -> L
     return validated
 
 
+def _validate_finding_validation_input_shape(
+    reproduction_steps: Any,
+    evidence_artifacts: Any,
+    control_artifacts: Any,
+    validation_manifest: Any,
+) -> None:
+    """Reject malformed validation payloads before interpreting values as paths."""
+
+    if not isinstance(reproduction_steps, list) or not all(
+        isinstance(step, str) for step in reproduction_steps
+    ):
+        raise ValueError("reproduction_steps must be an array of strings")
+    for field_name, references in (
+        ("evidence_artifacts", evidence_artifacts),
+        ("control_artifacts", control_artifacts),
+    ):
+        if references is not None and (
+            not isinstance(references, list)
+            or not all(isinstance(reference, str) for reference in references)
+        ):
+            raise ValueError(f"{field_name} must be an array of artifact reference strings")
+    if validation_manifest is not None and not isinstance(validation_manifest, str):
+        raise ValueError("validation_manifest must be an artifact reference string")
+
+
 def _artifact_fingerprints(references: List[str]) -> Dict[str, str]:
     """Snapshot evidence identity without assuming an HTTP or tool output format."""
 
@@ -3273,8 +3298,11 @@ def store_knowledge(content: str, metadata: Optional[Dict[str, Any]] = None) -> 
 
 
 def _finding_fingerprint(title: str, claim: str, target: str, technique: str) -> str:
+    """Return a stable finding identity independent of model-authored title wording."""
+
+    del title
     normalized = "|".join(
-        re.sub(r"\s+", " ", value.strip().lower()) for value in (title, claim, target, technique)
+        re.sub(r"\s+", " ", value.strip().lower()) for value in (claim, target, technique)
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
@@ -4035,6 +4063,13 @@ def record_finding_validation(
 ) -> str:
     """Record a validation outcome, deterministically re-proving candidate evidence for confirmations."""
 
+    _validate_finding_validation_input_shape(
+        reproduction_steps,
+        evidence_artifacts,
+        control_artifacts,
+        validation_manifest,
+    )
+
     op_id = _operation_id()
     store = _get_database_store()
     record = store.get_finding(op_id, finding_uid)
@@ -4776,6 +4811,9 @@ class TaskProposal(_StrictTaskWireModel):
                 if extra_limit in limits:
                     limits.pop(extra_limit)
                     logger.info("Removed hallucinated limit field: %s", extra_limit)
+            if not limits and normalized.get("methods") and not normalized.get("snapshot_refs"):
+                normalized["limits"] = dict(DEFAULT_TASK_PROPOSAL_LIMITS)
+                logger.info("Normalized empty procedure proposal limits to bounded defaults")
 
         # Handle criteria as list of strings
         criteria = normalized.get("criteria")
@@ -4835,11 +4873,13 @@ class TaskProposal(_StrictTaskWireModel):
         snapshot_fields = bool(self.snapshot_refs)
         if self.methods and snapshot_fields:
             raise ValueError("proposal must not mix procedure and snapshot fields")
+        if self.task_role == "synthesis" and self.methods:
+            raise ValueError("controller-owned synthesis proposal must leave methods empty")
         if snapshot_fields:
             if self.output_kind != "artifact":
                 raise ValueError("snapshot proposal must not set output_kind")
         else:
-            if not self.methods:
+            if not self.methods and self.task_role != "synthesis":
                 raise ValueError("proposal requires procedure methods or snapshot_refs")
             if not any(getattr(self.limits, key) is not None for key in DISCOVERY_PROCEDURE_LIMIT_KEYS):
                 raise ValueError("procedure proposal requires at least one discovery procedure limit")
@@ -6114,6 +6154,14 @@ def _normalize_task_proposal(proposal: TaskProposal) -> _NormalizedTaskProposal:
     return _NormalizedTaskProposal(proposal=proposal, basis_kind=basis_kind, limits=limits)
 
 
+def _proposal_procedure_methods(proposal: TaskProposal) -> List[str]:
+    """Return deterministic internal methods for controller-owned synthesis."""
+
+    if proposal.task_role == "synthesis" and not proposal.methods:
+        return ["controller_synthesis"]
+    return proposal.methods
+
+
 def _proposal_execution_requirements(
     proposal: TaskProposal,
     plan: OperationPlan,
@@ -6122,6 +6170,8 @@ def _proposal_execution_requirements(
     """Derive narrow, controller-owned execution obligations for procedure work."""
 
     if proposal.inferred_basis_kind != "procedure":
+        return ()
+    if proposal.task_role == "synthesis":
         return ()
     selected_ids = proposal.target_ids or [target.target_id for target in plan.targets]
     selected_targets = [target for target in plan.targets if target.target_id in selected_ids]
@@ -6180,7 +6230,7 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
             description=proposal.effective_basis_description,
             source_refs=source_refs,
             procedure=DiscoveryProcedure(
-                methods=proposal.methods,
+                methods=_proposal_procedure_methods(proposal),
                 limits=normalized.limits or {},
                 stop_condition="first_limit_reached",
                 gap_policy="record_unassessed",

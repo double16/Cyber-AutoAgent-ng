@@ -16,6 +16,7 @@ import yaml
 
 _VALID_MODES = frozenset({"fanout", "fanout_with_synthesis"})
 _VALID_ROLES = frozenset({"mapping", "synthesis", "direct_single_step"})
+_VALID_SYNTHESIS_EXECUTIONS = frozenset({"controller"})
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class PhaseTaskContract:
     mapping_workstreams: frozenset[str]
     synthesis_workstream: str | None = None
     synthesis_output_kind: str = "artifact"
+    synthesis_execution: str | None = None
     allow_direct_single_step: bool = False
     direct_single_step_workstreams: frozenset[str] = frozenset()
 
@@ -131,13 +133,17 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         raise ValueError(f"planning contract has fewer workstreams than its minimum for {module}")
     synthesis_workstream = raw.get("synthesis_workstream")
     synthesis_output_kind = raw.get("synthesis_output_kind", "artifact")
+    synthesis_execution = raw.get("synthesis_execution")
     if mode == "fanout_with_synthesis":
         if not isinstance(synthesis_workstream, str) or not synthesis_workstream.strip():
             raise ValueError(f"synthesis_workstream is required for {module}")
         if synthesis_output_kind not in {"artifact", "inventory_manifest"}:
             raise ValueError(f"synthesis_output_kind is invalid for {module}")
+        if synthesis_execution not in _VALID_SYNTHESIS_EXECUTIONS:
+            raise ValueError(f"synthesis_execution must be controller for {module}")
     else:
         synthesis_workstream = None
+        synthesis_execution = None
     allow_direct = bool(raw.get("allow_direct_single_step", False))
     direct_workstreams = raw.get("direct_single_step_workstreams", [])
     if not isinstance(direct_workstreams, list) or not all(
@@ -155,6 +161,7 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         mapping_workstreams=normalized_workstreams,
         synthesis_workstream=synthesis_workstream.strip() if synthesis_workstream else None,
         synthesis_output_kind=synthesis_output_kind,
+        synthesis_execution=synthesis_execution,
         allow_direct_single_step=allow_direct,
         direct_single_step_workstreams=normalized_direct_workstreams,
     )

@@ -994,6 +994,195 @@ def test_controller_resolves_task_local_request_artifact_as_execution_evidence(m
     assert persisted.recovery_context["controller_execution_evidence"]["criterion-1-execution-1"][
         "tool_use_ids"
     ] == ["request-1"]
+    assert persisted.recovery_context["execution_receipt_producers"]["criterion-1-execution-1"] == [{
+        "tool_name": "http_request",
+        "tool_use_id": "request-1",
+        "capabilities": ["request"],
+    }]
+
+
+def test_same_cycle_acceptance_resolves_live_http_request_evidence(monkeypatch, tmp_path):
+    artifact = tmp_path / "artifacts" / "root-response.log"
+    artifact.parent.mkdir()
+    artifact.write_text("HTTP/1.1 200 OK\n", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Request the application root",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[
+            ExecutionRequirement(
+                "criterion-1-execution-1",
+                "Produce execution evidence for http_request against /.",
+                "/",
+            )
+        ],
+    )
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    task = Task(
+        task_uid="same-cycle-request",
+        title="Request root",
+        objective="Request the root endpoint",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Request root",
+                source_refs=["target:target-1"],
+                procedure={
+                    "methods": ["http_request"],
+                    "limits": {"max_items": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task], acceptance_complete=False)
+    captured = {}
+    request_outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="root-request",
+        tool_name="http_request",
+        success=True,
+        correctable=False,
+        input_summary='{"method":"GET","url":"http://target.test/"}',
+        output_summary="artifact:artifacts/root-response.log",
+        artifact_refs=("artifact:artifacts/root-response.log",),
+    )
+
+    def acceptance_tool_builder(_task_uid, _task, execution_evidence_resolver):
+        captured["resolver"] = execution_evidence_resolver
+
+        def record_task_acceptance(**_kwargs):
+            return "accepted"
+
+        return record_task_acceptance
+
+    monkeypatch.setattr(workflow_mod, "build_record_task_acceptance_tool", acceptance_tool_builder)
+
+    def text_runner(role, _prompt, _tools, _system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"request root","tools":["http_request"]}'
+        if role == "task_evaluator":
+            return '{"status":"done","reason":"root request accepted"}'
+        raise AssertionError(role)
+
+    @contextmanager
+    def executor_session(_role, _tools, _system_prompt):
+        def run(_prompt, _policy):
+            captured["run_count"] = captured.get("run_count", 0) + 1
+            captured["resolved"] = captured["resolver"](task, criterion)
+            state.record_task_acceptance(task, {
+                "status": "satisfied",
+                "disposition": "observation",
+                "summary": "Root request completed",
+                "evidence_refs": ["artifact:artifacts/root-response.log"],
+            })
+            return workflow_mod.TaskExecutorCycleResult(text="accepted", outcomes=[request_outcome])
+
+        run.live_outcomes = lambda: [request_outcome]
+        yield run
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        executor_session_factory=executor_session,
+    )
+
+    controller._run_task(plan, plan.phases[0], task)
+
+    assert captured["resolved"] == {
+        "criterion-1-execution-1": ["artifact:artifacts/root-response.log"]
+    }
+    assert captured["run_count"] == 1
+    assert next(item for item in state.tasks if item.task_uid == task.task_uid).status == "done"
+
+
+def test_controller_does_not_match_root_requirement_to_another_route(monkeypatch, tmp_path):
+    artifact = tmp_path / "artifacts" / "api-config.log"
+    artifact.parent.mkdir()
+    artifact.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Request the application root",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement("root", "Request /", "/")],
+    )
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    task = Task(
+        task_uid="wrong-route",
+        title="Request root",
+        objective="Request the root endpoint",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=_artifact_acceptance(),
+    )
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="api-config-request",
+        tool_name="http_request",
+        success=True,
+        correctable=False,
+        input_summary='{"url":"http://target.test/api/config"}',
+        output_summary="artifact:artifacts/api-config.log",
+        artifact_refs=("artifact:artifacts/api-config.log",),
+    )
+
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [outcome]) == {}
+
+
+def test_task_prompt_builder_rejects_task_from_another_phase():
+    plan = _plan()
+    task = TaskModel(
+        task_uid="wrong-phase",
+        title="Impact demonstration",
+        objective="Demonstrate impact",
+        acceptance=_acceptance(),
+        phase=2,
+        status="active",
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+
+    with pytest.raises(TaskPromptBuildError, match="does not match active phase"):
+        controller._build_task_prompt(plan, plan.phases[0], task)
 
 
 def test_controller_reconciles_curl_evidence_before_loop_replacement(monkeypatch, tmp_path):
@@ -1555,6 +1744,35 @@ def test_controller_does_not_resolve_unknown_execution_capability(monkeypatch, t
     monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
 
     assert controller._resolve_controller_execution_evidence(plan, task, criterion, []) == {}
+
+
+def test_task_creator_rejects_unsupported_synthesis_execution_before_model_retry(monkeypatch):
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    phase = _plan().phases[0]
+    monkeypatch.setattr(
+        controller,
+        "_phase_task_contract",
+        lambda _phase: SimpleNamespace(
+            phase_id=phase.id,
+            mode="fanout_with_synthesis",
+            synthesis_execution="runtime",
+        ),
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="not executable"):
+        controller._validate_phase_task_contract_execution(phase)
+
+    assert {
+        "type": "phase_task_contract_validation",
+        "phase": phase.id,
+        "outcome": "rejected",
+        "code": "contract_unsatisfiable",
+        "reason": "synthesis contract requires unsupported execution mode",
+    } in controller.runtime.callback_handler.events
 
 
 def test_controller_acceptance_replay_contains_rejection_within_task():
@@ -6026,6 +6244,130 @@ def test_reasoning_loop_recovery_keeps_original_incomplete_and_queues_one_replac
     assert controller._assessment_is_complete(_plan()) is False
 
 
+def test_reasoning_loop_replacement_inherits_matching_parent_execution_receipt():
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Request the assigned route",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce request evidence for the assigned route",
+            "/api/health",
+        )],
+    )
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(
+            kind="procedure",
+            description="Bounded request",
+            source_refs=["target:target-1"],
+            procedure={
+                "methods": ["request"],
+                "limits": {"max_requests": 1},
+                "stop_condition": "first_limit_reached",
+                "gap_policy": "record_unassessed",
+                "output_kind": "artifact",
+            },
+        ),
+        criteria=[criterion],
+    )
+    task = Task(
+        task_uid="active",
+        title="Request route",
+        objective="Request the assigned route",
+        acceptance=acceptance,
+        phase=1,
+        status="partial_failure",
+        recovery_context={
+            "execution_evidence_receipts": {
+                "criterion-1-execution-1": ["artifact:artifacts/health-response.txt"],
+            },
+            "controller_execution_evidence": {
+                "criterion-1-execution-1": {
+                    "artifact_refs": ["artifact:artifacts/health-response.txt"],
+                    "subject_ref": "/api/health",
+                    "receipt_mode": "capability_matched",
+                    "tool_use_ids": ["request-1"],
+                    "producers": [{"tool_name": "http_request", "tool_use_id": "request-1"}],
+                },
+            },
+            "execution_receipt_producers": {
+                "criterion-1-execution-1": [{"tool_name": "http_request", "tool_use_id": "request-1"}],
+            },
+        },
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    replacement = controller._create_reasoning_loop_replacement_task(task, [])
+
+    assert replacement is not None
+    assert replacement.recovery_context["execution_evidence_receipts"] == {
+        "criterion-1-execution-1": ["artifact:artifacts/health-response.txt"],
+    }
+    assert replacement.recovery_context["controller_execution_evidence"]["criterion-1-execution-1"][
+        "receipt_mode"
+    ] == "inherited_parent_receipt"
+    assert replacement.recovery_context["inherited_execution_receipts"]["criterion-1-execution-1"] == {
+        "parent_task_uid": "active",
+        "source_task_uid": "active",
+        "subject_ref": "/api/health",
+    }
+
+
+def test_reasoning_loop_replacement_rejects_parent_receipt_for_different_subject():
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Request the assigned route",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce request evidence for the assigned route",
+            "/api/health",
+        )],
+    )
+    acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=_artifact_acceptance().basis,
+        criteria=[criterion],
+    )
+    task = Task(
+        task_uid="active",
+        title="Request route",
+        objective="Request the assigned route",
+        acceptance=acceptance,
+        phase=1,
+        status="partial_failure",
+        recovery_context={
+            "execution_evidence_receipts": {
+                "criterion-1-execution-1": ["artifact:artifacts/other-response.txt"],
+            },
+            "controller_execution_evidence": {
+                "criterion-1-execution-1": {
+                    "artifact_refs": ["artifact:artifacts/other-response.txt"],
+                    "subject_ref": "/api/other",
+                },
+            },
+        },
+    )
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    replacement = controller._create_reasoning_loop_replacement_task(task, [])
+
+    assert replacement is not None
+    assert "execution_evidence_receipts" not in replacement.recovery_context
+    assert "inherited_execution_receipts" not in replacement.recovery_context
+
+
 def test_reasoning_loop_replacement_requires_exactly_one_unresolved_criterion():
     acceptance = AcceptanceContract(
         mode="outcome",
@@ -8960,6 +9302,22 @@ def test_task_creator_repair_summary_preserves_rejected_proposal_intents():
     assert '"target_ids": ["target-1"]' in repair
     assert "split them into separate valid proposal objects" in repair
     assert "do not silently" in repair
+
+
+def test_task_creator_repair_prompt_explains_missing_procedure_limits():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+
+    repair = controller._task_creator_repair_prompt(
+        "procedure proposal requires at least one discovery procedure limit",
+        "",
+    )
+
+    assert "omit `limits` to use the bounded defaults" in repair
+    assert '"limits": {"max_requests": 50}' in repair
 
 
 def test_task_creator_retries_once_when_first_run_creates_no_durable_tasks():
