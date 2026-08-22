@@ -56,6 +56,34 @@ def test_ffuf_parser_accepts_csv_and_rejects_relative_fuzz_input():
     assert relative_records == []
 
 
+def test_ffuf_wildcard_responses_become_auditable_gaps_not_endpoints():
+    payload = {
+        "results": [
+            {
+                "url": f"https://target.test/missing-{index}",
+                "status": 200,
+                "length": 3031,
+                "words": 353,
+                "lines": 66,
+            }
+            for index in range(8)
+        ]
+        + [{"url": "https://target.test/api/config", "status": 200, "length": 794, "words": 1, "lines": 48}],
+    }
+
+    records = manifest_tool._parse_ffuf(json.dumps(payload))
+    manifest_tool._mark_ffuf_wildcard_records(records)
+    manifest = manifest_tool.records_to_inventory_manifest(
+        records,
+        target_id="target-1",
+        target="https://target.test",
+    )
+
+    endpoints = {item["value"] for item in manifest["items"] if item["kind"] == "endpoint"}
+    assert endpoints == {"https://target.test/api/config"}
+    assert len([gap for gap in manifest["unassessed_gaps"] if gap["reason"] == "wildcard_response"]) == 8
+
+
 def test_gobuster_parser_extracts_default_relative_path_output():
     records = manifest_tool._parse_gobuster("/admin (Status: 301) [Size: 0]")
 

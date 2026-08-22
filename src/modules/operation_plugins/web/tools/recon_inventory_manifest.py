@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+from collections import Counter
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 
@@ -99,13 +100,26 @@ def _stable_id(kind: str, target_id: str, value: str) -> str:
     return f"{kind}-{digest}"
 
 
-def _record(url: str, *, method: str = "GET", status: Any = None, technologies: Any = None) -> Dict[str, Any]:
-    return {
+def _record(
+    url: str,
+    *,
+    method: str = "GET",
+    status: Any = None,
+    technologies: Any = None,
+    response_length: Any = None,
+    words: Any = None,
+    lines: Any = None,
+) -> Dict[str, Any]:
+    record = {
         "url": url,
         "method": str(method or "GET").upper(),
         "status": int(status) if str(status or "").isdigit() else None,
         "technologies": technologies if isinstance(technologies, list) else [],
     }
+    for key, value in (("response_length", response_length), ("words", words), ("lines", lines)):
+        if str(value or "").isdigit():
+            record[key] = int(value)
+    return record
 
 
 def _json_values(text: str) -> List[Any]:
@@ -176,7 +190,16 @@ def _parse_ffuf(text: str) -> List[Dict[str, Any]]:
             if not url and isinstance(item.get("input"), dict):
                 url = item["input"].get("FUZZ")
             if url and str(url).startswith(("http://", "https://")):
-                records.append(_record(url, status=item.get("status"), method=item.get("method", "GET")))
+                records.append(
+                    _record(
+                        url,
+                        status=item.get("status"),
+                        method=item.get("method", "GET"),
+                        response_length=item.get("length"),
+                        words=item.get("words"),
+                        lines=item.get("lines"),
+                    )
+                )
     if records:
         return records
     try:
@@ -186,6 +209,32 @@ def _parse_ffuf(text: str) -> List[Dict[str, Any]]:
     except csv.Error:
         pass
     return records or _urls_from_text(text)
+
+
+def _mark_ffuf_wildcard_records(records: List[Dict[str, Any]]) -> None:
+    """Mark high-confidence wildcard responses without discarding auditability.
+
+    ffuf often reports every wordlist entry as a 200 when an SPA serves the same
+    fallback page. A response signature that dominates the result set is useful
+    evidence of that condition, but it is not evidence that every URL is a route.
+    """
+
+    signatures = [
+        (record.get("status"), record.get("response_length"), record.get("words"), record.get("lines"))
+        for record in records
+        if record.get("status") is not None and record.get("response_length") is not None
+    ]
+    counts = Counter(signatures)
+    total = len(records)
+    for record in records:
+        signature = (
+            record.get("status"),
+            record.get("response_length"),
+            record.get("words"),
+            record.get("lines"),
+        )
+        if counts[signature] >= 3 and counts[signature] / max(total, 1) >= 0.8:
+            record["wildcard_suspected"] = True
 
 
 def _parse_httpx(text: str) -> List[Dict[str, Any]]:
@@ -370,6 +419,9 @@ def records_to_inventory_manifest(
         if not _in_scope(url, target):
             gaps.append({"reason": "out_of_scope", "value": url})
             continue
+        if record.get("wildcard_suspected"):
+            gaps.append({"reason": "wildcard_response", "value": url})
+            continue
         parsed_url = urlparse(url)
         endpoint_identity = urlunparse(
             (parsed_url.scheme, parsed_url.netloc, parsed_url.path, parsed_url.params, "", "")
@@ -539,14 +591,24 @@ def write_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, A
         with os.fdopen(descriptor, "w", encoding="utf-8") as output:
             json.dump(manifest, output, indent=2, sort_keys=True)
             output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
         temporary_reference = canonical_artifact_reference(temporary)
         validated, digest = _load_inventory_manifest(temporary_reference)
         os.replace(temporary, absolute_path)
+        # The persisted destination, not the staging file, is the authoritative
+        # artifact. Re-open it before advertising a durable receipt.
+        reference = canonical_artifact_reference(absolute_path)
+        validated, digest = _load_inventory_manifest(reference)
+        directory_descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
 
-    reference = canonical_artifact_reference(absolute_path)
     return {
         "path": absolute_path,
         "artifact_ref": reference,
@@ -643,6 +705,8 @@ def recon_output_to_inventory_manifest(
         return json.dumps(result, sort_keys=True)
     bound_target, resolved_target_id = resolve_inventory_target(target or target_id, target_id)
     records = PARSERS[normalized_format](text)
+    if normalized_format == "ffuf":
+        _mark_ffuf_wildcard_records(records)
     if not records:
         raise ValueError(f"No inventory candidates were parsed from {normalized_format} output")
     if _canonical_url(bound_target):

@@ -1178,11 +1178,35 @@ def _format_finding_with_narrative(item: Dict[str, Any], index: int, narrative: 
         + "\n\n#### Steps to Reproduce\n\n"
         + steps
         + "\n\n"
-        + narrative.strip()
+        + _remove_unbacked_sensitive_examples(narrative, item).strip()
         + impact_grounding
         + "\n\n#### Attack Path Analysis\n\nNot established from supplied evidence\n\n"
         + _format_taxonomy_mappings(metadata.get("taxonomy", {}), metadata.get("taxonomy_annotation"))
     )
+
+
+_SENSITIVE_VALUE_PATTERN = re.compile(
+    r"(?:postgres(?:ql)?://[^\s`\"']+|AIza[\w-]{8,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]+-----)",
+    re.IGNORECASE,
+)
+
+
+def _remove_unbacked_sensitive_examples(narrative: str, item: Dict[str, Any]) -> str:
+    """Remove model-invented secret-shaped values from report narrative examples."""
+
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
+    evidence = "\n".join(
+        str(value or "")
+        for value in (item.get("content"), parsed.get("evidence"), metadata.get("observed_result"))
+    )
+    unbacked = [match.group(0) for match in _SENSITIVE_VALUE_PATTERN.finditer(narrative) if match.group(0) not in evidence]
+    if not unbacked:
+        return narrative
+    sanitized = narrative
+    for value in dict.fromkeys(unbacked):
+        sanitized = sanitized.replace(value, "[omitted: not backed by supplied evidence]")
+    return sanitized
 
 
 def _escape_markdown_text(value: Any) -> str:

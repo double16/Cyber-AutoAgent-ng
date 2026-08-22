@@ -3298,11 +3298,24 @@ def store_knowledge(content: str, metadata: Optional[Dict[str, Any]] = None) -> 
 
 
 def _finding_fingerprint(title: str, claim: str, target: str, technique: str) -> str:
-    """Return a stable finding identity independent of model-authored title wording."""
+    """Return a stable finding identity independent of model-authored title wording.
+
+    The subject extraction keeps distinct leaked-secret classes separate while
+    merging duplicate descriptions of the same exposure at one affected endpoint.
+    """
 
     del title
+    normalized_claim = re.sub(r"\s+", " ", claim.strip().lower())
+    subject_patterns = {
+        "database_connection": r"(?:postgres(?:ql)?|mysql|mssql|mongo(?:db)?|database).{0,40}(?:uri|url|connection|string)|(?:uri|url|connection|string).{0,40}(?:database|postgres(?:ql)?|mysql|mssql|mongo(?:db)?)",
+        "third_party_api_key": r"(?:google|maps|aws|azure|stripe|api)[\s_-]*(?:api[\s_-]*)?key|api[\s_-]*key",
+        "session_or_auth_secret": r"(?:jwt|session|cookie|oauth|auth(?:entication)?)[\s_-]*(?:secret|token|key)",
+        "private_key": r"(?:private|ssh|rsa)[\s_-]*key",
+    }
+    subjects = sorted(name for name, pattern in subject_patterns.items() if re.search(pattern, normalized_claim))
+    evidence_subject = ",".join(subjects) or normalized_claim
     normalized = "|".join(
-        re.sub(r"\s+", " ", value.strip().lower()) for value in (claim, target, technique)
+        re.sub(r"\s+", " ", value.strip().lower()) for value in (target, technique, evidence_subject)
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 

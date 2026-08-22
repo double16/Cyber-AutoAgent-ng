@@ -362,6 +362,23 @@ def test_finding_fingerprint_ignores_model_authored_title_variants():
     assert first != distinct
 
 
+def test_finding_fingerprint_merges_equivalent_multi_secret_exposure_claims():
+    first = mod._finding_fingerprint(
+        "Sensitive credentials exposed",
+        "The endpoint exposes a PostgreSQL connection string and a Google Maps API key.",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+    second = mod._finding_fingerprint(
+        "Configuration disclosure",
+        "A Google Maps API key and PostgreSQL connection string are disclosed by the endpoint.",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+
+    assert first == second
+
+
 def test_typed_evidence_assertions_validate_binary_and_json_artifacts(tmp_path: Path):
     binary = tmp_path / "capture.bin"
     binary.write_bytes(b"prefix\x00\xffproofsuffix")

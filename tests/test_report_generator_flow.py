@@ -176,6 +176,24 @@ def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
     assert "| 1 | done | **Mapping:** Inventory routes |" in plan
 
 
+def test_finding_narrative_omits_unbacked_secret_shaped_examples():
+    finding = {
+        "title": "Configuration exposure",
+        "severity": "HIGH",
+        "content": "The endpoint returned a database connection string.",
+        "metadata": {"observed_result": "A database connection string was returned."},
+    }
+    narrative = (
+        "#### Impact\n\nPotential exposure.\n\n#### Remediation\n\nRemove the secret.\n\n"
+        "#### TECHNICAL APPENDIX\n\n```json\n{\"connection\":\"postgresql://admin:invented@db/prod\"}\n```"
+    )
+
+    detail = _format_finding_with_narrative(finding, 0, narrative)
+
+    assert "postgresql://admin:invented@db/prod" not in detail
+    assert "[omitted: not backed by supplied evidence]" in detail
+
+
 def test_finding_narrative_uses_recorded_validation_steps_and_impact_evidence():
     finding = {
         "title": "Configuration exposure",
