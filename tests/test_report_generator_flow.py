@@ -41,6 +41,8 @@ from modules.handlers.report_generator import (
     _software_provenance,
     _run_next_steps_refinement,
     _run_report_refinement,
+    _ReportModelCircuitBreaker,
+    _invoke_report_agent,
     _select_artifact_excerpt,
     _validate_report_critique,
     _validate_next_steps,
@@ -1617,6 +1619,86 @@ def test_next_steps_refinement_uses_deterministic_fallback_without_critic():
     assert data["coverage_gaps"]
     assert critique is None
     critic.assert_not_called()
+
+
+def test_report_model_circuit_breaker_skips_later_actor_calls_after_provider_failure():
+    breaker = _ReportModelCircuitBreaker()
+    failed_actor = MagicMock(side_effect=RuntimeError("event loop unavailable"))
+    skipped_actor = MagicMock()
+
+    first, _ = _run_report_refinement(
+        failed_actor,
+        MagicMock(),
+        "Source data",
+        "Executive summary",
+        "Requirements",
+        refinement_cycles=0,
+        json_retries=0,
+        circuit_breaker=breaker,
+    )
+    second, _ = _run_report_refinement(
+        skipped_actor,
+        MagicMock(),
+        "Source data",
+        "Methodology",
+        "Requirements",
+        refinement_cycles=0,
+        json_retries=0,
+        circuit_breaker=breaker,
+    )
+
+    assert first == ""
+    assert second == ""
+    assert breaker.tripped is True
+    failed_actor.assert_called_once()
+    skipped_actor.assert_not_called()
+
+
+def test_report_agent_invocation_is_single_turn_and_identifies_its_section():
+    agent = MagicMock(return_value=MagicMock(stop_reason="end_turn"))
+
+    result = _invoke_report_agent(agent, "Narrative prompt", "Executive summary", None)
+
+    assert result.stop_reason == "end_turn"
+    agent.assert_called_once_with(
+        "Narrative prompt",
+        invocation_state={"report_section": "Executive summary"},
+        limits={"turns": 1},
+    )
+
+
+def test_report_agent_turn_limit_trips_circuit_breaker_without_reusing_tool_result():
+    breaker = _ReportModelCircuitBreaker()
+    agent = MagicMock(return_value=MagicMock(stop_reason="limit_turns"))
+
+    with pytest.raises(RuntimeError, match="single-turn limit"):
+        _invoke_report_agent(agent, "Narrative prompt", "Executive summary", breaker)
+
+    assert breaker.tripped is True
+    assert "Executive summary" in breaker.reason
+
+
+def test_next_steps_critic_failure_uses_deterministic_fallback_and_trips_circuit():
+    breaker = _ReportModelCircuitBreaker()
+    source = {
+        "completion_status": {"assessment_complete": False},
+        "phase_coverage": [{"phase_id": 2, "title": "Validation", "status": "blocked"}],
+    }
+    data, critique = _run_next_steps_refinement(
+        MagicMock(return_value=_agent_result(json.dumps(_next_steps_data({"duration": 60})))),
+        MagicMock(side_effect=RuntimeError("maximum recursion depth exceeded")),
+        "Source data",
+        "Requirements",
+        {"duration": 60},
+        source,
+        refinement_cycles=1,
+        json_retries=0,
+        circuit_breaker=breaker,
+    )
+
+    assert data["coverage_gaps"]
+    assert critique is None
+    assert breaker.tripped is True
 
 
 def test_report_category_helpers_cover_structured_and_free_form_artifacts():

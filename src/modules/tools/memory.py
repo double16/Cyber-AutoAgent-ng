@@ -6090,6 +6090,7 @@ def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> st
     """Canonicalize one HTTP inventory route and enforce its registered service boundary."""
 
     raw_value = str(value or "").strip().replace(r'\"', '"')
+    raw_value = re.sub(r"^charset=[^\s;]+\s+(?=https?://)", "", raw_value, flags=re.IGNORECASE)
     if raw_value.startswith('"') and raw_value.endswith('"') and len(raw_value) >= 2:
         raw_value = raw_value[1:-1].strip()
     parsed = urlsplit(raw_value)

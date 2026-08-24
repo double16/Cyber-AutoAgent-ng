@@ -310,52 +310,29 @@ class OllamaModel(Model):
 
     @staticmethod
     def _fallback_think_param(
-        current_request: dict[str, Any],
-        model_id: str,
-        exc: Exception,
-        registry: Any,
-        log_prefix: str = "Ollama rejected",
-    ) -> bool:
-        """Degrade or strip the 'think' parameter from the request.
+            current_request: dict[str, Any], model_id: str, exc: Exception, registry: Any
+    ) -> tuple[bool, Any | None]:
+        """Progressively retry a rejected ``think`` value without omitting it."""
+        if "think" not in current_request or current_request["think"] is False:
+            return False, None
 
-        Transitions:
-          - string think (e.g. 'medium') -> bool (False for none/low, True for medium/high/xhigh)
-          - bool think (or non-string) -> omitted from request
+        previous_value = current_request["think"]
+        if isinstance(previous_value, str):
+            from modules.config.models.agent_profiles import ReasoningLevel
 
-        Returns True if a fallback was applied, False otherwise.
-        """
-        if "think" not in current_request:
-            return False
-
-        val = current_request["think"]
-        if isinstance(val, str):
-            bool_val = val in ("medium", "high", "xhigh")
-            current_request["think"] = bool_val
-            logger.warning(
-                "%s string think='%s' for %s (%s). Falling back to think=%s",
-                log_prefix,
-                val,
-                model_id,
-                exc,
-                bool_val,
-            )
-            registry.record_parameter_fallback(
-                "ollama", model_id, "think", bool_val, "Ollama think string rejected"
-            )
-            return True
+            fallback_value = ReasoningLevel.from_value(previous_value).to_bool()
         else:
-            current_request.pop("think", None)
-            logger.warning(
-                "%s boolean think=%s for %s (%s). Omitting think parameter",
-                log_prefix,
-                val,
-                model_id,
-                exc,
-            )
-            registry.record_parameter_fallback(
-                "ollama", model_id, "think", None, "Ollama think boolean rejected"
-            )
-            return True
+            fallback_value = False
+
+        current_request["think"] = fallback_value
+        logger.warning(
+            "Ollama rejected think=%r for %s (%s). Retrying with think=%r",
+            previous_value,
+            model_id,
+            exc,
+            fallback_value,
+        )
+        return True, fallback_value
 
     async def _chat_with_fallback(self, client: ollama.AsyncClient, request: dict[str, Any]) -> Any:
         """Execute chat request with progressive parameter stripping upon provider errors."""
@@ -365,20 +342,38 @@ class OllamaModel(Model):
 
         current_request = dict(request)
         current_options = dict(current_request.get("options") or {})
+        pending_think_fallback: Any | None = None
 
         while True:
             try:
-                return await client.chat(**current_request)
+                response = await client.chat(**current_request)
+                if pending_think_fallback is not None:
+                    registry.record_parameter_fallback(
+                        "ollama",
+                        model_id,
+                        "think",
+                        pending_think_fallback,
+                        "Ollama think compatibility fallback accepted",
+                    )
+                return response
             except Exception as exc:
+                if isinstance(exc, RecursionError):
+                    logger.error(
+                        "Ollama request failed for %s with RecursionError; no parameter fallback will be attempted",
+                        model_id,
+                    )
+                    raise
                 err_msg = str(exc).lower()
 
-                # 1. Fallback for 'think' parameter if mentioned in error
-                if ("think" in err_msg or "reasoning" in err_msg) and self._fallback_think_param(
-                    current_request, model_id, exc, registry, log_prefix="Ollama rejected"
-                ):
-                    continue
+                if "think" in err_msg or "reasoning" in err_msg:
+                    think_fallback_applied, fallback_value = self._fallback_think_param(
+                        current_request, model_id, exc, registry
+                    )
+                    if think_fallback_applied:
+                        pending_think_fallback = fallback_value
+                        continue
 
-                # 2. Fallback for options: top_k -> temperature -> top_p
+                # Fallback for options: top_k -> temperature -> top_p.
                 if "top_k" in current_options and (
                     "top_k" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
                 ):
@@ -404,12 +399,6 @@ class OllamaModel(Model):
                     current_request["options"] = current_options
                     logger.warning("Ollama rejected top_p for %s (%s). Omitting top_p", model_id, exc)
                     registry.record_parameter_fallback("ollama", model_id, "top_p", None, "Ollama top_p rejected")
-                    continue
-
-                # 3. Fallback for 'think' if not mentioned in error but still active
-                if self._fallback_think_param(
-                    current_request, model_id, exc, registry, log_prefix="Ollama request failed with"
-                ):
                     continue
 
                 raise

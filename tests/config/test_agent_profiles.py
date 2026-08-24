@@ -11,7 +11,7 @@ from modules.config.models.agent_profiles import (
 )
 
 
-def test_ollama_reasoning_mutation_never_adds_reasoning_effort_to_transport_args():
+def test_ollama_reasoning_mutation_uses_string_think_without_transport_reasoning_effort():
     model = type(
         "OllamaModel",
         (),
@@ -25,7 +25,7 @@ def test_ollama_reasoning_mutation_never_adds_reasoning_effort_to_transport_args
     mutate_agent_model_reasoning(model, ReasoningLevel.MEDIUM)
 
     assert model.client_args == {"timeout": 30}
-    assert model.config["additional_args"]["think"] is True
+    assert model.config["additional_args"]["think"] == "medium"
 
 
 def test_reasoning_level_parsing_and_boolean_evaluation():
@@ -34,12 +34,14 @@ def test_reasoning_level_parsing_and_boolean_evaluation():
     assert ReasoningLevel.MEDIUM.to_bool() is True
     assert ReasoningLevel.HIGH.to_bool() is True
     assert ReasoningLevel.XHIGH.to_bool() is True
+    assert ReasoningLevel.MAX.to_bool() is True
 
     assert ReasoningLevel.from_value("none") == ReasoningLevel.NONE
     assert ReasoningLevel.from_value("LOW") == ReasoningLevel.LOW
     assert ReasoningLevel.from_value("Medium") == ReasoningLevel.MEDIUM
     assert ReasoningLevel.from_value("HIGH") == ReasoningLevel.HIGH
     assert ReasoningLevel.from_value("xhigh") == ReasoningLevel.XHIGH
+    assert ReasoningLevel.from_value("max") == ReasoningLevel.MAX
     assert ReasoningLevel.from_value(None) == ReasoningLevel.NONE
     assert ReasoningLevel.from_value("invalid_val") == ReasoningLevel.NONE
     assert ReasoningLevel.from_value(ReasoningLevel.HIGH) == ReasoningLevel.HIGH
@@ -103,7 +105,7 @@ def test_recommended_agent_defaults():
     report_agent = registry.get_settings("report_agent")
     assert report_agent.temperature == 0.2
     assert report_agent.reasoning_level == ReasoningLevel.NONE
-    assert report_agent.max_tokens == 8192
+    assert report_agent.max_tokens == 16384
 
     report_critic = registry.get_settings("report_critic")
     assert report_critic.temperature == 0.0
@@ -233,9 +235,15 @@ def test_translate_reasoning_to_provider():
     ollama_xhigh = translate_reasoning_to_provider("ollama", "qwen", ReasoningLevel.XHIGH)
     assert ollama_xhigh["think"] == "xhigh"
 
+    ollama_max = translate_reasoning_to_provider("ollama", "qwen", ReasoningLevel.MAX)
+    assert ollama_max["think"] == "max"
+
     # Gemini
     gemini_none = translate_reasoning_to_provider("gemini", "gemini-2.5", ReasoningLevel.NONE)
     assert gemini_none["thinking_budget"] == 0
 
     gemini_high = translate_reasoning_to_provider("gemini", "gemini-2.5", ReasoningLevel.HIGH, max_tokens=8192)
     assert gemini_high["thinking_budget"] == 8192
+
+    gemini_xhigh = translate_reasoning_to_provider("gemini", "gemini-2.5", ReasoningLevel.XHIGH, max_tokens=16384)
+    assert gemini_xhigh["thinking_budget"] == 12288

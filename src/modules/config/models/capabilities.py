@@ -234,7 +234,9 @@ class ModelCapabilitiesResolver:
 
         # Check Ollama capabilities
         if base_provider == "ollama":
-            # "reasoning_effort" is included in the config no matter if the model supports it
+            # LiteLLM can list reasoning_effort for Ollama despite it not being an
+            # Ollama request parameter. Ollama exposes reasoning support as
+            # ``thinking`` and receives its setting through ``think``.
             if "reasoning_effort" in allowed_params:
                 allowed_params.remove("reasoning_effort")
 
@@ -248,8 +250,6 @@ class ModelCapabilitiesResolver:
                         allowed_params.extend(["tools", "tool_choice"])
                     if "thinking" in show_response.capabilities:
                         allowed_params.append("thinking")
-                        if "gpt-oss" in model:
-                            allowed_params.append("reasoning_effort")
                     else:
                         if "thinking" in allowed_params:
                             allowed_params.remove("thinking")
@@ -263,6 +263,11 @@ class ModelCapabilitiesResolver:
         if ("thinking" in lowered) or ("reasoning_effort" in lowered):
             supports_reason = True
         pass_reasoning_effort = "reasoning_effort" in lowered
+        if base_provider == "ollama" and "thinking" in lowered:
+            # This existing internal flag selects string-valued reasoning levels
+            # during model construction. It does not cause a reasoning_effort
+            # parameter to be sent to Ollama.
+            pass_reasoning_effort = True
 
         # Update tool and temperature support from provider params if available
         if lowered:
@@ -513,11 +518,6 @@ def classify_parameter_error(error: Exception) -> Optional[str]:
         for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "budget", "does not support"]
     ):
         return "thinking"
-    if re.search(r"\bthink\b", err_msg) and any(
-        w in err_msg
-        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "level", "does not support", "option", "parameter"]
-    ):
-        return "think"
     if "effort" in err_msg and any(
         w in err_msg
         for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "does not support"]
@@ -533,6 +533,18 @@ def apply_parameter_fallback_to_model(model: Any, provider: str, model_id: str, 
 
     # 1. Handle OllamaModel
     if hasattr(model, "config") and isinstance(model.config, dict):
+        if provider == "ollama" and param_name == "think":
+            additional_args = model.config.get("additional_args")
+            if isinstance(additional_args, dict) and additional_args.get("think") is not False:
+                previous_value = additional_args["think"]
+                if isinstance(previous_value, str):
+                    from modules.config.models.agent_profiles import ReasoningLevel
+
+                    additional_args["think"] = ReasoningLevel.from_value(previous_value).to_bool()
+                    modified = True
+                elif previous_value is True:
+                    additional_args["think"] = False
+                    modified = True
         if param_name in ("temperature", "top_p", "top_k", "max_tokens"):
             if model.config.get(param_name) is not None:
                 model.config[param_name] = None
@@ -541,16 +553,6 @@ def apply_parameter_fallback_to_model(model: Any, provider: str, model_id: str, 
             if isinstance(options, dict) and param_name in options:
                 options.pop(param_name, None)
                 modified = True
-        elif param_name == "think":
-            add_args = model.config.get("additional_args")
-            if isinstance(add_args, dict) and "think" in add_args:
-                val = add_args["think"]
-                if isinstance(val, str):
-                    add_args["think"] = val in ("medium", "high", "xhigh")
-                    modified = True
-                else:
-                    add_args.pop("think", None)
-                    modified = True
 
     # 2. Handle LiteLLMModel / Strands models with params and client_args
     if hasattr(model, "params") and isinstance(model.params, dict):

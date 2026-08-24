@@ -5,6 +5,10 @@ import pytest
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
 from src.modules.handlers.tool_recovery import (
+    ARTIFACT_PAGE_LIMIT_REACHED_MARKER,
+    ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER,
+    EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY,
+    EvaluatorArtifactReadLimitHook,
     TaskFailureRecoveryHook,
     TOOL_RECOVERY_EXHAUSTED_STATE_KEY,
     ToolOutcomeJournal,
@@ -126,6 +130,90 @@ def test_outcome_journal_extracts_structured_mcp_artifact_id_from_result_only():
     )
 
     assert outcome.artifact_refs == ("artifact_id:mcp-inventory.json",)
+
+
+def test_evaluator_artifact_read_limit_hook_guides_once_then_stops():
+    hook = EvaluatorArtifactReadLimitHook()
+    first = _after(
+        "first",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Artifact read limit reached (8)",
+    )
+
+    hook._after_tool(first)
+
+    assert hook.blocked_attempts == 1
+    assert hook.exhausted is False
+    assert "Do not call read_artifact again" in first.result["content"][0]["text"]
+    assert first.invocation_state == {}
+
+    second = _after(
+        "second",
+        "read_artifact",
+        {"path": "artifact:artifacts/second.txt"},
+        status="error",
+        text=f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Artifact read limit reached (8)",
+    )
+    hook._after_tool(second)
+
+    assert hook.blocked_attempts == 2
+    assert hook.exhausted is True
+    assert "Evaluation is stopping" in second.result["content"][0]["text"]
+    assert second.invocation_state["request_state"] == {
+        "stop_event_loop": True,
+        EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY: {
+            "reason": "max_reads_exceeded",
+            "blocked_attempts": 2,
+        },
+    }
+
+
+def test_evaluator_artifact_page_limit_allows_another_artifact_then_stops_repeat():
+    hook = EvaluatorArtifactReadLimitHook()
+    first = _after(
+        "first",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact page limit reached (4)",
+    )
+
+    hook._after_tool(first)
+
+    assert hook.blocked_attempts == 0
+    assert hook.exhausted is False
+    assert "different controller-authorized artifact" in first.result["content"][0]["text"]
+
+    other = _after(
+        "other",
+        "read_artifact",
+        {"path": "artifact:artifacts/second.txt"},
+        status="error",
+        text=f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact page limit reached (4)",
+    )
+    hook._after_tool(other)
+
+    assert hook.exhausted is False
+
+    repeated = _after(
+        "repeated",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact page limit reached (4)",
+    )
+    hook._after_tool(repeated)
+
+    assert hook.exhausted is True
+    assert repeated.invocation_state["request_state"] == {
+        "stop_event_loop": True,
+        EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY: {
+            "reason": "repeated_page_limit",
+            "blocked_attempts": 1,
+        },
+    }
 
 
 def test_failed_corrections_exhaust_configured_allowance_without_blocking_independent_work():

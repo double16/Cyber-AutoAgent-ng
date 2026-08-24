@@ -2357,6 +2357,42 @@ def test_inventory_url_normalization_removes_serialized_quote_artifacts():
     ) == "http://host.docker.internal:4280/"
 
 
+@pytest.mark.parametrize("prefix", ["charset=utf-8", "charset=UTF-8"])
+def test_inventory_url_normalization_removes_leading_charset_contamination(prefix):
+    assert mod._canonical_inventory_url(
+        f"{prefix} http://host.docker.internal:4280/api/config",
+        "http://host.docker.internal:4280",
+    ) == "http://host.docker.internal:4280/api/config"
+
+
+def test_inventory_url_normalization_rejects_non_charset_prefix_contamination():
+    with pytest.raises(ValueError, match="absolute HTTP"):
+        mod._canonical_inventory_url(
+            "content-type: application/json http://host.docker.internal:4280/api/config",
+            "http://host.docker.internal:4280",
+        )
+
+
+def test_inventory_manifest_persists_normalized_charset_url(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    payload = json.loads(manifest.read_text())
+    payload["items"][0]["value"] = "charset=UTF-8 http://target.test/login"
+    manifest.write_text(json.dumps(payload))
+
+    loaded, _digest = mod._load_inventory_manifest(f"artifact:{manifest}")
+
+    assert loaded["items"][0]["value"] == "http://target.test/login"
+    assert json.loads(manifest.read_text())["items"][0]["value"] == "http://target.test/login"
+
+
 def test_inventory_manifest_deduplicates_normalized_endpoints(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(

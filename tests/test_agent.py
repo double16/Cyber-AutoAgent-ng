@@ -582,6 +582,48 @@ def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
     assert "controller support role" in kwargs["system_prompt"]
 
 
+def test_create_agent_registers_artifact_limit_guard_for_task_evaluator(monkeypatch):
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self.init_kwargs = kwargs
+            self.tool_registry = Mock()
+
+    config = AgentConfig(target="example.com", objective="test", provider="ollama", model_id="llama")
+    runtime = AgentRuntimeResources(
+        config=config,
+        operation_id="OP_EVALUATOR",
+        server_config=SimpleNamespace(),
+        config_manager=SimpleNamespace(),
+        callback_handler=Mock(),
+        tools_list=[],
+        tool_executor=object(),
+        system_prompt_payload="system payload",
+        system_prompt="system text",
+        hooks=[],
+        conversation_manager=None,
+        sdk_context_manager=None,
+        trace_attributes={},
+        prompt_token_limit=0,
+    )
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
+    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(return_value=SimpleNamespace(supports_reasoning=False)))
+    monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
+
+    agent = create_agent(
+        "example.com",
+        "test",
+        runtime_resources=runtime,
+        tools=[],
+        agent_type="task_evaluator",
+        include_tool_catalog=False,
+    )
+
+    kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
+    assert agent._cyber_evaluator_artifact_read_limit_hook in kwargs["hooks"]
+    assert agent._cyber_evaluator_artifact_read_limit_hook.exhausted is False
+
+
 def test_create_agent_uses_role_specific_event_handler(monkeypatch):
     class FakeAgent:
         def __init__(self, **kwargs):

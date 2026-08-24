@@ -303,8 +303,14 @@ Every `store_finding` call requires at least one durable artifact reference and 
 same-phase `finding_validation` task. The linked task must call
 `record_finding_validation`; only an evaluator-approved confirmation is promoted to a verified finding. Failed or
 unfinished validations remain visible in the final report under **Findings Requiring Validation**. Evaluators and
-report agents can inspect operation artifacts with the read-only `read_artifact` tool, limited by
-`CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation).
+report agents can inspect operation artifacts with the read-only `read_artifact` tool. Report and other read-only
+agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation). A task evaluator may read
+only controller-authorized task evidence and frozen acceptance artifacts. It receives up to
+`CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE` pages per artifact (default four), with its total derived from the
+number of distinct authorized artifacts; each evaluator page is limited to 200 lines. Reaching a page limit directs
+the evaluator to another authorized artifact; only total exhaustion or a repeated denied read stops evaluation.
+The general reader accepts one file per call. When it receives an in-scope directory, it returns up to 25 immediate
+file references so the agent can retry with a specific artifact; evaluator readers do not disclose directory listings.
 
 Target-owned artifacts are also checked for broad secret-exposure patterns. The detector retains only a secret type
 and SHA-256 fingerprint in workflow state; raw values remain solely in the evidence artifact. A match from a

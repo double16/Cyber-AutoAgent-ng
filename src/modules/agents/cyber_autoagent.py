@@ -64,7 +64,7 @@ from modules.handlers.conversation_budget import (
     register_conversation_manager,
 )
 from modules.handlers.react import AgentEventHandler
-from modules.handlers.tool_recovery import TaskFailureRecoveryHook
+from modules.handlers.tool_recovery import EvaluatorArtifactReadLimitHook, TaskFailureRecoveryHook
 from modules.handlers.terminal_tool import TerminalToolHook
 from modules.handlers.tool_repeat_guard import (
     DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
@@ -1086,6 +1086,10 @@ def create_agent(
 
     agent_hooks = list(runtime.hooks) if runtime.hooks else []
     failure_recovery_hook = None
+    evaluator_artifact_read_limit_hook = None
+    if agent_type == "task_evaluator":
+        evaluator_artifact_read_limit_hook = EvaluatorArtifactReadLimitHook()
+        agent_hooks.append(evaluator_artifact_read_limit_hook)
     if agent_type == "task_executor" and isinstance(callback_handler, AgentEventHandler):
         max_policy_violations = runtime.config_manager.getenv_int(
             "CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS",
@@ -1169,6 +1173,8 @@ def create_agent(
         setattr(agent, "_cyber_callback_handler", callback_handler)
         if failure_recovery_hook is not None:
             setattr(agent, "_cyber_failure_recovery_hook", failure_recovery_hook)
+        if evaluator_artifact_read_limit_hook is not None:
+            setattr(agent, "_cyber_evaluator_artifact_read_limit_hook", evaluator_artifact_read_limit_hook)
         if getattr(callback_handler, "agent_run_id", None):
             setattr(agent, "_cyber_agent_run_id", callback_handler.agent_run_id)
         if getattr(callback_handler, "parent_agent_run_id", None):

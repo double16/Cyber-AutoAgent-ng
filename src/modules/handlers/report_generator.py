@@ -64,6 +64,7 @@ _AI_CONTENT_DISCLAIMER = (
     "errors, omissions, or hallucinations. A qualified human should independently verify its findings and "
     "recommendations before relying on them."
 )
+_REPORT_AGENT_LIMITS = {"turns": 1}
 _SESSION_START_MARKER = "CYBER-AUTOAGENT SESSION STARTED:"
 _BUDGET_LINE_RE = re.compile(
     r"Budget:\s*duration=(?P<duration>[^,\s]+),\s*tokens=(?P<tokens>[^,\s]+),\s*cost=(?P<cost>[^\s]+)",
@@ -2063,6 +2064,67 @@ Return JSON exactly: {{"approved": bool, "feedback": [string]}}. Return no other
 """
 
 
+class _ReportModelCircuitBreaker:
+    """Stop optional report narration after the first provider-side failure."""
+
+    def __init__(self) -> None:
+        self.reason = ""
+
+    @property
+    def tripped(self) -> bool:
+        return bool(self.reason)
+
+    def trip(self, section_label: str, error: Exception) -> None:
+        if not self.reason:
+            self.reason = f"{section_label}: {error}"
+            logger.warning("Report model circuit breaker opened: %s", self.reason)
+
+
+def _invoke_report_agent(
+    agent: Any,
+    prompt: str,
+    section_label: str,
+    circuit_breaker: Optional[_ReportModelCircuitBreaker],
+) -> Any:
+    """Call one report agent unless a prior provider failure opened the circuit."""
+
+    if agent is None:
+        raise RuntimeError("report agent is unavailable")
+    if circuit_breaker is not None and circuit_breaker.tripped:
+        raise RuntimeError(f"report model circuit breaker is open: {circuit_breaker.reason}")
+    try:
+        result = agent(
+            prompt,
+            invocation_state={"report_section": section_label},
+            limits=_REPORT_AGENT_LIMITS,
+        )
+        if getattr(result, "stop_reason", None) == "limit_turns":
+            raise RuntimeError("report agent exceeded its single-turn limit")
+        return result
+    except Exception as error:
+        if circuit_breaker is not None:
+            circuit_breaker.trip(section_label, error)
+        raise
+
+
+def _create_report_agent(
+    circuit_breaker: Optional[_ReportModelCircuitBreaker],
+    section_label: str,
+    **kwargs: Any,
+) -> Any:
+    """Create an optional report agent without allowing factory failures to abort reporting."""
+
+    if circuit_breaker is not None and circuit_breaker.tripped:
+        return None
+    try:
+        return ReportGenerator.create_report_agent(**kwargs)
+    except Exception as error:  # noqa: BLE001 - deterministic reporting remains available
+        if circuit_breaker is not None:
+            circuit_breaker.trip(section_label, error)
+        logger.warning("Report %s agent creation failed: %s", section_label, error)
+        return None
+
+
 def _report_revision_prompt(
     section_label: str,
     source_prompt: str,
@@ -2092,12 +2154,16 @@ def _run_report_critic(
     critic_agent: Any,
     prompt: str,
     json_retries: int,
+    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
+    section_label: str = "report critic",
 ) -> Dict[str, Any]:
     """Run a report critic with the workflow's tolerant JSON parsing and retry convention."""
     current_prompt = prompt
     for attempt in range(json_retries + 1):
         try:
-            response = _extract_text_from_result(critic_agent(current_prompt))
+            response = _extract_text_from_result(
+                _invoke_report_agent(critic_agent, current_prompt, section_label, circuit_breaker)
+            )
         except Exception as error:
             logger.warning("Report critic model call failed: %s", error)
             raise
@@ -2135,10 +2201,13 @@ def _run_report_refinement(
     refinement_cycles: int,
     json_retries: int,
     efficiency_callback: Any = None,
+    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
     """Generate and critic-guided revise one report section."""
     try:
-        content = _extract_text_from_result(actor_agent(source_prompt))
+        content = _extract_text_from_result(
+            _invoke_report_agent(actor_agent, source_prompt, section_label, circuit_breaker)
+        )
     except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
         logger.warning("Report %s actor failed; using deterministic section fallback: %s", section_label, error)
         return "", None
@@ -2154,6 +2223,8 @@ def _run_report_refinement(
                 critic_agent,
                 _report_critic_prompt(section_label, section_requirements, source_prompt, content),
                 json_retries,
+                circuit_breaker,
+                section_label,
             )
         except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
             logger.warning("Report %s critic failed; using deterministic section fallback: %s", section_label, error)
@@ -2164,11 +2235,12 @@ def _run_report_refinement(
 
         logger.info("Report critic requested revision for %s on cycle %s", section_label, cycle)
         try:
-            revised = _extract_text_from_result(
-                actor_agent(
-                    _report_revision_prompt(section_label, source_prompt, content, critique["feedback"])
-                )
-            )
+            revised = _extract_text_from_result(_invoke_report_agent(
+                actor_agent,
+                _report_revision_prompt(section_label, source_prompt, content, critique["feedback"]),
+                section_label,
+                circuit_breaker,
+            ))
         except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
             logger.warning("Report %s revision failed; using deterministic section fallback: %s", section_label, error)
             return "", None
@@ -2434,13 +2506,19 @@ def _run_next_steps_actor(
     configured_budget: Dict[str, int | float],
     source: Dict[str, Any],
     json_retries: int,
+    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
 ) -> tuple[Dict[str, Any], bool]:
     """Run the Appendix B actor with tolerant JSON repair and validation retries."""
     current_prompt = prompt
     last_error = "invalid model response"
     for attempt in range(json_retries + 1):
         try:
-            response = _extract_text_from_result(actor_agent(current_prompt))
+            response = _extract_text_from_result(_invoke_report_agent(
+                actor_agent,
+                current_prompt,
+                "Appendix B: Recommended Next Steps",
+                circuit_breaker,
+            ))
             parsed = parse_json_response(response, require_object=True)
             return _validate_next_steps(parsed, configured_budget), False
         except Exception as error:
@@ -2451,6 +2529,8 @@ def _run_next_steps_actor(
                 json_retries + 1,
                 error,
             )
+            if circuit_breaker is not None and circuit_breaker.tripped:
+                break
             if attempt < json_retries:
                 current_prompt = f"""Your previous response was invalid: {error}
 
@@ -2472,10 +2552,11 @@ def _run_next_steps_refinement(
     refinement_cycles: int,
     json_retries: int,
     efficiency_callback: Any = None,
+    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Generate and critic-guided revise the structured Appendix B data."""
     data, used_fallback = _run_next_steps_actor(
-        actor_agent, source_prompt, configured_budget, source, json_retries
+        actor_agent, source_prompt, configured_budget, source, json_retries, circuit_breaker
     )
     if refinement_cycles == 0 or used_fallback:
         return _apply_next_steps_budget_scope(data, configured_budget, source), None
@@ -2484,16 +2565,24 @@ def _run_next_steps_refinement(
     for cycle in range(1, refinement_cycles + 1):
         if callable(efficiency_callback):
             efficiency_callback("critic_cycle")
-        critique = _run_report_critic(
-            critic_agent,
-            _report_critic_prompt(
+        try:
+            critique = _run_report_critic(
+                critic_agent,
+                _report_critic_prompt(
+                    "Appendix B: Recommended Next Steps",
+                    section_requirements,
+                    source_prompt,
+                    json.dumps(data, indent=2, ensure_ascii=False),
+                ),
+                json_retries,
+                circuit_breaker,
                 "Appendix B: Recommended Next Steps",
-                section_requirements,
-                source_prompt,
-                json.dumps(data, indent=2, ensure_ascii=False),
-            ),
-            json_retries,
-        )
+            )
+        except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
+            logger.warning("Appendix B critic failed; using deterministic fallback: %s", error)
+            return _apply_next_steps_budget_scope(
+                _next_steps_fallback(configured_budget, source, str(error)), configured_budget, source
+            ), None
         if critique["approved"]:
             return _apply_next_steps_budget_scope(data, configured_budget, source), None
         revision_prompt = f"""Revise the structured Appendix B result using every applicable critic feedback item.
@@ -2509,7 +2598,7 @@ Critic feedback:
 {json.dumps(critique['feedback'], indent=2)}
 """
         data, used_fallback = _run_next_steps_actor(
-            actor_agent, revision_prompt, configured_budget, source, json_retries
+            actor_agent, revision_prompt, configured_budget, source, json_retries, circuit_breaker
         )
         if used_fallback:
             return _apply_next_steps_budget_scope(data, configured_budget, source), None
@@ -2666,6 +2755,7 @@ def _generate_methodology_appendix(
     report_step_index: int,
     report_step_total: int,
     model_metrics: Dict[str, Any],
+    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
 ) -> int:
     """Generate a bounded methodology narrative inside a deterministic appendix."""
     logger.info("Generating Appendix A: Assessment Methodology...")
@@ -2678,17 +2768,19 @@ def _generate_methodology_appendix(
         + "\n"
         + module_appendix_prompt
     )
-    appendix_agent = ReportGenerator.create_report_agent(
-        provider=provider,
-        model_id=model_id,
-        operation_id=operation_id,
-        target=target,
-        callback_handler=report_metrics_callback,
-        system_prompt=appendix_system_prompt,
-    )
+    appendix_agent = None
+    if circuit_breaker is None or not circuit_breaker.tripped:
+        appendix_agent = _create_report_agent(circuit_breaker, "Appendix A: Assessment Methodology",
+            provider=provider,
+            model_id=model_id,
+            operation_id=operation_id,
+            target=target,
+            callback_handler=report_metrics_callback,
+            system_prompt=appendix_system_prompt,
+        )
     appendix_critic = None
-    if refinement_cycles:
-        appendix_critic = ReportGenerator.create_report_agent(
+    if refinement_cycles and appendix_agent is not None:
+        appendix_critic = _create_report_agent(circuit_breaker, "Appendix A: Assessment Methodology critic",
             provider=provider,
             model_id=model_id,
             operation_id=operation_id,
@@ -2732,6 +2824,7 @@ Narrative context:
             refinement_cycles,
             json_retries,
             efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
+            circuit_breaker=circuit_breaker,
         )
     finally:
         _cleanup_report_agent(appendix_agent, "report methodology actor")
@@ -2799,23 +2892,26 @@ def _generate_next_steps_appendix(
     report_metrics_callback: Any,
     report_step_index: int,
     report_step_total: int,
+    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
 ) -> int:
     """Generate and persist the structured recommended-next-steps appendix."""
     logger.info("Generating Appendix B: Recommended Next Steps...")
     next_steps_system_prompt = (
         get_report_next_steps_system_prompt() + "\n" + module_guidance + "\n" + completion_guidance
     )
-    next_steps_agent = ReportGenerator.create_report_agent(
-        provider=provider,
-        model_id=model_id,
-        operation_id=operation_id,
-        target=target,
-        callback_handler=report_metrics_callback,
-        system_prompt=next_steps_system_prompt,
-    )
+    next_steps_agent = None
+    if circuit_breaker is None or not circuit_breaker.tripped:
+        next_steps_agent = _create_report_agent(circuit_breaker, "Appendix B: Recommended Next Steps",
+            provider=provider,
+            model_id=model_id,
+            operation_id=operation_id,
+            target=target,
+            callback_handler=report_metrics_callback,
+            system_prompt=next_steps_system_prompt,
+        )
     next_steps_critic = None
-    if refinement_cycles:
-        next_steps_critic = ReportGenerator.create_report_agent(
+    if refinement_cycles and next_steps_agent is not None:
+        next_steps_critic = _create_report_agent(circuit_breaker, "Appendix B: Recommended Next Steps critic",
             provider=provider,
             model_id=model_id,
             operation_id=operation_id,
@@ -2889,6 +2985,7 @@ Canonical operation data:
             refinement_cycles,
             json_retries,
             efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
+            circuit_breaker=circuit_breaker,
         )
     finally:
         _cleanup_report_agent(next_steps_agent, "report next-steps actor")
@@ -3412,6 +3509,7 @@ def generate_security_report(
             except Exception:
                 logger.debug("Unable to set exact report item counts", exc_info=True)
         report_metrics_callback = _ReportMetricsCallback(callback_handler)
+        report_circuit_breaker = _ReportModelCircuitBreaker()
         report_findings = [
             (i, finding)
             for i, finding in enumerate(raw_findings)
@@ -3451,7 +3549,7 @@ def generate_security_report(
             + "\n"
             + module_report_agent_executive_system_prompt
         )
-        exec_agent = ReportGenerator.create_report_agent(
+        exec_agent = _create_report_agent(report_circuit_breaker, "Executive summary",
             provider=provider,
             model_id=model_id,
             operation_id=operation_id,
@@ -3461,7 +3559,7 @@ def generate_security_report(
         )
         exec_critic = None
         if refinement_cycles:
-            exec_critic = ReportGenerator.create_report_agent(
+            exec_critic = _create_report_agent(report_circuit_breaker, "Executive summary critic",
                 provider=provider,
                 model_id=model_id,
                 operation_id=operation_id,
@@ -3511,6 +3609,7 @@ Narrative context:
                 refinement_cycles,
                 json_retries,
                 efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
+                circuit_breaker=report_circuit_breaker,
             )
         finally:
             _cleanup_report_agent(exec_agent, "report executive summary actor")
@@ -3590,16 +3689,17 @@ Finding narrative context:
             section_label = f"Finding: {_report_item_title(finding, f'Finding {i + 1}')}"
             finding_agent = finding_critic = None
             try:
-                finding_agent = ReportGenerator.create_report_agent(
-                    provider=provider,
-                    model_id=model_id,
-                    operation_id=operation_id,
-                    target=target,
-                    callback_handler=report_metrics_callback,
-                    system_prompt=finding_system_prompt,
-                )
-                if refinement_cycles:
-                    finding_critic = ReportGenerator.create_report_agent(
+                if not report_circuit_breaker.tripped:
+                    finding_agent = _create_report_agent(report_circuit_breaker, section_label,
+                        provider=provider,
+                        model_id=model_id,
+                        operation_id=operation_id,
+                        target=target,
+                        callback_handler=report_metrics_callback,
+                        system_prompt=finding_system_prompt,
+                    )
+                if refinement_cycles and finding_agent is not None:
+                    finding_critic = _create_report_agent(report_circuit_breaker, f"{section_label} critic",
                         provider=provider,
                         model_id=model_id,
                         operation_id=operation_id,
@@ -3617,6 +3717,7 @@ Finding narrative context:
                     refinement_cycles,
                     json_retries,
                     efficiency_callback=getattr(callback_handler, "record_efficiency_event", None),
+                    circuit_breaker=report_circuit_breaker,
                 )
             finally:
                 _cleanup_report_agent(finding_agent, f"report finding {i + 1} actor")
@@ -3802,6 +3903,7 @@ Finding narrative context:
             report_step_index=report_step_index,
             report_step_total=report_step_total,
             model_metrics=model_metrics,
+            circuit_breaker=report_circuit_breaker,
         )
 
         report_step_index = _generate_next_steps_appendix(
@@ -3825,6 +3927,7 @@ Finding narrative context:
             report_metrics_callback=report_metrics_callback,
             report_step_index=report_step_index,
             report_step_total=report_step_total,
+            circuit_breaker=report_circuit_breaker,
         )
 
         # Re-write the JSON envelope after every narrative and deterministic section

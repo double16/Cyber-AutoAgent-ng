@@ -1006,7 +1006,8 @@ def run_workflow_agent_with_max_token_recovery(
                 # 2. Reasoning-induced max tokens: step down reasoning level to LOW or NONE
                 target_level = (
                     ReasoningLevel.LOW
-                    if current_settings.reasoning_level in (ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MEDIUM)
+                    if current_settings.reasoning_level
+                    in (ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MAX, ReasoningLevel.MEDIUM)
                     else ReasoningLevel.NONE
                 )
                 mutate_agent_model_reasoning(agent, target_level)

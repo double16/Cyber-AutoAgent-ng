@@ -1,6 +1,6 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-from modules.agents.report_agent import ReportGenerator
+from modules.agents.report_agent import ReportExecutionTelemetryHook, ReportGenerator
 
 
 @patch("modules.agents.report_agent.get_config_manager")
@@ -13,9 +13,11 @@ def test_create_report_agent_custom_system_prompt(mock_create_model, mock_agent,
     ReportGenerator.create_report_agent(provider="bedrock", system_prompt="Custom System Prompt")
 
     # Verify Agent was created with custom system prompt
-    args, kwargs = mock_agent.call_args
+    _, kwargs = mock_agent.call_args
     assert kwargs["system_prompt"] == "Custom System Prompt"
     assert kwargs["context_manager"] == "auto"
+    assert kwargs["tools"] == []
+    assert any(isinstance(hook, ReportExecutionTelemetryHook) for hook in kwargs["hooks"])
     mock_create_model.assert_called_once_with("bedrock", "test-model", "report_agent")
 
 
@@ -69,3 +71,34 @@ def test_create_report_agent_retries_without_context_manager_for_stateful_model(
     assert mock_agent.call_count == 2
     assert mock_agent.call_args_list[0].kwargs["context_manager"] == "auto"
     assert "context_manager" not in mock_agent.call_args_list[1].kwargs
+
+
+def test_report_execution_telemetry_records_model_and_unexpected_tool_events(caplog):
+    caplog.set_level("INFO")
+    hook = ReportExecutionTelemetryHook()
+    model_start = MagicMock(invocation_state={"report_section": "Executive summary"}, projected_input_tokens=42)
+    model_stop = MagicMock(
+        invocation_state={"report_section": "Executive summary"},
+        stop_response=MagicMock(stop_reason="tool_use"),
+        exception=None,
+    )
+    tool_start = MagicMock(
+        invocation_state={"report_section": "Executive summary"},
+        selected_tool=MagicMock(tool_name="read_artifact"),
+        tool_use={"name": "read_artifact"},
+    )
+    tool_stop = MagicMock(
+        invocation_state={"report_section": "Executive summary"},
+        selected_tool=MagicMock(tool_name="read_artifact"),
+        tool_use={"name": "read_artifact"},
+        exception=RuntimeError("blocked"),
+    )
+
+    hook.before_model_call(model_start)
+    hook.after_model_call(model_stop)
+    hook.before_tool_call(tool_start)
+    hook.after_tool_call(tool_stop)
+
+    assert "projected_input_tokens=42" in caplog.text
+    assert "attempted unexpected tool use" in caplog.text
+    assert "unexpected tool completed" in caplog.text

@@ -86,6 +86,14 @@ _READ_ONLY_TOOLS = {"memory_retrieve", "read_artifact", "tool_catalog"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 _SENSITIVE_KEYS = {"api_key", "authorization", "cookie", "password", "secret", "token"}
 TOOL_RECOVERY_EXHAUSTED_STATE_KEY = "tool_recovery_exhausted"
+EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY = "evaluator_artifact_read_limit_exhausted"
+ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER = "ARTIFACT_TOTAL_READ_LIMIT_REACHED"
+ARTIFACT_PAGE_LIMIT_REACHED_MARKER = "ARTIFACT_PAGE_LIMIT_REACHED"
+ARTIFACT_READ_POLICY_VIOLATION_MARKER = "ARTIFACT_READ_POLICY_VIOLATION"
+
+
+class EvaluatorArtifactReadLimitExceeded(RuntimeError):
+    """Raised after an evaluator ignores bounded artifact-read guidance twice."""
 
 
 def _bounded_text(value: Any, limit: int = 500) -> str:
@@ -425,6 +433,89 @@ class ToolOutcomeJournal:
 
     def entries(self) -> List[ToolOutcome]:
         return list(self._entries)
+
+
+class EvaluatorArtifactReadLimitHook(HookProvider):
+    """Stop a task evaluator that continues reading after its allowance is exhausted."""
+
+    def __init__(self) -> None:
+        self.blocked_attempts = 0
+        self.exhausted = False
+        self.page_limited_paths: set[str] = set()
+
+    def register_hooks(self, registry: HookRegistry) -> None:
+        registry.add_callback(AfterToolCallEvent, self._after_tool)
+
+    def _after_tool(self, event: AfterToolCallEvent) -> None:
+        if str(event.tool_use.get("name", "")) != "read_artifact":
+            return
+        result_text = _result_text(event.result)
+        if ARTIFACT_PAGE_LIMIT_REACHED_MARKER in result_text:
+            self._handle_page_limit(event)
+            return
+        if not any(
+            marker in result_text
+            for marker in (
+                ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER,
+                ARTIFACT_READ_POLICY_VIOLATION_MARKER,
+            )
+        ):
+            return
+
+        self.blocked_attempts += 1
+        if self.blocked_attempts == 1:
+            message = (
+                "ARTIFACT_READ_LIMIT_REACHED: The requested artifact page is unavailable. Do not call "
+                "read_artifact again. Review the controller-provided evidence and return the requested JSON decision."
+            )
+        else:
+            self.exhausted = True
+            message = (
+                "ARTIFACT_READ_LIMIT_EXHAUSTED: You called read_artifact after being told it was unavailable. "
+                "Evaluation is stopping; do not make further tool calls."
+            )
+            request_state = event.invocation_state.setdefault("request_state", {})
+            if isinstance(request_state, dict):
+                request_state["stop_event_loop"] = True
+                request_state[EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY] = {
+                    "reason": "max_reads_exceeded",
+                    "blocked_attempts": self.blocked_attempts,
+                }
+            logger.warning("Stopping task evaluator after repeated artifact-read limit violation")
+
+        if isinstance(event.result, dict):
+            event.result["content"] = [{"text": message}]
+
+    def _handle_page_limit(self, event: AfterToolCallEvent) -> None:
+        """Guide a first per-artifact cap to another artifact; stop repeated disregard."""
+
+        tool_input = event.tool_use.get("input", {})
+        path = str(tool_input.get("path", "")) if isinstance(tool_input, dict) else ""
+        if path not in self.page_limited_paths:
+            self.page_limited_paths.add(path)
+            message = (
+                "ARTIFACT_PAGE_LIMIT_REACHED: This artifact has reached its page allowance. "
+                "You may read a different controller-authorized artifact, but do not read this artifact again."
+            )
+            if isinstance(event.result, dict):
+                event.result["content"] = [{"text": message}]
+            return
+
+        self.exhausted = True
+        message = (
+            "ARTIFACT_READ_LIMIT_EXHAUSTED: You reread an artifact after being told its page allowance was "
+            "exhausted. Evaluation is stopping; do not make further tool calls."
+        )
+        request_state = event.invocation_state.setdefault("request_state", {})
+        if isinstance(request_state, dict):
+            request_state["stop_event_loop"] = True
+            request_state[EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY] = {
+                "reason": "repeated_page_limit",
+                "blocked_attempts": 1,
+            }
+        logger.warning("Stopping task evaluator after a repeated artifact page-limit violation")
+        if isinstance(event.result, dict):
+            event.result["content"] = [{"text": message}]
 
 
 class TaskFailureRecoveryHook(HookProvider):

@@ -203,11 +203,35 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
         mod.create_gemini_model("gemini/gemini-pro", "us-east-1")
 
 
-def test_create_ollama_model_passes_xhigh_string_reasoning(monkeypatch, config_manager):
+def test_create_ollama_model_passes_max_string_reasoning(monkeypatch, config_manager):
     import modules.config.models as models_pkg
     import modules.config.models.agent_profiles as profiles
     import modules.config.models.ollama as ollama_mod
     import modules.agents.patches as patches
+
+    registry = profiles.AgentSettingsRegistry(
+        custom_defaults={
+            "plan_creator": profiles.AgentModelSettings(
+                reasoning_level=profiles.ReasoningLevel.MAX,
+                max_tokens=8192,
+            )
+        }
+    )
+    monkeypatch.setattr(profiles, "get_agent_settings_registry", lambda: registry)
+    monkeypatch.setattr(ollama_mod, "OllamaModel", FakeModel)
+    monkeypatch.setattr(models_pkg, "get_capabilities", lambda *_args: fake_capabilities())
+    monkeypatch.setattr(patches, "patch_ollama_model_json_toolcalls", Mock())
+
+    model = mod.create_ollama_model("any-thinking-model", role="plan_creator")
+
+    assert model.kwargs["additional_args"]["think"] == "max"
+
+
+def test_create_ollama_model_passes_xhigh_string_reasoning(monkeypatch, config_manager):
+    import modules.agents.patches as patches
+    import modules.config.models as models_pkg
+    import modules.config.models.agent_profiles as profiles
+    import modules.config.models.ollama as ollama_mod
 
     registry = profiles.AgentSettingsRegistry(
         custom_defaults={
@@ -222,9 +246,27 @@ def test_create_ollama_model_passes_xhigh_string_reasoning(monkeypatch, config_m
     monkeypatch.setattr(models_pkg, "get_capabilities", lambda *_args: fake_capabilities())
     monkeypatch.setattr(patches, "patch_ollama_model_json_toolcalls", Mock())
 
-    model = mod.create_ollama_model("gpt-oss", role="plan_creator")
+    model = mod.create_ollama_model("any-thinking-model", role="plan_creator")
 
     assert model.kwargs["additional_args"]["think"] == "xhigh"
+
+
+def test_create_ollama_model_reuses_learned_think_fallback(monkeypatch, config_manager):
+    import modules.config.models.agent_profiles as profiles
+    import modules.config.models.ollama as ollama_mod
+    import modules.agents.patches as patches
+    import modules.config.models as models_pkg
+
+    registry = profiles.AgentSettingsRegistry()
+    registry.record_parameter_fallback("ollama", "any-thinking-model", "think", True)
+    monkeypatch.setattr(profiles, "get_agent_settings_registry", lambda: registry)
+    monkeypatch.setattr(ollama_mod, "OllamaModel", FakeModel)
+    monkeypatch.setattr(models_pkg, "get_capabilities", lambda *_args: fake_capabilities())
+    monkeypatch.setattr(patches, "patch_ollama_model_json_toolcalls", Mock())
+
+    model = mod.create_ollama_model("any-thinking-model", role="plan_creator")
+
+    assert model.kwargs["additional_args"]["think"] is True
 
 
 def test_provider_models_receive_plan_critic_profile(monkeypatch, config_manager):

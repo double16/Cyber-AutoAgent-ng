@@ -69,6 +69,24 @@ class TestCapabilitiesPrecedence:
         assert allows_reasoning_content_replay("litellm", "openai/gpt-5", caps) is False
         assert allows_reasoning_content_replay("bedrock", "claude-sonnet-4", caps) is True
 
+    def test_ollama_thinking_sets_internal_string_reasoning_flag(self):
+        show_response = MagicMock(capabilities=["thinking"])
+        ollama_client = MagicMock()
+        ollama_client.show.return_value = show_response
+
+        with (
+            patch("modules.config.models.capabilities.get_models_client", None),
+            patch("modules.config.models.capabilities.ProviderConfigManager", None),
+            patch("modules.config.models.capabilities.LlmProviders", None),
+            patch("modules.config.models.capabilities.ModelInfoBase", None),
+            patch("modules.config.models.capabilities.ollama.Client", return_value=ollama_client),
+        ):
+            ModelCapabilitiesResolver.capabilities.cache_clear()
+            caps = get_capabilities("ollama", "any-thinking-model")
+
+        assert caps.supports_reasoning is True
+        assert caps.pass_reasoning_effort is True
+
 
 class TestTokenLimitPrecedence:
     """Validate models.dev used for token limits."""

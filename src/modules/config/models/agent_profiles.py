@@ -46,14 +46,15 @@ class ReasoningLevel(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     XHIGH = "xhigh"
+    MAX = "max"
 
     def to_bool(self) -> bool:
         """Evaluate reasoning level as a boolean.
 
         In all boolean reasoning models, 'none' and 'low' evaluate to False,
-        while 'medium', 'high', and 'xhigh' evaluate to True.
+        while 'medium', 'high', 'xhigh', and 'max' evaluate to True.
         """
-        return self in (ReasoningLevel.MEDIUM, ReasoningLevel.HIGH, ReasoningLevel.XHIGH)
+        return self in (ReasoningLevel.MEDIUM, ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MAX)
 
     @classmethod
     def from_value(cls, value: Union[ReasoningLevel, str, None]) -> ReasoningLevel:
@@ -181,7 +182,7 @@ DEFAULT_AGENT_PROFILES: Dict[LLMRoleType, AgentModelSettings] = {
     LLMRoleType.REPORT_AGENT: AgentModelSettings(
         temperature=0.2,
         reasoning_level=ReasoningLevel.NONE,
-        max_tokens=8192,
+        max_tokens=16384,
     ),
     LLMRoleType.REPORT_CRITIC: AgentModelSettings(
         temperature=0.0,
@@ -517,7 +518,7 @@ def translate_reasoning_to_provider(
             result["thinking_budget"] = 0
         return result
 
-    # Reasoning is active (LOW, MEDIUM, HIGH, XHIGH)
+    # Reasoning is active (LOW, MEDIUM, HIGH, XHIGH, MAX)
     if provider_key == "ollama":
         # String level for Ollama; fallback logic will convert to bool if rejected
         result["think"] = reasoning_level.value
@@ -527,6 +528,7 @@ def translate_reasoning_to_provider(
             ReasoningLevel.MEDIUM: "medium",
             ReasoningLevel.HIGH: "high",
             ReasoningLevel.XHIGH: "max",
+            ReasoningLevel.MAX: "max",
         }
         result["effort"] = effort_map.get(reasoning_level, "medium")
         # Budget tokens for models requiring thinking budget
@@ -535,6 +537,7 @@ def translate_reasoning_to_provider(
             ReasoningLevel.MEDIUM: min(max_tokens, 2048),
             ReasoningLevel.HIGH: min(max_tokens, 4096),
             ReasoningLevel.XHIGH: min(max_tokens, int(max_tokens * 0.8)),
+            ReasoningLevel.MAX: min(max_tokens, int(max_tokens * 0.8)),
         }
         result["budget_tokens"] = budget_map.get(reasoning_level, min(max_tokens, 2048))
     elif provider_key == "litellm":
@@ -546,7 +549,8 @@ def translate_reasoning_to_provider(
             ReasoningLevel.LOW: min(max_tokens, 1024),
             ReasoningLevel.MEDIUM: min(max_tokens, 4096),
             ReasoningLevel.HIGH: min(max_tokens, 8192),
-            ReasoningLevel.XHIGH: min(max_tokens, 16384),
+            ReasoningLevel.XHIGH: min(max_tokens, 12288),
+            ReasoningLevel.MAX: min(max_tokens, 16384),
         }
         result["thinking_budget"] = gemini_budget.get(reasoning_level, min(max_tokens, 4096))
 
@@ -569,7 +573,7 @@ def mutate_agent_model_reasoning(agent: Any, level: Union[ReasoningLevel, str]) 
         if isinstance(config, dict):
             additional_args = config.setdefault("additional_args", {})
             if isinstance(additional_args, dict):
-                additional_args["think"] = target_level.to_bool()
+                additional_args["think"] = False if target_level == ReasoningLevel.NONE else target_level.value
         return
 
     # LiteLLMModel
@@ -599,6 +603,7 @@ def mutate_agent_model_reasoning(agent: Any, level: Union[ReasoningLevel, str]) 
                 ReasoningLevel.MEDIUM: "medium",
                 ReasoningLevel.HIGH: "high",
                 ReasoningLevel.XHIGH: "max",
+                ReasoningLevel.MAX: "max",
             }
             model.additional_request_fields.setdefault("output_config", {})
             model.additional_request_fields["output_config"]["effort"] = effort_map.get(target_level, "medium")
@@ -612,7 +617,8 @@ def mutate_agent_model_reasoning(agent: Any, level: Union[ReasoningLevel, str]) 
         else:
             model.config["additional_args"]["think"] = (
                 target_level.value
-                if target_level in (ReasoningLevel.LOW, ReasoningLevel.MEDIUM, ReasoningLevel.HIGH)
+                if target_level
+                in (ReasoningLevel.LOW, ReasoningLevel.MEDIUM, ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MAX)
                 else target_level.to_bool()
             )
 

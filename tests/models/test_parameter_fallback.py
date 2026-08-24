@@ -1,6 +1,6 @@
 """Unit and integration tests for single-parameter fallback, Ollama think transitions, and learned cache."""
 
-from typing import AsyncGenerator
+from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,7 +22,7 @@ def test_classify_parameter_error():
     assert classify_parameter_error(RuntimeError("Model does not support temperature setting")) == "temperature"
     assert classify_parameter_error(Exception("invalid parameter top_k")) == "top_k"
     assert classify_parameter_error(ValueError("top_p is not allowed with this configuration")) == "top_p"
-    assert classify_parameter_error(Exception("unknown option think")) == "think"
+    assert classify_parameter_error(Exception("unknown option think")) is None
     assert classify_parameter_error(RuntimeError("unsupported reasoning_effort parameter")) == "reasoning_effort"
     assert classify_parameter_error(ValueError("thinking budget is not supported")) == "thinking"
     assert classify_parameter_error(RuntimeError("effort level is invalid")) == "effort"
@@ -40,23 +40,22 @@ def test_apply_parameter_fallback_ollama():
         options={"top_k": 40, "top_p": 0.9, "temperature": 0.7},
     )
 
-    # Fallback 1: think string -> bool
+    # Ollama retries a rejected string think level with its boolean equivalent.
     applied = apply_parameter_fallback_to_model(model, "ollama", "qwen", "think")
     assert applied is True
     assert model.config["additional_args"]["think"] is True
 
-    # Fallback 2: think bool -> omit
-    applied = apply_parameter_fallback_to_model(model, "ollama", "qwen", "think")
-    assert applied is True
-    assert "think" not in model.config["additional_args"]
+    # A rejected enabled boolean then falls back to False without removing think.
+    assert apply_parameter_fallback_to_model(model, "ollama", "qwen", "think") is True
+    assert model.config["additional_args"]["think"] is False
 
-    # Fallback 3: top_k
+    # Fallback 1: top_k
     applied = apply_parameter_fallback_to_model(model, "ollama", "qwen", "top_k")
     assert applied is True
     assert model.config["top_k"] is None
     assert "top_k" not in model.config["options"]
 
-    # Fallback 4: temperature
+    # Fallback 2: temperature
     applied = apply_parameter_fallback_to_model(model, "ollama", "qwen", "temperature")
     assert applied is True
     assert model.config["temperature"] is None
@@ -101,7 +100,7 @@ async def test_wrap_model_with_fallback_progressive_retry():
 
 
 @pytest.mark.asyncio
-async def test_ollama_chat_with_fallback_think_and_options():
+async def test_ollama_chat_with_fallback_retries_string_then_boolean_and_learns_boolean():
     reset_agent_settings_registry()
     registry = get_agent_settings_registry()
 
@@ -114,16 +113,14 @@ async def test_ollama_chat_with_fallback_think_and_options():
 
     client_mock = AsyncMock()
     call_count = [0]
+    requests = []
 
     async def fake_chat(**kwargs):
         call_count[0] += 1
+        requests.append(kwargs)
         if call_count[0] == 1:
-            # String think failed
-            raise ValueError("invalid think option: expected boolean")
-        if call_count[0] == 2:
-            # top_k rejected
-            raise ValueError("unsupported option top_k")
-        # 3rd attempt succeeds
+            raise ValueError("unsupported think parameter")
+        # The boolean retry succeeds.
         res = MagicMock()
         res.message.content = "recovered answer"
         res.message.thinking = None
@@ -137,9 +134,113 @@ async def test_ollama_chat_with_fallback_think_and_options():
     client_mock.chat = fake_chat
 
     res = await model._chat_with_fallback(client_mock, model.format_request([{"role": "user", "content": [{"text": "hi"}]}]))
-    assert call_count[0] == 3
+    assert call_count[0] == 2
     assert res.message.content == "recovered answer"
+    assert requests[0]["think"] == "medium"
+    assert requests[1]["think"] is True
 
     fallbacks = registry.get_learned_fallbacks("ollama", "deepseek-r1")
-    assert "think" in fallbacks
-    assert "top_k" in fallbacks
+    assert fallbacks["think"] is True
+    assert "top_k" not in fallbacks
+
+
+@pytest.mark.asyncio
+async def test_ollama_chat_with_fallback_retries_enabled_boolean_then_false():
+    reset_agent_settings_registry()
+    registry = get_agent_settings_registry()
+    model = OllamaModel(
+        host="http://localhost:11434",
+        model_id="deepseek-r1",
+        additional_args={"think": "xhigh"},
+    )
+    client_mock = AsyncMock()
+    requests = []
+
+    async def fake_chat(**kwargs):
+        requests.append(kwargs)
+        if len(requests) < 3:
+            raise ValueError("unsupported think parameter")
+        response = MagicMock()
+        response.message.content = "recovered answer"
+        response.message.thinking = None
+        response.message.tool_calls = []
+        response.done_reason = "stop"
+        response.prompt_eval_count = 10
+        response.eval_count = 5
+        response.total_duration = 1000000
+        return response
+
+    client_mock.chat = fake_chat
+
+    await model._chat_with_fallback(client_mock, model.format_request([{"role": "user", "content": [{"text": "hi"}]}]))
+
+    assert [request["think"] for request in requests] == ["xhigh", True, False]
+    assert registry.get_learned_fallbacks("ollama", "deepseek-r1")["think"] is False
+
+
+@pytest.mark.asyncio
+async def test_ollama_chat_with_fallback_retries_low_string_directly_to_false():
+    model = OllamaModel(
+        host="http://localhost:11434",
+        model_id="deepseek-r1",
+        additional_args={"think": "low"},
+    )
+    client_mock = AsyncMock()
+    requests = []
+
+    async def fake_chat(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            raise ValueError("unsupported think parameter")
+        response = MagicMock()
+        response.message.content = "recovered answer"
+        response.message.thinking = None
+        response.message.tool_calls = []
+        response.done_reason = "stop"
+        response.prompt_eval_count = 10
+        response.eval_count = 5
+        response.total_duration = 1000000
+        return response
+
+    client_mock.chat = fake_chat
+
+    await model._chat_with_fallback(client_mock, model.format_request([{"role": "user", "content": [{"text": "hi"}]}]))
+
+    assert [request["think"] for request in requests] == ["low", False]
+
+
+@pytest.mark.asyncio
+async def test_ollama_chat_with_fallback_never_removes_disabled_think():
+    model = OllamaModel(
+        host="http://localhost:11434",
+        model_id="qwen",
+        additional_args={"think": False},
+    )
+    client_mock = AsyncMock()
+    client_mock.chat.side_effect = ValueError("unsupported think parameter")
+    request = model.format_request([{"role": "user", "content": [{"text": "hi"}]}])
+
+    with pytest.raises(ValueError, match="unsupported think parameter"):
+        await model._chat_with_fallback(client_mock, request)
+
+    client_mock.chat.assert_awaited_once_with(**request)
+    assert request["think"] is False
+
+
+@pytest.mark.asyncio
+async def test_ollama_recursion_error_is_terminal_and_preserves_think():
+    model = OllamaModel(
+        host="http://localhost:11434",
+        model_id="qwen",
+        additional_args={"think": False},
+        options={"top_k": 50},
+    )
+    client_mock = AsyncMock()
+    client_mock.chat.side_effect = RecursionError("maximum recursion depth exceeded")
+    request = model.format_request([{"role": "user", "content": [{"text": "hi"}]}])
+
+    with pytest.raises(RecursionError, match="maximum recursion depth exceeded"):
+        await model._chat_with_fallback(client_mock, request)
+
+    client_mock.chat.assert_awaited_once()
+    assert request["think"] is False

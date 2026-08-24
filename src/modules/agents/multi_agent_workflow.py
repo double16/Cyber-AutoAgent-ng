@@ -64,13 +64,13 @@ from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import classify_and_discard_max_token_output
 from modules.handlers.operation_health import DEFAULT_INCOMPLETE_HEALTH_CAP, compute_operation_health
-from modules.handlers.tool_recovery import ToolOutcome, outcomes_to_toon
+from modules.handlers.tool_recovery import EvaluatorArtifactReadLimitExceeded, ToolOutcome, outcomes_to_toon
 from modules.handlers.utils import (
     get_tool_description,
     get_tool_name,
     sanitize_toon_value,
 )
-from modules.tools.artifact import create_bounded_artifact_reader
+from modules.tools.artifact import create_bounded_artifact_reader, resolve_operation_artifact_path
 from modules.tools.memory import (
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
@@ -433,6 +433,11 @@ def default_text_runner(runtime: AgentRuntimeResources) -> AgentTextRunner:
         try:
             try:
                 result = agent(prompt)
+                artifact_read_limit_hook = getattr(agent, "_cyber_evaluator_artifact_read_limit_hook", None)
+                if getattr(artifact_read_limit_hook, "exhausted", False):
+                    raise EvaluatorArtifactReadLimitExceeded(
+                        "task evaluator exceeded its bounded artifact-read allowance twice"
+                    )
                 return extract_result_text(result)
             except MaxTokensReachedException as error:
                 sanitize_sdk_error(error)
@@ -7003,7 +7008,12 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         cycle: Optional[int] = None,
         cycle_total: Optional[int] = None,
     ) -> WorkflowDecision:
-        binding_failure = self._endpoint_evidence_guard(task, acceptance_results or [], tool_outcomes or [])
+        resolved_acceptance_results = (
+            acceptance_results
+            if acceptance_results is not None
+            else self.state.list_task_acceptance_results(task.task_uid)
+        )
+        binding_failure = self._endpoint_evidence_guard(task, resolved_acceptance_results, tool_outcomes or [])
         if binding_failure:
             self._log_workflow(
                 "task evidence binding rejected task=%s reason=%s",
@@ -7019,9 +7029,9 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
                 task,
                 worker_context,
                 tool_outcomes,
-                acceptance_results,
+                resolved_acceptance_results,
             ),
-            self._evaluator_tools(),
+            self._task_evaluator_tools(task, resolved_acceptance_results),
             self._task_evaluator_system_prompt(),
             data_validator=lambda payload: self._validate_task_evaluator_decision_payload(
                 payload, allowed=("done", "partial_failure", "blocked")
@@ -7037,7 +7047,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         repair = self._evaluator_repair_from_data(data)
         decision.repair_kind = repair["kind"]
         decision.unresolved_evidence_gaps = tuple(repair["evidence_gaps"])
-        if self._evaluator_reopens_resolved_execution_gate(task, acceptance_results or [], decision):
+        if self._evaluator_reopens_resolved_execution_gate(task, resolved_acceptance_results, decision):
             self._emit_evaluator_execution_gate_reconciliation(task, decision)
             decision = WorkflowDecision(
                 status="done",
@@ -7052,7 +7062,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             and recommendation["required"]
             and recommendation["confidence"] >= FINDING_OBSERVATION_REPAIR_CONFIDENCE
             and decision.status == "done"
-            and self._has_artifact_backed_observation(acceptance_results or [])
+            and self._has_artifact_backed_observation(resolved_acceptance_results)
             and not self._task_has_linked_finding(task.task_uid)
         ):
             decision.finding_advisory_required = True
@@ -7399,7 +7409,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             data = self._run_json_text_agent(
                 "phase_evaluator",
                 self._phase_evaluator_prompt(plan, phase) + context,
-                self._evaluator_tools(),
+                self._phase_evaluator_tools(),
                 self._phase_evaluator_system_prompt(),
                 data_validator=lambda payload: self._validate_evaluator_decision_payload(
                     payload, allowed=("continue", *EVALUATOR_PLAN_STATUSES)
@@ -7443,7 +7453,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             data = self._run_json_text_agent(
                 "phase_evaluator",
                 self._phase_evaluator_prompt(plan, phase, hard_cap=hard_cap),
-                self._evaluator_tools(),
+                self._phase_evaluator_tools(),
                 self._phase_evaluator_system_prompt(),
                 data_validator=lambda payload: self._validate_evaluator_decision_payload(
                     payload,
@@ -7457,6 +7467,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
                     "phase_id": phase.id,
                     "phase_title": phase.title,
                 },
+                raise_on_evaluator_failure=True,
             )
             allowed = EVALUATOR_PLAN_STATUSES if hard_cap is not None else ("continue", *EVALUATOR_PLAN_STATUSES)
             decision = self._decision_from_data(data, allowed=allowed)
@@ -7489,25 +7500,11 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
 
         bounded_error = self._short(error, 500)
         fingerprint = hashlib.sha256(str(error).encode("utf-8", errors="replace")).hexdigest()
-        tasks = self.state.list_tasks(phase=phase.id)
-        status_counts = Counter(task.status for task in tasks)
-        if status_counts.get("blocked", 0):
-            status = "blocked"
-            classification_reason = "one or more phase tasks are blocked"
-        elif status_counts.get("active", 0) or status_counts.get("pending", 0):
-            status = "continue"
-            classification_reason = "actionable phase tasks remain"
-        elif tasks and all(task.status in {"done", "superseded"} for task in tasks):
-            status = "done"
-            classification_reason = "all phase tasks reached successful terminal states"
-        else:
-            status = "partial_failure"
-            classification_reason = "no actionable work remains but the phase has incomplete task outcomes"
-        if status == "continue" and hard_cap is not None:
-            status = "partial_failure"
-            classification_reason = "actionable phase tasks remain after the mandatory phase budget cap"
+        decision, status_counts = self._classify_phase_from_durable_state(phase, hard_cap=hard_cap)
+        status = decision.status
+        classification_reason = decision.reason
         reason = (
-            "Phase evaluator parsing failed after bounded retries; controller applied deterministic durable-state "
+            "Phase evaluator was unavailable after bounded retries; controller applied deterministic durable-state "
             f"classification ({classification_reason}; task_status_counts={dict(sorted(status_counts.items()))}). "
             f"Error: {bounded_error}"
         )
@@ -7530,6 +7527,36 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             fingerprint,
         )
         return WorkflowDecision(status=status, reason=reason)
+
+    def _classify_phase_from_durable_state(
+        self,
+        phase: PlanPhase,
+        *,
+        hard_cap: Optional[float] = None,
+    ) -> tuple[WorkflowDecision, Counter[str]]:
+        """Classify a phase from persisted task and candidate state without model inference."""
+
+        tasks = self.state.list_tasks(phase=phase.id)
+        status_counts = Counter(task.status for task in tasks)
+        if status_counts.get("blocked", 0):
+            status = "blocked"
+            classification_reason = "one or more phase tasks are blocked"
+        elif status_counts.get("active", 0) or status_counts.get("pending", 0):
+            status = "continue"
+            classification_reason = "actionable phase tasks remain"
+        elif tasks and all(task.status in {"done", "superseded"} for task in tasks):
+            status = "done"
+            classification_reason = "all phase tasks reached successful terminal states"
+        elif not tasks and _phase_semantically_requires_finding_candidates(phase):
+            status = "not_applicable"
+            classification_reason = "the candidate-dependent phase has no tasks or finding candidates"
+        else:
+            status = "partial_failure"
+            classification_reason = "no actionable work remains but the phase has incomplete task outcomes"
+        if status == "continue" and hard_cap is not None:
+            status = "partial_failure"
+            classification_reason = "actionable phase tasks remain after the mandatory phase budget cap"
+        return WorkflowDecision(status=status, reason=classification_reason), status_counts
 
     def _guard_phase_terminal_decision(
         self,
@@ -7715,19 +7742,15 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         except Exception:
             logger.debug("Failed to emit phase hard cap trace span", exc_info=True)
 
-        try:
-            decision = self._evaluate_phase_with_policy(plan, phase, hard_cap=phase_cap)
-        except WorkflowInvariantError as error:
-            reason = (
-                f"Phase budget hard cap {phase_cap:.2f}% reached; "
-                f"terminal phase evaluation failed: {self._short(error, 500)}"
-            )
-            self._log_workflow(
-                "phase hard cap evaluator fallback phase=%s status=partial_failure reason=%s",
-                self._phase_label(phase),
-                self._short(reason),
-            )
-            decision = WorkflowDecision(status="partial_failure", reason=reason)
+        decision, status_counts = self._classify_phase_from_durable_state(phase, hard_cap=phase_cap)
+        self._emit_workflow_event({
+            "type": "phase_durable_state_classification",
+            "phase": phase.id,
+            "status": decision.status,
+            "reason": decision.reason,
+            "task_status_counts": dict(sorted(status_counts.items())),
+            "hard_cap": phase_cap,
+        })
 
         self._log_workflow(
             "marking capped phase=%s status=%s reason=%s",
@@ -7740,21 +7763,89 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         self._emit_plan_output("updated", updated_plan, previous_signature)
         return updated_plan
 
-    def _evaluator_tools(self) -> List[Any]:
-        """Return the read-focused tool allowlist shared by evaluator roles."""
-        tools = [
-            tool
-            for tool in build_role_tools(self.runtime)
-            if get_tool_name(tool) == "memory_retrieve"
+    @staticmethod
+    def _task_evaluator_artifact_refs(task: Task, acceptance_results: List[Any]) -> List[str]:
+        """Return canonical, distinct artifact evidence the task evaluator may inspect."""
+
+        candidates = list(task.evidence)
+        for result in acceptance_results:
+            candidates.extend(getattr(result, "evidence_refs", ()) or ())
+            for coverage in getattr(result, "coverage", ()) or ():
+                candidates.extend(getattr(coverage, "evidence_refs", ()) or ())
+
+        references = []
+        seen = set()
+        for candidate in candidates:
+            value = str(candidate or "").strip()
+            if not value.startswith(("artifact:", "artifact_id:")):
+                continue
+            try:
+                reference = canonical_artifact_reference(value)
+                # Evidence must still be readable from the artifact tool's operation root.
+                # This keeps the advertised budget identical to the reader's allowlist.
+                resolve_operation_artifact_path(reference)
+            except (OSError, TypeError, ValueError):
+                continue
+            if reference not in seen:
+                references.append(reference)
+                seen.add(reference)
+        return references
+
+    def _task_evaluator_tools(self, task: Task, acceptance_results: List[Any]) -> List[Any]:
+        """Return a task-local artifact reader with bounded per-artifact pagination."""
+
+        artifact_refs = self._task_evaluator_artifact_refs(task, acceptance_results)
+        if not artifact_refs:
+            return []
+        max_reads_per_artifact = max(
+            1,
+            self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4),
+        )
+        return [create_bounded_artifact_reader(
+            max_reads=len(artifact_refs) * max_reads_per_artifact,
+            allowed_artifact_refs=artifact_refs,
+            max_reads_per_artifact=max_reads_per_artifact,
+            max_lines_per_read=200,
+        )]
+
+    def _task_evaluator_artifact_limit_section(
+        self,
+        task: Task,
+        acceptance_results: List[Any],
+    ) -> str:
+        """Render the exact controller-owned artifact review budget for an evaluator."""
+
+        artifact_refs = self._task_evaluator_artifact_refs(task, acceptance_results)
+        max_reads_per_artifact = max(
+            1,
+            self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4),
+        )
+        lines = [
+            "## Artifact Review Limits",
+            f"- Authorized artifacts: {len(artifact_refs)}",
+            f"- Total successful reads: {len(artifact_refs) * max_reads_per_artifact}",
+            f"- Successful pages per artifact: {max_reads_per_artifact}",
+            "- Maximum lines per page: 200",
+            "- Read different pages with start_line when needed; do not repeat a page or read another artifact.",
+            "- Return the required JSON decision once you have the needed evidence.",
+            "",
+            "Authorized artifact references:",
         ]
-        return [create_bounded_artifact_reader(), *tools]
+        lines.extend(f"- {reference}" for reference in artifact_refs)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _phase_evaluator_tools() -> List[Any]:
+        """Phase evaluation is based solely on controller-provided durable state."""
+
+        return []
 
     def _evaluator_system_prompt(self) -> str:
         return """## Evaluator Role Boundary
 You are an evidence reviewer, not an execution agent. Classify existing work only. Do not perform the task, continue
 the phase, pursue the operation objective, gather new evidence, or change workflow state. Python owns all task, phase,
-and operation transitions. Use read_artifact only to inspect referenced operation artifacts and memory_retrieve only to
-review existing memories. Return only the requested JSON decision."""
+and operation transitions. Task evaluators may use read_artifact only for supplied task-local artifact references,
+within the controller-provided page limits. Phase evaluators have no tools. Return only the requested JSON decision."""
 
     def _task_evaluator_system_prompt(self) -> str:
         return self._evaluator_system_prompt()
@@ -9378,6 +9469,7 @@ Allowed evidence references:
         cycle: Optional[int] = None,
         cycle_total: Optional[int] = None,
         evaluator_fallback_context: Optional[Dict[str, Any]] = None,
+        raise_on_evaluator_failure: bool = False,
     ) -> Dict[str, Any]:
         current_prompt = prompt
         last_response = ""
@@ -9416,6 +9508,24 @@ Allowed evidence references:
                     from modules.config.models.agent_profiles import get_agent_settings_registry
                     get_agent_settings_registry().record_token_recovery_success(esc_role, boost_amount=2048)
                     pending_token_escalation = None
+            except EvaluatorArtifactReadLimitExceeded as error:
+                if role != "task_evaluator":
+                    raise
+                self._emit_workflow_activity(
+                    role,
+                    "failed",
+                    attempt=activity_attempt,
+                    attempt_total=activity_total,
+                    cycle=cycle,
+                    cycle_total=cycle_total,
+                )
+                fallback = self._evaluator_artifact_read_limit_fallback(error, evaluator_fallback_context)
+                self._emit_workflow_event(fallback["event"])
+                self._log_workflow(
+                    "task evaluator stopped after bounded artifact-read limit violation context=%s",
+                    self._short(evaluator_fallback_context or {}),
+                )
+                return fallback["data"]
             except MaxTokensReachedException as error:
                 sanitize_sdk_error(error)
                 self._emit_workflow_activity(
@@ -9465,7 +9575,7 @@ Allowed evidence references:
                     target_lvl = (
                         ReasoningLevel.LOW.value
                         if current_settings.reasoning_level
-                        in (ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MEDIUM)
+                        in (ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MAX, ReasoningLevel.MEDIUM)
                         else ReasoningLevel.NONE.value
                     )
                     pending_reasoning = (target_lvl, "reasoning max token reduction success")
@@ -9478,6 +9588,21 @@ Allowed evidence references:
                 current_prompt = self._json_max_token_retry_prompt(prompt, kind)
                 continue
             last_response = response
+            if role in {"phase_evaluator", "task_evaluator"} and not str(response or "").strip():
+                error = json.JSONDecodeError("Expecting value", str(response or ""), 0)
+                self._emit_workflow_activity(
+                    role,
+                    "failed",
+                    attempt=activity_attempt,
+                    attempt_total=activity_total,
+                    cycle=cycle,
+                    cycle_total=cycle_total,
+                )
+                last_error = error
+                last_failure_was_parse = True
+                last_failure_was_schema = False
+                self._log_workflow("json agent role=%s returned empty evaluator response", role)
+                break
             try:
                 parsed_response = parse_json_response_with_metadata(response, require_object=True)
                 data = parsed_response.value
@@ -9584,6 +9709,10 @@ Allowed evidence references:
                     self._short(evaluator_fallback_context or {}),
                 )
                 return fallback
+            if raise_on_evaluator_failure:
+                raise WorkflowInvariantError(
+                    f"{role} did not produce a parseable decision after {attempt + 1} attempt(s): {last_error}"
+                )
             fallback = self._evaluator_parse_fallback(
                 role,
                 last_error,
@@ -9599,6 +9728,10 @@ Allowed evidence references:
             )
             return fallback["data"]
         if role in {"phase_evaluator", "task_evaluator"} and last_failure_was_schema:
+            if raise_on_evaluator_failure:
+                raise WorkflowInvariantError(
+                    f"{role} did not produce a schema-valid decision after {attempt + 1} attempt(s): {last_error}"
+                )
             fallback = self._evaluator_schema_fallback(
                 role,
                 last_error,
@@ -9628,6 +9761,36 @@ Allowed evidence references:
             f"{role} returned invalid JSON after {attempt + 1} attempt(s): {last_error}. "
             f"Response excerpt: {excerpt}"
         )
+
+    @staticmethod
+    def _evaluator_artifact_read_limit_fallback(
+        error: EvaluatorArtifactReadLimitExceeded,
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return a non-retryable evaluator fallback after repeated bounded-reader violations."""
+
+        error_text = str(error)
+        fingerprint = hashlib.sha256(error_text.encode("utf-8", errors="replace")).hexdigest()
+        event = {
+            "type": "evaluator_fallback",
+            "role": "task_evaluator",
+            "status": "partial_failure",
+            "source": "artifact_read_limit_exhausted",
+            "error_type": error.__class__.__name__,
+            "error_fingerprint": fingerprint,
+        }
+        event.update(context or {})
+        return {
+            "data": {
+                "status": "partial_failure",
+                "reason": (
+                    "Task evaluation stopped after the evaluator exceeded its bounded artifact-read allowance twice; "
+                    "existing evidence was preserved with a deterministic partial_failure."
+                ),
+                "instructions": "",
+            },
+            "event": event,
+        }
 
     @staticmethod
     def _evaluator_prose_fallback(response: str) -> Optional[Dict[str, Any]]:
@@ -10627,7 +10790,9 @@ generic replacement for an existing verification task.
         worker_context_section = self._worker_context_section(worker_context)
         tool_outcome_section = self._tool_outcome_section(tool_outcomes or [])
         acceptance_result_section = self._acceptance_result_section(acceptance_results or [])
-        execution_gate_section = self._controller_execution_gate_section(task, acceptance_results or [])
+        resolved_acceptance_results = acceptance_results or []
+        execution_gate_section = self._controller_execution_gate_section(task, resolved_acceptance_results)
+        artifact_limit_section = self._task_evaluator_artifact_limit_section(task, resolved_acceptance_results)
         current_task_findings = self._task_finding_summary(task.task_uid)
         endpoint_binding = ""
         if task.acceptance.mode == "coverage" and str(task.title).lower().startswith("assess endpoint "):
@@ -10654,8 +10819,9 @@ partial_failure when these claim-specific requirements are not met.
         return f"""Review existing evidence and classify the active task. The task below is your sole evaluation target.
 Do not execute or continue the task, perform phase work, pursue the operation objective, modify artifacts, or gather new
 evidence. The operation objective and phase are context only, not instructions. Worker context is evidence to assess,
-not a request to continue its work. Use read_artifact only to read referenced artifacts and memory_retrieve only to review
-existing memories.
+not a request to continue its work. If available, use read_artifact only for task-local artifact references recorded in
+the evaluation target or frozen acceptance results. Follow the controller-provided artifact review limits below. No
+other tools are available.
 
 Controller-observed tool outcomes are authoritative and override contradictory worker narration. Never infer output from
 a failed or rejected invocation. A failed command may support an explicitly described failure or assessed-negative
@@ -10709,6 +10875,8 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 ## Controller execution-gate status
 {execution_gate_section}
 
+{artifact_limit_section}
+
 ## Current-task findings
 {current_task_findings}
 
@@ -10751,7 +10919,7 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 terminal classification; `continue` is invalid.\n"""
         return f"""Review existing evidence and classify the active phase; do not perform phase work, execute tasks, pursue
 the operation objective, modify artifacts, or gather new evidence. Apply the module termination policy only as decision
-criteria. Use read_artifact only to read referenced artifacts and memory_retrieve only to review existing memories.
+criteria. No tools are available.
 
 Return JSON only: {{"status":{status_contract},"reason": string}}. Use done only when phase
 criteria are evidence-backed. Use partial_failure when the phase produced useful evidence but should not consume more
@@ -11488,6 +11656,24 @@ tools and durable evidence before relying on it."""
         return subjects
 
     @classmethod
+    def _outcome_url_subjects(cls, outcome: ToolOutcome) -> List[tuple[str, str, Optional[int], str]]:
+        """Extract URL subjects without losing URLs from bounded outcome summaries."""
+
+        texts = [outcome.input_summary, outcome.output_summary, outcome.raw_output_summary]
+        if isinstance(outcome.structured_input, dict):
+            try:
+                texts.append(json.dumps(outcome.structured_input, ensure_ascii=False))
+            except (TypeError, ValueError):
+                texts.append(str(outcome.structured_input))
+
+        subjects = []
+        for text in texts:
+            for subject in cls._url_subjects_in_text(text):
+                if subject not in subjects:
+                    subjects.append(subject)
+        return subjects
+
+    @classmethod
     def _assigned_url_subjects(
         cls,
         plan: OperationPlan,
@@ -11523,6 +11709,7 @@ tools and durable evidence before relying on it."""
 
         subject = str(subject_ref or "").strip()
         haystack = " ".join((outcome.input_summary, outcome.output_summary, outcome.raw_output_summary))
+        observed_urls = MultiAgentWorkflowController._outcome_url_subjects(outcome)
         if subject.startswith("target:"):
             target_id = subject.split(":", 1)[1]
             assigned_targets = [
@@ -11542,7 +11729,7 @@ tools and durable evidence before relying on it."""
                 for target in assigned_targets
                 if (normalized := MultiAgentWorkflowController._canonical_url_subject(target.value)) is not None
             }
-            return any(candidate in assigned_urls for candidate in MultiAgentWorkflowController._url_subjects_in_text(haystack))
+            return any(candidate in assigned_urls for candidate in observed_urls)
         if subject.startswith("/"):
             assigned_urls = MultiAgentWorkflowController._assigned_url_subjects(plan, task)
             route_pattern = MultiAgentWorkflowController._route_subject_pattern(subject)
@@ -11550,7 +11737,7 @@ tools and durable evidence before relying on it."""
                 assigned_authorities = {(scheme, host, port) for scheme, host, port, _path in assigned_urls}
                 return any(
                     (scheme, host, port) in assigned_authorities and bool(route_pattern.fullmatch(path))
-                    for scheme, host, port, path in MultiAgentWorkflowController._url_subjects_in_text(haystack)
+                    for scheme, host, port, path in observed_urls
                 )
             return bool(route_pattern.search(haystack))
         normalized_subject = subject.rstrip("/").lower()

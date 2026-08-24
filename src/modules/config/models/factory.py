@@ -688,7 +688,7 @@ def create_ollama_model(
         options["top_p"] = top_p
 
     additional_args = dict()
-    from modules.config.models.agent_profiles import ReasoningLevel
+    from modules.config.models.agent_profiles import ReasoningLevel, get_agent_settings_registry
     if reasoning_level == ReasoningLevel.NONE:
         additional_args["think"] = False
     else:
@@ -696,6 +696,10 @@ def create_ollama_model(
             additional_args["think"] = reasoning_level.value
         elif capabilities.supports_reasoning:
             additional_args["think"] = reasoning_level.to_bool()
+
+    learned_fallbacks = get_agent_settings_registry().get_learned_fallbacks("ollama", config["model_id"])
+    if "think" in learned_fallbacks and "think" in additional_args:
+        additional_args["think"] = learned_fallbacks["think"]
 
     model = OllamaModel(
         host=config["host"],

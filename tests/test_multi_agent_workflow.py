@@ -30,6 +30,7 @@ from modules.tools.memory import (
     AcceptanceContract,
     AcceptanceCriterion,
     AcceptanceResult,
+    CoverageResult,
     EvidenceRequirement,
     ExecutionRequirement,
     OperationPlan,
@@ -1673,6 +1674,78 @@ def test_controller_matches_root_route_to_target_url_without_trailing_slash():
     assert MultiAgentWorkflowController._outcome_matches_execution_subject(plan, task, "/", outcome)
 
 
+def test_controller_matches_root_url_with_trailing_slash_from_structured_shell_input():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "http://192.168.253.101:3001", "network")],
+    )
+    task = TaskModel(
+        task_uid="root-url-proof",
+        title="Probe root",
+        objective="Probe root",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+    )
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="shell-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary="x" * 500,
+        output_summary="request complete",
+        structured_input={"command": "curl -sS http://192.168.253.101:3001/"},
+    )
+
+    assert MultiAgentWorkflowController._outcome_matches_execution_subject(plan, task, "/", outcome)
+    assert MultiAgentWorkflowController._outcome_matches_execution_subject(plan, task, "target:target-1", outcome)
+
+
+@pytest.mark.parametrize(
+    "tool_url",
+    [
+        "http://192.168.253.101:3002/",
+        "https://192.168.253.101:3001/",
+        "http://192.168.253.102:3001/",
+        "http://192.168.253.101:3001/admin",
+    ],
+)
+def test_controller_keeps_root_execution_subject_scope_exact(tool_url):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "http://192.168.253.101:3001", "network")],
+    )
+    task = TaskModel(
+        task_uid="root-url-scope",
+        title="Probe root",
+        objective="Probe root",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+    )
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="shell-1",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        input_summary="x" * 500,
+        output_summary="request complete",
+        structured_input={"command": f"curl -sS {tool_url}"},
+    )
+
+    assert not MultiAgentWorkflowController._outcome_matches_execution_subject(plan, task, "/", outcome)
+
+
 def test_controller_does_not_match_root_route_from_artifact_path_alone():
     plan = OperationPlan(
         objective="assess",
@@ -2715,6 +2788,49 @@ def test_task_evaluator_parse_failure_falls_back_to_partial_failure(response):
     assert event["source"] == "json_parse_failure"
     assert event["empty_response"] is (response == "")
     assert event["task_uid"] == "parse-fallback"
+
+
+def test_empty_task_evaluator_response_does_not_retry():
+    plan = _plan()
+    task = Task(task_uid="empty", title="Assess", objective="run", phase=1, status="active")
+    calls = []
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 3}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+        text_runner=lambda *args: calls.append(args[0]) or "",
+    )
+
+    decision = controller._evaluate_task(plan, plan.phases[0], task)
+
+    assert decision.status == "partial_failure"
+    assert calls == ["task_evaluator"]
+
+
+def test_task_evaluator_artifact_read_limit_exhaustion_falls_back_without_retry():
+    plan = _plan()
+    task = Task(task_uid="artifact-limit", title="Assess", objective="run", phase=1, status="active")
+    calls = []
+
+    def text_runner(*args):
+        calls.append(args[0])
+        raise workflow_mod.EvaluatorArtifactReadLimitExceeded("read allowance exhausted")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 3}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+        text_runner=text_runner,
+    )
+
+    decision = controller._evaluate_task(plan, plan.phases[0], task)
+
+    assert decision.status == "partial_failure"
+    assert "bounded artifact-read allowance twice" in decision.reason
+    assert calls == ["task_evaluator"]
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    assert event["source"] == "artifact_read_limit_exhausted"
+    assert event["task_uid"] == "artifact-limit"
 
 
 def test_non_evaluator_parse_failure_remains_an_invariant_error():
@@ -7416,7 +7532,7 @@ def test_controller_closes_phase_but_preserves_pending_task_when_hard_budget_cap
 
     controller.run()
 
-    assert calls == ["phase_evaluator"]
+    assert calls == []
     assert state.plan.assessment_complete is True
     assert state.plan.phases[0].status == "partial_failure"
     assert state.tasks[0].status == "pending"
@@ -7466,7 +7582,7 @@ def test_phase_hard_cap_defers_active_task_without_running_worker_and_advances()
     with pytest.raises(WorkflowInvariantError, match="Workflow iteration limit reached"):
         controller.run()
 
-    assert calls == ["phase_evaluator"]
+    assert calls == []
     assert state.plan.phases[0].status == "partial_failure"
     assert state.plan.phases[1].status == "active"
     assert next(task for task in state.tasks if task.task_uid == "active").status == "pending"
@@ -7527,8 +7643,7 @@ def test_phase_hard_cap_defers_finding_validation_without_resolving_it(monkeypat
     assert controller.runtime.callback_handler.events[0]["reference_id"] == "finding-1"
 
 
-@pytest.mark.parametrize("response", ['{"status":"continue","reason":"keep going"}', "not json"])
-def test_phase_hard_cap_falls_back_to_partial_failure_for_nonterminal_evaluation(response):
+def test_phase_hard_cap_uses_durable_state_without_evaluator():
     state = FakeState(
         _plan(),
         tasks=[Task(task_uid="pending", title="Pending", objective="run", phase=1, status="pending")],
@@ -7537,7 +7652,7 @@ def test_phase_hard_cap_falls_back_to_partial_failure_for_nonterminal_evaluation
 
     def text_runner(role, prompt, tools, system_prompt):
         calls.append(role)
-        return response
+        return '{"status":"done","reason":"unexpected evaluator call"}'
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(progress=100, env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
@@ -7550,9 +7665,14 @@ def test_phase_hard_cap_falls_back_to_partial_failure_for_nonterminal_evaluation
 
     controller.run()
 
-    assert calls == ["phase_evaluator"]
+    assert calls == []
     assert state.plan.phases[0].status == "partial_failure"
     assert state.tasks[0].status == "pending"
+    classification = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "phase_durable_state_classification"
+    )
+    assert classification["status"] == "partial_failure"
 
 
 @pytest.mark.parametrize("response", ["not json", '{"status":"invented","reason":"bad status"}'])
@@ -7570,14 +7690,9 @@ def test_phase_evaluator_malformed_output_emits_deterministic_partial_failure_fa
 
     assert decision.status == "partial_failure"
     event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
-    if response == "not json":
-        assert "deterministic durable-state" in decision.reason
-        assert event["source"] == "json_parse_failure"
-        assert event["error_type"] == "JSONDecodeError"
-    else:
-        assert "required decision schema" in decision.reason
-        assert event["source"] == "schema_validation"
-        assert event["error_type"] == "ValueError"
+    assert "deterministic durable-state" in decision.reason
+    assert event["source"] == "deterministic_phase_state"
+    assert event["error_type"] == "WorkflowInvariantError"
     assert event["phase_id"] == 1
     assert event["status"] == "partial_failure"
     assert len(event["error_fingerprint"]) == 64
@@ -8468,11 +8583,12 @@ def test_controller_reopens_completed_plan_only_at_start():
         return "worked"
 
     controller = MultiAgentWorkflowController(
-        runtime=_runtime(progress=100),
+        runtime=_runtime(progress=0),
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=state,
         text_runner=text_runner,
         work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
         max_iterations=4,
     )
 
@@ -11794,7 +11910,7 @@ def test_phase_evaluator_receives_module_termination_policy():
 
     assert decision.status == "done"
     assert captured["role"] == "phase_evaluator"
-    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "memory_retrieve"}
+    assert captured["tools"] == []
     assert "## Module Termination Policy" in captured["system_prompt"]
     assert "Require verified exploitability" in captured["system_prompt"]
     assert "Apply the module termination policy" in captured["prompt"]
@@ -11848,7 +11964,7 @@ def test_task_evaluator_does_not_receive_module_termination_policy():
     assert decision.reason == "not enough access"
     assert decision.instructions == ""
     assert captured["role"] == "task_evaluator"
-    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "memory_retrieve"}
+    assert captured["tools"] == []
     assert "Evaluator Role Boundary" in captured["system_prompt"]
     assert "Module Termination Policy" not in captured["system_prompt"]
     assert "sole evaluation target" in captured["prompt"]
@@ -11893,6 +12009,114 @@ def test_task_evaluator_decision_includes_prescriptive_instructions():
     assert "Satisfying the phase or operation objective does not make this task done" in captured["prompt"]
 
 
+def test_task_evaluator_artifact_reader_allows_one_read_per_distinct_recorded_artifact(monkeypatch, tmp_path):
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    artifact_refs = [f"artifact:artifacts/evidence-{index}.txt" for index in range(1, 9)]
+    for index, reference in enumerate(artifact_refs, 1):
+        (artifact_root / f"evidence-{index}.txt").write_text(reference, encoding="utf-8")
+    task = Task(
+        task_uid="evaluator-artifact-limit",
+        title="Review recorded artifacts",
+        objective="Review task evidence",
+        phase=1,
+        status="active",
+        evidence=[artifact_refs[0], artifact_refs[1], "memory:task-note"],
+    )
+    acceptance = AcceptanceResult(
+        criterion_id="task-outcome",
+        status="satisfied",
+        disposition="observation",
+        summary="Recorded artifact evidence",
+        evidence_refs=[artifact_refs[2], artifact_refs[3], artifact_refs[2], "finding:ignored", "https://ignored"],
+        coverage=(
+            CoverageResult("route-1", "satisfied", (artifact_refs[4], artifact_refs[5])),
+            CoverageResult("route-2", "satisfied", (artifact_refs[6], artifact_refs[7], "memory:ignored")),
+        ),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+
+    assert controller._task_evaluator_artifact_refs(task, [acceptance]) == artifact_refs
+    tools = controller._task_evaluator_tools(task, [acceptance])
+
+    assert {tool.__name__ for tool in tools} == {"read_artifact"}
+    for start_line in (1, 2, 3, 4):
+        assert artifact_refs[0] in tools[0](artifact_refs[0], start_line=start_line)
+    with pytest.raises(RuntimeError, match=r"Artifact page limit reached \(4\)"):
+        tools[0](artifact_refs[0], start_line=5)
+
+
+def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(monkeypatch, tmp_path):
+    artifact_refs = [f"artifact:artifacts/evidence-{index}.txt" for index in range(1, 13)]
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    for index in range(1, 13):
+        (artifact_root / f"evidence-{index}.txt").write_text("evidence", encoding="utf-8")
+    task = Task(
+        task_uid="evaluator-artifact-budget",
+        title="Review recorded artifacts",
+        objective="Review task evidence",
+        phase=1,
+        status="active",
+        evidence=artifact_refs,
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+
+    prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
+
+    assert "- Authorized artifacts: 12" in prompt
+    assert "- Total successful reads: 48" in prompt
+    assert "- Successful pages per artifact: 4" in prompt
+    assert "- Maximum lines per page: 200" in prompt
+    assert artifact_refs[0] in prompt
+    assert artifact_refs[-1] in prompt
+
+
+def test_task_evaluator_artifact_reader_uses_persisted_acceptance_results_when_omitted(monkeypatch, tmp_path):
+    artifact = tmp_path / "artifacts" / "recorded.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("recorded evidence", encoding="utf-8")
+    task = Task(task_uid="persisted-evidence", title="Review", objective="Review", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    state.acceptance_results[task.task_uid] = [AcceptanceResult(
+        criterion_id="task-outcome",
+        status="satisfied",
+        disposition="observation",
+        summary="Recorded artifact evidence",
+        evidence_refs=["artifact:artifacts/recorded.txt"],
+    )]
+    captured = {}
+
+    def text_runner(role, prompt, tools, system_prompt):
+        captured["tools"] = tools
+        return '{"status":"done","reason":"Recorded evidence is complete."}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+
+    controller._evaluate_task(_plan(), _plan().phases[0], task)
+
+    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact"}
+
+
 def test_evaluator_tools_exclude_shell_and_optional_execution_tools():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -11900,8 +12124,10 @@ def test_evaluator_tools_exclude_shell_and_optional_execution_tools():
         state_store=FakeState(_plan()),
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
+    task = Task(task_uid="no-artifacts", title="Assess", objective="Assess", phase=1, status="active")
 
-    assert {tool.__name__ for tool in controller._evaluator_tools()} == {"read_artifact", "memory_retrieve"}
+    assert controller._task_evaluator_tools(task, []) == []
+    assert controller._phase_evaluator_tools() == []
 
 
 def test_phase_evaluator_prompt_is_review_only():
