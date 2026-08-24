@@ -70,7 +70,11 @@ from modules.handlers.utils import (
     get_tool_name,
     sanitize_toon_value,
 )
-from modules.tools.artifact import create_bounded_artifact_reader, resolve_operation_artifact_path
+from modules.tools.artifact import (
+    artifact_max_bytes_for_context_window,
+    create_bounded_artifact_reader,
+    resolve_operation_artifact_path,
+)
 from modules.tools.memory import (
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
@@ -7791,6 +7795,11 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
                 seen.add(reference)
         return references
 
+    def _artifact_context_window_tokens(self) -> int:
+        """Return the runtime context window used to size one artifact page."""
+
+        return int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)
+
     def _task_evaluator_tools(self, task: Task, acceptance_results: List[Any]) -> List[Any]:
         """Return a task-local artifact reader with bounded per-artifact pagination."""
 
@@ -7803,6 +7812,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         )
         return [create_bounded_artifact_reader(
             max_reads=len(artifact_refs) * max_reads_per_artifact,
+            context_window_tokens=self._artifact_context_window_tokens(),
             allowed_artifact_refs=artifact_refs,
             max_reads_per_artifact=max_reads_per_artifact,
             max_lines_per_read=200,
@@ -7826,7 +7836,11 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             f"- Total successful reads: {len(artifact_refs) * max_reads_per_artifact}",
             f"- Successful pages per artifact: {max_reads_per_artifact}",
             "- Maximum lines per page: 200",
+            f"- Maximum UTF-8 bytes per page: "
+            f"{artifact_max_bytes_for_context_window(self._artifact_context_window_tokens())}",
             "- Read different pages with start_line when needed; do not repeat a page or read another artifact.",
+            "- If a page exceeds the byte limit, do not retry that page unchanged; return the JSON decision using "
+            "the controller-provided evidence.",
             "- Return the required JSON decision once you have the needed evidence.",
             "",
             "Authorized artifact references:",
@@ -9193,7 +9207,9 @@ Allowed artifact references (the evidence field must copy these exactly):
                     proposal = self._run_json_text_agent(
                         "taxonomy_annotator",
                         prompt,
-                        [create_bounded_artifact_reader()],
+                        [create_bounded_artifact_reader(
+                            context_window_tokens=self._artifact_context_window_tokens()
+                        )],
                         system_prompt,
                         lambda data: self._validate_taxonomy_annotation_proposal(
                             data,
@@ -9415,7 +9431,9 @@ Allowed evidence references:
                         proposal = self._run_json_text_agent(
                             "attack_enricher",
                             prompt,
-                            [create_bounded_artifact_reader()],
+                            [create_bounded_artifact_reader(
+                                context_window_tokens=self._artifact_context_window_tokens()
+                            )],
                             system_prompt,
                             lambda data: self._validate_attack_enrichment_proposal(
                                 data,

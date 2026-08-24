@@ -12080,6 +12080,8 @@ def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(m
     assert "- Total successful reads: 48" in prompt
     assert "- Successful pages per artifact: 4" in prompt
     assert "- Maximum lines per page: 200" in prompt
+    assert "- Maximum UTF-8 bytes per page: 9600" in prompt
+    assert "do not retry that page unchanged" in prompt
     assert artifact_refs[0] in prompt
     assert artifact_refs[-1] in prompt
 

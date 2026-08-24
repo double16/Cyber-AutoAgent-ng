@@ -141,7 +141,7 @@ DEFAULT_AGENT_PROFILES: Dict[LLMRoleType, AgentModelSettings] = {
     ),
     LLMRoleType.PLAN_CRITIC: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.LOW,
+        reasoning_level=ReasoningLevel.MEDIUM,
         max_tokens=4096,
     ),
     LLMRoleType.TASK_CREATOR: AgentModelSettings(
@@ -156,8 +156,8 @@ DEFAULT_AGENT_PROFILES: Dict[LLMRoleType, AgentModelSettings] = {
     ),
     LLMRoleType.TASK_PROMPT_CRITIC: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.LOW,
-        max_tokens=2048,
+        reasoning_level=ReasoningLevel.MEDIUM,
+        max_tokens=4096,
     ),
     LLMRoleType.TASK_EXECUTOR: AgentModelSettings(
         temperature=0.5,

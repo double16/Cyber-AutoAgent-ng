@@ -339,6 +339,10 @@ The resolved value is written to the Strands model's `context_window_limit` and 
 conversation compression. Ollama also receives the same value as `num_ctx`. Values such as 48,000 are configuration or
 detection results, not application defaults. Startup fails when no positive context window can be resolved.
 
+Artifact pages use the same resolved input context window. Each page is limited to 5% of the window at four UTF-8
+bytes per token, clamped from 8 KiB through 64 KiB. For example, a 48,000-token context permits 9,600 bytes. Oversized
+pages are rejected before their content is materialized.
+
 **Example fallback configuration:**
 ```bash
 export CYBER_CONTEXT_WINDOW_FALLBACKS='[

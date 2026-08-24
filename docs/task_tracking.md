@@ -307,8 +307,10 @@ report agents can inspect operation artifacts with the read-only `read_artifact`
 agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation). A task evaluator may read
 only controller-authorized task evidence and frozen acceptance artifacts. It receives up to
 `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE` pages per artifact (default four), with its total derived from the
-number of distinct authorized artifacts; each evaluator page is limited to 200 lines. Reaching a page limit directs
-the evaluator to another authorized artifact; only total exhaustion or a repeated denied read stops evaluation.
+number of distinct authorized artifacts; each evaluator page is limited to 200 lines and 5% of the resolved input
+context window at four UTF-8 bytes per token, clamped from 8 KiB through 64 KiB. Oversized pages are rejected without
+materializing their content. Reaching a page limit directs the evaluator to another authorized artifact; only total
+exhaustion or a repeated denied read stops evaluation.
 The general reader accepts one file per call. When it receives an in-scope directory, it returns up to 25 immediate
 file references so the agent can retry with a specific artifact; evaluator readers do not disclose directory listings.
 

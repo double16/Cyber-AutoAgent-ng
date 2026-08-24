@@ -81,7 +81,7 @@ from modules.handlers.utils import (
     tool_append_description,
     tool_rename,
 )
-from modules.tools.artifact import read_artifact
+from modules.tools.artifact import create_artifact_reader
 from modules.tools.editor import create_absolute_path_editor
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.browser import (
@@ -597,7 +597,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         record_objective_validation,
         memory_retrieve,
         memory_list,
-        read_artifact,
+        create_artifact_reader(prompt_token_limit),
         recon_output_to_inventory_manifest,
         create_tasks,
         sleep,

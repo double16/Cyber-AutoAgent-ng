@@ -11,7 +11,23 @@ from modules.tools.memory import _artifact_path_from_ref, _operation_output_root
 ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER = "ARTIFACT_TOTAL_READ_LIMIT_REACHED"
 ARTIFACT_PAGE_LIMIT_REACHED_MARKER = "ARTIFACT_PAGE_LIMIT_REACHED"
 ARTIFACT_READ_POLICY_VIOLATION_MARKER = "ARTIFACT_READ_POLICY_VIOLATION"
+ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER = "ARTIFACT_READ_SIZE_LIMIT_REACHED"
 ARTIFACT_DIRECTORY_LISTING_LIMIT = 25
+ARTIFACT_BYTES_PER_TOKEN = 4
+ARTIFACT_PAGE_CONTEXT_FRACTION = 0.05
+ARTIFACT_MIN_BYTES_PER_READ = 8 * 1024
+ARTIFACT_MAX_BYTES_PER_READ = 64 * 1024
+
+
+def artifact_max_bytes_for_context_window(context_window_tokens: int) -> int:
+    """Return the clamped UTF-8 page budget for one resolved input context window."""
+
+    if isinstance(context_window_tokens, bool) or not isinstance(context_window_tokens, int):
+        raise TypeError("context_window_tokens must be a positive integer")
+    if context_window_tokens < 1:
+        raise ValueError("context_window_tokens must be a positive integer")
+    context_budget = int(context_window_tokens * ARTIFACT_BYTES_PER_TOKEN * ARTIFACT_PAGE_CONTEXT_FRACTION)
+    return min(ARTIFACT_MAX_BYTES_PER_READ, max(ARTIFACT_MIN_BYTES_PER_READ, context_budget))
 
 
 def _resolved_operation_path(candidate: str, root: str) -> str:
@@ -99,38 +115,41 @@ def _directory_read_guidance(directory: str, root: str) -> str:
     return str(payload)
 
 
-@tool
-def read_artifact(path: str, start_line: int = 1, max_lines: int = 200) -> str:
-    """Read a bounded text excerpt from an artifact in the current operation output.
-
-    Args:
-        path: A single canonical artifact file reference, safe absolute file path, or relative file path. Relative
-            paths resolve from artifacts/ first, then from the current operation output directory. Directory paths
-            return a bounded list of immediate artifact files to choose from; their contents are not read.
-        start_line: One-based first line to return.
-        max_lines: Number of lines to return, from 1 through 500.
-    """
+def _read_artifact_with_limit(path: str, start_line: int, max_lines: int, max_bytes: int) -> str:
+    """Read a bounded artifact excerpt without materializing more than ``max_bytes``."""
 
     root = os.path.realpath(_operation_output_root())
-    try:
-        resolved = resolve_operation_artifact_path(path)
-    except ValueError:
-        directory = _resolve_operation_directory_path(path)
-        if directory is not None:
-            return _directory_read_guidance(directory, root)
-        raise
+    resolved = resolve_operation_artifact_path(path)
     if start_line < 1:
         raise ValueError("start_line must be at least 1")
     if max_lines < 1 or max_lines > 500:
         raise ValueError("max_lines must be between 1 and 500")
 
-    with open(resolved, "r", encoding="utf-8", errors="replace") as artifact_file:
+    with open(resolved, "rb") as artifact_file:
         lines = []
+        content_size = 0
         total_lines = 0
         end_line = start_line + max_lines - 1
-        for total_lines, line in enumerate(artifact_file, 1):
+        while True:
+            raw_line = artifact_file.readline(max_bytes + 1)
+            if not raw_line:
+                break
+            total_lines += 1
+            line_exceeds_limit = len(raw_line) > max_bytes and not raw_line.endswith(b"\n")
             if start_line <= total_lines <= end_line:
-                lines.append(line.rstrip("\n"))
+                normalized_line = raw_line.rstrip(b"\n")
+                additional_size = len(normalized_line) + (1 if lines else 0)
+                if line_exceeds_limit or content_size + additional_size > max_bytes:
+                    raise ValueError(
+                        f"{ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER}: Requested artifact page exceeds "
+                        f"the {max_bytes}-byte limit"
+                    )
+                decoded_line = normalized_line.decode("utf-8", errors="replace")
+                lines.append(decoded_line)
+                content_size += additional_size
+            if line_exceeds_limit:
+                while raw_line and not raw_line.endswith(b"\n"):
+                    raw_line = artifact_file.readline(8192)
 
     payload: dict[str, Any] = {
         "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
@@ -142,9 +161,31 @@ def read_artifact(path: str, start_line: int = 1, max_lines: int = 200) -> str:
     return str(payload)
 
 
+def create_artifact_reader(context_window_tokens: int) -> Any:
+    """Create a context-bound reader for current-operation artifacts."""
+
+    max_bytes = artifact_max_bytes_for_context_window(context_window_tokens)
+
+    @tool(name="read_artifact")
+    def read_artifact(path: str, start_line: int = 1, max_lines: int = 200) -> str:
+        """Read a bounded text excerpt from an artifact in the current operation output."""
+
+        root = os.path.realpath(_operation_output_root())
+        try:
+            return _read_artifact_with_limit(path, start_line, max_lines, max_bytes)
+        except ValueError:
+            directory = _resolve_operation_directory_path(path)
+            if directory is not None:
+                return _directory_read_guidance(directory, root)
+            raise
+
+    return read_artifact
+
+
 def create_bounded_artifact_reader(
     max_reads: int | None = None,
     *,
+    context_window_tokens: int,
     allowed_artifact_refs: Iterable[str] | None = None,
     max_reads_per_artifact: int | None = None,
     max_lines_per_read: int | None = None,
@@ -160,6 +201,7 @@ def create_bounded_artifact_reader(
         raise ValueError("max_reads_per_artifact must be at least 1")
     if max_lines_per_read is not None and not 1 <= max_lines_per_read <= 500:
         raise ValueError("max_lines_per_read must be between 1 and 500")
+    resolved_max_bytes = artifact_max_bytes_for_context_window(context_window_tokens)
 
     allowed_paths = None
     if allowed_artifact_refs is not None:
@@ -207,7 +249,12 @@ def create_bounded_artifact_reader(
                 f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: "
                 f"Artifact page limit reached ({max_reads_per_artifact})"
             )
-        result = read_artifact(resolved, start_line, max_lines)
+        try:
+            result = _read_artifact_with_limit(resolved, start_line, max_lines, resolved_max_bytes)
+        except ValueError as error:
+            if str(error).startswith(ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER):
+                raise RuntimeError(str(error)) from error
+            raise
         calls += 1
         reads_by_path[resolved] = reads_by_path.get(resolved, 0) + 1
         seen_ranges.add(page)

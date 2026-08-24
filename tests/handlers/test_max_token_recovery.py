@@ -130,8 +130,8 @@ def test_plan_critic_max_tokens_reduction_and_retry():
     workflow._emit_workflow_activity = MagicMock()
     workflow._json_max_token_retry_prompt = lambda prompt, kind: f"RETRY {prompt}"
 
-    # Verify plan_critic initial reasoning level is LOW
-    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.LOW
+    # Verify plan_critic initial reasoning level is MEDIUM.
+    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.MEDIUM
 
     attempt_reasoning_levels = []
 
@@ -156,16 +156,16 @@ def test_plan_critic_max_tokens_reduction_and_retry():
     )
 
     assert result == {"approved": True, "critique": "looks good"}
-    # First attempt ran with LOW, retry attempt ran with NONE
-    assert attempt_reasoning_levels == [ReasoningLevel.LOW, ReasoningLevel.NONE]
-    # Now permanently NONE
-    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.NONE
+    # First attempt ran with MEDIUM, retry attempt ran with LOW.
+    assert attempt_reasoning_levels == [ReasoningLevel.MEDIUM, ReasoningLevel.LOW]
+    # Now permanently LOW.
+    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.LOW
     records = registry.export_adjustment_records()
     assert any(
         r.agent_type == "plan_critic"
         and r.parameter_name == "reasoning_level"
-        and r.old_value == "low"
-        and r.new_value == "none"
+        and r.old_value == "medium"
+        and r.new_value == "low"
         for r in records
     )
 

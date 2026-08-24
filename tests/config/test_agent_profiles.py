@@ -5,8 +5,8 @@ from modules.config.models.agent_profiles import (
     AgentSettingsRegistry,
     LLMRoleType,
     ReasoningLevel,
-    normalize_agent_type,
     mutate_agent_model_reasoning,
+    normalize_agent_type,
     translate_reasoning_to_provider,
 )
 
@@ -67,7 +67,7 @@ def test_recommended_agent_defaults():
     # plan_critic
     plan_critic = registry.get_settings("plan_critic")
     assert plan_critic.temperature == 0.0
-    assert plan_critic.reasoning_level == ReasoningLevel.LOW
+    assert plan_critic.reasoning_level == ReasoningLevel.MEDIUM
     assert plan_critic.max_tokens == 4096
 
     # task_creator
@@ -85,8 +85,8 @@ def test_recommended_agent_defaults():
     # task_prompt_critic
     prompt_critic = registry.get_settings("task_prompt_critic")
     assert prompt_critic.temperature == 0.0
-    assert prompt_critic.reasoning_level == ReasoningLevel.LOW
-    assert prompt_critic.max_tokens == 2048
+    assert prompt_critic.reasoning_level == ReasoningLevel.MEDIUM
+    assert prompt_critic.max_tokens == 4096
 
     # task_executor
     task_executor = registry.get_settings("task_executor")

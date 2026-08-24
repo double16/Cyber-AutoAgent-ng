@@ -5,12 +5,33 @@ import pytest
 
 from modules.tools.artifact import (
     ARTIFACT_DIRECTORY_LISTING_LIMIT,
+    ARTIFACT_MAX_BYTES_PER_READ,
+    ARTIFACT_MIN_BYTES_PER_READ,
     ARTIFACT_PAGE_LIMIT_REACHED_MARKER,
     ARTIFACT_READ_POLICY_VIOLATION_MARKER,
+    ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER,
     ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER,
+    artifact_max_bytes_for_context_window,
+    create_artifact_reader,
     create_bounded_artifact_reader,
-    read_artifact,
 )
+
+READ_ARTIFACT = create_artifact_reader(48_000)
+
+
+def test_artifact_page_budget_scales_with_context_window_and_clamps():
+    assert artifact_max_bytes_for_context_window(1) == ARTIFACT_MIN_BYTES_PER_READ
+    assert artifact_max_bytes_for_context_window(48_000) == 9_600
+    assert artifact_max_bytes_for_context_window(1_000_000) == ARTIFACT_MAX_BYTES_PER_READ
+
+
+@pytest.mark.parametrize(
+    ("context_window_tokens", "error_type"),
+    [(0, ValueError), (-1, ValueError), (True, TypeError), ("48000", TypeError)],
+)
+def test_artifact_page_budget_rejects_invalid_context_window(context_window_tokens, error_type):
+    with pytest.raises(error_type, match="positive integer"):
+        artifact_max_bytes_for_context_window(context_window_tokens)
 
 
 def test_read_artifact_returns_bounded_lines(tmp_path: Path):
@@ -21,10 +42,47 @@ def test_read_artifact_returns_bounded_lines(tmp_path: Path):
         patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
-        result = read_artifact("evidence.txt", start_line=2, max_lines=2)
+        result = READ_ARTIFACT("evidence.txt", start_line=2, max_lines=2)
 
     assert "'content': 'two\\nthree'" in result
     assert "'total_lines': 4" in result
+
+
+def test_artifact_reader_uses_its_context_window_not_legacy_byte_override(monkeypatch, tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("x" * 100, encoding="utf-8")
+    monkeypatch.setenv("CYBER_WORKFLOW_ARTIFACT_MAX_BYTES_PER_READ", "64")
+    reader = create_artifact_reader(48_000)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        assert "x" * 100 in reader("evidence.txt")
+
+
+def test_read_artifact_rejects_oversized_minified_page_without_returning_content(tmp_path: Path):
+    artifact = tmp_path / "minified.js"
+    oversized_content = "x" * 9_601
+    artifact.write_text(oversized_content, encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER) as error,
+    ):
+        READ_ARTIFACT("minified.js")
+
+    assert oversized_content not in str(error.value)
+
+
+def test_read_artifact_counts_utf8_bytes_not_characters(tmp_path: Path):
+    artifact = tmp_path / "unicode.txt"
+    artifact.write_text("é" * 4_801, encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER),
+    ):
+        READ_ARTIFACT("unicode.txt")
 
 
 def test_read_artifact_prefers_artifact_directory_for_relative_paths(tmp_path: Path):
@@ -37,7 +95,7 @@ def test_read_artifact_prefers_artifact_directory_for_relative_paths(tmp_path: P
         patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
-        result = read_artifact("evidence.txt")
+        result = READ_ARTIFACT("evidence.txt")
 
     assert "artifact copy" in result
     assert "artifact:artifacts/evidence.txt" in result
@@ -48,7 +106,7 @@ def test_read_artifact_falls_back_to_operation_root_for_relative_paths(tmp_path:
     (tmp_path / "tools" / "evidence.txt").write_text("root file", encoding="utf-8")
 
     with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
-        result = read_artifact("tools/evidence.txt")
+        result = READ_ARTIFACT("tools/evidence.txt")
 
     assert "root file" in result
     assert "artifact:tools/evidence.txt" in result
@@ -64,7 +122,7 @@ def test_read_artifact_lists_immediate_files_when_given_a_directory(tmp_path: Pa
     (nested / "hidden.txt").write_text("hidden", encoding="utf-8")
 
     with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
-        result = read_artifact("artifacts")
+        result = READ_ARTIFACT("artifacts")
 
     assert "'status': 'directory'" in result
     assert "requires one file" in result
@@ -81,7 +139,7 @@ def test_read_artifact_directory_listing_is_bounded(tmp_path: Path):
         (artifacts / f"evidence-{index:02}.txt").write_text(str(index), encoding="utf-8")
 
     with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
-        result = read_artifact("artifacts")
+        result = READ_ARTIFACT("artifacts")
 
     assert result.count("artifact:artifacts/evidence-") == ARTIFACT_DIRECTORY_LISTING_LIMIT
     assert "'omitted_file_count': 1" in result
@@ -91,7 +149,7 @@ def test_read_artifact_directory_listing_handles_empty_directory(tmp_path: Path)
     (tmp_path / "artifacts").mkdir()
 
     with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
-        result = read_artifact("artifacts")
+        result = READ_ARTIFACT("artifacts")
 
     assert "'artifact_refs': []" in result
     assert "Retry with one listed artifact_ref" in result
@@ -103,11 +161,11 @@ def test_read_artifact_rejects_traversal_and_missing_files(tmp_path: Path):
 
     with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
         with pytest.raises(ValueError, match="outside"):
-            read_artifact(str(outside))
+            READ_ARTIFACT(str(outside))
         with pytest.raises(ValueError, match="does not exist"):
-            read_artifact("missing.txt")
+            READ_ARTIFACT("missing.txt")
         with pytest.raises(ValueError, match="outside"):
-            read_artifact("../../outside.txt")
+            READ_ARTIFACT("../../outside.txt")
 
 
 def test_bounded_reader_rejects_directory_without_consuming_a_read(tmp_path: Path):
@@ -122,6 +180,7 @@ def test_bounded_reader_rejects_directory_without_consuming_a_read(tmp_path: Pat
     ):
         reader = create_bounded_artifact_reader(
             max_reads=1,
+            context_window_tokens=48_000,
             allowed_artifact_refs=["artifact:artifacts/evidence.txt"],
         )
         with pytest.raises(RuntimeError, match=ARTIFACT_READ_POLICY_VIOLATION_MARKER):
@@ -138,13 +197,13 @@ def test_read_artifact_validates_bounds(tmp_path: Path, start_line: int, max_lin
         patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
         pytest.raises(ValueError),
     ):
-        read_artifact(str(artifact), start_line=start_line, max_lines=max_lines)
+        READ_ARTIFACT(str(artifact), start_line=start_line, max_lines=max_lines)
 
 
 def test_bounded_reader_enforces_per_agent_limit(tmp_path: Path):
     artifact = tmp_path / "evidence.txt"
     artifact.write_text("one", encoding="utf-8")
-    reader = create_bounded_artifact_reader(max_reads=1)
+    reader = create_bounded_artifact_reader(max_reads=1, context_window_tokens=48_000)
 
     with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
         assert "one" in reader(str(artifact))
@@ -166,6 +225,7 @@ def test_bounded_reader_allows_paginated_authorized_artifact_reads(tmp_path: Pat
     ):
         reader = create_bounded_artifact_reader(
             max_reads=8,
+            context_window_tokens=48_000,
             allowed_artifact_refs=["artifact:artifacts/evidence.txt"],
             max_reads_per_artifact=4,
             max_lines_per_read=2,
@@ -180,6 +240,7 @@ def test_bounded_reader_allows_paginated_authorized_artifact_reads(tmp_path: Pat
 
         duplicate_reader = create_bounded_artifact_reader(
             max_reads=4,
+            context_window_tokens=48_000,
             allowed_artifact_refs=["artifact:artifacts/evidence.txt"],
             max_reads_per_artifact=4,
             max_lines_per_read=2,
@@ -209,6 +270,7 @@ def test_bounded_reader_preserves_other_artifacts_after_one_reaches_its_page_lim
     ):
         reader = create_bounded_artifact_reader(
             max_reads=2,
+            context_window_tokens=48_000,
             allowed_artifact_refs=["artifact:artifacts/first.txt", "artifact:artifacts/second.txt"],
             max_reads_per_artifact=1,
         )
@@ -219,3 +281,26 @@ def test_bounded_reader_preserves_other_artifacts_after_one_reaches_its_page_lim
         assert "three" in reader("artifact:artifacts/second.txt")
         with pytest.raises(RuntimeError, match=ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER):
             reader("artifact:artifacts/second.txt", start_line=2)
+
+
+def test_bounded_reader_rejects_oversized_page_without_consuming_successful_read_budget(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    oversized = artifacts / "minified.js"
+    oversized.write_text("x" * 9_601, encoding="utf-8")
+    small = artifacts / "evidence.txt"
+    small.write_text("proof", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        reader = create_bounded_artifact_reader(
+            max_reads=1,
+            context_window_tokens=48_000,
+            allowed_artifact_refs=["artifact:artifacts/minified.js", "artifact:artifacts/evidence.txt"],
+        )
+
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER):
+            reader("artifact:artifacts/minified.js")
+        assert "proof" in reader("artifact:artifacts/evidence.txt")
