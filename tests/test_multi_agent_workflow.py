@@ -441,6 +441,283 @@ def test_controller_seeds_secret_candidate_only_from_target_scoped_tool_outcomes
     assert any(event["type"] == "secret_exposure_candidate_created" for event in controller.runtime.callback_handler.events)
 
 
+def test_controller_skips_unavailable_artifact_during_secret_candidate_seeding(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    task = Task(
+        task_uid="task",
+        title="Inspect config",
+        objective="Inspect target configuration",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-1"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, tasks=[task])
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "detect_secret_exposures",
+        Mock(side_effect=ValueError("Artifact does not exist: artifact:task_evidence/missing.json")),
+    )
+    outcome = ToolOutcome(
+        1,
+        "request",
+        "http_request",
+        True,
+        False,
+        "",
+        "",
+        artifact_refs=("artifact:task_evidence/missing.json",),
+        structured_input={"url": "http://target.test/api/config"},
+    )
+
+    controller._seed_secret_exposure_candidates(plan, task, [outcome])
+
+    skipped = [
+        event
+        for event in controller.runtime.callback_handler.events
+        if event["type"] == "secret_exposure_candidate_skipped"
+    ]
+    assert len(skipped) == 1
+    assert skipped[0]["artifact_ref"] == "artifact:task_evidence/missing.json"
+    assert "Artifact does not exist" in skipped[0]["reason"]
+
+
+def test_snapshot_verification_failure_is_contained_to_the_active_task(monkeypatch):
+    task = Task(task_uid="task", title="Task", objective="Assess behavior", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state
+    )
+    monkeypatch.setattr(
+        controller,
+        "_run_task_in_trace",
+        Mock(
+            side_effect=memory_mod.TaskEvidenceSnapshotVerificationError(
+                "TASK_EVIDENCE_SNAPSHOT_VERIFICATION_FAILED: digest mismatch"
+            )
+        ),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert state.tasks[0].status == "partial_failure"
+    assert "snapshot verification failed" in state.tasks[0].status_reason.lower()
+    assert any(
+        event["type"] == "task_evidence_snapshot_verification_failed"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
+def test_source_artifact_repair_replaces_only_unavailable_artifact_evidence(monkeypatch):
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan())
+    )
+    monkeypatch.setattr(
+        controller,
+        "_canonical_recovery_reference",
+        lambda reference: reference if reference.endswith("regenerated.txt") else "",
+    )
+    repair_outcome = ToolOutcome(
+        1,
+        "repair",
+        "shell",
+        True,
+        False,
+        "",
+        "",
+        artifact_refs=("artifact:artifacts/regenerated.txt",),
+    )
+
+    payload = controller._source_artifact_repair_payload(
+        {
+            "status": "satisfied",
+            "disposition": "observation",
+            "summary": "Result retained",
+            "evidence_refs": ["artifact:artifacts/missing.txt", "memory:retained"],
+        },
+        [repair_outcome],
+    )
+
+    assert payload["evidence_refs"] == ["artifact:artifacts/regenerated.txt", "memory:retained"]
+    assert (
+        controller._acceptance_recovery_details(
+            "TASK_EVIDENCE_SNAPSHOT_SOURCE_UNAVAILABLE: source artifact is unavailable"
+        )["code"]
+        == "source_artifact_unavailable"
+    )
+    assert (
+        controller._acceptance_recovery_details(
+            "TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: copied snapshot digest mismatch"
+        )["code"]
+        == "destination_snapshot_unverifiable"
+    )
+
+
+def test_source_artifact_repair_runs_once_and_replays_acceptance(monkeypatch):
+    plan = _plan()
+    task = Task(
+        task_uid="source-repair",
+        title="Repair source evidence",
+        objective="Produce the required artifact",
+        phase=1,
+        status="active",
+        acceptance=_artifact_acceptance(),
+    )
+    state = FakeState(plan, tasks=[task], acceptance_complete=False)
+    calls = 0
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"produce artifact","tools":[]}'
+        raise AssertionError(f"unexpected role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="Acceptance source disappeared",
+                outcomes=[ToolOutcome(
+                    sequence=1,
+                    tool_use_id="acceptance-1",
+                    tool_name="record_task_acceptance",
+                    success=False,
+                    correctable=False,
+                    input_summary="",
+                    output_summary="TASK_EVIDENCE_SNAPSHOT_SOURCE_UNAVAILABLE: source artifact is unavailable",
+                    raw_output_summary="TASK_EVIDENCE_SNAPSHOT_SOURCE_UNAVAILABLE: source artifact is unavailable",
+                    structured_input={
+                        "status": "satisfied",
+                        "disposition": "observation",
+                        "summary": "Artifact regenerated",
+                        "evidence_refs": ["artifact:artifacts/missing.txt"],
+                    },
+                )],
+            )
+        return workflow_mod.TaskExecutorCycleResult(
+            text="Regenerated the artifact",
+            outcomes=[ToolOutcome(
+                sequence=2,
+                tool_use_id="shell-2",
+                tool_name="shell",
+                success=True,
+                correctable=False,
+                input_summary="",
+                output_summary="",
+                artifact_refs=("artifact:artifacts/regenerated.txt",),
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
+    )
+    monkeypatch.setattr(
+        controller,
+        "_canonical_recovery_reference",
+        lambda reference: reference if reference.endswith("regenerated.txt") else "",
+    )
+    replayed = []
+
+    def replay_acceptance(**payload):
+        replayed.append(payload)
+        state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status="satisfied",
+            disposition="observation",
+            summary="Artifact regenerated",
+            evidence_refs=tuple(payload["evidence_refs"]),
+        )]
+        return '{"complete":true}'
+
+    monkeypatch.setattr(workflow_mod, "build_record_task_acceptance_tool", lambda *_args, **_kwargs: replay_acceptance)
+    monkeypatch.setattr(
+        controller,
+        "_evaluate_task",
+        lambda *_args, **_kwargs: workflow_mod.WorkflowDecision(status="done", reason="accepted"),
+    )
+
+    controller._run_task(plan, plan.phases[0], task)
+
+    assert calls == 2
+    assert replayed[0]["evidence_refs"] == ["artifact:artifacts/regenerated.txt"]
+    assert state.tasks[0].status == "done"
+    assert any(
+        event["type"] == "task_source_artifact_repair" and event["outcome"] == "scheduled"
+        for event in controller.runtime.callback_handler.events
+    )
+    assert any(
+        event["type"] == "task_source_artifact_repair" and event["outcome"] == "regenerated"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
+def test_destination_snapshot_failure_marks_task_partial_without_agent_repair(monkeypatch):
+    plan = _plan()
+    task = Task(
+        task_uid="destination-failure",
+        title="Destination failure",
+        objective="Produce the required artifact",
+        phase=1,
+        status="active",
+        acceptance=_artifact_acceptance(),
+    )
+    state = FakeState(plan, tasks=[task], acceptance_complete=False)
+    calls = 0
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"produce artifact","tools":[]}'
+        raise AssertionError(f"unexpected role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        nonlocal calls
+        calls += 1
+        return workflow_mod.TaskExecutorCycleResult(
+            text="Destination could not be verified",
+            outcomes=[ToolOutcome(
+                sequence=1,
+                tool_use_id="acceptance-1",
+                tool_name="record_task_acceptance",
+                success=False,
+                correctable=False,
+                input_summary="",
+                output_summary="TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: digest mismatch",
+                raw_output_summary="TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: digest mismatch",
+            )],
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": 2}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+        executor_session_factory=retained_work_runner(work_runner),
+    )
+
+    controller._run_task(plan, plan.phases[0], task)
+
+    assert calls == 1
+    assert state.tasks[0].status == "partial_failure"
+    assert any(
+        event["type"] == "task_source_artifact_repair" and event["outcome"] == "destination_unverifiable"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
 def test_candidate_dependent_phase_closes_without_speculative_task_creation(monkeypatch):
     plan = OperationPlan(
         objective="assess",
@@ -687,6 +964,19 @@ class FakeState:
 
     def list_finding_records(self):
         return list(self.finding_records)
+
+    def rebind_finding_verification_task(self, task, replacement):
+        for record in self.finding_records:
+            if (
+                record.get("finding_uid") == task.reference_id
+                and record.get("verification_task_uid") == task.task_uid
+                and not record.get("resolution")
+                and not record.get("validation_data")
+            ):
+                self.store_task(replacement)
+                record["verification_task_uid"] = replacement.task_uid
+                return True
+        return False
 
     def list_preflight_results(self):
         return list(self.preflight_results)
@@ -2404,6 +2694,41 @@ def test_task_evaluator_schema_failure_falls_back_to_partial_failure():
     assert event["received_keys"] == ["action", "action_input"]
 
 
+@pytest.mark.parametrize("response", ["", "not valid JSON"])
+def test_task_evaluator_parse_failure_falls_back_to_partial_failure(response):
+    plan = _plan()
+    task = Task(task_uid="parse-fallback", title="Assess", objective="run", phase=1, status="active")
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *args: response,
+    )
+
+    decision = controller._evaluate_task(plan, plan.phases[0], task)
+
+    assert decision.status == "partial_failure"
+    assert "existing evidence was preserved" in decision.reason
+    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
+    assert event["role"] == "task_evaluator"
+    assert event["source"] == "json_parse_failure"
+    assert event["empty_response"] is (response == "")
+    assert event["task_uid"] == "parse-fallback"
+
+
+def test_non_evaluator_parse_failure_remains_an_invariant_error():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 0}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda *args: "not valid JSON",
+    )
+
+    with pytest.raises(WorkflowInvariantError, match="task_prompt_builder returned invalid JSON"):
+        controller._run_json_text_agent("task_prompt_builder", "prompt", [], "system")
+
+
 def test_pending_finding_validation_is_prioritized_and_events_include_scope():
     plan = _plan()
     standard = Task("task-1", "Standard", "Do standard work", 1, "pending", created_at="1")
@@ -4025,6 +4350,42 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
         "reference_id": "finding-1",
         "finding_resolution": "verified",
     }
+
+
+def test_finding_validation_recovery_rebinds_the_canonical_verification_task():
+    task = Task(
+        task_uid="verify-1",
+        title="Verify finding",
+        objective="verify",
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(
+        _plan(),
+        tasks=[task],
+        acceptance_complete=False,
+        finding_records=[{
+            "finding_uid": "finding-1",
+            "verification_task_uid": "verify-1",
+            "candidate_data": {},
+            "resolution": "",
+            "validation_data": None,
+        }],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    replacement = controller._create_reasoning_loop_replacement_task(task, [])
+
+    assert replacement is not None
+    assert replacement.replacement_of == task.task_uid
+    assert state.finding_records[0]["verification_task_uid"] == replacement.task_uid
+    assert controller._create_reasoning_loop_replacement_task(task, []) is None
 
 
 def test_finding_validation_contract_requires_claim_specific_evidence():
@@ -7211,7 +7572,8 @@ def test_phase_evaluator_malformed_output_emits_deterministic_partial_failure_fa
     event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
     if response == "not json":
         assert "deterministic durable-state" in decision.reason
-        assert event["error_type"] == "WorkflowInvariantError"
+        assert event["source"] == "json_parse_failure"
+        assert event["error_type"] == "JSONDecodeError"
     else:
         assert "required decision schema" in decision.reason
         assert event["source"] == "schema_validation"

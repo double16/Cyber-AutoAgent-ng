@@ -92,6 +92,10 @@ from modules.tools.semantic_enum import normalize_semantic_enum
 logger = get_logger("Tools.Memory")
 
 
+class TaskEvidenceSnapshotVerificationError(ValueError):
+    """Raised when a task-owned evidence snapshot cannot be verified."""
+
+
 @dataclass(frozen=True)
 class SecretExposure:
     """A secret-shaped value found in a target-owned evidence artifact.
@@ -1404,6 +1408,14 @@ class ApplicationStore(Protocol):
         self, operation_id: str, receipt_uids: List[str]
     ) -> List[Dict[str, str]]: ...
 
+    def rebind_finding_verification_task(
+        self,
+        operation_id: str,
+        finding_uid: str,
+        expected_task_uid: str,
+        replacement_task_uid: str,
+    ) -> bool: ...
+
 
 class SQLiteApplicationStore:
     """SQLite persistence for application workflow state.
@@ -1435,6 +1447,7 @@ class SQLiteApplicationStore:
         "store_finding_evidence_receipt",
         "get_finding_evidence_receipts",
         "link_finding_source_task",
+        "rebind_finding_verification_task",
         "store_finding_validation",
         "update_finding_taxonomy_annotation",
         "update_finding_attack_enrichment",
@@ -2257,6 +2270,32 @@ class SQLiteApplicationStore:
                             finding_uid,
                         ),
                     )
+
+    def rebind_finding_verification_task(
+        self,
+        operation_id: str,
+        finding_uid: str,
+        expected_task_uid: str,
+        replacement_task_uid: str,
+    ) -> bool:
+        """Atomically transfer an unresolved finding's verification-task ownership."""
+
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "UPDATE finding_records SET verification_task_uid = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ? "
+                    "AND verification_task_uid = ? AND resolution IS NULL AND validation_data IS NULL",
+                    (
+                        replacement_task_uid,
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        finding_uid,
+                        expected_task_uid,
+                    ),
+                )
+        return cursor.rowcount == 1
 
     def store_finding_validation(
         self,
@@ -4073,6 +4112,8 @@ def record_finding_validation(
     control_artifacts: Optional[List[str]] = None,
     evidence_assertions: Optional[List[Dict[str, str]]] = None,
     validation_manifest: Optional[str] = None,
+    *,
+    expected_verification_task_uid: Optional[str] = None,
 ) -> str:
     """Record a validation outcome, deterministically re-proving candidate evidence for confirmations."""
 
@@ -4088,8 +4129,14 @@ def record_finding_validation(
     record = store.get_finding(op_id, finding_uid)
     if not record:
         raise ValueError("Unknown finding_uid for the current operation")
+    expected_task_uid = str(expected_verification_task_uid or record["verification_task_uid"] or "").strip()
     active = [task for task in store.get_tasks(op_id) if task.status == "active"]
-    if len(active) != 1 or active[0].task_uid != record["verification_task_uid"]:
+    if (
+        not expected_task_uid
+        or expected_task_uid != record["verification_task_uid"]
+        or len(active) != 1
+        or active[0].task_uid != expected_task_uid
+    ):
         raise ValueError("Finding validation may only be recorded by its active verification task")
 
     normalized_outcome = _normalize_finding_validation_outcome(outcome)
@@ -4196,6 +4243,20 @@ def build_record_finding_validation_tool(task: Task) -> Any:
     if task.kind != "finding_validation" or not task.reference_id:
         raise ValueError("record_finding_validation requires a bound finding-validation task")
     finding_uid = task.reference_id
+    requirements: List[Dict[str, Any]] = []
+    try:
+        record = _get_database_store().get_finding(_operation_id(), finding_uid)
+        if record:
+            requirements = _finding_confirmation_requirements(record.get("candidate_data") or {})
+    except (OSError, ValueError):
+        logger.warning("Unable to load confirmation requirements for finding validation task %s", task.task_uid)
+    requirement_ids = [str(item["id"]) for item in requirements]
+    manifest_description = "Versioned JSON artifact reference with claim-specific validation evidence."
+    if requirement_ids:
+        manifest_description = (
+            "Required for confirmed outcomes. Provide a previously written artifact reference, never inline JSON. "
+            f"It must attest: {', '.join(requirement_ids)}."
+        )
 
     def record_bound_finding_validation(
         outcome: str,
@@ -4216,31 +4277,37 @@ def build_record_finding_validation_tool(task: Task) -> Any:
             control_artifacts,
             None,
             validation_manifest,
+            expected_verification_task_uid=task.task_uid,
         )
 
     record_bound_finding_validation.__name__ = "record_finding_validation"
     record_bound_finding_validation.__doc__ = """Record the independent outcome for this assigned finding candidate.
 
-The controller binds this tool to the only finding assigned to the task. Supply fresh evidence artifacts and an
-outcome; Python re-proves the candidate's immutable markers and records the frozen task acceptance.
+The controller binds this tool to the only finding and verification task assigned to this task. Supply fresh evidence
+artifacts and an outcome; Python re-proves the candidate's immutable markers and records frozen task acceptance.
+For confirmed outcomes, provide any required validation manifest as an existing artifact reference, never inline JSON.
 """
+    input_schema: Dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "outcome": {"type": "string", "enum": ["confirmed", "not_confirmed"]},
+            "summary": {"type": "string"},
+            "reproduction_steps": {"type": "array", "items": {"type": "string"}},
+            "evidence_strategy": {"type": "string", "enum": ["direct", "differential"]},
+            "evidence_artifacts": {"type": "array", "items": {"type": "string"}},
+            "control_artifacts": {"type": "array", "items": {"type": "string"}},
+            "validation_manifest": {"type": "string", "description": manifest_description},
+        },
+        "required": ["outcome", "summary", "reproduction_steps"],
+    }
+    if requirement_ids:
+        input_schema["allOf"] = [{
+            "if": {"properties": {"outcome": {"const": "confirmed"}}, "required": ["outcome"]},
+            "then": {"required": ["validation_manifest"]},
+        }]
     return tool(
         record_bound_finding_validation,
-        inputSchema={
-            "json": {
-                "type": "object",
-                "properties": {
-                    "outcome": {"type": "string", "enum": ["confirmed", "not_confirmed"]},
-                    "summary": {"type": "string"},
-                    "reproduction_steps": {"type": "array", "items": {"type": "string"}},
-                    "evidence_strategy": {"type": "string", "enum": ["direct", "differential"]},
-                    "evidence_artifacts": {"type": "array", "items": {"type": "string"}},
-                    "control_artifacts": {"type": "array", "items": {"type": "string"}},
-                    "validation_manifest": {"type": "string"},
-                },
-                "required": ["outcome", "summary", "reproduction_steps"],
-            }
-        },
+        inputSchema={"json": input_schema},
     )
 
 
@@ -7298,15 +7365,71 @@ def _snapshot_task_artifact_reference(task: Task, reference: str) -> str:
 
     if not reference.startswith("artifact:"):
         return reference
-    source = Path(_artifact_path_from_ref(reference))
+    try:
+        source = Path(_artifact_path_from_ref(reference))
+    except ValueError as error:
+        raise TaskEvidenceSnapshotVerificationError(
+            "TASK_EVIDENCE_SNAPSHOT_SOURCE_UNAVAILABLE: source artifact is unavailable "
+            f"task_uid={task.task_uid} source_reference={reference}"
+        ) from error
+    operation_root = Path(_operation_output_root())
     task_segment = hashlib.sha256(task.task_uid.encode("utf-8")).hexdigest()[:16]
-    destination_dir = Path(_operation_output_root()) / "task_evidence" / task_segment
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+    destination_dir = operation_root / "task_evidence" / task_segment
+    try:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise TaskEvidenceSnapshotVerificationError(
+            "TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: unable to prepare snapshot destination "
+            f"task_uid={task.task_uid} operation_root={operation_root} destination_dir={destination_dir}"
+        ) from error
+    try:
+        source_content = source.read_bytes()
+    except OSError as error:
+        raise TaskEvidenceSnapshotVerificationError(
+            "TASK_EVIDENCE_SNAPSHOT_SOURCE_UNAVAILABLE: unable to prepare source snapshot "
+            f"task_uid={task.task_uid} operation_root={operation_root} source_reference={reference}"
+        ) from error
+    digest = hashlib.sha256(source_content).hexdigest()[:16]
     destination = destination_dir / f"{source.stem}-{digest}{source.suffix}"
+    logger.info(
+        "Creating task-evidence snapshot task_uid=%s source=%s operation_root=%s destination=%s",
+        task.task_uid,
+        reference,
+        operation_root,
+        destination,
+    )
     if not destination.exists():
-        shutil.copy2(source, destination)
-    return canonical_artifact_reference(str(destination))
+        try:
+            shutil.copy2(source, destination)
+        except OSError as error:
+            raise TaskEvidenceSnapshotVerificationError(
+                "TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: unable to copy snapshot "
+                f"task_uid={task.task_uid} operation_root={operation_root} destination={destination}"
+            ) from error
+        try:
+            if not destination.is_file():
+                raise TaskEvidenceSnapshotVerificationError(
+                    "TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: copied snapshot is not a regular file "
+                    f"task_uid={task.task_uid} operation_root={operation_root} destination={destination}"
+                )
+            copied_digest = hashlib.sha256(destination.read_bytes()).hexdigest()[:16]
+        except OSError as error:
+            raise TaskEvidenceSnapshotVerificationError(
+                "TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: unable to read copied snapshot "
+                f"task_uid={task.task_uid} operation_root={operation_root} destination={destination}"
+            ) from error
+        if copied_digest != digest:
+            raise TaskEvidenceSnapshotVerificationError(
+                "TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: copied snapshot digest mismatch "
+                f"task_uid={task.task_uid} operation_root={operation_root} destination={destination}"
+            )
+    try:
+        return canonical_artifact_reference(str(destination))
+    except ValueError as error:
+        raise TaskEvidenceSnapshotVerificationError(
+            "TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: copied snapshot is unavailable "
+            f"task_uid={task.task_uid} operation_root={operation_root} destination={destination}"
+        ) from error
 
 
 def _snapshot_task_acceptance_artifacts(task: Task, results: List[AcceptanceResult]) -> List[AcceptanceResult]:
@@ -7835,6 +7958,19 @@ def build_record_task_acceptance_tool(
                 raise ValueError(
                     "The submitted manifest file does not exist. Do not retry acceptance. Create a validated "
                     "inventory manifest first, then submit its returned artifact reference."
+                ) from error
+            unavailable_source = next(
+                (
+                    reference
+                    for reference in evidence_refs
+                    if str(reference).startswith("artifact:") and "does not exist" in str(error).lower()
+                ),
+                "",
+            )
+            if unavailable_source:
+                raise TaskEvidenceSnapshotVerificationError(
+                    "TASK_EVIDENCE_SNAPSHOT_SOURCE_UNAVAILABLE: source artifact is unavailable "
+                    f"task_uid={current_task.task_uid} source_reference={unavailable_source}"
                 ) from error
             raise
         execution_evidence_refs = [
@@ -8672,6 +8808,21 @@ class QdrantMemoryClient:
         """Return finding records for an explicit or current operation."""
 
         return _get_database_store().list_findings(_operation_id(operation_id))
+
+    def rebind_finding_verification_task(
+        self,
+        finding_uid: str,
+        expected_task_uid: str,
+        replacement_task_uid: str,
+    ) -> bool:
+        """Transfer an unresolved finding's verification ownership to its replacement task."""
+
+        return _get_database_store().rebind_finding_verification_task(
+            _operation_id(),
+            finding_uid,
+            expected_task_uid,
+            replacement_task_uid,
+        )
 
     def list_objective_validation_records(self) -> List[Dict[str, Any]]:
         """Return objective-validation records for the current operation."""

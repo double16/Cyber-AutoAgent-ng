@@ -409,6 +409,18 @@ def test_validation_error_status_is_not_treated_as_a_successful_tool_result():
             "RECORD_TASK_ACCEPTANCE_REPAIR_FINDING_PREREQUISITE",
         ),
         ("acceptance result evidence_refs required", "RECORD_TASK_ACCEPTANCE_REPAIR_EVIDENCE_REFS"),
+        (
+            "TASK_EVIDENCE_SNAPSHOT_VERIFICATION_FAILED: copied snapshot digest mismatch",
+            "RECORD_TASK_ACCEPTANCE_SNAPSHOT_VERIFICATION_FAILED",
+        ),
+        (
+            "TASK_EVIDENCE_SNAPSHOT_SOURCE_UNAVAILABLE: source artifact is unavailable",
+            "RECORD_TASK_ACCEPTANCE_SOURCE_ARTIFACT_REPAIR",
+        ),
+        (
+            "TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: copied snapshot digest mismatch",
+            "RECORD_TASK_ACCEPTANCE_SNAPSHOT_DESTINATION_FAILED",
+        ),
     ],
 )
 def test_acceptance_errors_return_specific_repair_instructions(raw, expected):

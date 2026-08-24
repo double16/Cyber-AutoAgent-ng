@@ -4,7 +4,7 @@ import shlex
 import subprocess
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, Union
 
 import yaml
 from strands import tool, Agent
@@ -225,7 +225,7 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
     """
 
     @tool(name="tool_catalog")
-    def tool_catalog(keywords: Optional[str] = None) -> str:
+    def tool_catalog(keywords: Optional[Union[str, List[str]]] = None) -> str:
         """
         List available tools to pick the best next tool.
 
@@ -244,7 +244,12 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
                 - 2–6 terms: capability + task (e.g., `idor validate`, `jwt decode`, `web_crawling`, `xss_testing`).
                 - 1 term: tool/command name.
         """
-        parts = re.split(r"[\s,;]+", (keywords or ""))
+        if isinstance(keywords, List):
+            parts = keywords
+        elif isinstance(keywords, str):
+            parts = re.split(r"[\s,;]+", (keywords or ""))
+        else:
+            parts = []
         keywords = [w.strip().lower() for w in parts if w.strip()]
         found_tools = []
         catalog = ""

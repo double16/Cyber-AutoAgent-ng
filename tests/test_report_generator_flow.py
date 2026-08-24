@@ -1037,6 +1037,31 @@ def test_report_refinement_zero_cycles_runs_only_initial_actor():
     actor.assert_called_once()
 
 
+@pytest.mark.parametrize("failure_point", ["actor", "critic", "revision"])
+def test_report_refinement_uses_deterministic_section_fallback_after_model_failure(failure_point):
+    actor = MagicMock(return_value=_agent_result("Draft"))
+    critic = MagicMock(return_value=_agent_result('{"approved": false, "feedback": ["Revise"]}'))
+    if failure_point == "actor":
+        actor.side_effect = RecursionError("maximum recursion depth exceeded")
+    elif failure_point == "critic":
+        critic.side_effect = RecursionError("maximum recursion depth exceeded")
+    else:
+        actor.side_effect = [_agent_result("Draft"), RecursionError("maximum recursion depth exceeded")]
+
+    content, final_critique = _run_report_refinement(
+        actor,
+        critic,
+        "Canonical source data",
+        "Executive summary",
+        "Executive section requirements",
+        refinement_cycles=1,
+        json_retries=1,
+    )
+
+    assert content == ""
+    assert final_critique is None
+
+
 def test_report_refinement_retries_invalid_critic_json_without_failing_report():
     actor = MagicMock(side_effect=[_agent_result("Draft"), _agent_result("Revised draft")])
     critic = MagicMock(side_effect=[_agent_result("not json"), _agent_result('{"approved": "yes"}')])

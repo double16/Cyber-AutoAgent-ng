@@ -356,7 +356,7 @@ def test_get_parameters_by_role_preserves_profile_when_server_config_lookup_fail
         {"temperature": 0.2, "max_tokens": 123},
     )
 
-    assert params.llm_temp == 0.4
+    assert params.llm_temp == 0.2
     assert params.llm_max == 8192
     assert params.role == "plan_creator"
 

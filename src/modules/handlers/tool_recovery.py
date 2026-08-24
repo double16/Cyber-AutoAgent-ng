@@ -264,6 +264,25 @@ def format_tool_repair_error(tool_name: str, output: str) -> str:
                 "Do not call record_task_acceptance until store_finding returns finding:<id>."
             )
     if tool_name == "record_task_acceptance":
+        if "task_evidence_snapshot_source_unavailable" in normalized:
+            return (
+                "RECORD_TASK_ACCEPTANCE_SOURCE_ARTIFACT_REPAIR: The controller retained this acceptance "
+                "submission and will run one bounded task-local evidence regeneration repair. Do not retry "
+                "acceptance in this turn."
+            )
+        if "task_evidence_snapshot_destination_unverifiable" in normalized:
+            return (
+                "RECORD_TASK_ACCEPTANCE_SNAPSHOT_DESTINATION_FAILED: The controller could not verify the "
+                "immutable task-evidence destination. Do not retry acceptance; the task will be marked "
+                "partial_failure and the operation will continue."
+            )
+        if "task_evidence_snapshot_verification_failed" in normalized:
+            return (
+                "RECORD_TASK_ACCEPTANCE_SNAPSHOT_VERIFICATION_FAILED: The controller could not verify the "
+                "immutable task-evidence copy. Do not retry acceptance in this task. The task will be marked "
+                "partial_failure and the operation will continue. Controller error: "
+                + _bounded_text(output, 900)
+            )
         if "requires a finding created by this task" in normalized:
             return (
                 "RECORD_TASK_ACCEPTANCE_REPAIR_FINDING_PREREQUISITE: The preceding finding submission did not "

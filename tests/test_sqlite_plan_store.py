@@ -287,6 +287,18 @@ def test_sqlite_finding_ledger_operations(tmp_path):
     assert store.list_findings("other-operation") == []
 
 
+def test_sqlite_finding_verification_task_rebinding_is_compare_and_set(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
+    store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
+
+    assert store.rebind_finding_verification_task("op", "finding-1", "task-1", "task-2") is True
+    assert store.get_finding("op", "finding-1")["verification_task_uid"] == "task-2"
+    assert store.rebind_finding_verification_task("op", "finding-1", "task-1", "task-3") is False
+
+    store.store_finding_validation("op", "finding-1", {"outcome": "confirmed"})
+    assert store.rebind_finding_verification_task("op", "finding-1", "task-2", "task-3") is False
+
+
 def test_sqlite_finding_evidence_receipts_are_operation_and_task_scoped(tmp_path):
     store = SQLiteApplicationStore(str(tmp_path / "receipt.db"), "target")
     store.store_finding_evidence_receipt(

@@ -3069,8 +3069,10 @@ def test_bound_acceptance_tool_normalizes_aliases_before_validation(fake_memory_
     assert recorded.disposition == "no_vulnerability"
 
 
-def test_acceptance_artifact_is_snapshotted_to_task_owned_storage(fake_memory_client):
+def test_acceptance_artifact_is_snapshotted_to_task_owned_storage(fake_memory_client, monkeypatch):
     _client, store = fake_memory_client
+    snapshot_logs = []
+    monkeypatch.setattr(mod.logger, "info", lambda message, *args: snapshot_logs.append((message, args)))
     artifact = Path(mod._operation_output_root()) / "artifacts" / "shared-result.txt"
     artifact.parent.mkdir(parents=True, exist_ok=True)
     artifact.write_text("first result")
@@ -3106,8 +3108,141 @@ def test_acceptance_artifact_is_snapshotted_to_task_owned_storage(fake_memory_cl
     recorded = store.get_acceptance_results("op1", task.task_uid)[0]
     assert recorded.evidence_refs[0].startswith("artifact:task_evidence/")
     assert Path(mod._artifact_path_from_ref(recorded.evidence_refs[0])).read_text() == "first result"
+    assert any(
+        "operation_root=%s" in message
+        and str(mod._operation_output_root()) in str(args)
+        and "task_evidence" in str(args[-1])
+        for message, args in snapshot_logs
+    )
     artifact.write_text("later task replacement")
     assert Path(mod._artifact_path_from_ref(recorded.evidence_refs[0])).read_text() == "first result"
+
+
+def test_acceptance_rejects_unverifiable_task_evidence_snapshot(fake_memory_client, monkeypatch):
+    _client, store = fake_memory_client
+    artifact = Path(mod._operation_output_root()) / "artifacts" / "shared-result.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("expected result")
+    task = mod.Task(
+        task_uid="corrupt-owned-artifact",
+        title="Record immutable result",
+        objective="Record the result",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="one artifact",
+                source_refs=["target:target-1"],
+            ),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Retain one result",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    def write_corrupt_snapshot(_source, destination):
+        Path(destination).write_text("corrupted result")
+        return str(destination)
+
+    monkeypatch.setattr(mod.shutil, "copy2", write_corrupt_snapshot)
+
+    with pytest.raises(mod.TaskEvidenceSnapshotVerificationError, match="digest mismatch"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Result retained",
+            evidence_refs=["artifact:artifacts/shared-result.txt"],
+        )
+
+    assert store.get_acceptance_results("op1", task.task_uid) == []
+
+
+def test_acceptance_classifies_missing_source_artifact_for_controller_repair(fake_memory_client):
+    _client, store = fake_memory_client
+    task = mod.Task(
+        task_uid="missing-owned-artifact",
+        title="Record immutable result",
+        objective="Record the result",
+        acceptance=mod.AcceptanceContract(
+            mode="outcome",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="one artifact",
+                source_refs=["target:target-1"],
+            ),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Retain one result",
+                evidence_requirements=[mod.EvidenceRequirement(kind="artifact", min_count=1)],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    with pytest.raises(mod.TaskEvidenceSnapshotVerificationError, match="SOURCE_UNAVAILABLE"):
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Result retained",
+            evidence_refs=["artifact:artifacts/missing-result.txt"],
+        )
+
+    assert store.get_acceptance_results("op1", task.task_uid) == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_message"),
+    [
+        ("copy", "unable to copy snapshot"),
+        ("not_file", "not a regular file"),
+        ("source", "unable to prepare source snapshot"),
+        ("read", "unable to read copied snapshot"),
+        ("canonical", "copied snapshot is unavailable"),
+    ],
+)
+def test_task_evidence_snapshot_wraps_io_and_canonicalization_failures(tmp_path, monkeypatch, failure, expected_message):
+    operation_root = tmp_path / "operation"
+    source = operation_root / "artifacts" / "result.txt"
+    source.parent.mkdir(parents=True)
+    source.write_text("expected result")
+    task = SimpleNamespace(task_uid="snapshot-failure")
+    monkeypatch.setattr(mod, "_operation_output_root", lambda: str(operation_root))
+    monkeypatch.setattr(mod, "_artifact_path_from_ref", lambda _reference: str(source))
+
+    if failure == "copy":
+        def fail_copy(_source, _destination):
+            raise OSError("copy failed")
+
+        monkeypatch.setattr(mod.shutil, "copy2", fail_copy)
+    elif failure == "not_file":
+        monkeypatch.setattr(mod.shutil, "copy2", lambda _source, _destination: None)
+    elif failure == "read":
+        original_read_bytes = Path.read_bytes
+
+        def fail_destination_read(path):
+            if "task_evidence" in path.parts:
+                raise OSError("read failed")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", fail_destination_read)
+    elif failure == "source":
+        monkeypatch.setattr(Path, "read_bytes", lambda _path: (_ for _ in ()).throw(OSError("read failed")))
+    else:
+        monkeypatch.setattr(
+            mod,
+            "canonical_artifact_reference",
+            lambda _reference: (_ for _ in ()).throw(ValueError("snapshot disappeared")),
+        )
+
+    with pytest.raises(mod.TaskEvidenceSnapshotVerificationError, match=expected_message):
+        mod._snapshot_task_artifact_reference(task, "artifact:artifacts/result.txt")
 
 
 def test_endpoint_coverage_acceptance_rejects_manifest_as_subject_evidence(fake_memory_client):

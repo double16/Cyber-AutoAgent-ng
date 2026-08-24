@@ -1221,6 +1221,37 @@ def test_bound_finding_validation_tool_hides_the_controller_owned_finding_identi
     assert schema["required"] == ["outcome", "summary", "reproduction_steps"]
 
 
+def test_bound_finding_validation_tool_requires_manifest_for_confirmed_secret_exposure(monkeypatch):
+    task = Task(
+        task_uid="verify-task",
+        title="Verify exposed connection string",
+        objective="Verify finding",
+        acceptance=make_acceptance("verify").to_dict(),
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    store = MagicMock()
+    store.get_finding.return_value = {
+        "candidate_data": {
+            "title": "Exposed connection string",
+            "claim": "A connection string is exposed.",
+            "technique": "Direct response inspection",
+        }
+    }
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    schema = get_tool_spec(mod.build_record_finding_validation_tool(task))["inputSchema"]["json"]
+
+    assert schema["allOf"] == [{
+        "if": {"properties": {"outcome": {"const": "confirmed"}}, "required": ["outcome"]},
+        "then": {"required": ["validation_manifest"]},
+    }]
+    assert "artifact reference, never inline JSON" in schema["properties"]["validation_manifest"]["description"]
+
+
 def test_finding_validation_runtime_schema_accepts_aliases():
     validated = record_finding_validation._metadata.validate_input({
         "finding_uid": "finding-1",

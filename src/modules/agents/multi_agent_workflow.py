@@ -81,8 +81,10 @@ from modules.tools.memory import (
     OperationTarget,
     PlanPhase,
     Task,
+    TaskEvidenceSnapshotVerificationError,
     _artifact_path_from_ref,
     _coverage_route_groups,
+    _finding_confirmation_requirements,
     _finding_validation_contradictions,
     _load_inventory_manifest,
     _operation_output_root,
@@ -522,6 +524,27 @@ class WorkflowStateStore:
 
     def list_finding_records(self) -> List[Dict[str, Any]]:
         return self.client.list_finding_records()
+
+    def rebind_finding_verification_task(self, task: Task, replacement: Task) -> bool:
+        """Store a successor and transfer its unresolved finding-validation ownership."""
+
+        if task.kind != "finding_validation" or replacement.kind != "finding_validation":
+            raise ValueError("finding verification rebinding requires finding-validation tasks")
+        if not task.reference_id or replacement.reference_id != task.reference_id:
+            raise ValueError("finding verification replacement must retain its finding reference")
+        self.store_task(replacement)
+        rebound = self.client.rebind_finding_verification_task(
+            task.reference_id,
+            task.task_uid,
+            replacement.task_uid,
+        )
+        if not rebound:
+            self.mark_task(
+                replacement,
+                "superseded",
+                "Finding verification ownership was already transferred to another task.",
+            )
+        return rebound
 
     def list_objective_validation_records(self) -> List[Dict[str, Any]]:
         list_records = getattr(self.client, "list_objective_validation_records", None)
@@ -2326,8 +2349,25 @@ class MultiAgentWorkflowController:
         return feedback
 
     def _run_task(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
-        with self._task_trace_context(plan, phase, task):
-            self._run_task_in_trace(plan, phase, task)
+        try:
+            with self._task_trace_context(plan, phase, task):
+                self._run_task_in_trace(plan, phase, task)
+        except TaskEvidenceSnapshotVerificationError as error:
+            reason = "Task evidence snapshot verification failed: " + self._short(str(error), 500)
+            self._log_workflow(
+                "task evidence snapshot verification failed task=%s phase=%s reason=%s",
+                self._task_label(task),
+                phase.id,
+                self._short(str(error), 500),
+            )
+            self._emit_workflow_event({
+                "type": "task_evidence_snapshot_verification_failed",
+                "phase": phase.id,
+                "task_uid": task.task_uid,
+                "reason": self._short(str(error), 500),
+            })
+            updated_task = self.state.mark_task(task, "partial_failure", reason)
+            self._emit_task_done(updated_task)
 
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
         self._emit_task_started(task)
@@ -2821,6 +2861,8 @@ class MultiAgentWorkflowController:
         execution_prerequisite_recovery_used = False
         output_prerequisite_recovery_active = False
         output_prerequisite_recovery_used = False
+        source_artifact_repair_active = False
+        source_artifact_repair_used = False
         pending_acceptance_payload: Dict[str, Any] = {}
         missing_acceptance_recovery_used = False
         memory_acceptance_recovery_used = False
@@ -2923,6 +2965,7 @@ class MultiAgentWorkflowController:
                 allowed_actor_cycles += int(evidence_prerequisite_recovery_used)
                 allowed_actor_cycles += int(execution_prerequisite_recovery_used)
                 allowed_actor_cycles += int(output_prerequisite_recovery_used)
+                allowed_actor_cycles += int(source_artifact_repair_used)
                 allowed_actor_cycles += int(max_token_recovery_used)
                 allowed_actor_cycles += int(evaluator_execution_repair_used)
                 allowed_actor_cycles += int(evaluator_synthesis_repair_used)
@@ -3044,6 +3087,22 @@ class MultiAgentWorkflowController:
                 if execution_prerequisite_recovery_active or output_prerequisite_recovery_active:
                     for criterion in task.acceptance.criteria:
                         self._resolve_controller_execution_evidence(plan, task, criterion, tool_outcomes)
+                    if source_artifact_repair_active:
+                        repaired_payload = self._source_artifact_repair_payload(
+                            pending_acceptance_payload,
+                            cycle_result.outcomes,
+                        )
+                        if not repaired_payload:
+                            self._emit_source_artifact_repair(task, "failed", cycle)
+                            decision = WorkflowDecision(
+                                status="partial_failure",
+                                reason=(
+                                    "Source artifact repair did not produce a replacement current-operation artifact."
+                                ),
+                            )
+                            break
+                        pending_acceptance_payload = repaired_payload
+                        self._emit_source_artifact_repair(task, "regenerated", cycle)
                     if output_prerequisite_recovery_active:
                         self._emit_output_prerequisite_recovery(
                             task,
@@ -3078,6 +3137,7 @@ class MultiAgentWorkflowController:
                             break
                         execution_prerequisite_recovery_active = False
                         output_prerequisite_recovery_active = False
+                        source_artifact_repair_active = False
                     else:
                         missing_ids = sorted(required_ids - set(receipts))
                         self._emit_controller_acceptance_replay(
@@ -4100,8 +4160,38 @@ class MultiAgentWorkflowController:
                                 "task acceptance memory recovery failed task=%s failures=%s error=%s",
                                 self._task_label(task),
                                 acceptance_failures,
-                                self._short(recovery["error"]),
-                            )
+                            self._short(recovery["error"]),
+                        )
+                    elif (
+                        failed_acceptance_calls
+                        and self._acceptance_recovery_details(
+                            failed_acceptance_calls[-1].raw_output_summary
+                            or failed_acceptance_calls[-1].output_summary
+                        )["code"] == "destination_snapshot_unverifiable"
+                    ):
+                        self._emit_source_artifact_repair(task, "destination_unverifiable", cycle)
+                        acceptance_submitted = True
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=(
+                                "Immutable task-evidence destination could not be verified; "
+                                "the operation will continue without an agent repair."
+                            ),
+                        )
+                    elif (
+                        failed_acceptance_calls
+                        and source_artifact_repair_used
+                        and self._acceptance_recovery_details(
+                            failed_acceptance_calls[-1].raw_output_summary
+                            or failed_acceptance_calls[-1].output_summary
+                        )["code"] == "source_artifact_unavailable"
+                    ):
+                        self._emit_source_artifact_repair(task, "exhausted", cycle)
+                        acceptance_submitted = True
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason="Source artifact remained unavailable after one bounded regeneration repair.",
+                        )
                     elif repeated_acceptance:
                         decision = WorkflowDecision(
                             status="partial_failure",
@@ -4167,6 +4257,7 @@ class MultiAgentWorkflowController:
                             sort_keys=True,
                         )
                         missing_manifest = "submitted manifest file does not exist" in acceptance_error.lower()
+                        source_artifact_unavailable = recovery_details["code"] == "source_artifact_unavailable"
                         missing_artifact = recovery_details["code"] == "missing_artifact_prerequisite"
                         missing_execution = recovery_details["code"] == "missing_execution_prerequisite"
                         missing_output = missing_execution and not self._has_valid_required_output(
@@ -4200,7 +4291,7 @@ class MultiAgentWorkflowController:
                         manifest_prerequisite_recovery_used = manifest_prerequisite_recovery_used or missing_manifest
                         evidence_prerequisite_recovery_active = (
                             (missing_artifact or no_eligible_evidence or missing_memory_prerequisite)
-                            and not missing_manifest and not missing_execution
+                            and not missing_manifest and not missing_execution and not source_artifact_unavailable
                         )
                         evidence_prerequisite_recovery_used = (
                             evidence_prerequisite_recovery_used or evidence_prerequisite_recovery_active
@@ -4208,8 +4299,30 @@ class MultiAgentWorkflowController:
                         acceptance_recovery_active = (
                             not missing_manifest and not missing_artifact and not no_eligible_evidence
                             and not missing_memory_prerequisite and not missing_execution
+                            and not source_artifact_unavailable
                         )
-                        if missing_output and not output_prerequisite_recovery_used:
+                        if source_artifact_unavailable and not source_artifact_repair_used:
+                            source_artifact_repair_active = True
+                            source_artifact_repair_used = True
+                            output_prerequisite_recovery_active = True
+                            pending_acceptance_payload = self._acceptance_payload_from_outcome(
+                                failed_acceptance_calls[-1]
+                            )
+                            recovery_tools = [
+                                get_tool_name(tool)
+                                for tool in tools
+                                if get_tool_name(tool) != "record_task_acceptance"
+                                and get_tool_name(tool) not in _NON_EVIDENCE_RECOVERY_TOOLS
+                            ]
+                            self._emit_source_artifact_repair(task, "scheduled", cycle)
+                            actor_prompt = self._output_prerequisite_recovery_prompt(
+                                plan,
+                                task,
+                                acceptance_recovery_evidence,
+                                next_cycle=cycle + 1,
+                            )
+                            self._record_efficiency_correction("source_artifact_repair")
+                        elif missing_output and not output_prerequisite_recovery_used:
                             output_prerequisite_recovery_active = True
                             output_prerequisite_recovery_used = True
                             pending_acceptance_payload = self._acceptance_payload_from_outcome(
@@ -4513,7 +4626,11 @@ class MultiAgentWorkflowController:
     ) -> Optional[Task]:
         """Keep a repairable prompt failure actionable with one pending replacement."""
 
-        existing = [candidate for candidate in self.state.list_tasks() if candidate.replacement_of == task.task_uid]
+        existing = [
+            candidate
+            for candidate in self.state.list_tasks()
+            if candidate.replacement_of == task.task_uid and candidate.status != "superseded"
+        ]
         if existing:
             return None
         feedback = "; ".join(error.feedback) if error.feedback else str(error)
@@ -4535,6 +4652,15 @@ class MultiAgentWorkflowController:
             target_scope=task.target_scope,
             target_ids=list(task.target_ids),
         )
+        if task.kind == "finding_validation":
+            if not self.state.rebind_finding_verification_task(task, replacement):
+                self._log_workflow(
+                    "finding validation replacement ownership conflict parent=%s replacement=%s",
+                    self._task_label(task),
+                    self._task_label(replacement),
+                )
+                return None
+            return replacement
         return self.state.store_task(replacement)
 
     def _create_reasoning_loop_replacement_task(
@@ -4544,7 +4670,11 @@ class MultiAgentWorkflowController:
     ) -> Optional[Task]:
         """Create one narrow successor when bounded executor recovery still loops."""
 
-        existing = [candidate for candidate in self.state.list_tasks() if candidate.replacement_of == task.task_uid]
+        existing = [
+            candidate
+            for candidate in self.state.list_tasks()
+            if candidate.replacement_of == task.task_uid and candidate.status != "superseded"
+        ]
         if existing:
             return None
         missing_criteria = self._missing_acceptance_criteria(
@@ -4606,6 +4736,15 @@ class MultiAgentWorkflowController:
             target_scope=task.target_scope,
             target_ids=list(task.target_ids),
         )
+        if task.kind == "finding_validation":
+            if not self.state.rebind_finding_verification_task(task, replacement):
+                self._log_workflow(
+                    "finding validation replacement ownership conflict parent=%s replacement=%s",
+                    self._task_label(task),
+                    self._task_label(replacement),
+                )
+                return None
+            return replacement
         return self.state.store_task(replacement)
 
     def _replacement_execution_receipts(
@@ -5416,6 +5555,10 @@ Allowed tools: {allowed_tools_text}
             code = "invalid_memory_reference"
         elif "inventory manifest" in normalized:
             code = "invalid_inventory_manifest"
+        elif "task_evidence_snapshot_source_unavailable" in normalized:
+            code = "source_artifact_unavailable"
+        elif "task_evidence_snapshot_destination_unverifiable" in normalized:
+            code = "destination_snapshot_unverifiable"
         elif "evidence reference" in normalized or "evidence_refs" in normalized:
             code = "invalid_evidence_reference"
         elif "artifact does not exist" in normalized or "artifact file does not exist" in normalized:
@@ -5437,6 +5580,44 @@ Allowed tools: {allowed_tools_text}
             ],
             "artifact_sha256": artifact_digest.group(1) if artifact_digest else None,
         }
+
+    def _source_artifact_repair_payload(
+        self,
+        payload: Dict[str, Any],
+        repair_outcomes: List[ToolOutcome],
+    ) -> Dict[str, Any]:
+        """Replace unavailable artifact evidence with artifacts regenerated in one repair cycle."""
+
+        evidence_refs = list(payload.get("evidence_refs") or []) if isinstance(payload, dict) else []
+        unavailable = [
+            reference
+            for reference in evidence_refs
+            if str(reference).startswith("artifact:") and not self._canonical_recovery_reference(reference)
+        ]
+        replacements = [
+            reference
+            for reference in self._artifact_refs_from_tool_outcomes(repair_outcomes)
+            if self._canonical_recovery_reference(reference)
+        ]
+        if not unavailable or len(replacements) < len(unavailable):
+            return {}
+        replacement_iter = iter(dict.fromkeys(replacements))
+        try:
+            repaired_refs = [next(replacement_iter) if reference in unavailable else reference for reference in evidence_refs]
+        except StopIteration:
+            return {}
+        return {**payload, "evidence_refs": repaired_refs}
+
+    def _emit_source_artifact_repair(self, task: Task, outcome: str, cycle: int) -> None:
+        """Emit the bounded source-artifact regeneration lifecycle for auditability."""
+
+        self._emit_workflow_event({
+            "type": "task_source_artifact_repair",
+            "task_uid": task.task_uid,
+            "phase": task.phase,
+            "cycle": cycle,
+            "outcome": outcome,
+        })
 
     @staticmethod
     def _acceptance_failure_signature(outcome: ToolOutcome) -> str:
@@ -7112,6 +7293,15 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             "expected_result": packet.get("expected_result") or candidate.get("expected_result"),
             "observed_result": packet.get("observed_result") or candidate.get("observed_result"),
             "evidence_assertions": packet.get("evidence_assertions") or candidate.get("evidence_assertions", []),
+            "confirmation_requirement_ids": [
+                str(requirement["id"])
+                for requirement in _finding_confirmation_requirements(candidate)
+            ],
+            "confirmation_manifest_rule": (
+                "For a confirmed outcome, write a versioned JSON validation manifest artifact that attests every "
+                "listed requirement, then pass its artifact reference to record_finding_validation. Never pass "
+                "inline JSON as validation_manifest."
+            ),
         }
         return json.dumps(context, indent=2, sort_keys=True)
 
@@ -9394,6 +9584,20 @@ Allowed evidence references:
                     self._short(evaluator_fallback_context or {}),
                 )
                 return fallback
+            fallback = self._evaluator_parse_fallback(
+                role,
+                last_error,
+                last_response,
+                evaluator_fallback_context,
+            )
+            self._emit_workflow_event(fallback["event"])
+            self._log_workflow(
+                "evaluator parse fallback role=%s status=partial_failure empty_response=%s context=%s",
+                role,
+                not bool(str(last_response or "").strip()),
+                self._short(evaluator_fallback_context or {}),
+            )
+            return fallback["data"]
         if role in {"phase_evaluator", "task_evaluator"} and last_failure_was_schema:
             fallback = self._evaluator_schema_fallback(
                 role,
@@ -9473,6 +9677,39 @@ Allowed evidence references:
             "error_type": error.__class__.__name__ if error else "ValueError",
             "error_fingerprint": fingerprint,
             "received_keys": response_keys,
+        }
+        event.update(context or {})
+        return {
+            "data": {"status": "partial_failure", "reason": reason, "instructions": ""},
+            "event": event,
+        }
+
+    @staticmethod
+    def _evaluator_parse_fallback(
+        role: str,
+        error: Optional[Exception],
+        response: str,
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Preserve task progress when an evaluator cannot produce a parseable decision."""
+
+        error_text = sanitize_sdk_error(error) or "invalid evaluator JSON response"
+        empty_response = not bool(str(response or "").strip())
+        response_state = "empty response" if empty_response else "non-JSON response"
+        reason = (
+            f"{role} did not produce a valid decision after bounded JSON retries ({response_state}); "
+            "existing evidence was preserved with a deterministic durable-state partial_failure. "
+            f"Error: {error_text}"
+        )
+        fingerprint = hashlib.sha256(error_text.encode("utf-8", errors="replace")).hexdigest()
+        event = {
+            "type": "evaluator_fallback",
+            "role": role,
+            "status": "partial_failure",
+            "source": "json_parse_failure",
+            "error_type": error.__class__.__name__ if error else "JSONDecodeError",
+            "error_fingerprint": fingerprint,
+            "empty_response": empty_response,
         }
         event.update(context or {})
         return {
@@ -11733,7 +11970,17 @@ tools and durable evidence before relying on it."""
             submitted = outcome.structured_input or {}
             target = str(submitted.get("url") or fallback_target)
             for artifact_ref in outcome.artifact_refs:
-                for exposure in detect_secret_exposures(artifact_ref):
+                try:
+                    exposures = detect_secret_exposures(artifact_ref)
+                except (OSError, ValueError) as error:
+                    self._emit_workflow_event({
+                        "type": "secret_exposure_candidate_skipped",
+                        "task_uid": task.task_uid,
+                        "artifact_ref": artifact_ref,
+                        "reason": self._short(str(error)),
+                    })
+                    continue
+                for exposure in exposures:
                     try:
                         result = json.loads(
                             store_finding(

@@ -2098,6 +2098,10 @@ def _run_report_critic(
     for attempt in range(json_retries + 1):
         try:
             response = _extract_text_from_result(critic_agent(current_prompt))
+        except Exception as error:
+            logger.warning("Report critic model call failed: %s", error)
+            raise
+        try:
             return _validate_report_critique(parse_json_response(response, require_object=True))
         except Exception as error:
             logger.warning(
@@ -2133,7 +2137,11 @@ def _run_report_refinement(
     efficiency_callback: Any = None,
 ) -> tuple[str, Optional[Dict[str, Any]]]:
     """Generate and critic-guided revise one report section."""
-    content = _extract_text_from_result(actor_agent(source_prompt))
+    try:
+        content = _extract_text_from_result(actor_agent(source_prompt))
+    except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
+        logger.warning("Report %s actor failed; using deterministic section fallback: %s", section_label, error)
+        return "", None
     if not content or refinement_cycles == 0:
         return content, None
 
@@ -2141,21 +2149,29 @@ def _run_report_refinement(
     for cycle in range(1, refinement_cycles + 1):
         if callable(efficiency_callback):
             efficiency_callback("critic_cycle")
-        critique = _run_report_critic(
-            critic_agent,
-            _report_critic_prompt(section_label, section_requirements, source_prompt, content),
-            json_retries,
-        )
+        try:
+            critique = _run_report_critic(
+                critic_agent,
+                _report_critic_prompt(section_label, section_requirements, source_prompt, content),
+                json_retries,
+            )
+        except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
+            logger.warning("Report %s critic failed; using deterministic section fallback: %s", section_label, error)
+            return "", None
         if critique["approved"]:
             logger.info("Report critic approved %s on cycle %s", section_label, cycle)
             return content, None
 
         logger.info("Report critic requested revision for %s on cycle %s", section_label, cycle)
-        revised = _extract_text_from_result(
-            actor_agent(
-                _report_revision_prompt(section_label, source_prompt, content, critique["feedback"])
+        try:
+            revised = _extract_text_from_result(
+                actor_agent(
+                    _report_revision_prompt(section_label, source_prompt, content, critique["feedback"])
+                )
             )
-        )
+        except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
+            logger.warning("Report %s revision failed; using deterministic section fallback: %s", section_label, error)
+            return "", None
         if revised:
             content = revised
         if cycle == refinement_cycles:

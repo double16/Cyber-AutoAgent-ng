@@ -43,14 +43,16 @@
 
 - Prefix subsequent `uv` commands with the same cache setting. Use the repository's `.venv` through `uv run`; do not
   activate a different virtual environment or invoke tools from a system Python.
+- When running coverage or tests that import NumPy on macOS, also set `KMP_DUPLICATE_LIB_OK=TRUE` to avoid the
+  duplicate OpenMP-library import error.
 - Examples:
 
   ```bash
   UV_CACHE_DIR="$PWD/.uv-cache" uv run python3 --version
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q --tb=short
+  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q --tb=short
   UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest -q
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage report
+  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest -q
+  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage report
   ```
 
 - If `.uv-cache` is not present, create it before running commands. Keep it project-local and persistent between agent
