@@ -1654,7 +1654,7 @@ def test_report_model_circuit_breaker_skips_later_actor_calls_after_provider_fai
     skipped_actor.assert_not_called()
 
 
-def test_report_agent_invocation_is_single_turn_and_identifies_its_section():
+def test_report_agent_invocation_uses_five_turns_and_identifies_its_section():
     agent = MagicMock(return_value=MagicMock(stop_reason="end_turn"))
 
     result = _invoke_report_agent(agent, "Narrative prompt", "Executive summary", None)
@@ -1663,7 +1663,7 @@ def test_report_agent_invocation_is_single_turn_and_identifies_its_section():
     agent.assert_called_once_with(
         "Narrative prompt",
         invocation_state={"report_section": "Executive summary"},
-        limits={"turns": 1},
+        limits={"turns": 5},
     )
 
 
@@ -1671,7 +1671,7 @@ def test_report_agent_turn_limit_trips_circuit_breaker_without_reusing_tool_resu
     breaker = _ReportModelCircuitBreaker()
     agent = MagicMock(return_value=MagicMock(stop_reason="limit_turns"))
 
-    with pytest.raises(RuntimeError, match="single-turn limit"):
+    with pytest.raises(RuntimeError, match="turn limit"):
         _invoke_report_agent(agent, "Narrative prompt", "Executive summary", breaker)
 
     assert breaker.tripped is True

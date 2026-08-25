@@ -64,7 +64,7 @@ _AI_CONTENT_DISCLAIMER = (
     "errors, omissions, or hallucinations. A qualified human should independently verify its findings and "
     "recommendations before relying on them."
 )
-_REPORT_AGENT_LIMITS = {"turns": 1}
+_REPORT_AGENT_LIMITS = {"turns": 5}
 _SESSION_START_MARKER = "CYBER-AUTOAGENT SESSION STARTED:"
 _BUDGET_LINE_RE = re.compile(
     r"Budget:\s*duration=(?P<duration>[^,\s]+),\s*tokens=(?P<tokens>[^,\s]+),\s*cost=(?P<cost>[^\s]+)",
@@ -1145,6 +1145,31 @@ def _format_executive_deterministic_sections(sections: Dict[str, Any]) -> str:
     )
 
 
+def _format_executive_narrative_fallback(sections: Dict[str, Any]) -> str:
+    """Render a safe executive narrative from persisted report records only."""
+
+    completion = sections.get("completion_status", {})
+    complete = bool(completion.get("assessment_complete"))
+    findings = int(sections.get("verified_finding_count", 0) or 0)
+    observations = int(sections.get("observation_count", 0) or 0)
+    status = "completed" if complete else "did not complete"
+    reason = str(completion.get("incomplete_reason") or "") if not complete else ""
+    risk = (
+        "No verified findings were recorded in the persisted workflow evidence."
+        if not findings
+        else f"The persisted workflow records {findings} verified finding(s) requiring remediation review."
+    )
+    return (
+        "### Assessment Context\n\n"
+        f"This assessment {status}. "
+        + (f"{reason}\n\n" if reason else "\n\n")
+        + "### Risk Assessment\n\n"
+        + risk
+        + (f" {observations} informational observation(s) were retained for follow-up." if observations else "")
+        + "\n"
+    )
+
+
 def _format_finding_with_narrative(item: Dict[str, Any], index: int, narrative: str) -> str:
     """Combine Python-owned finding facts with a bounded LLM interpretation."""
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
@@ -2099,7 +2124,7 @@ def _invoke_report_agent(
             limits=_REPORT_AGENT_LIMITS,
         )
         if getattr(result, "stop_reason", None) == "limit_turns":
-            raise RuntimeError("report agent exceeded its single-turn limit")
+            raise RuntimeError("report agent exceeded its configured turn limit")
         return result
     except Exception as error:
         if circuit_breaker is not None:
@@ -3634,7 +3659,8 @@ Narrative context:
                 f.write(
                     '<a name="executive-summary"></a>\n'
                     "## EXECUTIVE SUMMARY\n\n"
-                    "No executive narrative was returned by the report agent.\n\n"
+                    + _format_executive_narrative_fallback(sections)
+                    + "\n"
                     + _format_executive_deterministic_sections(sections)
                     + "\n"
                     + taxonomy_coverage

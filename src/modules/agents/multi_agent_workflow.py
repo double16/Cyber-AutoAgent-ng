@@ -4533,6 +4533,12 @@ class MultiAgentWorkflowController:
                     and not candidate_acceptance_owned
                     and not any(outcome.tool_name == "record_task_acceptance" for outcome in tool_outcomes)
                 ):
+                    if self._replay_missing_observation_acceptance(plan, task, tool_outcomes):
+                        decision = WorkflowDecision(
+                            status="done",
+                            reason="Controller replay recorded missing acceptance from task-local evidence.",
+                        )
+                        break
                     recovery_context = self._acceptance_recovery_context(
                         task,
                         self.state.list_task_acceptance_results(task.task_uid),
@@ -5054,6 +5060,40 @@ Use only this evidence. If the frozen criterion requires an observation or memor
 storage tool exactly once first. Then call record_task_acceptance exactly once using only canonical references returned
 by the storage tool or listed above. Do not add criteria or broaden scope.
 """
+
+    def _replay_missing_observation_acceptance(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        outcomes: List[ToolOutcome],
+    ) -> bool:
+        """Close a mechanically complete, non-finding task without another model turn."""
+
+        if task.kind in VALIDATION_TASK_KINDS or self._finding_candidate_acceptance_is_deterministic(task):
+            return False
+        criterion = task.acceptance.criteria[0] if len(task.acceptance.criteria) == 1 else None
+        if criterion is None or any(
+            requirement.kind in {"finding_candidate", "verified_finding"}
+            for requirement in criterion.evidence_requirements
+        ):
+            return False
+        self._resolve_controller_execution_evidence(plan, task, criterion, outcomes)
+        context = self._acceptance_recovery_context(task, [], outcomes, None)
+        refs = [item["reference"] for item in context if item["reference"].startswith(("artifact:", "memory:"))]
+        if not refs:
+            return False
+        try:
+            self.state.record_task_acceptance(task, {
+                "status": "satisfied",
+                "disposition": "observation",
+                "summary": "Controller replay recorded the frozen criterion from task-local durable evidence.",
+                "evidence_refs": list(dict.fromkeys(refs)),
+            })
+        except Exception as error:  # The bound tool remains the authoritative validator.
+            self._emit_controller_acceptance_replay(task, "rejected", self._short(error, 500))
+            return False
+        self._emit_controller_acceptance_replay(task, "recorded", "missing acceptance replayed from task-local receipts")
+        return True
 
     @staticmethod
     def _repeat_loop_is_repeated(
@@ -10751,7 +10791,7 @@ generic replacement for an existing verification task.
         return "\n".join(lines)
 
     def _task_creator_prior_phase_context(self, phase: PlanPhase) -> str:
-        """Return bounded terminal prior-phase work so task creation can avoid semantic repeats."""
+        """Return bounded terminal work and accepted evidence for later-phase fan-out."""
 
         prior_tasks = [
             task
@@ -10769,6 +10809,28 @@ generic replacement for an existing verification task.
                     sanitize_toon_value(self._short(task.status_reason, 240)),
                 ))
             )
+        accepted_rows = []
+        for task in prior_tasks:
+            if task.status != "done":
+                continue
+            for result in self.state.list_task_acceptance_results(task.task_uid):
+                if str(getattr(result, "status", "")) != "satisfied":
+                    continue
+                accepted_rows.append((
+                    task.phase,
+                    task.title,
+                    getattr(result, "disposition", ""),
+                    getattr(result, "summary", ""),
+                    "|".join(getattr(result, "evidence_refs", ())[:8]),
+                ))
+        lines.append(
+            f"accepted_prior_phase_evidence[{len(accepted_rows)}]"
+            "{phase,title,disposition,summary,evidence_refs}:"
+        )
+        lines.extend(
+            "  " + ",".join(sanitize_toon_value(value) for value in row)
+            for row in accepted_rows[-30:]
+        )
         return "\n".join(lines)
 
     def _task_creator_finding_context(self) -> str:

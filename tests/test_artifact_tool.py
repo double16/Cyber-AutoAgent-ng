@@ -73,6 +73,29 @@ def test_read_artifact_rejects_oversized_minified_page_without_returning_content
     assert oversized_content not in str(error.value)
 
 
+def test_read_artifact_reads_oversized_minified_content_by_byte_page(tmp_path: Path):
+    artifact = tmp_path / "minified.js"
+    artifact.write_text("x" * 9_601, encoding="utf-8")
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        result = READ_ARTIFACT("minified.js", start_byte=9_500, max_bytes=101)
+
+    assert "'start_byte': 9500" in result
+    assert "'end_byte': 9601" in result
+    assert "'eof': True" in result
+
+
+def test_read_artifact_rejects_mixed_line_and_byte_pages(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("one", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match="byte paging"),
+    ):
+        READ_ARTIFACT("evidence.txt", start_line=2, start_byte=0, max_bytes=8)
+
+
 def test_read_artifact_counts_utf8_bytes_not_characters(tmp_path: Path):
     artifact = tmp_path / "unicode.txt"
     artifact.write_text("é" * 4_801, encoding="utf-8")

@@ -5208,7 +5208,7 @@ def test_task_acceptance_gate_skips_evaluator_and_lists_missing_criteria():
     assert "assess-the-assigned-endpoint" in state.tasks[0].status_reason
 
 
-def test_missing_acceptance_gets_one_evidence_backed_terminal_recovery_turn(monkeypatch, tmp_path):
+def test_missing_acceptance_replays_mechanically_complete_evidence(monkeypatch, tmp_path):
     artifact = tmp_path / "endpoint.html"
     artifact.write_text("endpoint response", encoding="utf-8")
     task = TaskModel(
@@ -5309,19 +5309,9 @@ def test_missing_acceptance_gets_one_evidence_backed_terminal_recovery_turn(monk
 
     controller._run_task(_plan(), _plan().phases[0], task)
 
-    assert len(calls) == 2
-    assert calls[1][1].required_tool_names == {"record_task_acceptance"}
-    assert calls[1][1].max_tool_calls == 2
-    assert calls[1][2] <= {"read_artifact", "store_observation", "store_finding", "record_task_acceptance"}
-    assert "shell" not in calls[1][2]
-    assert "Required Terminal Acceptance Recovery" in calls[1][0]
-    assert "Do not repeat discovery" in calls[1][0]
-    event = next(
-        event
-        for event in runtime.callback_handler.events
-        if event["type"] == "acceptance_recovery_context" and event["reason"] == "missing_acceptance"
-    )
-    assert event["mode"] == "missing_acceptance_evidence_read_then_accept"
+    assert len(calls) == 1
+    event = next(event for event in runtime.callback_handler.events if event["type"] == "controller_acceptance_replay")
+    assert event["outcome"] == "recorded"
     assert state.tasks[0].status == "done"
 
 

@@ -176,18 +176,59 @@ def _read_artifact_with_limit(path: str, start_line: int, max_lines: int, max_by
     return str(payload)
 
 
+def _read_artifact_bytes(path: str, start_byte: int, max_bytes: int) -> str:
+    """Read one bounded byte page, including minified single-line artifacts."""
+
+    if start_byte < 0:
+        raise ValueError("start_byte must be at least 0")
+    root = os.path.realpath(_operation_output_root())
+    resolved = resolve_operation_artifact_path(path)
+    byte_size = os.path.getsize(resolved)
+    if start_byte > byte_size:
+        raise ValueError("start_byte is beyond the artifact size")
+    with open(resolved, "rb") as artifact_file:
+        artifact_file.seek(start_byte)
+        content = artifact_file.read(max_bytes)
+    end_byte = start_byte + len(content)
+    payload: dict[str, Any] = {
+        "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
+        "start_byte": start_byte,
+        "end_byte": end_byte,
+        "next_start_byte": end_byte if end_byte < byte_size else None,
+        "eof": end_byte >= byte_size,
+        "byte_size": byte_size,
+        "content": content.decode("utf-8", errors="replace"),
+    }
+    return str(payload)
+
+
 def create_artifact_reader(context_window_tokens: int) -> Any:
     """Create a context-bound reader for current-operation artifacts."""
 
-    max_bytes = artifact_max_bytes_for_context_window(context_window_tokens)
-
     @tool(name="read_artifact")
-    def read_artifact(path: str, start_line: int = 1, max_lines: int = 200) -> str:
+    def read_artifact(
+        path: str,
+        start_line: int = 1,
+        max_lines: int = 200,
+        start_byte: int | None = None,
+        max_bytes: int | None = None,
+    ) -> str:
         """Read a bounded text excerpt from an artifact in the current operation output."""
 
         root = os.path.realpath(_operation_output_root())
         try:
-            return _read_artifact_with_limit(path, start_line, max_lines, max_bytes)
+            if start_byte is not None or max_bytes is not None:
+                if start_line != 1 or max_lines != 200 or start_byte is None or max_bytes is None:
+                    raise ValueError("byte paging requires start_byte and max_bytes only")
+                if max_bytes < 1 or max_bytes > artifact_max_bytes_for_context_window(context_window_tokens):
+                    raise ValueError("max_bytes exceeds the artifact reader page budget")
+                return _read_artifact_bytes(path, start_byte, max_bytes)
+            return _read_artifact_with_limit(
+                path,
+                start_line,
+                max_lines,
+                artifact_max_bytes_for_context_window(context_window_tokens),
+            )
         except ValueError:
             directory = _resolve_operation_directory_path(path)
             if directory is not None:
@@ -234,7 +275,13 @@ def create_bounded_artifact_reader(
     seen_ranges: set[tuple[str, int, int]] = set()
 
     @tool(name="read_artifact")
-    def bounded_read_artifact(path: str, start_line: int = 1, max_lines: int = 200) -> str:
+    def bounded_read_artifact(
+        path: str,
+        start_line: int = 1,
+        max_lines: int = 200,
+        start_byte: int | None = None,
+        max_bytes: int | None = None,
+    ) -> str:
         """Read a bounded text excerpt from a current-operation artifact."""
 
         nonlocal calls
@@ -254,13 +301,18 @@ def create_bounded_artifact_reader(
             raise RuntimeError(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
             )
-        if max_lines_per_read is not None:
+        byte_mode = start_byte is not None or max_bytes is not None
+        if byte_mode and (start_line != 1 or max_lines != 200 or start_byte is None or max_bytes is None):
+            raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte page parameters are invalid")
+        if byte_mode and not 1 <= max_bytes <= resolved_max_bytes:
+            raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte page parameters are invalid")
+        if max_lines_per_read is not None and not byte_mode:
             max_lines = min(max_lines, max_lines_per_read)
         if start_line < 1 or not 1 <= max_lines <= 500:
             raise RuntimeError(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact page parameters are invalid"
             )
-        page = (resolved, start_line, max_lines)
+        page = (resolved, start_byte, max_bytes) if byte_mode else (resolved, start_line, max_lines)
         if calls >= max_reads:
             raise RuntimeError(
                 f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: "
@@ -276,7 +328,11 @@ def create_bounded_artifact_reader(
                 f"Artifact page limit reached ({max_reads_per_artifact})"
             )
         try:
-            result = _read_artifact_with_limit(resolved, start_line, max_lines, resolved_max_bytes)
+            result = (
+                _read_artifact_bytes(resolved, start_byte, max_bytes)
+                if byte_mode
+                else _read_artifact_with_limit(resolved, start_line, max_lines, resolved_max_bytes)
+            )
         except ValueError as error:
             if str(error).startswith(ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER):
                 raise RuntimeError(str(error)) from error
