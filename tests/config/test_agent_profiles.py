@@ -97,9 +97,9 @@ def test_recommended_agent_defaults():
     # task_evaluator / phase_evaluator have independent active state.
     evaluator = registry.get_settings("task_evaluator")
     assert evaluator.temperature == 0.0
-    assert evaluator.reasoning_level == ReasoningLevel.NONE
+    assert evaluator.reasoning_level == ReasoningLevel.MEDIUM
     assert evaluator.max_tokens == 4096
-    assert registry.get_settings("phase_evaluator").reasoning_level == ReasoningLevel.NONE
+    assert registry.get_settings("phase_evaluator").reasoning_level == ReasoningLevel.MEDIUM
 
     # report_agent / report_critic
     report_agent = registry.get_settings("report_agent")
@@ -138,7 +138,7 @@ def test_phase_evaluator_adaptation_does_not_modify_task_evaluator():
     registry.apply_reasoning_repair("phase_evaluator", ReasoningLevel.LOW, "phase recovery")
 
     assert registry.get_settings("phase_evaluator").reasoning_level is ReasoningLevel.LOW
-    assert registry.get_settings("task_evaluator").reasoning_level is ReasoningLevel.NONE
+    assert registry.get_settings("task_evaluator").reasoning_level is ReasoningLevel.MEDIUM
 
 
 def test_reasoning_repair_and_permanent_lock():

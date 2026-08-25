@@ -184,9 +184,9 @@ def test_non_reasoning_max_tokens_boost_and_retry():
     workflow._emit_workflow_activity = MagicMock()
     workflow._json_max_token_retry_prompt = lambda prompt, kind: f"RETRY {prompt}"
 
-    # task_evaluator has reasoning NONE and max_tokens 4096
-    assert registry.get_settings("task_evaluator").reasoning_level == ReasoningLevel.NONE
-    assert registry.get_settings("task_evaluator").max_tokens == 4096
+    # taxonomy_annotator has reasoning NONE and max_tokens 4096
+    assert registry.get_settings("taxonomy_annotator").reasoning_level == ReasoningLevel.NONE
+    assert registry.get_settings("taxonomy_annotator").max_tokens == 4096
 
     attempt_max_tokens = []
 
@@ -204,8 +204,8 @@ def test_non_reasoning_max_tokens_boost_and_retry():
     workflow.text_runner = evaluator_runner
 
     result = workflow._run_json_text_agent(
-        role="task_evaluator",
-        prompt="Evaluate task",
+        role="taxonomy_annotator",
+        prompt="Evaluate taxonomy",
         tools=[],
         system_prompt="sys prompt",
     )
@@ -214,4 +214,4 @@ def test_non_reasoning_max_tokens_boost_and_retry():
     # First attempt ran with 4096, retry attempt ran with boosted 6144
     assert attempt_max_tokens == [4096, 6144]
     # Since 1st recovery (< 3 strikes), baseline remains 4096
-    assert registry.get_settings("task_evaluator").max_tokens == 4096
+    assert registry.get_settings("taxonomy_annotator").max_tokens == 4096

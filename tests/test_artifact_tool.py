@@ -304,3 +304,28 @@ def test_bounded_reader_rejects_oversized_page_without_consuming_successful_read
         with pytest.raises(RuntimeError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER):
             reader("artifact:artifacts/minified.js")
         assert "proof" in reader("artifact:artifacts/evidence.txt")
+
+
+def test_bounded_reader_returns_large_artifact_digest_without_consuming_read_budget(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    oversized = artifacts / "minified.js"
+    oversized.write_text("x" * 9_601, encoding="utf-8")
+    small = artifacts / "evidence.txt"
+    small.write_text("proof", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        reader = create_bounded_artifact_reader(
+            max_reads=1,
+            context_window_tokens=48_000,
+            allowed_artifact_refs=["artifact:artifacts/evidence.txt"],
+            omitted_large_artifact_sizes={"artifact:artifacts/minified.js": 9_601},
+        )
+
+        with pytest.raises(RuntimeError, match=r"Artifact is 9601 bytes") as error:
+            reader("artifact:artifacts/minified.js")
+        assert "acceptance summary and review digest" in str(error.value)
+        assert "proof" in reader("artifact:artifacts/evidence.txt")

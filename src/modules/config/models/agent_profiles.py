@@ -166,18 +166,18 @@ DEFAULT_AGENT_PROFILES: Dict[LLMRoleType, AgentModelSettings] = {
     ),
     LLMRoleType.TASK_EVALUATOR: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.NONE,
+        reasoning_level=ReasoningLevel.MEDIUM,
         max_tokens=4096,
     ),
     LLMRoleType.PHASE_EVALUATOR: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.NONE,
+        reasoning_level=ReasoningLevel.MEDIUM,
         max_tokens=4096,
     ),
     LLMRoleType.TASK_PHASE_CLASSIFIER: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.NONE,
-        max_tokens=2048,
+        reasoning_level=ReasoningLevel.MEDIUM,
+        max_tokens=4096,
     ),
     LLMRoleType.REPORT_AGENT: AgentModelSettings(
         temperature=0.2,

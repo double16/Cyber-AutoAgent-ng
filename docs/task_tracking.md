@@ -311,6 +311,9 @@ number of distinct authorized artifacts; each evaluator page is limited to 200 l
 context window at four UTF-8 bytes per token, clamped from 8 KiB through 64 KiB. Oversized pages are rejected without
 materializing their content. Reaching a page limit directs the evaluator to another authorized artifact; only total
 exhaustion or a repeated denied read stops evaluation.
+Before artifact reads, the controller provides a deterministic digest with each artifact's byte size. Artifacts larger
+than the evaluator's page budget are omitted from its reader but retained in the digest for provenance; evaluators use
+the acceptance summary, controller-observed outcomes, and compact artifacts rather than paging through raw bundles.
 The general reader accepts one file per call. When it receives an in-scope directory, it returns up to 25 immediate
 file references so the agent can retry with a specific artifact; evaluator readers do not disclose directory listings.
 

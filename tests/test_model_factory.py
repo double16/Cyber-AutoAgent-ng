@@ -454,7 +454,7 @@ def test_thinking_model_disables_thinking_for_non_reasoning_profile(monkeypatch,
 
     model = mod.create_bedrock_model("thinking", "us-east-1", role="task_evaluator")
 
-    assert model.kwargs["additional_request_fields"] is None
+    assert model.kwargs["additional_request_fields"] == {'thinking': {'type': 'enabled', 'budget_tokens': 2048}}
 
 
 def test_get_model_and_provider_helpers():

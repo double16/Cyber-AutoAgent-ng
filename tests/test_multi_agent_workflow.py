@@ -12076,14 +12076,47 @@ def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(m
 
     prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
 
-    assert "- Authorized artifacts: 12" in prompt
+    assert "- Directly reviewable artifacts: 12" in prompt
     assert "- Total successful reads: 48" in prompt
     assert "- Successful pages per artifact: 4" in prompt
     assert "- Maximum lines per page: 200" in prompt
     assert "- Maximum UTF-8 bytes per page: 9600" in prompt
-    assert "do not retry that page unchanged" in prompt
+    assert "Evaluate the acceptance summaries and controller-observed outcomes first" in prompt
     assert artifact_refs[0] in prompt
     assert artifact_refs[-1] in prompt
+
+
+def test_task_evaluator_omits_large_artifacts_but_retains_their_review_digest(monkeypatch, tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "mapping.json").write_text('{"mapped": true}', encoding="utf-8")
+    (artifacts / "bundle.js").write_text("x" * 9_601, encoding="utf-8")
+    task = Task(
+        task_uid="large-artifact-review",
+        title="Review mapping evidence",
+        objective="Review task evidence",
+        phase=1,
+        status="active",
+        evidence=["artifact:artifacts/mapping.json", "artifact:artifacts/bundle.js"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+
+    tools = controller._task_evaluator_tools(task, [])
+    prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
+
+    assert "mapped" in tools[0]("artifact:artifacts/mapping.json")
+    with pytest.raises(RuntimeError, match=r"Artifact is 9601 bytes"):
+        tools[0]("artifact:artifacts/bundle.js")
+    assert "- Directly reviewable artifacts: 1" in prompt
+    assert "artifact:artifacts/mapping.json (16 bytes)" in prompt
+    assert "artifact:artifacts/bundle.js (9601 bytes; exceeds the page budget)" in prompt
+    assert "Do not page through them" in prompt
 
 
 def test_task_evaluator_artifact_reader_uses_persisted_acceptance_results_when_omitted(monkeypatch, tmp_path):

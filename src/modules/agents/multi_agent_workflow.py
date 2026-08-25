@@ -72,6 +72,7 @@ from modules.handlers.utils import (
 )
 from modules.tools.artifact import (
     artifact_max_bytes_for_context_window,
+    artifact_review_metadata,
     create_bounded_artifact_reader,
     resolve_operation_artifact_path,
 )
@@ -7800,20 +7801,45 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
 
         return int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)
 
+    def _task_evaluator_artifact_review(
+        self,
+        task: Task,
+        acceptance_results: List[Any],
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Split evaluator evidence into readable artifacts and deterministic large-artifact metadata."""
+
+        max_bytes = artifact_max_bytes_for_context_window(self._artifact_context_window_tokens())
+        reviewable = []
+        omitted_large = []
+        for reference in self._task_evaluator_artifact_refs(task, acceptance_results):
+            try:
+                metadata = artifact_review_metadata(reference, max_bytes)
+            except (OSError, TypeError, ValueError):
+                continue
+            if metadata["reviewable"]:
+                reviewable.append(metadata)
+            else:
+                omitted_large.append(metadata)
+        return reviewable, omitted_large
+
     def _task_evaluator_tools(self, task: Task, acceptance_results: List[Any]) -> List[Any]:
         """Return a task-local artifact reader with bounded per-artifact pagination."""
 
-        artifact_refs = self._task_evaluator_artifact_refs(task, acceptance_results)
-        if not artifact_refs:
+        reviewable, omitted_large = self._task_evaluator_artifact_review(task, acceptance_results)
+        if not reviewable and not omitted_large:
             return []
         max_reads_per_artifact = max(
             1,
             self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4),
         )
         return [create_bounded_artifact_reader(
-            max_reads=len(artifact_refs) * max_reads_per_artifact,
+            max_reads=max(1, len(reviewable) * max_reads_per_artifact),
             context_window_tokens=self._artifact_context_window_tokens(),
-            allowed_artifact_refs=artifact_refs,
+            allowed_artifact_refs=[item["artifact_ref"] for item in reviewable],
+            omitted_large_artifact_sizes={
+                item["artifact_ref"]: item["byte_size"]
+                for item in omitted_large
+            },
             max_reads_per_artifact=max_reads_per_artifact,
             max_lines_per_read=200,
         )]
@@ -7825,27 +7851,34 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
     ) -> str:
         """Render the exact controller-owned artifact review budget for an evaluator."""
 
-        artifact_refs = self._task_evaluator_artifact_refs(task, acceptance_results)
+        reviewable, omitted_large = self._task_evaluator_artifact_review(task, acceptance_results)
         max_reads_per_artifact = max(
             1,
             self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4),
         )
         lines = [
             "## Artifact Review Limits",
-            f"- Authorized artifacts: {len(artifact_refs)}",
-            f"- Total successful reads: {len(artifact_refs) * max_reads_per_artifact}",
+            f"- Directly reviewable artifacts: {len(reviewable)}",
+            f"- Total successful reads: {len(reviewable) * max_reads_per_artifact}",
             f"- Successful pages per artifact: {max_reads_per_artifact}",
             "- Maximum lines per page: 200",
             f"- Maximum UTF-8 bytes per page: "
             f"{artifact_max_bytes_for_context_window(self._artifact_context_window_tokens())}",
-            "- Read different pages with start_line when needed; do not repeat a page or read another artifact.",
-            "- If a page exceeds the byte limit, do not retry that page unchanged; return the JSON decision using "
-            "the controller-provided evidence.",
+            "- Evaluate the acceptance summaries and controller-observed outcomes first.",
+            "- Read a directly reviewable artifact only when it resolves a concrete evidence gap.",
+            "- Omitted large artifacts are provenance only. Do not page through them; use the acceptance summary and "
+            "review digest instead.",
             "- Return the required JSON decision once you have the needed evidence.",
             "",
-            "Authorized artifact references:",
+            "Directly reviewable artifact references:",
         ]
-        lines.extend(f"- {reference}" for reference in artifact_refs)
+        lines.extend(f"- {item['artifact_ref']} ({item['byte_size']} bytes)" for item in reviewable)
+        if omitted_large:
+            lines.extend(["", "Omitted large artifact references:"])
+            lines.extend(
+                f"- {item['artifact_ref']} ({item['byte_size']} bytes; exceeds the page budget)"
+                for item in omitted_large
+            )
         return "\n".join(lines)
 
     @staticmethod

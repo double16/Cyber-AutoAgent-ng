@@ -1,7 +1,7 @@
 """Read-only access to artifacts produced by the current operation."""
 
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from strands import tool
@@ -115,6 +115,21 @@ def _directory_read_guidance(directory: str, root: str) -> str:
     return str(payload)
 
 
+def artifact_review_metadata(path: str, max_bytes: int) -> dict[str, Any]:
+    """Return deterministic evaluator-review metadata without materializing artifact content."""
+
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be at least 1")
+    root = os.path.realpath(_operation_output_root())
+    resolved = resolve_operation_artifact_path(path)
+    byte_size = os.path.getsize(resolved)
+    return {
+        "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
+        "byte_size": byte_size,
+        "reviewable": byte_size <= max_bytes,
+    }
+
+
 def _read_artifact_with_limit(path: str, start_line: int, max_lines: int, max_bytes: int) -> str:
     """Read a bounded artifact excerpt without materializing more than ``max_bytes``."""
 
@@ -187,6 +202,7 @@ def create_bounded_artifact_reader(
     *,
     context_window_tokens: int,
     allowed_artifact_refs: Iterable[str] | None = None,
+    omitted_large_artifact_sizes: Mapping[str, int] | None = None,
     max_reads_per_artifact: int | None = None,
     max_lines_per_read: int | None = None,
 ) -> Any:
@@ -209,6 +225,10 @@ def create_bounded_artifact_reader(
             resolve_operation_artifact_path(reference)
             for reference in allowed_artifact_refs
         }
+    omitted_large_paths = {
+        resolve_operation_artifact_path(reference): int(byte_size)
+        for reference, byte_size in (omitted_large_artifact_sizes or {}).items()
+    }
     calls = 0
     reads_by_path: dict[str, int] = {}
     seen_ranges: set[tuple[str, int, int]] = set()
@@ -224,6 +244,12 @@ def create_bounded_artifact_reader(
             raise RuntimeError(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
             ) from error
+        if resolved in omitted_large_paths:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER}: Artifact is {omitted_large_paths[resolved]} bytes "
+                f"and exceeds the {resolved_max_bytes}-byte evaluator page budget; use the "
+                "controller-provided acceptance summary and review digest"
+            )
         if allowed_paths is not None and resolved not in allowed_paths:
             raise RuntimeError(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
