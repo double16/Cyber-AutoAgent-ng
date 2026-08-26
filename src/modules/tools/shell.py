@@ -6,6 +6,7 @@
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -60,6 +61,30 @@ def validate_command(command: Union[str, Dict]) -> Tuple[str, Dict]:
         raise ValueError("Command must be string or dict")
 
 
+_SHELL_CONTROL_OPERATOR_PATTERN = re.compile(r"(?:&&|\|\||[;<>]|`|\$\()")
+
+
+def _is_empty_read_only_search(command: str, exit_code: int, error: str) -> bool:
+    """Return whether grep/rg exit status one unambiguously means no matches."""
+
+    if (
+        exit_code != 1
+        or error.strip()
+        or _SHELL_CONTROL_OPERATOR_PATTERN.search(command)
+    ):
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    executable = os.path.basename(tokens[0]).lower()
+    if executable not in {"grep", "rg"}:
+        return False
+    return "--pre" not in tokens and "--pre-glob" not in tokens
+
+
 class CommandExecutor:
     """Handles execution of shell commands with timeout."""
 
@@ -105,6 +130,9 @@ def execute_single_command(
             "error": error,
             "status": "success" if exit_code == 0 else "error",
         }
+        if _is_empty_read_only_search(cmd_str, exit_code, error):
+            result["status"] = "success"
+            result["no_matches"] = True
 
         if cmd_opts:
             result["options"] = cmd_opts
@@ -346,13 +374,14 @@ def shell(
 
         content = []
         for result in results:
+            no_matches = "\nNo Matches: true" if result.get("no_matches") else ""
             content.append(
                 {
                     "text": f"Command: {result['command']}\n"
                             f"Status: {result['status']}\n"
                             f"Exit Code: {result['exit_code']}\n"
                             f"Output: {result['output']}\n"
-                            f"Error: {result['error']}"
+                            f"Error: {result['error']}{no_matches}"
                 }
             )
 

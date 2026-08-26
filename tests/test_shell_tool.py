@@ -102,6 +102,35 @@ def test_execute_single_command_validation_error_shape():
     assert "Command object must contain" in result["error"]
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["grep -c sourceMappingURL bundle.js", "rg sourceMappingURL bundle.js"],
+)
+def test_execute_single_command_treats_empty_read_only_search_as_success(command):
+    with patch.object(CommandExecutor, "execute", return_value=(1, "0\n", "")):
+        result = execute_single_command(command, "/tmp", 30)
+
+    assert result["status"] == "success"
+    assert result["exit_code"] == 1
+    assert result["no_matches"] is True
+
+
+@pytest.mark.parametrize(
+    ("command", "error"),
+    [
+        ("grep sourceMappingURL bundle.js", "permission denied"),
+        ("printf missing", ""),
+        ("grep sourceMappingURL bundle.js && echo found", ""),
+    ],
+)
+def test_execute_single_command_preserves_other_nonzero_results_as_errors(command, error):
+    with patch.object(CommandExecutor, "execute", return_value=(1, "", error)):
+        result = execute_single_command(command, "/tmp", 30)
+
+    assert result["status"] == "error"
+    assert "no_matches" not in result
+
+
 def test_execute_commands_sequential_cd_context(tmp_path):
     start_dir = os.getcwd()
     result = execute_commands(["pwd", f"cd {shlex.quote(str(tmp_path))}", "pwd"], False, False, start_dir, 30)
@@ -134,6 +163,22 @@ def test_shell_formats_success_response():
     assert result["status"] == "success"
     assert "Total commands: 1" in result["content"][0]["text"]
     assert "Output: hi" in result["content"][1]["text"]
+
+
+def test_shell_formats_empty_search_response():
+    command = {
+        "command": "grep needle bundle.js",
+        "exit_code": 1,
+        "output": "",
+        "error": "",
+        "status": "success",
+    }
+    command["no_matches"] = True
+    with patch.object(shell_module, "execute_commands", return_value=[command]):
+        result = shell("grep needle bundle.js")
+
+    assert result["status"] == "success"
+    assert "No Matches: true" in result["content"][1]["text"]
 
 
 def test_shell_formats_error_response():

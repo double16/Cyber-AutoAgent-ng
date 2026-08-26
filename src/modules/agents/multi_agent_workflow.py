@@ -319,6 +319,7 @@ _TOOL_EXECUTION_CAPABILITIES = {
     "auth_chain_analyzer": frozenset({"analyze", "request"}),
     "browser_goto_url": frozenset({"request"}),
     "browser_observe_page": frozenset({"analyze"}),
+    "client_bundle_inventory": frozenset({"analyze"}),
     "editor": frozenset({"analyze"}),
     "http_request": frozenset({"request"}),
     "idor_specialist": frozenset({"analyze", "request", "execute"}),
