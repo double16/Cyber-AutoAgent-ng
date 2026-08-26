@@ -13,6 +13,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 
 from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider, HookRegistry
 
+from modules.tools.shell_provenance import shell_execution_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ _PREREQUISITE_FAILURE_PATTERNS = tuple(
 )
 _HTTP_STATUS_LINE_PATTERN = re.compile(r"\bHTTP/\d(?:\.\d)?\s+([1-5]\d{2})\b", re.IGNORECASE)
 _CURL_WRITE_OUT_STATUS_PATTERN = re.compile(r"(?m)^\s*(?:http_code=|status=)?([1-5]\d{2})(?:\s|$)")
+_EXECUTION_RECEIPT_MARKER = "__CYBER_EXECUTION_RECEIPT__"
 _REDIRECT_BODY_FAILURE_PATTERN = re.compile(
     r"(?:response\.)?body.*(?:unavailable|not available).*redirect|redirect responses?", re.IGNORECASE
 )
@@ -352,6 +354,60 @@ def _is_interpretable_curl_http_result(tool_name: str, tool_input: Any, output: 
     return _captured_http_status(output, allow_write_out_status=_uses_curl_write_out(tool_input)) is not None
 
 
+def _execution_receipts(tool_name: str, tool_input: Any, output: Any) -> tuple[ExecutionReceipt, ...]:
+    """Extract deterministic request provenance without interpreting agent prose."""
+
+    payload = tool_input if isinstance(tool_input, dict) else {}
+    if tool_name in {"http_request", "browser_goto_url"}:
+        url = str(payload.get("url") or "").strip()
+        return (ExecutionReceipt(tool_name, (url,), 1),) if url else ()
+    if tool_name == "shell":
+        command = str(payload.get("command") or payload.get("cmd") or "")
+        provenance = shell_execution_provenance(command)
+        subjects = tuple(dict.fromkeys([*provenance.urls, *provenance.collection_urls]))
+        if not subjects:
+            return ()
+        return (
+            ExecutionReceipt(
+                "shell",
+                subjects,
+                max(len(provenance.collection_urls), len(provenance.urls)),
+                len(provenance.collection_urls) >= 2,
+            ),
+        )
+    if tool_name != "python_repl":
+        return ()
+
+    receipts = []
+    for line in str(output or "").splitlines():
+        if not line.startswith(_EXECUTION_RECEIPT_MARKER):
+            continue
+        try:
+            value = json.loads(line[len(_EXECUTION_RECEIPT_MARKER) :])
+        except (TypeError, ValueError):
+            continue
+        subjects = tuple(
+            str(subject).strip()
+            for subject in value.get("subjects", [])
+            if str(subject).strip().startswith(("http://", "https://"))
+        )
+        request_count = value.get("request_count", 0)
+        if not subjects or not isinstance(request_count, int) or request_count < 1:
+            continue
+        receipts.append(ExecutionReceipt("python_runtime", subjects, request_count, bool(value.get("collection"))))
+    return tuple(receipts)
+
+
+@dataclass(frozen=True)
+class ExecutionReceipt:
+    """Controller-observed network activity associated with one tool result."""
+
+    source: str
+    subjects: tuple[str, ...]
+    request_count: int
+    collection: bool = False
+
+
 @dataclass(frozen=True)
 class ToolOutcome:
     """A bounded, controller-observed tool result."""
@@ -369,6 +425,7 @@ class ToolOutcome:
     raw_output_summary: str = ""
     artifact_refs: tuple[str, ...] = ()
     structured_input: Optional[Dict[str, Any]] = None
+    execution_receipts: tuple[ExecutionReceipt, ...] = ()
 
 
 class ToolOutcomeJournal:
@@ -403,6 +460,7 @@ class ToolOutcomeJournal:
         else:
             input_summary = str(redacted_input)
         artifact_refs = _artifact_references(output, raw_output)
+        execution_receipts = _execution_receipts(tool_name, redacted_input, output)
         outcome = ToolOutcome(
             sequence=self._sequence,
             tool_use_id=_bounded_text(tool_use_id, 100),
@@ -421,6 +479,7 @@ class ToolOutcomeJournal:
                 if isinstance(redacted_input, dict)
                 else None
             ),
+            execution_receipts=execution_receipts,
         )
         self._entries.append(outcome)
         return outcome

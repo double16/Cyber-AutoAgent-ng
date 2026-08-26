@@ -21,7 +21,6 @@ from strands.tools.executors import ConcurrentToolExecutor
 from strands_tools import (
     environment,
     http_request,
-    python_repl,
 )
 
 # These tools have the @tool decorator, the function is to be imported
@@ -37,6 +36,7 @@ from modules.agents.factory import (
     init_agent_factory,
     model_uses_server_side_state,
 )
+from modules.agents.fail_fast_tool_executor import FailFastSequentialToolExecutor
 from modules.agents.patches import ToolUseIdHook
 from modules.config import (
     AgentConfig,
@@ -81,6 +81,7 @@ from modules.handlers.utils import (
     tool_append_description,
     tool_rename,
 )
+from modules.tools import python_repl
 from modules.tools.artifact import create_artifact_reader
 from modules.tools.editor import create_absolute_path_editor
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
@@ -141,6 +142,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 logger = get_logger("Agents.CyberAutoAgent")
 
 _SECLISTS_CONSUMER_TOOLS = {"dirb", "feroxbuster", "ffuf", "gobuster", "hydra", "ncrack", "wfuzz", "wpscan"}
+_FAIL_FAST_TOOL_ROLES = {"task_evaluator", "plan_critic", "task_prompt_critic"}
 
 # Backward compatibility: expose get_system_prompt from modules.prompts for legacy imports/tests
 get_system_prompt = prompts.get_system_prompt
@@ -1124,11 +1126,15 @@ def create_agent(
     if agent_type in {"task_creator", "task_executor"}:
         agent_hooks.append(TerminalToolHook(agent_type))
 
+    tool_executor = runtime.tool_executor
+    if agent_type in _FAIL_FAST_TOOL_ROLES:
+        tool_executor = FailFastSequentialToolExecutor()
+
     agent_kwargs = {
         "model": model,
         "name": name or f"Cyber-AutoAgent {config.op_id or runtime.operation_id}",
         "tools": tools if tools is not None else build_role_tools(runtime),
-        "tool_executor": runtime.tool_executor,
+        "tool_executor": tool_executor,
         "system_prompt": resolved_system_prompt,
         "callback_handler": callback_handler,
         "hooks": agent_hooks or None,

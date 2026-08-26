@@ -12,17 +12,18 @@ import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import modules.agents.cyber_autoagent as cyber_agent_module
 from modules.agents.cyber_autoagent import (
     AgentRuntimeResources,
     create_agent,
 )
-import modules.agents.cyber_autoagent as cyber_agent_module
+from modules.agents.fail_fast_tool_executor import FailFastSequentialToolExecutor
+from modules.config import AgentConfig
 from modules.config.manager import (
     get_config_manager,
     get_default_model_configs,
     get_ollama_host,
 )
-from modules.config import AgentConfig
 
 
 class TestModelConfigs:
@@ -582,7 +583,20 @@ def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
     assert "controller support role" in kwargs["system_prompt"]
 
 
-def test_create_agent_registers_artifact_limit_guard_for_task_evaluator(monkeypatch):
+@pytest.mark.parametrize(
+    ("agent_type", "uses_fail_fast_executor"),
+    [
+        ("task_evaluator", True),
+        ("plan_critic", True),
+        ("task_prompt_critic", True),
+        ("task_executor", False),
+    ],
+)
+def test_create_agent_assigns_review_roles_a_fail_fast_executor(
+    monkeypatch,
+    agent_type,
+    uses_fail_fast_executor,
+):
     class FakeAgent:
         def __init__(self, **kwargs):
             self.init_kwargs = kwargs
@@ -615,13 +629,18 @@ def test_create_agent_registers_artifact_limit_guard_for_task_evaluator(monkeypa
         "test",
         runtime_resources=runtime,
         tools=[],
-        agent_type="task_evaluator",
+        agent_type=agent_type,
         include_tool_catalog=False,
     )
 
     kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
-    assert agent._cyber_evaluator_artifact_read_limit_hook in kwargs["hooks"]
-    assert agent._cyber_evaluator_artifact_read_limit_hook.exhausted is False
+    if agent_type == "task_evaluator":
+        assert agent._cyber_evaluator_artifact_read_limit_hook in kwargs["hooks"]
+        assert agent._cyber_evaluator_artifact_read_limit_hook.exhausted is False
+    if uses_fail_fast_executor:
+        assert isinstance(kwargs["tool_executor"], FailFastSequentialToolExecutor)
+    else:
+        assert kwargs["tool_executor"] is runtime.tool_executor
 
 
 def test_create_agent_uses_role_specific_event_handler(monkeypatch):

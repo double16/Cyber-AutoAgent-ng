@@ -23,7 +23,7 @@ from modules.agents.multi_agent_workflow import (
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import MaxTokenClassification
-from modules.handlers.tool_recovery import ToolOutcome, ToolOutcomeJournal
+from modules.handlers.tool_recovery import ExecutionReceipt, ToolOutcome, ToolOutcomeJournal
 from modules.tools import memory as memory_mod
 from modules.tools.memory import (
     AcceptanceBasis,
@@ -1535,6 +1535,149 @@ def test_controller_reconciles_curl_evidence_before_loop_replacement(monkeypatch
     )
 
     assert controller._all_execution_requirements_resolved(plan, task, [outcome]) is True
+
+
+def test_controller_aggregates_request_receipts_into_enumeration_evidence(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Map the root response surface",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement("root", "Request and enumerate root", "/")],
+    )
+    task = TaskModel(
+        task_uid="request-collection",
+        title="Map routes",
+        objective="Map routes",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded requests",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["request", "enumerate"],
+                    "limits": {"max_requests": 3},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state
+    )
+    artifact = tmp_path / "artifacts" / "root.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("HTTP/1.1 200 OK", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    root = ToolOutcome(
+        sequence=1,
+        tool_use_id="root",
+        tool_name="http_request",
+        success=True,
+        correctable=False,
+        input_summary='{"url":"http://target.test/"}',
+        output_summary="artifact:artifacts/root.txt",
+        artifact_refs=("artifact:artifacts/root.txt",),
+        execution_receipts=(ExecutionReceipt("http_request", ("http://target.test/",), 1),),
+    )
+    routes = ToolOutcome(
+        sequence=2,
+        tool_use_id="routes",
+        tool_name="http_request",
+        success=True,
+        correctable=False,
+        input_summary='{"url":"http://target.test/api"}',
+        output_summary="200",
+        execution_receipts=(ExecutionReceipt(
+            "http_request",
+            ("http://target.test/api", "http://target.test/login"),
+            2,
+            True,
+        ),),
+    )
+
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [root, routes]) == {
+        "root": ["artifact:artifacts/root.txt"]
+    }
+    stored = state.list_tasks()[0].recovery_context["controller_execution_evidence"]["root"]
+    assert stored["receipt_mode"] == "aggregated_request_collection"
+    assert stored["tool_use_ids"] == ["root", "routes"]
+
+
+def test_controller_does_not_infer_enumeration_from_duplicate_request_receipts(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Map the root response surface",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement("root", "Request and enumerate root", "/")],
+    )
+    task = TaskModel(
+        task_uid="duplicate-requests",
+        title="Map routes",
+        objective="Map routes",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded requests",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["request", "enumerate"],
+                    "limits": {"max_requests": 2},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, tasks=[task])
+    )
+    artifact = tmp_path / "artifacts" / "root.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("HTTP/1.1 200 OK", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    root = ToolOutcome(
+        sequence=1,
+        tool_use_id="root",
+        tool_name="http_request",
+        success=True,
+        correctable=False,
+        input_summary='{"url":"http://target.test/"}',
+        output_summary="artifact:artifacts/root.txt",
+        artifact_refs=("artifact:artifacts/root.txt",),
+        execution_receipts=(ExecutionReceipt("http_request", ("http://target.test/",), 2),),
+    )
+
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [root]) == {}
 
 
 @pytest.mark.parametrize("subject_ref", ["/api/products/:id", "target:target-1"])
@@ -3588,7 +3731,7 @@ def test_controller_resumes_prior_contracted_mapping_before_later_task_creation(
     } in runtime.callback_handler.events
 
 
-def test_contract_prerequisite_resume_ignores_terminal_failures_and_ready_producers():
+def test_contract_prerequisite_resume_ignores_terminal_mapping_failures_and_ready_producers():
     plan = OperationPlan(
         objective="assess",
         current_phase=2,
@@ -3661,6 +3804,351 @@ def test_contract_prerequisite_resume_ignores_terminal_failures_and_ready_produc
     )
 
     assert ready_controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is None
+
+
+def test_contract_prerequisite_resume_replaces_terminal_synthesis_in_owner_phase():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    failed_synthesis = Task(
+        task_uid="failed-synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="partial_failure",
+        created_at="1",
+        recovery_context={
+            "phase_task_contract": {
+                "module": "web",
+                "phase_id": 1,
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[failed_synthesis], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    candidate = controller._contract_prerequisite_resume_candidate(plan, plan.phases[1])
+
+    assert candidate is not None
+    owner_phase, replacement = candidate
+    assert owner_phase.id == 1
+    assert replacement.phase == 1
+    assert replacement.status == "pending"
+    assert replacement.replacement_of == "failed-synthesis"
+    assert replacement.supersedes_criteria == ["criterion:failed-synthesis"]
+    assert replacement.recovery_context["phase_task_contract"] == failed_synthesis.recovery_context[
+        "phase_task_contract"
+    ]
+    assert controller._contract_prerequisite_blocker(plan, plan.phases[1]) == ""
+
+
+def test_completed_contract_synthesis_replacement_reconciles_owner_phase():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    contract_context = {
+        "module": "web",
+        "phase_id": 1,
+        "workstream": "inventory_synthesis",
+    }
+    mapping = Task(
+        task_uid="mapping",
+        title="Crawl routes",
+        objective="Crawl routes",
+        phase=1,
+        status="done",
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "bounded_crawl",
+                "task_role": "mapping",
+            }
+        },
+    )
+    failed_synthesis = Task(
+        task_uid="failed-synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="partial_failure",
+        acceptance=_acceptance("criterion-1"),
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "task_role": "synthesis",
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[mapping, failed_synthesis], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    candidate = controller._contract_prerequisite_resume_candidate(plan, plan.phases[1])
+
+    assert candidate is not None
+    _, replacement = candidate
+    completed_replacement = state.mark_task(replacement, "done", "Recovered inventory manifest")
+    controller._reconcile_completed_contract_prerequisite(plan, completed_replacement)
+
+    assert next(task for task in state.tasks if task.task_uid == "failed-synthesis").status == "superseded"
+    assert [phase.status for phase in state.plan.phases] == ["done", "active"]
+
+
+def test_contract_prerequisite_repairs_failed_synthesis_from_retained_recon_evidence(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    contract_context = {
+        "module": "web",
+        "phase_id": 1,
+    }
+    mapping = Task(
+        task_uid="mapping",
+        title="Crawl routes",
+        objective="Crawl routes",
+        phase=1,
+        status="done",
+        evidence=["artifact:artifacts/katana_output.txt"],
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "bounded_crawl",
+                "task_role": "mapping",
+            }
+        },
+    )
+    failed_synthesis = Task(
+        task_uid="failed-synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="partial_failure",
+        target_ids=["target-1"],
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[mapping, failed_synthesis], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    converted = []
+
+    def convert(**kwargs):
+        converted.append(kwargs)
+        return json.dumps({"artifact_ref": "artifact:artifacts/contract_recovery/inventory_manifest.json"})
+
+    def load_manifest(_plan, reference):
+        if reference == "artifact:artifacts/contract_recovery/inventory_manifest.json":
+            return {"schema_version": 1, "items": [{}], "unassessed_gaps": []}, "manifest-hash"
+        raise ValueError("not an inventory manifest")
+
+    monkeypatch.setattr(workflow_mod, "recon_output_to_inventory_manifest", convert)
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", load_manifest)
+
+    assert controller._repair_failed_contract_prerequisites(plan, plan.phases[1]) is True
+    assert converted == [
+        {
+            "source_artifact": "artifact:artifacts/katana_output.txt",
+            "output_file": "artifacts/contract_recovery/failed-synthesis-inventory_manifest.json",
+            "source_format": "auto",
+            "target_id": "target-1",
+        }
+    ]
+    repaired = next(task for task in state.tasks if task.task_uid == "failed-synthesis")
+    assert repaired.status == "done"
+    assert state.acceptance_results[repaired.task_uid][0].evidence_refs == (
+        "artifact:artifacts/contract_recovery/inventory_manifest.json",
+    )
+    assert [phase.status for phase in state.plan.phases] == ["done", "active"]
+
+
+def test_contract_prerequisite_does_not_replace_failed_synthesis_when_conversion_is_unavailable(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    failed_synthesis = Task(
+        task_uid="failed-synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="partial_failure",
+        target_ids=["target-1"],
+        evidence=["artifact:artifacts/unstructured.txt"],
+        recovery_context={
+            "phase_task_contract": {
+                "module": "web",
+                "phase_id": 1,
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[failed_synthesis], acceptance_complete=False),
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "recon_output_to_inventory_manifest",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("unsupported source")),
+    )
+
+    assert controller._repair_failed_contract_prerequisites(plan, plan.phases[1]) is False
+    assert controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is not None
+
+
+def test_contract_prerequisite_blocks_dependent_task_creation_for_ambiguous_failed_synthesis(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    base_acceptance = _acceptance("criterion-one")
+    acceptance = AcceptanceContract(
+        mode=base_acceptance.mode,
+        basis=base_acceptance.basis,
+        criteria=[
+            *base_acceptance.criteria,
+            AcceptanceCriterion(
+                id="criterion-two",
+                description="Record remaining inventory evidence",
+                evidence_requirements=[EvidenceRequirement(kind="inventory_manifest")],
+            ),
+        ],
+    )
+    failed_synthesis = Task(
+        task_uid="failed-synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="partial_failure",
+        acceptance=acceptance,
+        recovery_context={
+            "phase_task_contract": {
+                "module": "web",
+                "phase_id": 1,
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[failed_synthesis], acceptance_complete=False),
+        max_iterations=1,
+    )
+    monkeypatch.setattr(controller, "_create_tasks", lambda *_args: pytest.fail("dependent task creation must not run"))
+
+    with pytest.raises(WorkflowInvariantError, match="Task creation for phase 2 is blocked"):
+        controller.run()
+
+
+def test_contract_prerequisite_blocks_when_its_replacement_has_already_failed():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    contract_context = {
+        "phase_task_contract": {
+            "module": "web",
+            "phase_id": 1,
+            "workstream": "inventory_synthesis",
+            "task_role": "synthesis",
+        }
+    }
+    failed_synthesis = Task(
+        task_uid="failed-synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="partial_failure",
+        recovery_context=contract_context,
+    )
+    failed_replacement = Task(
+        task_uid="failed-replacement",
+        title="Synthesize inventory (prerequisite recovery)",
+        objective="Repair inventory",
+        phase=1,
+        status="partial_failure",
+        replacement_of="failed-synthesis",
+        supersedes_criteria=["criterion:failed-synthesis"],
+        recovery_context=contract_context,
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(
+            plan,
+            tasks=[failed_synthesis, failed_replacement],
+            acceptance_complete=False,
+        ),
+    )
+
+    assert controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is None
+    assert "cannot be resumed or replaced" in controller._contract_prerequisite_blocker(plan, plan.phases[1])
 
 
 def test_contract_prerequisite_resume_requires_valid_inventory_output(monkeypatch):
@@ -10693,6 +11181,45 @@ def test_task_prompt_critic_checks_pseudo_calls_and_tool_selection_limits():
     assert "pseudo-syntax" in prompt
     assert "Controller-Appended Terminal Protocol" in prompt
     assert "record_task_acceptance` exactly once" in prompt
+    assert "Do not reject a draft for omitting" in prompt
+
+
+def test_task_prompt_builder_can_omit_controller_owned_acceptance_requirements():
+    task = Task(
+        task_uid="active",
+        title="Map entry points",
+        objective="Map the assigned web entry points",
+        phase=1,
+        status="active",
+        acceptance=_artifact_acceptance("entry-points"),
+    )
+    captured = {}
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            assert "Do not restate those controller-owned requirements here" in prompt
+            return '{"prompt":"Inspect the assigned entry points and capture the results.","tools":[],"shell_commands":[]}'
+        if role == "task_prompt_critic":
+            captured["critic"] = prompt
+            return '{"approved":true,"feedback":[]}'
+        if role == "task_evaluator":
+            return '{"status":"partial_failure","reason":"no acceptance was recorded"}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=text_runner,
+        work_runner=lambda role, prompt, tools, system_prompt: captured.setdefault("executor", prompt),
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert "Do not reject a draft for omitting" in captured["critic"]
+    assert "## Frozen Task Acceptance Contract (Controller-owned)" in captured["executor"]
+    assert '"kind": "artifact"' in captured["executor"]
+    assert "## Task Executor Contract (Controller-owned)" in captured["executor"]
 
 
 def test_task_prompt_critic_defines_swarm_acceptance_rules():
@@ -10777,7 +11304,7 @@ def test_task_prompt_builder_excludes_published_acceptance_memory():
     assert controller._selected_memory_context(["acceptance-memory-1"]) == ""
 
 
-def test_task_prompt_critic_rejects_generic_acceptance_summaries():
+def test_task_prompt_critic_delegates_acceptance_summary_requirements_to_controller():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -10799,9 +11326,10 @@ def test_task_prompt_critic_rejects_generic_acceptance_summaries():
         {"prompt": "Identify exposed routes and summarize what you found.", "memory_ids": [], "tools": []},
     )
 
-    assert "requires concrete, reusable acceptance summaries" in prompt
+    assert "Do not reject a draft for omitting" in prompt
+    assert "requires concrete, reusable acceptance summaries" not in prompt
     assert "reject" in prompt
-    assert "generic completion claims" in prompt
+    assert "controller-appended acceptance contract" in prompt
 
 
 def test_task_target_scope_text_preserves_explicit_url_service_boundaries():

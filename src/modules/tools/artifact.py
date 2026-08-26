@@ -213,10 +213,12 @@ def create_artifact_reader(context_window_tokens: int) -> Any:
         start_byte: int | None = None,
         max_bytes: int | None = None,
     ) -> str:
-        """Read a bounded text excerpt from an artifact in the current operation output."""
+        """Read a bounded text excerpt; byte paging defaults to offset zero when max_bytes is supplied."""
 
         root = os.path.realpath(_operation_output_root())
         try:
+            if max_bytes is not None and start_byte is None:
+                start_byte = 0
             if start_byte is not None or max_bytes is not None:
                 if start_line != 1 or max_lines != 200 or start_byte is None or max_bytes is None:
                     raise ValueError("byte paging requires start_byte and max_bytes only")
@@ -282,7 +284,7 @@ def create_bounded_artifact_reader(
         start_byte: int | None = None,
         max_bytes: int | None = None,
     ) -> str:
-        """Read a bounded text excerpt from a current-operation artifact."""
+        """Read a bounded text excerpt; byte paging defaults to offset zero when max_bytes is supplied."""
 
         nonlocal calls
         try:
@@ -301,6 +303,8 @@ def create_bounded_artifact_reader(
             raise RuntimeError(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
             )
+        if max_bytes is not None and start_byte is None:
+            start_byte = 0
         byte_mode = start_byte is not None or max_bytes is not None
         if byte_mode and (start_line != 1 or max_lines != 200 or start_byte is None or max_bytes is None):
             raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte page parameters are invalid")

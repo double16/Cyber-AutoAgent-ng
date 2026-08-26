@@ -85,6 +85,18 @@ def test_read_artifact_reads_oversized_minified_content_by_byte_page(tmp_path: P
     assert "'eof': True" in result
 
 
+def test_read_artifact_defaults_byte_page_to_zero_offset(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("abcdef", encoding="utf-8")
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        result = READ_ARTIFACT("evidence.txt", max_bytes=3)
+
+    assert "'start_byte': 0" in result
+    assert "'end_byte': 3" in result
+    assert "'content': 'abc'" in result
+
+
 def test_read_artifact_rejects_mixed_line_and_byte_pages(tmp_path: Path):
     artifact = tmp_path / "evidence.txt"
     artifact.write_text("one", encoding="utf-8")
@@ -232,6 +244,28 @@ def test_bounded_reader_enforces_per_agent_limit(tmp_path: Path):
         assert "one" in reader(str(artifact))
         with pytest.raises(RuntimeError, match="read limit"):
             reader(str(artifact))
+
+
+def test_bounded_reader_defaults_byte_page_to_zero_offset(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    artifact = artifacts / "evidence.txt"
+    artifact.write_text("abcdef", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        reader = create_bounded_artifact_reader(
+            max_reads=1,
+            context_window_tokens=48_000,
+            allowed_artifact_refs=["artifact:artifacts/evidence.txt"],
+        )
+        result = reader("artifact:artifacts/evidence.txt", max_bytes=3)
+
+    assert "'start_byte': 0" in result
+    assert "'end_byte': 3" in result
+    assert "'content': 'abc'" in result
 
 
 def test_bounded_reader_allows_paginated_authorized_artifact_reads(tmp_path: Path):

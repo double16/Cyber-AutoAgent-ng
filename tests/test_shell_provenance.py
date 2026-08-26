@@ -32,3 +32,16 @@ def test_provenance_rejects_malformed_or_dynamic_output_paths(tmp_path):
     assert malformed == type(malformed)((), (), False)
     assert dynamic.parsed is True
     assert dynamic.output_paths == ()
+
+
+def test_provenance_expands_static_loop_url_collection():
+    provenance = shell_execution_provenance(
+        'for path in /api /login /admin; do curl -sS "http://target.test${path}"; done'
+    )
+
+    assert provenance.urls == ()
+    assert provenance.collection_urls == (
+        "http://target.test/api",
+        "http://target.test/login",
+        "http://target.test/admin",
+    )

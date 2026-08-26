@@ -117,6 +117,47 @@ def test_outcome_journal_retains_externalized_artifact_references():
     assert outcome.artifact_refs == ("artifact:artifacts/specialized_recon_orchestrator_result.log",)
 
 
+def test_outcome_journal_records_static_shell_request_collection():
+    outcome = ToolOutcomeJournal().append(
+        tool_use_id="routes",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        tool_input={
+            "command": 'for path in /api /login; do curl -sS "http://target.test${path}"; done'
+        },
+        output="/api -> 200\n/login -> 200",
+    )
+
+    assert outcome.execution_receipts[0].subjects == (
+        "http://target.test/api",
+        "http://target.test/login",
+    )
+    assert outcome.execution_receipts[0].request_count == 2
+    assert outcome.execution_receipts[0].collection is True
+
+
+def test_outcome_journal_records_python_runtime_receipts_only_from_marker():
+    journal = ToolOutcomeJournal()
+    output = (
+        "done\n__CYBER_EXECUTION_RECEIPT__"
+        '{"collection": true, "request_count": 2, '
+        '"subjects": ["http://target.test/api", "http://target.test/login"]}'
+    )
+
+    outcome = journal.append(
+        tool_use_id="python-routes",
+        tool_name="python_repl",
+        success=True,
+        correctable=False,
+        tool_input={"code": "..."},
+        output=output,
+    )
+
+    assert outcome.execution_receipts[0].source == "python_runtime"
+    assert outcome.execution_receipts[0].request_count == 2
+
+
 def test_outcome_journal_extracts_structured_mcp_artifact_id_from_result_only():
     journal = ToolOutcomeJournal()
 

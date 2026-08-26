@@ -156,16 +156,64 @@ def test_plan_critic_max_tokens_reduction_and_retry():
     )
 
     assert result == {"approved": True, "critique": "looks good"}
-    # First attempt ran with MEDIUM, retry attempt ran with LOW.
-    assert attempt_reasoning_levels == [ReasoningLevel.MEDIUM, ReasoningLevel.LOW]
-    # Now permanently LOW.
-    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.LOW
+    # First attempt ran with MEDIUM, retry attempt ran with reasoning disabled.
+    assert attempt_reasoning_levels == [ReasoningLevel.MEDIUM, ReasoningLevel.NONE]
+    # Now permanently disabled.
+    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.NONE
     records = registry.export_adjustment_records()
     assert any(
         r.agent_type == "plan_critic"
         and r.parameter_name == "reasoning_level"
         and r.old_value == "medium"
-        and r.new_value == "low"
+        and r.new_value == "none"
+        for r in records
+    )
+
+
+def test_active_low_reasoning_max_tokens_retries_with_reasoning_disabled():
+    reset_agent_settings_registry()
+    registry = get_agent_settings_registry()
+    registry.apply_reasoning_repair("plan_critic", ReasoningLevel.LOW, "test setup", permanent=True)
+
+    from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+
+    workflow = MultiAgentWorkflowController.__new__(MultiAgentWorkflowController)
+    workflow.json_retries = 1
+    workflow._workflow_activity_listeners = []
+    workflow._log_workflow = MagicMock()
+    workflow._record_max_token_exhaustion = MagicMock()
+    workflow._emit_workflow_activity = MagicMock()
+    workflow._json_max_token_retry_prompt = lambda prompt, kind: f"RETRY {prompt}"
+
+    attempt_reasoning_levels = []
+
+    def plan_critic_runner(role, prompt, tools, system_prompt):
+        attempt_reasoning_levels.append(registry.get_settings(role).reasoning_level)
+        if len(attempt_reasoning_levels) == 1:
+            error = MaxTokensReachedException("Hit max tokens in plan_critic")
+            error.max_token_classification = MaxTokenClassification(
+                "reasoning_exhaustion", 0.0, None, 1000, is_reasoning_induced=True
+            )
+            raise error
+        return '{"approved": true, "critique": "looks good"}'
+
+    workflow.text_runner = plan_critic_runner
+
+    result = workflow._run_json_text_agent(
+        role="plan_critic",
+        prompt="Critique plan draft",
+        tools=[],
+        system_prompt="sys prompt",
+    )
+
+    assert result == {"approved": True, "critique": "looks good"}
+    assert attempt_reasoning_levels == [ReasoningLevel.LOW, ReasoningLevel.NONE]
+    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.NONE
+    records = registry.export_adjustment_records()
+    assert any(
+        r.agent_type == "plan_critic"
+        and r.parameter_name == "reasoning_level"
+        and r.new_value == "none"
         for r in records
     )
 

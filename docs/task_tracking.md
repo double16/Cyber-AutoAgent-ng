@@ -314,6 +314,9 @@ exhaustion or a repeated denied read stops evaluation.
 Before artifact reads, the controller provides a deterministic digest with each artifact's byte size. Artifacts larger
 than the evaluator's page budget are omitted from its reader but retained in the digest for provenance; evaluators use
 the acceptance summary, controller-observed outcomes, and compact artifacts rather than paging through raw bundles.
+When a review agent emits several tool calls in one model response, the controller executes them in order and stops
+the batch after the first failed call. Remaining calls receive a skipped result and do not consume evaluator evidence
+read allowance.
 The general reader accepts one file per call. When it receives an in-scope directory, it returns up to 25 immediate
 file references so the agent can retry with a specific artifact; evaluator readers do not disclose directory listings.
 
