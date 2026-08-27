@@ -307,6 +307,19 @@ def _record_context_reduction_event(
 
     setattr(agent, "_context_reduction_events", history)
 
+    reduced = after_msgs < before_msgs or (
+        before_tokens is not None and after_tokens is not None and after_tokens < before_tokens
+    )
+    if reduced:
+        states = getattr(agent, "_cyber_context_reduction_states", ())
+        for state in states if isinstance(states, (list, tuple)) else ():
+            if not isinstance(state, dict):
+                continue
+            try:
+                state["epoch"] = max(0, int(state.get("epoch", 0))) + 1
+            except (TypeError, ValueError):
+                state["epoch"] = 1
+
     # Safe attribute deletion with proper error handling
     # Clear the "no reduction" warning flag since we just recorded a reduction
     if hasattr(agent, _NO_REDUCTION_ATTR):

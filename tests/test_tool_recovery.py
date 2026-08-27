@@ -1,17 +1,17 @@
 import json
 
 import pytest
-
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
 from src.modules.handlers.tool_recovery import (
     ARTIFACT_PAGE_LIMIT_REACHED_MARKER,
+    ARTIFACT_READ_OVERLAP_GUARD_MARKER,
     ARTIFACT_READ_REPEAT_GUARD_MARKER,
     ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER,
     EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY,
+    TOOL_RECOVERY_EXHAUSTED_STATE_KEY,
     EvaluatorArtifactReadLimitHook,
     TaskFailureRecoveryHook,
-    TOOL_RECOVERY_EXHAUSTED_STATE_KEY,
     ToolOutcomeJournal,
     _input_fingerprint,
     _result_success,
@@ -226,6 +226,44 @@ def test_evaluator_artifact_read_limit_hook_preserves_repeat_guard_reason():
 
     assert "ARTIFACT_READ_REPEAT_GUARD" in event.result["content"][0]["text"]
     assert "page is unavailable" not in event.result["content"][0]["text"]
+
+
+def test_evaluator_artifact_read_limit_hook_guides_overlap_then_stops_repeat():
+    hook = EvaluatorArtifactReadLimitHook()
+    first = _after(
+        "first",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: page overlaps returned content",
+    )
+    hook._after_tool(first)
+
+    assert hook.exhausted is False
+    assert ARTIFACT_READ_OVERLAP_GUARD_MARKER in first.result["content"][0]["text"]
+
+    other = _after(
+        "other",
+        "read_artifact",
+        {"path": "artifact:artifacts/second.txt"},
+        status="error",
+        text=f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: page overlaps returned content",
+    )
+    hook._after_tool(other)
+
+    assert hook.exhausted is False
+
+    second = _after(
+        "second",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: artifact is blocked",
+    )
+    hook._after_tool(second)
+
+    assert hook.exhausted is True
+    assert second.invocation_state["request_state"]["stop_event_loop"] is True
 
 
 def test_evaluator_artifact_page_limit_allows_another_artifact_then_stops_repeat():

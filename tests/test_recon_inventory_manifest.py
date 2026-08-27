@@ -269,7 +269,11 @@ def test_converter_reads_artifact_normalizes_alias_and_writes_valid_manifest(tmp
         encoding="utf-8",
     )
     output = artifact_dir / "inventory.json"
-    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    plan = SimpleNamespace(
+        targets=[
+            SimpleNamespace(target_id="target-1", value="https://target.test")
+        ]
+    )
     monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
@@ -288,6 +292,87 @@ def test_converter_reads_artifact_normalizes_alias_and_writes_valid_manifest(tmp
     assert result["artifact_ref"] == "artifact:artifacts/inventory.json"
     assert {item["kind"] for item in written["items"]} == {"service", "endpoint", "parameter"}
     assert memory._load_inventory_manifest(result["artifact_ref"])[0]["schema_version"] == 1
+
+
+@pytest.mark.parametrize(
+    "source_format",
+    ["auto", "client_bundle_inventory", "client-bundle-inventory"],
+)
+def test_converter_recognizes_client_bundle_inventory_extraction(
+    tmp_path, monkeypatch, source_format
+):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    source = artifact_dir / "bundle-inventory.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": "client_bundle_inventory_v2",
+                "target": "https://target.test",
+                "target_id": "target-1",
+                "api_paths": ["/api/products"],
+                "spa_routes": ["/profile"],
+                "auth_indicators": [],
+                "auth_storage_keys": [],
+                "external_origins": [],
+                "source_map_references": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = artifact_dir / f"inventory-{source_format}.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = json.loads(
+        manifest_tool.recon_output_to_inventory_manifest(
+            "artifact:artifacts/bundle-inventory.json",
+            str(output),
+            source_format=source_format,
+        )
+    )
+
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    assert result["source_format"] == "client_bundle_inventory"
+    assert {
+        item["value"]
+        for item in manifest["items"]
+        if item["kind"] == "endpoint"
+    } == {
+        "https://target.test/",
+        "https://target.test/api/products",
+        "https://target.test/profile",
+    }
+
+
+def test_converter_rejects_malformed_client_bundle_inventory_extraction(
+    tmp_path, monkeypatch
+):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    source = artifact_dir / "bundle-inventory.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": "client_bundle_inventory_v2",
+                "target": "https://target.test",
+                "api_paths": "/api/products",
+                "spa_routes": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+
+    with pytest.raises(ValueError, match="No inventory candidates"):
+        manifest_tool.recon_output_to_inventory_manifest(
+            "artifact:artifacts/bundle-inventory.json",
+            "artifacts/inventory.json",
+            source_format="client_bundle_inventory",
+        )
 
 
 @pytest.mark.parametrize("source_format", ["auto", "inventory_manifest", "inventory", "manifest"])

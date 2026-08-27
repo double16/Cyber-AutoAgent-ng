@@ -1159,6 +1159,13 @@ def create_agent(
 
     # Create agent (telemetry is handled globally by Strands SDK)
     agent = create_agent_with_stateful_retry(agent_kwargs, config.model_id, Agent)
+    context_reduction_states = [
+        state
+        for tool in agent_kwargs["tools"]
+        if isinstance((state := getattr(tool, "_cyber_context_reduction_state", None)), dict)
+    ]
+    if context_reduction_states:
+        setattr(agent, "_cyber_context_reduction_states", context_reduction_states)
     # Allow reasoning deltas only when the provider/model supports them
     try:
         caps = get_capabilities(config.provider, config.model_id or "")

@@ -14,6 +14,7 @@ ARTIFACT_PAGE_LIMIT_REACHED_MARKER = "ARTIFACT_PAGE_LIMIT_REACHED"
 ARTIFACT_READ_POLICY_VIOLATION_MARKER = "ARTIFACT_READ_POLICY_VIOLATION"
 ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER = "ARTIFACT_READ_SIZE_LIMIT_REACHED"
 ARTIFACT_READ_REPEAT_GUARD_MARKER = "ARTIFACT_READ_REPEAT_GUARD"
+ARTIFACT_READ_OVERLAP_GUARD_MARKER = "ARTIFACT_READ_OVERLAP_GUARD"
 ARTIFACT_DIRECTORY_LISTING_LIMIT = 25
 ARTIFACT_BYTES_PER_TOKEN = 4
 ARTIFACT_PAGE_CONTEXT_FRACTION = 0.10
@@ -307,6 +308,7 @@ def create_bounded_artifact_reader(
     omitted_large_artifact_sizes: Mapping[str, int] | None = None,
     max_reads_per_artifact: int | None = None,
     max_lines_per_read: int | None = None,
+    context_reduction_state: dict[str, int] | None = None,
 ) -> Any:
     """Create an agent-local artifact reader with optional path and page limits."""
 
@@ -337,6 +339,35 @@ def create_bounded_artifact_reader(
     returned_ranges: dict[str, list[tuple[int, int]]] = {}
     guided_requests: set[tuple[str, tuple[Any, ...]]] = set()
     terminal_byte_page_guards: dict[str, str] = {}
+    blocked_paths: set[str] = set()
+    successful_pages: dict[str, list[dict[str, Any]]] = {}
+    replayed_epochs: dict[str, set[int]] = {}
+    reduction_state = context_reduction_state if context_reduction_state is not None else {"epoch": 0}
+
+    def reduction_epoch() -> int:
+        """Return the current evaluator-local context reduction epoch."""
+
+        try:
+            return max(0, int(reduction_state.get("epoch", 0)))
+        except (AttributeError, TypeError, ValueError):
+            return 0
+
+    def compression_replay(resolved: str, page_range: tuple[int, int]) -> str | None:
+        """Replay one prior page when a real context reduction made it stale."""
+
+        epoch = reduction_epoch()
+        if epoch < 1 or epoch in replayed_epochs.get(resolved, set()):
+            return None
+        for record in reversed(successful_pages.get(resolved, [])):
+            start, end = record["range"]
+            if record["epoch"] >= epoch or not (page_range[0] < end and start < page_range[1]):
+                continue
+            payload = ast.literal_eval(record["result"])
+            payload["compression_recovery"] = True
+            payload["compression_recovery_epoch"] = epoch
+            replayed_epochs.setdefault(resolved, set()).add(epoch)
+            return str(payload)
+        return None
 
     def guide_once(resolved: str, page: tuple[Any, ...], reason: str, message: str) -> str:
         """Guide a first non-distinct request, then retain a repeat guard for stubborn retries."""
@@ -369,6 +400,11 @@ def create_bounded_artifact_reader(
         if allowed_paths is not None and resolved not in allowed_paths:
             raise RuntimeError(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
+            )
+        if resolved in blocked_paths:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This artifact page was already rejected as overlapping; "
+                "return the requested JSON decision without rereading it"
             )
         if max_bytes is not None and start_byte is None:
             start_byte = 0
@@ -434,26 +470,30 @@ def create_bounded_artifact_reader(
         else:
             page_range = (int(payload["start_line"]), int(payload["end_line"]) + 1)
         if page in seen_pages:
-            return guide_once(
-                resolved,
-                page,
-                "duplicate_page",
-                "This exact artifact page was already returned during this evaluation.",
+            replay = compression_replay(resolved, page_range)
+            if replay is not None:
+                return replay
+            blocked_paths.add(resolved)
+            raise RuntimeError(
+                f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This exact artifact page was already returned during "
+                "this evaluation"
             )
         if any(
             page_range[0] < end and start < page_range[1]
             for start, end in returned_ranges.get(resolved, [])
         ):
+            replay = compression_replay(resolved, page_range)
+            if replay is not None:
+                return replay
             if byte_mode:
                 terminal_byte_page_guards[resolved] = (
                     "This artifact has already received an overlapping byte page. "
                     "Use the returned page, provided digest, or another artifact."
                 )
-            return guide_once(
-                resolved,
-                page,
-                "overlapping_page",
-                "This artifact page overlaps content already returned during this evaluation.",
+            blocked_paths.add(resolved)
+            raise RuntimeError(
+                f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This artifact page overlaps content already returned "
+                "during this evaluation"
             )
         if byte_mode and any(
             0 < min(abs(page_range[0] - end), abs(start - page_range[1])) <= ARTIFACT_NEARBY_BYTE_PAGE_GAP
@@ -487,7 +527,13 @@ def create_bounded_artifact_reader(
         reads_by_path[resolved] = reads_by_path.get(resolved, 0) + 1
         seen_pages.add(page)
         returned_ranges.setdefault(resolved, []).append(page_range)
+        successful_pages.setdefault(resolved, []).append({
+            "epoch": reduction_epoch(),
+            "range": page_range,
+            "result": result,
+        })
         return result
 
     bounded_read_artifact.__name__ = "read_artifact"
+    bounded_read_artifact._cyber_context_reduction_state = reduction_state
     return bounded_read_artifact

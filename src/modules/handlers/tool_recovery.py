@@ -93,6 +93,7 @@ ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER = "ARTIFACT_TOTAL_READ_LIMIT_REACHED"
 ARTIFACT_PAGE_LIMIT_REACHED_MARKER = "ARTIFACT_PAGE_LIMIT_REACHED"
 ARTIFACT_READ_POLICY_VIOLATION_MARKER = "ARTIFACT_READ_POLICY_VIOLATION"
 ARTIFACT_READ_REPEAT_GUARD_MARKER = "ARTIFACT_READ_REPEAT_GUARD"
+ARTIFACT_READ_OVERLAP_GUARD_MARKER = "ARTIFACT_READ_OVERLAP_GUARD"
 
 
 class EvaluatorArtifactReadLimitExceeded(RuntimeError):
@@ -497,6 +498,7 @@ class EvaluatorArtifactReadLimitHook(HookProvider):
         self.blocked_attempts = 0
         self.exhausted = False
         self.page_limited_paths: set[str] = set()
+        self.overlap_blocked_paths: set[str] = set()
 
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(AfterToolCallEvent, self._after_tool)
@@ -508,12 +510,16 @@ class EvaluatorArtifactReadLimitHook(HookProvider):
         if ARTIFACT_PAGE_LIMIT_REACHED_MARKER in result_text:
             self._handle_page_limit(event)
             return
+        if ARTIFACT_READ_OVERLAP_GUARD_MARKER in result_text:
+            self._handle_overlap_guard(event)
+            return
         if not any(
             marker in result_text
             for marker in (
                 ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER,
                 ARTIFACT_READ_POLICY_VIOLATION_MARKER,
                 ARTIFACT_READ_REPEAT_GUARD_MARKER,
+                ARTIFACT_READ_OVERLAP_GUARD_MARKER,
             )
         ):
             return
@@ -550,6 +556,37 @@ class EvaluatorArtifactReadLimitHook(HookProvider):
                 }
             logger.warning("Stopping task evaluator after repeated artifact-read limit violation")
 
+        if isinstance(event.result, dict):
+            event.result["content"] = [{"text": message}]
+
+    def _handle_overlap_guard(self, event: AfterToolCallEvent) -> None:
+        """Allow another artifact after one overlap, but stop a reread of the blocked artifact."""
+
+        tool_input = event.tool_use.get("input", {})
+        path = str(tool_input.get("path", "")) if isinstance(tool_input, dict) else ""
+        if path not in self.overlap_blocked_paths:
+            self.overlap_blocked_paths.add(path)
+            message = (
+                "ARTIFACT_READ_OVERLAP_GUARD: This artifact page overlaps evidence already returned. "
+                "You may read another controller-authorized artifact, but do not reread this artifact."
+            )
+            if isinstance(event.result, dict):
+                event.result["content"] = [{"text": message}]
+            return
+
+        self.exhausted = True
+        message = (
+            "ARTIFACT_READ_LIMIT_EXHAUSTED: You reread an artifact after its overlap guard. "
+            "Evaluation is stopping; do not make further tool calls."
+        )
+        request_state = event.invocation_state.setdefault("request_state", {})
+        if isinstance(request_state, dict):
+            request_state["stop_event_loop"] = True
+            request_state[EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY] = {
+                "reason": "repeated_overlap_guard",
+                "blocked_attempts": 1,
+            }
+        logger.warning("Stopping task evaluator after a repeated artifact overlap guard")
         if isinstance(event.result, dict):
             event.result["content"] = [{"text": message}]
 

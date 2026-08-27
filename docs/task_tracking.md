@@ -198,10 +198,12 @@ requires `inventory_manifest`; ordinary JSON outputs must use the generic `artif
 Web discovery tasks should prefer deterministic manifest production. Pass `--inventory-manifest` (or the additive
 `inventory_manifest` tool argument) to `specialized_recon_orchestrator` or `auth_chain_analyzer` while retaining their
 normal output. The generally available `recon_output_to_inventory_manifest` tool converts katana, feroxbuster, ffuf,
-gobuster, dirsearch, httpx, gospider, and plain URL-list artifacts; the source artifact remains unchanged. URL-list
-auto-detection samples at most the first five non-empty lines before the converter processes the complete artifact.
-It also accepts an existing inventory manifest as `source_artifact` and writes a distinct, validated manifest copy;
-manifest input bypasses recon parsing and preserves its target IDs and inventory structure for controller validation.
+gobuster, dirsearch, httpx, gospider, client-bundle extraction, and plain URL-list artifacts; the source artifact
+remains unchanged. It recognizes the `client_bundle_inventory_v2` extraction artifact and converts its target-scoped
+API paths and SPA routes. URL-list auto-detection samples at most the first five non-empty lines before the converter
+processes the complete artifact. It also accepts an existing inventory manifest as `source_artifact` and writes a
+distinct, validated manifest copy; manifest input bypasses recon parsing and preserves its target IDs and inventory
+structure for controller validation.
 
 Before an inventory is frozen, Python extracts same-scope navigation and form destinations from current-operation HTML
 artifacts and merges unambiguous missing routes. Fan-out then dispatches by kind: endpoints and their parameters share

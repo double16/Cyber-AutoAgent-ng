@@ -25,6 +25,7 @@ SUPPORTED_RECON_FORMATS = (
     "url_list",
     "specialized_recon",
     "auth_chain",
+    "client_bundle_inventory",
     "inventory_manifest",
 )
 RECON_FORMAT_ALIASES = {
@@ -307,6 +308,33 @@ def _parse_auth_chain(text: str) -> List[Dict[str, Any]]:
     return records
 
 
+def _parse_client_bundle_inventory(text: str) -> list[dict[str, Any]]:
+    """Normalize the client_bundle_inventory extraction artifact."""
+
+    values = _json_values(text)
+    if len(values) != 1 or not isinstance(values[0], dict):
+        return []
+    payload = values[0]
+    if payload.get("schema_version") != "client_bundle_inventory_v2":
+        return []
+    target = _canonical_url(str(payload.get("target") or ""))
+    api_paths = payload.get("api_paths")
+    spa_routes = payload.get("spa_routes")
+    if (
+        not target
+        or not isinstance(api_paths, list)
+        or not isinstance(spa_routes, list)
+    ):
+        return []
+
+    records = [_record(target)]
+    for path in [*api_paths, *spa_routes]:
+        if not isinstance(path, str) or not path.startswith("/"):
+            continue
+        records.append(_record(urljoin(target.rstrip("/") + "/", path.lstrip("/"))))
+    return records
+
+
 def _is_complete_http_url(value: str) -> bool:
     """Return whether one stripped line contains only a parseable HTTP(S) URL."""
 
@@ -334,6 +362,7 @@ PARSERS = {
     "url_list": _parse_url_list,
     "specialized_recon": _parse_specialized_recon,
     "auth_chain": _parse_auth_chain,
+    "client_bundle_inventory": _parse_client_bundle_inventory,
 }
 
 
@@ -346,6 +375,12 @@ def _infer_format(text: str) -> str:
         and "unassessed_gaps" in values[0]
     ):
         return "inventory_manifest"
+    if (
+        len(values) == 1
+        and isinstance(values[0], dict)
+        and values[0].get("schema_version") == "client_bundle_inventory_v2"
+    ):
+        return "client_bundle_inventory"
     if '"format": "recon_result_v1"' in text or '"format":"recon_result_v1"' in text:
         return "specialized_recon"
     if '"auth_endpoints"' in text and '"flow_analysis"' in text:

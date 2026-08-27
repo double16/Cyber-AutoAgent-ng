@@ -8,6 +8,7 @@ from modules.tools.artifact import (
     ARTIFACT_DIRECTORY_LISTING_LIMIT,
     ARTIFACT_MAX_BYTES_PER_READ,
     ARTIFACT_MIN_BYTES_PER_READ,
+    ARTIFACT_READ_OVERLAP_GUARD_MARKER,
     ARTIFACT_READ_POLICY_VIOLATION_MARKER,
     ARTIFACT_READ_REPEAT_GUARD_MARKER,
     ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER,
@@ -365,16 +366,15 @@ def test_bounded_reader_allows_paginated_authorized_artifact_reads(tmp_path: Pat
             max_lines_per_read=2,
         )
         duplicate_reader("artifact:artifacts/evidence.txt", max_lines=2)
-        duplicate = ast.literal_eval(duplicate_reader("artifact:artifacts/evidence.txt", max_lines=2))
-        assert duplicate["status"] == "not_directly_readable"
-        assert duplicate["reason"] == "duplicate_page"
-        with pytest.raises(RuntimeError, match=ARTIFACT_READ_REPEAT_GUARD_MARKER):
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
+            duplicate_reader("artifact:artifacts/evidence.txt", max_lines=2)
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
             duplicate_reader("artifact:artifacts/evidence.txt", max_lines=2)
         with pytest.raises(RuntimeError, match=ARTIFACT_READ_POLICY_VIOLATION_MARKER):
             duplicate_reader("artifact:artifacts/other.txt", max_lines=2)
         with pytest.raises(RuntimeError, match=ARTIFACT_READ_POLICY_VIOLATION_MARKER):
             duplicate_reader("artifact:artifacts/missing.txt", max_lines=2)
-        with pytest.raises(RuntimeError, match=ARTIFACT_READ_POLICY_VIOLATION_MARKER):
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
             duplicate_reader("artifact:artifacts/evidence.txt", start_line=0, max_lines=2)
 
 
@@ -431,7 +431,7 @@ def test_bounded_reader_preserves_other_artifacts_after_one_reaches_its_page_lim
         assert total_limit["reason"] == "evaluator_read_budget_exhausted"
 
 
-def test_bounded_reader_returns_non_consuming_guidance_for_overlapping_line_and_byte_pages(tmp_path: Path):
+def test_bounded_reader_rejects_overlapping_line_and_byte_pages(tmp_path: Path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     lines = artifacts / "lines.txt"
@@ -449,10 +449,10 @@ def test_bounded_reader_returns_non_consuming_guidance_for_overlapping_line_and_
             allowed_artifact_refs=["artifact:artifacts/lines.txt"],
         )
         assert "one" in line_reader("artifact:artifacts/lines.txt", max_lines=2)
-        overlap = ast.literal_eval(line_reader("artifact:artifacts/lines.txt", start_line=2, max_lines=2))
-        assert overlap["status"] == "not_directly_readable"
-        assert overlap["reason"] == "overlapping_page"
-        assert "three" in line_reader("artifact:artifacts/lines.txt", start_line=3, max_lines=2)
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
+            line_reader("artifact:artifacts/lines.txt", start_line=2, max_lines=2)
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
+            line_reader("artifact:artifacts/lines.txt", start_line=3, max_lines=2)
 
         byte_reader = create_bounded_artifact_reader(
             max_reads=2,
@@ -460,16 +460,44 @@ def test_bounded_reader_returns_non_consuming_guidance_for_overlapping_line_and_
             allowed_artifact_refs=["artifact:artifacts/bytes.txt"],
         )
         assert "abcd" in byte_reader("artifact:artifacts/bytes.txt", start_byte=0, max_bytes=4)
-        byte_overlap = ast.literal_eval(
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
             byte_reader("artifact:artifacts/bytes.txt", start_byte=2, max_bytes=4)
-        )
-        assert byte_overlap["reason"] == "overlapping_page"
-        guarded = ast.literal_eval(
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
             byte_reader("artifact:artifacts/bytes.txt", start_byte=4, max_bytes=4)
+
+
+def test_bounded_reader_replays_overlapping_page_once_after_context_reduction(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    artifact = artifacts / "evidence.txt"
+    artifact.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+    reduction_state = {"epoch": 0}
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        reader = create_bounded_artifact_reader(
+            max_reads=1,
+            context_window_tokens=48_000,
+            allowed_artifact_refs=["artifact:artifacts/evidence.txt"],
+            context_reduction_state=reduction_state,
         )
-        assert guarded["reason"] == "artifact_byte_page_guarded"
-        with pytest.raises(RuntimeError, match=ARTIFACT_READ_REPEAT_GUARD_MARKER):
-            byte_reader("artifact:artifacts/bytes.txt", start_byte=4, max_bytes=4)
+        initial = ast.literal_eval(reader("artifact:artifacts/evidence.txt", max_lines=120))
+        reduction_state["epoch"] = 1
+        replay = ast.literal_eval(reader("artifact:artifacts/evidence.txt", start_line=4, max_lines=120))
+
+    assert initial["content"] == "one\ntwo\nthree\nfour"
+    assert replay["content"] == initial["content"]
+    assert replay["compression_recovery"] is True
+    assert replay["compression_recovery_epoch"] == 1
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER),
+    ):
+        reader("artifact:artifacts/evidence.txt", start_line=3, max_lines=120)
 
 
 def test_bounded_reader_terminally_guards_nearby_byte_pages(tmp_path: Path):
