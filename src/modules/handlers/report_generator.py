@@ -23,10 +23,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from strands.types.exceptions import MaxTokensReachedException
+
 from modules.agents.report_agent import ReportGenerator
 from modules.config import get_config_manager, get_report_refinement_cycles
 from modules.config.system.logger import get_logger
 from modules.config.types import DEFAULT_MAX_DURATION
+from modules.handlers.max_token_recovery import reset_agent_conversation_for_recovery
 from modules.handlers.utils import duration_max, get_output_path, sanitize_target_name, format_duration
 from modules.prompts.factory import (
     _extract_domain_lens,
@@ -2056,6 +2059,10 @@ def _validate_report_critique(data: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("approved report critic responses must have empty feedback")
     if not data["approved"] and not feedback:
         raise ValueError("rejected report critic responses require feedback")
+    if len(feedback) > 5:
+        raise ValueError("report critic feedback may contain at most five items")
+    if any(len(item.strip()) > 300 for item in feedback):
+        raise ValueError("report critic feedback items must be at most 300 characters")
     return {"approved": data["approved"], "feedback": [item.strip() for item in feedback]}
 
 
@@ -2073,7 +2080,8 @@ and does not invent facts. Python renders all deterministic facts, including cou
 tables, metrics, completion status, and evidence references; do not request changes to those sections. Provide
 actionable revision feedback only for material narrative issues.
 
-Return JSON exactly: {{"approved": bool, "feedback": [string]}}. Return no other text.
+Return JSON exactly: {{"approved": bool, "feedback": [string]}}. Return no other text. Do not provide step-by-step
+analysis, restate the draft, or produce more than five feedback items; keep each item at most 300 characters.
 
 ## Section label
 {section_label}
@@ -2127,6 +2135,8 @@ def _invoke_report_agent(
             raise RuntimeError("report agent exceeded its configured turn limit")
         return result
     except Exception as error:
+        if isinstance(error, MaxTokensReachedException):
+            raise
         if circuit_breaker is not None:
             circuit_breaker.trip(section_label, error)
         raise
@@ -2184,11 +2194,22 @@ def _run_report_critic(
 ) -> Dict[str, Any]:
     """Run a report critic with the workflow's tolerant JSON parsing and retry convention."""
     current_prompt = prompt
-    for attempt in range(json_retries + 1):
+    remaining_json_retries = json_retries
+    max_token_retry_used = False
+    while True:
         try:
             response = _extract_text_from_result(
                 _invoke_report_agent(critic_agent, current_prompt, section_label, circuit_breaker)
             )
+        except MaxTokensReachedException:
+            if not max_token_retry_used:
+                max_token_retry_used = True
+                reset_agent_conversation_for_recovery(critic_agent)
+                current_prompt = """The previous critique exhausted its token limit and was discarded.
+Return only JSON matching {"approved": bool, "feedback": [string]}. Do not include analysis. Use no more than five
+short feedback items. Review request:\n""" + prompt
+                continue
+            raise
         except Exception as error:
             logger.warning("Report critic model call failed: %s", error)
             raise
@@ -2197,11 +2218,12 @@ def _run_report_critic(
         except Exception as error:
             logger.warning(
                 "Report critic returned an invalid review (attempt %s/%s): %s",
-                attempt + 1,
+                json_retries - remaining_json_retries + 1,
                 json_retries + 1,
                 error,
             )
-            if attempt < json_retries:
+            if remaining_json_retries > 0:
+                remaining_json_retries -= 1
                 current_prompt = f"""Your previous response could not be parsed as the required JSON object.
 
 Return only valid JSON matching {{"approved": bool, "feedback": [string]}}. Do not use Markdown fences or prose.
@@ -2209,6 +2231,8 @@ Return only valid JSON matching {{"approved": bool, "feedback": [string]}}. Do n
 Original review request:
 {prompt}
 """
+                continue
+            break
     return {
         "approved": False,
         "feedback": [
@@ -3036,7 +3060,7 @@ def _format_parameter_adjustments_section(registry: Optional[Any] = None) -> str
 
     parts = [
         "### Model & Agent Parameter Adjustments\n\n",
-        "This appendix documents initial baseline model parameters, runtime parameter adaptations "
+        "This section documents initial baseline model parameters, runtime parameter adaptations "
         "(such as reasoning loop recovery and token limit escalations), and provider capability fallback events.\n\n",
         "### Agent Role Configurations\n\n",
         "| Agent Role | Parameter | Baseline | Final | Status |\n",

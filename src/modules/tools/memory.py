@@ -1072,6 +1072,12 @@ class PlanPhase:
     status: PlanStatus
     criteria: str = ""
     requires_finding_candidates: bool = False
+    task_creation_mode: Literal[
+        "standard",
+        "snapshot_dependent",
+        "finding_dependent",
+        "finding_validation",
+    ] = "standard"
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, int) or self.id < 0:
@@ -1090,6 +1096,9 @@ class PlanPhase:
             raise ValueError("phase.criteria must be a string")
         if not isinstance(self.requires_finding_candidates, bool):
             raise ValueError("phase.requires_finding_candidates must be a boolean")
+        valid_modes = {"standard", "snapshot_dependent", "finding_dependent", "finding_validation"}
+        if self.task_creation_mode not in valid_modes:
+            raise ValueError(f"phase.task_creation_mode must be one of: {', '.join(sorted(valid_modes))}")
 
     @staticmethod
     def from_obj(obj: Any) -> "PlanPhase":
@@ -1101,6 +1110,10 @@ class PlanPhase:
             status=str(obj.get("status", "pending")),  # validated in __post_init__
             criteria=str(obj.get("criteria", "")) if obj.get("criteria") is not None else "",
             requires_finding_candidates=obj.get("requires_finding_candidates", False),
+            task_creation_mode=str(
+                obj.get("task_creation_mode")
+                or ("finding_dependent" if obj.get("requires_finding_candidates", False) else "standard")
+            ),
         )
 
     @staticmethod
@@ -1109,7 +1122,7 @@ class PlanPhase:
 
     @staticmethod
     def csv_format() -> str:
-        return "id,title,status,criteria,requires_finding_candidates"
+        return "id,title,status,criteria,requires_finding_candidates,task_creation_mode"
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
@@ -1118,7 +1131,10 @@ class PlanPhase:
         lines = []
         if include_format:
             lines.append(f"{self.toon_format()}:")
-        lines.append(f"  {self.id},{title},{status},{criteria},{str(self.requires_finding_candidates).lower()}")
+        lines.append(
+            f"  {self.id},{title},{status},{criteria},{str(self.requires_finding_candidates).lower()},"
+            f"{self.task_creation_mode}"
+        )
         return "\n".join(lines).strip()
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1128,6 +1144,7 @@ class PlanPhase:
             "status": self.status,
             "criteria": self.criteria,
             "requires_finding_candidates": self.requires_finding_candidates,
+            "task_creation_mode": self.task_creation_mode,
         })
 
 
@@ -5052,6 +5069,50 @@ def _compact_task_proposal_validation_error(error: ValidationError) -> str:
 TaskProposalList = List[TaskProposal]
 
 
+@dataclass
+class TaskProposalRepairGuard:
+    """Restore previously valid proposals before a corrective task-creation mutation."""
+
+    baseline: List[Optional[TaskProposal]] = field(default_factory=list)
+    valid_indexes: set[int] = field(default_factory=set)
+
+    def capture(self, tasks: Any) -> None:
+        """Remember individually valid proposals from a rejected batch without guessing repairs."""
+
+        if not isinstance(tasks, list):
+            return
+        if self.valid_indexes and len(tasks) != len(self.baseline):
+            return
+        baseline = list(self.baseline) if self.baseline else [None] * len(tasks)
+        valid_indexes = set(self.valid_indexes)
+        for index, task in enumerate(tasks):
+            if index in valid_indexes:
+                continue
+            try:
+                proposal = TypeAdapter(TaskProposal).validate_python(task)
+            except ValidationError:
+                proposal = None
+            baseline[index] = proposal
+            if proposal is not None:
+                valid_indexes.add(index)
+        self.baseline = baseline
+        self.valid_indexes = valid_indexes
+
+    def restore(self, tasks: TaskProposalList) -> TaskProposalList:
+        """Prevent an LLM correction from changing proposals that were already valid."""
+
+        if not self.valid_indexes:
+            return tasks
+        if len(tasks) != len(self.baseline):
+            raise ValueError("task-creator repair must preserve the original proposal count and order")
+        restored = list(tasks)
+        for index in self.valid_indexes:
+            baseline = self.baseline[index]
+            if baseline is not None:
+                restored[index] = baseline
+        return restored
+
+
 _TASK_PROPOSAL_INPUT_SCHEMA = {
     "json": {
         "type": "object",
@@ -7164,6 +7225,7 @@ def build_create_tasks_tool(
     phase_task_contract: Any = None,
     proposal_preflight_validator: Optional[Callable[[List[TaskProposal]], None]] = None,
     reject_duplicate_proposals: bool = False,
+    repair_guard: Optional[TaskProposalRepairGuard] = None,
     invocation_observer: Optional[Callable[[Dict[str, Any], Any, Optional[Exception]], None]] = None,
 ) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
@@ -7179,6 +7241,9 @@ def build_create_tasks_tool(
         try:
             if completed:
                 raise ValueError("Task creation already completed for this role run")
+            if repair_guard is not None:
+                tasks = repair_guard.restore(tasks)
+                tool_input = {"tasks": tasks}
             result = _create_tasks_from_proposals(
                 tasks,
                 prompt_token_limit=prompt_token_limit,

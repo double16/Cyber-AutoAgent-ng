@@ -4567,6 +4567,127 @@ def test_task_executor_contract_only_names_available_persistence_tools(
     assert ("store_finding" in contract) is expects_finding
 
 
+def _execution_requirement_task(methods, requirements):
+    return TaskModel(
+        task_uid="execution-guidance",
+        title="Produce execution evidence",
+        objective="Produce bounded execution evidence",
+        phase=1,
+        status="active",
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded execution",
+                source_refs=["plan:phase-1"],
+                procedure={
+                    "methods": methods,
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[
+                AcceptanceCriterion(
+                    id="criterion-1",
+                    description="Produce evidence",
+                    evidence_requirements=[EvidenceRequirement(kind="artifact")],
+                    execution_requirements=requirements,
+                )
+            ],
+        ),
+    )
+
+
+def test_task_executor_contract_lists_only_matching_execution_requirement_providers(monkeypatch):
+    monkeypatch.setattr(
+        workflow_mod,
+        "get_shell_command_execution_capabilities",
+        lambda command: {"katana": frozenset({"crawl"}), "gospider": frozenset({"crawl"})}.get(
+            command, frozenset()
+        ),
+    )
+    task = _execution_requirement_task(
+        ["crawl"],
+        [ExecutionRequirement("crawl-proof", "Crawl the route", "/")],
+    )
+
+    contract = MultiAgentWorkflowController._task_executor_contract(
+        task,
+        {"shell", "specialized_recon_orchestrator", "client_bundle_inventory"},
+        [{"command": "katana"}, {"command": "gospider"}],
+    )
+
+    section = contract.split("## Execution Requirements and Available Providers (Controller-owned)", 1)[1]
+    assert "Frozen subject: `/`" in section
+    assert "native `specialized_recon_orchestrator`" in section
+    assert "shell command `katana`" in section
+    assert "shell command `gospider`" in section
+    assert "client_bundle_inventory" not in section
+    assert "crawl-proof" not in section
+    assert "choose any one suitable supplied provider" in section
+    assert "do not execute every listed provider" in section
+
+
+def test_task_executor_contract_groups_providers_by_declared_capability_and_handles_restriction(monkeypatch):
+    monkeypatch.setattr(
+        workflow_mod,
+        "get_shell_command_execution_capabilities",
+        lambda command: {"katana": frozenset({"crawl"}), "curl": frozenset({"request"})}.get(
+            command, frozenset()
+        ),
+    )
+    task = _execution_requirement_task(
+        ["crawl", "request"],
+        [
+            ExecutionRequirement("first", "Crawl root", "/"),
+            ExecutionRequirement("second", "Crawl API", "/api"),
+        ],
+    )
+
+    normal = MultiAgentWorkflowController._task_executor_contract(
+        task,
+        {"shell", "specialized_recon_orchestrator", "http_request"},
+        [{"command": "katana"}, {"command": "curl"}],
+    )
+    restricted = MultiAgentWorkflowController._task_executor_contract(task, {"record_task_acceptance"}, [])
+
+    normal_section = normal.split("## Execution Requirements and Available Providers (Controller-owned)", 1)[1]
+    assert normal_section.count("Frozen subject:") == 2
+    assert (
+        "Declared procedure capability `crawl`: native `specialized_recon_orchestrator`, shell command `katana`"
+        in normal_section
+    )
+    assert (
+        "Declared procedure capability `request`: native `http_request`, native "
+        "`specialized_recon_orchestrator`, shell command `curl`"
+        in normal_section
+    )
+    crawl_provider_section = normal_section.split("Declared procedure capability `crawl`", 1)[1].split(
+        "Declared procedure capability `request`", 1
+    )[0]
+    assert "shell command `curl`" not in crawl_provider_section
+    assert restricted.count("no supplied provider available") == 4
+
+
+def test_task_executor_contract_omits_execution_provider_section_without_requirements():
+    contract = MultiAgentWorkflowController._task_executor_contract(
+        TaskModel(
+            task_uid="no-execution-requirements",
+            title="Observe",
+            objective="Observe",
+            acceptance=_acceptance(),
+            phase=1,
+            status="active",
+        ),
+        {"shell"},
+        [{"command": "katana"}],
+    )
+
+    assert "Execution Requirements and Available Providers" not in contract
+
+
 def test_endpoint_evidence_guard_rejects_inventory_manifest(monkeypatch):
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -8608,6 +8729,7 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert "separates hypothesis generation" in prompt
     assert "models exploit chains" in prompt
     assert "Concise means avoiding" in prompt
+    assert '"task_creation_mode": "standard|snapshot_dependent|finding_dependent|finding_validation"' in prompt
     assert "not minimizing the number of phases" in prompt
     assert "recommended minimum phase contract" in prompt
     assert "advisory, not a" in prompt
@@ -10498,6 +10620,41 @@ def test_task_creator_repair_prompt_explains_unavailable_execution_capability():
 
     assert '["analyze", "crawl"]' in repair
     assert "Tool names such as `shell` are not procedure capabilities" in repair
+
+
+def test_task_creator_max_token_recovery_is_not_executor_evidence_prompt():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+
+    prompt = controller._task_creator_max_token_recovery_prompt(_plan().phases[0])
+
+    assert "create_tasks" in prompt
+    assert "Do not explain" in prompt
+    assert "Successful tools already observed" not in prompt
+
+
+def test_task_creator_skips_controller_owned_finding_validation_phase():
+    phase = PlanPhase(
+        id=1,
+        title="Finding validation",
+        status="active",
+        task_creation_mode="finding_validation",
+    )
+    plan = OperationPlan(objective="Validate candidates", phases=[phase], current_phase=1, total_phases=1)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+    )
+
+    outcome = controller._create_tasks(plan, phase)
+
+    assert outcome.created_count == 0
+    assert outcome.attempts == 0
+    assert outcome.failure_reason == "finding-validation tasks are controller-owned"
 
 
 def test_task_creation_fails_before_model_retry_without_execution_path(monkeypatch):
@@ -13900,6 +14057,7 @@ def test_shared_prompt_memory_marks_prior_operation_as_advisory():
         ({"kind": "execution", "evidence_gaps": []}, "requires evidence_gaps"),
         ({"kind": "invented", "evidence_gaps": ["gap"]}, "none, acceptance, or execution"),
         ({"kind": "execution", "evidence_gaps": [""]}, "non-empty strings"),
+        ({"kind": "execution", "evidence_gaps": ["one", "two", "three", "four"]}, "at most three"),
     ],
 )
 def test_task_evaluator_rejects_invalid_repair_contract(repair, error):

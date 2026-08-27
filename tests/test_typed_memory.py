@@ -14,6 +14,7 @@ from src.modules.tools.memory import (
     AcceptanceCriterion,
     EvidenceRequirement,
     Task,
+    TaskProposalRepairGuard,
     finalize_finding_validation,
     finalize_objective_validation,
     record_finding_validation,
@@ -23,6 +24,116 @@ from src.modules.tools.memory import (
     store_observation,
     store_objective_candidate,
 )
+
+
+def test_plan_phase_normalizes_legacy_finding_dependency_to_creation_mode():
+    phase = mod.PlanPhase.from_obj({
+        "id": 1,
+        "title": "Candidate follow-up",
+        "status": "pending",
+        "requires_finding_candidates": True,
+    })
+
+    assert phase.task_creation_mode == "finding_dependent"
+    assert phase.to_dict()["task_creation_mode"] == "finding_dependent"
+
+
+def test_plan_phase_rejects_unknown_task_creation_mode():
+    with pytest.raises(ValueError, match="task_creation_mode must be one of"):
+        mod.PlanPhase(id=1, title="Invalid", status="pending", task_creation_mode="invented")
+
+
+def test_task_proposal_repair_guard_restores_individually_valid_proposals():
+    guard = TaskProposalRepairGuard()
+    guard.capture([
+        {
+            "title": "Valid mapping",
+            "objective": "Map one bounded target",
+            "methods": ["crawl"],
+            "limits": {"max_requests": 5},
+            "criteria": [{"description": "Store a finite inventory"}],
+        },
+        {"title": "Broken"},
+    ])
+    rewritten = mod.TaskProposal.model_validate({
+        "title": "Rewritten mapping",
+        "objective": "Changed objective",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 9},
+        "criteria": [{"description": "Changed criterion"}],
+    })
+    repaired = mod.TaskProposal.model_validate({
+        "title": "Fixed proposal",
+        "objective": "Perform bounded work",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 5},
+        "criteria": [{"description": "Store finite evidence"}],
+    })
+
+    restored = guard.restore([rewritten, repaired])
+
+    assert restored[0].title == "Valid mapping"
+    assert restored[1].title == "Fixed proposal"
+
+
+def test_task_proposal_repair_guard_keeps_prior_valid_slots_across_captures():
+    guard = TaskProposalRepairGuard()
+    original = {
+        "title": "Original valid proposal",
+        "objective": "Map one bounded target",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 5},
+        "criteria": [{"description": "Store a finite inventory"}],
+    }
+    repaired = {
+        "title": "Repaired proposal",
+        "objective": "Perform bounded work",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 5},
+        "criteria": [{"description": "Store finite evidence"}],
+    }
+    guard.capture([original, "invalid proposal"])
+    guard.capture([{**original, "title": "Unwanted rewrite"}, repaired])
+
+    restored = guard.restore([
+        mod.TaskProposal.model_validate({**original, "title": "Another rewrite"}),
+        mod.TaskProposal.model_validate({**repaired, "title": "Later rewrite"}),
+    ])
+
+    assert [proposal.title for proposal in restored] == ["Original valid proposal", "Repaired proposal"]
+
+
+def test_task_proposal_repair_guard_rejects_count_changes():
+    guard = TaskProposalRepairGuard()
+    guard.capture([
+        {
+            "title": "Valid proposal",
+            "objective": "Map one bounded target",
+            "methods": ["crawl"],
+            "limits": {"max_requests": 5},
+            "criteria": [{"description": "Store a finite inventory"}],
+        },
+        "invalid proposal",
+    ])
+
+    with pytest.raises(ValueError, match="preserve the original proposal count and order"):
+        guard.restore([guard.baseline[0]])
+
+
+def test_task_proposal_repair_guard_ignores_malformed_capture_without_valid_slots():
+    guard = TaskProposalRepairGuard()
+    proposal = mod.TaskProposal.model_validate({
+        "title": "Valid proposal",
+        "objective": "Map one bounded target",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 5},
+        "criteria": [{"description": "Store a finite inventory"}],
+    })
+
+    guard.capture({"tasks": []})
+    guard.capture(["invalid proposal"])
+
+    assert guard.restore([proposal]) == [proposal]
 from tests.helpers.acceptance import make_acceptance
 
 

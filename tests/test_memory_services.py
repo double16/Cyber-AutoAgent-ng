@@ -3605,13 +3605,21 @@ def test_bound_create_tasks_tool_requires_and_persists_candidate_source_refs(fak
     )
     proposal = task_proposal("Demonstrate impact", "Demonstrate the assigned finding", "impact")
 
-    with pytest.raises(ValueError, match="requires at least one canonical finding_refs"):
-        mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
+    result = mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
 
+    assert json.loads(result)["created_count"] == 1
+    assert store.tasks[-1].evidence == ["finding:candidate-1"]
+
+    proposal = task_proposal("Demonstrate impact", "Demonstrate the assigned finding", "impact")
     proposal["finding_refs"] = ["finding:unknown"]
     with pytest.raises(ValueError, match="includes unavailable finding_refs"):
         mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
 
+    proposal = task_proposal(
+        "Demonstrate assigned finding explicitly",
+        "Demonstrate the assigned finding with an explicit reference",
+        "impact",
+    )
     proposal["finding_refs"] = ["finding:candidate-1"]
     result = mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
 

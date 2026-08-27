@@ -90,6 +90,7 @@ from modules.tools.memory import (
     PlanPhase,
     Task,
     TaskEvidenceSnapshotVerificationError,
+    TaskProposalRepairGuard,
     _artifact_path_from_ref,
     _coverage_route_groups,
     _finding_confirmation_requirements,
@@ -361,7 +362,9 @@ _SHELL_EXECUTION_CAPABILITIES = {
 def _phase_semantically_requires_finding_candidates(phase: PlanPhase) -> bool:
     """Return the explicit structured dependency recorded on the plan phase."""
 
-    return bool(phase.requires_finding_candidates)
+    return phase.task_creation_mode in {"finding_dependent", "finding_validation"} or bool(
+        phase.requires_finding_candidates
+    )
 
 
 @dataclass(frozen=True)
@@ -617,6 +620,7 @@ class WorkflowStateStore:
                 status=status,
                 criteria=phase.criteria,
                 requires_finding_candidates=phase.requires_finding_candidates,
+                task_creation_mode=phase.task_creation_mode,
             ))
         return self.store_plan(OperationPlan(
             objective=plan.objective,
@@ -667,6 +671,7 @@ class WorkflowStateStore:
                 status=status,
                 criteria=phase.criteria,
                 requires_finding_candidates=phase.requires_finding_candidates,
+                task_creation_mode=phase.task_creation_mode,
             ))
         return self.store_plan(OperationPlan(
             objective=plan.objective,
@@ -742,6 +747,7 @@ class WorkflowStateStore:
                 status=status if phase.id == phase_id else phase.status,
                 criteria=phase.criteria,
                 requires_finding_candidates=phase.requires_finding_candidates,
+                task_creation_mode=phase.task_creation_mode,
             )
             for phase in plan.phases
         ]
@@ -754,6 +760,7 @@ class WorkflowStateStore:
                     status="active" if phase.id == next_phase.id else phase.status,
                     criteria=phase.criteria,
                     requires_finding_candidates=phase.requires_finding_candidates,
+                    task_creation_mode=phase.task_creation_mode,
                 )
                 for phase in phases
             ]
@@ -871,6 +878,7 @@ class WorkflowStateStore:
                 status=phase.status,
                 criteria=phase.criteria,
                 requires_finding_candidates=_phase_semantically_requires_finding_candidates(phase),
+                task_creation_mode=phase.task_creation_mode,
             )
             for phase in phases
         ]
@@ -883,6 +891,7 @@ class WorkflowStateStore:
                 status="active",
                 criteria=phases[0].criteria,
                 requires_finding_candidates=phases[0].requires_finding_candidates,
+                task_creation_mode=phases[0].task_creation_mode,
             )
         plan = OperationPlan(
             objective=str(plan_data.get("objective") or ""),
@@ -2957,7 +2966,7 @@ class MultiAgentWorkflowController:
         execution_prompt = (
             execution_prompt.rstrip()
             + "\n\n"
-            + self._task_executor_contract(task, self._tool_names(tools))
+            + self._task_executor_contract(task, self._tool_names(tools), selected_shell_commands)
             + "\n\n"
             + self._tool_selection_policy()
         )
@@ -3490,14 +3499,15 @@ class MultiAgentWorkflowController:
                 )
                 max_token_synthesis_cycle = max_token_synthesis_recovery_active
                 cycle_tools = tools if closure_tools is None else closure_tools
+                cycle_tool_names = self._tool_names(cycle_tools)
+                cycle_shell_commands = selected_shell_commands if "shell" in cycle_tool_names else []
+                cycle_prompt_base = execution_prompt_context if actor_prompt == execution_prompt else actor_prompt
                 cycle_prompt = (
-                    execution_prompt_context.rstrip()
+                    cycle_prompt_base.rstrip()
                     + "\n\n"
-                    + self._task_executor_contract(task, self._tool_names(cycle_tools))
+                    + self._task_executor_contract(task, cycle_tool_names, cycle_shell_commands)
                     + "\n\n"
                     + self._tool_selection_policy()
-                    if actor_prompt == execution_prompt
-                    else actor_prompt
                 )
                 worker_result = run_executor(cycle_prompt, current_policy, closure_tools)
                 cycle_result = self._executor_cycle_result(worker_result)
@@ -8140,6 +8150,8 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         if not isinstance(gaps, list) or any(not isinstance(gap, str) or not gap.strip() for gap in gaps):
             raise WorkflowInvariantError("task evaluator repair.evidence_gaps must contain non-empty strings")
         normalized_gaps = list(dict.fromkeys(gap.strip() for gap in gaps))
+        if len(normalized_gaps) > 3:
+            raise WorkflowInvariantError("task evaluator repair.evidence_gaps may contain at most three items")
         if kind == "execution" and not normalized_gaps:
             raise WorkflowInvariantError("task evaluator execution repair requires evidence_gaps")
         return {"kind": kind, "evidence_gaps": normalized_gaps}
@@ -8354,10 +8366,9 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
 
     def _evaluator_system_prompt(self) -> str:
         return """## Evaluator Role Boundary
-You are an evidence reviewer, not an execution agent. Classify existing work only. Do not perform the task, continue
-the phase, pursue the operation objective, gather new evidence, or change workflow state. Python owns all task, phase,
-and operation transitions. Task evaluators may use read_artifact only for supplied task-local artifact references,
-within the controller-provided page limits. Phase evaluators have no tools. Return only the requested JSON decision."""
+Classify existing work only; Python owns execution and workflow transitions. Task evaluators may use read_artifact only
+for supplied task-local references within the controller page limits. Phase evaluators have no tools. Return only the
+requested JSON decision, with at most three concrete evidence gaps and no analysis or Markdown."""
 
     def _task_evaluator_system_prompt(self) -> str:
         return self._evaluator_system_prompt()
@@ -8370,6 +8381,12 @@ within the controller-provided page limits. Phase evaluators have no tools. Retu
         return f"{system_prompt}\n\n## Module Termination Policy\n{termination_policy}"
 
     def _create_tasks(self, plan: OperationPlan, phase: PlanPhase) -> TaskCreationOutcome:
+        if phase.task_creation_mode == "finding_validation":
+            return TaskCreationOutcome(
+                created_count=0,
+                attempts=0,
+                failure_reason="finding-validation tasks are controller-owned",
+            )
         self._validate_phase_task_contract_execution(phase)
         system_prompt = self._remove_tool_guide_from_prompt(self.runtime.system_prompt)
         before_count = len(self.state.list_tasks(phase=phase.id))
@@ -8396,7 +8413,17 @@ within the controller-provided page limits. Phase evaluators have no tools. Retu
         max_attempts = 1 + self._task_creator_correction_count()
         for batch in batches:
             task_creator_ledger = TaskCreatorToolInvocationLedger()
-            tools = self._task_creator_tools(phase, batch, invocation_observer=task_creator_ledger.observe)
+            repair_guard = TaskProposalRepairGuard()
+            task_creator_tool_kwargs = {
+                "invocation_observer": task_creator_ledger.observe,
+            }
+            if "repair_guard" in inspect.signature(self._task_creator_tools).parameters:
+                task_creator_tool_kwargs["repair_guard"] = repair_guard
+            tools = self._task_creator_tools(
+                phase,
+                batch,
+                **task_creator_tool_kwargs,
+            )
             prompt = self._task_creator_prompt(plan, phase, batch)
             before_batch_uids = {task.task_uid for task in self.state.list_tasks()}
             before_batch_actionable = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
@@ -8428,7 +8455,11 @@ within the controller-provided page limits. Phase evaluators have no tools. Retu
                     attempt_prompt = (
                         prompt
                         if attempt == 1
-                        else self._task_creator_repair_prompt(batch_failure_reason, rejected_proposals)
+                        else (
+                            self._task_creator_max_token_recovery_prompt(phase)
+                            if previous_attempt_max_tokens
+                            else self._task_creator_repair_prompt(batch_failure_reason, rejected_proposals)
+                        )
                     )
                     activity_context = {
                         "phase_id": phase.id,
@@ -8489,6 +8520,9 @@ within the controller-provided page limits. Phase evaluators have no tools. Retu
                             f"task creator reached its model token limit: {self._short(error, 300)}"
                         )
                     previous_creator_result = creator_result
+                    rejected_payload = self._task_creator_rejected_task_payload(creator_result)
+                    if rejected_payload is not None:
+                        repair_guard.capture(rejected_payload)
                     self._reassign_new_task_creator_tasks_to_active_phase(phase, before_batch_uids)
                     after_batch_actionable = len(
                         self.state.list_tasks(phase=phase.id, status=["active", "pending"])
@@ -9016,28 +9050,38 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
 """
 
     @staticmethod
-    def _task_creator_rejected_proposals(result: Any) -> str:
-        """Extract a bounded proposal summary so corrections preserve rejected task intent."""
+    def _task_creator_rejected_task_payload(result: Any) -> Optional[List[Any]]:
+        """Extract the last rejected proposal list for controller-owned repair guarding."""
 
         if not isinstance(result, TaskExecutorCycleResult):
-            return ""
+            return None
         failed = [
             outcome
             for outcome in result.outcomes
             if outcome.tool_name == "create_tasks" and not outcome.success
         ]
         if not failed:
-            return ""
+            return None
         try:
             payload = json.loads(failed[-1].input_summary)
         except (TypeError, ValueError):
-            return ""
+            return None
         tasks = payload.get("tasks") if isinstance(payload, dict) else None
         if not isinstance(tasks, list):
+            return None
+        return tasks
+
+    @classmethod
+    def _task_creator_rejected_proposals(cls, result: Any) -> str:
+        """Extract a bounded proposal summary so corrections preserve rejected task intent."""
+
+        tasks = cls._task_creator_rejected_task_payload(result)
+        if tasks is None:
             return ""
         summary = []
         for proposal in tasks:
             if not isinstance(proposal, dict):
+                summary.append({"payload": proposal})
                 continue
             summary.append(
                 {
@@ -9067,10 +9111,19 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
         """Return a compact correction turn for the retained task-creator conversation."""
 
         proposal_context = (
-            f"\nPreserve these proposal intents unless a dependency is explicitly unavailable:\n{rejected_proposals}\n"
+            "\nOriginal proposal list (the controller will restore every already-valid proposal):\n"
+            f"{rejected_proposals}\n"
             if rejected_proposals
             else ""
         )
+        repair_scope = (
+            "Resubmit the complete proposal list in the same order and count. Change only proposals and fields "
+            "implicated by the validation result. The controller restores previously valid proposals before "
+            "mutation, so do not rewrite, remove, reorder, or replace them."
+            if rejected_proposals
+            else "Submit one complete proposal list that addresses the validation result."
+        )
+        finding_context = self._task_creator_finding_context()
         batch_repair = (
             "Consolidate every prior snapshot proposal into exactly one snapshot proposal; Python performs the "
             "route fan-out.\n"
@@ -9120,19 +9173,36 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
         return f"""The preceding `create_tasks` call was rejected or produced no new actionable task.
 Validation result: {failure_reason or "no actionable task was created"}
 {common_fixes}
-Preserve every correction already made in this conversation and every valid proposal intent. Change only the fields
-needed to resolve this validation result, then make exactly one corrected `create_tasks` call. If procedure and snapshot
-proposals were mixed, split them into separate valid proposal objects. If a snapshot producer is not yet eligible,
-create only its bounded prerequisite and retain the dependent intent for the next task-creation pass; do not silently
-discard it. Do not restart the proposal, repeat completed reasoning, explain, execute, inspect, or gather evidence.
+{repair_scope}
+Preserve every correction already made in this conversation and every valid proposal intent.
+Make exactly one corrected `create_tasks` call.
+If procedure and snapshot proposals were mixed, split them into separate valid proposal objects; do not silently
+discard valid proposal intent, restart the proposal, explain, execute, inspect, or gather evidence.
 Every `tasks[i]` must contain its own `objective` and `limits`. Never put `objective` beside `tasks`, and never emit
 `work_type`. The only canonical `output_kind` values are `artifact` and `inventory_manifest`; map report-like
 deliverables to `artifact`. Do not invent missing objectives, methods, criteria, targets, or bounds.
 If the error mentions `supersedes_criteria`, either use only the exact parent criterion IDs supplied in
 `replacement_parent_criteria`, or remove both `replacement_of` and `supersedes_criteria` for unrelated follow-up
 work. Do not spend this correction turn reconstructing parent contracts from prior reasoning.
+
+## Current Finding References
+{finding_context}
+Use a listed canonical `finding:<uid>` reference only when the failed proposal is finding-dependent.
 {batch_repair}
 {proposal_context}"""
+
+    def _task_creator_max_token_recovery_prompt(self, phase: PlanPhase) -> str:
+        """Build a task-creator-only continuation with no executor evidence language."""
+
+        finding_context = (
+            f"\nCanonical finding references:\n{self._task_creator_finding_context()}\n"
+            if phase.task_creation_mode == "finding_dependent"
+            or (phase.task_creation_mode == "standard" and phase.requires_finding_candidates)
+            else ""
+        )
+        return f"""The task creator reached its model token limit; the prior response was discarded.
+Submit exactly one valid `create_tasks` call for active phase {phase.id}. Do not explain, inspect, execute, gather
+evidence, or restate the plan. Return only the tool call payload.{finding_context}"""
 
     def _task_creator_failure_reason(self, result: Any) -> str:
         """Return the most specific controller-observed task-creation failure."""
@@ -9359,12 +9429,17 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
         phase: Optional[PlanPhase] = None,
         batch: Optional[TaskCreationBatch] = None,
         invocation_observer: Optional[Callable[[Dict[str, Any], Any, Optional[Exception]], None]] = None,
+        repair_guard: Optional[TaskProposalRepairGuard] = None,
     ) -> List[Any]:
         if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
             raise WorkflowInvariantError("create_tasks tool is required for task_creator")
         required_finding_refs = None
         finding_ref_aliases = None
-        if phase is not None and _phase_semantically_requires_finding_candidates(phase):
+        finding_dependent = phase is not None and (
+            phase.task_creation_mode == "finding_dependent"
+            or (phase.task_creation_mode == "standard" and phase.requires_finding_candidates)
+        )
+        if finding_dependent:
             unresolved = [
                 record for record in self.state.list_finding_records()
                 if record.get("finding_uid") and not str(record.get("resolution") or "").strip()
@@ -9402,6 +9477,7 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
                 else None
             ),
             reject_duplicate_proposals=True,
+            repair_guard=repair_guard,
             invocation_observer=observe_preflight,
         )]
 
@@ -10674,6 +10750,9 @@ Set `requires_finding_candidates` to true only when a phase's stated outcome con
 such as correlation, exploit-chain analysis, impact composition, or finding-derived validation. Set it false for
 discovery, hypothesis generation, testing, and any phase that can proceed without stored candidates. This is semantic
 metadata; do not infer it from a phase number or title.
+Set `task_creation_mode` explicitly: standard for ordinary work, snapshot_dependent for frozen-inventory work,
+finding_dependent for work that creates tasks from persisted candidates, and finding_validation when Python owns the
+candidate verification tasks. A finding_validation phase must not use generic task creation.
 
 Use bounded criteria. Replace absolute claims such as "all publicly reachable services" with the discovery sources or
 inventory being assessed, the durable evidence expected, and how unassessed gaps will be documented.
@@ -10688,7 +10767,12 @@ uses a frozen snapshot of that inventory; later discoveries become follow-up wor
 
 {termination_policy_section}
 
-Return JSON exactly: {{\"objective\": string, \"constraints\": [string], \"current_phase\": 1, \"phases\": [{{\"id\": int, \"title\": string, \"status\": \"pending\", \"criteria\": string, \"requires_finding_candidates\": boolean}}]}}.
+Return JSON exactly:
+{{\"objective\": string, \"constraints\": [string], \"current_phase\": 1, \"phases\": [{{
+  \"id\": int, \"title\": string, \"status\": \"pending\", \"criteria\": string,
+  \"requires_finding_candidates\": boolean,
+  \"task_creation_mode\": \"standard|snapshot_dependent|finding_dependent|finding_validation\"
+}}]}}.
 
 Now, create the plan and output only the plan:
 """
@@ -10733,6 +10817,7 @@ Approve only when the draft:
 - rejects circular criteria such as "all discovered", "across the application", or "key workflows" unless the draft
   states how the finite inventory is produced and frozen;
 - follows the required plan schema; and
+- assigns each phase a task_creation_mode consistent with its structured dependencies and controller ownership; and
 - excludes specific tools and every report, executive-summary, findings-consolidation, evidence-consolidation, or
   equivalent post-processing phase, regardless of its title;
 - rejects coverage-closure, evidence-reconciliation, or proof-pack-finalization phases when they merely summarize
@@ -10797,7 +10882,12 @@ retain their evidence and coverage outcomes, and document any omitted inapplicab
 ## Critic feedback
 {json.dumps(feedback, indent=2)}
 
-Return JSON exactly: {{"objective": string, "constraints": [string], "current_phase": 1, "phases": [{{"id": int, "title": string, "status": "pending", "criteria": string, "requires_finding_candidates": boolean}}]}}.
+Return JSON exactly:
+{{"objective": string, "constraints": [string], "current_phase": 1, "phases": [{{
+  "id": int, "title": string, "status": "pending", "criteria": string,
+  "requires_finding_candidates": boolean,
+  "task_creation_mode": "standard|snapshot_dependent|finding_dependent|finding_validation"
+}}]}}.
 
 Output only the revised plan:
 """
@@ -11111,6 +11201,18 @@ endpoint" or "assess frozen inventory" wording.
         else:
             existing_task_context = self._task_creator_compact_existing_task_context(phase)
             batch_context = ""
+        mode = phase.task_creation_mode
+        finding_section = ""
+        if mode == "finding_dependent" or (mode == "standard" and phase.requires_finding_candidates):
+            finding_section = f"""## Finding-dependent work
+Use only these persisted candidates for proposals that consume a finding:
+{self._task_creator_finding_context()}
+Every proposal in this phase must include the appropriate canonical `finding:<uid>` in `finding_refs`.
+"""
+        elif mode == "finding_validation":
+            finding_section = """## Finding validation ownership
+Finding-verification tasks are controller-owned. Do not call create_tasks for this phase.
+"""
         return f"""Create durable task records for the assessment plan. Your only action is one successful
 `create_tasks` call. Do not execute, validate, scan, inspect, browse, shell out, or gather evidence. Stop immediately
 after the call succeeds.
@@ -11119,7 +11221,8 @@ Create cohesive, independently completable tasks with exactly one acceptance cri
 for active phase {phase.id}. Create prerequisite inventory work first; do not create dependent snapshot tasks until
 their finite basis exists in durable task history or memory. If an earlier phase's required producer is unavailable,
 do not create a substitute in this phase; the controller owns producer recovery. You may create tasks only for active
-phase {phase.id}; do not create earlier-phase or future-phase tasks. Existing tasks should
+phase {phase.id}; do not create earlier-phase or future-phase tasks. Never emit `work_type`; validation task ownership
+is represented by the structured phase mode. Existing tasks should
 not be duplicated. Use prior-phase task results as inputs, but create work that implements only the active phase's
 distinct objective. When revisiting an earlier endpoint, make the task perform the current phase's materially different
 work and preserve that distinction in its objective and criterion. Do not turn closure, verification, or validation
@@ -11145,10 +11248,7 @@ the task explicitly tests that difference.
 
 {batch_context}
 
-## Finding Validation Ownership
-{self._task_creator_finding_context()}
-Finding-verification tasks are created by `store_finding` and reassigned by Python. Never emit `work_type` or create a
-generic replacement for an existing verification task.
+{finding_section}
 
 ## Eligible Canonical Snapshot Handles
 {self._eligible_snapshot_handles()}
@@ -11697,6 +11797,7 @@ Do not return `continue` merely because work is incomplete when the task history
     def _task_executor_contract(
         task: Optional[Task] = None,
         available_tool_names: Optional[set[str]] = None,
+        selected_shell_commands: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Return the controller-owned execution boundary shared by all modules."""
 
@@ -11804,6 +11905,11 @@ Do not return `continue` merely because work is incomplete when the task history
             )
             else ""
         )
+        execution_requirement_providers = MultiAgentWorkflowController._execution_requirement_provider_guidance(
+            task,
+            tool_names,
+            selected_shell_commands or [],
+        )
         return f"""## Task Executor Contract (Controller-owned)
 Execute only the assigned task objective. The objective is one single assigned task unit named by the acceptance
 contract; do not broaden it. Treat plan constraints and module access, safety, execution, evidence, and
@@ -11830,7 +11936,70 @@ ledger does not replace storing substantive artifact evidence. Successful accept
 evidence references as one operation observation for later tasks. The controller binds the tool to the assigned task,
 criterion, and coverage IDs; never guess or submit those IDs. End with a concise summary of completed work,
 partial progress, or a concrete blocker. Python owns task, phase, and operation state transitions; never claim or
-perform them.{finding_submission_methodology}{finding_validation_methodology}{execution_evidence_methodology}"""
+perform them.{finding_submission_methodology}{finding_validation_methodology}{execution_evidence_methodology}
+{execution_requirement_providers}"""
+
+    @classmethod
+    def _execution_requirement_provider_guidance(
+        cls,
+        task: Optional[Task],
+        available_tool_names: set[str],
+        selected_shell_commands: List[Dict[str, Any]],
+    ) -> str:
+        """Render task-local execution providers from the supplied invocation tools only."""
+
+        if task is None or not any(
+            criterion.execution_requirements for criterion in task.acceptance.criteria
+        ):
+            return ""
+
+        procedure = task.acceptance.basis.procedure
+        capabilities = tuple(dict.fromkeys(
+            cls._canonical_execution_method(method)
+            for method in (procedure.methods if procedure is not None else ("analyze",))
+            if str(method).strip()
+        ))
+        native_by_capability = {
+            capability: sorted(
+                tool_name
+                for tool_name in available_tool_names
+                if capability in _TOOL_EXECUTION_CAPABILITIES.get(tool_name, frozenset())
+            )
+            for capability in capabilities
+        }
+        shell_by_capability = {capability: [] for capability in capabilities}
+        if "shell" in available_tool_names:
+            for spec in selected_shell_commands:
+                command = str(spec.get("command") or "").strip()
+                if not command:
+                    continue
+                command_capabilities = get_shell_command_execution_capabilities(command)
+                if not command_capabilities:
+                    command_capabilities = _SHELL_EXECUTION_CAPABILITIES.get(command, frozenset())
+                for capability in capabilities:
+                    if capability in command_capabilities and command not in shell_by_capability[capability]:
+                        shell_by_capability[capability].append(command)
+
+        lines = [
+            "## Execution Requirements and Available Providers (Controller-owned)",
+            "Create qualifying task-local proof for every frozen execution requirement against its frozen subject. "
+            "For each declared capability, choose any one suitable supplied provider; do not execute every listed "
+            "provider. A listed provider qualifies only after a successful task-local invocation against the frozen "
+            "subject with the required durable output.",
+        ]
+        for criterion in task.acceptance.criteria:
+            for requirement in criterion.execution_requirements:
+                lines.append(f"\nFrozen subject: `{requirement.subject_ref}`")
+                for capability in capabilities:
+                    providers = [
+                        *(f"native `{name}`" for name in native_by_capability[capability]),
+                        *(f"shell command `{command}`" for command in shell_by_capability[capability]),
+                    ]
+                    if providers:
+                        lines.append(f"- Declared procedure capability `{capability}`: " + ", ".join(providers))
+                    else:
+                        lines.append(f"- Declared procedure capability `{capability}`: no supplied provider available.")
+        return "\n\n" + "\n".join(lines)
 
     @staticmethod
     def _tool_selection_policy() -> str:

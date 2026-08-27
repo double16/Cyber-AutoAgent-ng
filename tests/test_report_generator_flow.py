@@ -3,6 +3,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from strands.types.exceptions import MaxTokensReachedException
 
 from modules.handlers import report_generator as report_generator_module
 from modules.handlers.report_generator import (
@@ -24,6 +25,7 @@ from modules.handlers.report_generator import (
     _markdown_table_cell,
     _format_model_usage_table,
     _remove_generated_execution_metrics,
+    _run_report_critic,
     _format_next_steps_appendix,
     _format_taxonomy_mappings,
     _format_taxonomy_coverage_tables,
@@ -999,6 +1001,38 @@ def test_cleanup_report_agent_tolerates_cleanup_failure():
 def test_validate_report_critique_rejects_invalid_schema(critique, error):
     with pytest.raises(ValueError, match=error):
         _validate_report_critique(critique)
+
+
+def test_validate_report_critique_rejects_excessive_feedback():
+    with pytest.raises(ValueError, match="at most five"):
+        _validate_report_critique({"approved": False, "feedback": ["fix"] * 6})
+
+    with pytest.raises(ValueError, match="at most 300 characters"):
+        _validate_report_critique({"approved": False, "feedback": ["x" * 301]})
+
+
+def test_report_critic_retries_once_after_max_tokens_even_without_json_retries():
+    critic_agent = MagicMock(side_effect=[
+        MaxTokensReachedException("max_tokens"),
+        _agent_result('{"approved": true, "feedback": []}'),
+    ])
+
+    result = _run_report_critic(critic_agent, "Review the executive summary.", json_retries=0)
+
+    assert result == {"approved": True, "feedback": []}
+    assert critic_agent.call_count == 2
+    retry_prompt = critic_agent.call_args_list[1].args[0]
+    assert "exhausted its token limit" in retry_prompt
+    assert "Review the executive summary." in retry_prompt
+
+
+def test_report_critic_propagates_repeated_max_token_failure():
+    critic_agent = MagicMock(side_effect=MaxTokensReachedException("max_tokens"))
+
+    with pytest.raises(MaxTokensReachedException):
+        _run_report_critic(critic_agent, "Review the executive summary.", json_retries=2)
+
+    assert critic_agent.call_count == 2
 
 
 def test_report_refinement_stops_on_critic_approval():
