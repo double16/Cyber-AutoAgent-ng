@@ -92,6 +92,7 @@ EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY = "evaluator_artifact_read_lim
 ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER = "ARTIFACT_TOTAL_READ_LIMIT_REACHED"
 ARTIFACT_PAGE_LIMIT_REACHED_MARKER = "ARTIFACT_PAGE_LIMIT_REACHED"
 ARTIFACT_READ_POLICY_VIOLATION_MARKER = "ARTIFACT_READ_POLICY_VIOLATION"
+ARTIFACT_READ_REPEAT_GUARD_MARKER = "ARTIFACT_READ_REPEAT_GUARD"
 
 
 class EvaluatorArtifactReadLimitExceeded(RuntimeError):
@@ -517,16 +518,28 @@ class EvaluatorArtifactReadLimitHook(HookProvider):
             for marker in (
                 ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER,
                 ARTIFACT_READ_POLICY_VIOLATION_MARKER,
+                ARTIFACT_READ_REPEAT_GUARD_MARKER,
             )
         ):
             return
 
         self.blocked_attempts += 1
         if self.blocked_attempts == 1:
-            message = (
-                "ARTIFACT_READ_LIMIT_REACHED: The requested artifact page is unavailable. Do not call "
-                "read_artifact again. Review the controller-provided evidence and return the requested JSON decision."
-            )
+            if ARTIFACT_READ_REPEAT_GUARD_MARKER in result_text:
+                message = (
+                    "ARTIFACT_READ_REPEAT_GUARD: You retried an artifact page after structured guidance. "
+                    "Review the controller-provided evidence and return the requested JSON decision."
+                )
+            elif ARTIFACT_READ_POLICY_VIOLATION_MARKER in result_text:
+                message = (
+                    "ARTIFACT_READ_POLICY_VIOLATION: The requested artifact read is not allowed. "
+                    "Review the controller-provided evidence and return the requested JSON decision."
+                )
+            else:
+                message = (
+                    "ARTIFACT_TOTAL_READ_LIMIT_REACHED: The evaluator-wide artifact-read budget is exhausted. "
+                    "Review the controller-provided evidence and return the requested JSON decision."
+                )
         else:
             self.exhausted = True
             message = (

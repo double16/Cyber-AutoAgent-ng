@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -108,6 +109,80 @@ def test_client_bundle_inventory_writes_target_service_for_empty_bundle(
         (artifacts / "empty-manifest.json").read_text(encoding="utf-8")
     )
     assert [item["kind"] for item in manifest["items"]] == ["service", "endpoint"]
+
+
+def test_client_bundle_inventory_persists_webcrack_derivative_without_raw_reference(
+    monkeypatch, tmp_path: Path
+):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "app.js").write_text('const api="/api/raw";', encoding="utf-8")
+    _operation_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        bundle_tool,
+        "resolve_inventory_target",
+        lambda *_args: ("https://target.test", "target-1"),
+    )
+    monkeypatch.setattr(bundle_tool.shutil, "which", lambda _command: "/usr/bin/webcrack")
+
+    def write_formatted_bundle(command, **_kwargs):
+        output_directory = Path(command[command.index("--output") + 1])
+        assert not output_directory.exists()
+        output_directory.mkdir()
+        (output_directory / "deobfuscated.js").write_text(
+            'const api = "/api/formatted";\n', encoding="utf-8"
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(bundle_tool.subprocess, "run", write_formatted_bundle)
+
+    result = json.loads(
+        bundle_tool.client_bundle_inventory(
+            "artifact:artifacts/app.js",
+            "artifacts/bundle-inventory.json",
+            "artifacts/inventory-manifest.json",
+        )
+    )
+    extraction = json.loads(
+        (artifacts / "bundle-inventory.json").read_text(encoding="utf-8")
+    )
+
+    assert result["format_status"] == "formatted"
+    assert result["formatted_artifact"] == "artifact:artifacts/app.webcrack.js"
+    assert (artifacts / "app.webcrack.js").is_file()
+    assert extraction["analysis_artifact"] == "artifact:artifacts/app.webcrack.js"
+    assert extraction["api_paths"] == ["/api/formatted"]
+    assert "artifact:artifacts/app.js" not in json.dumps(extraction)
+
+
+def test_client_bundle_inventory_exposes_raw_bundle_when_webcrack_is_unavailable(
+    monkeypatch, tmp_path: Path
+):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "app.js").write_text('const api="/api/raw";', encoding="utf-8")
+    _operation_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        bundle_tool,
+        "resolve_inventory_target",
+        lambda *_args: ("https://target.test", "target-1"),
+    )
+    monkeypatch.setattr(bundle_tool.shutil, "which", lambda _command: None)
+
+    result = json.loads(
+        bundle_tool.client_bundle_inventory(
+            "artifact:artifacts/app.js",
+            "artifacts/bundle-inventory.json",
+            "artifacts/inventory-manifest.json",
+        )
+    )
+    extraction = json.loads(
+        (artifacts / "bundle-inventory.json").read_text(encoding="utf-8")
+    )
+
+    assert result["format_status"] == "unavailable"
+    assert result["formatted_artifact"] is None
+    assert extraction["analysis_artifact"] == "artifact:artifacts/app.js"
 
 
 def test_client_bundle_inventory_rejects_output_outside_operation(

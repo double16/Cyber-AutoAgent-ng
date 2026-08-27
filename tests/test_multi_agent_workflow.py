@@ -1,3 +1,4 @@
+import ast
 import inspect
 import json
 from contextlib import contextmanager
@@ -3070,6 +3071,173 @@ def test_json_agent_retries_fresh_after_reasoning_loop():
     assert controller.runtime.callback_handler.efficiency_events == [
         ("max_token_exhaustion", "task_evaluator", "reasoning_loop", 1, None)
     ]
+
+
+def test_task_evaluator_retry_recreates_its_tool_state_after_max_tokens():
+    error = MaxTokensReachedException("max_tokens")
+    error.max_token_classification = MaxTokenClassification(
+        kind="reasoning_loop",
+        repetition_ratio=0.8,
+        pattern_hash="abc123",
+        discarded_tokens=6000,
+    )
+    supplied_tools = []
+
+    def text_runner(_role, _prompt, tools, _system_prompt):
+        supplied_tools.append(tools)
+        if len(supplied_tools) == 1:
+            raise error
+        return '{"status":"done"}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=text_runner,
+    )
+    tool_factory_calls = []
+
+    def tool_factory():
+        tool_factory_calls.append(None)
+        return [object()]
+
+    result = controller._run_json_text_agent(
+        "task_evaluator", "original", [], "system", tool_factory=tool_factory
+    )
+
+    assert result == {"status": "done"}
+    assert len(tool_factory_calls) == 2
+    assert supplied_tools[0] is not supplied_tools[1]
+    assert supplied_tools[0][0] is not supplied_tools[1][0]
+
+
+def test_taxonomy_annotator_retry_recreates_bounded_artifact_reader_after_max_tokens(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Validation", status="done")],
+        assessment_complete=True,
+    )
+    state = FakeState(
+        plan,
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "candidate_data": {"artifacts": ["artifact:artifacts/proof.txt"]},
+                "verification_task_uid": "verify-finding-1",
+                "validation_data": {"outcome": "confirmed"},
+                "resolution": "verified",
+            }
+        ],
+    )
+    readers = []
+    supplied_tools = []
+
+    class Catalog:
+        def candidates(self, _finding, kind, limit=12):
+            return [{"id": "CWE-79" if kind == "cwe" else "T1190", "name": "Candidate"}]
+
+    def bounded_reader(**_kwargs):
+        reader = object()
+        readers.append(reader)
+        return reader
+
+    def text_runner(_role, _prompt, tools, _system_prompt):
+        supplied_tools.append(tools)
+        if len(supplied_tools) == 1:
+            raise MaxTokensReachedException("max_tokens")
+        return (
+            '{"cwe":[{"id":"CWE-79","confidence":0.95,"rationale":"Proof",'
+            '"evidence":["artifact:artifacts/proof.txt"]}],"mitre_attack":[]}'
+        )
+
+    monkeypatch.setattr(workflow_mod, "create_bounded_artifact_reader", bounded_reader)
+    monkeypatch.setattr(workflow_mod, "get_taxonomy_catalog", lambda: Catalog())
+    monkeypatch.setattr(
+        workflow_mod,
+        "validate_taxonomy_mappings",
+        lambda cwe, attack, _artifacts: {"cwe": cwe, "mitre_attack": attack, "provenance": {}},
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+
+    controller._annotate_verified_findings(plan)
+
+    assert state.finding_records[0]["candidate_data"]["taxonomy_annotation"]["status"] == "completed"
+    assert len(readers) == 2
+    assert supplied_tools == [[readers[0]], [readers[1]]]
+    assert readers[0] is not readers[1]
+
+
+def test_attack_enricher_retry_recreates_bounded_artifact_reader_after_max_tokens(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Validation", status="done")],
+        assessment_complete=True,
+    )
+    state = FakeState(
+        plan,
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "candidate_data": {"artifacts": ["artifact:artifacts/proof.txt"]},
+                "resolution": "verified",
+            }
+        ],
+    )
+    readers = []
+    supplied_tools = []
+
+    class Catalog:
+        def candidates(self, _finding, _kind, limit=12):
+            return [{"id": "T1059.004", "name": "Unix Shell"}]
+
+    def bounded_reader(**_kwargs):
+        reader = object()
+        readers.append(reader)
+        return reader
+
+    def text_runner(_role, _prompt, tools, _system_prompt):
+        supplied_tools.append(tools)
+        if len(supplied_tools) == 1:
+            raise MaxTokensReachedException("max_tokens")
+        return (
+            '{"mitre_attack":[{"id":"T1059.004","confidence":0.95,"rationale":"Proof",'
+            '"evidence":["artifact:artifacts/proof.txt"]}]}'
+        )
+
+    monkeypatch.setattr(workflow_mod, "create_bounded_artifact_reader", bounded_reader)
+    monkeypatch.setattr(workflow_mod, "get_taxonomy_catalog", lambda: Catalog())
+    monkeypatch.setattr(
+        workflow_mod,
+        "validate_taxonomy_mappings",
+        lambda cwe, attack, _artifacts: {"cwe": cwe, "mitre_attack": attack, "provenance": {}},
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+    )
+    monkeypatch.setattr(
+        controller,
+        "_finding_behavior_evidence",
+        lambda _record: ([{"summary": "Observed shell execution"}], ["artifact:artifacts/proof.txt"]),
+    )
+
+    controller._enrich_final_attack_mappings(plan)
+
+    assert state.finding_records[0]["candidate_data"]["final_attack_enrichment"]["status"] == "completed"
+    assert len(readers) == 2
+    assert supplied_tools == [[readers[0]], [readers[1]]]
+    assert readers[0] is not readers[1]
 
 
 def test_json_agent_emits_workflow_activity_lifecycle_events():
@@ -12566,8 +12734,9 @@ def test_task_evaluator_artifact_reader_allows_one_read_per_distinct_recorded_ar
     assert {tool.__name__ for tool in tools} == {"read_artifact"}
     for start_line in (1, 2, 3, 4):
         assert artifact_refs[0] in tools[0](artifact_refs[0], start_line=start_line)
-    with pytest.raises(RuntimeError, match=r"Artifact page limit reached \(4\)"):
-        tools[0](artifact_refs[0], start_line=5)
+    page_limit = ast.literal_eval(tools[0](artifact_refs[0], start_line=5))
+    assert page_limit["status"] == "not_directly_readable"
+    assert page_limit["reason"] == "artifact_page_budget_exhausted"
 
 
 def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(monkeypatch, tmp_path):
@@ -12594,21 +12763,24 @@ def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(m
 
     prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
 
-    assert "- Directly reviewable artifacts: 12" in prompt
+    assert "- Smaller artifacts available for line review: 12" in prompt
+    assert "- Larger artifacts available only by explicit byte page: 0" in prompt
     assert "- Total successful reads: 48" in prompt
     assert "- Successful pages per artifact: 4" in prompt
     assert "- Maximum lines per page: 200" in prompt
-    assert "- Maximum UTF-8 bytes per page: 9600" in prompt
-    assert "Evaluate the acceptance summaries and controller-observed outcomes first" in prompt
+    assert "- Maximum UTF-8 bytes per page: 19200" in prompt
+    assert "Evaluate the acceptance summaries, review digest, and controller-observed outcomes first" in prompt
+    assert "Controller execution receipts are authoritative" in prompt
+    assert "never reread artifacts to prove a receipt or tool invocation" in prompt
     assert artifact_refs[0] in prompt
     assert artifact_refs[-1] in prompt
 
 
-def test_task_evaluator_omits_large_artifacts_but_retains_their_review_digest(monkeypatch, tmp_path):
+def test_task_evaluator_allows_large_artifact_byte_pages_but_prioritizes_digest(monkeypatch, tmp_path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     (artifacts / "mapping.json").write_text('{"mapped": true}', encoding="utf-8")
-    (artifacts / "bundle.js").write_text("x" * 9_601, encoding="utf-8")
+    (artifacts / "bundle.js").write_text("x" * 19_201, encoding="utf-8")
     task = Task(
         task_uid="large-artifact-review",
         title="Review mapping evidence",
@@ -12629,12 +12801,76 @@ def test_task_evaluator_omits_large_artifacts_but_retains_their_review_digest(mo
     prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
 
     assert "mapped" in tools[0]("artifact:artifacts/mapping.json")
-    with pytest.raises(RuntimeError, match=r"Artifact is 9601 bytes"):
+    with pytest.raises(RuntimeError, match="requires explicit byte paging"):
         tools[0]("artifact:artifacts/bundle.js")
-    assert "- Directly reviewable artifacts: 1" in prompt
+    first_page = tools[0]("artifact:artifacts/bundle.js", start_byte=0, max_bytes=19_200)
+    assert "'start_byte': 0" in first_page
+    assert "- Smaller artifacts available for line review: 1" in prompt
+    assert "- Larger artifacts available only by explicit byte page: 1" in prompt
+    assert "- Total successful reads: 8" in prompt
     assert "artifact:artifacts/mapping.json (16 bytes)" in prompt
-    assert "artifact:artifacts/bundle.js (9601 bytes; exceeds the page budget)" in prompt
-    assert "Do not page through them" in prompt
+    assert "artifact:artifacts/bundle.js (19201 bytes; exceeds one page)" in prompt
+    assert "Prefer smaller artifacts" in prompt
+    assert "not routine review" in prompt
+
+
+def test_task_evaluator_hides_raw_bundle_when_webcrack_derivative_is_available(monkeypatch, tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "bundle.js").write_text("x" * 19_201, encoding="utf-8")
+    (artifacts / "bundle.webcrack.js").write_text(
+        'const api = "/api/products";\n', encoding="utf-8"
+    )
+    task = Task(
+        task_uid="formatted-bundle-review",
+        title="Review client bundle evidence",
+        objective="Review task evidence",
+        phase=1,
+        status="active",
+        evidence=[
+            "artifact:artifacts/bundle.js",
+            "artifact:artifacts/bundle.webcrack.js",
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+
+    tools = controller._task_evaluator_tools(task, [])
+    prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
+
+    assert controller._task_evaluator_artifact_refs(task, []) == [
+        "artifact:artifacts/bundle.webcrack.js"
+    ]
+    with pytest.raises(RuntimeError, match="Artifact is not available to this evaluator"):
+        tools[0]("artifact:artifacts/bundle.js", start_byte=0, max_bytes=19_200)
+    assert "/api/products" in tools[0]("artifact:artifacts/bundle.webcrack.js", max_lines=1)
+    assert "artifact:artifacts/bundle.webcrack.js" in prompt
+    assert "artifact:artifacts/bundle.js" not in prompt
+
+
+def test_durable_artifact_evidence_prefers_webcrack_derivative_for_downstream_tasks():
+    outcome = ToolOutcome(
+        sequence=1,
+        tool_use_id="bundle-inventory",
+        tool_name="client_bundle_inventory",
+        success=True,
+        correctable=False,
+        input_summary='{"source_artifact":"artifact:artifacts/bundle.js"}',
+        output_summary=(
+            '{"formatted_artifact":"artifact:artifacts/bundle.webcrack.js",'
+            '"extraction_artifact":"artifact:artifacts/bundle-inventory.json"}'
+        ),
+    )
+
+    assert MultiAgentWorkflowController._artifact_refs_from_tool_outcomes([outcome]) == [
+        "artifact:artifacts/bundle-inventory.json",
+        "artifact:artifacts/bundle.webcrack.js",
+    ]
 
 
 def test_task_evaluator_artifact_reader_uses_persisted_acceptance_results_when_omitted(monkeypatch, tmp_path):

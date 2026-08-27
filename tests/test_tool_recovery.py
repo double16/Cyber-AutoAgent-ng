@@ -6,6 +6,7 @@ from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
 from src.modules.handlers.tool_recovery import (
     ARTIFACT_PAGE_LIMIT_REACHED_MARKER,
+    ARTIFACT_READ_REPEAT_GUARD_MARKER,
     ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER,
     EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY,
     EvaluatorArtifactReadLimitHook,
@@ -187,7 +188,7 @@ def test_evaluator_artifact_read_limit_hook_guides_once_then_stops():
 
     assert hook.blocked_attempts == 1
     assert hook.exhausted is False
-    assert "Do not call read_artifact again" in first.result["content"][0]["text"]
+    assert "evaluator-wide artifact-read budget is exhausted" in first.result["content"][0]["text"]
     assert first.invocation_state == {}
 
     second = _after(
@@ -209,6 +210,22 @@ def test_evaluator_artifact_read_limit_hook_guides_once_then_stops():
             "blocked_attempts": 2,
         },
     }
+
+
+def test_evaluator_artifact_read_limit_hook_preserves_repeat_guard_reason():
+    hook = EvaluatorArtifactReadLimitHook()
+    event = _after(
+        "repeat",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_READ_REPEAT_GUARD_MARKER}: Repeated artifact read guidance for duplicate_page",
+    )
+
+    hook._after_tool(event)
+
+    assert "ARTIFACT_READ_REPEAT_GUARD" in event.result["content"][0]["text"]
+    assert "page is unavailable" not in event.result["content"][0]["text"]
 
 
 def test_evaluator_artifact_page_limit_allows_another_artifact_then_stops_repeat():

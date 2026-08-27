@@ -42,6 +42,7 @@ import sqlite3
 import sys
 import uuid
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -7399,8 +7400,9 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
                 tool_outcomes,
                 resolved_acceptance_results,
             ),
-            self._task_evaluator_tools(task, resolved_acceptance_results),
+            [],
             self._task_evaluator_system_prompt(),
+            tool_factory=lambda: self._task_evaluator_tools(task, resolved_acceptance_results),
             data_validator=lambda payload: self._validate_task_evaluator_decision_payload(
                 payload, allowed=("done", "partial_failure", "blocked")
             ),
@@ -8157,7 +8159,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             if reference not in seen:
                 references.append(reference)
                 seen.add(reference)
-        return references
+        return MultiAgentWorkflowController._prefer_formatted_client_bundles(references)
 
     def _artifact_context_window_tokens(self) -> int:
         """Return the runtime context window used to size one artifact page."""
@@ -8169,7 +8171,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         task: Task,
         acceptance_results: List[Any],
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Split evaluator evidence into readable artifacts and deterministic large-artifact metadata."""
+        """Split evaluator evidence into line-reviewable and byte-page-required artifacts."""
 
         max_bytes = artifact_max_bytes_for_context_window(self._artifact_context_window_tokens())
         reviewable = []
@@ -8196,9 +8198,12 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4),
         )
         return [create_bounded_artifact_reader(
-            max_reads=max(1, len(reviewable) * max_reads_per_artifact),
+            max_reads=max(1, (len(reviewable) + len(omitted_large)) * max_reads_per_artifact),
             context_window_tokens=self._artifact_context_window_tokens(),
-            allowed_artifact_refs=[item["artifact_ref"] for item in reviewable],
+            allowed_artifact_refs=[
+                item["artifact_ref"]
+                for item in [*reviewable, *omitted_large]
+            ],
             omitted_large_artifact_sizes={
                 item["artifact_ref"]: item["byte_size"]
                 for item in omitted_large
@@ -8221,25 +8226,30 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         )
         lines = [
             "## Artifact Review Limits",
-            f"- Directly reviewable artifacts: {len(reviewable)}",
-            f"- Total successful reads: {len(reviewable) * max_reads_per_artifact}",
+            f"- Smaller artifacts available for line review: {len(reviewable)}",
+            f"- Larger artifacts available only by explicit byte page: {len(omitted_large)}",
+            f"- Total successful reads: {(len(reviewable) + len(omitted_large)) * max_reads_per_artifact}",
             f"- Successful pages per artifact: {max_reads_per_artifact}",
             "- Maximum lines per page: 200",
             f"- Maximum UTF-8 bytes per page: "
             f"{artifact_max_bytes_for_context_window(self._artifact_context_window_tokens())}",
-            "- Evaluate the acceptance summaries and controller-observed outcomes first.",
-            "- Read a directly reviewable artifact only when it resolves a concrete evidence gap.",
-            "- Omitted large artifacts are provenance only. Do not page through them; use the acceptance summary and "
-            "review digest instead.",
+            "- Evaluate the acceptance summaries, review digest, and controller-observed outcomes first.",
+            "- Controller execution receipts are authoritative for whether required execution occurred; never reread "
+            "artifacts to prove a receipt or tool invocation.",
+            "- Prefer smaller artifacts; read any artifact only when it resolves a concrete evidence gap.",
+            "- Distinct pages must not overlap an already returned page. A duplicate, overlap, or exhausted budget returns "
+            "guidance without artifact content and does not justify another read.",
+            "- A larger artifact requires explicit byte paging. Use it only for an unresolved material gap, not routine "
+            "review; max_lines may further narrow a byte page, and next_start_byte continues after returned content.",
             "- Return the required JSON decision once you have the needed evidence.",
             "",
-            "Directly reviewable artifact references:",
+            "Smaller artifact references:",
         ]
         lines.extend(f"- {item['artifact_ref']} ({item['byte_size']} bytes)" for item in reviewable)
         if omitted_large:
-            lines.extend(["", "Omitted large artifact references:"])
+            lines.extend(["", "Larger artifact references (explicit byte pages only):"])
             lines.extend(
-                f"- {item['artifact_ref']} ({item['byte_size']} bytes; exceeds the page budget)"
+                f"- {item['artifact_ref']} ({item['byte_size']} bytes; exceeds one page)"
                 for item in omitted_large
             )
         return "\n".join(lines)
@@ -9603,15 +9613,16 @@ Allowed artifact references (the evidence field must copy these exactly):
                     proposal = self._run_json_text_agent(
                         "taxonomy_annotator",
                         prompt,
-                        [create_bounded_artifact_reader(
-                            context_window_tokens=self._artifact_context_window_tokens()
-                        )],
+                        [],
                         system_prompt,
                         lambda data: self._validate_taxonomy_annotation_proposal(
                             data,
                             list(candidate.get("artifacts") or []),
                             self._disallowed_attack_ids(preflight_context),
                         ),
+                        tool_factory=lambda: [create_bounded_artifact_reader(
+                            context_window_tokens=self._artifact_context_window_tokens()
+                        )],
                     )
                 taxonomy = validate_taxonomy_mappings(
                     proposal["cwe"],
@@ -9827,15 +9838,16 @@ Allowed evidence references:
                         proposal = self._run_json_text_agent(
                             "attack_enricher",
                             prompt,
-                            [create_bounded_artifact_reader(
-                                context_window_tokens=self._artifact_context_window_tokens()
-                            )],
+                            [],
                             system_prompt,
                             lambda data: self._validate_attack_enrichment_proposal(
                                 data,
                                 evidence_refs,
                                 self._disallowed_attack_ids(preflight_context),
                             ),
+                            tool_factory=lambda: [create_bounded_artifact_reader(
+                                context_window_tokens=self._artifact_context_window_tokens()
+                            )],
                         )
                     taxonomy = validate_taxonomy_mappings(
                         [],
@@ -9884,6 +9896,7 @@ Allowed evidence references:
         cycle_total: Optional[int] = None,
         evaluator_fallback_context: Optional[Dict[str, Any]] = None,
         raise_on_evaluator_failure: bool = False,
+        tool_factory: Optional[Callable[[], List[Any]]] = None,
     ) -> Dict[str, Any]:
         current_prompt = prompt
         last_response = ""
@@ -9911,7 +9924,8 @@ Allowed evidence references:
             )
             self._log_workflow("json agent role=%s attempt=%s max_retries=%s", role, attempt + 1, self.json_retries)
             try:
-                response = self.text_runner(role, current_prompt, tools, system_prompt)
+                attempt_tools = tool_factory() if tool_factory is not None else tools
+                response = self.text_runner(role, current_prompt, attempt_tools, system_prompt)
                 if pending_reasoning:
                     target_lvl, rsn = pending_reasoning
                     from modules.config.models.agent_profiles import get_agent_settings_registry
@@ -11213,10 +11227,54 @@ generic replacement for an existing verification task.
         tool_outcomes: Optional[List[ToolOutcome]] = None,
         acceptance_results: Optional[List[Any]] = None,
     ) -> str:
-        worker_context_section = self._worker_context_section(worker_context)
-        tool_outcome_section = self._tool_outcome_section(tool_outcomes or [])
-        acceptance_result_section = self._acceptance_result_section(acceptance_results or [])
         resolved_acceptance_results = acceptance_results or []
+        visible_artifact_refs = set(
+            self._task_evaluator_artifact_refs(task, resolved_acceptance_results)
+        )
+        hidden_artifact_refs = []
+        candidate_refs = list(task.evidence)
+        for result in resolved_acceptance_results:
+            candidate_refs.extend(getattr(result, "evidence_refs", ()) or ())
+            for coverage in getattr(result, "coverage", ()) or ():
+                candidate_refs.extend(getattr(coverage, "evidence_refs", ()) or ())
+        for candidate in candidate_refs:
+            try:
+                reference = canonical_artifact_reference(str(candidate or ""))
+            except (OSError, TypeError, ValueError):
+                continue
+            if (
+                reference.startswith("artifact:")
+                and reference.endswith(".js")
+                and not reference.endswith(".webcrack.js")
+                and f"{reference[:-3]}.webcrack.js" in visible_artifact_refs
+            ):
+                hidden_artifact_refs.append(reference)
+
+        hidden_artifact_tokens = set(hidden_artifact_refs)
+        for reference in hidden_artifact_refs:
+            hidden_artifact_tokens.add(reference.removeprefix("artifact:"))
+            try:
+                hidden_artifact_tokens.add(resolve_operation_artifact_path(reference))
+            except (OSError, TypeError, ValueError):
+                continue
+
+        def hide_raw_bundle_references(value: str) -> str:
+            for token in sorted(hidden_artifact_tokens, key=len, reverse=True):
+                value = value.replace(token, "[controller-only raw client bundle]")
+            return value
+
+        worker_context_section = hide_raw_bundle_references(
+            self._worker_context_section(worker_context)
+        )
+        tool_outcome_section = hide_raw_bundle_references(
+            self._tool_outcome_section(tool_outcomes or [])
+        )
+        task_payload = hide_raw_bundle_references(
+            json.dumps(task.to_dict(), indent=2, sort_keys=True)
+        )
+        acceptance_result_section = hide_raw_bundle_references(
+            self._acceptance_result_section(resolved_acceptance_results)
+        )
         execution_gate_section = self._controller_execution_gate_section(task, resolved_acceptance_results)
         artifact_limit_section = self._task_evaluator_artifact_limit_section(task, resolved_acceptance_results)
         current_task_findings = self._task_finding_summary(task.task_uid)
@@ -11272,7 +11330,8 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
   examples, or new discoveries outside the frozen manifest.
 - The controller execution-gate section below is authoritative. When it reports that all frozen execution
   requirements are satisfied, a historical failed acceptance attempt is not an unresolved execution gap. Do not return
-  an execution repair for that historical failure; evaluate only independent semantic-quality concerns.
+  an execution repair for that historical failure; evaluate only independent semantic-quality concerns. Do not call
+  read_artifact to verify controller execution receipts or tool invocations.
 - A recorded status is not self-proving. Use partial_failure when its summary or evidence references do not support the
   corresponding frozen criterion and status.
 - Use partial_failure when useful progress was made but any material part remains unsupported.
@@ -11293,7 +11352,7 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
   Keep instructions within the same task boundary and omit or return an empty string when no further task work is needed.
 
 ## Evaluation target: active task
-{json.dumps(task.to_dict(), indent=2, sort_keys=True)}
+{task_payload}
 
 ## Frozen acceptance results
 {acceptance_result_section}
@@ -11966,7 +12025,24 @@ tools and durable evidence before relying on it."""
                         continue
                     if resolved.is_relative_to(root) and resolved.is_file():
                         references.update(MultiAgentWorkflowController._operation_local_artifact_refs_in_text(str(resolved)))
-        return sorted(references)
+        return MultiAgentWorkflowController._prefer_formatted_client_bundles(references)
+
+    @staticmethod
+    def _prefer_formatted_client_bundles(references: Iterable[str]) -> List[str]:
+        """Keep a webcrack derivative in task context while retaining its raw source controller-side."""
+
+        distinct = sorted(set(references))
+        reference_set = set(distinct)
+        return [
+            reference
+            for reference in distinct
+            if not (
+                reference.startswith("artifact:")
+                and reference.endswith(".js")
+                and not reference.endswith(".webcrack.js")
+                and f"{reference[:-3]}.webcrack.js" in reference_set
+            )
+        ]
 
     @staticmethod
     def _operation_local_artifact_refs_in_text(text: str) -> List[str]:

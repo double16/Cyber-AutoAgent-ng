@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlunparse
@@ -85,6 +87,64 @@ def _write_json_artifact(path: str, payload: dict[str, Any]) -> str:
         if os.path.exists(temporary):
             os.unlink(temporary)
     return canonical_artifact_reference(resolved)
+
+
+def _write_binary_artifact(path: str, content: bytes) -> str:
+    """Atomically persist a derived JavaScript artifact and return its canonical reference."""
+
+    resolved = _operation_output_path(path)
+    directory = os.path.dirname(resolved)
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".client-bundle-", suffix=".js", dir=directory
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as artifact:
+            artifact.write(content)
+            artifact.flush()
+            os.fsync(artifact.fileno())
+        os.replace(temporary, resolved)
+        directory_descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return canonical_artifact_reference(resolved)
+
+
+def _formatted_bundle_path(source_path: str) -> str:
+    """Return the durable operation path for one webcrack derivative."""
+
+    stem, _ = os.path.splitext(source_path)
+    return f"{stem}.webcrack.js"
+
+
+def _format_bundle_with_webcrack(source_path: str) -> tuple[bytes | None, str]:
+    """Return a formatted bundle when webcrack is available, otherwise a stable fallback status."""
+
+    command = shutil.which("webcrack")
+    if command is None:
+        return None, "unavailable"
+    with tempfile.TemporaryDirectory(prefix="client-bundle-webcrack-") as parent_directory:
+        output_directory = os.path.join(parent_directory, "output")
+        try:
+            result = subprocess.run(
+                [command, source_path, "--output", output_directory],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=90,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None, "failed"
+        formatted_path = os.path.join(output_directory, "deobfuscated.js")
+        if result.returncode != 0 or not os.path.isfile(formatted_path):
+            return None, "failed"
+        with open(formatted_path, "rb") as formatted_bundle:
+            return formatted_bundle.read(), "formatted"
 
 
 def _is_candidate_route(path: str) -> bool:
@@ -207,14 +267,26 @@ def client_bundle_inventory(
         raise ValueError("target must resolve to a registered HTTP(S) target")
     with open(source_path, "rb") as source:
         source_bytes = source.read()
+    formatted_bytes, format_status = _format_bundle_with_webcrack(source_path)
+    formatted_ref = None
+    analysis_bytes = source_bytes
+    analysis_ref = source_ref
+    if formatted_bytes is not None:
+        formatted_ref = _write_binary_artifact(
+            _formatted_bundle_path(source_path), formatted_bytes
+        )
+        analysis_bytes = formatted_bytes
+        analysis_ref = formatted_ref
     extracted = _bundle_inventory(
-        source_bytes.decode("utf-8", errors="replace"), canonical_target
+        analysis_bytes.decode("utf-8", errors="replace"), canonical_target
     )
 
     extraction_payload = {
-        "schema_version": "client_bundle_inventory_v1",
-        "source_artifact": source_ref,
+        "schema_version": "client_bundle_inventory_v2",
         "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+        "analysis_artifact": analysis_ref,
+        "analysis_sha256": hashlib.sha256(analysis_bytes).hexdigest(),
+        "format_status": format_status,
         "target": canonical_target,
         "target_id": resolved_target_id,
         **extracted,
@@ -235,9 +307,10 @@ def client_bundle_inventory(
     manifest_result = write_inventory_manifest(inventory_manifest, manifest)
     return json.dumps(
         {
-            "source_artifact": source_ref,
             "extraction_artifact": extraction_ref,
             "inventory_manifest": manifest_result,
+            "formatted_artifact": formatted_ref,
+            "format_status": format_status,
             "api_path_count": len(extracted["api_paths"]),
             "spa_route_count": len(extracted["spa_routes"]),
             "external_origin_count": len(extracted["external_origins"]),
