@@ -1026,6 +1026,33 @@ def test_canonical_evidence_reference_rejects_non_durable_references(reference):
         mod._canonical_evidence_reference(reference)
 
 
+def test_bare_artifact_references_prefer_artifacts_and_canonicalize(fake_memory_client):
+    _client, _store = fake_memory_client
+    operation_root = Path(mod._operation_output_root())
+    artifacts_file = operation_root / "artifacts" / "response.txt"
+    root_file = operation_root / "response.txt"
+    artifacts_file.parent.mkdir(parents=True, exist_ok=True)
+    artifacts_file.write_text("artifact directory", encoding="utf-8")
+    root_file.write_text("operation root", encoding="utf-8")
+
+    assert mod._artifact_path_from_ref("response.txt") == str(artifacts_file)
+    assert mod.canonical_artifact_reference("response.txt") == "artifact:artifacts/response.txt"
+    assert mod._canonical_evidence_reference("response.txt") == "artifact:artifacts/response.txt"
+    assert mod._artifact_path_from_ref("artifact:response.txt") == str(root_file)
+
+
+def test_bare_artifact_reference_falls_back_to_operation_root_and_rejects_escape(fake_memory_client):
+    _client, _store = fake_memory_client
+    operation_root = Path(mod._operation_output_root())
+    root_file = operation_root / "root-only.txt"
+    operation_root.mkdir(parents=True, exist_ok=True)
+    root_file.write_text("operation root", encoding="utf-8")
+
+    assert mod.canonical_artifact_reference("root-only.txt") == "artifact:root-only.txt"
+    with pytest.raises(ValueError, match="outside the current operation output"):
+        mod.canonical_artifact_reference("../outside.txt")
+
+
 def test_task_proposal_defaults_procedure_output_to_artifact():
     payload = task_proposal("Check", "Check target")
     payload.pop("output_kind")

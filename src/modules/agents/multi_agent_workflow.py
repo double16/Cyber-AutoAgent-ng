@@ -7492,6 +7492,17 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
                 self._short(binding_failure),
             )
             return WorkflowDecision(status="partial_failure", reason=binding_failure)
+        execution_gate_satisfied, execution_requirement_ids = (
+            self._controller_execution_gate_status(task, resolved_acceptance_results)
+        )
+        if execution_requirement_ids and not execution_gate_satisfied:
+            decision = self._incomplete_execution_gate_decision(task)
+            self._log_workflow(
+                "task evaluator execution gate incomplete task=%s gaps=%s",
+                self._task_label(task),
+                len(decision.unresolved_evidence_gaps),
+            )
+            return decision
         data = self._run_json_text_agent(
             "task_evaluator",
             self._task_evaluator_prompt(
@@ -7627,8 +7638,45 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
             task,
         )
-        receipts = dict(current_task.recovery_context.get("execution_evidence_receipts") or {})
+        receipts = dict(
+            current_task.recovery_context.get("execution_evidence_receipts") or {}
+        )
         return set(required_ids).issubset(receipts), required_ids
+
+    def _incomplete_execution_gate_decision(self, task: Task) -> WorkflowDecision:
+        """Return the controller-owned repair decision for an incomplete gate."""
+
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        receipts = dict(
+            current_task.recovery_context.get("execution_evidence_receipts") or {}
+        )
+        requirements = [
+            requirement
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        ]
+        unresolved = [
+            requirement for requirement in requirements if requirement.id not in receipts
+        ]
+        if not unresolved:
+            unresolved = requirements
+        gaps = tuple(
+            f"{requirement.id}: {requirement.description} (subject: {requirement.subject_ref})"
+            for requirement in unresolved[:3]
+        )
+        return WorkflowDecision(
+            status="partial_failure",
+            reason="Controller execution gate is incomplete; required execution receipts are unresolved.",
+            instructions=(
+                "Produce current-operation durable evidence and controller execution receipts "
+                "for each listed gap."
+            ),
+            repair_kind="execution",
+            unresolved_evidence_gaps=gaps,
+        )
 
     def _evaluator_reopens_resolved_execution_gate(
         self,
@@ -8337,14 +8385,18 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             "- Maximum lines per page: 200",
             f"- Maximum UTF-8 bytes per page: "
             f"{artifact_max_bytes_for_context_window(self._artifact_context_window_tokens())}",
-            "- Evaluate the acceptance summaries, review digest, and controller-observed outcomes first.",
-            "- Controller execution receipts are authoritative for whether required execution occurred; never reread "
-            "artifacts to prove a receipt or tool invocation.",
-            "- Prefer smaller artifacts; read any artifact only when it resolves a concrete evidence gap.",
+            "- Acceptance summaries, review digest, and controller-observed outcomes are the default evidence for this "
+            "decision. Controller execution receipts are authoritative for whether required execution occurred; never "
+            "reread artifacts to prove a receipt or tool invocation.",
+            "- Read an artifact only for a named material contradiction or missing fact that the supplied summaries and "
+            "receipts cannot resolve. Prefer smaller artifacts.",
             "- Distinct pages must not overlap an already returned page. A duplicate, overlap, or exhausted budget returns "
-            "guidance without artifact content and does not justify another read.",
+            "guidance without artifact content. You may consider another listed artifact for a different material gap, "
+            "but never retry that unavailable page or artifact.",
             "- A larger artifact requires explicit byte paging. Use it only for an unresolved material gap, not routine "
-            "review; max_lines may further narrow a byte page, and next_start_byte continues after returned content.",
+            "review; max_lines may further narrow a byte page, and next_start_byte continues after returned content. "
+            "If the controller closes artifact access at its hard stop, synthesize immediately from the supplied "
+            "summaries and receipts.",
             "- Return the required JSON decision once you have the needed evidence.",
             "",
             "Smaller artifact references:",
@@ -10099,6 +10151,7 @@ Allowed evidence references:
         max_token_retries = 0
         pending_reasoning: Optional[tuple[str, str]] = None
         pending_token_escalation: Optional[tuple[str, int]] = None
+        artifact_synthesis_active = False
         schema_retry_limit = 1 if role == "task_evaluator" else self.json_retries
         maximum_attempts = 1 + self.json_retries + schema_retry_limit + 1
         for attempt in range(maximum_attempts):
@@ -10114,7 +10167,9 @@ Allowed evidence references:
             )
             self._log_workflow("json agent role=%s attempt=%s max_retries=%s", role, attempt + 1, self.json_retries)
             try:
-                attempt_tools = tool_factory() if tool_factory is not None else tools
+                attempt_tools = [] if artifact_synthesis_active else (
+                    tool_factory() if tool_factory is not None else tools
+                )
                 response = self.text_runner(role, current_prompt, attempt_tools, system_prompt)
                 if pending_reasoning:
                     target_lvl, rsn = pending_reasoning
@@ -10137,13 +10192,24 @@ Allowed evidence references:
                     cycle=cycle,
                     cycle_total=cycle_total,
                 )
-                fallback = self._evaluator_artifact_read_limit_fallback(error, evaluator_fallback_context)
-                self._emit_workflow_event(fallback["event"])
+                if artifact_synthesis_active:
+                    fallback = self._evaluator_artifact_read_limit_fallback(error, evaluator_fallback_context)
+                    self._emit_workflow_event(fallback["event"])
+                    return fallback["data"]
+                artifact_synthesis_active = True
+                current_prompt = self._task_evaluator_artifact_synthesis_prompt(prompt, error)
+                event = {
+                    "type": "evaluator_artifact_synthesis",
+                    "role": role,
+                    "source": "artifact_read_limit_hard_stop",
+                }
+                event.update(evaluator_fallback_context or {})
+                self._emit_workflow_event(event)
                 self._log_workflow(
-                    "task evaluator stopped after bounded artifact-read limit violation context=%s",
+                    "task evaluator reached the bounded artifact-read hard stop; retrying once without tools context=%s",
                     self._short(evaluator_fallback_context or {}),
                 )
-                return fallback["data"]
+                continue
             except MaxTokensReachedException as error:
                 sanitize_sdk_error(error)
                 self._emit_workflow_activity(
@@ -10204,7 +10270,8 @@ Allowed evidence references:
                     registry.boost_max_tokens_for_retry(role, boost_amount=2048)
                     pending_token_escalation = (role, previous_tokens)
 
-                current_prompt = self._json_max_token_retry_prompt(prompt, kind)
+                retry_base_prompt = current_prompt if artifact_synthesis_active else prompt
+                current_prompt = self._json_max_token_retry_prompt(retry_base_prompt, kind)
                 continue
             last_response = response
             if role in {"phase_evaluator", "task_evaluator"} and not str(response or "").strip():
@@ -10255,8 +10322,9 @@ Allowed evidence references:
                     self._short(error),
                     self._short(response),
                 )
+                retry_base_prompt = current_prompt if artifact_synthesis_active else prompt
                 current_prompt = self._json_retry_prompt(
-                    prompt,
+                    retry_base_prompt,
                     error,
                     response,
                     include_previous_response=role in {"taxonomy_annotator", "attack_enricher"},
@@ -10288,8 +10356,9 @@ Allowed evidence references:
                     self._short(error),
                     self._short(response),
                 )
+                retry_base_prompt = current_prompt if artifact_synthesis_active else prompt
                 current_prompt = self._json_retry_prompt(
-                    prompt,
+                    retry_base_prompt,
                     error,
                     response,
                     include_previous_response=role in {"task_evaluator", "taxonomy_annotator", "attack_enricher"},
@@ -10410,6 +10479,25 @@ Allowed evidence references:
             },
             "event": event,
         }
+
+    @staticmethod
+    def _task_evaluator_artifact_synthesis_prompt(
+        prompt: str,
+        error: EvaluatorArtifactReadLimitExceeded,
+    ) -> str:
+        """Close artifact access after the hard stop and require a final decision."""
+
+        return f"""{prompt}
+
+## Final synthesis after artifact-read hard stop
+The controller has closed artifact access after the evaluator reached its terminal read guard: {error}.
+You have no tools for this final pass. Do not request, mention, or wait for another artifact read. Synthesize the
+required JSON decision now from the acceptance summaries, controller execution-gate receipt, tool-outcome excerpts,
+and any already-returned artifact content in this prompt. Those controller-provided records are the available evidence
+for this decision. An artifact that was too large, unreadable, page-limited, or guard-blocked is not by itself an
+evidence gap; identify a gap only when the available summaries and receipts fail to support a material frozen
+criterion. Return the JSON decision immediately.
+"""
 
     @staticmethod
     def _evaluator_prose_fallback(response: str) -> Optional[Dict[str, Any]]:
@@ -11552,8 +11640,9 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
   requirements are satisfied, a historical failed acceptance attempt is not an unresolved execution gap. Do not return
   an execution repair for that historical failure; evaluate only independent semantic-quality concerns. Do not call
   read_artifact to verify controller execution receipts or tool invocations.
-- A recorded status is not self-proving. Use partial_failure when its summary or evidence references do not support the
-  corresponding frozen criterion and status.
+- Treat the acceptance summaries and controller receipts supplied here as the primary evidence. A recorded status needs
+  partial_failure only when those supplied records materially conflict with, or fail to support, its frozen criterion;
+  artifact size, read limits, or an unavailable page alone do not create that gap.
 - Use partial_failure when useful progress was made but any material part remains unsupported.
 - Require memory or observation evidence only when the frozen criterion explicitly declares that evidence kind.
   Automatically published acceptance memory supports later tasks but is not an additional acceptance criterion.

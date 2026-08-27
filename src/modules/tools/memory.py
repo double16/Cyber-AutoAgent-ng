@@ -5618,6 +5618,13 @@ _RE_NUMERIC_ID = re.compile(r'(?<=/|=)\d+(?=$|/|&|\s)')
 
 
 def _artifact_path_from_ref(reference: str) -> str:
+    """Resolve an operation-local artifact reference without escaping its root.
+
+    Bare relative paths are accepted for compatibility with artifact-producing
+    tools and resolve from ``artifacts/`` before the operation root. Explicit
+    ``artifact:`` references retain their exact operation-relative meaning.
+    """
+
     text = str(reference or "").strip()
     if text.startswith("artifact_id:"):
         artifact_id = text.split(":", 1)[1]
@@ -5625,17 +5632,24 @@ def _artifact_path_from_ref(reference: str) -> str:
             raise ValueError("artifact_id must contain one artifact filename")
         text = f"artifact:artifacts/{artifact_id}"
     raw_path = text.removeprefix("artifact:")
-    root = _operation_output_root()
-    candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root, raw_path)
-    resolved = os.path.realpath(candidate)
-    if os.path.commonpath([root, resolved]) != root:
-        raise ValueError(
-            f"Artifact is outside the current operation output {root}: {reference}. "
-            "Use a path relative to the current operation output with the artifact: prefix."
-        )
-    if not os.path.isfile(resolved):
-        raise ValueError(f"Artifact does not exist: {reference}")
-    return resolved
+    root = os.path.realpath(_operation_output_root())
+    if os.path.isabs(raw_path):
+        candidates = [raw_path]
+    elif text.startswith("artifact:") or raw_path.startswith("artifacts/"):
+        candidates = [os.path.join(root, raw_path)]
+    else:
+        candidates = [os.path.join(root, "artifacts", raw_path), os.path.join(root, raw_path)]
+
+    for candidate in candidates:
+        resolved = os.path.realpath(candidate)
+        if os.path.commonpath([root, resolved]) != root:
+            raise ValueError(
+                f"Artifact is outside the current operation output {root}: {reference}. "
+                "Use a path relative to the current operation output with the artifact: prefix."
+            )
+        if os.path.isfile(resolved):
+            return resolved
+    raise ValueError(f"Artifact does not exist: {reference}")
 
 
 def _is_inventory_manifest_candidate(reference: str) -> bool:
@@ -5668,7 +5682,8 @@ def canonical_artifact_reference(reference: str) -> str:
 
 _CANONICAL_ACCEPTANCE_EVIDENCE_HELP = (
     "Acceptance evidence references must use one of: artifact:artifacts/<file>, artifact_id:<id>, memory:<id>, "
-    "or finding:<id>. Raw URLs, shell commands, tool IDs, and inline output are invalid. "
+    "or finding:<id>. Bare current-operation relative artifact paths are accepted for compatibility and resolve "
+    "from artifacts/ first. Raw URLs, shell commands, tool IDs, and inline output are invalid. "
     "Example: artifact:artifacts/http_response.txt"
 )
 
@@ -5695,11 +5710,14 @@ def _acceptance_evidence_memory_error(reference: str) -> ValueError:
 
 def _canonical_evidence_reference(reference: str) -> str:
     text = str(reference or "").strip()
-    if text.startswith(("artifact:", "artifact_id:")) or os.path.isabs(text) or text.startswith("artifacts/"):
-        return canonical_artifact_reference(text)
     if text.startswith(("memory:", "finding:")):
         return text
-    raise _acceptance_evidence_reference_error()
+    try:
+        return canonical_artifact_reference(text)
+    except ValueError as error:
+        if text.startswith(("artifact:", "artifact_id:")) or os.path.isabs(text) or text.startswith("artifacts/"):
+            raise
+        raise _acceptance_evidence_reference_error() from error
 
 
 class _InventoryLinkParser(HTMLParser):

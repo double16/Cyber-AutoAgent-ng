@@ -1404,7 +1404,12 @@ def test_same_cycle_acceptance_resolves_live_http_request_evidence(monkeypatch, 
     assert captured["resolved"] == {
         "criterion-1-execution-1": ["artifact:artifacts/root-response.log"]
     }
-    assert captured["run_count"] == 1
+    assert captured["run_count"] == 2
+    assert any(
+        event["type"] == "evaluator_execution_repair"
+        and event["outcome"] == "scheduled"
+        for event in controller.runtime.callback_handler.events
+    )
     assert next(item for item in state.tasks if item.task_uid == task.task_uid).status == "done"
 
 
@@ -2861,6 +2866,80 @@ def test_task_evaluator_execution_feedback_remains_when_controller_receipt_is_mi
     )
 
 
+def test_incomplete_execution_gate_forces_controller_owned_execution_repair():
+    plan = _plan()
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Crawl the assigned target",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce execution evidence for crawl against target:target-1.",
+            "target:target-1",
+        )],
+    )
+    task = TaskModel(
+        task_uid="incomplete-execution-gate",
+        title="Crawl target",
+        objective="Crawl target",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Crawl target",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["crawl"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task])
+    state.acceptance_results[task.task_uid] = [AcceptanceResult(
+        criterion_id="criterion-1",
+        status="satisfied",
+        disposition="finding_candidate",
+        summary="Worker reported successful crawl evidence.",
+        evidence_refs=("artifact:artifacts/crawl.json",),
+    )]
+    evaluator_calls = []
+
+    def unexpected_evaluator_call(*args):
+        evaluator_calls.append(args)
+        raise AssertionError("incomplete execution gates must not invoke the LLM evaluator")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=unexpected_evaluator_call,
+    )
+
+    decision = controller._evaluate_task(
+        plan,
+        plan.phases[0],
+        task,
+        acceptance_results=state.list_task_acceptance_results(task.task_uid),
+    )
+
+    assert evaluator_calls == []
+    assert decision.status == "partial_failure"
+    assert decision.repair_kind == "execution"
+    assert decision.unresolved_evidence_gaps == (
+        "criterion-1-execution-1: Produce execution evidence for crawl against target:target-1. "
+        + "(subject: target:target-1)",
+    )
+    assert "execution gate is incomplete" in decision.reason
+
+
 def test_task_evaluator_retries_schema_valid_non_decision_response():
     plan = _plan()
     task = Task(task_uid="schema-retry", title="Assess", objective="run", phase=1, status="active")
@@ -2951,14 +3030,16 @@ def test_empty_task_evaluator_response_does_not_retry():
     assert calls == ["task_evaluator"]
 
 
-def test_task_evaluator_artifact_read_limit_exhaustion_falls_back_without_retry():
+def test_task_evaluator_artifact_read_limit_exhaustion_synthesizes_without_tools():
     plan = _plan()
     task = Task(task_uid="artifact-limit", title="Assess", objective="run", phase=1, status="active")
     calls = []
 
     def text_runner(*args):
-        calls.append(args[0])
-        raise workflow_mod.EvaluatorArtifactReadLimitExceeded("read allowance exhausted")
+        calls.append(args)
+        if len(calls) == 1:
+            raise workflow_mod.EvaluatorArtifactReadLimitExceeded("read allowance exhausted")
+        return '{"status":"done","reason":"controller receipt supports the criterion","instructions":""}'
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 3}),
@@ -2969,11 +3050,16 @@ def test_task_evaluator_artifact_read_limit_exhaustion_falls_back_without_retry(
 
     decision = controller._evaluate_task(plan, plan.phases[0], task)
 
-    assert decision.status == "partial_failure"
-    assert "bounded artifact-read allowance twice" in decision.reason
-    assert calls == ["task_evaluator"]
-    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_fallback")
-    assert event["source"] == "artifact_read_limit_exhausted"
+    assert decision.status == "done"
+    assert len(calls) == 2
+    assert calls[0][0] == "task_evaluator"
+    assert calls[1][0] == "task_evaluator"
+    assert calls[1][2] == []
+    assert "Final synthesis after artifact-read hard stop" in calls[1][1]
+    event = next(
+        event for event in controller.runtime.callback_handler.events if event["type"] == "evaluator_artifact_synthesis"
+    )
+    assert event["source"] == "artifact_read_limit_hard_stop"
     assert event["task_uid"] == "artifact-limit"
 
 
@@ -12961,7 +13047,7 @@ def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(m
     assert "- Successful pages per artifact: 4" in prompt
     assert "- Maximum lines per page: 200" in prompt
     assert "- Maximum UTF-8 bytes per page: 19200" in prompt
-    assert "Evaluate the acceptance summaries, review digest, and controller-observed outcomes first" in prompt
+    assert "Acceptance summaries, review digest, and controller-observed outcomes are the default evidence" in prompt
     assert "Controller execution receipts are authoritative" in prompt
     assert "never reread artifacts to prove a receipt or tool invocation" in prompt
     assert artifact_refs[0] in prompt

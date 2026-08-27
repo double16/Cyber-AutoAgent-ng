@@ -17,13 +17,14 @@ from strands.agent.conversation_manager import SummarizingConversationManager
 from strands.types.exceptions import ContextWindowOverflowException
 
 from modules.handlers.conversation_budget import (
-    LargeToolResultMapper,
-    MappingConversationManager,
     PROACTIVE_COMPRESSION_THRESHOLD,
     TOOL_COMPRESS_THRESHOLD,
     TOOL_COMPRESS_TRUNCATE,
-    _estimate_prompt_tokens_for_agent,
+    LargeToolResultMapper,
+    MappingConversationManager,
+    _compact_failed_tool_outputs,
     _compact_stale_tool_outputs,
+    _estimate_prompt_tokens_for_agent,
     safe_estimate_tokens,
 )
 
@@ -546,6 +547,26 @@ class TestToolResultCompression:
         assert "artifact:artifacts/result.txt" in summary["references"]
         assert "memory:m-1" in summary["references"]
         assert any('"task_uid":"task-1"' in value for value in summary["workflow_state"])
+
+    def test_failed_tool_outputs_are_compacted_before_normal_compression(self):
+        generator = MockDataGenerator(CLAUDE_SONNET_CONFIG)
+        failed = generator.create_tool_result_message(
+            "shell",
+            "artifact:artifacts/failed.txt " + ("traceback " * 500),
+        )
+        failed["content"][0]["toolResult"]["status"] = "error"
+        successful = generator.create_tool_result_message("shell", "result " * 1000)
+        agent = MockAgent(
+            [failed, successful, generator.create_assistant_message("recent")],
+            CLAUDE_SONNET_CONFIG,
+        )
+
+        assert _compact_failed_tool_outputs(agent, preserve_recent=1) == 1
+        failed_summary = failed["content"][0]["toolResult"]["content"][0]["json"]
+        assert failed_summary["compacted_failure"] is True
+        assert failed_summary["status"] == "error"
+        assert "artifact:artifacts/failed.txt" in failed_summary["references"]
+        assert successful["content"][0]["toolResult"]["content"][0]["text"].startswith("result")
 
     def test_compression_produces_valid_structure(self):
         """Verify compressed results maintain valid message structure."""

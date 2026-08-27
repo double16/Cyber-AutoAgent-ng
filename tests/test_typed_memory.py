@@ -968,6 +968,49 @@ def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, o
     assert acceptance_results[0].disposition == "existing_finding"
 
 
+def test_record_finding_validation_canonicalizes_bare_artifact_references(tmp_path: Path, operation_ids, memory_client):
+    artifact = tmp_path / "artifacts" / "response.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("HTTP 200", encoding="utf-8")
+    validation_acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["finding:finding-1"]),
+        criteria=[AcceptanceCriterion(
+            id="verify-finding:finding-1",
+            description="Verify finding",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    task = Task(
+        "task-1", "Verify", "Verify claim", validation_acceptance, 1, "active",
+        kind="finding_validation", reference_id="finding-1"
+    )
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "evidence_assertions": [{"artifact": "artifact:artifacts/response.txt", "marker": "HTTP 200"}],
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    acceptance_results = []
+    plan_store.get_acceptance_results.side_effect = lambda *_args: list(acceptance_results)
+    plan_store.store_acceptance_results.side_effect = (
+        lambda _op_id, _task_uid, results: acceptance_results.extend(results)
+    )
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry"),
+    ):
+        record_finding_validation(
+            "finding-1", "confirmed", "Confirmed", ["Request target"], "direct", ["response.txt"]
+        )
+
+    validation = plan_store.store_finding_validation.call_args.args[2]
+    assert validation["evidence_artifacts"] == ["artifact:artifacts/response.txt"]
+
+
 @pytest.mark.parametrize(
     ("reproduction_steps", "evidence_artifacts", "expected_error"),
     [

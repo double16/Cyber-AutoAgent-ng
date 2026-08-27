@@ -269,6 +269,55 @@ def _compact_stale_tool_outputs(agent: Agent, preserve_recent: int) -> int:
     return compacted
 
 
+def _compact_failed_tool_outputs(agent: Agent, preserve_recent: int) -> int:
+    """Replace stale failed tool payloads with bounded, actionable failure receipts.
+
+    Failed calls are useful for their status, references, and a short diagnostic, but
+    their complete output is rarely useful after the recovery turn that follows. Do
+    this before general result compression so a large traceback cannot displace the
+    later successful correction or controller guidance from the conversation.
+    """
+
+    messages = getattr(agent, "messages", None)
+    if not isinstance(messages, list):
+        return 0
+    stale_limit = max(0, len(messages) - max(1, preserve_recent))
+    reference_pattern = re.compile(r"\b(?:artifact|artifact_id|memory|finding):[^\s\],}\\\"]+")
+    compacted = 0
+    for message in messages[:stale_limit]:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or "toolResult" not in block:
+                continue
+            tool_result = block.get("toolResult")
+            if not isinstance(tool_result, dict):
+                continue
+            status = str(tool_result.get("status", "")).lower()
+            if status in {"success", "completed", "ok"}:
+                continue
+            result_content = tool_result.get("content", [])
+            rendered = _json_to_compact_str(result_content)
+            if not rendered or len(rendered) <= STALE_TOOL_RESULT_THRESHOLD:
+                continue
+            references = list(dict.fromkeys(reference_pattern.findall(rendered)))
+            excerpt = " ".join(rendered.split())[:500]
+            tool_result["content"] = [{
+                "json": {
+                    "compacted_failure": True,
+                    "status": tool_result.get("status"),
+                    "original_chars": len(rendered),
+                    "references": references,
+                    "error_excerpt": excerpt,
+                }
+            }]
+            compacted += 1
+    if compacted:
+        logger.info("Compacted %d stale failed tool result(s) before normal compression", compacted)
+    return compacted
+
+
 def _record_context_reduction_event(
     agent: Agent,
     *,
@@ -828,7 +877,13 @@ class MappingConversationManager(SummarizingConversationManager):
                 window_size
             )
 
-        # Apply mapper compression first
+        # Failed calls are collapsed before generic compression so recovery receipts
+        # remain visible without retaining large tracebacks or duplicate diagnostics.
+        failed_compactions = _compact_failed_tool_outputs(agent, self.preserve_last)
+        if failed_compactions:
+            self.removed_message_count += failed_compactions
+
+        # Apply mapper compression after failed-call pruning.
         self._apply_mapper(agent)
 
         # Check for window overflow and force prune if needed
