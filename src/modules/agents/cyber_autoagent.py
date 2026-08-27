@@ -1085,6 +1085,8 @@ def create_agent(
             emit_operation_init=False,
             start_metrics_thread=False,
         )
+    if getattr(callback_handler, "agent_run_id", None):
+        trace_attributes["cyber.agent.run_id"] = str(callback_handler.agent_run_id)
 
     agent_hooks = list(runtime.hooks) if runtime.hooks else []
     failure_recovery_hook = None

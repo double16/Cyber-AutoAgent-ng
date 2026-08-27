@@ -9464,6 +9464,41 @@ def test_validation_phase_marks_missing_verification_task_partial_without_task_c
     assert state.plan.assessment_complete is True
 
 
+def test_validation_phase_recreates_missing_verification_task_from_persisted_packet():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(
+            id=1,
+            title="Impact Validation and Proof Generation",
+            status="active",
+            criteria="Validate findings with proof",
+        )],
+    )
+    state = FakeState(plan, finding_records=[{
+        "finding_uid": "finding-1",
+        "verification_task_uid": "missing-task",
+        "resolution": None,
+        "candidate_data": {"title": "Config exposure", "verification_packet": {
+            "target": "http://target.test/config",
+            "artifacts": ["artifact:evidence.json"],
+            "target_scope": "subset",
+            "target_ids": ["target-1"],
+        }},
+    }])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state
+    )
+
+    controller._recover_missing_finding_validation_tasks(plan.phases[0])
+
+    assert len(state.tasks) == 1
+    assert state.tasks[0].kind == "finding_validation"
+    assert state.tasks[0].reference_id == "finding-1"
+    assert state.finding_records[0]["verification_task_uid"] == state.tasks[0].task_uid
+
+
 def test_validation_phase_with_terminal_history_marks_missing_verification_task_partial():
     plan = OperationPlan(
         objective="assess",

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from opentelemetry import trace as otel_trace
 from strands.handlers import PrintingCallbackHandler
 
 from modules.config.system.logger import get_logger
@@ -1232,10 +1233,38 @@ class AgentEventHandler(PrintingCallbackHandler):
         classification: str,
         exhaustion_ordinal: int,
         agent: Any = None,
+        failure_snapshot: Any = None,
+        failure_type: str = "MaxTokensReachedException",
     ) -> None:
         """Account for and expose one observed max-token exhaustion."""
 
         self.record_efficiency_event("max_token_exhaustion", agent=agent)
+        snapshot = failure_snapshot or {}
+        usage = getattr(snapshot, "usage", {}) or {}
+        span = otel_trace.get_current_span()
+        span_context = span.get_span_context()
+        generation_id = format(span_context.span_id, "016x") if span_context.is_valid else ""
+        failure_record = {
+            "generation_id": generation_id,
+            "agent_run_id": str(self.agent_run_id or ""),
+            "stop_reason": "max_tokens",
+            "failure_type": str(failure_type or "MaxTokensReachedException"),
+            "max_token_classification": str(classification or "unknown"),
+            "usage": dict(usage),
+            "recorded_reasoning": str(getattr(snapshot, "recorded_reasoning", "") or ""),
+            "partial_output": str(getattr(snapshot, "partial_output", "") or ""),
+        }
+        with otel_trace.get_tracer(__name__).start_as_current_span(
+            "generation_failure",
+            attributes={
+                "langfuse.observation.type": "event",
+                "workflow.event.name": "generation_failure",
+                "workflow.failure.record": json.dumps(failure_record, sort_keys=True),
+                "workflow.failure.agent_run_id": failure_record["agent_run_id"],
+                "workflow.failure.generation_id": generation_id,
+            },
+        ):
+            pass
         self.emit_ui_event(
             {
                 "type": "model_max_token_exhaustion",

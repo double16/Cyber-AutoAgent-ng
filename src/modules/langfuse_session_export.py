@@ -7,32 +7,20 @@ command does not initialize Ragas or the assessment evaluation stack.
 import argparse
 import json
 import os
-import re
 import sys
 import tempfile
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from langfuse import Langfuse
 import yaml
+from langfuse import Langfuse
 
+from modules.utils.redaction import REDACTED, redact
 
 DEFAULT_LANGFUSE_HOST = "http://localhost:3000"
 DEFAULT_OUTPUT_FORMAT = "yaml"
 OUTPUT_FORMATS = ("json", "yaml")
-REDACTED = "[REDACTED]"
-SENSITIVE_KEY_PATTERN = re.compile(
-    r"(?:api[_-]?key|secret|password|token|authorization|cookie|credential|private[_-]?key|access[_-]?key)",
-    re.IGNORECASE,
-)
-TEXT_REDACTION_PATTERNS = (
-    re.compile(r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+"),
-    re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+=*"),
-    re.compile(r"(?i)\b((?:api[_-]?key|secret|password|token|access[_-]?key)\s*[:=]\s*)[^\s,;]+"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@"),
-)
 
 REVIEW_INSTRUCTIONS = (
     "Review each generation's prompts, recorded reasoning, response, and tool decisions. "
@@ -57,29 +45,6 @@ def _timestamp(value: Any) -> str | None:
         return None
     isoformat = getattr(value, "isoformat", None)
     return isoformat() if callable(isoformat) else str(value)
-
-
-def redact(value: Any) -> Any:
-    """Recursively remove common secrets while retaining the surrounding review context."""
-    if isinstance(value, Mapping):
-        return {
-            str(key): REDACTED if SENSITIVE_KEY_PATTERN.search(str(key)) else redact(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [redact(item) for item in value]
-    if isinstance(value, tuple):
-        return [redact(item) for item in value]
-    if not isinstance(value, str):
-        return value
-
-    redacted = value
-    for pattern in TEXT_REDACTION_PATTERNS:
-        if pattern.groups >= 1:
-            redacted = pattern.sub(lambda match: f"{match.group(1)}{REDACTED}", redacted)
-        else:
-            redacted = pattern.sub(REDACTED, redacted)
-    return redacted
 
 
 def _as_json(value: Any) -> Any:
@@ -221,7 +186,7 @@ class LangfuseSessionExporter:
 
         records = [self._trace_record(trace) for trace in sorted(traces, key=self._trace_sort_key)]
         packet: dict[str, Any] = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "review_instructions": REVIEW_INSTRUCTIONS,
             "session_id": session_id,
             "traces": records,
@@ -238,11 +203,14 @@ class LangfuseSessionExporter:
         metadata = _get(trace, "metadata", {}) or {}
         attributes = _get(metadata, "attributes", {}) or {}
         role = _get(attributes, "langfuse.agent.type") or _get(metadata, "agent_type")
+        observations = sorted(_get(trace, "observations", []) or [], key=self._observation_sort_key)
         generations = [
             self._generation_record(observation)
-            for observation in sorted(_get(trace, "observations", []) or [], key=self._observation_sort_key)
+            for observation in observations
             if str(_get(observation, "type", "")).upper() == "GENERATION"
         ]
+        failures = [failure for observation in observations if (failure := self._failure_record(observation))]
+        unmatched = self._attach_failures(generations, failures)
         record: dict[str, Any] = {
             "trace_id": str(_get(trace, "id", "unknown")),
             "trace_name": redact(str(_get(trace, "name", "Unnamed trace"))),
@@ -250,7 +218,59 @@ class LangfuseSessionExporter:
         }
         if role:
             record["agent_role"] = redact(str(role))
+        if unmatched:
+            record["unmatched_generation_failures"] = unmatched
         return record
+
+    @staticmethod
+    def _attributes(observation: Any) -> Mapping[str, Any]:
+        metadata = _get(observation, "metadata", {}) or {}
+        return _get(metadata, "attributes", {}) or _get(observation, "attributes", {}) or {}
+
+    def _failure_record(self, observation: Any) -> dict[str, Any] | None:
+        attributes = self._attributes(observation)
+        encoded = attributes.get("workflow.failure.record")
+        if attributes.get("workflow.event.name") != "generation_failure" or not encoded:
+            return None
+        record = _as_json(encoded)
+        if not isinstance(record, Mapping):
+            return None
+        return {
+            "generation_id": str(record.get("generation_id") or ""),
+            "agent_run_id": str(record.get("agent_run_id") or ""),
+            "stop_reason": str(record.get("stop_reason") or "max_tokens"),
+            "failure_type": str(record.get("failure_type") or "unknown"),
+            "max_token_classification": str(record.get("max_token_classification") or "unknown"),
+            "usage": redact(record.get("usage") or {}),
+            "recorded_reasoning": redact(str(record.get("recorded_reasoning") or "")),
+            "partial_output": redact(str(record.get("partial_output") or "")),
+            "timestamp": self._observation_sort_key(observation),
+        }
+
+    @staticmethod
+    def _attach_failures(generations: list[dict[str, Any]], failures: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        unmatched = []
+        for failure in failures:
+            exact = next((item for item in generations if item["generation_id"] == failure["generation_id"]), None)
+            target = exact
+            method = "exact_generation_id" if target else ""
+            if target is None:
+                compatible = [
+                    item for item in generations
+                    if not failure["agent_run_id"] or item.get("agent_run_id") == failure["agent_run_id"]
+                ]
+                if compatible:
+                    target = compatible[-1]
+                    method = "inferred_agent_run_timestamp"
+            if target is None:
+                unmatched.append(failure)
+                continue
+            attached = dict(failure)
+            attached["generation_id"] = target["generation_id"]
+            attached["correlation_method"] = method
+            attached["correlation_confidence"] = "exact" if method == "exact_generation_id" else "inferred"
+            target["failure"] = attached
+        return unmatched
 
     @staticmethod
     def _observation_sort_key(observation: Any) -> str:
@@ -263,6 +283,9 @@ class LangfuseSessionExporter:
             "generation_id": str(_get(observation, "id", "unknown")),
             "prompts": _messages(_get(observation, "input")),
         }
+        agent_run_id = LangfuseSessionExporter._attributes(observation).get("cyber.agent.run_id")
+        if agent_run_id:
+            record["agent_run_id"] = str(agent_run_id)
         if reasoning:
             record["recorded_reasoning"] = reasoning
         if response:

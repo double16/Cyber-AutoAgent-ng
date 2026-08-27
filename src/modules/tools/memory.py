@@ -6762,6 +6762,7 @@ def _create_tasks_from_proposals(
     phase_title: str = "",
     phase_objective: str = "",
     required_finding_refs: Optional[set[str]] = None,
+    finding_ref_aliases: Optional[Dict[str, str]] = None,
     phase_task_contract: Any = None,
     proposal_preflight_validator: Optional[Callable[[List[TaskProposal]], None]] = None,
     reject_duplicate_proposals: bool = False,
@@ -6818,6 +6819,11 @@ def _create_tasks_from_proposals(
             str(reference).strip() for reference in proposal.finding_refs if str(reference).strip()
         ))
         if required_finding_refs is not None:
+            aliases = finding_ref_aliases or {}
+            if not finding_refs and len(required_finding_refs) == 1:
+                finding_refs = [next(iter(required_finding_refs))]
+            finding_refs = [aliases.get(reference, reference) for reference in finding_refs]
+            finding_refs = list(dict.fromkeys(finding_refs))
             if not finding_refs:
                 raise ValueError("finding-dependent task proposal requires at least one canonical finding_refs entry")
             invalid_finding_refs = sorted(set(finding_refs) - required_finding_refs)
@@ -7154,6 +7160,7 @@ def build_create_tasks_tool(
     phase_title: str = "",
     phase_objective: str = "",
     required_finding_refs: Optional[set[str]] = None,
+    finding_ref_aliases: Optional[Dict[str, str]] = None,
     phase_task_contract: Any = None,
     proposal_preflight_validator: Optional[Callable[[List[TaskProposal]], None]] = None,
     reject_duplicate_proposals: bool = False,
@@ -7180,6 +7187,7 @@ def build_create_tasks_tool(
                 phase_title=phase_title,
                 phase_objective=phase_objective,
                 required_finding_refs=required_finding_refs,
+                finding_ref_aliases=finding_ref_aliases,
                 phase_task_contract=phase_task_contract,
                 proposal_preflight_validator=proposal_preflight_validator,
                 reject_duplicate_proposals=reject_duplicate_proposals,

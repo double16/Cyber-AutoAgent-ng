@@ -6,10 +6,10 @@ import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
+from modules.utils.redaction import bounded_redacted_text
 from modules.utils.text_reducer import collapse_first_repeated_sequence
-
 
 _WORD_RE = re.compile(r"\w+")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -25,9 +25,18 @@ class MaxTokenClassification:
 
     kind: str
     repetition_ratio: float
-    pattern_hash: Optional[str]
+    pattern_hash: str | None
     discarded_tokens: int
     is_reasoning_induced: bool = False
+
+
+@dataclass(frozen=True)
+class MaxTokenFailureSnapshot:
+    """Redacted excerpts and controller-safe counters for one interrupted generation."""
+
+    recorded_reasoning: str
+    partial_output: str
+    usage: dict[str, int]
 
 
 def _message_parts(message: Any) -> tuple[str, str, bool]:
@@ -78,7 +87,7 @@ def _logical_units(text: str) -> list[str]:
 def classify_max_token_output(
     text: str,
     has_reasoning: bool = False,
-    active_reasoning_level: Optional[str] = None,
+    active_reasoning_level: str | None = None,
 ) -> MaxTokenClassification:
     """Classify an incomplete response without retaining any of its claims."""
 
@@ -139,7 +148,7 @@ def discard_incomplete_assistant_message(agent: Any) -> tuple[str, bool, bool]:
 
 
 def classify_and_discard_max_token_output(
-    agent: Any, active_reasoning_level: Optional[str] = None
+    agent: Any, active_reasoning_level: str | None = None
 ) -> tuple[MaxTokenClassification, bool]:
     """Discard the incomplete tail and return content-free classification metadata."""
 
@@ -147,6 +156,31 @@ def classify_and_discard_max_token_output(
     return classify_max_token_output(
         text, has_reasoning=has_reasoning, active_reasoning_level=active_reasoning_level
     ), removed
+
+
+def capture_and_discard_max_token_output(
+    agent: Any, active_reasoning_level: str | None = None
+) -> tuple[MaxTokenClassification, bool, MaxTokenFailureSnapshot]:
+    """Capture bounded redacted diagnostics before removing an incomplete assistant tail."""
+
+    messages = getattr(agent, "messages", None)
+    message = messages[-1] if isinstance(messages, list) and messages else None
+    combined, reasoning, _has_reasoning = _message_parts(message)
+    output = combined
+    if reasoning and output.endswith(reasoning):
+        output = output[: -len(reasoning)].rstrip()
+    usage = getattr(getattr(agent, "event_loop_metrics", None), "accumulated_usage", {}) or {}
+    counters = {
+        key: int(usage.get(key, 0) or 0)
+        for key in ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens")
+        if isinstance(usage, dict)
+    }
+    classification, removed = classify_and_discard_max_token_output(agent, active_reasoning_level)
+    return classification, removed, MaxTokenFailureSnapshot(
+        recorded_reasoning=bounded_redacted_text(reasoning),
+        partial_output=bounded_redacted_text(output),
+        usage=counters,
+    )
 
 
 def reset_agent_conversation_for_recovery(agent: Any) -> bool:
@@ -170,7 +204,7 @@ def is_repeated_max_token_pattern(agent: Any, classification: MaxTokenClassifica
     seen = getattr(agent, "_max_token_pattern_hashes", None)
     if not isinstance(seen, set):
         seen = set()
-        setattr(agent, "_max_token_pattern_hashes", seen)
+        agent._max_token_pattern_hashes = seen
     repeated = classification.pattern_hash in seen
     seen.add(classification.pattern_hash)
     return repeated

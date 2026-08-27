@@ -149,6 +149,45 @@ def test_marks_unavailable_traces_but_exports_available_content():
     assert packet["unavailable_traces"] == [{"trace_id": "missing", "error": "not found"}]
 
 
+def test_attaches_redacted_max_token_failure_by_agent_run_when_generation_id_is_unavailable():
+    generation = _generation(
+        observation_id="g1",
+        start_time="2026-01-01T00:00:00Z",
+        input_data=[{"role": "user", "content": "Assess this."}],
+        output={"content": [{"text": "partial"}]},
+    )
+    generation.metadata = {"attributes": {"cyber.agent.run_id": "run-1"}}
+    failure = SimpleNamespace(
+        type="EVENT",
+        start_time="2026-01-01T00:01:00Z",
+        metadata={"attributes": {
+            "workflow.event.name": "generation_failure",
+            "workflow.failure.record": json.dumps({
+                "generation_id": "",
+                "agent_run_id": "run-1",
+                "stop_reason": "max_tokens",
+                "failure_type": "MaxTokensReachedException",
+                "max_token_classification": "reasoning_loop",
+                "usage": {"outputTokens": 42},
+                "recorded_reasoning": "Authorization: Bearer hidden",
+                "partial_output": "API_KEY=hidden",
+            }),
+        }},
+    )
+    trace = SimpleNamespace(id="trace-1", name="trace", metadata={}, observations=[generation, failure])
+
+    packet = exporter.LangfuseSessionExporter(
+        _client(SimpleNamespace(traces=[SimpleNamespace(id="trace-1")]), {"trace-1": trace})
+    ).export("session-1")
+
+    attached = packet["traces"][0]["generations"][0]["failure"]
+    assert attached["generation_id"] == "g1"
+    assert attached["agent_run_id"] == "run-1"
+    assert attached["correlation_method"] == "inferred_agent_run_timestamp"
+    assert "hidden" not in str(attached)
+    assert exporter.REDACTED in str(attached)
+
+
 def test_main_uses_configured_host_localhost_fallback_and_file_output(monkeypatch, capsys, tmp_path):
     captured_hosts = []
 

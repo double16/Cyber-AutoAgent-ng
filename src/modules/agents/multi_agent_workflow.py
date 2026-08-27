@@ -63,7 +63,7 @@ from modules.agents.run_policy import AgentRunPolicy
 from modules.config.taxonomy_catalog import get_taxonomy_catalog, validate_taxonomy_mappings
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
-from modules.handlers.max_token_recovery import classify_and_discard_max_token_output
+from modules.handlers.max_token_recovery import capture_and_discard_max_token_output
 from modules.handlers.operation_health import DEFAULT_INCOMPLETE_HEALTH_CAP, compute_operation_health
 from modules.handlers.tool_recovery import EvaluatorArtifactReadLimitExceeded, ToolOutcome, outcomes_to_toon
 from modules.handlers.utils import (
@@ -80,8 +80,10 @@ from modules.tools.artifact import (
 from modules.tools.memory import (
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
+    AcceptanceBasis,
     AcceptanceContract,
     AcceptanceCriterion,
+    EvidenceRequirement,
     ExecutionRequirement,
     OperationPlan,
     OperationTarget,
@@ -451,20 +453,27 @@ def default_text_runner(runtime: AgentRuntimeResources) -> AgentTextRunner:
                 sanitize_sdk_error(error)
                 from modules.config.models.agent_profiles import get_agent_settings_registry
                 active_settings = get_agent_settings_registry().get_settings(role)
-                classification, removed = classify_and_discard_max_token_output(
+                classification, removed, failure_snapshot = capture_and_discard_max_token_output(
                     agent, active_reasoning_level=active_settings.reasoning_level.value
                 )
                 setattr(error, "max_token_classification", classification)
+                setattr(error, "max_token_failure_snapshot", failure_snapshot)
                 callback_handler = getattr(runtime, "callback_handler", None)
                 if not getattr(error, "_max_token_efficiency_recorded", False):
                     recorder = getattr(callback_handler, "record_max_token_exhaustion", None)
                     if callable(recorder):
-                        recorder(
-                            role=role,
-                            classification=classification.kind,
-                            exhaustion_ordinal=1,
-                            agent=agent,
-                        )
+                        payload = {
+                            "role": role,
+                            "classification": classification.kind,
+                            "exhaustion_ordinal": 1,
+                            "agent": agent,
+                            "failure_snapshot": failure_snapshot,
+                            "failure_type": type(error).__name__,
+                        }
+                        try:
+                            recorder(**payload)
+                        except TypeError:
+                            recorder(**{key: payload[key] for key in ("role", "classification", "exhaustion_ordinal", "agent")})
                     else:
                         fallback_recorder = getattr(callback_handler, "record_efficiency_event", None)
                         if callable(fallback_recorder):
@@ -1313,16 +1322,29 @@ class MultiAgentWorkflowController:
         if callable(recorder):
             recorder(category)
 
-    def _record_max_token_exhaustion(self, role: str, classification: str, exhaustion_ordinal: int) -> None:
+    def _record_max_token_exhaustion(
+        self,
+        role: str,
+        classification: str,
+        exhaustion_ordinal: int,
+        failure_snapshot: Any = None,
+        failure_type: str = "MaxTokensReachedException",
+    ) -> None:
         """Record one max-token exhaustion not already observed by an agent callback."""
 
         recorder = getattr(self.runtime.callback_handler, "record_max_token_exhaustion", None)
         if callable(recorder):
-            recorder(
-                role=role,
-                classification=classification,
-                exhaustion_ordinal=exhaustion_ordinal,
-            )
+            payload = {
+                "role": role,
+                "classification": classification,
+                "exhaustion_ordinal": exhaustion_ordinal,
+                "failure_snapshot": failure_snapshot,
+                "failure_type": failure_type,
+            }
+            try:
+                recorder(**payload)
+            except TypeError:
+                recorder(**{key: payload[key] for key in ("role", "classification", "exhaustion_ordinal")})
             return
         self._record_efficiency_correction("max_token_exhaustion")
 
@@ -1592,6 +1614,7 @@ class MultiAgentWorkflowController:
                 phase = next(item for item in plan.phases if item.status == "active")
 
             self._claim_finding_validation_tasks(phase)
+            self._recover_missing_finding_validation_tasks(phase)
 
             pending_count = len(self.state.list_tasks(phase=phase.id, status=["pending"]))
             active_count = len(self.state.list_tasks(phase=phase.id, status=["active"]))
@@ -1781,7 +1804,10 @@ class MultiAgentWorkflowController:
         """Move actionable verification tasks into the active validation phase."""
 
         plan = self.state.get_plan()
-        if plan is None or not self._is_finding_validation_phase(plan, phase):
+        if plan is None or not (
+            _phase_semantically_requires_finding_candidates(phase)
+            or self._is_finding_validation_phase(plan, phase)
+        ):
             return
         for task in self.state.list_tasks(status=["active", "pending"]):
             if task.kind != "finding_validation" or task.phase == phase.id:
@@ -1804,6 +1830,72 @@ class MultiAgentWorkflowController:
                 "kind": reassigned.kind,
                 "reference_id": reassigned.reference_id,
             })
+
+    def _recover_missing_finding_validation_tasks(self, phase: PlanPhase) -> None:
+        """Rebuild a persisted candidate's validation task without invoking a task-creator model."""
+
+        plan = self.state.get_plan()
+        if plan is None or not (
+            _phase_semantically_requires_finding_candidates(phase)
+            or self._is_finding_validation_phase(plan, phase)
+        ):
+            return
+        tasks_by_uid = {task.task_uid: task for task in self.state.list_tasks()}
+        for record in self.state.list_finding_records():
+            if str(record.get("resolution") or "").strip():
+                continue
+            finding_uid = str(record.get("finding_uid") or "").strip()
+            verification_uid = str(record.get("verification_task_uid") or "").strip()
+            if not finding_uid or not verification_uid or verification_uid in tasks_by_uid:
+                continue
+            candidate = record.get("candidate_data") or record.get("candidate") or {}
+            packet = candidate.get("verification_packet") if isinstance(candidate, dict) else None
+            if not isinstance(packet, dict):
+                continue
+            replacement = Task(
+                task_uid=str(uuid.uuid4()),
+                title=f"Verify finding: {str(candidate.get('title') or finding_uid)}",
+                objective=(
+                    f"Independently verify finding candidate {finding_uid} against {packet.get('target', '')}. "
+                    "Capture fresh evidence, call record_finding_validation with the outcome, and stop."
+                ),
+                acceptance=AcceptanceContract(
+                    mode="outcome",
+                    basis=AcceptanceBasis(
+                        kind="snapshot",
+                        description=f"Finding candidate {finding_uid}",
+                        source_refs=[f"finding:{finding_uid}"],
+                    ),
+                    criteria=[AcceptanceCriterion(
+                        id=f"verify-finding:{finding_uid}",
+                        description="Record an evidence-backed independent validation outcome for the finding candidate.",
+                        evidence_requirements=[EvidenceRequirement(kind="artifact", min_count=1)],
+                    )],
+                ),
+                evidence=list(packet.get("artifacts") or []),
+                phase=phase.id,
+                status="pending",
+                kind="finding_validation",
+                reference_id=finding_uid,
+                target_scope=str(packet.get("target_scope") or "all"),
+                target_ids=list(packet.get("target_ids") or []),
+            )
+            missing = Task(
+                task_uid=verification_uid,
+                title="Missing finding validation task",
+                objective="Recover persisted finding validation ownership.",
+                acceptance=replacement.acceptance,
+                phase=phase.id,
+                status="partial_failure",
+                kind="finding_validation",
+                reference_id=finding_uid,
+            )
+            if self.state.rebind_finding_verification_task(missing, replacement):
+                self._log_workflow(
+                    "recovered missing finding validation task finding=%s replacement=%s",
+                    finding_uid,
+                    replacement.task_uid,
+                )
 
     def _empty_validation_phase_decision(
         self,
@@ -8382,6 +8474,8 @@ within the controller-provided page limits. Phase evaluators have no tools. Retu
                                 "task_creator",
                                 max_token_classification,
                                 attempt,
+                                getattr(error, "max_token_failure_snapshot", None),
+                                type(error).__name__,
                             )
                             setattr(error, "_max_token_efficiency_recorded", True)
                         self._emit_workflow_activity(
@@ -8401,6 +8495,13 @@ within the controller-provided page limits. Phase evaluators have no tools. Retu
                     )
                     if after_batch_actionable > before_batch_actionable:
                         batch_failure_reason = ""
+                        break
+                    if "finding-dependent task proposal" in batch_failure_reason:
+                        self._log_workflow(
+                            "task creator finding reference rejected deterministically phase=%s reason=%s",
+                            phase.id,
+                            self._short(batch_failure_reason),
+                        )
                         break
                     raw_result = (
                         creator_result.text if isinstance(creator_result, TaskExecutorCycleResult) else creator_result
@@ -9262,12 +9363,24 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
         if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
             raise WorkflowInvariantError("create_tasks tool is required for task_creator")
         required_finding_refs = None
+        finding_ref_aliases = None
         if phase is not None and _phase_semantically_requires_finding_candidates(phase):
-            required_finding_refs = {
-                f"finding:{record['finding_uid']}"
-                for record in self.state.list_finding_records()
+            unresolved = [
+                record for record in self.state.list_finding_records()
                 if record.get("finding_uid") and not str(record.get("resolution") or "").strip()
-            }
+            ]
+            required_finding_refs = {f"finding:{record['finding_uid']}" for record in unresolved}
+            finding_ref_aliases = {}
+            for record in unresolved:
+                canonical = f"finding:{record['finding_uid']}"
+                finding_ref_aliases.update({
+                    canonical: canonical,
+                    str(record["finding_uid"]): canonical,
+                    f"task:{record.get('verification_task_uid', '')}": canonical,
+                    str(record.get("verification_task_uid") or ""): canonical,
+                })
+            if len(required_finding_refs) == 1:
+                finding_ref_aliases[str(self.runtime.operation_id)] = next(iter(required_finding_refs))
         def observe_preflight(tool_input: Dict[str, Any], result: Any, error: Optional[Exception]) -> None:
             if invocation_observer is not None:
                 invocation_observer(tool_input, result, error)
@@ -9281,6 +9394,7 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
             phase_title=phase.title if phase else "",
             phase_objective=phase.criteria if phase else "",
             required_finding_refs=required_finding_refs,
+            finding_ref_aliases=finding_ref_aliases,
             phase_task_contract=self._phase_task_contract(phase),
             proposal_preflight_validator=(
                 lambda proposals: self._validate_generated_task_proposals(phase, proposals)
@@ -9971,7 +10085,13 @@ Allowed evidence references:
                 kind = getattr(classification, "kind", "output_truncation")
                 ratio = float(getattr(classification, "repetition_ratio", 0.0) or 0.0)
                 if not getattr(error, "_max_token_efficiency_recorded", False):
-                    self._record_max_token_exhaustion(role, kind, attempt + 1)
+                    self._record_max_token_exhaustion(
+                        role,
+                        kind,
+                        attempt + 1,
+                        getattr(error, "max_token_failure_snapshot", None),
+                        type(error).__name__,
+                    )
                     setattr(error, "_max_token_efficiency_recorded", True)
                 if max_token_retries >= 1:
                     if pending_token_escalation:

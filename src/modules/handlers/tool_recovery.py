@@ -14,6 +14,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider, HookRegistry
 
 from modules.tools.shell_provenance import shell_execution_provenance
+from modules.utils.redaction import redact
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +87,6 @@ _STRUCTURED_VALIDATION_PATTERNS = tuple(
 )
 _READ_ONLY_TOOLS = {"memory_retrieve", "read_artifact", "tool_catalog"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
-_SENSITIVE_KEYS = {"api_key", "authorization", "cookie", "password", "secret", "token"}
 TOOL_RECOVERY_EXHAUSTED_STATE_KEY = "tool_recovery_exhausted"
 EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY = "evaluator_artifact_read_limit_exhausted"
 ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER = "ARTIFACT_TOTAL_READ_LIMIT_REACHED"
@@ -117,14 +117,9 @@ def _value_fingerprint(value: Any) -> str:
 
 
 def _redacted_input(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: "[REDACTED]" if str(key).lower() in _SENSITIVE_KEYS else _redacted_input(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redacted_input(item) for item in value]
-    return value
+    """Apply the shared diagnostic redaction policy before hashing tool inputs."""
+
+    return redact(value)
 
 
 def _input_fingerprint(value: Any) -> str:
