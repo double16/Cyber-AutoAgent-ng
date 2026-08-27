@@ -12314,24 +12314,45 @@ tools and durable evidence before relying on it."""
                         continue
                     if resolved.is_relative_to(root) and resolved.is_file():
                         references.update(MultiAgentWorkflowController._operation_local_artifact_refs_in_text(str(resolved)))
-        return MultiAgentWorkflowController._prefer_formatted_client_bundles(references)
+        # Tool outcomes are controller-side provenance. Keep raw and formatted bundle
+        # references here; substitution happens only in evaluator-facing selection.
+        return sorted(references)
 
     @staticmethod
     def _prefer_formatted_client_bundles(references: Iterable[str]) -> List[str]:
-        """Keep a webcrack derivative in task context while retaining its raw source controller-side."""
+        """Prefer readable webcrack siblings in evaluator-visible artifact references.
 
-        distinct = sorted(set(references))
-        reference_set = set(distinct)
-        return [
-            reference
-            for reference in distinct
-            if not (
-                reference.startswith("artifact:")
-                and reference.endswith(".js")
-                and not reference.endswith(".webcrack.js")
-                and f"{reference[:-3]}.webcrack.js" in reference_set
-            )
-        ]
+        This normalization is deliberately applied only to derived, evaluator-facing
+        reference lists. Task evidence and acceptance records retain the original raw
+        bundle reference for controller-side provenance.
+        """
+
+        preferred = []
+        for reference in sorted(set(references)):
+            formatted_reference = MultiAgentWorkflowController._readable_webcrack_sibling(reference)
+            candidate = formatted_reference or reference
+            if candidate not in preferred:
+                preferred.append(candidate)
+        return preferred
+
+    @staticmethod
+    def _readable_webcrack_sibling(reference: str) -> Optional[str]:
+        """Return a raw bundle's readable same-location webcrack derivative, if any."""
+
+        if (
+            not reference.startswith("artifact:")
+            or not reference.endswith(".js")
+            or reference.endswith(".webcrack.js")
+        ):
+            return None
+        sibling_reference = f"{reference[:-3]}.webcrack.js"
+        try:
+            sibling_path = resolve_operation_artifact_path(sibling_reference)
+            with Path(sibling_path).open("rb"):
+                pass
+        except (OSError, TypeError, ValueError):
+            return None
+        return sibling_reference
 
     @staticmethod
     def _operation_local_artifact_refs_in_text(text: str) -> List[str]:

@@ -13045,7 +13045,134 @@ def test_task_evaluator_hides_raw_bundle_when_webcrack_derivative_is_available(m
     assert "artifact:artifacts/bundle.js" not in prompt
 
 
-def test_durable_artifact_evidence_prefers_webcrack_derivative_for_downstream_tasks():
+def test_task_evaluator_substitutes_webcrack_sibling_when_only_raw_bundle_is_cited(monkeypatch, tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "bundle.js").write_text("minified source", encoding="utf-8")
+    (artifacts / "bundle.webcrack.js").write_text(
+        'const api = "/api/products";\n', encoding="utf-8"
+    )
+    task_a = Task(
+        task_uid="bundle-formatting",
+        title="Format client bundle",
+        objective="Create a readable client bundle derivative",
+        phase=1,
+        status="done",
+        evidence=["artifact:artifacts/bundle.webcrack.js"],
+    )
+    task_b = Task(
+        task_uid="bundle-review",
+        title="Review raw client bundle evidence",
+        objective="Review task evidence",
+        phase=1,
+        status="active",
+        evidence=["artifact:artifacts/bundle.js"],
+    )
+    acceptance = AcceptanceResult(
+        criterion_id="task-outcome",
+        status="satisfied",
+        disposition="observation",
+        summary="Raw source bundle was retained as evidence.",
+        evidence_refs=["artifact:artifacts/bundle.js"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task_a, task_b]),
+    )
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+
+    tools = controller._task_evaluator_tools(task_b, [acceptance])
+    prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task_b, acceptance_results=[acceptance])
+
+    assert controller._task_evaluator_artifact_refs(task_b, [acceptance]) == [
+        "artifact:artifacts/bundle.webcrack.js"
+    ]
+    with pytest.raises(RuntimeError, match="Artifact is not available to this evaluator"):
+        tools[0]("artifact:artifacts/bundle.js")
+    assert "/api/products" in tools[0]("artifact:artifacts/bundle.webcrack.js", max_lines=1)
+    assert "artifact:artifacts/bundle.webcrack.js" in prompt
+    assert "artifact:artifacts/bundle.js" not in prompt
+    assert task_b.evidence == ["artifact:artifacts/bundle.js"]
+    assert acceptance.evidence_refs == ("artifact:artifacts/bundle.js",)
+
+
+@pytest.mark.parametrize("derivative_exists, derivative_readable", [(False, True), (True, False)])
+def test_task_evaluator_keeps_raw_bundle_when_webcrack_sibling_is_unavailable(
+    monkeypatch,
+    tmp_path,
+    derivative_exists,
+    derivative_readable,
+):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "bundle.js").write_text("raw source", encoding="utf-8")
+    if derivative_exists:
+        (artifacts / "bundle.webcrack.js").write_text("formatted source", encoding="utf-8")
+    task = Task(
+        task_uid="raw-bundle-fallback",
+        title="Review client bundle evidence",
+        objective="Review task evidence",
+        phase=1,
+        status="active",
+        evidence=["artifact:artifacts/bundle.js"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+    if not derivative_readable:
+        original_open = Path.open
+
+        def reject_webcrack_derivative(path, *args, **kwargs):
+            if path.name == "bundle.webcrack.js":
+                raise PermissionError("webcrack derivative is unreadable")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(
+            Path,
+            "open",
+            reject_webcrack_derivative,
+        )
+
+    tools = controller._task_evaluator_tools(task, [])
+
+    assert controller._task_evaluator_artifact_refs(task, []) == ["artifact:artifacts/bundle.js"]
+    assert "raw source" in tools[0]("artifact:artifacts/bundle.js", max_lines=1)
+
+
+def test_task_evaluator_does_not_substitute_non_sibling_or_fresh_bundle_artifacts(monkeypatch, tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "bundle.js.fresh").write_text("fresh raw source", encoding="utf-8")
+    (artifacts / "other.webcrack.js").write_text("unrelated formatted source", encoding="utf-8")
+    task = Task(
+        task_uid="fresh-bundle",
+        title="Review fresh bundle evidence",
+        objective="Review task evidence",
+        phase=1,
+        status="active",
+        evidence=["artifact:artifacts/bundle.js.fresh"],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+
+    tools = controller._task_evaluator_tools(task, [])
+
+    assert controller._task_evaluator_artifact_refs(task, []) == ["artifact:artifacts/bundle.js.fresh"]
+    assert "fresh raw source" in tools[0]("artifact:artifacts/bundle.js.fresh", max_lines=1)
+
+
+def test_durable_artifact_evidence_keeps_raw_bundle_for_controller_provenance():
     outcome = ToolOutcome(
         sequence=1,
         tool_use_id="bundle-inventory",
@@ -13061,6 +13188,7 @@ def test_durable_artifact_evidence_prefers_webcrack_derivative_for_downstream_ta
 
     assert MultiAgentWorkflowController._artifact_refs_from_tool_outcomes([outcome]) == [
         "artifact:artifacts/bundle-inventory.json",
+        "artifact:artifacts/bundle.js",
         "artifact:artifacts/bundle.webcrack.js",
     ]
 
