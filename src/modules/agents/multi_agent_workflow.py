@@ -104,10 +104,12 @@ from modules.tools.memory import (
     build_record_finding_validation_tool,
     build_record_task_acceptance_tool,
     canonical_artifact_reference,
+    canonical_procedure_methods,
     detect_secret_exposures,
     finalize_finding_validation,
     finalize_objective_validation,
     finding_validation_outcome,
+    finding_validation_manifest_schema,
     finding_validation_submitted,
     get_memory_client,
     inventory_manifest_contract_text,
@@ -520,6 +522,53 @@ class WorkflowStateStore:
         self.client.store_plan(plan=plan, operation_id=self.operation_id)
         return self.get_plan() or plan
 
+    def patch_plan(
+        self,
+        *,
+        phase_status_updates: Optional[Dict[int, str]] = None,
+        current_phase: Optional[int] = None,
+        assessment_complete: Optional[bool] = None,
+    ) -> OperationPlan:
+        """Update plan progress without replacing unrelated plan fields."""
+
+        patch_plan = getattr(self.client, "patch_plan", None)
+        if callable(patch_plan):
+            return patch_plan(
+                operation_id=self.operation_id,
+                phase_status_updates=phase_status_updates,
+                current_phase=current_phase,
+                assessment_complete=assessment_complete,
+            )
+        current = self.get_plan()
+        if current is None:
+            raise ValueError(f"Unknown operation plan: {self.operation_id}")
+        updates = {int(phase_id): str(status) for phase_id, status in (phase_status_updates or {}).items()}
+        return self.store_plan(replace(
+            current,
+            phases=[replace(phase, status=updates.get(phase.id, phase.status)) for phase in current.phases],
+            current_phase=current_phase if current_phase is not None else current.current_phase,
+            assessment_complete=(
+                assessment_complete if assessment_complete is not None else current.assessment_complete
+            ),
+        ))
+
+    def _persist_plan_progress(self, previous: OperationPlan, updated: OperationPlan) -> OperationPlan:
+        """Persist only status fields changed by one controller plan transition."""
+
+        if not callable(getattr(self.client, "patch_plan", None)):
+            return self.store_plan(updated)
+        prior_statuses = {phase.id: phase.status for phase in previous.phases}
+        updates = {
+            phase.id: phase.status
+            for phase in updated.phases
+            if prior_statuses.get(phase.id) != phase.status
+        }
+        return self.patch_plan(
+            phase_status_updates=updates,
+            current_phase=updated.current_phase,
+            assessment_complete=updated.assessment_complete,
+        )
+
     def list_tasks(self, phase: Optional[int] = None, status: Optional[List[str]] = None) -> List[Task]:
         tasks = self.client.list_tasks(phase=phase, status=status)
         tasks.sort(key=lambda task: task.created_at or "")
@@ -590,6 +639,50 @@ class WorkflowStateStore:
         self.client.store_task(task=task)
         return task
 
+    def patch_task(
+        self,
+        task_uid: str,
+        *,
+        status: Optional[str] = None,
+        status_reason: Optional[str] = None,
+        phase: Optional[int] = None,
+        evidence_additions: Iterable[str] = (),
+        recovery_context_updates: Optional[Dict[str, Any]] = None,
+        recovery_context_removals: Iterable[str] = (),
+    ) -> Task:
+        """Update task-owned mutable state without replacing concurrent updates."""
+
+        patch_task = getattr(self.client, "patch_task", None)
+        if callable(patch_task):
+            return patch_task(
+                task_uid=task_uid,
+                status=status,
+                status_reason=status_reason,
+                phase=phase,
+                evidence_additions=evidence_additions,
+                recovery_context_updates=recovery_context_updates,
+                recovery_context_removals=recovery_context_removals,
+            )
+        current = next((item for item in self.list_tasks() if item.task_uid == task_uid), None)
+        if current is None:
+            raise ValueError(f"Unknown task_uid for operation: {task_uid}")
+        evidence = list(current.evidence)
+        for reference in evidence_additions:
+            if reference and reference not in evidence:
+                evidence.append(reference)
+        context = dict(current.recovery_context)
+        for key in recovery_context_removals:
+            context.pop(key, None)
+        context.update(recovery_context_updates or {})
+        return self.store_task(replace(
+            current,
+            status=status if status is not None else current.status,
+            status_reason=status_reason if status_reason is not None else current.status_reason,
+            phase=phase if phase is not None else current.phase,
+            evidence=evidence,
+            recovery_context=context,
+        ))
+
     def reopen_plan(self, plan: OperationPlan) -> OperationPlan:
         actionable_phase_ids = {
             task.phase
@@ -623,7 +716,7 @@ class WorkflowStateStore:
                 requires_finding_candidates=phase.requires_finding_candidates,
                 task_creation_mode=phase.task_creation_mode,
             ))
-        return self.store_plan(OperationPlan(
+        return self._persist_plan_progress(plan, OperationPlan(
             objective=plan.objective,
             current_phase=resume_phase.id,
             total_phases=len(phases),
@@ -646,8 +739,7 @@ class WorkflowStateStore:
         for phase in plan.phases:
             if phase.status not in TERMINAL_PLAN_STATUSES:
                 return self.activate_phase(plan, phase.id)
-        plan.assessment_complete = self._assessment_is_complete(plan)
-        return self.store_plan(plan)
+        return self.patch_plan(assessment_complete=self._assessment_is_complete(plan))
 
     def _assessment_is_complete(self, plan: OperationPlan) -> bool:
         """Return whether every phase and task reached a successful terminal state."""
@@ -674,7 +766,7 @@ class WorkflowStateStore:
                 requires_finding_candidates=phase.requires_finding_candidates,
                 task_creation_mode=phase.task_creation_mode,
             ))
-        return self.store_plan(OperationPlan(
+        return self._persist_plan_progress(plan, OperationPlan(
             objective=plan.objective,
             current_phase=phase_id,
             total_phases=len(phases),
@@ -765,7 +857,7 @@ class WorkflowStateStore:
                 )
                 for phase in phases
             ]
-        return self.store_plan(OperationPlan(
+        return self._persist_plan_progress(plan, OperationPlan(
             objective=plan.objective,
             current_phase=next_phase.id if next_phase else phase_id,
             total_phases=len(phases),
@@ -785,90 +877,22 @@ class WorkflowStateStore:
         ))
 
     def activate_task(self, task: Task) -> Task:
-        return self.store_task(Task(
-            task_uid=task.task_uid,
-            title=task.title,
-            objective=task.objective,
-            acceptance=task.acceptance,
-            phase=task.phase,
-            status="active",
-            status_reason="activated",
-            evidence=task.evidence,
-            created_at=task.created_at,
-            kind=task.kind,
-            reference_id=task.reference_id,
-            replacement_of=task.replacement_of,
-            supersedes_criteria=task.supersedes_criteria,
-            recovery_context=task.recovery_context,
-            target_scope=task.target_scope,
-            target_ids=task.target_ids,
-        ))
+        return self.patch_task(task.task_uid, status="active", status_reason="activated")
 
     def mark_task(self, task: Task, status: str, reason: str = "") -> Task:
         if status not in ("done", "partial_failure", "blocked", "superseded"):
             raise ValueError(f"task status must be terminal, got {status}")
-        return self.store_task(Task(
-            task_uid=task.task_uid,
-            title=task.title,
-            objective=task.objective,
-            acceptance=task.acceptance,
-            phase=task.phase,
-            status=status,
-            status_reason=reason,
-            evidence=task.evidence,
-            created_at=task.created_at,
-            kind=task.kind,
-            reference_id=task.reference_id,
-            replacement_of=task.replacement_of,
-            supersedes_criteria=task.supersedes_criteria,
-            recovery_context=task.recovery_context,
-            target_scope=task.target_scope,
-            target_ids=task.target_ids,
-        ))
+        return self.patch_task(task.task_uid, status=status, status_reason=reason)
 
     def defer_task(self, task: Task, reason: str = "") -> Task:
         """Return interrupted task work to the pending queue for a later continuation."""
 
-        return self.store_task(Task(
-            task_uid=task.task_uid,
-            title=task.title,
-            objective=task.objective,
-            acceptance=task.acceptance,
-            phase=task.phase,
-            status="pending",
-            status_reason=reason,
-            evidence=task.evidence,
-            created_at=task.created_at,
-            kind=task.kind,
-            reference_id=task.reference_id,
-            replacement_of=task.replacement_of,
-            supersedes_criteria=task.supersedes_criteria,
-            recovery_context=task.recovery_context,
-            target_scope=task.target_scope,
-            target_ids=task.target_ids,
-        ))
+        return self.patch_task(task.task_uid, status="pending", status_reason=reason)
 
     def reassign_task_phase(self, task: Task, phase_id: int) -> Task:
         """Move a task without changing its identity, evidence, or status."""
 
-        return self.store_task(Task(
-            task_uid=task.task_uid,
-            title=task.title,
-            objective=task.objective,
-            acceptance=task.acceptance,
-            phase=phase_id,
-            status=task.status,
-            status_reason=task.status_reason,
-            evidence=task.evidence,
-            created_at=task.created_at,
-            kind=task.kind,
-            reference_id=task.reference_id,
-            replacement_of=task.replacement_of,
-            supersedes_criteria=task.supersedes_criteria,
-            recovery_context=task.recovery_context,
-            target_scope=task.target_scope,
-            target_ids=task.target_ids,
-        ))
+        return self.patch_task(task.task_uid, phase=phase_id)
 
     def create_plan_from_dict(self, plan_data: Dict[str, Any]) -> OperationPlan:
         phases = [PlanPhase.from_obj(phase) for phase in plan_data.get("phases", [])]
@@ -2474,7 +2498,11 @@ class MultiAgentWorkflowController:
             phases=[replace(item, status="done") if item.id == phase_id else item for item in plan.phases],
             assessment_complete=False,
         )
-        self.state.store_plan(updated_plan)
+        persist_progress = getattr(self.state, "_persist_plan_progress", None)
+        if callable(persist_progress):
+            persist_progress(plan, updated_plan)
+        else:
+            self.state.store_plan(updated_plan)
         self._emit_plan_output("updated", updated_plan, self._plan_signature(plan))
 
     def _reconcile_completed_contract_prerequisite(
@@ -2719,8 +2747,16 @@ class MultiAgentWorkflowController:
             if not methods:
                 raise ValueError("task_preflight:execution_capability: procedure proposal has no declared method")
             unavailable = []
+            selected_target_ids = set(getattr(proposal, "target_ids", []) or [])
+            plan = self.state.get_plan()
+            selected_targets = [
+                target
+                for target in plan.targets
+                if not selected_target_ids or target.target_id in selected_target_ids
+            ]
             for method in methods:
-                capability = self._canonical_execution_method(method)
+                normalized_method = canonical_procedure_methods([method], selected_targets)
+                capability = normalized_method[0] if normalized_method else self._canonical_execution_method(method)
                 if capability not in available_capabilities:
                     unavailable.append(f"{method} ({capability})")
             if unavailable:
@@ -2967,7 +3003,12 @@ class MultiAgentWorkflowController:
         execution_prompt = (
             execution_prompt.rstrip()
             + "\n\n"
-            + self._task_executor_contract(task, self._tool_names(tools), selected_shell_commands)
+            + self._task_executor_contract(
+                task,
+                self._tool_names(tools),
+                selected_shell_commands,
+                plan=plan,
+            )
             + "\n\n"
             + self._tool_selection_policy()
         )
@@ -3506,7 +3547,12 @@ class MultiAgentWorkflowController:
                 cycle_prompt = (
                     cycle_prompt_base.rstrip()
                     + "\n\n"
-                    + self._task_executor_contract(task, cycle_tool_names, cycle_shell_commands)
+                    + self._task_executor_contract(
+                        task,
+                        cycle_tool_names,
+                        cycle_shell_commands,
+                        plan=plan,
+                    )
                     + "\n\n"
                     + self._tool_selection_policy()
                 )
@@ -6459,7 +6505,11 @@ Return exactly one decision for each candidate.
             f"Replacement task {replacement.task_uid} queued after {trigger}; the original remains incomplete "
             "until replacement coverage is reconciled."
         )
-        updated_task = self.state.mark_task(task, "partial_failure", reason)
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        updated_task = self.state.mark_task(current_task, "partial_failure", reason)
         self._emit_task_done(updated_task)
         self._emit_workflow_event(
             {
@@ -7595,14 +7645,17 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
         try:
             response = json.loads(store_observation(content, artifacts=artifacts, metadata=metadata))
             memory_ref = str(response.get("memory_ref") or "")
-            context = dict(current_task.recovery_context)
-            context["evaluator_finding_advisory"] = {
-                "memory_ref": memory_ref,
-                "reason": decision.finding_advisory_reason,
-                "confidence": decision.finding_advisory_confidence,
-                "artifacts": artifacts,
-            }
-            self.state.store_task(replace(current_task, recovery_context=context))
+            self.state.patch_task(
+                current_task.task_uid,
+                recovery_context_updates={
+                    "evaluator_finding_advisory": {
+                        "memory_ref": memory_ref,
+                        "reason": decision.finding_advisory_reason,
+                        "confidence": decision.finding_advisory_confidence,
+                        "artifacts": artifacts,
+                    }
+                },
+            )
             outcome = "stored"
             error = ""
         except (TypeError, ValueError, json.JSONDecodeError) as advisory_error:
@@ -7829,9 +7882,12 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
                 for requirement in _finding_confirmation_requirements(candidate)
             ],
             "confirmation_manifest_rule": (
-                "For a confirmed outcome, write a versioned JSON validation manifest artifact that attests every "
-                "listed requirement, then pass its artifact reference to record_finding_validation. Never pass "
-                "inline JSON as validation_manifest."
+                "For a confirmed outcome, write an operation-local JSON validation manifest matching "
+                "confirmation_manifest_schema, then pass its artifact reference to record_finding_validation. "
+                "Never pass inline JSON as validation_manifest."
+            ),
+            "confirmation_manifest_schema": finding_validation_manifest_schema(
+                _finding_confirmation_requirements(candidate)
             ),
         }
         return json.dumps(context, indent=2, sort_keys=True)
@@ -9006,6 +9062,9 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
   inventory JSON; otherwise omit it and Python defaults to `artifact`.
 - For HTTP reconnaissance and service probing, specify "request" or "http_request" in `methods` rather than
   "inspect" or "recon" to ensure successful evidence verification against active network targets.
+- For explicit `http://` or `https://` targets, use `crawl` for route, page, endpoint, directory, or navigation
+  discovery. Reserve `enumerate` for host, port, service, DNS, and network-surface discovery. Python applies this
+  same target-aware normalization to legacy tasks without using titles or objective wording.
 - Do not use moving claims such as "all reachable", "all discovered", "all endpoints from the inventory", "across
   the application", or "key workflows" in procedure objectives or acceptance criteria. Inventory-wide work requires
   canonical `snapshot_refs`.
@@ -11898,6 +11957,8 @@ Do not return `continue` merely because work is incomplete when the task history
         task: Optional[Task] = None,
         available_tool_names: Optional[set[str]] = None,
         selected_shell_commands: Optional[List[Dict[str, Any]]] = None,
+        *,
+        plan: Optional[OperationPlan] = None,
     ) -> str:
         """Return the controller-owned execution boundary shared by all modules."""
 
@@ -11986,11 +12047,9 @@ Do not return `continue` merely because work is incomplete when the task history
             "a 401 or 403 is evidence of blocking, not bypass; require protected data or an equivalent "
             "authorization-sensitive success condition. Python rejects confirmed outcomes whose cited artifacts "
             "match configured, unambiguous contradiction rules; record those outcomes as not_confirmed instead. "
-            "For user-enumeration or lack-of-rate-limiting claims, a confirmed outcome also requires a version-1 "
-            "JSON validation_manifest artifact. It must contain checks keyed by user_enumeration and/or "
-            "lack_of_rate_limiting, referencing operation-local response artifacts. Enumeration needs known-existing "
-            "and known-nonexistent response artifacts with materially different signatures; rate limiting needs at "
-            "least ten sequential response-artifact attempts without throttle or lockout evidence."
+            "When a confirmed outcome requires a validation_manifest, the Finding Validation Context provides its "
+            "authoritative checks schema. Write exactly the required check objects with operation-local artifact "
+            "references; do not add a version key."
             if task is not None and task.kind == "finding_validation"
             else ""
         )
@@ -12009,6 +12068,7 @@ Do not return `continue` merely because work is incomplete when the task history
             task,
             tool_names,
             selected_shell_commands or [],
+            targets=MultiAgentWorkflowController._task_execution_targets(plan, task),
         )
         return f"""## Task Executor Contract (Controller-owned)
 Execute only the assigned task objective. The objective is one single assigned task unit named by the acceptance
@@ -12045,6 +12105,8 @@ perform them.{finding_submission_methodology}{finding_validation_methodology}{ex
         task: Optional[Task],
         available_tool_names: set[str],
         selected_shell_commands: List[Dict[str, Any]],
+        *,
+        targets: Optional[List[OperationTarget]] = None,
     ) -> str:
         """Render task-local execution providers from the supplied invocation tools only."""
 
@@ -12054,11 +12116,12 @@ perform them.{finding_submission_methodology}{finding_validation_methodology}{ex
             return ""
 
         procedure = task.acceptance.basis.procedure
-        capabilities = tuple(dict.fromkeys(
-            cls._canonical_execution_method(method)
-            for method in (procedure.methods if procedure is not None else ("analyze",))
-            if str(method).strip()
-        ))
+        capabilities = tuple(
+            canonical_procedure_methods(
+                procedure.methods if procedure is not None else ("analyze",),
+                targets or (),
+            )
+        )
         native_by_capability = {
             capability: sorted(
                 tool_name
@@ -12472,6 +12535,22 @@ tools and durable evidence before relying on it."""
         return references
 
     @staticmethod
+    def _task_execution_targets(
+        plan: Optional[OperationPlan],
+        task: Optional[Task],
+    ) -> List[OperationTarget]:
+        """Return structured targets assigned to a task for method normalization."""
+
+        if plan is None:
+            return []
+        target_ids = set(task.target_ids) if task is not None and task.target_ids else set()
+        return [
+            target
+            for target in plan.targets
+            if not target_ids or target.target_id in target_ids
+        ]
+
+    @staticmethod
     def _canonical_execution_method(method: str) -> str:
         """Return one protocol-neutral execution capability name."""
 
@@ -12533,10 +12612,12 @@ tools and durable evidence before relying on it."""
         requirement: ExecutionRequirement,
         candidates: List[tuple[ToolOutcome, frozenset[str]]],
     ) -> List[tuple[ToolOutcome, frozenset[str]]]:
-        """Return request outcomes that prove bounded multi-route enumeration.
+        """Return request outcomes that prove bounded multi-route collection.
 
-        Enumeration is a collection property: it is derived only from receipts
-        that expose at least two distinct, assigned routes on one authority.
+        Route collection is a collection property: it is derived only from
+        receipts that expose at least two distinct, assigned routes on one
+        authority. The historical method name remains for compatibility with
+        existing callers and diagnostics.
         """
 
         subject = str(requirement.subject_ref or "").strip()
@@ -12724,11 +12805,12 @@ tools and durable evidence before relying on it."""
         if not criterion.execution_requirements:
             return {}
         procedure = task.acceptance.basis.procedure
-        expected_capabilities = {
-            self._canonical_execution_method(method)
-            for method in (procedure.methods if procedure is not None else ("analyze",))
-            if str(method).strip()
-        }
+        expected_capabilities = set(
+            canonical_procedure_methods(
+                procedure.methods if procedure is not None else ("analyze",),
+                self._task_execution_targets(plan, task),
+            )
+        )
         candidates = []
         for outcome in tool_outcomes:
             if not outcome.success or outcome.tool_name in _NON_EXECUTION_RECEIPT_TOOLS:
@@ -12749,16 +12831,16 @@ tools and durable evidence before relying on it."""
                     outcome,
                 )
             ]
-            enumeration_matches = (
+            route_collection_matches = (
                 self._enumeration_receipt_outcomes(plan, task, requirement, candidates)
-                if "enumerate" in expected_capabilities
+                if expected_capabilities.intersection({"crawl", "enumerate"})
                 else []
             )
             observed_capabilities = set().union(*(capabilities for _outcome, capabilities in matched)) if matched else set()
-            if enumeration_matches:
-                observed_capabilities.add("enumerate")
+            if route_collection_matches:
+                observed_capabilities.update(expected_capabilities.intersection({"crawl", "enumerate"}))
             receipt_producers = list(matched)
-            for item in enumeration_matches:
+            for item in route_collection_matches:
                 if not any(existing[0].tool_use_id == item[0].tool_use_id for existing in receipt_producers):
                     receipt_producers.append(item)
             references = self._valid_required_output_artifact_refs(
@@ -12785,7 +12867,7 @@ tools and durable evidence before relying on it."""
                     "validated_inventory_manifest"
                     if procedure is not None and procedure.output_kind == "inventory_manifest"
                     else "aggregated_request_collection"
-                    if enumeration_matches
+                    if route_collection_matches
                     else "unknown_tool_artifact"
                     if expected_capabilities and not expected_capabilities.issubset(observed_capabilities)
                     else "capability_matched"
@@ -12807,19 +12889,22 @@ tools and durable evidence before relying on it."""
                 (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
                 task,
             )
-            context = dict(current_task.recovery_context)
-            receipts = dict(context.get("execution_evidence_receipts") or {})
-            controller_details = dict(context.get("controller_execution_evidence") or {})
+            receipts = dict(current_task.recovery_context.get("execution_evidence_receipts") or {})
+            controller_details = dict(current_task.recovery_context.get("controller_execution_evidence") or {})
             for requirement_id, references in resolved.items():
                 receipts[requirement_id] = list(dict.fromkeys([*receipts.get(requirement_id, []), *references]))
                 controller_details[requirement_id] = details[requirement_id]
-            context["execution_evidence_receipts"] = receipts
-            context["controller_execution_evidence"] = controller_details
-            context["execution_receipt_producers"] = {
-                requirement_id: details[requirement_id]["producers"]
-                for requirement_id in resolved
-            }
-            self.state.store_task(replace(current_task, recovery_context=context))
+            self.state.patch_task(
+                current_task.task_uid,
+                recovery_context_updates={
+                    "execution_evidence_receipts": receipts,
+                    "controller_execution_evidence": controller_details,
+                    "execution_receipt_producers": {
+                        requirement_id: details[requirement_id]["producers"]
+                        for requirement_id in resolved
+                    },
+                },
+            )
         self._emit_controller_execution_evidence(task, criterion, resolved, details, expected_capabilities)
         return resolved
 
@@ -13256,14 +13341,19 @@ tools and durable evidence before relying on it."""
         )
         if "pending_controller_acceptance" not in current_task.recovery_context:
             return
-        context = dict(current_task.recovery_context)
-        context.pop("pending_controller_acceptance", None)
-        self.state.store_task(replace(current_task, recovery_context=context))
+        self.state.patch_task(
+            current_task.task_uid,
+            recovery_context_removals=("pending_controller_acceptance",),
+        )
 
     def _retain_task_artifact_evidence(self, task: Task, outcomes: List[ToolOutcome]) -> Task:
         """Persist successful task-owned artifacts before a fresh executor context can lose them."""
 
-        known = list(task.evidence)
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
+            task,
+        )
+        known = list(current_task.evidence)
         known_set = set(known)
         additions = []
         for reference in self._artifact_refs_from_tool_outcomes(outcomes):
@@ -13272,9 +13362,8 @@ tools and durable evidence before relying on it."""
                 known_set.add(canonical)
                 additions.append(canonical)
         if not additions:
-            return task
-        updated = replace(task, evidence=[*known, *additions])
-        persisted = self.state.store_task(updated)
+            return current_task
+        persisted = self.state.patch_task(task.task_uid, evidence_additions=additions)
         self._emit_workflow_event({
             "type": "task_durable_evidence_retained",
             "task_uid": task.task_uid,

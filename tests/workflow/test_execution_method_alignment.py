@@ -1,6 +1,9 @@
-from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
-from modules.tools.tool_catalog import get_shell_command_execution_capabilities
 from unittest.mock import MagicMock
+
+from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+from modules.tools.memory import OperationTarget, canonical_procedure_methods
+from modules.tools.tool_catalog import get_shell_command_execution_capabilities
+
 
 def test_canonical_execution_method_alignment():
     # Existing behavior preserved
@@ -18,6 +21,40 @@ def test_canonical_execution_method_alignment():
     
     # Regular analyze tokens
     assert MultiAgentWorkflowController._canonical_execution_method("source_review") == "analyze"
+
+
+def test_http_targets_normalize_enumeration_to_crawl():
+    target = OperationTarget(target_id="target-1", type="network", value="https://example.test:8443")
+
+    assert canonical_procedure_methods(["request", "enumerate"], [target]) == ["request", "crawl"]
+
+
+def test_network_targets_retain_enumeration_and_ignore_objective_wording():
+    target = OperationTarget(target_id="target-1", type="network", value="10.0.0.5")
+
+    assert canonical_procedure_methods(["enumerate"], [target]) == ["enumerate"]
+    assert canonical_procedure_methods(["enumerate routes and pages"], [target]) == [
+        "enumerate_routes_and_pages"
+    ]
+
+
+def test_filesystem_target_with_path_retains_enumeration():
+    target = OperationTarget(
+        target_id="source-1",
+        type="filesystem",
+        value="/workspace/project/src",
+    )
+
+    assert canonical_procedure_methods(["enumerate"], [target]) == ["enumerate"]
+
+
+def test_mixed_target_selection_does_not_reclassify_network_enumeration():
+    targets = [
+        OperationTarget(target_id="web", type="network", value="http://example.test"),
+        OperationTarget(target_id="host", type="network", value="10.0.0.5"),
+    ]
+
+    assert canonical_procedure_methods(["enumerate"], targets) == ["enumerate"]
 
 def test_tool_execution_capabilities_updated():
     # Verify environment.yaml changes are loaded

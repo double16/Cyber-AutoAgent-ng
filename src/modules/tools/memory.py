@@ -53,6 +53,7 @@ import subprocess
 import tempfile
 import threading
 import uuid
+from collections.abc import Iterable
 from functools import wraps
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -1399,9 +1400,32 @@ class ApplicationStore(Protocol):
 
     def store_plan(self, operation_id: str, plan: OperationPlan) -> None: ...
 
+    def patch_plan(
+        self,
+        operation_id: str,
+        *,
+        phase_status_updates: Optional[Dict[int, str]] = None,
+        current_phase: Optional[int] = None,
+        assessment_complete: Optional[bool] = None,
+    ) -> OperationPlan: ...
+
     def get_plan(self, operation_id: str) -> Optional[OperationPlan]: ...
 
     def store_task(self, operation_id: str, task: Task) -> None: ...
+
+    def patch_task(
+        self,
+        operation_id: str,
+        task_uid: str,
+        *,
+        status: Optional[str] = None,
+        status_reason: Optional[str] = None,
+        phase: Optional[int] = None,
+        evidence_additions: Iterable[str] = (),
+        evidence_replacement: Optional[Iterable[str]] = None,
+        recovery_context_updates: Optional[Dict[str, Any]] = None,
+        recovery_context_removals: Iterable[str] = (),
+    ) -> Task: ...
 
     def get_tasks(self, operation_id: str) -> List[Task]: ...
 
@@ -1450,6 +1474,7 @@ class SQLiteApplicationStore:
         "store_plan",
         "get_plan",
         "store_task",
+        "patch_task",
         "get_tasks",
         "store_acceptance_results",
         "get_acceptance_results",
@@ -1808,6 +1833,58 @@ class SQLiteApplicationStore:
                     plan_dict["updated_at"]
                 ))
 
+    def patch_plan(
+        self,
+        operation_id: str,
+        *,
+        phase_status_updates: Optional[Dict[int, str]] = None,
+        current_phase: Optional[int] = None,
+        assessment_complete: Optional[bool] = None,
+    ) -> OperationPlan:
+        """Atomically update controller-owned plan progress without replacing plan content."""
+
+        updates = {int(phase_id): str(status) for phase_id, status in (phase_status_updates or {}).items()}
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                    (self.logical_target, operation_id),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Unknown operation plan: {operation_id}")
+                plan = OperationPlan.from_obj(json.loads(row[0]))
+                known_phase_ids = {phase.id for phase in plan.phases}
+                unknown_phase_ids = sorted(set(updates) - known_phase_ids)
+                if unknown_phase_ids:
+                    raise ValueError(f"Unknown plan phase IDs: {unknown_phase_ids}")
+                phases = [
+                    replace(phase, status=updates.get(phase.id, phase.status))
+                    for phase in plan.phases
+                ]
+                patched = replace(
+                    plan,
+                    phases=phases,
+                    current_phase=current_phase if current_phase is not None else plan.current_phase,
+                    assessment_complete=(
+                        assessment_complete if assessment_complete is not None else plan.assessment_complete
+                    ),
+                    updated_at=datetime.now().isoformat(),
+                )
+                conn.execute(
+                    "UPDATE plans SET current_phase = ?, assessment_complete = ?, plan_data = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ?",
+                    (
+                        patched.current_phase,
+                        patched.assessment_complete,
+                        json.dumps(patched.to_dict()),
+                        patched.updated_at,
+                        self.logical_target,
+                        operation_id,
+                    ),
+                )
+        return patched
+
     def get_plan(self, operation_id: str) -> Optional[OperationPlan]:
         """Retrieve a plan by operation_id."""
         with self._lock:
@@ -1888,6 +1965,91 @@ class SQLiteApplicationStore:
                     json.dumps(task.target_ids),
                 ))
 
+    def patch_task(
+        self,
+        operation_id: str,
+        task_uid: str,
+        *,
+        status: Optional[str] = None,
+        status_reason: Optional[str] = None,
+        phase: Optional[int] = None,
+        evidence_additions: Iterable[str] = (),
+        evidence_replacement: Optional[Iterable[str]] = None,
+        recovery_context_updates: Optional[Dict[str, Any]] = None,
+        recovery_context_removals: Iterable[str] = (),
+    ) -> Task:
+        """Atomically update mutable task fields without replacing unrelated task state."""
+
+        additions = [str(item) for item in evidence_additions if str(item)]
+        updates = dict(recovery_context_updates or {})
+        removals = {str(item) for item in recovery_context_removals if str(item)}
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._register_operation(conn, operation_id)
+                row = conn.execute(
+                    "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, "
+                    "created_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
+                    "target_scope, target_ids FROM tasks "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    (self.logical_target, operation_id, task_uid),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"Unknown task_uid for operation: {task_uid}")
+
+                evidence = (
+                    list(dict.fromkeys(str(item) for item in evidence_replacement if str(item)))
+                    if evidence_replacement is not None
+                    else list(json.loads(row[6] or "[]"))
+                )
+                if evidence_replacement is None:
+                    for reference in additions:
+                        if reference not in evidence:
+                            evidence.append(reference)
+                recovery_context = dict(json.loads(row[12] or "{}"))
+                for key in removals:
+                    recovery_context.pop(key, None)
+                recovery_context.update(updates)
+                now = datetime.now().isoformat()
+                next_phase = int(phase) if phase is not None else int(row[3])
+                next_status = str(status) if status is not None else str(row[4])
+                next_reason = str(status_reason) if status_reason is not None else str(row[5] or "")
+                conn.execute(
+                    "UPDATE tasks SET phase = ?, status = ?, status_reason = ?, evidence = ?, "
+                    "recovery_context = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    (
+                        next_phase,
+                        next_status,
+                        next_reason,
+                        json.dumps(evidence),
+                        json.dumps(recovery_context, sort_keys=True),
+                        now,
+                        self.logical_target,
+                        operation_id,
+                        task_uid,
+                    ),
+                )
+        return Task(
+            title=row[0],
+            objective=row[1],
+            acceptance=AcceptanceContract.from_obj(json.loads(row[2])),
+            phase=next_phase,
+            status=next_status,
+            status_reason=next_reason,
+            evidence=evidence,
+            task_uid=task_uid,
+            created_at=row[7],
+            updated_at=now,
+            kind=row[8] or "standard",
+            reference_id=row[9],
+            replacement_of=row[10],
+            supersedes_criteria=json.loads(row[11] or "[]"),
+            recovery_context=recovery_context,
+            target_scope=row[13] or "all",
+            target_ids=json.loads(row[14] or "[]"),
+        )
+
     def get_tasks(self, operation_id: str) -> List[Task]:
         """Retrieve all tasks for an operation."""
         tasks = []
@@ -1935,6 +2097,7 @@ class SQLiteApplicationStore:
         now = datetime.now().isoformat()
         with self._lock:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 self._register_operation(conn, operation_id)
                 conn.executemany(
                     """
@@ -1942,6 +2105,7 @@ class SQLiteApplicationStore:
                         logical_target, operation_id, task_uid, criterion_id, status, disposition, summary,
                         evidence_refs, coverage, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(logical_target, operation_id, task_uid, criterion_id) DO NOTHING
                     """,
                     [
                         (
@@ -2244,6 +2408,7 @@ class SQLiteApplicationStore:
 
         with self._lock:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     "SELECT candidate_data FROM finding_records "
                     "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
@@ -2343,6 +2508,7 @@ class SQLiteApplicationStore:
         """Atomically attach one taxonomy annotation to an unresolved finding candidate."""
         with self._lock:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     "SELECT candidate_data FROM finding_records "
                     "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
@@ -2379,6 +2545,7 @@ class SQLiteApplicationStore:
 
         with self._lock:
             with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 row = conn.execute(
                     "SELECT candidate_data FROM finding_records "
                     "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
@@ -3985,25 +4152,94 @@ def _finding_confirmation_requirements(candidate: Dict[str, Any]) -> List[Dict[s
     return requirements
 
 
-def _read_json_artifact(reference: str) -> Tuple[str, Dict[str, Any]]:
-    canonical = _validated_artifact_paths([reference], require_one=True)[0]
+def finding_validation_manifest_schema(requirements: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the model-facing JSON shape for the candidate's required checks."""
+
+    checks: Dict[str, Any] = {}
+    for requirement in requirements:
+        rule_id = str(requirement["id"])
+        kind = str(requirement["kind"])
+        if kind == "response_comparison":
+            checks[rule_id] = {
+                "known_existing_artifact": "artifact:<operation-local response artifact>",
+                "known_nonexistent_artifact": "artifact:<operation-local response artifact>",
+            }
+        elif kind == "rate_limit_probe":
+            checks[rule_id] = {
+                "attempts": [
+                    {
+                        "sequence": 1,
+                        "response_artifact": "artifact:<operation-local response artifact>",
+                    }
+                ],
+            }
+        elif kind == "secret_exposure_revalidation":
+            checks[rule_id] = {
+                "reexposure_artifact": "artifact:<fresh operation-local exposure artifact>",
+            }
+    return {"checks": checks}
+
+
+def _confirmation_manifest_error(message: str, requirements: List[Dict[str, Any]]) -> ValueError:
+    """Return a schema error that gives the executor a complete repair target."""
+
+    shape = json.dumps(finding_validation_manifest_schema(requirements), sort_keys=True)
+    return ValueError(f"{message}. Expected validation_manifest JSON shape: {shape}")
+
+
+def _required_manifest_reference(
+    check: Dict[str, Any],
+    field_name: str,
+    requirements: List[Dict[str, Any]],
+) -> str:
+    """Return one non-empty manifest artifact reference with actionable schema errors."""
+
+    reference = check.get(field_name)
+    if not isinstance(reference, str) or not reference.strip():
+        raise _confirmation_manifest_error(
+            f"validation_manifest is missing required field: {field_name}", requirements
+        )
+    return reference.strip()
+
+
+def _resolve_confirmation_artifact_reference(
+    reference: str,
+    requirements: List[Dict[str, Any]],
+    field_name: str,
+) -> str:
+    """Resolve a manifest artifact reference or give the executor its repair target."""
+
+    try:
+        return _validated_artifact_paths([reference], require_one=True)[0]
+    except ValueError as error:
+        raise _confirmation_manifest_error(
+            f"validation_manifest {field_name} reference is invalid: {error}", requirements
+        ) from error
+
+
+def _read_json_artifact(reference: str, requirements: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+    canonical = _resolve_confirmation_artifact_reference(reference, requirements, "reference")
     try:
         payload = json.loads(Path(_artifact_path_from_ref(canonical)).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("validation_manifest must be a readable JSON artifact") from error
-    if not isinstance(payload, dict) or payload.get("version") != 1:
-        raise ValueError("validation_manifest must declare version 1")
+        raise _confirmation_manifest_error(
+            f"validation_manifest must be a readable JSON artifact: {error}", requirements
+        ) from error
+    if not isinstance(payload, dict):
+        raise _confirmation_manifest_error("validation_manifest must be a JSON object", requirements)
     return canonical, payload
 
 
-def _response_signature(reference: str) -> Dict[str, str]:
+def _response_signature(reference: str, requirements: List[Dict[str, Any]]) -> Dict[str, str]:
     """Derive a stable response signature from one resolved response artifact."""
 
-    canonical = _validated_artifact_paths([reference], require_one=True)[0]
+    canonical = _resolve_confirmation_artifact_reference(reference, requirements, "response artifact")
     try:
         text = Path(_artifact_path_from_ref(canonical)).read_text(encoding="utf-8", errors="replace")
     except OSError as error:
-        raise ValueError(f"Unable to read validation response artifact: {canonical}") from error
+        raise _confirmation_manifest_error(
+            f"validation response artifact is unreadable: {canonical}: {error}", requirements
+        ) from error
     status_match = re.search(r"\bHTTP(?:/\d(?:\.\d)?)?\s+(\d{3})\b|\bstatus(?:_code)?\s*[:=]\s*(\d{3})\b", text, re.I)
     status = next((value for value in status_match.groups() if value), "") if status_match else ""
     body = re.split(r"\r?\n\r?\n", text, maxsplit=1)[-1]
@@ -4017,20 +4253,26 @@ def _response_signature(reference: str) -> Dict[str, str]:
 def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -> Dict[str, Any]:
     """Validate narrow, artifact-derived positive predicates for matched claim families."""
 
-    manifest_ref, manifest = _read_json_artifact(reference)
     requirements = _finding_confirmation_requirements(candidate)
+    manifest_ref, manifest = _read_json_artifact(reference, requirements)
     checks = manifest.get("checks")
     if not isinstance(checks, dict):
-        raise ValueError("validation_manifest must contain a checks object")
+        raise _confirmation_manifest_error("validation_manifest must contain a checks object", requirements)
     derived: Dict[str, Any] = {}
     for requirement in requirements:
         rule_id = requirement["id"]
         check = checks.get(rule_id)
         if not isinstance(check, dict):
-            raise ValueError(f"validation_manifest is missing required check: {rule_id}")
+            raise _confirmation_manifest_error(
+                f"validation_manifest is missing required check: checks.{rule_id}", requirements
+            )
         if requirement["kind"] == "response_comparison":
-            existing = _response_signature(check.get("known_existing_artifact", ""))
-            nonexistent = _response_signature(check.get("known_nonexistent_artifact", ""))
+            existing = _response_signature(
+                _required_manifest_reference(check, "known_existing_artifact", requirements), requirements
+            )
+            nonexistent = _response_signature(
+                _required_manifest_reference(check, "known_nonexistent_artifact", requirements), requirements
+            )
             if (existing["status"], existing["body_sha256"]) == (
                 nonexistent["status"], nonexistent["body_sha256"],
             ):
@@ -4039,15 +4281,31 @@ def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -
         elif requirement["kind"] == "rate_limit_probe":
             attempts = check.get("attempts")
             if not isinstance(attempts, list) or len(attempts) < 10:
-                raise ValueError("lack_of_rate_limiting confirmation requires at least 10 recorded attempts")
+                raise _confirmation_manifest_error(
+                    "lack_of_rate_limiting confirmation requires at least 10 recorded attempts", requirements
+                )
             normalized_attempts = []
             for expected_index, attempt in enumerate(attempts, 1):
-                if not isinstance(attempt, dict) or int(attempt.get("sequence", 0) or 0) != expected_index:
-                    raise ValueError("rate-limit attempts must be ordered sequentially from 1")
-                signature = _response_signature(attempt.get("response_artifact", ""))
-                artifact_text = Path(_artifact_path_from_ref(signature["artifact"])).read_text(
-                    encoding="utf-8", errors="replace"
-                ).lower()
+                sequence = attempt.get("sequence") if isinstance(attempt, dict) else None
+                if (
+                    not isinstance(sequence, int)
+                    or isinstance(sequence, bool)
+                    or sequence != expected_index
+                ):
+                    raise _confirmation_manifest_error(
+                        "rate-limit attempts must be ordered sequentially from 1", requirements
+                    )
+                signature = _response_signature(
+                    _required_manifest_reference(attempt, "response_artifact", requirements), requirements
+                )
+                try:
+                    artifact_text = Path(_artifact_path_from_ref(signature["artifact"])).read_text(
+                        encoding="utf-8", errors="replace"
+                    ).lower()
+                except OSError as error:
+                    raise _confirmation_manifest_error(
+                        f"validation response artifact is unreadable: {signature['artifact']}: {error}", requirements
+                    ) from error
                 if signature["status"] == "429" or any(
                     marker in artifact_text for marker in ("too many requests", "rate limit", "account locked", "locked out")
                 ):
@@ -4055,19 +4313,24 @@ def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -
                 normalized_attempts.append(signature)
             derived[rule_id] = {"attempt_count": len(normalized_attempts), "attempts": normalized_attempts}
         elif requirement["kind"] == "secret_exposure_revalidation":
-            reexposure_ref = check.get("reexposure_artifact", "")
+            reexposure_ref = _required_manifest_reference(check, "reexposure_artifact", requirements)
+            canonical_reexposure_ref = _resolve_confirmation_artifact_reference(
+                reexposure_ref, requirements, "reexposure_artifact"
+            )
             candidate_assertions = list(candidate.get("evidence_assertions") or [])
             secret_assertions = [
-                {**assertion, "artifact": reexposure_ref}
+                {**assertion, "artifact": canonical_reexposure_ref}
                 for assertion in candidate_assertions
                 if isinstance(assertion, dict) and assertion.get("type") == "secret_exposure"
             ]
             if not secret_assertions or not all(
-                _assertion_matches_artifact(assertion, reexposure_ref)
+                _assertion_matches_artifact(assertion, canonical_reexposure_ref)
                 for assertion in secret_assertions
             ):
-                raise ValueError("secret exposure revalidation requires the same exposure in a fresh artifact")
-            derived[rule_id] = {"reexposure_artifact": _validated_artifact_paths([reexposure_ref], require_one=True)[0]}
+                raise _confirmation_manifest_error(
+                    "secret exposure revalidation requires the same exposure in a fresh artifact", requirements
+                )
+            derived[rule_id] = {"reexposure_artifact": canonical_reexposure_ref}
     return {
         "manifest": manifest_ref,
         "requirements": requirements,
@@ -4112,7 +4375,10 @@ def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -
                 },
                 "validation_manifest": {
                     "type": "string",
-                    "description": "Versioned JSON artifact with claim-specific validation evidence when required.",
+                    "description": (
+                        "JSON artifact with claim-specific validation evidence when required. Its required "
+                        "checks shape is supplied by the bound finding-validation tool and task context."
+                    ),
                 },
             },
             "required": ["finding_uid", "outcome", "summary", "reproduction_steps"],
@@ -4268,11 +4534,13 @@ def build_record_finding_validation_tool(task: Task) -> Any:
     except (OSError, ValueError):
         logger.warning("Unable to load confirmation requirements for finding validation task %s", task.task_uid)
     requirement_ids = [str(item["id"]) for item in requirements]
-    manifest_description = "Versioned JSON artifact reference with claim-specific validation evidence."
+    manifest_description = "JSON artifact reference with claim-specific validation evidence."
     if requirement_ids:
+        manifest_shape = json.dumps(finding_validation_manifest_schema(requirements), sort_keys=True)
         manifest_description = (
             "Required for confirmed outcomes. Provide a previously written artifact reference, never inline JSON. "
-            f"It must attest: {', '.join(requirement_ids)}."
+            f"It must contain these required checks: {', '.join(requirement_ids)}. "
+            f"Manifest JSON shape: {manifest_shape}"
         )
 
     def record_bound_finding_validation(
@@ -6326,6 +6594,63 @@ def _proposal_procedure_methods(proposal: TaskProposal) -> List[str]:
     return proposal.methods
 
 
+def canonical_procedure_methods(
+    methods: Iterable[str],
+    targets: Iterable[OperationTarget] = (),
+) -> List[str]:
+    """Normalize procedure methods using the structured target boundary.
+
+    HTTP(S) service targets use ``crawl`` for route and resource discovery;
+    network targets retain ``enumerate`` for host, port, and service discovery.
+    The conversion is intentionally based only on structured target values and
+    never on task titles or free-form objective wording.
+    """
+
+    target_values = [str(target.value).strip() for target in targets]
+    all_http_service_targets = bool(target_values) and all(
+        (parsed := urlsplit(value)).scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+        for value in target_values
+    )
+    aliases = {
+        "analyze": "analyze",
+        "analysis": "analyze",
+        "audit": "analyze",
+        "inspect": "analyze",
+        "review": "analyze",
+        "source_analysis": "analyze",
+        "source_review": "analyze",
+        "crawl": "crawl",
+        "spider": "crawl",
+        "spidering": "crawl",
+        "web_spider": "crawl",
+        "web_spidering": "crawl",
+        "discover": "crawl",
+        "discovery": "crawl",
+        "enumeration": "enumerate",
+        "scan": "enumerate",
+        "http_request": "request",
+        "web_inspect": "request",
+        "web_recon": "request",
+        "probe": "request",
+        "request": "request",
+        "compare": "compare",
+        "comparison": "compare",
+        "execute": "execute",
+        "exploit": "execute",
+        "test": "execute",
+        "validate": "execute",
+    }
+    normalized = []
+    for method in methods:
+        value = re.sub(r"[^a-z0-9]+", "_", str(method or "").strip().lower()).strip("_")
+        canonical = aliases.get(value, value)
+        if canonical == "enumerate" and all_http_service_targets:
+            canonical = "crawl"
+        if canonical and canonical not in normalized:
+            normalized.append(canonical)
+    return normalized
+
+
 def _proposal_execution_requirements(
     proposal: TaskProposal,
     plan: OperationPlan,
@@ -6341,16 +6666,7 @@ def _proposal_execution_requirements(
     selected_targets = [target for target in plan.targets if target.target_id in selected_ids]
     routes = _procedure_proposal_endpoint_routes(proposal, selected_targets)
     subjects = routes or [f"target:{target_id}" for target_id in selected_ids]
-    method_aliases = {
-        "spider": "crawl",
-        "spidering": "crawl",
-        "web_spider": "crawl",
-        "web_spidering": "crawl",
-    }
-    canonical_methods = [
-        method_aliases.get(re.sub(r"[^a-z0-9]+", "_", method.lower()).strip("_"), method)
-        for method in proposal.methods
-    ]
+    canonical_methods = canonical_procedure_methods(proposal.methods, selected_targets)
     method_text = ", ".join(dict.fromkeys(canonical_methods))
     return tuple(
         ExecutionRequirement(
@@ -7665,6 +7981,16 @@ def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> s
 
     store.store_acceptance_results(op_id, task.task_uid, normalized_results)
     recorded_results = store.get_acceptance_results(op_id, task.task_uid)
+    expected_results = {
+        result.criterion_id: json.dumps(result.to_dict(), sort_keys=True)
+        for result in normalized_results
+    }
+    persisted_results = {
+        result.criterion_id: json.dumps(result.to_dict(), sort_keys=True)
+        for result in recorded_results
+    }
+    if persisted_results and persisted_results != expected_results:
+        raise ValueError("Acceptance results were already recorded with conflicting immutable evidence")
     _store_task_acceptance_evidence(task, recorded_results)
     recorded_ids = {result.criterion_id for result in recorded_results}
     memory_published, memory_created, memory_warning = _publish_task_acceptance_memory(
@@ -7793,7 +8119,7 @@ def _publish_task_acceptance_memory(
 
 
 def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult]) -> None:
-    """Replace provisional task evidence with the validated immutable ledger references."""
+    """Replace task evidence from the immutable ledger without losing task metadata."""
 
     evidence = []
     for result in results:
@@ -7801,27 +8127,15 @@ def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult])
         for coverage_item in result.coverage:
             evidence.extend(coverage_item.evidence_refs)
     canonical_evidence = list(dict.fromkeys(evidence))
-    if task.evidence == canonical_evidence:
+    current_task = next(
+        (item for item in _get_database_store().get_tasks(_operation_id()) if item.task_uid == task.task_uid),
+        task,
+    )
+    if current_task.evidence == canonical_evidence:
         return
-    _ensure_memory_client().store_task(
-        task=Task(
-            task_uid=task.task_uid,
-            title=task.title,
-            objective=task.objective,
-            acceptance=task.acceptance,
-            phase=task.phase,
-            status=task.status,
-            status_reason=task.status_reason,
-            evidence=canonical_evidence,
-            created_at=task.created_at,
-            kind=task.kind,
-            reference_id=task.reference_id,
-            replacement_of=task.replacement_of,
-            supersedes_criteria=task.supersedes_criteria,
-            recovery_context=task.recovery_context,
-            target_scope=task.target_scope,
-            target_ids=task.target_ids,
-        ),
+    _ensure_memory_client().patch_task(
+        task_uid=task.task_uid,
+        evidence_replacement=canonical_evidence,
         user_id=_user_id(),
     )
 
@@ -8009,18 +8323,28 @@ def build_record_task_acceptance_tool(
                 f"{requirement.id} ({requirement.description})" for requirement in missing_requirements
             )
             if execution_evidence_resolver is not None:
-                context = dict(current_task.recovery_context)
-                context["pending_controller_acceptance"] = {
+                pending_submission = {
                     "status": status,
                     "disposition": disposition,
                     "summary": summary,
                     "evidence_refs": list(evidence_refs),
                     "missing_requirement_ids": [requirement.id for requirement in missing_requirements],
                 }
-                _ensure_memory_client().store_task(
-                    task=replace(current_task, recovery_context=context),
-                    user_id=_user_id(),
-                )
+                memory_client = _ensure_memory_client()
+                patch_task = getattr(memory_client, "patch_task", None)
+                if callable(patch_task):
+                    patch_task(
+                        task_uid=current_task.task_uid,
+                        recovery_context_updates={"pending_controller_acceptance": pending_submission},
+                        user_id=_user_id(),
+                    )
+                else:
+                    context = dict(current_task.recovery_context)
+                    context["pending_controller_acceptance"] = pending_submission
+                    _get_database_store().store_task(
+                        _operation_id(),
+                        replace(current_task, recovery_context=context),
+                    )
                 raise ValueError(
                     "Acceptance is incomplete: execution evidence is required before acceptance. "
                     "Missing execution requirements: "
@@ -8642,6 +8966,41 @@ class QdrantMemoryClient:
 
         return result
 
+    def patch_plan(
+        self,
+        *,
+        phase_status_updates: Optional[Dict[int, str]] = None,
+        current_phase: Optional[int] = None,
+        assessment_complete: Optional[bool] = None,
+        operation_id: Optional[str] = None,
+    ) -> OperationPlan:
+        """Patch controller-owned plan progress while retaining immutable plan content."""
+
+        op_id = _operation_id(operation_id)
+        store = _get_database_store()
+        patch_plan = getattr(store, "patch_plan", None)
+        if callable(patch_plan):
+            return patch_plan(
+                op_id,
+                phase_status_updates=phase_status_updates,
+                current_phase=current_phase,
+                assessment_complete=assessment_complete,
+            )
+        current = store.get_plan(op_id)
+        if current is None:
+            raise ValueError(f"Unknown operation plan: {op_id}")
+        updates = {int(phase_id): str(status) for phase_id, status in (phase_status_updates or {}).items()}
+        patched = replace(
+            current,
+            phases=[replace(phase, status=updates.get(phase.id, phase.status)) for phase in current.phases],
+            current_phase=current_phase if current_phase is not None else current.current_phase,
+            assessment_complete=(
+                assessment_complete if assessment_complete is not None else current.assessment_complete
+            ),
+        )
+        store.store_plan(op_id, patched)
+        return patched
+
     def get_active_plan(
             self,
             user_id: Optional[str] = None,
@@ -8717,30 +9076,74 @@ class QdrantMemoryClient:
                 all_tasks = _get_database_store().get_tasks(op_id)
                 for t in all_tasks:
                     if t.task_uid != task.task_uid and t.status == "active":
-                        # Demote current active task
-                        demoted = Task(
+                        self.patch_task(
                             task_uid=t.task_uid,
-                            title=t.title,
-                            objective=t.objective,
-                            acceptance=t.acceptance,
-                            evidence=t.evidence,
-                            phase=t.phase,
                             status="pending",
                             status_reason="demoted",
-                            created_at=t.created_at,
-                            kind=t.kind,
-                            reference_id=t.reference_id,
-                            replacement_of=t.replacement_of,
-                            supersedes_criteria=t.supersedes_criteria,
-                            recovery_context=t.recovery_context,
-                            target_scope=t.target_scope,
-                            target_ids=t.target_ids,
+                            user_id=user_id,
                         )
-                        _get_database_store().store_task(op_id, demoted)
             except Exception as e:
                 logger.debug("Could not enforce single active task: %s", e)
 
         _get_database_store().store_task(op_id, task)
+
+    def patch_task(
+            self,
+            *,
+            task_uid: str,
+            status: Optional[str] = None,
+            status_reason: Optional[str] = None,
+            phase: Optional[int] = None,
+            evidence_additions: Iterable[str] = (),
+            evidence_replacement: Optional[Iterable[str]] = None,
+            recovery_context_updates: Optional[Dict[str, Any]] = None,
+            recovery_context_removals: Iterable[str] = (),
+            user_id: Optional[str] = None,
+    ) -> Task:
+        """Patch one persisted task without replacing independent task state."""
+
+        del user_id
+        operation_id = _operation_id()
+        store = _get_database_store()
+        patch_task = getattr(store, "patch_task", None)
+        if callable(patch_task):
+            return patch_task(
+                operation_id,
+                task_uid,
+                status=status,
+                status_reason=status_reason,
+                phase=phase,
+                evidence_additions=evidence_additions,
+                evidence_replacement=evidence_replacement,
+                recovery_context_updates=recovery_context_updates,
+                recovery_context_removals=recovery_context_removals,
+            )
+        current = next((item for item in store.get_tasks(operation_id) if item.task_uid == task_uid), None)
+        if current is None:
+            raise ValueError(f"Unknown task_uid for operation: {task_uid}")
+        evidence = (
+            list(dict.fromkeys(str(item) for item in evidence_replacement if str(item)))
+            if evidence_replacement is not None
+            else list(current.evidence)
+        )
+        if evidence_replacement is None:
+            for reference in evidence_additions:
+                if reference and reference not in evidence:
+                    evidence.append(reference)
+        context = dict(current.recovery_context)
+        for key in recovery_context_removals:
+            context.pop(key, None)
+        context.update(recovery_context_updates or {})
+        updated = replace(
+            current,
+            status=status if status is not None else current.status,
+            status_reason=status_reason if status_reason is not None else current.status_reason,
+            phase=phase if phase is not None else current.phase,
+            evidence=evidence,
+            recovery_context=context,
+        )
+        store.store_task(operation_id, updated)
+        return updated
 
     def advance_task_in_phase(
             self,
@@ -8772,25 +9175,12 @@ class QdrantMemoryClient:
 
         updated: Optional[Task] = None
         if target:
-            updated = Task(
+            updated = self.patch_task(
                 task_uid=target.task_uid,
-                title=target.title,
-                objective=target.objective,
-                acceptance=target.acceptance,
-                evidence=target.evidence,
-                phase=target.phase,
                 status=new_status,
                 status_reason=new_status_reason,
-                created_at=target.created_at,
-                kind=target.kind,
-                reference_id=target.reference_id,
-                replacement_of=target.replacement_of,
-                supersedes_criteria=target.supersedes_criteria,
-                recovery_context=target.recovery_context,
-                target_scope=target.target_scope,
-                target_ids=target.target_ids,
+                user_id=user_id,
             )
-            self.store_task(task=updated, user_id=user_id)
 
         # After updating, find next pending
         next_active: Optional[Task] = None
@@ -8802,26 +9192,12 @@ class QdrantMemoryClient:
                 if pendings:
                     # Sort pendings by created_at (asc) to pick the oldest pending as next
                     pendings.sort(key=lambda x: x.created_at or "")
-                    p = pendings[0]
-                    next_active = Task(
-                        task_uid=p.task_uid,
-                        title=p.title,
-                        objective=p.objective,
-                        acceptance=p.acceptance,
-                        evidence=p.evidence,
-                        phase=p.phase,
+                    next_active = self.patch_task(
+                        task_uid=pendings[0].task_uid,
                         status="active",
                         status_reason="activated",
-                        created_at=p.created_at,
-                        kind=p.kind,
-                        reference_id=p.reference_id,
-                        replacement_of=p.replacement_of,
-                        supersedes_criteria=p.supersedes_criteria,
-                        recovery_context=p.recovery_context,
-                        target_scope=p.target_scope,
-                        target_ids=p.target_ids,
+                        user_id=user_id,
                     )
-                    self.store_task(task=next_active, user_id=user_id)
 
         return updated, next_active
 
@@ -8848,25 +9224,12 @@ class QdrantMemoryClient:
             return None, False
 
         pendings.sort(key=lambda x: x.created_at or "")
-        p = pendings[0]
-
-        next_active = Task(
-            task_uid=p.task_uid,
-            title=p.title,
-            objective=p.objective,
-            acceptance=p.acceptance,
-            evidence=p.evidence,
-            phase=p.phase,
+        next_active = self.patch_task(
+            task_uid=pendings[0].task_uid,
             status="active",
             status_reason="activated",
-            created_at=p.created_at,
-            kind=p.kind,
-            reference_id=p.reference_id,
-            target_scope=p.target_scope,
-            target_ids=p.target_ids,
+            user_id=user_id,
         )
-
-        self.store_task(task=next_active, user_id=user_id)
         return next_active, True
 
     def list_tasks(

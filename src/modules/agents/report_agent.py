@@ -189,7 +189,6 @@ class ReportGenerator:
             "trace_attributes": trace_attrs if operation_id else None,
             "callback_handler": callback_handler or NoOpCallbackHandler(),
             "hooks": [ReportExecutionTelemetryHook(), ToolUseIdHook()],
-            "context_manager": "auto",
         }
         return create_agent_with_stateful_retry(
             agent_kwargs,

@@ -15,7 +15,7 @@ def test_create_report_agent_custom_system_prompt(mock_create_model, mock_agent,
     # Verify Agent was created with custom system prompt
     _, kwargs = mock_agent.call_args
     assert kwargs["system_prompt"] == "Custom System Prompt"
-    assert kwargs["context_manager"] == "auto"
+    assert "context_manager" not in kwargs
     assert kwargs["tools"] == []
     assert any(isinstance(hook, ReportExecutionTelemetryHook) for hook in kwargs["hooks"])
     mock_create_model.assert_called_once_with("bedrock", "test-model", "report_agent")
@@ -50,27 +50,26 @@ def test_create_report_critic_uses_distinct_role_metadata(mock_create_model, moc
     assert kwargs["name"] == "Cyber-ReportCritic OP-CRITIC"
     assert kwargs["trace_attributes"]["langfuse.agent.type"] == "report_critic"
     assert kwargs["trace_attributes"]["agent.role"] == "report_critic"
+    assert kwargs["tools"] == []
+    assert "context_manager" not in kwargs
 
 
 @patch("modules.agents.report_agent.get_config_manager")
 @patch("modules.agents.report_agent.Agent")
 @patch("modules.agents.report_agent.create_strands_model")
-def test_create_report_agent_retries_without_context_manager_for_stateful_model(
+def test_create_report_agent_supports_stateful_model_without_context_manager(
     mock_create_model, mock_agent, mock_cfg
 ):
     mock_cfg.return_value.get_llm_config.return_value.model_id = "test-model"
-    fallback_agent = object()
-    mock_agent.side_effect = [
-        ValueError("context_manager and conversation_manager cannot be used with a stateful model"),
-        fallback_agent,
-    ]
+    stateful_agent = object()
+    mock_agent.return_value = stateful_agent
 
     result = ReportGenerator.create_report_agent(provider="litellm", system_prompt="Report Prompt")
 
-    assert result is fallback_agent
-    assert mock_agent.call_count == 2
-    assert mock_agent.call_args_list[0].kwargs["context_manager"] == "auto"
-    assert "context_manager" not in mock_agent.call_args_list[1].kwargs
+    assert result is stateful_agent
+    mock_agent.assert_called_once()
+    assert "context_manager" not in mock_agent.call_args.kwargs
+    assert mock_agent.call_args.kwargs["tools"] == []
 
 
 def test_report_execution_telemetry_records_model_and_unexpected_tool_events(caplog):

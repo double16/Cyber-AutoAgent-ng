@@ -387,6 +387,41 @@ def test_successful_artifact_outcomes_are_retained_as_task_evidence(monkeypatch)
     assert any(event["type"] == "task_durable_evidence_retained" for event in controller.runtime.callback_handler.events)
 
 
+def test_artifact_retention_preserves_execution_receipts_from_fresher_task_state(monkeypatch):
+    persisted_task = Task(
+        task_uid="task",
+        title="Task",
+        objective="Crawl target",
+        phase=1,
+        status="active",
+        recovery_context={
+            "execution_evidence_receipts": {"crawl-root": ["artifact:artifacts/recon.json"]},
+            "controller_execution_evidence": {"crawl-root": {"receipt_mode": "capability_matched"}},
+        },
+    )
+    state = FakeState(_plan(), tasks=[persisted_task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state
+    )
+    stale_task = replace(persisted_task, recovery_context={})
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    outcome = ToolOutcome(
+        1,
+        "tool",
+        "specialized_recon_orchestrator",
+        True,
+        False,
+        "",
+        "artifact:artifacts/recon.json",
+    )
+
+    updated = controller._retain_task_artifact_evidence(stale_task, [outcome])
+
+    assert updated.evidence == ["artifact:artifacts/recon.json"]
+    assert updated.recovery_context == persisted_task.recovery_context
+    assert state.tasks[0].recovery_context == persisted_task.recovery_context
+
+
 def test_controller_seeds_secret_candidate_only_from_target_scoped_tool_outcomes(monkeypatch):
     plan = OperationPlan(
         objective="assess",
@@ -928,6 +963,35 @@ class FakeState:
         self.tasks.append(task)
         return task
 
+    def patch_task(
+        self,
+        task_uid,
+        *,
+        status=None,
+        status_reason=None,
+        phase=None,
+        evidence_additions=(),
+        recovery_context_updates=None,
+        recovery_context_removals=(),
+    ):
+        current = next(task for task in self.tasks if task.task_uid == task_uid)
+        evidence = list(current.evidence)
+        for reference in evidence_additions:
+            if reference and reference not in evidence:
+                evidence.append(reference)
+        context = dict(current.recovery_context)
+        for key in recovery_context_removals:
+            context.pop(key, None)
+        context.update(recovery_context_updates or {})
+        return self.store_task(replace(
+            current,
+            status=status if status is not None else current.status,
+            status_reason=status_reason if status_reason is not None else current.status_reason,
+            phase=phase if phase is not None else current.phase,
+            evidence=evidence,
+            recovery_context=context,
+        ))
+
     def list_task_acceptance_results(self, task_uid):
         if task_uid in self.acceptance_results:
             return self.acceptance_results[task_uid]
@@ -1404,8 +1468,8 @@ def test_same_cycle_acceptance_resolves_live_http_request_evidence(monkeypatch, 
     assert captured["resolved"] == {
         "criterion-1-execution-1": ["artifact:artifacts/root-response.log"]
     }
-    assert captured["run_count"] == 2
-    assert any(
+    assert captured["run_count"] == 1
+    assert not any(
         event["type"] == "evaluator_execution_repair"
         and event["outcome"] == "scheduled"
         for event in controller.runtime.callback_handler.events
@@ -4755,6 +4819,38 @@ def test_task_executor_contract_groups_providers_by_declared_capability_and_hand
     )[0]
     assert "shell command `curl`" not in crawl_provider_section
     assert restricted.count("no supplied provider available") == 4
+
+
+def test_task_executor_contract_normalizes_legacy_http_enumeration_to_crawl(monkeypatch):
+    monkeypatch.setattr(
+        workflow_mod,
+        "get_shell_command_execution_capabilities",
+        lambda command: {"katana": frozenset({"crawl"}), "nmap": frozenset({"enumerate"})}.get(
+            command, frozenset()
+        ),
+    )
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Recon", status="active")],
+        targets=[OperationTarget("target-1", "https://example.test:8443", "network")],
+    )
+    task = _execution_requirement_task(
+        ["request", "enumerate"],
+        [ExecutionRequirement("execution", "Map the root", "/")],
+    )
+    task = replace(task, target_ids=["target-1"])
+
+    contract = MultiAgentWorkflowController._task_executor_contract(
+        task,
+        {"shell"},
+        [{"command": "katana"}, {"command": "nmap"}],
+        plan=plan,
+    )
+
+    assert "Declared procedure capability `crawl`: shell command `katana`" in contract
+    assert "Declared procedure capability `enumerate`" not in contract
 
 
 def test_task_executor_contract_omits_execution_provider_section_without_requirements():
@@ -11524,6 +11620,50 @@ def test_finding_validation_prompt_separates_payload_markers_from_target_scope()
     assert "postgres://bc:bc@db:5432/bc" in context
     assert "https://bucket.s3.amazonaws.com" in context
     assert "## Finding Validation Context" in prompt
+
+
+def test_finding_validation_context_documents_secret_exposure_manifest_schema():
+    task = TaskModel(
+        task_uid="verify-1",
+        title="Verify exposed API key",
+        objective="Independently verify finding candidate finding-1.",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(
+        _plan(),
+        tasks=[task],
+        finding_records=[
+            {
+                "finding_uid": "finding-1",
+                "candidate_data": {
+                    "title": "Exposed API key",
+                    "claim": "A secret exposure was reported.",
+                    "technique": "secret exposure",
+                },
+            }
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    context = json.loads(controller._finding_validation_context(task))
+
+    assert context["confirmation_manifest_schema"] == {
+        "checks": {
+            "secret_exposure": {
+                "reexposure_artifact": "artifact:<fresh operation-local exposure artifact>",
+            }
+        }
+    }
+    assert "version" not in context["confirmation_manifest_rule"]
 
 
 def test_task_prompt_builder_requires_reusable_acceptance_summaries():

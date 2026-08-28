@@ -1068,7 +1068,6 @@ def test_confirmed_enumeration_and_rate_limit_require_resolved_manifest(tmp_path
     nonexistent.write_text("HTTP/1.1 200 OK\n\npositive-marker unknown user", encoding="utf-8")
     manifest = tmp_path / "validation.json"
     manifest.write_text(json.dumps({
-        "version": 1,
         "checks": {
             "user_enumeration": {
                 "known_existing_artifact": str(existing),
@@ -1122,6 +1121,214 @@ def test_confirmed_enumeration_and_rate_limit_require_resolved_manifest(tmp_path
     assert payload["outcome"] == "confirmed"
     validation = plan_store.store_finding_validation.call_args.args[2]
     assert validation["validation_manifest_attestation"]["derived"]["lack_of_rate_limiting"]["attempt_count"] == 10
+
+
+def test_secret_exposure_manifest_error_repeats_required_schema(tmp_path: Path, operation_ids):
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps({"checks": {"secret_exposure": {}}}), encoding="utf-8")
+    candidate = {
+        "title": "Exposed API key",
+        "claim": "The target has a secret exposure.",
+        "technique": "secret exposure",
+        "evidence_assertions": [{"type": "secret_exposure", "kind": "api_key", "digest": "digest"}],
+    }
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError) as error,
+    ):
+        mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    message = str(error.value)
+    assert "reexposure_artifact" in message
+    assert "Expected validation_manifest JSON shape" in message
+    assert '"version"' not in message
+
+
+@pytest.mark.parametrize(
+    ("candidate", "manifest_payload", "missing_field"),
+    [
+        (
+            {"title": "User Enumeration", "claim": "User enumeration", "technique": "authentication"},
+            {"checks": {"user_enumeration": {}}},
+            "known_existing_artifact",
+        ),
+        (
+            {"title": "Lack of rate limiting", "claim": "No rate limiting", "technique": "HTTP"},
+            {"checks": {"lack_of_rate_limiting": {"attempts": []}}},
+            "at least 10 recorded attempts",
+        ),
+    ],
+)
+def test_confirmation_manifest_schema_errors_repeat_the_required_shape(
+    tmp_path: Path,
+    operation_ids,
+    candidate,
+    manifest_payload,
+    missing_field,
+):
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError) as error,
+    ):
+        mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    message = str(error.value)
+    assert missing_field in message
+    assert "Expected validation_manifest JSON shape" in message
+    assert '"checks"' in message
+
+
+@pytest.mark.parametrize(
+    ("candidate", "manifest_payload", "manifest_name", "expected_reason"),
+    [
+        (
+            {"title": "User Enumeration", "claim": "User enumeration", "technique": "authentication"},
+            None,
+            "missing-validation.json",
+            "Artifact does not exist",
+        ),
+        (
+            {"title": "User Enumeration", "claim": "User enumeration", "technique": "authentication"},
+            {
+                "checks": {
+                    "user_enumeration": {
+                        "known_existing_artifact": "missing-response.txt",
+                        "known_nonexistent_artifact": "missing-control.txt",
+                    }
+                }
+            },
+            "validation.json",
+            "Artifact does not exist: missing-response.txt",
+        ),
+        (
+            {"title": "Lack of rate limiting", "claim": "No rate limiting", "technique": "HTTP"},
+            {
+                "checks": {
+                    "lack_of_rate_limiting": {
+                        "attempts": [
+                            {"sequence": index, "response_artifact": "missing-attempt.txt"}
+                            for index in range(1, 11)
+                        ]
+                    }
+                }
+            },
+            "validation.json",
+            "Artifact does not exist: missing-attempt.txt",
+        ),
+        (
+            {
+                "title": "Exposed API key",
+                "claim": "The target has a secret exposure.",
+                "technique": "secret exposure",
+                "evidence_assertions": [{"type": "secret_exposure", "kind": "api_key", "digest": "digest"}],
+            },
+            {"checks": {"secret_exposure": {"reexposure_artifact": "missing-fresh-response.txt"}}},
+            "validation.json",
+            "Artifact does not exist: missing-fresh-response.txt",
+        ),
+    ],
+    ids=("missing_manifest", "invalid_response_comparison", "invalid_rate_limit_attempt", "invalid_reexposure"),
+)
+def test_confirmation_manifest_invalid_references_repeat_reason_and_required_shape(
+    tmp_path: Path,
+    operation_ids,
+    candidate,
+    manifest_payload,
+    manifest_name,
+    expected_reason,
+):
+    manifest = tmp_path / manifest_name
+    if manifest_payload is not None:
+        manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError) as error,
+    ):
+        mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    message = str(error.value)
+    assert expected_reason in message
+    assert "Expected validation_manifest JSON shape" in message
+    assert '"checks"' in message
+
+
+def test_confirmation_manifest_unreadable_json_repeats_reason_and_required_shape(
+    tmp_path: Path, operation_ids
+):
+    manifest = tmp_path / "validation.json"
+    manifest.write_text("not valid JSON", encoding="utf-8")
+    candidate = {"title": "User Enumeration", "claim": "User enumeration", "technique": "authentication"}
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError) as error,
+    ):
+        mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    message = str(error.value)
+    assert "Expecting value" in message
+    assert "Expected validation_manifest JSON shape" in message
+    assert '"checks"' in message
+
+
+def test_finding_validation_manifest_schema_documents_every_supported_check_shape():
+    schema = mod.finding_validation_manifest_schema([
+        {"id": "user_enumeration", "kind": "response_comparison"},
+        {"id": "lack_of_rate_limiting", "kind": "rate_limit_probe"},
+        {"id": "secret_exposure", "kind": "secret_exposure_revalidation"},
+    ])
+
+    assert schema == {
+        "checks": {
+            "user_enumeration": {
+                "known_existing_artifact": "artifact:<operation-local response artifact>",
+                "known_nonexistent_artifact": "artifact:<operation-local response artifact>",
+            },
+            "lack_of_rate_limiting": {
+                "attempts": [
+                    {
+                        "sequence": 1,
+                        "response_artifact": "artifact:<operation-local response artifact>",
+                    }
+                ],
+            },
+            "secret_exposure": {
+                "reexposure_artifact": "artifact:<fresh operation-local exposure artifact>",
+            },
+        }
+    }
+
+
+def test_secret_exposure_manifest_accepts_versionless_fresh_reexposure_artifact(
+    tmp_path: Path, operation_ids
+):
+    fresh_artifact = tmp_path / "fresh-response.json"
+    fresh_artifact.write_text('{"api_key":"fresh-secret"}', encoding="utf-8")
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps({
+        "checks": {"secret_exposure": {"reexposure_artifact": str(fresh_artifact)}},
+    }), encoding="utf-8")
+    candidate = {
+        "title": "Exposed API key",
+        "claim": "The target has a secret exposure.",
+        "technique": "secret exposure",
+        "evidence_assertions": [{"type": "secret_exposure", "kind": "api_key", "digest": "digest"}],
+    }
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._assertion_matches_artifact", return_value=True),
+    ):
+        attestation = mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    assert attestation["derived"]["secret_exposure"] == {
+        "reexposure_artifact": "artifact:fresh-response.json"
+    }
 
 
 def test_confirmed_enumeration_rejects_identical_response_signatures(tmp_path: Path, operation_ids):
@@ -1404,6 +1611,8 @@ def test_bound_finding_validation_tool_requires_manifest_for_confirmed_secret_ex
         "then": {"required": ["validation_manifest"]},
     }]
     assert "artifact reference, never inline JSON" in schema["properties"]["validation_manifest"]["description"]
+    assert "reexposure_artifact" in schema["properties"]["validation_manifest"]["description"]
+    assert '"version"' not in schema["properties"]["validation_manifest"]["description"]
 
 
 def test_finding_validation_runtime_schema_accepts_aliases():
