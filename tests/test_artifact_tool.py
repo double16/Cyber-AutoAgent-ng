@@ -134,6 +134,9 @@ def test_read_artifact_rejects_oversized_minified_page_without_returning_content
         READ_ARTIFACT("minified.js")
 
     assert oversized_content not in str(error.value)
+    assert "max_lines" in str(error.value)
+    assert "start_byte" in str(error.value)
+    assert "max_bytes" in str(error.value)
 
 
 def test_read_artifact_reads_oversized_minified_content_by_byte_page(tmp_path: Path):
@@ -636,5 +639,8 @@ def test_bounded_reader_requires_explicit_byte_page_for_large_artifact(tmp_path:
         with pytest.raises(RuntimeError, match=r"Artifact is 19201 bytes") as error:
             reader("artifact:artifacts/minified.js")
         assert "requires explicit byte paging" in str(error.value)
+        assert "start_byte" in str(error.value)
+        assert "max_bytes" in str(error.value)
+        assert "max_lines" in str(error.value)
         assert "'start_byte': 0" in reader("artifact:artifacts/minified.js", max_bytes=19_200)
         assert "proof" in reader("artifact:artifacts/evidence.txt")

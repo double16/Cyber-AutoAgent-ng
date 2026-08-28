@@ -216,7 +216,8 @@ def _read_artifact_with_limit(
                 if line_exceeds_limit or content_size + additional_size > max_bytes:
                     raise ValueError(
                         f"{ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER}: Requested artifact page exceeds "
-                        f"the {max_bytes}-byte limit"
+                        f"the {max_bytes}-byte limit. Retry with a smaller max_lines value or use "
+                        "byte paging with start_byte and max_bytes"
                     )
                 decoded_line = normalized_line.decode("utf-8", errors="replace")
                 lines.append(decoded_line)
@@ -514,7 +515,8 @@ def create_bounded_artifact_reader(
         if resolved in omitted_large_paths and not byte_mode:
             raise RuntimeError(
                 f"{ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER}: Artifact is {omitted_large_paths[resolved]} bytes "
-                f"and requires explicit byte paging with start_byte and max_bytes"
+                "and requires explicit byte paging with start_byte and max_bytes; use max_lines to narrow "
+                "line-based reads when applicable"
             )
         if byte_mode:
             byte_max_lines = max_lines if max_lines is not None else (200 if start_line is not None else None)
