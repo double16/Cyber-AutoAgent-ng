@@ -197,7 +197,7 @@ const CONFIG_FIELDS: ConfigField[] = [
   },
   {
     key: 'toolMaxResultChars', label: 'Tool Max Result Size (chars)', type: 'number', section: 'Operations',
-    description: 'Max tool output size before truncation (default: 30000). Maps to CYBER_TOOL_MAX_RESULT_CHARS.'
+    description: 'Max tool output size before truncation (auto: 10% of context window at 4 chars/token, capped at 30000). Maps to CYBER_TOOL_MAX_RESULT_CHARS.'
   },
   {
     key: 'toolArtifactThreshold', label: 'Tool Artifact Threshold (chars)', type: 'number', section: 'Operations',

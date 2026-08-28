@@ -75,6 +75,7 @@ from modules.tools.artifact import (
     artifact_max_bytes_for_context_window,
     artifact_review_metadata,
     create_bounded_artifact_reader,
+    resolve_tool_result_max_chars,
     resolve_operation_artifact_path,
 )
 from modules.tools.memory import (
@@ -8318,6 +8319,13 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
 
         return int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)
 
+    def _artifact_router_max_chars(self) -> int:
+        """Return the resolved router ceiling for evaluator artifact reads."""
+
+        getenv = getattr(self.runtime.config_manager, "getenv", None)
+        configured = getenv("CYBER_TOOL_MAX_RESULT_CHARS") if callable(getenv) else None
+        return resolve_tool_result_max_chars(self._artifact_context_window_tokens(), configured)
+
     def _task_evaluator_artifact_review(
         self,
         task: Task,
@@ -8362,6 +8370,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             },
             max_reads_per_artifact=max_reads_per_artifact,
             max_lines_per_read=200,
+            max_output_chars=self._artifact_router_max_chars(),
         )]
 
     def _task_evaluator_artifact_limit_section(
@@ -9863,7 +9872,8 @@ Allowed artifact references (the evidence field must copy these exactly):
                             self._disallowed_attack_ids(preflight_context),
                         ),
                         tool_factory=lambda: [create_bounded_artifact_reader(
-                            context_window_tokens=self._artifact_context_window_tokens()
+                            context_window_tokens=self._artifact_context_window_tokens(),
+                            max_output_chars=self._artifact_router_max_chars(),
                         )],
                     )
                 taxonomy = validate_taxonomy_mappings(
@@ -10088,7 +10098,8 @@ Allowed evidence references:
                                 self._disallowed_attack_ids(preflight_context),
                             ),
                             tool_factory=lambda: [create_bounded_artifact_reader(
-                                context_window_tokens=self._artifact_context_window_tokens()
+                                context_window_tokens=self._artifact_context_window_tokens(),
+                                max_output_chars=self._artifact_router_max_chars(),
                             )],
                         )
                     taxonomy = validate_taxonomy_mappings(

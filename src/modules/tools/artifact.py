@@ -3,6 +3,7 @@
 import ast
 import os
 from collections.abc import Iterable, Mapping
+from math import ceil
 from typing import Any
 
 from strands import tool
@@ -21,6 +22,9 @@ ARTIFACT_PAGE_CONTEXT_FRACTION = 0.10
 ARTIFACT_MIN_BYTES_PER_READ = 8 * 1024
 ARTIFACT_MAX_BYTES_PER_READ = 64 * 1024
 ARTIFACT_NEARBY_BYTE_PAGE_GAP = 256
+TOOL_RESULT_CONTEXT_FRACTION = 0.10
+TOOL_RESULT_CHARS_PER_TOKEN = 4
+TOOL_RESULT_MAX_CHARS = 30_000
 
 
 def artifact_max_bytes_for_context_window(context_window_tokens: int) -> int:
@@ -32,6 +36,30 @@ def artifact_max_bytes_for_context_window(context_window_tokens: int) -> int:
         raise ValueError("context_window_tokens must be a positive integer")
     context_budget = int(context_window_tokens * ARTIFACT_BYTES_PER_TOKEN * ARTIFACT_PAGE_CONTEXT_FRACTION)
     return min(ARTIFACT_MAX_BYTES_PER_READ, max(ARTIFACT_MIN_BYTES_PER_READ, context_budget))
+
+
+def resolve_tool_result_max_chars(
+    context_window_tokens: int,
+    configured_max_chars: str | None = None,
+) -> int:
+    """Resolve the router's character ceiling from context tokens or an override."""
+
+    if isinstance(context_window_tokens, bool) or not isinstance(context_window_tokens, int):
+        raise TypeError("context_window_tokens must be a positive integer")
+    if context_window_tokens < 1:
+        raise ValueError("context_window_tokens must be a positive integer")
+
+    computed = min(
+        TOOL_RESULT_MAX_CHARS,
+        ceil(context_window_tokens * TOOL_RESULT_CONTEXT_FRACTION * TOOL_RESULT_CHARS_PER_TOKEN),
+    )
+    if configured_max_chars is None:
+        return computed
+    try:
+        configured = int(configured_max_chars)
+    except (TypeError, ValueError):
+        return computed
+    return configured if configured > 0 else computed
 
 
 def _resolved_operation_path(candidate: str, root: str) -> str:
@@ -95,7 +123,7 @@ def _resolve_operation_directory_path(path: str) -> str | None:
     return None
 
 
-def _directory_read_guidance(directory: str, root: str) -> str:
+def _directory_read_guidance(directory: str, root: str, max_output_chars: int | None = None) -> str:
     """Return a bounded, non-recursive file listing for a directory read attempt."""
 
     files = []
@@ -108,14 +136,22 @@ def _directory_read_guidance(directory: str, root: str) -> str:
             files.append(f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}")
     files.sort()
     listed_files = files[:ARTIFACT_DIRECTORY_LISTING_LIMIT]
-    omitted_count = len(files) - len(listed_files)
-    payload: dict[str, Any] = {
-        "status": "directory",
-        "message": "read_artifact requires one file. Retry with one listed artifact_ref.",
-        "directory": f"artifact:{os.path.relpath(directory, root).replace(os.sep, '/')}",
-        "artifact_refs": listed_files,
-        "omitted_file_count": omitted_count,
-    }
+
+    def payload_for(references: list[str]) -> dict[str, Any]:
+        return {
+            "status": "directory",
+            "message": "read_artifact requires one file. Retry with one listed artifact_ref.",
+            "directory": f"artifact:{os.path.relpath(directory, root).replace(os.sep, '/')}",
+            "artifact_refs": references,
+            "omitted_file_count": len(files) - len(references),
+        }
+
+    payload = payload_for(listed_files)
+    while listed_files and max_output_chars is not None and len(str(payload)) > max_output_chars:
+        listed_files.pop()
+        payload = payload_for(listed_files)
+    if max_output_chars is not None and len(str(payload)) > max_output_chars:
+        raise ValueError("artifact reader output limit is too small for directory guidance")
     return str(payload)
 
 
@@ -147,7 +183,13 @@ def artifact_review_metadata(path: str, max_bytes: int) -> dict[str, Any]:
     }
 
 
-def _read_artifact_with_limit(path: str, start_line: int, max_lines: int, max_bytes: int) -> str:
+def _read_artifact_with_limit(
+    path: str,
+    start_line: int,
+    max_lines: int,
+    max_bytes: int,
+    max_output_chars: int | None = None,
+) -> str:
     """Read a bounded artifact excerpt without materializing more than ``max_bytes``."""
 
     root = os.path.realpath(_operation_output_root())
@@ -183,13 +225,24 @@ def _read_artifact_with_limit(path: str, start_line: int, max_lines: int, max_by
                 while raw_line and not raw_line.endswith(b"\n"):
                     raw_line = artifact_file.readline(8192)
 
-    payload: dict[str, Any] = {
-        "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
-        "start_line": start_line,
-        "end_line": start_line + len(lines) - 1 if lines else start_line - 1,
-        "total_lines": total_lines,
-        "content": "\n".join(lines),
-    }
+    def payload_for(page_lines: list[str]) -> dict[str, Any]:
+        return {
+            "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
+            "start_line": start_line,
+            "end_line": start_line + len(page_lines) - 1 if page_lines else start_line - 1,
+            "total_lines": total_lines,
+            "content": "\n".join(page_lines),
+        }
+
+    original_line_count = len(lines)
+    payload = payload_for(lines)
+    while lines and max_output_chars is not None and len(str(payload)) > max_output_chars:
+        lines.pop()
+        payload = payload_for(lines)
+    if max_output_chars is not None and original_line_count and not lines:
+        raise ValueError("artifact reader output limit is too small for one complete line")
+    if max_output_chars is not None and len(str(payload)) > max_output_chars:
+        raise ValueError("artifact reader output limit is too small for result metadata")
     return str(payload)
 
 
@@ -199,6 +252,7 @@ def _read_artifact_bytes(
     max_bytes: int,
     start_line: int | None = None,
     max_lines: int | None = None,
+    max_output_chars: int | None = None,
 ) -> str:
     """Read one byte page, optionally narrowed to a bounded line range."""
 
@@ -240,25 +294,49 @@ def _read_artifact_bytes(
         content_end = line_end
 
     content = byte_page[content_start:content_end]
-    end_byte = start_byte + content_end
-    payload: dict[str, Any] = {
-        "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
-        "start_byte": start_byte,
-        "end_byte": end_byte,
-        "next_start_byte": end_byte if end_byte < byte_size else None,
-        "eof": end_byte >= byte_size,
-        "byte_size": byte_size,
-        "content": content.decode("utf-8", errors="replace"),
-    }
-    if max_lines is not None:
-        returned_line_count = content.count(b"\n") + int(bool(content) and not content.endswith(b"\n"))
-        payload["start_line"] = current_line
-        payload["end_line"] = current_line + returned_line_count - 1
+
+    def payload_for(page_content: bytes) -> dict[str, Any]:
+        page_end = content_start + len(page_content)
+        end_byte = start_byte + page_end
+        payload: dict[str, Any] = {
+            "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
+            "start_byte": start_byte,
+            "end_byte": end_byte,
+            "next_start_byte": end_byte if end_byte < byte_size else None,
+            "eof": end_byte >= byte_size,
+            "byte_size": byte_size,
+            "content": page_content.decode("utf-8", errors="replace"),
+        }
+        if max_lines is not None:
+            returned_line_count = page_content.count(b"\n") + int(
+                bool(page_content) and not page_content.endswith(b"\n")
+            )
+            payload["start_line"] = current_line
+            payload["end_line"] = current_line + returned_line_count - 1
+        return payload
+
+    payload = payload_for(content)
+    if max_output_chars is not None and len(str(payload)) > max_output_chars:
+        lower, upper = 0, len(content)
+        while lower < upper:
+            midpoint = (lower + upper + 1) // 2
+            candidate = payload_for(content[:midpoint])
+            if len(str(candidate)) <= max_output_chars:
+                lower = midpoint
+            else:
+                upper = midpoint - 1
+        content = content[:lower]
+        payload = payload_for(content)
+    if max_output_chars is not None and len(str(payload)) > max_output_chars:
+        raise ValueError("artifact reader output limit is too small for result metadata")
     return str(payload)
 
 
-def create_artifact_reader(context_window_tokens: int) -> Any:
+def create_artifact_reader(context_window_tokens: int, *, max_output_chars: int | None = None) -> Any:
     """Create a context-bound reader for current-operation artifacts."""
+
+    if max_output_chars is not None and max_output_chars < 1:
+        raise ValueError("max_output_chars must be at least 1")
 
     @tool(name="read_artifact")
     def read_artifact(
@@ -282,7 +360,14 @@ def create_artifact_reader(context_window_tokens: int) -> Any:
                 if max_bytes < 1 or max_bytes > artifact_max_bytes_for_context_window(context_window_tokens):
                     raise ValueError("max_bytes exceeds the artifact reader page budget")
                 byte_max_lines = max_lines if max_lines is not None else (200 if start_line is not None else None)
-                return _read_artifact_bytes(path, start_byte, max_bytes, start_line, byte_max_lines)
+                return _read_artifact_bytes(
+                    path,
+                    start_byte,
+                    max_bytes,
+                    start_line,
+                    byte_max_lines,
+                    max_output_chars,
+                )
             start_line = 1 if start_line is None else start_line
             max_lines = 200 if max_lines is None else max_lines
             return _read_artifact_with_limit(
@@ -290,11 +375,12 @@ def create_artifact_reader(context_window_tokens: int) -> Any:
                 start_line,
                 max_lines,
                 artifact_max_bytes_for_context_window(context_window_tokens),
+                max_output_chars,
             )
         except ValueError:
             directory = _resolve_operation_directory_path(path)
             if directory is not None:
-                return _directory_read_guidance(directory, root)
+                return _directory_read_guidance(directory, root, max_output_chars)
             raise
 
     return read_artifact
@@ -308,6 +394,7 @@ def create_bounded_artifact_reader(
     omitted_large_artifact_sizes: Mapping[str, int] | None = None,
     max_reads_per_artifact: int | None = None,
     max_lines_per_read: int | None = None,
+    max_output_chars: int | None = None,
     context_reduction_state: dict[str, int] | None = None,
 ) -> Any:
     """Create an agent-local artifact reader with optional path and page limits."""
@@ -321,6 +408,8 @@ def create_bounded_artifact_reader(
         raise ValueError("max_reads_per_artifact must be at least 1")
     if max_lines_per_read is not None and not 1 <= max_lines_per_read <= 500:
         raise ValueError("max_lines_per_read must be between 1 and 500")
+    if max_output_chars is not None and max_output_chars < 1:
+        raise ValueError("max_output_chars must be at least 1")
     resolved_max_bytes = artifact_max_bytes_for_context_window(context_window_tokens)
 
     allowed_paths = None
@@ -456,9 +545,22 @@ def create_bounded_artifact_reader(
         )
         try:
             result = (
-                _read_artifact_bytes(resolved, start_byte, max_bytes, start_line, byte_max_lines)
+                _read_artifact_bytes(
+                    resolved,
+                    start_byte,
+                    max_bytes,
+                    start_line,
+                    byte_max_lines,
+                    max_output_chars,
+                )
                 if byte_mode
-                else _read_artifact_with_limit(resolved, start_line, max_lines, resolved_max_bytes)
+                else _read_artifact_with_limit(
+                    resolved,
+                    start_line,
+                    max_lines,
+                    resolved_max_bytes,
+                    max_output_chars,
+                )
             )
         except ValueError as error:
             if str(error).startswith(ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER):

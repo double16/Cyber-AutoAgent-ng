@@ -82,7 +82,7 @@ from modules.handlers.utils import (
     tool_rename,
 )
 from modules.tools import python_repl
-from modules.tools.artifact import create_artifact_reader
+from modules.tools.artifact import create_artifact_reader, resolve_tool_result_max_chars
 from modules.tools.editor import create_absolute_path_editor
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.browser import (
@@ -333,11 +333,10 @@ def create_agent_runtime_resources(
     logger.info("Prompt token limit (input tokens): %d", prompt_token_limit)
 
     # Allow configurable truncation and externalization of large tool outputs via env var
-    computed_max_results_chars = min(ceil(prompt_token_limit // 10), 30000) if prompt_token_limit else 30000
-    try:
-        max_result_chars = int(os.getenv("CYBER_TOOL_MAX_RESULT_CHARS", str(computed_max_results_chars)))
-    except Exception:
-        max_result_chars = computed_max_results_chars
+    max_result_chars = resolve_tool_result_max_chars(
+        prompt_token_limit,
+        os.getenv("CYBER_TOOL_MAX_RESULT_CHARS"),
+    )
 
     if max_result_chars < 4000:
         computed_artifact_threshold = max_result_chars
@@ -599,7 +598,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         record_objective_validation,
         memory_retrieve,
         memory_list,
-        create_artifact_reader(prompt_token_limit),
+        create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
         recon_output_to_inventory_manifest,
         create_tasks,
         sleep,

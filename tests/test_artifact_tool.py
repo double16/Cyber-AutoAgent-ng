@@ -1,9 +1,12 @@
 import ast
+import asyncio
+import types
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from modules.handlers.tool_router import ToolRouterHook
 from modules.tools.artifact import (
     ARTIFACT_DIRECTORY_LISTING_LIMIT,
     ARTIFACT_MAX_BYTES_PER_READ,
@@ -15,6 +18,7 @@ from modules.tools.artifact import (
     artifact_max_bytes_for_context_window,
     create_artifact_reader,
     create_bounded_artifact_reader,
+    resolve_tool_result_max_chars,
 )
 
 READ_ARTIFACT = create_artifact_reader(48_000)
@@ -24,6 +28,14 @@ def test_artifact_page_budget_scales_with_context_window_and_clamps():
     assert artifact_max_bytes_for_context_window(1) == ARTIFACT_MIN_BYTES_PER_READ
     assert artifact_max_bytes_for_context_window(48_000) == 19_200
     assert artifact_max_bytes_for_context_window(1_000_000) == ARTIFACT_MAX_BYTES_PER_READ
+
+
+def test_tool_result_max_chars_converts_context_tokens_to_characters():
+    assert resolve_tool_result_max_chars(40_000) == 16_000
+    assert resolve_tool_result_max_chars(100_000) == 30_000
+    assert resolve_tool_result_max_chars(40_000, "12000") == 12_000
+    assert resolve_tool_result_max_chars(40_000, "invalid") == 16_000
+    assert resolve_tool_result_max_chars(40_000, "0") == 16_000
 
 
 @pytest.mark.parametrize(
@@ -47,6 +59,56 @@ def test_read_artifact_returns_bounded_lines(tmp_path: Path):
 
     assert "'content': 'two\\nthree'" in result
     assert "'total_lines': 4" in result
+
+
+def test_read_artifact_serialized_line_page_stays_below_router_limit(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    lines = [f"line-{index}: {'x' * 40}" for index in range(1, 301)]
+    artifact.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    reader = create_artifact_reader(40_000, max_output_chars=4_000)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        first = ast.literal_eval(reader("evidence.txt", max_lines=200))
+        second = ast.literal_eval(reader("evidence.txt", start_line=first["end_line"] + 1, max_lines=200))
+
+    assert len(str(first)) <= 4_000
+    assert first["end_line"] < 200
+    assert second["start_line"] == first["end_line"] + 1
+    assert second["content"].startswith(lines[first["end_line"]])
+
+
+def test_router_does_not_truncate_reader_result_within_its_ceiling(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("x" * 10_270, encoding="utf-8")
+    reader = create_artifact_reader(40_000, max_output_chars=16_000)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        output = reader("evidence.txt", max_bytes=10_270)
+
+    result = {"content": [{"text": output}]}
+    event = types.SimpleNamespace(result=result, tool_use={"name": "read_artifact"})
+    hook = ToolRouterHook(max_result_chars=16_000, artifact_threshold=16_000)
+    asyncio.run(hook._truncate_large_results_async(event))
+
+    assert len(output) <= 16_000
+    assert event.result is result
+
+
+def test_read_artifact_serialized_byte_page_stays_below_router_limit(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("x" * 10_000, encoding="utf-8")
+    reader = create_artifact_reader(40_000, max_output_chars=1_000)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        first = ast.literal_eval(reader("evidence.txt", start_byte=0, max_bytes=10_000))
+        second = ast.literal_eval(
+            reader("evidence.txt", start_byte=first["next_start_byte"], max_bytes=10_000 - first["next_start_byte"])
+        )
+
+    assert len(str(first)) <= 1_000
+    assert first["next_start_byte"] is not None
+    assert second["start_byte"] == first["next_start_byte"]
+    assert second["content"]
 
 
 def test_artifact_reader_uses_its_context_window_not_legacy_byte_override(monkeypatch, tmp_path: Path):
