@@ -4013,6 +4013,9 @@ def store_finding(
     target_scope: TargetScope = "subset" if target_ids else "all"
     candidate["verification_packet"] = {
         "version": 1,
+        "finding_uid": finding_uid,
+        "confirmation_guard_catalog_version": 1,
+        "confirmation_requirements": _finding_confirmation_requirements(candidate),
         "source_task": {
             "task_uid": source_task_uid,
             "title": source_task.title if source_task is not None else "",
@@ -4185,6 +4188,59 @@ def _finding_confirmation_requirements(candidate: Dict[str, Any]) -> List[Dict[s
     return requirements
 
 
+def _frozen_finding_confirmation_requirements(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return the candidate's immutable confirmation requirements, with a legacy fallback."""
+
+    packet = candidate.get("verification_packet")
+    frozen = packet.get("confirmation_requirements") if isinstance(packet, dict) else None
+    if isinstance(frozen, list) and all(
+        isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and item["id"].strip()
+        and isinstance(item.get("kind"), str)
+        and item["kind"].strip()
+        for item in frozen
+    ):
+        return [
+            {"id": str(item["id"]), "kind": str(item["kind"])}
+            for item in frozen
+        ]
+    return _finding_confirmation_requirements(candidate)
+
+
+def _load_finding_validation_binding(
+    store: Any,
+    operation_id: str,
+    finding_uid: str,
+    verification_task_uid: str,
+) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
+    """Load one finding only when its persisted task ownership is exact."""
+
+    record = store.get_finding(operation_id, finding_uid)
+    if not record:
+        raise ValueError("Unknown finding_uid for the current operation")
+    candidate_data = record.get("candidate_data")
+    candidate = candidate_data if isinstance(candidate_data, dict) else {}
+
+    stored_task_uid = str(record.get("verification_task_uid") or "").strip()
+    candidate_uid = str(candidate.get("finding_uid") or "").strip()
+    packet = candidate.get("verification_packet")
+    packet_uid = str(packet.get("finding_uid") or "").strip() if isinstance(packet, dict) else ""
+    if (
+        (stored_task_uid and stored_task_uid != verification_task_uid)
+        or (candidate_uid and candidate_uid != finding_uid)
+        or (packet_uid and packet_uid != finding_uid)
+    ):
+        raise ValueError(
+            "Finding validation binding mismatch: "
+            f"requested_finding_uid={finding_uid}, stored_finding_uid={candidate_uid or finding_uid}, "
+            f"packet_finding_uid={packet_uid or '<legacy>'}, "
+            f"expected_verification_task_uid={verification_task_uid}, "
+            f"stored_verification_task_uid={stored_task_uid or '<missing>'}"
+        )
+    return record, candidate, _frozen_finding_confirmation_requirements(candidate)
+
+
 def finding_validation_manifest_schema(requirements: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Return the model-facing JSON shape for the candidate's required checks."""
 
@@ -4286,7 +4342,7 @@ def _response_signature(reference: str, requirements: List[Dict[str, Any]]) -> D
 def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -> Dict[str, Any]:
     """Validate narrow, artifact-derived positive predicates for matched claim families."""
 
-    requirements = _finding_confirmation_requirements(candidate)
+    requirements = _frozen_finding_confirmation_requirements(candidate)
     manifest_ref, manifest = _read_json_artifact(reference, requirements)
     checks = manifest.get("checks")
     if not isinstance(checks, dict):
@@ -4432,14 +4488,14 @@ def record_finding_validation(
 
     op_id = _operation_id()
     store = _get_database_store()
-    record = store.get_finding(op_id, finding_uid)
-    if not record:
+    provisional_record = store.get_finding(op_id, finding_uid)
+    if not provisional_record:
         raise ValueError("Unknown finding_uid for the current operation")
-    expected_task_uid = str(expected_verification_task_uid or record["verification_task_uid"] or "").strip()
+    expected_task_uid = str(expected_verification_task_uid or provisional_record["verification_task_uid"] or "").strip()
     active = [task for task in store.get_tasks(op_id) if task.status == "active"]
     if (
         not expected_task_uid
-        or expected_task_uid != record["verification_task_uid"]
+        or expected_task_uid != provisional_record["verification_task_uid"]
         or len(active) != 1
         or active[0].task_uid != expected_task_uid
     ):
@@ -4461,18 +4517,20 @@ def record_finding_validation(
     controls = _validated_artifact_paths(control_artifacts, allow_delimited_strings=True)
     if normalized_outcome == "confirmed" and strategy == "differential" and not controls:
         raise ValueError("Differential confirmation requires at least one negative-control artifact")
+    record, candidate, requirements = _load_finding_validation_binding(
+        store, op_id, finding_uid, expected_task_uid
+    )
     manifest_attestation: Dict[str, Any] = {}
     if normalized_outcome == "confirmed":
-        requirements = _finding_confirmation_requirements(record.get("candidate_data") or {})
         if requirements:
             if not validation_manifest:
                 required = ", ".join(item["id"] for item in requirements)
                 raise ValueError(f"confirmed validation requires validation_manifest for: {required}")
             manifest_attestation = _validate_confirmation_manifest(
-                record.get("candidate_data") or {}, validation_manifest
+                candidate, validation_manifest
             )
             evidence = list(dict.fromkeys([*evidence, manifest_attestation["manifest"]]))
-        candidate_assertions = (record.get("candidate_data") or {}).get("evidence_assertions")
+        candidate_assertions = candidate.get("evidence_assertions")
         assertions = []
         for candidate_assertion in candidate_assertions or []:
             if not isinstance(candidate_assertion, dict):
@@ -4553,13 +4611,25 @@ def build_record_finding_validation_tool(task: Task) -> Any:
     if task.kind != "finding_validation" or not task.reference_id:
         raise ValueError("record_finding_validation requires a bound finding-validation task")
     finding_uid = task.reference_id
-    requirements: List[Dict[str, Any]] = []
-    try:
-        record = _get_database_store().get_finding(_operation_id(), finding_uid)
-        if record:
-            requirements = _finding_confirmation_requirements(record.get("candidate_data") or {})
-    except (OSError, ValueError):
-        logger.warning("Unable to load confirmation requirements for finding validation task %s", task.task_uid)
+    store = _get_database_store()
+    record = store.get_finding(_operation_id(), finding_uid)
+    if record is None:
+        requirements: List[Dict[str, Any]] = []
+        logger.warning(
+            "Finding validation tool built before its candidate was available task=%s finding=%s",
+            task.task_uid,
+            finding_uid,
+        )
+    else:
+        _record, _candidate, requirements = _load_finding_validation_binding(
+            store, _operation_id(), finding_uid, task.task_uid
+        )
+    logger.info(
+        "Bound finding validation tool task=%s finding=%s requirements=%s",
+        task.task_uid,
+        finding_uid,
+        ",".join(str(item["id"]) for item in requirements) or "none",
+    )
     requirement_ids = [str(item["id"]) for item in requirements]
     manifest_description = "JSON artifact reference with claim-specific validation evidence."
     if requirement_ids:
@@ -4633,8 +4703,9 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
     record = store.get_finding(op_id, task.reference_id)
     if not record or record.get("resolution"):
         return record.get("resolution") if record else None
-
-    candidate = record["candidate_data"]
+    record, candidate, requirements = _load_finding_validation_binding(
+        store, op_id, task.reference_id, task.task_uid
+    )
     validation = record.get("validation_data")
     confirmed = (
         evaluator_status == "done"
@@ -4647,7 +4718,7 @@ def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_rea
             validation.get("evidence_artifact_fingerprints"),
         )
         and (
-            not _finding_confirmation_requirements(candidate)
+            not requirements
             or bool(validation.get("validation_manifest_attestation"))
         )
     )
@@ -4966,6 +5037,66 @@ def record_objective_validation(
             "acceptance": acceptance_response,
         },
         sort_keys=True,
+    )
+
+
+def build_record_objective_validation_tool(task: Task) -> Any:
+    """Bind objective validation to the exact candidate owned by one task."""
+
+    if task.kind != "objective_validation" or not task.reference_id:
+        raise ValueError("record_objective_validation requires a bound objective-validation task")
+    candidate_uid = task.reference_id
+    record = _get_database_store().get_objective_candidate(_operation_id(), candidate_uid)
+    if record is None:
+        logger.warning(
+            "Objective validation tool built before its candidate was available task=%s candidate=%s",
+            task.task_uid,
+            candidate_uid,
+        )
+    elif str(record.get("verification_task_uid") or "") != task.task_uid:
+        raise ValueError(
+            "Objective validation binding mismatch: "
+            f"candidate_uid={candidate_uid}, expected_verification_task_uid={task.task_uid}, "
+            f"stored_verification_task_uid={str(record.get('verification_task_uid') or '')}"
+        )
+    logger.info("Bound objective validation tool task=%s candidate=%s", task.task_uid, candidate_uid)
+
+    def record_bound_objective_validation(
+        outcome: str,
+        confidence: int,
+        summary: str,
+        evidence_artifacts: List[str],
+        validator: str,
+    ) -> str:
+        return record_objective_validation(
+            candidate_uid,
+            outcome,
+            confidence,
+            summary,
+            evidence_artifacts,
+            validator,
+        )
+
+    record_bound_objective_validation.__name__ = "record_objective_validation"
+    record_bound_objective_validation.__doc__ = (
+        "Record the outcome for this controller-bound objective candidate. "
+        "The candidate identifier is owned by the controller and is not an input."
+    )
+    return tool(
+        record_bound_objective_validation,
+        inputSchema={
+            "json": {
+                "type": "object",
+                "properties": {
+                    "outcome": {"type": "string", "enum": ["confirmed", "rejected", "inconclusive"]},
+                    "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "summary": {"type": "string"},
+                    "evidence_artifacts": {"type": "array", "items": {"type": "string"}},
+                    "validator": {"type": "string"},
+                },
+                "required": ["outcome", "confidence", "summary", "evidence_artifacts", "validator"],
+            }
+        },
     )
 
 

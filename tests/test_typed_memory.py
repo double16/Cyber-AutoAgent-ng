@@ -387,6 +387,9 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     }]
     assert candidate["verification_packet"] == {
         "version": 1,
+        "finding_uid": result["finding_uid"],
+        "confirmation_guard_catalog_version": 1,
+        "confirmation_requirements": [],
         "source_task": {
             "task_uid": "source-task",
             "title": "Assess admin",
@@ -1566,7 +1569,7 @@ def test_finding_validation_schema_advertises_only_canonical_enum_values():
     assert "evidence_assertions" not in schema["required"]
 
 
-def test_bound_finding_validation_tool_hides_the_controller_owned_finding_identifier():
+def test_bound_finding_validation_tool_hides_the_controller_owned_finding_identifier(monkeypatch):
     task = Task(
         task_uid="verify-task",
         title="Verify finding",
@@ -1577,6 +1580,14 @@ def test_bound_finding_validation_tool_hides_the_controller_owned_finding_identi
         kind="finding_validation",
         reference_id="finding-1",
     )
+
+    store = MagicMock()
+    store.get_finding.return_value = {
+        "verification_task_uid": "verify-task",
+        "candidate_data": {"finding_uid": "finding-1", "title": "Open redirect"},
+    }
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
 
     schema = get_tool_spec(mod.build_record_finding_validation_tool(task))["inputSchema"]["json"]
 
@@ -1598,7 +1609,9 @@ def test_bound_finding_validation_tool_requires_manifest_for_confirmed_secret_ex
     )
     store = MagicMock()
     store.get_finding.return_value = {
+        "verification_task_uid": "verify-task",
         "candidate_data": {
+            "finding_uid": "finding-1",
             "title": "Exposed connection string",
             "claim": "A connection string is exposed.",
             "technique": "Direct response inspection",
@@ -1616,6 +1629,145 @@ def test_bound_finding_validation_tool_requires_manifest_for_confirmed_secret_ex
     assert "artifact reference, never inline JSON" in schema["properties"]["validation_manifest"]["description"]
     assert "reexposure_artifact" in schema["properties"]["validation_manifest"]["description"]
     assert '"version"' not in schema["properties"]["validation_manifest"]["description"]
+
+
+def test_bound_finding_validation_uses_frozen_requirements_per_candidate(monkeypatch):
+    store = MagicMock()
+    records = {
+        "open-redirect": {
+            "verification_task_uid": "verify-open",
+            "candidate_data": {
+                "finding_uid": "open-redirect",
+                "title": "Open redirect",
+                "claim": "Redirects to the supplied URL.",
+                "technique": "open redirect",
+                "verification_packet": {"confirmation_requirements": []},
+            },
+        },
+        "secret": {
+            "verification_task_uid": "verify-secret",
+            "candidate_data": {
+                "finding_uid": "secret",
+                "title": "Exposed API key",
+                "claim": "A secret exposure was reported.",
+                "technique": "secret exposure",
+                "verification_packet": {
+                    "confirmation_requirements": [
+                        {"id": "secret_exposure", "kind": "secret_exposure_revalidation"}
+                    ]
+                },
+            },
+        },
+    }
+    store.get_finding.side_effect = lambda _operation_id, finding_uid: records[finding_uid]
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    open_task = Task("verify-open", "Verify redirect", "Verify", make_acceptance("open").to_dict(), 1, "active",
+                     kind="finding_validation", reference_id="open-redirect")
+    secret_task = Task("verify-secret", "Verify secret", "Verify", make_acceptance("secret").to_dict(), 1, "active",
+                       kind="finding_validation", reference_id="secret")
+
+    open_schema = get_tool_spec(mod.build_record_finding_validation_tool(open_task))["inputSchema"]["json"]
+    secret_schema = get_tool_spec(mod.build_record_finding_validation_tool(secret_task))["inputSchema"]["json"]
+
+    assert "allOf" not in open_schema
+    assert secret_schema["allOf"][0]["then"] == {"required": ["validation_manifest"]}
+
+
+def test_bound_finding_validation_rejects_mismatched_verification_task(monkeypatch):
+    task = Task("verify-open", "Verify redirect", "Verify", make_acceptance("open").to_dict(), 1, "active",
+                kind="finding_validation", reference_id="open-redirect")
+    store = MagicMock()
+    store.get_finding.return_value = {
+        "verification_task_uid": "verify-secret",
+        "candidate_data": {"finding_uid": "open-redirect", "title": "Open redirect"},
+    }
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    with pytest.raises(ValueError, match="Finding validation binding mismatch"):
+        mod.build_record_finding_validation_tool(task)
+
+
+def test_bound_finding_validation_rejects_unknown_candidate(monkeypatch):
+    task = Task("verify-open", "Verify redirect", "Verify", make_acceptance("open").to_dict(), 1, "active",
+                kind="finding_validation", reference_id="open-redirect")
+    store = MagicMock()
+    store.get_finding.return_value = None
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    with pytest.raises(ValueError, match="Unknown finding_uid"):
+        mod._load_finding_validation_binding(store, "test_op", "open-redirect", task.task_uid)
+
+
+def test_bound_finding_validation_rejects_mismatched_candidate_packet(monkeypatch):
+    task = Task("verify-open", "Verify redirect", "Verify", make_acceptance("open").to_dict(), 1, "active",
+                kind="finding_validation", reference_id="open-redirect")
+    store = MagicMock()
+    store.get_finding.return_value = {
+        "verification_task_uid": "verify-open",
+        "candidate_data": {
+            "finding_uid": "secret",
+            "verification_packet": {"finding_uid": "secret"},
+        },
+    }
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    with pytest.raises(ValueError, match="stored_finding_uid=secret"):
+        mod.build_record_finding_validation_tool(task)
+
+
+def test_bound_objective_validation_tool_hides_controller_owned_candidate_identifier(monkeypatch):
+    task = Task("verify-objective", "Validate flag", "Validate", make_acceptance("objective").to_dict(), 1, "active",
+                kind="objective_validation", reference_id="candidate-1")
+    store = MagicMock()
+    store.get_objective_candidate.return_value = {"verification_task_uid": "verify-objective"}
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    schema = get_tool_spec(mod.build_record_objective_validation_tool(task))["inputSchema"]["json"]
+
+    assert "candidate_uid" not in schema["properties"]
+    assert schema["required"] == ["outcome", "confidence", "summary", "evidence_artifacts", "validator"]
+
+
+def test_bound_objective_validation_tool_rejects_invalid_or_mismatched_task(monkeypatch):
+    invalid_task = Task("verify-objective", "Validate", "Validate", make_acceptance("objective").to_dict(), 1,
+                        "active", kind="recon", reference_id="candidate-1")
+    with pytest.raises(ValueError, match="bound objective-validation task"):
+        mod.build_record_objective_validation_tool(invalid_task)
+
+    task = Task("verify-objective", "Validate", "Validate", make_acceptance("objective").to_dict(), 1, "active",
+                kind="objective_validation", reference_id="candidate-1")
+    store = MagicMock()
+    store.get_objective_candidate.return_value = {"verification_task_uid": "different-task"}
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    with pytest.raises(ValueError, match="Objective validation binding mismatch"):
+        mod.build_record_objective_validation_tool(task)
+
+
+def test_bound_objective_validation_tool_forwards_only_its_owned_candidate(monkeypatch):
+    task = Task("verify-objective", "Validate", "Validate", make_acceptance("objective").to_dict(), 1, "active",
+                kind="objective_validation", reference_id="candidate-1")
+    store = MagicMock()
+    store.get_objective_candidate.return_value = {"verification_task_uid": "verify-objective"}
+    recorded = MagicMock(return_value='{"status":"recorded"}')
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+    monkeypatch.setattr(mod, "record_objective_validation", recorded)
+
+    bound_tool = mod.build_record_objective_validation_tool(task)
+    bound_tool("confirmed", 90, "Validated", ["artifact:proof.json"], "evaluator")
+
+    assert recorded.call_args.args[0] == "candidate-1"
+    assert recorded.call_args.args[1:] == (
+        "confirmed", 90, "Validated", ["artifact:proof.json"], "evaluator"
+    )
 
 
 def test_finding_validation_runtime_schema_accepts_aliases():

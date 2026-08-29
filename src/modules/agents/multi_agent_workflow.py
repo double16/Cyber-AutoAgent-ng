@@ -95,7 +95,7 @@ from modules.tools.memory import (
     TaskProposalRepairGuard,
     _artifact_path_from_ref,
     _coverage_route_groups,
-    _finding_confirmation_requirements,
+    _frozen_finding_confirmation_requirements,
     _finding_validation_contradictions,
     _load_inventory_manifest,
     _operation_output_root,
@@ -103,6 +103,7 @@ from modules.tools.memory import (
     _write_inventory_manifest_atomically,
     build_create_tasks_tool,
     build_record_finding_validation_tool,
+    build_record_objective_validation_tool,
     build_record_task_acceptance_tool,
     canonical_artifact_reference,
     canonical_procedure_methods,
@@ -1889,6 +1890,16 @@ class MultiAgentWorkflowController:
             packet = candidate.get("verification_packet") if isinstance(candidate, dict) else None
             if not isinstance(packet, dict):
                 continue
+            candidate_uid = str(candidate.get("finding_uid") or "").strip()
+            packet_uid = str(packet.get("finding_uid") or "").strip()
+            if (candidate_uid and candidate_uid != finding_uid) or (packet_uid and packet_uid != finding_uid):
+                self._log_workflow(
+                    "skipped finding validation recovery due to binding mismatch finding=%s candidate=%s packet=%s",
+                    finding_uid,
+                    candidate_uid or "<legacy>",
+                    packet_uid or "<legacy>",
+                )
+                continue
             replacement = Task(
                 task_uid=str(uuid.uuid4()),
                 title=f"Verify finding: {str(candidate.get('title') or finding_uid)}",
@@ -3047,6 +3058,7 @@ class MultiAgentWorkflowController:
         )
         finding_tool_names = {
             "record_finding_validation",
+            "record_objective_validation",
             "record_task_acceptance",
             "store_finding",
         }
@@ -3055,6 +3067,8 @@ class MultiAgentWorkflowController:
         acceptance_tool = None
         if task.kind == "finding_validation":
             tools.append(build_record_finding_validation_tool(task))
+        elif task.kind == "objective_validation":
+            tools.append(build_record_objective_validation_tool(task))
         elif task.kind != "objective_validation":
             tools.append(store_finding)
             if not candidate_acceptance_owned:
@@ -3488,6 +3502,19 @@ class MultiAgentWorkflowController:
                 if failed_tool_inputs[key] >= 2:
                     repeated = outcome
             return repeated
+
+        def permanently_blocked_finding_validation(
+            outcomes: List[ToolOutcome],
+            recovery_exhausted: bool,
+        ) -> bool:
+            """Return whether the finding-validation guard ended this executor session."""
+
+            return recovery_exhausted and any(
+                outcome.tool_name == "record_finding_validation"
+                and not outcome.success
+                and outcome.recovery_role == "blocked"
+                for outcome in outcomes
+            )
 
         def track_acceptance_outcomes(
             outcomes: List[ToolOutcome],
@@ -4015,6 +4042,23 @@ class MultiAgentWorkflowController:
                     finding_acceptance_recovery = False
                 if acceptance_recovery_active and successful_acceptance_calls:
                     acceptance_recovery_active = False
+                if permanently_blocked_finding_validation(
+                    cycle_result.outcomes,
+                    cycle_result.recovery_exhausted,
+                ):
+                    decision = WorkflowDecision(
+                        status="partial_failure",
+                        reason=(
+                            "record_finding_validation was permanently blocked by the controller guard; "
+                            "the task executor was stopped."
+                        ),
+                    )
+                    self._log_workflow(
+                        "task finding-validation guard exhausted task=%s cycle=%s",
+                        self._task_label(task),
+                        cycle,
+                    )
+                    break
                 if repeated_tool_failure is not None:
                     if repeated_tool_failure.tool_name == "record_finding_validation":
                         replacement = self._create_reasoning_loop_replacement_task(task, tool_outcomes)
@@ -4188,6 +4232,23 @@ class MultiAgentWorkflowController:
                     successful_acceptance_calls.extend(recovery_successful_acceptance)
                     repeated_acceptance = repeated_acceptance or recovery_repeated_acceptance
                     repeated_tool_failure = repeated_correctable_failure(recovery_result.outcomes)
+                    if permanently_blocked_finding_validation(
+                        recovery_result.outcomes,
+                        recovery_result.recovery_exhausted,
+                    ):
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason=(
+                                "record_finding_validation was permanently blocked by the controller guard; "
+                                "the task executor was stopped."
+                            ),
+                        )
+                        self._log_workflow(
+                            "task finding-validation guard exhausted during recovery task=%s cycle=%s",
+                            self._task_label(task),
+                            cycle,
+                        )
+                        break
                     if repeated_tool_failure is not None:
                         if repeated_tool_failure.tool_name == "record_finding_validation":
                             replacement = self._create_reasoning_loop_replacement_task(task, tool_outcomes)
@@ -7986,6 +8047,10 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             packet = candidate
         context = {
             "finding_uid": task.reference_id,
+            "binding_rule": (
+                "Only this controller-bound finding_uid may be validated. Other finding IDs or memory results "
+                "are advisory context and must not be used for validation."
+            ),
             "target": packet.get("target") or candidate.get("target"),
             "technique": packet.get("technique") or candidate.get("technique"),
             "claim": packet.get("claim") or candidate.get("claim"),
@@ -7994,7 +8059,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             "evidence_assertions": packet.get("evidence_assertions") or candidate.get("evidence_assertions", []),
             "confirmation_requirement_ids": [
                 str(requirement["id"])
-                for requirement in _finding_confirmation_requirements(candidate)
+                for requirement in _frozen_finding_confirmation_requirements(candidate)
             ],
             "confirmation_manifest_rule": (
                 "For a confirmed outcome, write an operation-local JSON validation manifest matching "
@@ -8002,7 +8067,7 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
                 "Never pass inline JSON as validation_manifest."
             ),
             "confirmation_manifest_schema": finding_validation_manifest_schema(
-                _finding_confirmation_requirements(candidate)
+                _frozen_finding_confirmation_requirements(candidate)
             ),
         }
         return json.dumps(context, indent=2, sort_keys=True)

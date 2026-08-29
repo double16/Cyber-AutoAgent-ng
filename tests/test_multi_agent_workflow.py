@@ -7773,6 +7773,126 @@ def test_task_executor_does_not_offer_another_turn_after_correction_was_exhauste
     assert state.tasks[0].status == "partial_failure"
 
 
+def test_finding_validation_guard_exhaustion_stops_executor_without_replacement(monkeypatch):
+    runtime = _runtime()
+    task = Task(
+        task_uid="verify-1",
+        title="Verify finding",
+        objective="verify",
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(_plan(), tasks=[task])
+    executor_calls = []
+    finalize = Mock(return_value="validation_failure")
+    monkeypatch.setattr(workflow_mod, "finalize_finding_validation", finalize)
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"verify","tools":[]}'
+        pytest.fail(f"unexpected evaluator role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        executor_calls.append(prompt)
+        return workflow_mod.TaskExecutorCycleResult(
+            text="validation guard blocked further calls",
+            outcomes=[ToolOutcome(
+                sequence=1,
+                tool_use_id="validation-blocked",
+                tool_name="record_finding_validation",
+                success=False,
+                correctable=False,
+                input_summary="same-validation-payload",
+                output_summary="The configured correction allowance has been exhausted.",
+                recovery_role="blocked",
+            )],
+            recovery_required=True,
+            recovery_exhausted=True,
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert len(executor_calls) == 1
+    assert len(state.tasks) == 1
+    assert state.tasks[0].status == "partial_failure"
+    assert "permanently blocked by the controller guard" in state.tasks[0].status_reason
+    finalize.assert_called_once_with(task, "partial_failure", state.tasks[0].status_reason)
+
+
+def test_finding_validation_guard_exhaustion_during_recovery_stops_executor(monkeypatch):
+    runtime = _runtime()
+    task = Task(
+        task_uid="verify-1",
+        title="Verify finding",
+        objective="verify",
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(_plan(), tasks=[task])
+    executor_calls = []
+    finalize = Mock(return_value="validation_failure")
+    monkeypatch.setattr(workflow_mod, "finalize_finding_validation", finalize)
+
+    def text_runner(role, prompt, tools, system_prompt):
+        if role == "task_prompt_builder":
+            return '{"prompt":"verify","tools":[]}'
+        pytest.fail(f"unexpected evaluator role: {role}")
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        executor_calls.append(prompt)
+        if len(executor_calls) == 1:
+            return workflow_mod.TaskExecutorCycleResult(
+                text="retry validation once",
+                outcomes=[],
+                recovery_required=True,
+                recovery_guidance="retry validation with the corrected payload",
+            )
+        return workflow_mod.TaskExecutorCycleResult(
+            text="validation guard blocked further calls",
+            outcomes=[ToolOutcome(
+                sequence=2,
+                tool_use_id="validation-blocked",
+                tool_name="record_finding_validation",
+                success=False,
+                correctable=False,
+                input_summary="changed-validation-payload",
+                output_summary="The configured correction allowance has been exhausted.",
+                recovery_role="blocked",
+            )],
+            recovery_required=True,
+            recovery_exhausted=True,
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert executor_calls[1] == "retry validation with the corrected payload"
+    assert len(executor_calls) == 2
+    assert len(state.tasks) == 1
+    assert state.tasks[0].status == "partial_failure"
+    assert "permanently blocked by the controller guard" in state.tasks[0].status_reason
+    finalize.assert_called_once_with(task, "partial_failure", state.tasks[0].status_reason)
+
+
 def test_task_executor_max_token_recovery_exhaustion_is_partial_failure():
     runtime = _runtime()
     state = FakeState(
@@ -9994,6 +10114,41 @@ def test_validation_phase_recreates_missing_verification_task_from_persisted_pac
     assert state.finding_records[0]["verification_task_uid"] == state.tasks[0].task_uid
 
 
+def test_validation_phase_does_not_recover_contaminated_finding_packet():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(
+            id=1,
+            title="Impact Validation and Proof Generation",
+            status="active",
+            criteria="Validate findings with proof",
+        )],
+    )
+    state = FakeState(plan, finding_records=[{
+        "finding_uid": "open-redirect",
+        "verification_task_uid": "missing-task",
+        "resolution": None,
+        "candidate_data": {
+            "finding_uid": "secret-exposure",
+            "title": "Open redirect",
+            "verification_packet": {
+                "finding_uid": "secret-exposure",
+                "target": "http://target.test/redirect",
+            },
+        },
+    }])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state
+    )
+
+    controller._recover_missing_finding_validation_tasks(plan.phases[0])
+
+    assert state.tasks == []
+    assert state.finding_records[0]["verification_task_uid"] == "missing-task"
+
+
 def test_validation_phase_with_terminal_history_marks_missing_verification_task_partial():
     plan = OperationPlan(
         objective="assess",
@@ -11894,6 +12049,7 @@ def test_finding_validation_context_documents_secret_exposure_manifest_schema():
             }
         }
     }
+    assert "Only this controller-bound finding_uid" in context["binding_rule"]
     assert "version" not in context["confirmation_manifest_rule"]
 
 
