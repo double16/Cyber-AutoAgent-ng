@@ -10444,6 +10444,46 @@ def test_task_creator_requires_create_tasks_tool():
         controller._task_creator_tools()
 
 
+def test_finding_dependent_task_creator_allows_only_verified_canonical_finding_refs(monkeypatch):
+    phase = PlanPhase(
+        id=1,
+        title="Exploit Chain Analysis",
+        status="active",
+        requires_finding_candidates=True,
+        task_creation_mode="finding_dependent",
+    )
+    plan = OperationPlan(objective="assess", current_phase=1, total_phases=1, phases=[phase])
+    state = FakeState(plan, finding_records=[
+        {"finding_uid": "verified-id", "resolution": "verified", "verification_task_uid": "verify-1"},
+        {"finding_uid": "pending-id", "resolution": "", "verification_task_uid": "verify-2"},
+        {"finding_uid": "rejected-id", "resolution": "validation_failure", "verification_task_uid": "verify-3"},
+    ])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: "{}",
+    )
+    captured = {}
+
+    def build_tool(**kwargs):
+        captured.update(kwargs)
+        return _tool("create_tasks")
+
+    monkeypatch.setattr(workflow_mod, "build_create_tasks_tool", build_tool)
+
+    controller._task_creator_tools(phase)
+
+    assert captured["required_finding_refs"] == {"finding:verified-id"}
+    assert captured["finding_ref_aliases"]["verified-id"] == "finding:verified-id"
+    assert "pending-id" not in captured["finding_ref_aliases"]
+    assert "rejected-id" not in captured["finding_ref_aliases"]
+    context = controller._task_creator_finding_context(phase)
+    assert "verified-id" in context
+    assert "pending-id" not in context
+    assert "rejected-id" not in context
+
+
 def test_task_creator_requires_retained_session_factory():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),

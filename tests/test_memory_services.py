@@ -3660,6 +3660,22 @@ def test_bound_create_tasks_tool_requires_and_persists_candidate_source_refs(fak
     with pytest.raises(ValueError, match="includes unavailable finding_refs"):
         mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
 
+    proposal = task_proposal("Demonstrate unknown finding", "Demonstrate an unknown finding", "impact")
+    proposal["finding_refs"] = ["unknown"]
+    with pytest.raises(ValueError, match="includes unavailable finding_refs"):
+        mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
+
+    proposal = task_proposal(
+        "Demonstrate assigned finding by bare ID",
+        "Demonstrate the assigned finding with a bare identifier",
+        "impact",
+    )
+    proposal["finding_refs"] = ["candidate-1"]
+    result = mod.build_create_tasks_tool(required_finding_refs={"finding:candidate-1"})(tasks=[proposal])
+
+    assert json.loads(result)["created_count"] == 1
+    assert store.tasks[-1].evidence == ["finding:candidate-1"]
+
     proposal = task_proposal(
         "Demonstrate assigned finding explicitly",
         "Demonstrate the assigned finding with an explicit reference",

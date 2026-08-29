@@ -35,6 +35,7 @@ from modules.handlers.report_generator import (
     _artifact_references,
     _omit_cross_operation_artifact_references,
     _normalize_report_category,
+    _resolved_finding_report_category,
     _normalize_budget_config,
     _normalize_artifact_reference,
     _next_steps_fallback,
@@ -214,6 +215,45 @@ def test_finding_narrative_uses_recorded_validation_steps_and_impact_evidence():
     assert "1. Request /api/config" in detail
     assert "2. Observe the response" in detail
     assert "#### Impact Grounding" not in detail
+
+
+def test_finding_narrative_removes_unsupported_impact_and_aws_rotation_claims():
+    finding = {
+        "title": "Configuration exposure",
+        "severity": "HIGH",
+        "content": "The endpoint returned an AWS S3 bucket URL.",
+        "metadata": {},
+    }
+    narrative = (
+        "#### Impact\n\nThis enables direct compromise and lateral movement.\n\n"
+        "#### Remediation\n\nRotate all exposed AWS credentials immediately."
+    )
+
+    detail = _format_finding_with_narrative(finding, 0, narrative)
+
+    assert "direct compromise" not in detail
+    assert "lateral movement" not in detail
+    assert "Rotate all exposed AWS credentials" not in detail
+    assert "Impact grounding correction" in detail
+    assert "supplied evidence establishes only the exposed value" in detail
+
+
+def test_finding_narrative_keeps_impact_claims_with_impact_artifacts():
+    finding = {
+        "title": "Unauthorized data access",
+        "severity": "HIGH",
+        "content": "The validation artifact demonstrates unauthorized data access.",
+        "metadata": {"impact_evidence_artifacts": ["artifact:artifacts/impact.txt"]},
+    }
+
+    detail = _format_finding_with_narrative(
+        finding,
+        0,
+        "#### Impact\n\nUnauthorized access enabled data exfiltration.\n\n#### Remediation\n\nFix access control.",
+    )
+
+    assert "Unauthorized access enabled data exfiltration." in detail
+    assert "Impact grounding correction" not in detail
 
 
 def test_report_progress_counts_only_llm_authored_sections():
@@ -1770,6 +1810,16 @@ def test_summary_table_preserves_full_finding_location():
     ) == "validation_failure"
 
 
+def test_verified_finding_record_cannot_be_rendered_as_validation_required():
+    metadata = {
+        "finding_uid": "finding-1",
+        "finding_record_resolution": "verified",
+        "validation_status": "verified",
+    }
+
+    assert _resolved_finding_report_category("validation_failure", metadata, "", {}) == "finding"
+
+
 @pytest.mark.parametrize(
     ("artifact_content", "expected_category"),
     [
@@ -2037,11 +2087,11 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
             "id": "1",
             "memory": "[VULNERABILITY] Verified with Proof [WHERE] /a [EVIDENCE] proof exists",
             "metadata": {
-                "category": "finding",
+                "category": "validation_failure",
                 "operation_id": op_id,
                 "finding_uid": "finding-1",
                 "severity": "CRITICAL",
-                "validation_status": "verified",
+                "validation_status": "pending",
                 "proof_pack": {"artifacts": [str(tmp_path / "proof.txt")]},
                 "negative_control_artifacts": [str(tmp_path / "negative-control.txt")],
             },
@@ -2159,6 +2209,7 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     mock_client.list_finding_records.return_value = [
         {
             "finding_uid": "finding-1",
+            "resolution": "verified",
             "candidate_data": {
                 "source_task_uids": ["task-verified"],
                 "taxonomy": {
@@ -2204,6 +2255,8 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     # Check item 1: Should remain a finding
     item1 = next(e for e in evidence if e["id"] == "1")
     assert item1["category"] == "finding", "Item 1 should remain a finding"
+    assert item1["validation_status"] == "verified"
+    assert item1["metadata"]["validation_status"] == "verified"
     assert item1["metadata"]["taxonomy"]["mitre_attack"] == [{"id": "T1059.004"}]
     assert item1["metadata"]["final_attack_enrichment"]["status"] == "completed"
 

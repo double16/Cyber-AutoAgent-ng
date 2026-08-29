@@ -103,8 +103,10 @@ Do not install packages or create a replacement database as part of forensic rev
 
 **Step 2: Validate the database without modifying it**
 
+NOTE: the integrity check requires write access, therefore `-readonly` is omitted.
+
 ```bash
-if ! integrity=$(sqlite3 -readonly outputs/cyber_autoagent.db "PRAGMA integrity_check;"); then
+if ! integrity=$(sqlite3 outputs/cyber_autoagent.db "PRAGMA integrity_check;"); then
   echo "SKIP: SQLite integrity check failed"
 elif [ "$integrity" != "ok" ]; then
   echo "SKIP: SQLite database is corrupted: $integrity"

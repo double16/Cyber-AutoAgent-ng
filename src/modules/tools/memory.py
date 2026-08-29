@@ -7242,9 +7242,17 @@ def _create_tasks_from_proposals(
         ))
         if required_finding_refs is not None:
             aliases = finding_ref_aliases or {}
+            canonical_by_bare_ref = {
+                reference.removeprefix("finding:"): reference
+                for reference in required_finding_refs
+                if reference.startswith("finding:")
+            }
             if not finding_refs and len(required_finding_refs) == 1:
                 finding_refs = [next(iter(required_finding_refs))]
-            finding_refs = [aliases.get(reference, reference) for reference in finding_refs]
+            finding_refs = [
+                aliases.get(reference, canonical_by_bare_ref.get(reference, reference))
+                for reference in finding_refs
+            ]
             finding_refs = list(dict.fromkeys(finding_refs))
             if not finding_refs:
                 raise ValueError("finding-dependent task proposal requires at least one canonical finding_refs entry")

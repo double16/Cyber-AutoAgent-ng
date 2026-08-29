@@ -8690,7 +8690,11 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
                         else (
                             self._task_creator_max_token_recovery_prompt(phase)
                             if previous_attempt_max_tokens
-                            else self._task_creator_repair_prompt(batch_failure_reason, rejected_proposals)
+                            else self._task_creator_repair_prompt(
+                                batch_failure_reason,
+                                rejected_proposals,
+                                phase=phase,
+                            )
                         )
                     )
                     activity_context = {
@@ -9342,6 +9346,7 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
         self,
         failure_reason: str = "",
         rejected_proposals: str = "",
+        phase: Optional[PlanPhase] = None,
     ) -> str:
         """Return a compact correction turn for the retained task-creator conversation."""
 
@@ -9358,7 +9363,7 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
             if rejected_proposals
             else "Submit one complete proposal list that addresses the validation result."
         )
-        finding_context = self._task_creator_finding_context()
+        finding_context = self._task_creator_finding_context(phase)
         batch_repair = (
             "Consolidate every prior snapshot proposal into exactly one snapshot proposal; Python performs the "
             "route fan-out.\n"
@@ -9430,7 +9435,7 @@ Use a listed canonical `finding:<uid>` reference only when the failed proposal i
         """Build a task-creator-only continuation with no executor evidence language."""
 
         finding_context = (
-            f"\nCanonical finding references:\n{self._task_creator_finding_context()}\n"
+            f"\nCanonical finding references:\n{self._task_creator_finding_context(phase)}\n"
             if phase.task_creation_mode == "finding_dependent"
             or (phase.task_creation_mode == "standard" and phase.requires_finding_candidates)
             else ""
@@ -9675,13 +9680,10 @@ evidence, or restate the plan. Return only the tool call payload.{finding_contex
             or (phase.task_creation_mode == "standard" and phase.requires_finding_candidates)
         )
         if finding_dependent:
-            unresolved = [
-                record for record in self.state.list_finding_records()
-                if record.get("finding_uid") and not str(record.get("resolution") or "").strip()
-            ]
-            required_finding_refs = {f"finding:{record['finding_uid']}" for record in unresolved}
+            eligible_records = self._eligible_finding_records(phase)
+            required_finding_refs = {f"finding:{record['finding_uid']}" for record in eligible_records}
             finding_ref_aliases = {}
-            for record in unresolved:
+            for record in eligible_records:
                 canonical = f"finding:{record['finding_uid']}"
                 finding_ref_aliases.update({
                     canonical: canonical,
@@ -11478,8 +11480,8 @@ endpoint" or "assess frozen inventory" wording.
         finding_section = ""
         if mode == "finding_dependent" or (mode == "standard" and phase.requires_finding_candidates):
             finding_section = f"""## Finding-dependent work
-Use only these persisted candidates for proposals that consume a finding:
-{self._task_creator_finding_context()}
+Use only these verified persisted findings for proposals that consume a finding:
+{self._task_creator_finding_context(phase)}
 Every proposal in this phase must include the appropriate canonical `finding:<uid>` in `finding_refs`.
 """
         elif mode == "finding_validation":
@@ -11653,14 +11655,34 @@ the task explicitly tests that difference.
         )
         return "\n".join(lines)
 
-    def _task_creator_finding_context(self) -> str:
-        """Return compact canonical finding ownership for task-creation decisions."""
+    def _eligible_finding_records(self, phase: Optional[PlanPhase] = None) -> List[Dict[str, Any]]:
+        """Return controller-approved finding records for a phase's task creation."""
+
+        list_records = getattr(self.state, "list_finding_records", None)
+        if not callable(list_records):
+            return []
+        records = list_records()
+        finding_dependent = phase is not None and (
+            phase.task_creation_mode == "finding_dependent"
+            or (phase.task_creation_mode == "standard" and phase.requires_finding_candidates)
+        )
+        if not finding_dependent:
+            return list(records)
+        return [
+            record
+            for record in records
+            if record.get("finding_uid") and str(record.get("resolution") or "").strip() == "verified"
+        ]
+
+    def _task_creator_finding_context(self, phase: Optional[PlanPhase] = None) -> str:
+        """Return compact controller-approved finding ownership for task creation."""
 
         list_records = getattr(self.state, "list_finding_records", None)
         if not callable(list_records):
             return "finding_records[0]{finding_uid,title,resolution,verification_task_uid}:"
+        records = self._eligible_finding_records(phase)
         rows = []
-        for record in list_records():
+        for record in records:
             candidate = record.get("candidate_data") if isinstance(record.get("candidate_data"), dict) else {}
             rows.append((
                 str(record.get("finding_uid") or ""),
