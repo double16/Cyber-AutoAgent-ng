@@ -7,13 +7,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from jsonschema import Draft202012Validator
 import pytest
+from jsonschema import Draft202012Validator
 from pydantic import TypeAdapter, ValidationError
+from strands.hooks.events import BeforeToolCallEvent
 
 import modules.tools as tools_module
 from modules.handlers.utils import get_tool_spec
 from modules.tools import memory as mod
+from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
 from tests.helpers import memory_tasks
 from tests.helpers.acceptance import acceptance_dict, make_acceptance, task_proposal
 
@@ -3477,6 +3479,21 @@ def test_bound_acceptance_tool_runtime_schema_accepts_aliases_before_function_va
 
     assert validated["status"] == "completed"
     assert validated["disposition"] == "assessed-negative"
+    delimited_input = {
+        "status": "satisfied",
+        "disposition": "no_vulnerability",
+        "summary": "No vulnerability was demonstrated",
+        "evidence_refs": "artifact:artifacts/result.txt,artifact:artifacts/control.txt",
+    }
+    event = BeforeToolCallEvent(
+        agent=None,
+        selected_tool=acceptance_tool,
+        tool_use={"toolUseId": "acceptance-1", "name": "record_task_acceptance", "input": delimited_input},
+        invocation_state={},
+    )
+    ArtifactReferenceInputNormalizationHook()._normalize_tool_input(event)
+    delimited = acceptance_tool._metadata.validate_input(event.tool_use["input"])
+    assert delimited["evidence_refs"] == ["artifact:artifacts/result.txt", "artifact:artifacts/control.txt"]
     schema = get_tool_spec(acceptance_tool)["inputSchema"]["json"]
     assert schema["properties"]["status"]["enum"] == [
         "satisfied",
@@ -3491,6 +3508,7 @@ def test_bound_acceptance_tool_runtime_schema_accepts_aliases_before_function_va
         "finding_candidate",
         "existing_finding",
     ]
+    assert schema["properties"]["evidence_refs"]["type"] == "array"
 
 
 def test_acceptance_alias_normalizers_leave_unknown_values_for_strict_validation():

@@ -55,6 +55,7 @@ from modules.tools.memory import (
     list_persisted_operation_model_metrics,
     memory_is_cross_operation,
 )
+from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.utils.json_repair import parse_json_response
 
 logger = get_logger("Handlers.ReportGenerator")
@@ -329,7 +330,7 @@ def _current_operation_report_memories(
 
 def _normalize_artifact_reference(reference: str) -> str:
     """Normalize canonical and supported bare artifact paths for comparison and resolution."""
-    normalized = str(reference).strip().strip("`.,;:)]}")
+    normalized = normalize_artifact_reference_token(reference)
     lowered = normalized.lower()
     if lowered.startswith("artifact_id:"):
         return f"artifact:artifacts/{normalized.split(':', 1)[1]}"

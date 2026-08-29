@@ -6,8 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.modules.tools import memory as mod
 from src.modules.handlers.utils import get_tool_spec
+from src.modules.tools import memory as mod
 from src.modules.tools.memory import (
     AcceptanceBasis,
     AcceptanceContract,
@@ -21,8 +21,8 @@ from src.modules.tools.memory import (
     record_objective_validation,
     store_finding,
     store_knowledge,
-    store_observation,
     store_objective_candidate,
+    store_observation,
 )
 
 
@@ -798,6 +798,9 @@ def test_store_finding_schema_requires_artifacts():
     schema = get_tool_spec(store_finding)["inputSchema"]["json"]
 
     assert "artifacts" in schema["required"]
+    assert schema["properties"]["artifacts"] == {"type": "array", "items": {"type": "string"}, "minItems": 1}
+    assert str(store_finding._tool_func.__annotations__["artifacts"]) == "typing.Annotated[list[str], Len(min_length=1, max_length=None)]"
+    assert str(store_observation._tool_func.__annotations__["artifacts"]) == "typing.Optional[typing.List[str]]"
     assertion_schema = schema["properties"]["evidence_assertions"]["items"]
     assert assertion_schema["properties"]["type"]["enum"] == [
         "literal_text",
@@ -1015,11 +1018,11 @@ def test_record_finding_validation_canonicalizes_bare_artifact_references(tmp_pa
     ("reproduction_steps", "evidence_artifacts", "expected_error"),
     [
         ("Replay request", [], "reproduction_steps must be an array of strings"),
-        (["Replay request"], {}, "evidence_artifacts must be an array of artifact reference strings"),
+        (["Replay request"], {}, "evidence_artifacts must be an artifact reference string or array of strings"),
         (
             ["Replay request"],
             ["artifact:response.txt", {}],
-            "evidence_artifacts must be an array of artifact reference strings",
+            "evidence_artifacts must be an artifact reference string or array of strings",
         ),
     ],
 )

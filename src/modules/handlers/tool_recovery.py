@@ -14,6 +14,7 @@ from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider, HookRegistry
 
 from modules.tools.shell_provenance import shell_execution_provenance
+from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.utils.redaction import redact
 
 logger = logging.getLogger(__name__)
@@ -161,7 +162,10 @@ def _artifact_references(*values: Any) -> tuple[str, ...]:
     references = []
 
     def add(reference: Any) -> None:
-        value = str(reference or "").strip()
+        try:
+            value = normalize_artifact_reference_token(reference)
+        except (TypeError, ValueError):
+            return
         if value and value not in references:
             references.append(value)
 
@@ -179,7 +183,7 @@ def _artifact_references(*values: Any) -> tuple[str, ...]:
             add(f"artifact_id:{text}")
         elif field_name in {"artifact", "artifact_ref"} and text.startswith(("artifact:", "artifact_id:")):
             add(text)
-        for reference in re.findall(r"(?:artifact|artifact_id):[^\s\\\]\}\)\"']+", text):
+        for reference in re.findall(r"(?:artifact|artifact_id):[^\s,\\\]\}\)\"']+", text):
             add(reference)
 
     for value in values:

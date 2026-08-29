@@ -118,6 +118,19 @@ def test_outcome_journal_retains_externalized_artifact_references():
     assert outcome.artifact_refs == ("artifact:artifacts/specialized_recon_orchestrator_result.log",)
 
 
+def test_outcome_journal_normalizes_comma_terminated_artifact_references():
+    outcome = ToolOutcomeJournal().append(
+        tool_use_id="evidence",
+        tool_name="store_observation",
+        success=True,
+        correctable=False,
+        tool_input={},
+        output="Stored artifact:task_evidence/abc/root_status.txt,",
+    )
+
+    assert outcome.artifact_refs == ("artifact:task_evidence/abc/root_status.txt",)
+
+
 def test_outcome_journal_records_static_shell_request_collection():
     outcome = ToolOutcomeJournal().append(
         tool_use_id="routes",

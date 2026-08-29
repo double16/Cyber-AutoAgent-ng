@@ -88,6 +88,10 @@ from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
 from modules.storage import SQLiteMigrationRunner
 from modules.tools.semantic_enum import normalize_semantic_enum
+from modules.tools.artifact_references import (
+    normalize_artifact_reference_token,
+    split_delimited_reference_values,
+)
 
 # Set up logging
 logger = get_logger("Tools.Memory")
@@ -3229,10 +3233,20 @@ def _operation_output_root() -> str:
     )
 
 
-def _validated_artifact_paths(artifacts: Any, *, require_one: bool = False) -> List[str]:
+def _validated_artifact_paths(
+    artifacts: Any,
+    *,
+    require_one: bool = False,
+    allow_delimited_strings: bool = False,
+) -> List[str]:
     validated: List[str] = []
-    for raw_path in _normalize_evidence(artifacts):
-        validated.append(canonical_artifact_reference(raw_path))
+    for raw_path in split_delimited_reference_values(
+        artifacts,
+        allow_delimited_strings=allow_delimited_strings,
+    ):
+        reference = canonical_artifact_reference(raw_path)
+        if reference not in validated:
+            validated.append(reference)
     if require_one and not validated:
         raise ValueError("At least one existing artifact is required")
     return validated
@@ -3254,11 +3268,14 @@ def _validate_finding_validation_input_shape(
         ("evidence_artifacts", evidence_artifacts),
         ("control_artifacts", control_artifacts),
     ):
-        if references is not None and (
-            not isinstance(references, list)
-            or not all(isinstance(reference, str) for reference in references)
+        if references is not None and not (
+            isinstance(references, str)
+            or (
+                isinstance(references, list)
+                and all(isinstance(reference, str) for reference in references)
+            )
         ):
-            raise ValueError(f"{field_name} must be an array of artifact reference strings")
+            raise ValueError(f"{field_name} must be an artifact reference string or array of strings")
     if validation_manifest is not None and not isinstance(validation_manifest, str):
         raise ValueError("validation_manifest must be an artifact reference string")
 
@@ -3447,7 +3464,19 @@ def _matching_evidence_assertions(
         return False
 
 
-@tool
+@tool(
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "artifacts": {"type": "array", "items": {"type": "string"}},
+                "metadata": {"type": "object"},
+            },
+            "required": ["content"],
+        }
+    }
+)
 def store_observation(
     content: str,
     artifacts: Optional[List[str]] = None,
@@ -3491,7 +3520,7 @@ def store_observation(
             merged["target"] = target.value
             merged.pop("location", None)
     if artifacts:
-        merged["artifacts"] = _validated_artifact_paths(artifacts)
+        merged["artifacts"] = _validated_artifact_paths(artifacts, allow_delimited_strings=True)
     result = _store_memory_entry(content, "observation", merged)
     return json.dumps(
         {
@@ -3914,7 +3943,11 @@ def store_finding(
     observed_lower = candidate["observed_result"].lower()
     if any(term in observed_lower for term in weak_evidence_terms):
         raise ValueError("observed_result must describe concrete observed evidence, not assumptions")
-    candidate["artifacts"] = _validated_artifact_paths(artifacts, require_one=True)
+    candidate["artifacts"] = _validated_artifact_paths(
+        artifacts,
+        require_one=True,
+        allow_delimited_strings=True,
+    )
     candidate["artifact_fingerprints"] = _artifact_fingerprints(candidate["artifacts"])
     op_id = _operation_id()
     store = _get_database_store()
@@ -4361,18 +4394,8 @@ def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -
                     "default": "direct",
                     "description": "Evidence strategy used for validation.",
                 },
-                "evidence_artifacts": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "default": None,
-                    "description": "Artifacts supporting the validation.",
-                },
-                "control_artifacts": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "default": None,
-                    "description": "Negative-control artifacts for differential validation.",
-                },
+                "evidence_artifacts": {"type": "array", "items": {"type": "string"}, "default": None},
+                "control_artifacts": {"type": "array", "items": {"type": "string"}, "default": None},
                 "validation_manifest": {
                     "type": "string",
                     "description": (
@@ -4430,8 +4453,12 @@ def record_finding_validation(
     if strategy not in {"direct", "differential"}:
         raise ValueError("evidence_strategy must be direct or differential")
 
-    evidence = _validated_artifact_paths(evidence_artifacts, require_one=normalized_outcome == "confirmed")
-    controls = _validated_artifact_paths(control_artifacts)
+    evidence = _validated_artifact_paths(
+        evidence_artifacts,
+        require_one=normalized_outcome == "confirmed",
+        allow_delimited_strings=True,
+    )
+    controls = _validated_artifact_paths(control_artifacts, allow_delimited_strings=True)
     if normalized_outcome == "confirmed" and strategy == "differential" and not controls:
         raise ValueError("Differential confirmation requires at least one negative-control artifact")
     manifest_attestation: Dict[str, Any] = {}
@@ -4770,7 +4797,7 @@ def store_objective_candidate(
     steps = [_clean_memory_text(step, "reproduction step") for step in reproduction_steps]
     if not steps:
         raise ValueError("reproduction_steps requires at least one step")
-    artifacts = _validated_artifact_paths(evidence_artifacts, require_one=True)
+    artifacts = _validated_artifact_paths(evidence_artifacts, require_one=True, allow_delimited_strings=True)
     fingerprint = _objective_candidate_fingerprint(normalized_type, value)
     op_id = _operation_id()
     store = _get_database_store()
@@ -4893,7 +4920,7 @@ def record_objective_validation(
         raise ValueError("outcome must be confirmed, rejected, or inconclusive")
     if isinstance(confidence, bool) or not isinstance(confidence, int) or not 0 <= confidence <= 100:
         raise ValueError("confidence must be an integer from 0 through 100")
-    evidence = _validated_artifact_paths(evidence_artifacts, require_one=True)
+    evidence = _validated_artifact_paths(evidence_artifacts, require_one=True, allow_delimited_strings=True)
     candidate = record["candidate_data"]
     failures = _objective_constraint_failures(candidate["candidate_value"], candidate.get("constraints", {}))
     if normalized_outcome == "confirmed" and not _objective_evidence_contains_candidate(
@@ -5893,7 +5920,7 @@ def _artifact_path_from_ref(reference: str) -> str:
     ``artifact:`` references retain their exact operation-relative meaning.
     """
 
-    text = str(reference or "").strip()
+    text = normalize_artifact_reference_token(reference)
     if text.startswith("artifact_id:"):
         artifact_id = text.split(":", 1)[1]
         if not artifact_id or artifact_id != os.path.basename(artifact_id):
@@ -8302,6 +8329,7 @@ def build_record_task_acceptance_tool(
     ) -> str:
         status = _normalize_acceptance_status_alias(status)
         disposition = _normalize_acceptance_disposition_alias(disposition)
+        evidence_refs = split_delimited_reference_values(evidence_refs, allow_delimited_strings=True)
         current_task = next(
             (item for item in _get_database_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
             task,
@@ -8479,6 +8507,7 @@ def build_record_task_acceptance_tool(
                     "evidence_refs": {
                         "type": "array",
                         "items": {"type": "string"},
+                        "minItems": 1,
                         "description": (
                             f"Durable references satisfying {required_evidence}. Use artifact:, memory:, or finding:; "
                             "raw commands, URLs, tool IDs, and inline output are invalid."

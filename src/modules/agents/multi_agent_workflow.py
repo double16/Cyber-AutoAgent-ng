@@ -78,6 +78,7 @@ from modules.tools.artifact import (
     resolve_tool_result_max_chars,
     resolve_operation_artifact_path,
 )
+from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.tools.memory import (
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
@@ -2534,6 +2535,7 @@ class MultiAgentWorkflowController:
             "Controller consolidated dependent mapping artifacts into a validated inventory manifest.",
         )
         self._emit_task_done(updated)
+        self._reconcile_completed_contract_prerequisite(plan, updated)
         self._emit_workflow_event(
             {
                 "type": "controller_inventory_synthesis",
@@ -2620,9 +2622,9 @@ class MultiAgentWorkflowController:
         plan: OperationPlan,
         task: Task,
     ) -> None:
-        """Reconcile an owning phase after its contracted synthesis replacement succeeds."""
+        """Reconcile an owning phase after its contracted synthesis task succeeds."""
 
-        if not task.replacement_of or task.status not in {"done", "superseded"}:
+        if task.status not in {"done", "superseded"}:
             return
         owner_phase = next((phase for phase in plan.phases if phase.id == task.phase), None)
         if owner_phase is None:
@@ -5183,8 +5185,9 @@ class MultiAgentWorkflowController:
         )
         updated_task = self.state.mark_task(current_task, decision.status, decision.reason)
         self._emit_task_done(updated_task, finding_resolution=resolution)
-        if updated_task.replacement_of and updated_task.status in {"done", "superseded"}:
-            self._reconcile_superseded_tasks(updated_task.phase)
+        if updated_task.status in {"done", "superseded"}:
+            if updated_task.replacement_of:
+                self._reconcile_superseded_tasks(updated_task.phase)
             self._reconcile_completed_contract_prerequisite(plan, updated_task)
 
     @staticmethod
@@ -13330,7 +13333,25 @@ tools and durable evidence before relying on it."""
             target = str(submitted.get("url") or fallback_target)
             for artifact_ref in outcome.artifact_refs:
                 try:
-                    exposures = detect_secret_exposures(artifact_ref)
+                    canonical_ref = normalize_artifact_reference_token(artifact_ref)
+                except (TypeError, ValueError) as error:
+                    self._emit_workflow_event({
+                        "type": "secret_exposure_candidate_skipped",
+                        "task_uid": task.task_uid,
+                        "artifact_ref": artifact_ref,
+                        "reason": self._short(str(error)),
+                    })
+                    continue
+                if canonical_ref != artifact_ref:
+                    self._emit_workflow_event({
+                        "type": "artifact_reference_normalized",
+                        "task_uid": task.task_uid,
+                        "raw_reference": artifact_ref,
+                        "canonical_reference": canonical_ref,
+                        "reason": "trimmed_presentation_punctuation",
+                    })
+                try:
+                    exposures = detect_secret_exposures(canonical_ref)
                 except (OSError, ValueError) as error:
                     self._emit_workflow_event({
                         "type": "secret_exposure_candidate_skipped",
@@ -13359,10 +13380,10 @@ tools and durable evidence before relying on it."""
                                     "Retrieve the assigned target location using the recorded authorized method.",
                                     "Inspect the resulting artifact for the independently fingerprinted exposure.",
                                 ],
-                                artifacts=[artifact_ref],
+                                artifacts=[canonical_ref],
                                 evidence_assertions=[
                                     {
-                                        "artifact": artifact_ref,
+                                        "artifact": canonical_ref,
                                         "type": "secret_exposure",
                                         "kind": exposure.kind,
                                         "digest": exposure.digest,
@@ -13382,7 +13403,7 @@ tools and durable evidence before relying on it."""
                     self._emit_workflow_event({
                         "type": "secret_exposure_candidate_created",
                         "task_uid": task.task_uid,
-                        "artifact_ref": artifact_ref,
+                        "artifact_ref": canonical_ref,
                         "secret_kind": exposure.kind,
                         "finding_ref": result.get("finding_ref", ""),
                     })

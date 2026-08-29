@@ -4237,6 +4237,109 @@ def test_completed_contract_synthesis_replacement_reconciles_owner_phase():
     assert [phase.status for phase in state.plan.phases] == ["done", "active"]
 
 
+def test_completed_original_contract_synthesis_reconciles_owner_phase():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    contract_context = {
+        "module": "web",
+        "phase_id": 1,
+        "workstream": "inventory_synthesis",
+    }
+    mapping = Task(
+        task_uid="mapping",
+        title="Crawl routes",
+        objective="Crawl routes",
+        phase=1,
+        status="done",
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "bounded_crawl",
+                "task_role": "mapping",
+            }
+        },
+    )
+    synthesis = Task(
+        task_uid="synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="pending",
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "task_role": "synthesis",
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[mapping, synthesis], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    completed_synthesis = state.mark_task(synthesis, "done", "Inventory manifest created")
+    controller._reconcile_completed_contract_prerequisite(plan, completed_synthesis)
+
+    assert [phase.status for phase in state.plan.phases] == ["done", "active"]
+
+
+def test_completed_original_contract_synthesis_keeps_owner_phase_partial_when_work_remains():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Attack Surface Mapping", status="partial_failure"),
+            PlanPhase(id=2, title="Attack Hypothesis Generation", status="active"),
+        ],
+    )
+    pending_mapping = Task(
+        task_uid="pending-mapping",
+        title="Map authentication",
+        objective="Map authentication",
+        phase=1,
+        status="pending",
+    )
+    synthesis = Task(
+        task_uid="synthesis",
+        title="Synthesize inventory",
+        objective="Build inventory",
+        phase=1,
+        status="done",
+        recovery_context={
+            "phase_task_contract": {
+                "module": "web",
+                "phase_id": 1,
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[pending_mapping, synthesis], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    controller._reconcile_completed_contract_prerequisite(plan, synthesis)
+
+    assert [phase.status for phase in state.plan.phases] == ["partial_failure", "active"]
+
+
 def test_contract_prerequisite_repairs_failed_synthesis_from_retained_recon_evidence(monkeypatch):
     plan = OperationPlan(
         objective="assess",

@@ -69,7 +69,11 @@ def discover_flag_candidates(evidence_artifacts: List[str], max_candidates: int 
         or not 1 <= max_candidates <= _MAX_CANDIDATES
     ):
         raise ValueError("max_candidates must be an integer from 1 through 20")
-    artifacts = memory_tools._validated_artifact_paths(evidence_artifacts, require_one=True)
+    artifacts = memory_tools._validated_artifact_paths(
+        evidence_artifacts,
+        require_one=True,
+        allow_delimited_strings=True,
+    )
     discovered: List[Dict[str, Any]] = []
     seen_values = set()
     for artifact_ref in artifacts:

@@ -83,6 +83,7 @@ from modules.handlers.utils import (
 )
 from modules.tools import python_repl
 from modules.tools.artifact import create_artifact_reader, resolve_tool_result_max_chars
+from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
 from modules.tools.editor import create_absolute_path_editor
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.browser import (
@@ -830,6 +831,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     tool_call_repair_hook = AgentRepairHook()
 
+    artifact_reference_input_normalization_hook = ArtifactReferenceInputNormalizationHook()
+
     tool_repeat_guard_hook = _create_tool_repeat_guard(config_manager, agent_logger)
 
     prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
@@ -844,13 +847,27 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     hooks: List[HookProvider] = list(
         filter(
             bool,
-            [tool_call_repair_hook, tool_repeat_guard_hook, tool_router_hook, react_hooks, prompt_budget_hook],
+            [
+                artifact_reference_input_normalization_hook,
+                tool_call_repair_hook,
+                tool_repeat_guard_hook,
+                tool_router_hook,
+                react_hooks,
+                prompt_budget_hook,
+            ],
         )
     )
     subagent_hooks: List[HookProvider] = list(
         filter(
             bool,
-            [tool_call_repair_hook, tool_repeat_guard_hook, tool_router_hook, react_hooks, prompt_budget_hook],
+            [
+                artifact_reference_input_normalization_hook,
+                tool_call_repair_hook,
+                tool_repeat_guard_hook,
+                tool_router_hook,
+                react_hooks,
+                prompt_budget_hook,
+            ],
         )
     )
 
