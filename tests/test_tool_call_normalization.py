@@ -1,6 +1,9 @@
 import pytest
 
-from modules.utils.tool_call_normalization import normalize_tool_call_payload
+from modules.utils.tool_call_normalization import (
+    normalize_tool_call_payload,
+    repair_model_response_tool_input,
+)
 
 
 def test_normalize_tool_call_payload_accepts_text_wrapped_direct_call():
@@ -45,3 +48,38 @@ def test_normalize_tool_call_payload_rejects_unknown_registered_tool():
         normalize_tool_call_payload(
             {"name": "unknown", "arguments": {}}, registered_tool_names={"shell"}
         )
+
+
+def test_repair_model_response_tool_input_recovers_json_value_with_atem_suffix():
+    repaired, fields = repair_model_response_tool_input(
+        {
+            "content": "Observation",
+            "artifacts": (
+                '["artifact:artifacts/api_config_headers_fresh.txt"]</atem:invoke>\n'
+                '<atem:parameter name="metadata">{"target":"http://example.test"}'
+            ),
+        }
+    )
+
+    assert repaired == {
+        "content": "Observation",
+        "artifacts": ["artifact:artifacts/api_config_headers_fresh.txt"],
+    }
+    assert fields == ("artifacts",)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '["artifact:artifacts/proof.txt"] trailing text',
+        '["artifact:artifacts/proof.txt"]</unexpected:invoke>',
+        '["artifact:artifacts/proof.txt"',
+    ],
+)
+def test_repair_model_response_tool_input_leaves_unrecognized_or_invalid_values_unchanged(value):
+    payload = {"artifacts": value}
+
+    repaired, fields = repair_model_response_tool_input(payload)
+
+    assert repaired == payload
+    assert fields == ()

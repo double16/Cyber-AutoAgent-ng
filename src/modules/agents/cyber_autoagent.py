@@ -848,8 +848,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         filter(
             bool,
             [
-                artifact_reference_input_normalization_hook,
                 tool_call_repair_hook,
+                artifact_reference_input_normalization_hook,
                 tool_repeat_guard_hook,
                 tool_router_hook,
                 react_hooks,
@@ -861,8 +861,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         filter(
             bool,
             [
-                artifact_reference_input_normalization_hook,
                 tool_call_repair_hook,
+                artifact_reference_input_normalization_hook,
                 tool_repeat_guard_hook,
                 tool_router_hook,
                 react_hooks,

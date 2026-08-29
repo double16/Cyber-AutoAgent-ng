@@ -212,6 +212,25 @@ def test_agent_repair_hook_ignores_direct_tool_calls_and_rejects_invalid_wrapper
     assert invalid.cancel_tool
 
 
+def test_agent_repair_hook_repairs_atem_envelope_before_direct_tool_dispatch():
+    hook = AgentRepairHook()
+    event = SimpleNamespace(
+        tool_use={
+            "name": "store_observation",
+            "input": {
+                "content": "Observation",
+                "artifacts": '["artifact:artifacts/api_config_headers_fresh.txt"]</atem:invoke>',
+            },
+        },
+        cancel_tool=False,
+    )
+
+    hook.before_tool_call_repair(event)
+
+    assert event.cancel_tool is False
+    assert event.tool_use["input"]["artifacts"] == ["artifact:artifacts/api_config_headers_fresh.txt"]
+
+
 def test_agent_repair_hook_leaves_max_tokens_for_controller_recovery():
     hook = AgentRepairHook()
     agent = SimpleNamespace(

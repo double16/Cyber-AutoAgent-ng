@@ -4,13 +4,22 @@ import re
 from typing import Any
 
 from strands.hooks import HookProvider, HookRegistry
-from strands.hooks.events import AfterModelCallEvent, BeforeModelCallEvent, BeforeToolCallEvent
+from strands.hooks.events import (
+    AfterModelCallEvent,
+    BeforeModelCallEvent,
+    BeforeToolCallEvent,
+)
 
+from modules.agents.patches import (
+    _JSON_BARE_RE,
+    _JSON_FENCE_RE,
+    patch_ollama_model_json_toolcalls,
+)
 from modules.config.system.logger import get_logger
-
-from modules.agents.patches import _JSON_FENCE_RE, _JSON_BARE_RE, patch_ollama_model_json_toolcalls
-from modules.utils.tool_call_normalization import normalize_tool_call_payload
-
+from modules.utils.tool_call_normalization import (
+    normalize_tool_call_payload,
+    repair_model_response_tool_input,
+)
 
 logger = get_logger("Handlers.AgentRepairHook")
 
@@ -37,9 +46,17 @@ class AgentRepairHook(HookProvider):
         logger.debug("AgentRepairHook registered")
 
     def before_tool_call_repair(self, event: BeforeToolCallEvent) -> None:
-        """Repair a model-emitted generic tool_use wrapper when its target is registered."""
+        """Repair known response-envelope leakage before dispatching a tool call."""
 
         tool_use = event.tool_use
+        repaired_input, repaired_fields = repair_model_response_tool_input(tool_use.get("input", {}))
+        if repaired_fields:
+            tool_use["input"] = repaired_input
+            logger.warning(
+                "Repaired trailing model tool envelope for %s field(s) on tool %s",
+                ", ".join(repaired_fields),
+                tool_use.get("name", "unknown"),
+            )
         if tool_use.get("name") != "tool_use":
             return
         wrapper_input = tool_use.get("input", {})
