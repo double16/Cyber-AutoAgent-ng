@@ -121,7 +121,9 @@ from modules.tools.memory import (
     task_service_scope_validation_details,
     task_service_scope_violations,
 )
-from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
+from modules.tools.recon_inventory_manifest import (
+    consolidate_recon_artifacts,
+)
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.tools.shell import scoped_shell_command_validator
 from modules.tools.shell_provenance import ShellExecutionProvenance, shell_execution_provenance
@@ -2380,13 +2382,11 @@ class MultiAgentWorkflowController:
         if len(missing) != 1 or len(synthesis_task.target_ids) != 1:
             return False
         evidence_refs = self._contract_inventory_evidence_refs(contract_tasks)
-        manifest_ref = self._valid_contract_inventory_manifest(plan, evidence_refs)
-        if manifest_ref is None:
-            manifest_ref = self._convert_contract_inventory_evidence(
-                plan,
-                synthesis_task,
-                evidence_refs,
-            )
+        manifest_ref = self._convert_contract_inventory_evidence(
+            plan,
+            synthesis_task,
+            evidence_refs,
+        )
         if manifest_ref is None:
             return False
         payload = {
@@ -2435,6 +2435,119 @@ class MultiAgentWorkflowController:
             if isinstance(reference, str) and reference.startswith("artifact:")
         ]
 
+    def _run_controller_inventory_synthesis(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+        task: Task,
+    ) -> bool:
+        """Complete declared web inventory synthesis without constructing an executor agent."""
+
+        contract = self._phase_task_contract(phase)
+        procedure = task.acceptance.basis.procedure
+        if (
+            contract is None
+            or contract.mode != "fanout_with_synthesis"
+            or contract.synthesis_execution != "controller"
+            or contract.synthesis_output_kind != "inventory_manifest"
+            or self._task_planning_role(task) != "synthesis"
+            or self._task_planning_workstream(task) != contract.synthesis_workstream
+            or procedure is None
+            or procedure.output_kind != "inventory_manifest"
+        ):
+            return False
+
+        context = task.recovery_context.get("phase_task_contract")
+        dependencies = context.get("depends_on_workstreams") if isinstance(context, dict) else []
+        dependency_workstreams = {str(value) for value in dependencies if str(value).strip()}
+        mapping_tasks = [
+            candidate
+            for candidate in self.state.list_tasks(phase=phase.id)
+            if self._task_planning_role(candidate) == "mapping"
+            and self._task_planning_workstream(candidate) in dependency_workstreams
+        ]
+        completed_workstreams = {
+            self._task_planning_workstream(candidate)
+            for candidate in mapping_tasks
+            if candidate.status == "done"
+        }
+        if completed_workstreams != dependency_workstreams:
+            missing = sorted(dependency_workstreams - completed_workstreams)
+            updated = self.state.mark_task(
+                task,
+                "blocked",
+                "Controller inventory synthesis prerequisites are incomplete: " + ", ".join(missing),
+            )
+            self._emit_task_done(updated)
+            return True
+        if len(task.target_ids) != 1:
+            updated = self.state.mark_task(
+                task,
+                "partial_failure",
+                "Controller inventory synthesis requires exactly one target ID.",
+            )
+            self._emit_task_done(updated)
+            return True
+
+        target_id = task.target_ids[0]
+        target = next((item.value for item in plan.targets if item.target_id == target_id), "")
+        evidence_refs = self._contract_inventory_evidence_refs(mapping_tasks)
+        output_file = f"artifacts/inventory_synthesis/{task.task_uid}-inventory_manifest.json"
+        try:
+            result = consolidate_recon_artifacts(
+                evidence_refs,
+                output_file,
+                target_id=target_id,
+                target=target,
+            )
+            manifest_ref = str(result["artifact_ref"])
+            self._load_controller_inventory_manifest(plan, manifest_ref)
+            self.state.record_task_acceptance(
+                task,
+                {
+                    "status": "satisfied",
+                    "disposition": "observation",
+                    "summary": "Controller consolidated dependent mapping artifacts into a validated inventory manifest.",
+                    "evidence_refs": [manifest_ref],
+                },
+            )
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            updated = self.state.mark_task(
+                task,
+                "partial_failure",
+                "Controller inventory synthesis failed: " + self._short(error, 500),
+            )
+            self._emit_task_done(updated)
+            self._emit_workflow_event(
+                {
+                    "type": "controller_inventory_synthesis",
+                    "task_uid": task.task_uid,
+                    "phase": phase.id,
+                    "outcome": "failed",
+                    "reason": self._short(error, 500),
+                }
+            )
+            return True
+        updated = self.state.mark_task(
+            task,
+            "done",
+            "Controller consolidated dependent mapping artifacts into a validated inventory manifest.",
+        )
+        self._emit_task_done(updated)
+        self._emit_workflow_event(
+            {
+                "type": "controller_inventory_synthesis",
+                "task_uid": updated.task_uid,
+                "phase": updated.phase,
+                "outcome": "completed",
+                "input_reference_count": len(evidence_refs),
+                "skipped_artifact_count": len(result["skipped_artifacts"]),
+                "manifest_ref": result["artifact_ref"],
+                "item_count": result["item_count"],
+            }
+        )
+        return True
+
     def _valid_contract_inventory_manifest(
         self,
         plan: OperationPlan,
@@ -2457,31 +2570,28 @@ class MultiAgentWorkflowController:
         synthesis_task: Task,
         evidence_refs: List[str],
     ) -> Optional[str]:
-        """Convert one retained recon artifact into a validated inventory manifest."""
+        """Consolidate retained recon evidence into one validated inventory manifest."""
 
         target_id = synthesis_task.target_ids[0]
         output_file = f"artifacts/contract_recovery/{synthesis_task.task_uid}-inventory_manifest.json"
-        for reference in evidence_refs:
-            try:
-                result = recon_output_to_inventory_manifest(
-                    source_artifact=reference,
-                    output_file=output_file,
-                    source_format="auto",
-                    target_id=target_id,
-                )
-                payload = json.loads(result)
-                manifest_ref = str(payload["artifact_ref"])
-                self._load_controller_inventory_manifest(plan, manifest_ref)
-            except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-                self._log_workflow(
-                    "contract inventory conversion skipped task=%s source=%s error=%s",
-                    self._task_label(synthesis_task),
-                    self._short(reference, 180),
-                    self._short(error, 240),
-                )
-                continue
+        target = next((item.value for item in plan.targets if item.target_id == target_id), "")
+        try:
+            result = consolidate_recon_artifacts(
+                evidence_refs,
+                output_file,
+                target_id=target_id,
+                target=target,
+            )
+            manifest_ref = str(result["artifact_ref"])
+            self._load_controller_inventory_manifest(plan, manifest_ref)
             return manifest_ref
-        return None
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            self._log_workflow(
+                "contract inventory consolidation failed task=%s error=%s",
+                self._task_label(synthesis_task),
+                self._short(error, 240),
+            )
+            return None
 
     def _reconcile_contract_prerequisite_phase(self, plan: OperationPlan, phase_id: int) -> None:
         """Mark a repaired earlier phase done without advancing the currently active phase."""
@@ -2843,6 +2953,8 @@ class MultiAgentWorkflowController:
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
         self._emit_task_started(task)
         self._log_workflow("running task=%s phase=%s", self._task_label(task), phase.id)
+        if self._run_controller_inventory_synthesis(plan, phase, task):
+            return
         preflight_feedback = (
             self._task_pre_execution_feedback(task)
             if task.recovery_context.get("task_preflight_validated")

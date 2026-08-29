@@ -668,6 +668,172 @@ def _inventory_manifest_output_path(path: str) -> str:
     return absolute_path
 
 
+def _read_inventory_source(
+    source_artifact: str,
+    *,
+    source_format: str = "auto",
+    target_id: str = "target-1",
+    target: str = "",
+) -> tuple[str, str, Dict[str, Any]]:
+    """Read one supported artifact into a validated in-memory inventory manifest."""
+
+    from modules.tools.artifact import resolve_operation_artifact_path
+    from modules.tools.memory import canonical_artifact_reference
+
+    source_path = resolve_operation_artifact_path(source_artifact)
+    source_ref = canonical_artifact_reference(source_path)
+    with open(source_path, "r", encoding="utf-8", errors="replace") as source:
+        text = source.read()
+    normalized_format = str(source_format or "auto").strip().lower().replace("-", "_")
+    normalized_format = RECON_FORMAT_ALIASES.get(normalized_format, normalized_format)
+    if normalized_format == "auto":
+        normalized_format = _infer_format(text)
+    if normalized_format not in {*PARSERS, "inventory_manifest"}:
+        raise ValueError(f"source_format must be auto or one of: {', '.join(SUPPORTED_RECON_FORMATS)}")
+    if normalized_format == "inventory_manifest":
+        try:
+            manifest = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError("inventory_manifest source must be a JSON object") from error
+        if not isinstance(manifest, dict):
+            raise ValueError("inventory_manifest source must be a JSON object")
+        return source_ref, normalized_format, manifest
+
+    bound_target, resolved_target_id = resolve_inventory_target(target or target_id, target_id)
+    records = PARSERS[normalized_format](text)
+    if normalized_format == "ffuf":
+        _mark_ffuf_wildcard_records(records)
+    if not records:
+        raise ValueError(f"No inventory candidates were parsed from {normalized_format} output")
+    if _canonical_url(bound_target):
+        for record in records:
+            if str(record.get("url") or "").startswith("/"):
+                record["url"] = urljoin(bound_target.rstrip("/") + "/", str(record["url"]).lstrip("/"))
+    workflows, technologies, parameters = _structured_inventory_fields(text, normalized_format)
+    manifest = records_to_inventory_manifest(
+        records,
+        target_id=resolved_target_id,
+        target=bound_target,
+        source_ref=source_ref,
+        workflows=workflows,
+        technologies=technologies,
+        parameters=parameters,
+    )
+    if not manifest["items"]:
+        raise ValueError("Recon output produced no in-scope inventory items")
+    return source_ref, normalized_format, manifest
+
+
+def _inventory_item_identity(item: Dict[str, Any]) -> str:
+    """Return the stable semantic identity used while combining inventories."""
+
+    return json.dumps(
+        {"target_id": item.get("target_id"), "kind": item.get("kind"), "value": item.get("value")},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _merge_inventory_value(existing: Any, incoming: Any) -> Any:
+    """Combine complementary attributes while retaining the first deterministic value on conflict."""
+
+    if existing == incoming:
+        return existing
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        merged = json.loads(json.dumps(existing))
+        for key, value in incoming.items():
+            merged[key] = _merge_inventory_value(merged[key], value) if key in merged else value
+        return merged
+    if isinstance(existing, list) and isinstance(incoming, list):
+        return [*existing, *(value for value in incoming if value not in existing)]
+    return existing
+
+
+def _merge_inventory_manifests(sources: Iterable[tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
+    """Merge source manifests without losing source references or duplicate suppression."""
+
+    items_by_identity: Dict[str, Dict[str, Any]] = {}
+    gaps: List[Any] = []
+    source_count = 0
+    candidate_count = 0
+    for source_ref, manifest in sources:
+        source_count += 1
+        for gap in manifest.get("unassessed_gaps", []):
+            if gap not in gaps:
+                gaps.append(gap)
+        for raw_item in manifest.get("items", []):
+            if not isinstance(raw_item, dict):
+                continue
+            candidate_count += 1
+            item = json.loads(json.dumps(raw_item))
+            attributes = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+            item["attributes"] = attributes
+            provenance = attributes.setdefault("source_artifact_refs", [])
+            if source_ref not in provenance:
+                provenance.append(source_ref)
+            identity = _inventory_item_identity(item)
+            if identity not in items_by_identity:
+                items_by_identity[identity] = item
+                continue
+            existing = items_by_identity[identity]
+            existing_attributes = existing.get("attributes") if isinstance(existing.get("attributes"), dict) else {}
+            existing["attributes"] = _merge_inventory_value(existing_attributes, attributes)
+    items = [items_by_identity[identity] for identity in sorted(items_by_identity)]
+    if not items:
+        raise ValueError("No valid in-scope inventory items were available for consolidation")
+    return {
+        "schema_version": 1,
+        "items": items,
+        "unassessed_gaps": gaps,
+        "extraction": {
+            "source_artifact_count": source_count,
+            "candidate_count": candidate_count,
+            "added_count": len(items),
+        },
+    }
+
+
+def consolidate_recon_artifacts(
+    source_artifacts: Iterable[str],
+    output_file: str,
+    *,
+    target_id: str = "target-1",
+    target: str = "",
+) -> Dict[str, Any]:
+    """Create one validated inventory manifest from supported operation artifacts.
+
+    This controller-facing entry point intentionally is not decorated as a tool.
+    Unsupported artifacts are reported and skipped so one unrelated evidence file
+    cannot discard valid recon output from another mapping workstream.
+    """
+
+    processed = []
+    processed_details = []
+    skipped = []
+    for artifact in dict.fromkeys(str(value) for value in source_artifacts if str(value).strip()):
+        try:
+            source_ref, _source_format, manifest = _read_inventory_source(
+                artifact,
+                target_id=target_id,
+                target=target,
+            )
+        except (OSError, TypeError, ValueError) as error:
+            skipped.append({"source_artifact": artifact, "reason": str(error)})
+            continue
+        processed.append((source_ref, manifest))
+        processed_details.append({"source_artifact": source_ref, "source_format": _source_format})
+    manifest = _merge_inventory_manifests(processed)
+    result = write_inventory_manifest(output_file, manifest)
+    result.update(
+        {
+            "source_artifacts": [reference for reference, _manifest in processed],
+            "processed_artifacts": processed_details,
+            "skipped_artifacts": skipped,
+        }
+    )
+    return result
+
+
 @tool(
     inputSchema={
         "json": {
@@ -712,54 +878,21 @@ def recon_output_to_inventory_manifest(
 ) -> str:
     """Convert supported recon output or validate-copy an inventory manifest into a validated inventory manifest."""
 
-    from modules.tools.artifact import resolve_operation_artifact_path
-    from modules.tools.memory import canonical_artifact_reference
-
-    source_path = resolve_operation_artifact_path(source_artifact)
-    source_ref = canonical_artifact_reference(source_path)
-    with open(source_path, "r", encoding="utf-8", errors="replace") as source:
-        text = source.read()
-    normalized_format = str(source_format or "auto").strip().lower().replace("-", "_")
-    normalized_format = RECON_FORMAT_ALIASES.get(normalized_format, normalized_format)
-    if normalized_format == "auto":
-        normalized_format = _infer_format(text)
-    if normalized_format not in {*PARSERS, "inventory_manifest"}:
-        raise ValueError(f"source_format must be auto or one of: {', '.join(SUPPORTED_RECON_FORMATS)}")
+    source_ref, normalized_format, manifest = _read_inventory_source(
+        source_artifact,
+        source_format=source_format,
+        target_id=target_id,
+        target=target,
+    )
     if normalized_format == "inventory_manifest":
         output_path = _inventory_manifest_output_path(output_file)
-        if output_path == os.path.realpath(source_path):
+        from modules.tools.artifact import resolve_operation_artifact_path
+
+        if output_path == os.path.realpath(resolve_operation_artifact_path(source_artifact)):
             raise ValueError("inventory manifest output_file must differ from source_artifact")
-        try:
-            manifest = json.loads(text)
-        except json.JSONDecodeError as error:
-            raise ValueError("inventory_manifest source must be a JSON object") from error
-        if not isinstance(manifest, dict):
-            raise ValueError("inventory_manifest source must be a JSON object")
         result = write_inventory_manifest(output_file, manifest)
         result.update({"source_artifact": source_ref, "source_format": normalized_format})
         return json.dumps(result, sort_keys=True)
-    bound_target, resolved_target_id = resolve_inventory_target(target or target_id, target_id)
-    records = PARSERS[normalized_format](text)
-    if normalized_format == "ffuf":
-        _mark_ffuf_wildcard_records(records)
-    if not records:
-        raise ValueError(f"No inventory candidates were parsed from {normalized_format} output")
-    if _canonical_url(bound_target):
-        for record in records:
-            if str(record.get("url") or "").startswith("/"):
-                record["url"] = urljoin(bound_target.rstrip("/") + "/", str(record["url"]).lstrip("/"))
-    workflows, technologies, parameters = _structured_inventory_fields(text, normalized_format)
-    manifest = records_to_inventory_manifest(
-        records,
-        target_id=resolved_target_id,
-        target=bound_target,
-        source_ref=source_ref,
-        workflows=workflows,
-        technologies=technologies,
-        parameters=parameters,
-    )
-    if not manifest["items"]:
-        raise ValueError("Recon output produced no in-scope inventory items")
     result = write_inventory_manifest(output_file, manifest)
     result.update({"source_artifact": source_ref, "source_format": normalized_format})
     return json.dumps(result, sort_keys=True)

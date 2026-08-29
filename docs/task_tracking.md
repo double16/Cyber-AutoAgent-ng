@@ -205,6 +205,11 @@ processes the complete artifact. It also accepts an existing inventory manifest 
 distinct, validated manifest copy; manifest input bypasses recon parsing and preserves its target IDs and inventory
 structure for controller validation.
 
+For a web phase-1 task with the declared `inventory_synthesis` controller contract, Python collects the artifact
+evidence from its completed mapping workstreams and consolidates supported recon outputs and existing manifests into
+one validated inventory manifest. This deterministic task does not invoke an executor agent; unsupported source
+artifacts are reported in controller diagnostics and do not discard valid contributions.
+
 Before an inventory is frozen, Python extracts same-scope navigation and form destinations from current-operation HTML
 artifacts and merges unambiguous missing routes. Fan-out then dispatches by kind: endpoints and their parameters share
 route tasks, workflows and services receive matching assessment tasks, and technologies receive component-validation

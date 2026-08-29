@@ -294,6 +294,83 @@ def test_converter_reads_artifact_normalizes_alias_and_writes_valid_manifest(tmp
     assert memory._load_inventory_manifest(result["artifact_ref"])[0]["schema_version"] == 1
 
 
+def test_consolidation_merges_detected_sources_preserves_provenance_and_skips_unknown_artifacts(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    ffuf = artifact_dir / "ffuf.json"
+    ffuf.write_text(
+        json.dumps({"ffufhash": "fixture", "results": [{"url": "https://target.test/admin", "status": 200}]}),
+        encoding="utf-8",
+    )
+    manifest = artifact_dir / "source-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "items": [
+                    {
+                        "id": "endpoint-admin",
+                        "target_id": "target-1",
+                        "kind": "endpoint",
+                        "value": "https://target.test/admin",
+                        "attributes": {"source": "existing"},
+                    },
+                    {
+                        "id": "endpoint-api",
+                        "target_id": "target-1",
+                        "kind": "endpoint",
+                        "value": "https://target.test/api",
+                        "attributes": {},
+                    },
+                ],
+                "unassessed_gaps": ["requires authenticated crawl"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    unknown = artifact_dir / "notes.txt"
+    unknown.write_text("not a supported recon artifact", encoding="utf-8")
+    output = artifact_dir / "consolidated.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = manifest_tool.consolidate_recon_artifacts(
+        ["artifact:artifacts/ffuf.json", "artifact:artifacts/source-manifest.json", "artifact:artifacts/notes.txt"],
+        str(output),
+        target_id="target-1",
+        target="https://target.test",
+    )
+
+    written = json.loads(output.read_text(encoding="utf-8"))
+    endpoints = [item for item in written["items"] if item["kind"] == "endpoint"]
+    admin = next(item for item in endpoints if item["value"] == "https://target.test/admin")
+    assert {item["value"] for item in endpoints} == {"https://target.test/admin", "https://target.test/api"}
+    assert set(admin["attributes"]["source_artifact_refs"]) == {
+        "artifact:artifacts/ffuf.json",
+        "artifact:artifacts/source-manifest.json",
+    }
+    assert written["unassessed_gaps"] == ["requires authenticated crawl"]
+    assert result["validation_status"] == "valid"
+    assert result["skipped_artifacts"][0]["source_artifact"] == "artifact:artifacts/notes.txt"
+
+
+def test_consolidation_rejects_when_every_source_is_unsupported(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    source = artifact_dir / "notes.txt"
+    source.write_text("not a supported recon artifact", encoding="utf-8")
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+
+    with pytest.raises(ValueError, match="No valid in-scope inventory items"):
+        manifest_tool.consolidate_recon_artifacts(
+            ["artifact:artifacts/notes.txt"],
+            "artifacts/consolidated.json",
+        )
+
+
 @pytest.mark.parametrize(
     "source_format",
     ["auto", "client_bundle_inventory", "client-bundle-inventory"],

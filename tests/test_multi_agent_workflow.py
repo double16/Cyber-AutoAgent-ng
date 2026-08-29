@@ -4291,33 +4291,121 @@ def test_contract_prerequisite_repairs_failed_synthesis_from_retained_recon_evid
     )
     converted = []
 
-    def convert(**kwargs):
+    def consolidate(source_artifacts, output_file, **kwargs):
+        assert source_artifacts == ["artifact:artifacts/katana_output.txt"]
         converted.append(kwargs)
-        return json.dumps({"artifact_ref": "artifact:artifacts/contract_recovery/inventory_manifest.json"})
+        assert output_file == "artifacts/contract_recovery/failed-synthesis-inventory_manifest.json"
+        return {
+            "artifact_ref": "artifact:artifacts/contract_recovery/inventory_manifest.json",
+            "item_count": 1,
+            "skipped_artifacts": [],
+        }
 
     def load_manifest(_plan, reference):
         if reference == "artifact:artifacts/contract_recovery/inventory_manifest.json":
             return {"schema_version": 1, "items": [{}], "unassessed_gaps": []}, "manifest-hash"
         raise ValueError("not an inventory manifest")
 
-    monkeypatch.setattr(workflow_mod, "recon_output_to_inventory_manifest", convert)
+    monkeypatch.setattr(workflow_mod, "consolidate_recon_artifacts", consolidate)
     monkeypatch.setattr(controller, "_load_controller_inventory_manifest", load_manifest)
 
     assert controller._repair_failed_contract_prerequisites(plan, plan.phases[1]) is True
-    assert converted == [
-        {
-            "source_artifact": "artifact:artifacts/katana_output.txt",
-            "output_file": "artifacts/contract_recovery/failed-synthesis-inventory_manifest.json",
-            "source_format": "auto",
-            "target_id": "target-1",
-        }
-    ]
+    assert converted == [{"target_id": "target-1", "target": ""}]
     repaired = next(task for task in state.tasks if task.task_uid == "failed-synthesis")
     assert repaired.status == "done"
     assert state.acceptance_results[repaired.task_uid][0].evidence_refs == (
         "artifact:artifacts/contract_recovery/inventory_manifest.json",
     )
     assert [phase.status for phase in state.plan.phases] == ["done", "active"]
+
+
+def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Attack Surface Mapping", status="active")],
+        targets=[OperationTarget("target-1", "https://target.test", "network")],
+    )
+    contract_context = {"module": "web", "phase_id": 1}
+    mapping = Task(
+        task_uid="crawl",
+        title="Crawl routes",
+        objective="Crawl routes",
+        phase=1,
+        status="done",
+        evidence=["artifact:artifacts/katana.json"],
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "bounded_crawl",
+                "task_role": "mapping",
+            }
+        },
+    )
+    synthesis = Task(
+        task_uid="synthesis",
+        title="Synthesize inventory",
+        objective="Consolidate mapping workstreams",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=_acceptance("criterion-1"),
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+                "depends_on_workstreams": ["bounded_crawl"],
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[mapping, synthesis], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    calls = []
+
+    def consolidate(source_artifacts, output_file, **kwargs):
+        calls.append((source_artifacts, output_file, kwargs))
+        return {
+            "artifact_ref": "artifact:artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
+            "item_count": 2,
+            "skipped_artifacts": [{"source_artifact": "artifact:artifacts/notes.txt", "reason": "unsupported"}],
+        }
+
+    monkeypatch.setattr(workflow_mod, "consolidate_recon_artifacts", consolidate)
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", lambda *_args: ({"items": [{}, {}]}, "hash"))
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: pytest.fail("executor prompt must not be built"))
+
+    controller._run_task_in_trace(plan, plan.phases[0], synthesis)
+
+    assert calls == [
+        (
+            ["artifact:artifacts/katana.json"],
+            "artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
+            {"target_id": "target-1", "target": "https://target.test"},
+        )
+    ]
+    completed = next(task for task in state.tasks if task.task_uid == "synthesis")
+    assert completed.status == "done"
+    assert state.acceptance_results["synthesis"][0].evidence_refs == (
+        "artifact:artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
+    )
+    assert {
+        "type": "controller_inventory_synthesis",
+        "task_uid": "synthesis",
+        "phase": 1,
+        "outcome": "completed",
+        "input_reference_count": 1,
+        "skipped_artifact_count": 1,
+        "manifest_ref": "artifact:artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
+        "item_count": 2,
+    } in runtime.callback_handler.events
 
 
 def test_contract_prerequisite_does_not_replace_failed_synthesis_when_conversion_is_unavailable(monkeypatch):
@@ -4356,8 +4444,8 @@ def test_contract_prerequisite_does_not_replace_failed_synthesis_when_conversion
     )
     monkeypatch.setattr(
         workflow_mod,
-        "recon_output_to_inventory_manifest",
-        lambda **_kwargs: (_ for _ in ()).throw(ValueError("unsupported source")),
+        "consolidate_recon_artifacts",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("unsupported source")),
     )
 
     assert controller._repair_failed_contract_prerequisites(plan, plan.phases[1]) is False

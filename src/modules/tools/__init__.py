@@ -45,7 +45,10 @@ from modules.tools.oast import (
     oast_poll,
     oast_register_http_response,
 )
-from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
+from modules.tools.recon_inventory_manifest import (
+    consolidate_recon_artifacts,
+    recon_output_to_inventory_manifest,
+)
 
 __all__ = [
     "QdrantMemoryClient",
@@ -64,6 +67,7 @@ __all__ = [
     "channel_send",
     "channel_status",
     "close_oast_providers",
+    "consolidate_recon_artifacts",
     "create_artifact_reader",
     "create_tasks",
     "discover_mcp_tools",

@@ -68,9 +68,12 @@ planning:
       synthesis_execution: controller
 ```
 
-The controller validates this declaration before it invokes the task creator. An unsupported execution mode ends task
-creation with a `phase_task_contract_validation` event and `contract_unsatisfiable` code, rather than spending model
-retries on an impossible proposal.
+The controller validates this declaration before it invokes the task creator. For the web module's
+`inventory_synthesis`, `synthesis_execution: controller` also makes execution deterministic: after every declared
+mapping workstream is done, Python consolidates its retained artifact evidence into one validated inventory manifest,
+records acceptance, and does not construct an executor agent. An unsupported execution mode ends task creation with a
+`phase_task_contract_validation` event and `contract_unsatisfiable` code, rather than spending model retries on an
+impossible proposal.
 
 Task proposals persist their planning metadata in the existing task `recovery_context` JSON. This includes
 `workstream`, `task_role`, `depends_on_workstreams`, and any `inapplicability_reason`. No SQL schema migration is
