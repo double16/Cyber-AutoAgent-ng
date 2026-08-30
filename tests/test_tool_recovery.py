@@ -654,6 +654,62 @@ def test_non_shell_failed_correction_exhausts_recovery():
     assert hook.exhausted is True
 
 
+def test_finding_validation_corrections_survive_shell_inspection_and_stop_on_final_failure():
+    journal = ToolOutcomeJournal()
+    hook = TaskFailureRecoveryHook(journal, max_policy_violations=10, max_corrections=2)
+    validation_error = (
+        "secret exposure revalidation requires the same exposure in a fresh artifact; "
+        "API_KEY=exact-validator-secret"
+    )
+    first_input = {"outcome": "confirmed", "evidence_artifacts": ["artifact:artifacts/first.json"]}
+
+    first_failure = _after(
+        "validation-1",
+        "record_finding_validation",
+        first_input,
+        status="error",
+        text=validation_error,
+    )
+    hook._after_tool(first_failure)
+    assert "FINDING_VALIDATION_REPAIR" in _result_text(first_failure.result)
+    assert "same exposure in a fresh artifact" in _result_text(first_failure.result)
+    assert "exact-validator-secret" in _result_text(first_failure.result)
+
+    shell_one = _before("shell-1", "shell", {"command": "curl -sS http://target/first"})
+    hook._before_tool(shell_one)
+    hook._after_tool(_after("shell-1", "shell", shell_one.tool_use["input"], status="success", text="first.json"))
+    assert hook.unresolved is True
+
+    second_input = {"outcome": "confirmed", "evidence_artifacts": ["artifact:artifacts/second.json"]}
+    second = _before("validation-2", "record_finding_validation", second_input)
+    hook._before_tool(second)
+    assert second.cancel_tool is False
+    hook._after_tool(_after("validation-2", "record_finding_validation", second_input, status="error", text=validation_error))
+
+    shell_two = _before("shell-2", "shell", {"command": "curl -sS http://target/second"})
+    hook._before_tool(shell_two)
+    hook._after_tool(_after("shell-2", "shell", shell_two.tool_use["input"], status="success", text="second.json"))
+    assert hook.unresolved is True
+
+    final_input = {"outcome": "confirmed", "evidence_artifacts": ["artifact:artifacts/final.json"]}
+    final = _before("validation-3", "record_finding_validation", final_input)
+    hook._before_tool(final)
+    assert final.cancel_tool is False
+    final_failure = _after("validation-3", "record_finding_validation", final_input, status="error", text=validation_error)
+    hook._after_tool(final_failure)
+
+    assert hook.exhausted is True
+    assert final_failure.invocation_state["request_state"]["stop_event_loop"] is True
+    assert final_failure.invocation_state["request_state"][TOOL_RECOVERY_EXHAUSTED_STATE_KEY]["reason"] == "correction_failed"
+    assert [outcome.recovery_role for outcome in journal.entries()] == [
+        "normal",
+        "alternative",
+        "correction",
+        "alternative",
+        "correction",
+    ]
+
+
 def test_shell_correction_allows_different_executable_and_requires_changed_input():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
@@ -724,7 +780,7 @@ def test_shell_validation_failure_without_executable_accepts_valid_changed_corre
     assert [outcome.recovery_role for outcome in journal.entries()] == ["normal", "correction"]
 
 
-def test_outcome_journal_is_bounded_and_redacts_sensitive_input():
+def test_outcome_journal_is_bounded_and_retains_sensitive_internal_input():
     journal = ToolOutcomeJournal(max_entries=2)
     for index in range(3):
         journal.append(
@@ -738,8 +794,8 @@ def test_outcome_journal_is_bounded_and_redacts_sensitive_input():
 
     entries = journal.entries()
     assert [entry.sequence for entry in entries] == [2, 3]
-    assert "Bearer secret" not in entries[-1].input_summary
-    assert "[REDACTED]" in entries[-1].input_summary
+    assert "Bearer secret" in entries[-1].input_summary
+    assert "[REDACTED]" not in entries[-1].input_summary
     assert len(entries[-1].output_summary) == 500
 
 

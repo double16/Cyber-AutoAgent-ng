@@ -38,7 +38,8 @@ within the applicable operational phases; do not create a separate consolidation
   with no captured status are not sufficient evidence of absence.
 - Submit security weakness candidates with `store_finding`, including expected and actual behavior, affected
   scope, negative control, reproduction steps, and artifacts. Default uncertain impact to an observation.
-- Never store response bodies containing sensitive data in memory; reference redacted artifacts instead.
+- Internal task memory may retain exact response data, including secret values, when needed for evidence correlation
+  and validation. Redact secret values only in reports, logs, and trace exports.
 </evidence_policy>
 
 <prohibited_actions>

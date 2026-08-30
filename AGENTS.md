@@ -103,6 +103,9 @@
 - When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.
 - When an LLM is to return structured data, prefer JSON.
 - Primary use-case LLM have ~26b parameters and 48,000 tokens context window.
+- Secret redaction boundary: redact secret values in report Markdown/JSON, logs, and trace exports. Agent prompts,
+  internal memory, SQLite records, and non-report evidence artifacts are sensitive internal data and may retain exact
+  secret values when required for evidence correlation and validation.
 - CWE mappings describe software weaknesses and may use deterministic candidate seeds derived from vulnerability
   terminology. MITRE ATT&CK mappings describe observed adversary behavior and should be inferred only from evidence
   such as execution traces, commands, access paths, or post-exploitation activity; a vulnerability alone does not

@@ -13,6 +13,7 @@ from modules.config.models.agent_profiles import (
 )
 from modules.handlers.max_token_recovery import (
     MaxTokenClassification,
+    capture_and_discard_max_token_output,
     classify_max_token_output,
 )
 
@@ -35,6 +36,44 @@ def test_classify_max_token_output_reasoning_and_loop():
     assert c3.is_reasoning_induced is True
     assert c3.repetition_ratio > 0.4
     assert c3.pattern_hash is not None
+
+
+def test_max_token_snapshot_retains_exact_internal_secret_values():
+    agent = MagicMock()
+    agent.messages = [
+        {
+            "content": [
+                {"text": "Partial result API_KEY=internal-secret"},
+                {"reasoningContent": {"reasoningText": {"text": "Authorization: Bearer internal-token"}}},
+            ]
+        }
+    ]
+    agent.event_loop_metrics.accumulated_usage = {}
+
+    _classification, _removed, snapshot = capture_and_discard_max_token_output(agent)
+
+    assert "internal-secret" in snapshot.partial_output
+    assert "internal-token" in snapshot.recorded_reasoning
+
+
+def test_max_token_snapshot_bounds_internal_secret_diagnostics():
+    agent = MagicMock()
+    agent.messages = [
+        {
+            "content": [
+                {"text": "API_KEY=internal-secret " + "x" * 4_100},
+                {"reasoningContent": {"reasoningText": {"text": "Bearer internal-token " + "y" * 4_100}}},
+            ]
+        }
+    ]
+    agent.event_loop_metrics.accumulated_usage = {}
+
+    _classification, _removed, snapshot = capture_and_discard_max_token_output(agent)
+
+    assert snapshot.partial_output.endswith("…[truncated]")
+    assert snapshot.recorded_reasoning.endswith("…[truncated]")
+    assert "internal-secret" in snapshot.partial_output
+    assert "internal-token" in snapshot.recorded_reasoning
 
 
 def test_mutate_agent_model_reasoning_and_tokens():

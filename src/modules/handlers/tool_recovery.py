@@ -118,19 +118,13 @@ def _value_fingerprint(value: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _redacted_input(value: Any) -> Any:
-    """Apply the shared diagnostic redaction policy before hashing tool inputs."""
-
-    return redact(value)
-
-
 def _input_fingerprint(value: Any) -> str:
-    """Return a deterministic redacted fingerprint for tool input."""
+    """Return a deterministic diagnostic fingerprint without retaining secret values."""
 
     try:
-        canonical = json.dumps(_redacted_input(value), sort_keys=True, separators=(",", ":"), default=str)
+        canonical = json.dumps(redact(value), sort_keys=True, separators=(",", ":"), default=str)
     except (TypeError, ValueError):
-        canonical = str(_redacted_input(value))
+        canonical = str(redact(value))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -237,9 +231,16 @@ def is_correctable_tool_failure(tool_name: str, tool_input: Any, output: str) ->
 
 
 def format_tool_repair_error(tool_name: str, output: str) -> str:
-    """Return concise, actionable tool failures without exposing raw validator diagnostics to the agent."""
+    """Return concise, actionable tool failures for the task executor."""
 
     normalized = str(output or "").lower()
+    if tool_name == "record_finding_validation":
+        return (
+            "FINDING_VALIDATION_REPAIR: The validation submission was rejected. Use fresh evidence that "
+            "reproduces every immutable candidate assertion; do not substitute a different observation for the "
+            "required evidence. Controller validation error: "
+            + _bounded_text(output, 900)
+        )
     if tool_name == "shell" and "service target is outside the assigned task boundary" in normalized:
         return (
             "The controller rejected the command before execution because its target is outside the assigned task "
@@ -452,16 +453,16 @@ class ToolOutcomeJournal:
         recovery_role: str = "normal",
     ) -> ToolOutcome:
         self._sequence += 1
-        redacted_input = _redacted_input(tool_input)
+        internal_input = tool_input
         if tool_name in {"create_tasks", "record_task_acceptance"}:
             try:
-                input_summary = json.dumps(redacted_input, ensure_ascii=False, sort_keys=True)
+                input_summary = json.dumps(internal_input, ensure_ascii=False, sort_keys=True)
             except (TypeError, ValueError):
-                input_summary = str(redacted_input)
+                input_summary = str(internal_input)
         else:
-            input_summary = str(redacted_input)
+            input_summary = str(internal_input)
         artifact_refs = _artifact_references(output, raw_output)
-        execution_receipts = _execution_receipts(tool_name, redacted_input, output)
+        execution_receipts = _execution_receipts(tool_name, internal_input, output)
         outcome = ToolOutcome(
             sequence=self._sequence,
             tool_use_id=_bounded_text(tool_use_id, 100),
@@ -471,13 +472,13 @@ class ToolOutcomeJournal:
             input_summary=_bounded_text(input_summary, 6000 if tool_name == "create_tasks" else 500),
             output_summary=_bounded_text(output),
             recovery_role=recovery_role,
-            input_fingerprint=_value_fingerprint(redacted_input),
+            input_fingerprint=_value_fingerprint(internal_input),
             output_fingerprint=_value_fingerprint(output),
             raw_output_summary=_bounded_text(raw_output if raw_output is not None else output),
             artifact_refs=artifact_refs,
             structured_input=(
-                redacted_input
-                if isinstance(redacted_input, dict)
+                internal_input
+                if isinstance(internal_input, dict)
                 else None
             ),
             execution_receipts=execution_receipts,
@@ -653,6 +654,8 @@ class TaskFailureRecoveryHook(HookProvider):
         self.quarantined_executables = quarantined_executables if quarantined_executables is not None else set()
         self.efficiency_callback = efficiency_callback
         self._correction_attempts = 0
+        self._session_correction_attempts: dict[tuple[str, str], int] = {}
+        self._active_correction_key: tuple[str, str] | None = None
         self._policy_violations = 0
         self._recovery_roles: Dict[str, str] = {}
         self._artifact_retry_used = False
@@ -732,11 +735,25 @@ class TaskFailureRecoveryHook(HookProvider):
             return
         if self._is_correction(tool_name, tool_input):
             correction_limit = 1 if self.failure_category == "task_scope_violation" else self.max_corrections
-            if self._correction_attempts >= correction_limit:
+            correction_key = (
+                self._correction_key(tool_name, tool_input)
+                if tool_name == "record_finding_validation"
+                else None
+            )
+            correction_attempts = (
+                self._session_correction_attempts.get(correction_key, 0)
+                if correction_key is not None
+                else self._correction_attempts
+            )
+            if correction_attempts >= correction_limit:
                 self.exhausted = True
                 self._block(event, tool_id, "The configured correction allowance has been exhausted.")
                 return
-            self._correction_attempts += 1
+            correction_attempts += 1
+            if correction_key is not None:
+                self._session_correction_attempts[correction_key] = correction_attempts
+            self._correction_attempts = correction_attempts
+            self._active_correction_key = correction_key
             self._recovery_roles[tool_id] = "correction"
             if self.efficiency_callback is not None:
                 self.efficiency_callback("tool_correction")
@@ -781,6 +798,24 @@ class TaskFailureRecoveryHook(HookProvider):
         if not self.failed_executable:
             return bool(executable and executable not in _DIAGNOSTIC_EXECUTABLES)
         return executable == self.failed_executable
+
+    @staticmethod
+    def _correction_key(tool_name: str, tool_input: Any) -> tuple[str, str]:
+        """Return a session-stable correction class without retaining sensitive payload values."""
+
+        if tool_name != "record_finding_validation" or not isinstance(tool_input, dict):
+            return tool_name, _input_fingerprint(tool_input)
+        return (
+            tool_name,
+            json.dumps(
+                {
+                    "outcome": str(tool_input.get("outcome") or ""),
+                    "evidence_strategy": str(tool_input.get("evidence_strategy") or "direct"),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
 
     @staticmethod
     def _is_read_only(tool_name: str) -> bool:
@@ -848,6 +883,9 @@ class TaskFailureRecoveryHook(HookProvider):
                 self.unresolved = False
                 self.exhausted = False
                 self._policy_violations = 0
+                if self._active_correction_key is not None:
+                    self._session_correction_attempts.pop(self._active_correction_key, None)
+                self._active_correction_key = None
                 if tool_name == "store_finding":
                     self.finding_submission_repair_active = False
                     self._finding_repair_requires_artifact_read = False
@@ -863,6 +901,8 @@ class TaskFailureRecoveryHook(HookProvider):
         if role in {"diagnostic", "read_only"} and success and tool_name == "read_artifact":
             self._finding_repair_artifact_read_complete = True
         if role == "alternative" and success:
+            if self.failed_tool_name == "record_finding_validation":
+                return
             self.unresolved = False
             self.exhausted = False
             return

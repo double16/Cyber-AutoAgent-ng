@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import atexit
+import copy
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from modules.config.system.logger import (
     initialize_logger_factory,
     unsafe_diagnostic_logging_enabled,
 )
+from modules.utils.redaction import redact, redact_text
 
 
 def clean_operation_memory(operation_id: str, target_values: Optional[List[str]] = None):
@@ -368,7 +370,7 @@ class TeeOutput:
                     # Write all complete lines
                     for line in lines[:-1]:
                         # Don't strip leading spaces - preserve formatting
-                        self.log.write(line + "\n")
+                        self.log.write(redact_text(line) + "\n")
                     # Keep the incomplete line in buffer
                     self.line_buffer = lines[-1]
                     self.log.flush()
@@ -393,7 +395,7 @@ class TeeOutput:
             try:
                 # Flush any remaining buffered content
                 if self.line_buffer:
-                    self.log.write(self.line_buffer)
+                    self.log.write(redact_text(self.line_buffer))
                     self.line_buffer = ""
                     self.log.flush()
                 self.log.close()
@@ -442,7 +444,19 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
     initialize_logger_factory(log_file=log_file, verbose=verbose)
 
     # Traditional logger setup for structured logging
-    formatter = logging.Formatter(
+    class RedactingFormatter(logging.Formatter):
+        """Render log records without secret values while preserving diagnostic context."""
+
+        def format(self, record: logging.LogRecord) -> str:
+            safe_record = copy.copy(record)
+            if isinstance(safe_record.args, tuple):
+                safe_record.args = tuple(redact(value) for value in safe_record.args)
+            elif safe_record.args:
+                safe_record.args = redact(safe_record.args)
+            safe_record.msg = redact(safe_record.msg)
+            return redact_text(super().format(safe_record))
+
+    formatter = RedactingFormatter(
         fmt="%(asctime)s - [%(name)s] - %(levelname)s - [%(threadName)s] - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )

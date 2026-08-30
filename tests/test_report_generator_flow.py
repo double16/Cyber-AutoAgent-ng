@@ -2466,8 +2466,11 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
                     "title": "Stored XSS",
                     "category": "finding",
                     "severity": "HIGH",
-                    "content": "Verified script execution.",
-                    "metadata": {"artifacts": ["artifact:artifacts/proof.txt"]},
+                    "content": "Verified script execution. Authorization: Bearer report-secret",
+                    "metadata": {
+                        "api_key": "report-json-secret",
+                        "artifacts": ["artifact:artifacts/proof.txt"],
+                    },
                 },
                 {
                     "id": "candidate-1",
@@ -2511,6 +2514,8 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
     payload = json.loads((tmp_path / "security_assessment_report.json").read_text())
     assert result["status"] == "fallback"
     assert "Deterministic fallback report" in markdown
+    assert "report-secret" not in markdown
+    assert "[REDACTED]" in markdown
     assert "Stored XSS" in markdown
     assert "Possible SQL injection" in markdown
     assert "Server banner" in markdown
@@ -2526,8 +2531,30 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
     assert "AI-Generated Content Disclaimer" not in markdown
     assert "report agent unavailable" in markdown
     assert payload["report_status"] == "fallback"
+    assert "report-json-secret" not in json.dumps(payload)
     assert payload["narrative"] == {}
     assert payload["canonical"]["verified_findings_total"] == 1
+
+
+def test_report_artifact_writers_redact_text_and_secret_bearing_json_fields(tmp_path):
+    markdown_path = tmp_path / "report.md"
+    json_path = tmp_path / "report.json"
+
+    report_generator_module._write_redacted_report_text(
+        str(markdown_path),
+        "Authorization: Bearer report-markdown-secret",
+    )
+    report_generator_module._write_redacted_report_json(
+        str(json_path),
+        {"api_key": "report-json-secret", "message": "Authorization: Bearer report-message-secret"},
+    )
+
+    markdown = markdown_path.read_text()
+    payload = json.loads(json_path.read_text())
+    assert "report-markdown-secret" not in markdown
+    assert "[REDACTED]" in markdown
+    assert payload["api_key"] == "[REDACTED]"
+    assert "report-message-secret" not in payload["message"]
 
 
 def test_fallback_report_uses_controller_snapshot_when_store_sections_fail(tmp_path, monkeypatch):

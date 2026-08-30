@@ -266,6 +266,8 @@ def test_setup_logging_redirects_streams_and_registers_cleanup(monkeypatch, tmp_
             for handler in logger.handlers
             if isinstance(handler, logging.FileHandler)
         )
+        logger.info("Structured diagnostic: %s", {"api_key": "structured-log-secret"})
+        logger.info("Mapping diagnostic: %(api_key)s", {"api_key": "mapping-log-secret"})
     finally:
         registered[0]()
         logger.handlers.clear()
@@ -273,8 +275,27 @@ def test_setup_logging_redirects_streams_and_registers_cleanup(monkeypatch, tmp_
     assert sys.stdout is sys.__stdout__
     assert sys.stderr is sys.__stderr__
     assert "CYBER-AUTOAGENT SESSION STARTED" in log_file.read_text()
+    assert "structured-log-secret" not in log_file.read_text()
+    assert "mapping-log-secret" not in log_file.read_text()
+    assert "[REDACTED]" in log_file.read_text()
     sys.stdout = original_stdout
     sys.stderr = original_stderr
+
+
+def test_tee_output_redacts_secret_values_from_log_file(tmp_path):
+    terminal = io.StringIO()
+    log_file = tmp_path / "cyber.log"
+    output = mod.TeeOutput(terminal, str(log_file))
+
+    output.write('Authorization: Bearer log-secret; {"api_key": "json-log-secret"}\n')
+    output.write("token=trailing-log-secret")
+    output.close()
+
+    logged = log_file.read_text()
+    assert "log-secret" not in logged
+    assert "json-log-secret" not in logged
+    assert "trailing-log-secret" not in logged
+    assert "[REDACTED]" in logged
 
 
 def test_provider_payload_logging_requires_explicit_unsafe_flag(monkeypatch):

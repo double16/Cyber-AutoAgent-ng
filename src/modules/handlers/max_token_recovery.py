@@ -8,7 +8,6 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
-from modules.utils.redaction import bounded_redacted_text
 from modules.utils.text_reducer import collapse_first_repeated_sequence
 
 _WORD_RE = re.compile(r"\w+")
@@ -17,6 +16,13 @@ MIN_LOOP_WORDS = 256
 MIN_LOOP_UNITS = 6
 MIN_REPEATED_UNITS = 3
 LOOP_REPETITION_THRESHOLD = 0.40
+
+
+def _bounded_text(value: Any, limit: int = 4_000) -> str:
+    """Return an internal diagnostic excerpt with a deterministic upper bound."""
+
+    text = str(value or "")
+    return text if len(text) <= limit else f"{text[:limit]}…[truncated]"
 
 
 @dataclass(frozen=True)
@@ -32,7 +38,7 @@ class MaxTokenClassification:
 
 @dataclass(frozen=True)
 class MaxTokenFailureSnapshot:
-    """Redacted excerpts and controller-safe counters for one interrupted generation."""
+    """Bounded internal excerpts and controller-safe counters for one interrupted generation."""
 
     recorded_reasoning: str
     partial_output: str
@@ -161,7 +167,7 @@ def classify_and_discard_max_token_output(
 def capture_and_discard_max_token_output(
     agent: Any, active_reasoning_level: str | None = None
 ) -> tuple[MaxTokenClassification, bool, MaxTokenFailureSnapshot]:
-    """Capture bounded redacted diagnostics before removing an incomplete assistant tail."""
+    """Capture bounded internal diagnostics before removing an incomplete assistant tail."""
 
     messages = getattr(agent, "messages", None)
     message = messages[-1] if isinstance(messages, list) and messages else None
@@ -177,8 +183,8 @@ def capture_and_discard_max_token_output(
     }
     classification, removed = classify_and_discard_max_token_output(agent, active_reasoning_level)
     return classification, removed, MaxTokenFailureSnapshot(
-        recorded_reasoning=bounded_redacted_text(reasoning),
-        partial_output=bounded_redacted_text(output),
+        recorded_reasoning=_bounded_text(reasoning),
+        partial_output=_bounded_text(output),
         usage=counters,
     )
 

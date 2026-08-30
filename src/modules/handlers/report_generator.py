@@ -57,6 +57,7 @@ from modules.tools.memory import (
 )
 from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.utils.json_repair import parse_json_response
+from modules.utils.redaction import redact, redact_text
 
 logger = get_logger("Handlers.ReportGenerator")
 
@@ -150,6 +151,21 @@ _EXCERPT_PROOF_MARKERS = (
     "<script",
     "warning",
 )
+
+
+def _write_redacted_report_text(path: str, content: Any) -> None:
+    """Write a report artifact after removing credential-shaped text."""
+
+    with open(path, "w", encoding="utf-8") as report_file:
+        report_file.write(redact_text(content))
+
+
+def _write_redacted_report_json(path: str, payload: Any) -> None:
+    """Write a report JSON artifact after recursively redacting secret-bearing fields."""
+
+    with open(path, "w", encoding="utf-8") as report_file:
+        json.dump(redact(payload), report_file, indent=2, sort_keys=True)
+        report_file.write("\n")
 
 
 def _normalize_completion_status(value: Any) -> Dict[str, Any]:
@@ -3082,8 +3098,7 @@ Narrative context:
         + _format_parameter_adjustments_section()
     )
     methodology_file = os.path.join(output_path, "report_methodology.md")
-    with open(methodology_file, "w") as f:
-        f.write(appendix_content)
+    _write_redacted_report_text(methodology_file, appendix_content)
     report_parts_files.append(methodology_file)
     return report_step_index
 
@@ -3212,8 +3227,7 @@ Canonical operation data:
     next_steps_content = _format_next_steps_appendix(next_steps_data)
     next_steps_content = _append_inline_review_feedback(next_steps_content, next_steps_critique)
     next_steps_file = os.path.join(output_path, "report_recommended_next_steps.md")
-    with open(next_steps_file, "w") as f:
-        f.write(next_steps_content)
+    _write_redacted_report_text(next_steps_file, next_steps_content)
     report_parts_files.append(next_steps_file)
 
     return report_step_index
@@ -3282,42 +3296,45 @@ def _assemble_security_assessment_report(
 ) -> str:
     """Combine report parts and append deterministic operation metadata."""
     report_filename = filename or os.path.join(output_path, "security_assessment_report.md")
-    with open(report_filename, "w") as final_f:
-        final_f.write("# SECURITY ASSESSMENT REPORT\n\n")
-        final_f.write(_AI_CONTENT_DISCLAIMER + "\n\n")
-        final_f.write("## TABLE OF CONTENTS\n")
-        final_f.write("- [Executive Summary](#executive-summary)\n")
-        final_f.write("- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n")
-        final_f.write("- [Findings Requiring Validation](#findings-requiring-validation)\n")
-        if has_observations:
-            final_f.write("- [Observations and Discoveries](#observations-and-discoveries)\n")
-        final_f.write("- [Target Coverage](#target-coverage)\n")
-        final_f.write("- [Execution History](#execution-history)\n")
-        final_f.write("- [Appendix A: Assessment Methodology](#appendix-a-assessment-methodology)\n")
-        final_f.write("- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n\n")
-        final_f.write(completion_notice)
+    parts = [
+        "# SECURITY ASSESSMENT REPORT\n\n",
+        _AI_CONTENT_DISCLAIMER + "\n\n",
+        "## TABLE OF CONTENTS\n",
+        "- [Executive Summary](#executive-summary)\n",
+        "- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n",
+        "- [Findings Requiring Validation](#findings-requiring-validation)\n",
+    ]
+    if has_observations:
+        parts.append("- [Observations and Discoveries](#observations-and-discoveries)\n")
+    parts.extend(
+        [
+            "- [Target Coverage](#target-coverage)\n",
+            "- [Execution History](#execution-history)\n",
+            "- [Appendix A: Assessment Methodology](#appendix-a-assessment-methodology)\n",
+            "- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n\n",
+            completion_notice,
+        ]
+    )
+    for part_file in report_parts_files:
+        with open(part_file, "r", encoding="utf-8") as part_file_handle:
+            parts.extend([part_file_handle.read(), "\n\n"])
 
-        for part_file in report_parts_files:
-            with open(part_file, "r") as part_f:
-                final_f.write(part_f.read())
-                final_f.write("\n\n")
-
-        provenance_lines = []
-        software = _software_provenance()
-        repository = _git_provenance()
-        if software is not None:
-            provenance_lines.append(f"- Software: {software['name']} v{software['version']}")
-        if repository is not None:
-            provenance_lines.append(f"- Repository: {repository['repository_url']} @ {repository['commit_hash']}")
-        provenance = "\n".join(provenance_lines)
-        if provenance:
-            provenance = f"{provenance}\n"
-        footer = f"""
+    provenance_lines = []
+    software = _software_provenance()
+    repository = _git_provenance()
+    if software is not None:
+        provenance_lines.append(f"- Software: {software['name']} v{software['version']}")
+    if repository is not None:
+        provenance_lines.append(f"- Repository: {repository['repository_url']} @ {repository['commit_hash']}")
+    provenance = "\n".join(provenance_lines)
+    if provenance:
+        provenance = f"{provenance}\n"
+    footer = f"""
 - Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 {provenance}- Operation ID: {operation_id}
 """
-        final_f.write(footer)
-        final_f.write("\n" + _AI_CONTENT_DISCLAIMER + "\n")
+    parts.extend([footer, "\n", _AI_CONTENT_DISCLAIMER, "\n"])
+    _write_redacted_report_text(report_filename, "".join(parts))
     return report_filename
 
 
@@ -3529,13 +3546,10 @@ def generate_deterministic_fallback_report(
         ]
     )
     markdown = "".join(parts)
-    with open(report_filename, "w", encoding="utf-8") as report_file:
-        report_file.write(markdown)
+    _write_redacted_report_text(report_filename, markdown)
     payload = _canonical_report_json(sections, {}, report_consistency_errors)
     payload.update({"report_status": "fallback", "report_generation_error": error_text})
-    with open(json_filename, "w", encoding="utf-8") as json_file:
-        json.dump(payload, json_file, indent=2, sort_keys=True)
-        json_file.write("\n")
+    _write_redacted_report_json(json_filename, payload)
     return {
         "report_path": report_filename,
         "report_json_path": json_filename,
@@ -3707,8 +3721,10 @@ def generate_security_report(
         narrative_warnings: List[str] = []
         # Persist the contract before model calls so interrupted reports still expose
         # authoritative facts and an explicit empty narrative envelope.
-        with open(os.path.join(output_path, "security_assessment_report.json"), "w") as f:
-            f.write(json.dumps(_canonical_report_json(sections, narratives, narrative_warnings), indent=2, sort_keys=True))
+        _write_redacted_report_json(
+            os.path.join(output_path, "security_assessment_report.json"),
+            _canonical_report_json(sections, narratives, narrative_warnings),
+        )
 
         module_str = module or "web"
         module_guidance = (
@@ -3846,22 +3862,21 @@ Narrative context:
             # Add anchor for Table of Contents
             exec_content = "<a name=\"executive-summary\"></a>\n" + exec_content
             exec_summary_file = os.path.join(output_path, "report_executive_summary.md")
-            with open(exec_summary_file, "w") as f:
-                f.write(exec_content)
+            _write_redacted_report_text(exec_summary_file, exec_content)
             report_parts_files.append(exec_summary_file)
         else:
             # A failed narrative call must not remove the factual executive section.
             exec_summary_file = os.path.join(output_path, "report_executive_summary.md")
-            with open(exec_summary_file, "w") as f:
-                f.write(
-                    '<a name="executive-summary"></a>\n'
-                    "## EXECUTIVE SUMMARY\n\n"
-                    + _format_executive_narrative_fallback(sections)
-                    + "\n"
-                    + _format_executive_deterministic_sections(sections)
-                    + "\n"
-                    + taxonomy_coverage
-                )
+            _write_redacted_report_text(
+                exec_summary_file,
+                '<a name="executive-summary"></a>\n'
+                "## EXECUTIVE SUMMARY\n\n"
+                + _format_executive_narrative_fallback(sections)
+                + "\n"
+                + _format_executive_deterministic_sections(sections)
+                + "\n"
+                + taxonomy_coverage,
+            )
             report_parts_files.append(exec_summary_file)
 
         # Part 2: Detailed Findings
@@ -3873,8 +3888,7 @@ Narrative context:
             findings_header += "\n### Findings Summary\n\n" + sections.get("summary_table") + "\n\n"
 
         findings_header_file = os.path.join(output_path, "report_findings_header.md")
-        with open(findings_header_file, "w") as f:
-            f.write(findings_header)
+        _write_redacted_report_text(findings_header_file, findings_header)
         report_parts_files.append(findings_header_file)
 
         finding_system_prompt = (
@@ -3956,27 +3970,28 @@ Finding narrative context:
                 finding_text = _append_inline_review_feedback(finding_text, final_critique)
                 finding_filename = f"finding_{i+1}_{sanitize_target_name(finding.get('title', 'finding')[:50])}.md"
                 finding_path = os.path.join(output_path, finding_filename)
-                with open(finding_path, "w") as f:
-                    f.write(_PAGE_BREAK + finding_text + "\n\n")
+                _write_redacted_report_text(finding_path, _PAGE_BREAK + finding_text + "\n\n")
                 report_parts_files.append(finding_path)
 
         # Persist enrichment results with the canonical report inputs for later audit or re-rendering.
         sections["next_steps"] = {}
-        with open(os.path.join(output_path, "security_assessment_report.json"), "w") as f:
-            f.write(json.dumps(_canonical_report_json(sections, narratives, narrative_warnings), indent=2, sort_keys=True))
+        _write_redacted_report_json(
+            os.path.join(output_path, "security_assessment_report.json"),
+            _canonical_report_json(sections, narratives, narrative_warnings),
+        )
 
         # Part 3: Findings Requiring Validation. This section is deterministic so an
         # unverified claim cannot gain invented evidence during report generation.
         if report_validation_failures:
             validation_header_file = os.path.join(output_path, "report_validation_failures_header.md")
-            with open(validation_header_file, "w") as f:
-                f.write(
-                    _PAGE_BREAK
-                    + '<a name="findings-requiring-validation"></a>\n'
-                    + "## FINDINGS REQUIRING VALIDATION\n\n"
-                    + "These claims were not verified by the evidence contract. They remain investigation items, "
-                    + "not confirmed vulnerabilities.\n\n"
-                )
+            _write_redacted_report_text(
+                validation_header_file,
+                _PAGE_BREAK
+                + '<a name="findings-requiring-validation"></a>\n'
+                + "## FINDINGS REQUIRING VALIDATION\n\n"
+                + "These claims were not verified by the evidence contract. They remain investigation items, "
+                + "not confirmed vulnerabilities.\n\n",
+            )
             report_parts_files.append(validation_header_file)
             for i, item in report_validation_failures:
                 report_step_index += 1
@@ -4007,8 +4022,7 @@ Finding narrative context:
                     output_path,
                     f"validation_failure_{i + 1}_{sanitize_target_name(title[:50])}.md",
                 )
-                with open(path, "w") as f:
-                    f.write(_PAGE_BREAK + text + "\n")
+                _write_redacted_report_text(path, _PAGE_BREAK + text + "\n")
                 report_parts_files.append(path)
                 _emit_report_progress(
                     callback_handler,
@@ -4052,8 +4066,7 @@ Finding narrative context:
                         "",
                     ]
                 )
-            with open(objective_path, "w") as report_file:
-                report_file.write("\n".join(lines).rstrip() + "\n")
+            _write_redacted_report_text(objective_path, "\n".join(lines).rstrip() + "\n")
             report_parts_files.append(objective_path)
 
         # Part 4: Observations and Discoveries
@@ -4069,44 +4082,41 @@ Finding narrative context:
             observation_text = _format_observation(finding, i)
             obs_filename = f"observation_{i+1}_{sanitize_target_name(finding.get('title', 'observation')[:50])}.md"
             obs_path = os.path.join(output_path, obs_filename)
-            with open(obs_path, "w") as f:
-                f.write(_PAGE_BREAK + observation_text + "\n\n")
+            _write_redacted_report_text(obs_path, _PAGE_BREAK + observation_text + "\n\n")
             observation_parts_files.append(obs_path)
 
         if has_observations:
             observations_header_file = os.path.join(output_path, "report_observations_header.md")
-            with open(observations_header_file, "w") as f:
-                f.write(observations_header)
+            _write_redacted_report_text(observations_header_file, observations_header)
             report_parts_files.append(observations_header_file)
             report_parts_files.extend(observation_parts_files)
 
         target_coverage_file = os.path.join(output_path, "report_target_coverage.md")
-        with open(target_coverage_file, "w") as f:
-            f.write(
-                _PAGE_BREAK
-                + "<a name=\"target-coverage\"></a>\n"
-                + "## Target Coverage\n\n"
-                + str(sections.get("target_coverage") or "No target coverage data was recorded.")
-                + "\n\n"
-            )
+        _write_redacted_report_text(
+            target_coverage_file,
+            _PAGE_BREAK
+            + "<a name=\"target-coverage\"></a>\n"
+            + "## Target Coverage\n\n"
+            + str(sections.get("target_coverage") or "No target coverage data was recorded.")
+            + "\n\n",
+        )
         report_parts_files.append(target_coverage_file)
 
         report_consistency_errors.extend(narrative_warnings)
         sections["report_consistency_errors"] = report_consistency_errors
         if report_consistency_errors:
             consistency_file = os.path.join(output_path, "report_consistency_warnings.md")
-            with open(consistency_file, "w") as report_file:
-                report_file.write(_format_report_consistency_warnings(report_consistency_errors))
+            _write_redacted_report_text(consistency_file, _format_report_consistency_warnings(report_consistency_errors))
             report_parts_files.append(consistency_file)
 
         execution_history_file = os.path.join(output_path, "report_execution_history.md")
-        with open(execution_history_file, "w") as f:
-            f.write(
-                _PAGE_BREAK
-                + '<a name="execution-history"></a>\n'
-                + str(sections.get("execution_history") or "No task history was recorded.")
-                + "\n\n"
-            )
+        _write_redacted_report_text(
+            execution_history_file,
+            _PAGE_BREAK
+            + '<a name="execution-history"></a>\n'
+            + str(sections.get("execution_history") or "No task history was recorded.")
+            + "\n\n",
+        )
         report_parts_files.append(execution_history_file)
 
         report_step_index = _generate_methodology_appendix(
@@ -4156,8 +4166,10 @@ Finding narrative context:
 
         # Re-write the JSON envelope after every narrative and deterministic section
         # has been assembled.  Canonical values remain a separate, authoritative tree.
-        with open(os.path.join(output_path, "security_assessment_report.json"), "w") as f:
-            f.write(json.dumps(_canonical_report_json(sections, narratives, report_consistency_errors), indent=2, sort_keys=True))
+        _write_redacted_report_json(
+            os.path.join(output_path, "security_assessment_report.json"),
+            _canonical_report_json(sections, narratives, report_consistency_errors),
+        )
 
         filename = _assemble_security_assessment_report(
             filename=filename,

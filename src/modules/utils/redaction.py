@@ -15,6 +15,10 @@ TEXT_REDACTION_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+"),
     re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+=*"),
     re.compile(r"(?i)\b((?:api[_-]?key|secret|password|token|access[_-]?key)\s*[:=]\s*)[^\s,;]+"),
+    re.compile(
+        r'(?i)(["\']?(?:authorization|api[_-]?key|secret|password|token|access[_-]?key)["\']?\s*[:=]\s*'
+        r'["\']?(?:bearer\s+)?)[^\s,;"\'}]+'
+    ),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@"),
 )
