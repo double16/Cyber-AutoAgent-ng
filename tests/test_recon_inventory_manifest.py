@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from modules.handlers.utils import get_tool_spec
-from modules.operation_plugins.web.tools import recon_inventory_manifest as manifest_tool
+from modules.tools import recon_inventory_manifest as manifest_tool
 from modules.prompts.factory import ModulePromptLoader
 from modules.tools import artifact
 from modules.tools import memory
@@ -593,10 +593,10 @@ def test_converter_resolves_relative_gobuster_paths_against_registered_target(tm
 
 
 @pytest.mark.parametrize("module_name", ["web", "web_recon"])
-def test_web_modules_do_not_register_the_globally_available_inventory_converter(module_name):
+def test_web_modules_do_not_expose_plugin_local_tools(module_name):
     tools, missing = ModulePromptLoader().discover_module_tools(module_name)
 
-    assert not any(path.endswith("/recon_inventory_manifest.py") for path in tools)
+    assert tools == []
     assert missing is not None
 
 

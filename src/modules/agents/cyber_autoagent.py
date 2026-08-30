@@ -82,9 +82,13 @@ from modules.handlers.utils import (
     tool_rename,
 )
 from modules.tools import python_repl
+from modules.tools.advanced_payload_coordinator import advanced_payload_coordinator
+from modules.tools.auth_chain_analyzer import auth_chain_analyzer
 from modules.tools.artifact import create_artifact_reader, resolve_tool_result_max_chars
 from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
+from modules.tools.client_bundle_inventory import client_bundle_inventory
 from modules.tools.editor import create_absolute_path_editor
+from modules.tools.idor_specialist import idor_specialist
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.browser import (
     browser_evaluate_js,
@@ -130,6 +134,7 @@ from modules.tools.oast import (
     oast_register_http_response,
 )
 from modules.tools.shell import shell
+from modules.tools.specialized_recon_orchestrator import specialized_recon_orchestrator
 from modules.tools.swarm import swarm
 from modules.tools.tool_catalog import (
     get_shell_command_alternatives,
@@ -564,6 +569,11 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         oast_poll,
         oast_register_http_response,
         oast_clear_http_responses,
+        specialized_recon_orchestrator,
+        advanced_payload_coordinator,
+        auth_chain_analyzer,
+        idor_specialist,
+        client_bundle_inventory,
     ]
 
     web_search_instructions = """

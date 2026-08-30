@@ -12,7 +12,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 from strands import tool
 
-from modules.operation_plugins.web.tools.recon_inventory_manifest import (
+from modules.tools.recon_inventory_manifest import (
     _canonical_url,
     records_to_inventory_manifest,
     resolve_inventory_target,

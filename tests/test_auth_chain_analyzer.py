@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-import modules.operation_plugins.web.tools.auth_chain_analyzer as aca
+import modules.tools.auth_chain_analyzer as aca
 import modules.tools.recon_inventory_manifest as manifest_tool
 
 

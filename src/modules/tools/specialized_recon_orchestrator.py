@@ -16,7 +16,7 @@ import urllib3
 
 from strands import tool
 
-from modules.operation_plugins.web.tools.result_cache import (
+from modules.tools.result_cache import (
     build_result_cache_key,
     cache_result,
     get_cached_result,

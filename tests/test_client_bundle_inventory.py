@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from modules.handlers.utils import get_tool_spec
-from modules.operation_plugins.web.tools import client_bundle_inventory as bundle_tool
+from modules.tools import client_bundle_inventory as bundle_tool
 
 
 def _operation_root(monkeypatch, tmp_path: Path) -> None:

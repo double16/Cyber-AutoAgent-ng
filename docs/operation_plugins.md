@@ -133,14 +133,14 @@ mechanism directly.
 
 ## Bundled modules
 
-| Module | Domain | Custom tools |
-|---|---|---:|
-| `web` | Web application and network security | 4 |
-| `web_recon` | Web reconnaissance, extending `web` | 0 |
-| `ctf` | CTF challenge solving, extending `web` | 1 |
-| `threat_emulation` | Threat emulation and ATT&CK-oriented workflows | 0 |
-| `context_navigator` | Post-access environment discovery | 0 |
-| `code_security` | Static code security analysis | 0 |
+| Module              | Domain                                         |
+|---------------------|------------------------------------------------|
+| `web`               | Web application and network security           |
+| `web_recon`         | Web reconnaissance, extending `web`            |
+| `ctf`               | CTF challenge solving, extending `web`         |
+| `threat_emulation`  | Threat emulation and ATT&CK-oriented workflows | 
+| `context_navigator` | Post-access environment discovery              |
+| `code_security`     | Static code security analysis                  |
 
 Only the three modules listed in the task-planning documentation currently opt into declarative fan-out contracts.
 `code_security`, `context_navigator`, and `threat_emulation` continue to use generic task planning.

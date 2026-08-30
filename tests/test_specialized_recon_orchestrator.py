@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-import modules.operation_plugins.web.tools.specialized_recon_orchestrator as sro
+import modules.tools.specialized_recon_orchestrator as sro
 import modules.tools.recon_inventory_manifest as manifest_tool
 
 

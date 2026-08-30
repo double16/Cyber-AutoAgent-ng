@@ -2,7 +2,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-import modules.operation_plugins.web.tools.idor_specialist as ids
+import modules.tools.idor_specialist as ids
 
 
 # -------------------------
@@ -243,7 +243,7 @@ def test_idor_specialist_comprehensive_flow(monkeypatch):
     assert "findings" in result
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_perform_login_basic(mock_request):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -260,7 +260,7 @@ def test_perform_login_basic(mock_request):
     assert "user" in mock_request.call_args.kwargs["data"]
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_perform_login_jwt(mock_request):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
@@ -277,7 +277,7 @@ def test_perform_login_jwt(mock_request):
     assert mock_request.call_args.kwargs["json"] == {"user": "admin"}
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_json_mode(mock_request):
     # Mock baseline
     baseline_resp = MagicMock()
@@ -307,7 +307,7 @@ def test_idor_specialist_json_mode(mock_request):
     assert json_calls[0].kwargs["json"] == {"id": "1"}
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_evaluate_authz_replay_inversion(mock_request):
     auth_resp = MagicMock()
     auth_resp.status_code = 403
@@ -325,8 +325,8 @@ def test_evaluate_authz_replay_inversion(mock_request):
     assert finding["vulnerable"] is False
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery")
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.advanced_parameter_discovery")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_multi_creds_full(mock_request, mock_discovery):
     mock_discovery.return_value = ["id"]
 
@@ -360,7 +360,7 @@ def test_idor_specialist_multi_creds_full(mock_request, mock_discovery):
     assert "2" in sessions
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_graphql_mode(mock_request):
     # Mock baseline
     baseline_resp = MagicMock()
@@ -385,7 +385,7 @@ def test_idor_specialist_graphql_mode(mock_request):
     assert any(f["finding_type"] == "idor_likely" for f in result["findings"])
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_path_id_replay(mock_request, monkeypatch):
     # Mock baseline
     b = MagicMock()
@@ -416,7 +416,7 @@ def test_idor_specialist_path_id_replay(mock_request, monkeypatch):
     assert any(f["finding_type"] == "authz_replay_match" for f in result["findings"])
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.idor_specialist")
+@patch("modules.tools.idor_specialist.idor_specialist")
 def test_main_cli(mock_tool, monkeypatch):
     mock_tool.return_value = "{}"
     monkeypatch.setattr("sys.argv", [
@@ -449,7 +449,7 @@ def test_perform_login_error_handling(monkeypatch):
     assert headers is None
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_send_request_exception(mock_request):
     mock_request.side_effect = Exception("error")
 
@@ -458,7 +458,7 @@ def test_send_request_exception(mock_request):
     assert resp is None
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_baseline_failed(mock_request, monkeypatch):
     mock_request.return_value = None
     monkeypatch.setattr(ids, "advanced_parameter_discovery", lambda *args, **kwargs: [])
@@ -481,7 +481,7 @@ def test_idor_specialist_malformed_json_inputs(monkeypatch):
     assert "findings" in json.loads(res2)
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.idor_specialist")
+@patch("modules.tools.idor_specialist.idor_specialist")
 def test_main_cli_malformed_inputs(mock_tool, monkeypatch):
     mock_tool.return_value = "{}"
     monkeypatch.setattr("sys.argv", [
@@ -502,7 +502,7 @@ def test_idor_parameter_discovery_comprehensive():
     rc = ids.RequestConfig(target_url="http://example.com/api/data?id=123")
 
     # In comprehensive mode, it should run advanced discovery
-    with patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
+    with patch("modules.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
         mock_adv.return_value = ["adv_param"]
         params = ids._idor_parameter_discovery(rc, None, test_type="comprehensive")
 
@@ -514,7 +514,7 @@ def test_idor_parameter_discovery_idor_with_url_params():
     # In idor mode (not comprehensive/param_discovery), it should only return URL params if present
     rc = ids.RequestConfig(target_url="http://example.com/api/data?id=123&user=abc")
 
-    with patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
+    with patch("modules.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
         params = ids._idor_parameter_discovery(rc, None, test_type="idor")
 
         assert "id" in params
@@ -526,7 +526,7 @@ def test_idor_parameter_discovery_idor_no_url_params():
     # In idor mode, if no URL params, it should fall back to advanced discovery
     rc = ids.RequestConfig(target_url="http://example.com/api/data")
 
-    with patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
+    with patch("modules.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
         mock_adv.return_value = ["adv_param"]
         params = ids._idor_parameter_discovery(rc, None, test_type="idor")
 
@@ -538,7 +538,7 @@ def test_idor_parameter_discovery_path_id():
     # Path IDs should be considered URL params
     rc = ids.RequestConfig(target_url="http://example.com/api/user/123")
 
-    with patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
+    with patch("modules.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
         params = ids._idor_parameter_discovery(rc, None, test_type="idor")
 
         assert "(path_id_at_3)" in params

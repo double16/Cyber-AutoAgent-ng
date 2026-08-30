@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import parse_qs, urlparse
 
-import modules.operation_plugins.web.tools.advanced_payload_coordinator as apc
+import modules.tools.advanced_payload_coordinator as apc
 
 
 # -------------------------

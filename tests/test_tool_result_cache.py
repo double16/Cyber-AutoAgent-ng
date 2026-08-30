@@ -2,7 +2,7 @@
 
 import json
 
-from modules.operation_plugins.web.tools import result_cache
+from modules.tools import result_cache
 
 
 def test_cache_round_trip_and_expiry(monkeypatch, tmp_path):

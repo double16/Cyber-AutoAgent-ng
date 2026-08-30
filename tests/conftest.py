@@ -15,7 +15,7 @@ from modules.config.models.capabilities import (
     get_model_output_limit,
     get_model_pricing,
 )
-from modules.operation_plugins.web.tools import result_cache
+from modules.tools import result_cache
 
 # Disable dotenv loading in tests
 os.environ["PYTHON_DOTENV_DISABLED"] = "true"
