@@ -85,6 +85,8 @@ Use the SQLite database for structured workflow state when it is available. This
 missing `sqlite3` executable, missing database, corrupted database, or failed query must not fail the forensic
 request. Report the database as unavailable and continue with the operation log and Langfuse playbooks.
 
+The database is always at `outputs/cyber_autoagent.db`.
+
 **Step 1: Check that the optional database tooling and file are available**
 
 Run from the repository root:

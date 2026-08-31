@@ -3908,10 +3908,10 @@ def store_finding(
     """Submit one finding candidate and create its dedicated verification task.
 
     This tool never creates a verified finding directly. Each candidate must include typed positive-evidence assertions
-    satisfied by its cited artifacts; a separate same-phase task must independently reproduce every assertion before the
-    finding can affect confirmed risk totals. Taxonomy classification is performed by a separate, read-only workflow
-    agent after this candidate is persisted. The candidate location is bound to its assigned service, network, or
-    filesystem target before persistence.
+    satisfied by its cited artifacts; a separate controller-owned task must independently reproduce every assertion
+    before the finding can affect confirmed risk totals. Taxonomy classification is performed by a separate, read-only
+    workflow agent after this candidate is persisted. The candidate location is bound to its assigned service, network,
+    or filesystem target before persistence.
     """
 
     candidate = {
@@ -4009,6 +4009,7 @@ def store_finding(
     _store_memory_entry(content, "finding_candidate", candidate)
 
     current_phase = _get_plan_current_phase()
+    verification_phase = _finding_validation_task_phase(active_plan, current_phase)
     target_ids = bound_target_ids or _target_ids_for_literal(candidate["target"])
     target_scope: TargetScope = "subset" if target_ids else "all"
     candidate["verification_packet"] = {
@@ -4058,7 +4059,7 @@ def store_finding(
             ],
         ),
         evidence=candidate["artifacts"],
-        phase=current_phase,
+        phase=verification_phase,
         status="pending",
         kind="finding_validation",
         reference_id=finding_uid,
@@ -5640,6 +5641,47 @@ def _get_active_plan() -> OperationPlan:
 
 def _get_plan_current_phase() -> int:
     return int(_get_active_plan().current_phase)
+
+
+def _finding_validation_task_phase(plan: Optional[OperationPlan], current_phase: int) -> int:
+    """Choose the planned owner for a controller-created finding-validation task."""
+
+    if plan is None:
+        return current_phase
+    ordered_phases = sorted(plan.phases, key=lambda phase: phase.id)
+    current_index = next(
+        (index for index, phase in enumerate(ordered_phases) if phase.id == current_phase),
+        None,
+    )
+    if current_index is None:
+        return current_phase
+    validation_indices = [
+        index
+        for index, phase in enumerate(ordered_phases)
+        if phase.task_creation_mode == "finding_validation"
+    ]
+    if current_index in validation_indices or any(index < current_index for index in validation_indices):
+        return current_phase
+
+    next_finding_dependent_index = next(
+        (
+            index
+            for index, phase in enumerate(ordered_phases[current_index + 1 :], start=current_index + 1)
+            if phase.task_creation_mode == "finding_dependent"
+            or (phase.task_creation_mode == "standard" and phase.requires_finding_candidates)
+        ),
+        None,
+    )
+    future_validation_index = next(
+        (
+            index
+            for index, phase in enumerate(ordered_phases[current_index + 1 :], start=current_index + 1)
+            if phase.task_creation_mode == "finding_validation"
+            and (next_finding_dependent_index is None or index < next_finding_dependent_index)
+        ),
+        None,
+    )
+    return ordered_phases[future_validation_index].id if future_validation_index is not None else current_phase
 
 
 def _target_ids_for_literal(target_value: str) -> List[str]:

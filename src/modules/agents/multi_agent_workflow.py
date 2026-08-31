@@ -1746,14 +1746,14 @@ class MultiAgentWorkflowController:
                     self._activate_task(pending_task)
                     continue
 
-            if _phase_semantically_requires_finding_candidates(phase) and before_count == 0:
-                candidate_records = self.state.list_finding_records()
-                eligible_candidates = [
-                    record for record in candidate_records if not str(record.get("resolution") or "").strip()
-                ]
+            finding_dependent = phase.task_creation_mode == "finding_dependent" or (
+                phase.task_creation_mode == "standard" and phase.requires_finding_candidates
+            )
+            if finding_dependent and before_count == 0:
+                eligible_candidates = self._eligible_finding_records(phase)
                 if not eligible_candidates:
                     self._log_workflow(
-                        "closing candidate-dependent phase=%s not_applicable reason=no_persisted_finding_candidates",
+                        "closing finding-dependent phase=%s not_applicable reason=no_verified_finding_candidates",
                         self._phase_label(phase),
                     )
                     previous_signature = self._plan_signature(plan)
@@ -1763,7 +1763,7 @@ class MultiAgentWorkflowController:
                         "type": "phase_dependency_gate",
                         "phase": phase.id,
                         "decision": "not_applicable",
-                        "reason": "no_persisted_finding_candidates",
+                        "reason": "no_verified_finding_candidates",
                         "semantic_dependency": True,
                     })
                     if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
@@ -1826,29 +1826,28 @@ class MultiAgentWorkflowController:
         return decision is not None and decision[0] in {"done", "not_applicable"}
 
     @staticmethod
-    def _is_finding_validation_phase(plan: OperationPlan, phase: PlanPhase) -> bool:
-        """Return whether the final phase owns finding validation and proof work."""
+    def _is_finding_validation_phase(_plan: OperationPlan, phase: PlanPhase) -> bool:
+        """Return whether structured phase metadata assigns finding-validation ownership."""
 
-        if phase.id != max(item.id for item in plan.phases):
-            return False
-        phase_text = f"{phase.title} {phase.criteria}".lower()
-        if not any(token in phase_text for token in ("finding", "impact", "proof")):
-            return False
-        if "validat" not in phase_text and "proof" not in phase_text:
-            return False
-        return True
+        return phase.task_creation_mode == "finding_validation"
 
     def _claim_finding_validation_tasks(self, phase: PlanPhase) -> None:
         """Move actionable verification tasks into the active validation phase."""
 
         plan = self.state.get_plan()
-        if plan is None or not (
-            _phase_semantically_requires_finding_candidates(phase)
-            or self._is_finding_validation_phase(plan, phase)
-        ):
+        if plan is None or not self._is_finding_validation_phase(plan, phase):
+            return
+        phase_positions = {item.id: index for index, item in enumerate(sorted(plan.phases, key=lambda item: item.id))}
+        active_position = phase_positions.get(phase.id)
+        if active_position is None:
             return
         for task in self.state.list_tasks(status=["active", "pending"]):
-            if task.kind != "finding_validation" or task.phase == phase.id:
+            task_position = phase_positions.get(task.phase)
+            if (
+                task.kind != "finding_validation"
+                or task_position is None
+                or task_position >= active_position
+            ):
                 continue
             original_phase = task.phase
             reassigned = self.state.reassign_task_phase(task, phase.id)
@@ -1873,10 +1872,7 @@ class MultiAgentWorkflowController:
         """Rebuild a persisted candidate's validation task without invoking a task-creator model."""
 
         plan = self.state.get_plan()
-        if plan is None or not (
-            _phase_semantically_requires_finding_candidates(phase)
-            or self._is_finding_validation_phase(plan, phase)
-        ):
+        if plan is None or not self._is_finding_validation_phase(plan, phase):
             return
         tasks_by_uid = {task.task_uid: task for task in self.state.list_tasks()}
         for record in self.state.list_finding_records():
@@ -9226,8 +9222,7 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
                 or record.get("id")
                 or ""
             ).strip()
-            for record in self.state.list_finding_records()
-            if not str(record.get("resolution") or "").strip()
+            for record in self._eligible_finding_records(phase)
         ]
         candidate_context = ""
         if _phase_semantically_requires_finding_candidates(phase):
@@ -11093,6 +11088,8 @@ metadata; do not infer it from a phase number or title.
 Set `task_creation_mode` explicitly: standard for ordinary work, snapshot_dependent for frozen-inventory work,
 finding_dependent for work that creates tasks from persisted candidates, and finding_validation when Python owns the
 candidate verification tasks. A finding_validation phase must not use generic task creation.
+Every finding-dependent phase must follow a finding_validation phase that can verify its candidate inputs. Do not place
+exploit-chain, correlation, impact-composition, or other finding-dependent work before its required validation phase.
 
 Use bounded criteria. Replace absolute claims such as "all publicly reachable services" with the discovery sources or
 inventory being assessed, the durable evidence expected, and how unassessed gaps will be documented.
@@ -11158,6 +11155,7 @@ Approve only when the draft:
   states how the finite inventory is produced and frozen;
 - follows the required plan schema; and
 - assigns each phase a task_creation_mode consistent with its structured dependencies and controller ownership; and
+- places a finding_validation phase before every finding-dependent phase that consumes verified findings; and
 - excludes specific tools and every report, executive-summary, findings-consolidation, evidence-consolidation, or
   equivalent post-processing phase, regardless of its title;
 - rejects coverage-closure, evidence-reconciliation, or proof-pack-finalization phases when they merely summarize

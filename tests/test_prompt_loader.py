@@ -513,6 +513,19 @@ def test_web_phase_contract_uses_distinct_industry_aligned_capabilities():
     assert "without destructive action" in policy
 
 
+@pytest.mark.parametrize("module", ["web", "code_security"])
+def test_finding_validation_precedes_finding_dependent_phase_contracts(module):
+    root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"
+    policy = (root / module / "termination_policy.md").read_text()
+    dependent_phase = (
+        "**Exploit Chain Analysis**"
+        if module == "web"
+        else "**Data-Flow and Exploit-Path Analysis**"
+    )
+
+    assert policy.index("**Finding Validation**") < policy.index(dependent_phase)
+
+
 @pytest.mark.parametrize("module", ["web", "ctf", "code_security"])
 def test_chain_phase_contracts_are_analytical_and_conditionally_applicable(module):
     root = Path(__file__).parent.parent / "src" / "modules" / "operation_plugins"

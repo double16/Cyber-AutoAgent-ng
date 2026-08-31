@@ -43,6 +43,48 @@ def test_plan_phase_rejects_unknown_task_creation_mode():
         mod.PlanPhase(id=1, title="Invalid", status="pending", task_creation_mode="invented")
 
 
+@pytest.mark.parametrize(
+    ("current_phase", "phase_modes", "expected_phase"),
+    [
+        (1, ["standard", "finding_validation", "finding_dependent"], 2),
+        (1, ["standard", "finding_dependent", "finding_validation"], 1),
+        (2, ["standard", "finding_validation", "finding_dependent"], 2),
+        (3, ["standard", "finding_validation", "finding_dependent"], 3),
+        (2, ["standard", "finding_validation", "standard", "finding_dependent"], 2),
+        (2, ["finding_validation", "standard", "finding_validation"], 2),
+        (1, ["standard", "finding_dependent"], 1),
+    ],
+)
+def test_finding_validation_task_phase_uses_planned_validation_owner(
+    current_phase, phase_modes, expected_phase
+):
+    phases = [
+        mod.PlanPhase(id=index, title=f"Phase {index}", status="pending", task_creation_mode=mode)
+        for index, mode in enumerate(phase_modes, start=1)
+    ]
+    plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=current_phase,
+        total_phases=len(phases),
+        phases=phases,
+    )
+
+    assert mod._finding_validation_task_phase(plan, current_phase) == expected_phase
+
+
+def test_finding_validation_task_phase_keeps_current_phase_without_matching_plan_context():
+    assert mod._finding_validation_task_phase(None, 3) == 3
+
+    plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Finding validation", status="active")],
+    )
+
+    assert mod._finding_validation_task_phase(plan, 99) == 99
+
+
 def test_task_proposal_repair_guard_restores_individually_valid_proposals():
     guard = TaskProposalRepairGuard()
     guard.capture([
@@ -327,7 +369,7 @@ def test_store_observation_reports_current_root_for_outside_artifact(memory_clie
     memory_client.store_memory.assert_not_called()
 
 
-def test_store_finding_creates_one_linked_same_phase_task(memory_client, operation_ids, tmp_path: Path):
+def test_store_finding_routes_task_to_future_validation_phase(memory_client, operation_ids, tmp_path: Path):
     artifact = tmp_path / "admin-response.txt"
     artifact.write_text("HTTP 200 admin data", encoding="utf-8")
     plan_store = MagicMock()
@@ -341,8 +383,26 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
         status="active",
     )
     plan_store.get_tasks.return_value = [source_task]
+    plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=3,
+        total_phases=4,
+        phases=[
+            mod.PlanPhase(id=1, title="Discovery", status="done"),
+            mod.PlanPhase(id=2, title="Testing", status="done"),
+            mod.PlanPhase(id=3, title="Candidate discovery", status="active"),
+            mod.PlanPhase(
+                id=4,
+                title="Finding validation",
+                status="pending",
+                task_creation_mode="finding_validation",
+            ),
+        ],
+        targets=[mod.OperationTarget(target_id="target-1", value="https://target", type="network")],
+    )
     with (
         patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_active_plan", return_value=plan),
         patch("src.modules.tools.memory._get_plan_current_phase", return_value=3),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
@@ -365,13 +425,14 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     assert result["status"] == "pending_validation"
     store_entry.assert_called_once()
     task = memory_client.store_task.call_args.kwargs["task"]
-    assert task.phase == 3
+    assert task.phase == 4
     assert task.kind == "finding_validation"
     assert task.reference_id == result["finding_uid"]
     assert result["finding_ref"] == f"finding:{result['finding_uid']}"
     assert result["verification_task_ref"] == f"task:{result['verification_task_uid']}"
     assert task.status == "pending"
-    assert task.target_scope == "all"
+    assert task.target_scope == "subset"
+    assert task.target_ids == ["target-1"]
     candidate = plan_store.store_finding_candidate.call_args.args[3]
     assert "admin data" not in task.objective
     assert candidate["verification_packet"]["observed_result"] == "Admin data was returned"
@@ -396,8 +457,8 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
             "objective": "Assess admin authorization",
         },
         "target": "https://target/admin",
-        "target_scope": "all",
-        "target_ids": [],
+        "target_scope": "subset",
+        "target_ids": ["target-1"],
         "claim": "An unauthenticated user can access admin data",
         "technique": "auth_bypass",
         "expected_result": "Unauthenticated request is denied",

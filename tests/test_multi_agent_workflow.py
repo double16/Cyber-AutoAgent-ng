@@ -755,7 +755,8 @@ def test_destination_snapshot_failure_marks_task_partial_without_agent_repair(mo
     )
 
 
-def test_candidate_dependent_phase_closes_without_speculative_task_creation(monkeypatch):
+@pytest.mark.parametrize("finding_records", [[], [{"finding_uid": "pending", "resolution": ""}]])
+def test_finding_dependent_phase_closes_without_verified_candidates(monkeypatch, finding_records):
     plan = OperationPlan(
         objective="assess",
         current_phase=1,
@@ -769,7 +770,7 @@ def test_candidate_dependent_phase_closes_without_speculative_task_creation(monk
             ),
         ],
     )
-    state = FakeState(plan, finding_records=[])
+    state = FakeState(plan, finding_records=finding_records)
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -800,7 +801,7 @@ def test_candidate_dependent_phase_closes_without_speculative_task_creation(monk
 
     assert transitions == [(1, "not_applicable")]
     assert any(
-        event["type"] == "phase_dependency_gate" and event["reason"] == "no_persisted_finding_candidates"
+        event["type"] == "phase_dependency_gate" and event["reason"] == "no_verified_finding_candidates"
         for event in controller.runtime.callback_handler.events
     )
 
@@ -9230,6 +9231,7 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert "Merge adjacent recommendations only" in prompt
     assert "Omit a recommendation only when it is" in prompt
     assert "demonstrably inapplicable" in prompt
+    assert "must follow a finding_validation phase" in prompt
 
 
 def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
@@ -9259,6 +9261,7 @@ def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
     assert "mandatory" in prompt
     assert "merged criteria preserve every included capability" in prompt
     assert "operational coverage phase is valid" in prompt
+    assert "places a finding_validation phase before every finding-dependent phase" in prompt
 
 
 def test_plan_critic_calibrates_semantic_equivalence_and_task_boundaries():
@@ -9916,6 +9919,7 @@ def test_controller_completes_empty_final_validation_phase_without_task_creator(
             title="Impact Validation and Proof Generation",
             status="active",
             criteria="Validate findings with proof",
+            task_creation_mode="finding_validation",
         )],
     )
     state = FakeState(plan, finding_records=[{"resolution": "verified"}])
@@ -9947,6 +9951,7 @@ def test_empty_final_validation_phase_with_unresolved_finding_requires_tasks():
             title="Impact Validation and Proof Generation",
             status="active",
             criteria="Validate findings with proof",
+            task_creation_mode="finding_validation",
         )],
     )
     controller = MultiAgentWorkflowController(
@@ -9971,6 +9976,7 @@ def test_empty_final_validation_phase_does_not_hide_incomplete_predecessor_work(
                 title="Impact Validation and Proof Generation",
                 status="active",
                 criteria="Validate findings with proof",
+                task_creation_mode="finding_validation",
             ),
         ],
     )
@@ -9999,6 +10005,7 @@ def test_validation_phase_claims_existing_pending_verification_task_without_task
                 title="Impact Validation and Proof Generation",
                 status="active",
                 criteria="Validate findings with proof",
+                task_creation_mode="finding_validation",
             ),
         ],
     )
@@ -10044,6 +10051,59 @@ def test_validation_phase_claims_existing_pending_verification_task_without_task
     assert reassigned["phase"] == 2
 
 
+def test_intervening_finding_dependent_phase_does_not_claim_future_validation_task():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Discovery", status="done"),
+            PlanPhase(
+                id=2,
+                title="Finding correlation",
+                status="active",
+                task_creation_mode="finding_dependent",
+            ),
+            PlanPhase(
+                id=3,
+                title="Finding validation",
+                status="pending",
+                task_creation_mode="finding_validation",
+            ),
+        ],
+    )
+    validation = Task(
+        task_uid="verify-1",
+        title="Verify finding: SQL injection",
+        objective="Verify finding",
+        phase=3,
+        status="pending",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    state = FakeState(plan, tasks=[validation])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    controller._claim_finding_validation_tasks(plan.phases[1])
+
+    assert state.list_tasks()[0].phase == 3
+
+
+def test_finding_validation_phase_requires_explicit_task_creation_mode():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Finding Validation", status="active")],
+    )
+
+    assert MultiAgentWorkflowController._is_finding_validation_phase(plan, plan.phases[0]) is False
+
+
 def test_validation_phase_marks_missing_verification_task_partial_without_task_creator():
     plan = OperationPlan(
         objective="assess",
@@ -10054,6 +10114,7 @@ def test_validation_phase_marks_missing_verification_task_partial_without_task_c
             title="Impact Validation and Proof Generation",
             status="active",
             criteria="Validate findings with proof",
+            task_creation_mode="finding_validation",
         )],
     )
     state = FakeState(plan, finding_records=[{
@@ -10089,6 +10150,7 @@ def test_validation_phase_recreates_missing_verification_task_from_persisted_pac
             title="Impact Validation and Proof Generation",
             status="active",
             criteria="Validate findings with proof",
+            task_creation_mode="finding_validation",
         )],
     )
     state = FakeState(plan, finding_records=[{
@@ -10124,6 +10186,7 @@ def test_validation_phase_does_not_recover_contaminated_finding_packet():
             title="Impact Validation and Proof Generation",
             status="active",
             criteria="Validate findings with proof",
+            task_creation_mode="finding_validation",
         )],
     )
     state = FakeState(plan, finding_records=[{
@@ -10159,6 +10222,7 @@ def test_validation_phase_with_terminal_history_marks_missing_verification_task_
             title="Impact Validation and Proof Generation",
             status="active",
             criteria="Validate findings with proof",
+            task_creation_mode="finding_validation",
         )],
     )
     terminal_history = Task(
@@ -10637,6 +10701,10 @@ def test_finding_dependent_task_creator_allows_only_verified_canonical_finding_r
     assert "verified-id" in context
     assert "pending-id" not in context
     assert "rejected-id" not in context
+    contract = controller._task_creator_contract(plan, phase)
+    assert "finding:verified-id" in contract
+    assert "pending-id" not in contract
+    assert "rejected-id" not in contract
 
 
 def test_task_creator_requires_retained_session_factory():

@@ -13,12 +13,12 @@ inapplicable and document the reason.
    security patterns, data flows, and business logic without treating tool matches as findings.
 3. **Vulnerability Analysis** — Apply applicable static, dependency, secret, data-flow, and business-logic analysis;
    preserve unverified theoretical risks as observations.
-4. **Data-Flow and Exploit-Path Analysis** — Determine whether multiple weaknesses or code paths combine into a material
+4. **Finding Validation** — Validate candidates in surrounding code and deployment context with exact locations and
+reproducible evidence. This phase must complete before any phase that consumes verified findings.
+5. **Data-Flow and Exploit-Path Analysis** — Determine whether multiple verified weaknesses or code paths combine into a material
    security consequence, recording prerequisites and evidence for each link. Mark this phase `not_applicable` when no
-   evidenced candidates or code paths can compose. Analyze existing candidates and data flows rather than repeating
+   verified candidates or code paths can compose. Analyze existing candidates and data flows rather than repeating
    vulnerability discovery; create follow-on analysis only for a concrete unresolved path link.
-5. **Finding Validation** — Validate candidates in surrounding code and deployment context with exact locations and
-   reproducible evidence.
 6. **Impact Assessment** — Establish security impact and provide practical remediation for each verified vulnerability.
 
 Classify the phase against its own criteria and the following operation-level outcomes:

@@ -307,7 +307,9 @@ exact boundary and never receives fuzzy authorization.
 
 Every `store_finding` call requires at least one durable artifact reference and returns canonical `finding_ref` and
 `verification_task_ref` values. Python links the finding to the currently active source task and creates one narrow,
-same-phase `finding_validation` task. The linked task must call
+controller-owned `finding_validation` task. Before the first planned finding-validation phase, the task is assigned to
+that future phase; during or after a finding-validation phase, it remains in the current phase. The linked task must
+call
 `record_finding_validation`; only an evaluator-approved confirmation is promoted to a verified finding. Failed or
 unfinished validations remain visible in the final report under **Findings Requiring Validation**. Evaluators and
 report agents can inspect operation artifacts with the read-only `read_artifact` tool. Report and other read-only
