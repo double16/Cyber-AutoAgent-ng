@@ -82,6 +82,23 @@ def test_react_hooks_can_disable_tool_lifecycle_when_callback_handler_owns_it():
     assert "tool_end" not in event_types
 
 
+def test_react_hooks_normalizes_empty_failure_for_model_and_lifecycle_event():
+    emitter = RecordingEmitter()
+    hooks = ReactHooks(emitter=emitter, operation_id="OP")
+    after = SimpleNamespace(
+        tool_use={"name": "record_task_acceptance", "toolUseId": "acceptance-1"},
+        result={"status": "error", "content": []},
+        exception=RuntimeError("missing execution evidence"),
+    )
+
+    hooks._on_after_tool(after)
+
+    assert after.result["content"] == [{"text": "missing execution evidence"}]
+    tool_end = next(event for event in emitter.events if event["type"] == "tool_end")
+    assert tool_end["success"] is False
+    assert tool_end["error_summary"] == "missing execution evidence"
+
+
 def test_react_hooks_swarm_rewrite():
     hooks = ReactHooks(emitter=RecordingEmitter())
     event = SimpleNamespace(

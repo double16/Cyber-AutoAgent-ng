@@ -4,6 +4,7 @@ export interface CyberEventStreamParserState {
   inToolExecution: boolean;
   toolOutputBuffer: string;
   sawBackendToolOutput: boolean;
+  lastToolHadBackendOutput?: boolean;
   currentToolName?: string;
 }
 
@@ -109,6 +110,7 @@ function updateToolExecutionState(
     state.inToolExecution = true;
     state.toolOutputBuffer = '';
     state.sawBackendToolOutput = false;
+    state.lastToolHadBackendOutput = false;
     state.currentToolName = eventData.tool_name || eventData.toolName || eventData.tool || undefined;
 
     if (eventData.type === 'tool_start') {
@@ -128,8 +130,12 @@ function updateToolExecutionState(
     eventData.type === 'progress_update' ||
     eventData.type === 'tool_end'
   ) {
+    const hadBackendToolOutput = state.sawBackendToolOutput || state.lastToolHadBackendOutput === true;
     if (!state.sawBackendToolOutput) {
       flushToolOutputChunks(state, emitEvent, true);
+    }
+    if (eventData.type === 'tool_invocation_end') {
+      state.lastToolHadBackendOutput = hadBackendToolOutput;
     }
     state.toolOutputBuffer = '';
     state.inToolExecution = false;
@@ -142,11 +148,15 @@ function updateToolExecutionState(
         : eventData.executed === false
           ? `🚫 ${eventData.tool_name} (${eventData.outcome === 'blocked' ? 'blocked' : 'input validation failed'})`
           : `❌ ${eventData.tool_name} (failed)`;
+      const errorSummary = typeof eventData.error_summary === 'string' ? eventData.error_summary.trim() : '';
       emitEvent({
         type: 'output',
-        content: completion,
+        content: !eventData.success && !hadBackendToolOutput && errorSummary
+          ? `${completion}\n${errorSummary}`
+          : completion,
         timestamp: Date.now(),
       });
+      state.lastToolHadBackendOutput = false;
     }
     return;
   }

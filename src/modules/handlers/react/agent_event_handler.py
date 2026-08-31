@@ -23,11 +23,12 @@ from opentelemetry import trace as otel_trace
 from strands.handlers import PrintingCallbackHandler
 
 from modules.config.system.logger import get_logger
-from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.handlers.utils import (
+    format_duration,
     get_output_path,
-    sanitize_target_name, format_duration,
+    sanitize_target_name,
 )
+from modules.tools.semantic_enum import normalize_semantic_enum
 
 from ...config import get_config_manager, get_report_refinement_cycles
 from ...config.models import get_models_client
@@ -44,6 +45,7 @@ from ..output_interceptor import (
     get_buffered_output,
     set_tool_execution_state,
 )
+from ..tool_failure_summary import failure_summary, tool_result_text
 from ..tool_recovery import ToolOutcomeJournal
 from .tool_emitters import ToolEventEmitter
 
@@ -2208,14 +2210,13 @@ class AgentEventHandler(PrintingCallbackHandler):
             "tool_id": tool_use_id,
             **completion_metadata,
         }
+        if status == "error":
+            _deferred_tool_end["error_summary"] = failure_summary(tool_result_dict)
         if duration is not None:
             _deferred_tool_end["duration"] = f"{duration:.2f}s"
         # Handle errors with tool-specific processing
         if status == "error":
-            error_text = ""
-            for item in content_items:
-                if isinstance(item, dict) and "text" in item:
-                    error_text += item["text"] + "\n"
+            error_text = tool_result_text(tool_result_dict)
 
             if error_text.strip():
                 # Combine buffered output with error text for single emission
@@ -2319,6 +2320,29 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
 
                 # Mark that we've emitted output for this tool invocation
+                if tool_use_id:
+                    self.tool_use_output_emitted[tool_use_id] = True
+            else:
+                combined_output = "\n".join(
+                    part
+                    for part in (str(buffered_output or "").strip(), _deferred_tool_end["error_summary"])
+                    if part
+                )
+                self.emit_ui_event(
+                    {
+                        "type": "output",
+                        "content": combined_output,
+                        "metadata": {"fromToolBuffer": True, "tool": tool_name},
+                    }
+                )
+                self.emit_ui_event(
+                    {
+                        "type": "tool_invocation_end",
+                        "tool_name": tool_name,
+                        **completion_metadata,
+                    }
+                )
+                self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
                 if tool_use_id:
                     self.tool_use_output_emitted[tool_use_id] = True
             return

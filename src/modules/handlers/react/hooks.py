@@ -17,9 +17,11 @@ from strands.hooks import (
     HookRegistry,
 )
 
-from ..events import EventEmitter, get_emitter
 from modules.config.system.logger import get_logger
+
 from ...config import AgentConfig
+from ..events import EventEmitter, get_emitter
+from ..tool_failure_summary import normalize_failed_tool_result
 
 logger = get_logger("Handlers.ReactHooks")
 
@@ -201,7 +203,13 @@ class ReactHooks(HookProvider):
             duration = self._calculate_duration(tool_id)
 
             # Extract and process result
-            result = event.result
+            result, error_summary = normalize_failed_tool_result(
+                event.result,
+                getattr(event, "exception", None),
+                str(tool_id or ""),
+            )
+            if result is not event.result:
+                event.result = result
             outcome, executed = classify_tool_outcome(result, getattr(event, "cancel_message", None))
             if isinstance(result, dict):
                 result[_TOOL_OUTCOME_KEY] = outcome
@@ -228,17 +236,18 @@ class ReactHooks(HookProvider):
                         "executed": executed,
                     }
                 )
-                self.emitter.emit(
-                    {
-                        "type": "tool_end",
-                        "tool_name": tool_name,
-                        "tool_id": tool_id,
-                        "success": success,
-                        "duration": f"{duration:.2f}s",
-                        "outcome": outcome,
-                        "executed": executed,
-                    }
-                )
+                tool_end_event = {
+                    "type": "tool_end",
+                    "tool_name": tool_name,
+                    "tool_id": tool_id,
+                    "success": success,
+                    "duration": f"{duration:.2f}s",
+                    "outcome": outcome,
+                    "executed": executed,
+                }
+                if not success and error_summary:
+                    tool_end_event["error_summary"] = error_summary
+                self.emitter.emit(tool_end_event)
 
             # AgentEventHandler handles tool_end emission with full context when
             # lifecycle emission is disabled.

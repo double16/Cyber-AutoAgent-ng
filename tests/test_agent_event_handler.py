@@ -437,6 +437,23 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert handler.coordinator.report_findings == 0
 
 
+def test_empty_tool_error_emits_failure_reason_instead_of_success_completion(monkeypatch):
+    handler = make_handler()
+    handler.tool_name_buffer["acceptance-error"] = "record_task_acceptance"
+    monkeypatch.setattr("modules.handlers.react.agent_event_handler.get_buffered_output", lambda: "")
+
+    handler._process_tool_result_from_message(
+        {"toolUseId": "acceptance-error", "status": "error", "content": []}
+    )
+
+    outputs = [event for event in handler._events if event["type"] == "output"]
+    tool_end = [event for event in handler._events if event["type"] == "tool_end"][-1]
+    assert outputs[-1]["content"] == "Tool failed without a diagnostic message."
+    assert tool_end["success"] is False
+    assert tool_end["error_summary"] == "Tool failed without a diagnostic message."
+    assert all(event["content"] != "Command completed" for event in outputs)
+
+
 def test_shell_help_text_with_timeout_option_is_not_reported_as_timeout():
     handler = make_handler()
     handler.tool_name_buffer["help"] = "shell"
