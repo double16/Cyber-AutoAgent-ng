@@ -403,6 +403,13 @@ Optional tools are selected as needed:
 - MCP tools
 - any other discovered non-core tools
 
+The controller may also make built-in optional tools available from persisted task-contract metadata. These
+controller-owned rules inspect only declared procedure output kinds and acceptance evidence requirements; they do not
+infer needs from task titles or objectives. For example, a task that produces or requires an `inventory_manifest`
+receives the converter plus the available direct producers `specialized_recon_orchestrator` and
+`auth_chain_analyzer`. This supplements, rather than replaces, the
+prompt-builder's optional-tool selection. Shell-command selection remains separate.
+
 Selection happens in two passes:
 
 1. Python narrows candidates based on objective, phase/task context, available tools, MCP metadata, and memories.

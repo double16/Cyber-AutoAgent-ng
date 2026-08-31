@@ -3914,6 +3914,64 @@ def test_role_tools_exclude_plan_task_mutation_and_gate_create_tasks():
     assert "mcp_scan" not in selected_names
 
 
+def test_controller_requires_available_metadata_selected_optional_tools():
+    runtime = _runtime()
+    runtime.optional_tools_list.extend(
+        [
+            _tool("recon_output_to_inventory_manifest"),
+            _tool("specialized_recon_orchestrator"),
+            _tool("auth_chain_analyzer"),
+        ]
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    inventory_task = Task(
+        task_uid="inventory",
+        title="Inventory",
+        objective="Produce an inventory manifest",
+        phase=1,
+        status="pending",
+    )
+    artifact_task = Task(
+        task_uid="artifact",
+        title="Artifact",
+        objective="Produce an artifact",
+        phase=1,
+        status="pending",
+        acceptance=_artifact_acceptance(),
+    )
+
+    assert controller._required_optional_tool_names(inventory_task) == [
+        "recon_output_to_inventory_manifest",
+        "specialized_recon_orchestrator",
+        "auth_chain_analyzer",
+    ]
+    assert controller._required_optional_tool_names(artifact_task) == []
+    selected_names = {
+        tool.__name__
+        for tool in build_role_tools(
+            runtime,
+            selected_optional_tool_names=[
+                *controller._required_optional_tool_names(inventory_task),
+                "module_probe",
+            ],
+        )
+    }
+    assert {
+        "recon_output_to_inventory_manifest",
+        "specialized_recon_orchestrator",
+        "auth_chain_analyzer",
+        "module_probe",
+    }.issubset(selected_names)
+
+    runtime.optional_tools_list = [_tool("module_probe"), _tool("auth_chain_analyzer")]
+    assert controller._required_optional_tool_names(inventory_task) == ["auth_chain_analyzer"]
+
+
 def test_controller_runs_existing_active_task_before_pending_task():
     calls = []
     runtime = _runtime()

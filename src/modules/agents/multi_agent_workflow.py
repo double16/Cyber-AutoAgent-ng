@@ -123,9 +123,8 @@ from modules.tools.memory import (
     task_service_scope_validation_details,
     task_service_scope_violations,
 )
-from modules.tools.recon_inventory_manifest import (
-    consolidate_recon_artifacts,
-)
+from modules.tools.optional_tool_selection import required_optional_tool_names
+from modules.tools.recon_inventory_manifest import consolidate_recon_artifacts
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.tools.shell import scoped_shell_command_validator
 from modules.tools.shell_provenance import ShellExecutionProvenance, shell_execution_provenance
@@ -3047,6 +3046,8 @@ class MultiAgentWorkflowController:
 
         selected_tools = prompt_spec.get("tools", [])
         selected_tools = list(selected_tools) if isinstance(selected_tools, list) else []
+        required_optional_tools = self._required_optional_tool_names(task)
+        selected_tools = list(dict.fromkeys([*required_optional_tools, *selected_tools]))
         tools = build_role_tools(
             self.runtime,
             selected_optional_tool_names=selected_tools,
@@ -7626,6 +7627,14 @@ Return JSON exactly: {{"prompt": string, "memory_indices": [integer], "memory_id
             "shell_commands": shell_commands,
         }
 
+    def _required_optional_tool_names(self, task: Task) -> List[str]:
+        """Return available built-in optional tools required by the frozen task contract."""
+
+        available_optional_tools = {get_tool_name(tool) for tool in self.runtime.optional_tools_list}
+        return [
+            name for name in required_optional_tool_names(task) if name in available_optional_tools
+        ]
+
     def _emit_task_memory_selection_filter(
         self,
         dropped_ids: List[str],
@@ -12083,10 +12092,12 @@ Do not return `continue` merely because work is incomplete when the task history
             return ""
         return (
             "\n\n## Inventory Manifest Evidence Contract (Controller-owned)\n"
-            "Prefer deterministic production: request `inventory_manifest` from specialized_recon_orchestrator or "
-            "auth_chain_analyzer when applicable, or convert an existing crawler, fuzzer, HTTP-probe, or URL-list "
-            "artifact with `recon_output_to_inventory_manifest`. Preserve the original tool output; the manifest "
-            "is an additional artifact and must cite each source artifact in its structured evidence references. "
+            "The controller supplied specialized_recon_orchestrator, auth_chain_analyzer, and "
+            "recon_output_to_inventory_manifest for this contract when available. Prefer direct deterministic "
+            "production from specialized_recon_orchestrator, or auth_chain_analyzer only when authentication-flow "
+            "analysis is relevant; otherwise convert an existing crawler, fuzzer, HTTP-probe, or URL-list artifact "
+            "with recon_output_to_inventory_manifest. Preserve the original tool output; the manifest is an "
+            "additional artifact and must cite each source artifact in its structured evidence references. "
             "Hand-author JSON only when no supported producer or converter applies.\n"
             + inventory_manifest_contract_text()
         )

@@ -610,14 +610,13 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         memory_retrieve,
         memory_list,
         create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
-        recon_output_to_inventory_manifest,
         create_tasks,
         sleep,
         python_repl,
         environment,  # environment is referenced by other strands tools
     ]
 
-    optional_tools_list = []
+    optional_tools_list = [recon_output_to_inventory_manifest]
 
     if "module_tool_allowlist" in locals() and module_tool_allowlist is not None:
         for builtin_tool in builtin_tools_list:
