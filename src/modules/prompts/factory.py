@@ -7,19 +7,20 @@ report generation prompts, and module-specific prompts.
 """
 
 import base64
+import contextlib
 import json
 import os
+import re
 import threading
 import time
-import re
-from functools import lru_cache
-
-import yaml
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib import parse as _urlparse
 from urllib import request as _urlreq
+
+import yaml
 
 from modules.config.system.logger import get_logger
 from modules.config.types import BudgetConfig
@@ -28,7 +29,7 @@ from modules.tools.memory import OperationPlan
 logger = get_logger("Prompts.Factory")
 
 # In-memory cache with TTL (defaults to 300s, min 60s)
-_LF_CACHE: Dict[str, Dict[str, Any]] = {}
+_LF_CACHE: dict[str, dict[str, Any]] = {}
 _LF_CACHE_TTL = max(60, int(os.getenv("LANGFUSE_PROMPT_CACHE_TTL", "300") or 300))
 _LF_CACHE_LOCK = threading.Lock()
 _LF_SEEDED = False
@@ -63,7 +64,7 @@ _NON_EXECUTOR_ROLES = frozenset(
 )
 
 
-def get_role_system_prompt(system_prompt: str, agent_type: Optional[str]) -> str:
+def get_role_system_prompt(system_prompt: str, agent_type: str | None) -> str:
     """Remove executor-only protocols for planning and prompt-construction roles."""
 
     if agent_type not in _NON_EXECUTOR_ROLES or "<role_boundary>" in system_prompt:
@@ -111,7 +112,7 @@ def _lf_ck(name: str, label: str) -> str:
     return f"{name}::{label}"
 
 
-def _lf_cache_get(name: str, label: str) -> Optional[Dict[str, Any]]:
+def _lf_cache_get(name: str, label: str) -> dict[str, Any] | None:
     key = _lf_ck(name, label)
     with _LF_CACHE_LOCK:
         item = _LF_CACHE.get(key)
@@ -122,13 +123,13 @@ def _lf_cache_get(name: str, label: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _lf_cache_set(name: str, label: str, value: Dict[str, Any]) -> None:
+def _lf_cache_set(name: str, label: str, value: dict[str, Any]) -> None:
     key = _lf_ck(name, label)
     with _LF_CACHE_LOCK:
         _LF_CACHE[key] = {"ts": time.time(), "value": value}
 
 
-def _lf_get_prompt(name: str, label: str) -> Optional[Dict[str, Any]]:
+def _lf_get_prompt(name: str, label: str) -> dict[str, Any] | None:
     if not _lf_enabled():
         return None
     cached = _lf_cache_get(name, label)
@@ -157,9 +158,9 @@ def _lf_create_prompt_version(
     name: str,
     prompt_text: str,
     label: str,
-    tags: Optional[List[str]] = None,
+    tags: list[str] | None = None,
     commit: str = "seed",
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     if not _lf_enabled():
         return None
     payload = {
@@ -260,8 +261,8 @@ def _lf_resolve_template_text(template_name: str) -> str:
 
 
 def _get_overlay_file(
-    output_config: Optional[Dict[str, Any]], operation_id: str
-) -> Optional[Path]:
+    output_config: dict[str, Any] | None, operation_id: str
+) -> Path | None:
     """Return path to the adaptive overlay file for an operation."""
 
     if not isinstance(output_config, dict):
@@ -276,7 +277,7 @@ def _get_overlay_file(
     return Path(base_dir) / target_name / operation_id / OVERLAY_FILENAME
 
 
-def _load_overlay_json(path: Path) -> Optional[Dict[str, Any]]:
+def _load_overlay_json(path: Path) -> dict[str, Any] | None:
     """Load overlay JSON if it exists."""
 
     if not path.exists():
@@ -285,10 +286,8 @@ def _load_overlay_json(path: Path) -> Optional[Dict[str, Any]]:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         logger.warning("Overlay file at %s is invalid JSON; removing", path)
-        try:
+        with contextlib.suppress(OSError):
             path.unlink()
-        except OSError:
-            pass
     except OSError as exc:
         logger.debug("Unable to read overlay file %s: %s", path, exc)
     return None
@@ -305,7 +304,7 @@ def _lf_module_prompt_name(module_name: str, kind: str) -> str:
     return f"cyber/module/{safe_module}/{kind}_prompt"
 
 
-def _lf_resolve_prompt_by_name(name: str, *, label: Optional[str] = None) -> str:
+def _lf_resolve_prompt_by_name(name: str, *, label: str | None = None) -> str:
     """Fetch a prompt by exact Langfuse name and flatten to text if needed."""
     if not _lf_enabled():
         return ""
@@ -328,12 +327,12 @@ def _lf_resolve_prompt_by_name(name: str, *, label: Optional[str] = None) -> str
     return ""
 
 
-def _read_module_yaml_for_tags(module_dir: Path) -> List[str]:
+def _read_module_yaml_for_tags(module_dir: Path) -> list[str]:
     """Parse module.yaml to derive tags for Langfuse prompt versions.
 
     Returns a conservative set of tags like ["module:<name>", "capability:<x>"]
     """
-    tags: List[str] = []
+    tags: list[str] = []
     try:
         for fname in ("module.yaml", "module.yml"):
             ypath = module_dir / fname
@@ -385,18 +384,18 @@ def load_prompt_template(template_name: str) -> str:
         if not template_path.exists():
             logger.warning("Prompt template not found: %s", template_path)
             return ""
-        with open(template_path, "r", encoding="utf-8") as f:
+        with open(template_path, encoding="utf-8") as f:
             return f.read()
     except Exception as e:
         logger.exception("Failed to load prompt template '%s': %s", template_name, e)
         return ""
 
 
-def _extract_domain_lens(module_prompt: str) -> Dict[str, str]:
+def _extract_domain_lens(module_prompt: str) -> dict[str, str]:
     """Extract domain-specific guidance from module prompt (best-effort)."""
     if not module_prompt:
         return {}
-    domain_lens: Dict[str, str] = {}
+    domain_lens: dict[str, str] = {}
     if "<domain_lens>" in module_prompt and "</domain_lens>" in module_prompt:
         start_tag = module_prompt.find("<domain_lens>") + len("<domain_lens>")
         end_tag = module_prompt.find("</domain_lens>")
@@ -425,8 +424,8 @@ def _extract_domain_lens(module_prompt: str) -> Dict[str, str]:
     return domain_lens
 
 
-def _format_overlay_directives(payload: Any) -> List[str]:
-    directives: List[str] = []
+def _format_overlay_directives(payload: Any) -> list[str]:
+    directives: list[str] = []
     if isinstance(payload, dict):
         raw_directives = payload.get("directives")
         if isinstance(raw_directives, list):
@@ -451,7 +450,7 @@ def _format_overlay_directives(payload: Any) -> List[str]:
 
 
 def _render_overlay_block(
-    output_config: Optional[Dict[str, Any]],
+    output_config: dict[str, Any] | None,
     operation_id: str,
     current_progress: int,
 ) -> str:
@@ -483,7 +482,7 @@ def _render_overlay_block(
     if note and not directives:
         directives.append(str(note))
 
-    header_meta: List[str] = []
+    header_meta: list[str] = []
     if overlay_data.get("origin"):
         header_meta.append(f"origin={overlay_data['origin']}")
     if overlay_data.get("reviewer"):
@@ -513,18 +512,18 @@ def get_system_prompt(
     target: str,
     objective: str,
     operation_id: str,
-    budget: Optional[BudgetConfig] = None,
+    budget: BudgetConfig | None = None,
     progress_percent: int = 0,
     has_existing_memories: bool = False,
-    memory_overview: Optional[Dict[str, Any]] = None,
+    memory_overview: dict[str, Any] | None = None,
     # Extended, centralized parameters
-    provider: Optional[str] = None,
+    provider: str | None = None,
     has_memory_path: bool = False,
-    tools_context: Optional[str] = None,
-    seclists_root: Optional[str] = None,
-    output_config: Optional[Dict[str, Any]] = None,
-    plan_snapshot: Optional[OperationPlan] = None,
-    plan_current_phase: Optional[int] = None,
+    tools_context: str | None = None,
+    seclists_root: str | None = None,
+    output_config: dict[str, Any] | None = None,
+    plan_snapshot: OperationPlan | None = None,
+    plan_current_phase: int | None = None,
 ) -> str:
     """Build the system prompt using the master template."""
 
@@ -599,7 +598,7 @@ def get_report_generation_prompt(
     target: str,
     objective: str,
     evidence_text: str = "",
-    tools_used: Optional[List[str]] = None,
+    tools_used: list[str] | None = None,
 ) -> str:
     """Build the report generation prompt used by the report agent or step."""
     template = load_prompt_template("report_generation_prompt.md")
@@ -672,14 +671,14 @@ def get_report_next_steps_system_prompt() -> str:
 class ModulePromptLoader:
     """Lightweight loader for module-specific prompts (execution/report)."""
 
-    def __init__(self, templates_dir: Optional[Path] = None):
+    def __init__(self, templates_dir: Path | None = None):
         self.templates_dir = templates_dir or (Path(__file__).parent / "templates")
         # Support multiple module roots via CYBER_PLUGIN_PATH (PATH-style, ':' separated).
         # Search order: CYBER_PLUGIN_PATH entries first, then built-in modules/operation_plugins last.
         default_plugins_dir = (Path(__file__).parent.parent / "operation_plugins").resolve()
 
         raw_paths = os.getenv("CYBER_PLUGIN_PATH", "")
-        plugin_dirs: List[Path] = []
+        plugin_dirs: list[Path] = []
 
         def _add_dir(p: Path) -> None:
             try:
@@ -703,13 +702,13 @@ class ModulePromptLoader:
 
         self.plugin_dirs = plugin_dirs
         # Track sources for observability
-        self.last_loaded_execution_prompt_source: Optional[str] = None
-        self.last_loaded_termination_policy_source: Optional[str] = None
-        self.last_loaded_report_prompt_source: Optional[str] = None
+        self.last_loaded_execution_prompt_source: str | None = None
+        self.last_loaded_termination_policy_source: str | None = None
+        self.last_loaded_report_prompt_source: str | None = None
 
 
     @lru_cache
-    def _find_module_dir(self, module_name: str) -> Optional[Path]:
+    def _find_module_dir(self, module_name: str) -> Path | None:
         """Find the first matching module directory in plugin roots.
 
         Performs a deep search using **/module_name/module.yaml or
@@ -729,7 +728,7 @@ class ModulePromptLoader:
         return None
 
     @lru_cache
-    def _read_module_yaml(self, module_dir: Path) -> Dict[str, Any]:
+    def _read_module_yaml(self, module_dir: Path) -> dict[str, Any]:
         """Read module.yaml/module.yml as a dict. Returns {} on any failure."""
         try:
             for fname in ("module.yaml", "module.yml"):
@@ -742,7 +741,7 @@ class ModulePromptLoader:
         return {}
 
     @lru_cache
-    def _get_extend_list(self, module_dir: Optional[Path]) -> List[str]:
+    def _get_extend_list(self, module_dir: Path | None) -> list[str]:
         """Return the ordered list of modules this module extends."""
         if module_dir is None:
             return []
@@ -750,7 +749,7 @@ class ModulePromptLoader:
         raw = data.get("extend")
         if not isinstance(raw, list):
             return []
-        out: List[str] = []
+        out: list[str] = []
         for item in raw:
             s = str(item).strip()
             if s:
@@ -758,7 +757,7 @@ class ModulePromptLoader:
         return out
 
     @lru_cache
-    def _inheritance_chain(self, module_name: str) -> List[str]:
+    def _inheritance_chain(self, module_name: str) -> list[str]:
         """Return module inheritance resolution order.
 
         Precedence order is:
@@ -768,7 +767,7 @@ class ModulePromptLoader:
 
         Cycles are detected and truncated.
         """
-        chain: List[str] = []
+        chain: list[str] = []
         visited: set[str] = set()
         stack: set[str] = set()
 
@@ -791,7 +790,7 @@ class ModulePromptLoader:
         _dfs(module_name)
         return chain
 
-    def _find_prompt_path(self, module_name: str, filename: str) -> Tuple[Optional[Path], Optional[Path]]:
+    def _find_prompt_path(self, module_name: str, filename: str) -> tuple[Path | None, Path | None]:
         """Find a prompt file for a module across plugin roots.
 
         Uses the module's directory to resolve the prompt file within it.
@@ -805,7 +804,7 @@ class ModulePromptLoader:
                 return p, mdir
         return None, None
 
-    def _find_tools_dir(self, module_name: str) -> Tuple[Optional[Path], Optional[Path]]:
+    def _find_tools_dir(self, module_name: str) -> tuple[Path | None, Path | None]:
         """Find tools directory for a module across plugin roots.
 
         Uses the module's directory to resolve the tools/ sub-directory within it.
@@ -819,7 +818,7 @@ class ModulePromptLoader:
                 return td, mdir
         return None, None
 
-    def _read_tools_allowlist(self, module_dir: Optional[Path]) -> Optional[List[str]]:
+    def _read_tools_allowlist(self, module_dir: Path | None) -> list[str] | None:
         """Read tools allowlist from THIS module's module.yaml.
 
         NOTE: The 'tools' key is NOT inherited.
@@ -835,7 +834,7 @@ class ModulePromptLoader:
             return None
         return None
 
-    def load_module_prompt(self, module_name: str, kind: str, filename: str) -> Tuple[str, Optional[str]]:
+    def load_module_prompt(self, module_name: str, kind: str, filename: str) -> tuple[str, str | None]:
         """Load module-specific prompt, if available.
 
         Order of resolution:
@@ -862,9 +861,9 @@ class ModulePromptLoader:
                     continue
 
         # 2) Local candidate (walk inheritance chain)
-        local_candidate: Optional[Path] = None
-        local_module_dir: Optional[Path] = None
-        resolved_module: Optional[str] = None
+        local_candidate: Path | None = None
+        local_module_dir: Path | None = None
+        resolved_module: str | None = None
         for mod in chain:
             path, mdir = self._find_prompt_path(mod, filename)
             if path is not None:
@@ -902,7 +901,7 @@ class ModulePromptLoader:
         return "", None
 
     def load_module_execution_prompt(
-            self, module_name: str, operation_root: Optional[str] = None
+            self, module_name: str, operation_root: str | None = None
     ) -> str:
         """Load a module-specific execution prompt if available.
 
@@ -942,24 +941,24 @@ class ModulePromptLoader:
         content, self.last_loaded_report_prompt_source = self.load_module_prompt(module_name, "report_agent_appendix_system", "report_agent_appendix_system_prompt.md")
         return content
 
-    def discover_module_tools(self, module_name: str) -> Tuple[List[str], Optional[List[str]]]:
+    def discover_module_tools(self, module_name: str) -> tuple[list[str], list[str] | None]:
         """Discover module-specific tool files under operation_plugins.
 
         Returns a list of Python file paths for tools in modules/operation_plugins/<module>/tools.
         If module.yaml defines a 'tools' allowlist, only those tool stems are returned.
         """
-        results: List[str] = []
-        allowed_tools: Optional[List[str]] = None
+        results: list[str] = []
+        allowed_tools: list[str] | None = None
         try:
             # Resolve module inheritance order (module first, then parents)
             chain = self._inheritance_chain(module_name)
 
             # Track selected stems to enforce precedence:
             # module tools > first parent tools > later parent tools (transitively)
-            selected: Dict[str, str] = {}
+            selected: dict[str, str] = {}
 
             # Only the requested module's allowlist is returned to callers
-            base_tools_dir, base_module_dir = self._find_tools_dir(module_name)
+            _base_tools_dir, base_module_dir = self._find_tools_dir(module_name)
             allowed_tools = self._read_tools_allowlist(base_module_dir)
             allowed_tools_missing = allowed_tools.copy() if allowed_tools is not None else None
 
@@ -1010,7 +1009,7 @@ def _get_current_date() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
+def generate_findings_summary_table(evidence: list[dict[str, Any]]) -> str:
     """Generate an actionable KEY FINDINGS table from structured evidence.
 
     Columns: Severity | Count | Canonical Finding (anchor) | Primary Location | Verified
@@ -1029,7 +1028,7 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
         return s.strip("-")
 
     # Group evidence by severity using parsed fields when available
-    groups: Dict[str, List[Dict[str, Any]]] = {
+    groups: dict[str, list[dict[str, Any]]] = {
         "CRITICAL": [],
         "HIGH": [],
         "MEDIUM": [],
@@ -1048,7 +1047,7 @@ def generate_findings_summary_table(evidence: List[Dict[str, Any]]) -> str:
         "|----------|-------|-------------------|------------------|----------|\n"
     )
 
-    rows: List[str] = []
+    rows: list[str] = []
     for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
         items = groups[sev]
         if not items:
@@ -1153,7 +1152,7 @@ def _indent_text(text: str, spaces: int) -> str:
 
 
 def format_evidence_for_report(
-    evidence: List[Dict[str, Any]], max_items: int = 400
+    evidence: list[dict[str, Any]], max_items: int = 400
 ) -> str:
     """
     Format evidence list into structured text for the report.
@@ -1321,7 +1320,7 @@ def is_reportable_tool(tool_name: str) -> bool:
     return normalized not in REPORT_BOOKKEEPING_TOOLS and normalized not in REPORT_EXCLUDED_SHELL_COMMANDS
 
 
-def format_tools_summary(tools_used: List[str] | Dict[str, int]) -> str:
+def format_tools_summary(tools_used: list[str] | dict[str, int]) -> str:
     """Format a unique reportable-tool list.
 
     Accepts either:
@@ -1331,11 +1330,8 @@ def format_tools_summary(tools_used: List[str] | Dict[str, int]) -> str:
     if not tools_used:
         return ""
 
-    unique_tools: List[str] = []
-    if isinstance(tools_used, dict):
-        candidates = tools_used.keys()
-    else:
-        candidates = tools_used
+    unique_tools: list[str] = []
+    candidates = tools_used.keys() if isinstance(tools_used, dict) else tools_used
     for tool in candidates:
         tool_name = str(tool).split(":", 1)[0].strip()
         if tool_name and is_reportable_tool(tool_name) and tool_name not in unique_tools:
@@ -1344,11 +1340,11 @@ def format_tools_summary(tools_used: List[str] | Dict[str, int]) -> str:
 
 
 def _transform_evidence_to_content(
-    evidence: List[Dict[str, Any]],
-    domain_lens: Dict[str, str],
+    evidence: list[dict[str, Any]],
+    domain_lens: dict[str, str],
     target: str,
     objective: str,
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """
     Return empty content - LLM generates everything from raw_evidence.
     """

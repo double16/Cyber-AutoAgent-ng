@@ -13,7 +13,7 @@ import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 from xml.etree import ElementTree
 
 from modules.config.system.logger import get_logger
@@ -142,15 +142,15 @@ def _env_bool(name: str, default: bool = False) -> bool:
 class TaxonomyCatalog:
     """Load normalized taxonomy snapshots with a non-blocking refresh fallback."""
 
-    def __init__(self, cache_dir: Optional[Path] = None) -> None:
+    def __init__(self, cache_dir: Path | None = None) -> None:
         configured = os.getenv("CYBER_TAXONOMY_CACHE_DIR", "").strip()
         self.cache_dir = cache_dir or (Path(configured) if configured else Path.home() / ".cache" / "cyber-autoagent")
         self.cache_file = self.cache_dir / "taxonomy_catalog.json"
         self.snapshot_file = _CATALOG_DIR / "taxonomy_snapshot.json"
-        self._data: Optional[Dict[str, Any]] = None
+        self._data: dict[str, Any] | None = None
         self._source = "unknown"
 
-    def get_data(self) -> Dict[str, Any]:
+    def get_data(self) -> dict[str, Any]:
         if self._data is not None:
             return self._data
         cached = self._read(self.cache_file)
@@ -172,7 +172,7 @@ class TaxonomyCatalog:
         self._data = {"version": "unavailable", "cwe": [], "attack": []}
         return self._data
 
-    def provenance(self) -> Dict[str, Any]:
+    def provenance(self) -> dict[str, Any]:
         data = self.get_data()
         configured_url = os.getenv("CYBER_TAXONOMY_CATALOG_URL", "").strip()
         refresh_urls = [configured_url] if configured_url else [_SOURCES["cwe"], _SOURCES["attack"]]
@@ -183,7 +183,7 @@ class TaxonomyCatalog:
             "configured_refresh_urls": refresh_urls,
         }
 
-    def candidates(self, finding: Dict[str, Any], kind: str, limit: int = 12) -> List[Dict[str, Any]]:
+    def candidates(self, finding: dict[str, Any], kind: str, limit: int = 12) -> list[dict[str, Any]]:
         """Return relevant catalog candidates, favoring high-signal technique labels."""
         data = self.get_data()
         records = data.get(kind, []) if kind in {"cwe", "attack"} else []
@@ -214,7 +214,7 @@ class TaxonomyCatalog:
                 scored.append((score, identifier, record))
         return [record for _score, _identifier, record in sorted(scored, key=lambda item: (-item[0], item[1]))[:limit]]
 
-    def get(self, kind: str, identifier: str) -> Optional[Dict[str, Any]]:
+    def get(self, kind: str, identifier: str) -> dict[str, Any] | None:
         normalized = str(identifier or "").strip().upper()
         for record in self.get_data().get(kind, []):
             if str(record.get("id", "")).upper() == normalized:
@@ -229,7 +229,7 @@ class TaxonomyCatalog:
             return False
 
     @staticmethod
-    def _read(path: Path) -> Optional[Dict[str, Any]]:
+    def _read(path: Path) -> dict[str, Any] | None:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and isinstance(data.get("cwe"), list) and isinstance(data.get("attack"), list):
@@ -238,7 +238,7 @@ class TaxonomyCatalog:
             return None
         return None
 
-    def _refresh(self) -> Optional[Dict[str, Any]]:
+    def _refresh(self) -> dict[str, Any] | None:
         """Refresh official catalogs or a supplied normalized mirror without blocking reports."""
         url = os.getenv("CYBER_TAXONOMY_CATALOG_URL", "").strip()
         source = url or _SOURCES["cwe"]
@@ -277,7 +277,7 @@ class TaxonomyCatalog:
             logger.warning("Unable to refresh taxonomy catalog from %s: %s", source, error)
             return None
 
-    def refresh_snapshot(self) -> Optional[Dict[str, Any]]:
+    def refresh_snapshot(self) -> dict[str, Any] | None:
         """Refresh authoritative data and atomically replace the bundled fallback snapshot."""
         data = self._refresh()
         if not data:
@@ -290,7 +290,7 @@ class TaxonomyCatalog:
         return data
 
     @staticmethod
-    def _normalize_cwe(payload: bytes) -> List[Dict[str, Any]]:
+    def _normalize_cwe(payload: bytes) -> list[dict[str, Any]]:
         """Normalize CWE's published XML ZIP without retaining its large source schema."""
         with zipfile.ZipFile(BytesIO(payload)) as archive:
             xml_names = [name for name in archive.namelist() if name.lower().endswith(".xml")]
@@ -326,7 +326,7 @@ class TaxonomyCatalog:
         return records
 
     @staticmethod
-    def _normalize_attack(source: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _normalize_attack(source: dict[str, Any]) -> list[dict[str, Any]]:
         """Normalize Enterprise ATT&CK STIX attack-pattern objects."""
         records = []
         for item in source.get("objects", []) if isinstance(source, dict) else []:
@@ -350,7 +350,7 @@ class TaxonomyCatalog:
         return records
 
 
-_catalog: Optional[TaxonomyCatalog] = None
+_catalog: TaxonomyCatalog | None = None
 
 
 def get_taxonomy_catalog() -> TaxonomyCatalog:
@@ -364,10 +364,10 @@ def get_taxonomy_catalog() -> TaxonomyCatalog:
 def validate_taxonomy_mappings(
     cwe_mappings: Any,
     mitre_attack_mappings: Any,
-    artifacts: List[str],
+    artifacts: list[str],
     *,
-    disallowed_attack_ids: Optional[set[str]] = None,
-) -> Dict[str, Any]:
+    disallowed_attack_ids: set[str] | None = None,
+) -> dict[str, Any]:
     """Validate model-proposed finding mappings against catalog records and evidence.
 
     The result is safe to persist with a finding candidate.  Catalog data supplies
@@ -379,7 +379,7 @@ def validate_taxonomy_mappings(
     catalog = get_taxonomy_catalog()
     disallowed_attack_ids = {str(identifier).upper() for identifier in disallowed_attack_ids or set()}
     allowed_artifacts = set(artifacts)
-    normalized: Dict[str, Any] = {
+    normalized: dict[str, Any] = {
         "cwe": [],
         "mitre_attack": [],
         "provenance": catalog.provenance(),

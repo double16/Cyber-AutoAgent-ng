@@ -16,10 +16,11 @@ from __future__ import annotations
 import logging
 import os
 import re
-import ollama
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Optional, Tuple
+from typing import Any
+
+import ollama
 
 from modules.config.providers import get_ollama_host
 from modules.config.providers.ollama_config import get_ollama_timeout
@@ -38,9 +39,11 @@ try:
     import litellm  # type: ignore
     from litellm.utils import (  # type: ignore
         LlmProviders,
-        ProviderConfigManager,
-        supports_reasoning as llm_supports_reasoning,
         ModelInfoBase,
+        ProviderConfigManager,
+    )
+    from litellm.utils import (
+        supports_reasoning as llm_supports_reasoning,
     )
 except Exception:  # pragma: no cover
     litellm = None  # type: ignore
@@ -50,7 +53,7 @@ except Exception:  # pragma: no cover
 
 
     def llm_supports_reasoning(
-            model: str, custom_llm_provider: Optional[str] = None
+            model: str, custom_llm_provider: str | None = None
     ) -> bool:  # type: ignore
         return False
 
@@ -58,7 +61,7 @@ except Exception:  # pragma: no cover
 # --- Helpers -------------------------------------------------------------------
 
 
-def _split_prefix(model_id: str) -> Tuple[str, str]:
+def _split_prefix(model_id: str) -> tuple[str, str]:
     if not isinstance(model_id, str):
         return "", ""
     if "/" in model_id:
@@ -67,7 +70,7 @@ def _split_prefix(model_id: str) -> Tuple[str, str]:
     return "", model_id
 
 
-def _static_supports_reasoning_model(model_id: Optional[str]) -> bool:
+def _static_supports_reasoning_model(model_id: str | None) -> bool:
     """Return True if the model is known to support extended reasoning blocks.
 
     This is a fast explicit check for models with native reasoning support.
@@ -142,14 +145,11 @@ class ModelCapabilitiesResolver:
         base_provider = provider
 
         if provider == "litellm":
-            pfx, provider_model = _split_prefix(model)
+            pfx, _provider_model = _split_prefix(model)
             if pfx:
                 base_provider = pfx
 
-        if base_provider != "ollama" and ":" in model:
-            model_no_variant = model.split(":")[0]
-        else:
-            model_no_variant = model
+        model_no_variant = model.split(":")[0] if base_provider != "ollama" and ":" in model else model
 
         supports_reason = False
         pass_reasoning_effort = False
@@ -315,7 +315,7 @@ def get_capabilities(provider: str, model_id: str) -> Capabilities:
 def allows_reasoning_content_replay(
     provider: str,
     model_id: str,
-    capabilities: Optional[Capabilities] = None,
+    capabilities: Capabilities | None = None,
 ) -> bool:
     """Return whether prior reasoning blocks may be replayed to the model API."""
 
@@ -365,7 +365,7 @@ MODEL_FAMILY_PATTERNS = [
 
 
 @lru_cache
-def get_model_input_limit(model_id: str) -> Optional[int]:
+def get_model_input_limit(model_id: str) -> int | None:
     """Get INPUT token limit for a model (context window capacity).
 
     Precedence:
@@ -395,7 +395,7 @@ def get_model_input_limit(model_id: str) -> Optional[int]:
     return None
 
 
-def get_provider_default_limit(provider: str) -> Optional[int]:
+def get_provider_default_limit(provider: str) -> int | None:
     """Conservative default INPUT limit for a provider (last resort)."""
     defaults = {
         "bedrock": 200000,  # Conservative for Claude 3.5
@@ -406,7 +406,7 @@ def get_provider_default_limit(provider: str) -> Optional[int]:
 
 
 @lru_cache
-def get_model_output_limit(model_id: str) -> Optional[int]:
+def get_model_output_limit(model_id: str) -> int | None:
     """Get OUTPUT token limit for a model (max completion length).
 
     Precedence:
@@ -448,7 +448,7 @@ def get_model_output_limit(model_id: str) -> Optional[int]:
 
 
 @lru_cache
-def get_model_pricing(model_id: str) -> Optional[tuple[float, float]]:
+def get_model_pricing(model_id: str) -> tuple[float, float] | None:
     """Get pricing for a model (cost per million tokens).
 
     Returns:
@@ -470,7 +470,7 @@ def get_model_pricing(model_id: str) -> Optional[tuple[float, float]]:
     return None
 
 
-def classify_parameter_error(error: Exception) -> Optional[str]:
+def classify_parameter_error(error: Exception) -> str | None:
     """Classify an exception to identify if a specific LLM parameter caused the failure."""
     err_msg = str(error).lower()
 
@@ -555,10 +555,9 @@ def apply_parameter_fallback_to_model(model: Any, provider: str, model_id: str, 
                 modified = True
 
     # 2. Handle LiteLLMModel / Strands models with params and client_args
-    if hasattr(model, "params") and isinstance(model.params, dict):
-        if param_name in model.params:
-            model.params.pop(param_name, None)
-            modified = True
+    if hasattr(model, "params") and isinstance(model.params, dict) and param_name in model.params:
+        model.params.pop(param_name, None)
+        modified = True
     if hasattr(model, "client_args") and isinstance(model.client_args, dict):
         if param_name in model.client_args:
             model.client_args.pop(param_name, None)
@@ -578,7 +577,7 @@ def apply_parameter_fallback_to_model(model: Any, provider: str, model_id: str, 
     # 3. Handle BedrockModel
     if hasattr(model, "temperature") and param_name == "temperature":
         if getattr(model, "temperature", None) is not None:
-            setattr(model, "temperature", None)
+            model.temperature = None
             modified = True
     if hasattr(model, "additional_request_fields") and isinstance(model.additional_request_fields, dict):
         if param_name in ("effort", "thinking", "reasoning_effort"):
@@ -595,6 +594,7 @@ def apply_parameter_fallback_to_model(model: Any, provider: str, model_id: str, 
 def wrap_model_with_fallback(model: Any, provider: str, model_id: str) -> Any:
     """Wrap model stream and structured_output methods with progressive parameter fallback."""
     import functools
+
     from modules.config.models.agent_profiles import get_agent_settings_registry
 
     original_stream = getattr(model, "stream", None)
@@ -627,7 +627,7 @@ def wrap_model_with_fallback(model: Any, provider: str, model_id: str) -> Any:
                             continue
                     raise
 
-        setattr(model, "stream", fallback_stream)
+        model.stream = fallback_stream
 
     if callable(original_structured_output):
         @functools.wraps(original_structured_output)
@@ -656,25 +656,25 @@ def wrap_model_with_fallback(model: Any, provider: str, model_id: str) -> Any:
                             continue
                     raise
 
-        setattr(model, "structured_output", fallback_structured_output)
+        model.structured_output = fallback_structured_output
 
     return model
 
 
 __all__ = [
+    "MODEL_FAMILY_PATTERNS",
     # Capabilities
     "Capabilities",
     "ModelCapabilitiesResolver",
+    "apply_parameter_fallback_to_model",
+    # Parameter Fallback
+    "classify_parameter_error",
     "get_capabilities",
     # Limits
     "get_model_input_limit",
     "get_model_output_limit",
-    "get_provider_default_limit",
-    "MODEL_FAMILY_PATTERNS",
     # Pricing
     "get_model_pricing",
-    # Parameter Fallback
-    "classify_parameter_error",
-    "apply_parameter_fallback_to_model",
+    "get_provider_default_limit",
     "wrap_model_with_fallback",
 ]

@@ -1,13 +1,13 @@
+import contextlib
 import sys
 import types
 from dataclasses import dataclass
-import pytest
 
-from modules.agents import factory
+import pytest
 import strands
 
+from modules.agents import factory
 from modules.agents.factory import AgentFactoryConfig
-
 
 # -------------------------
 # Test helpers / fakes
@@ -145,10 +145,8 @@ def _isolate_toolregistry_register_tool_patch(monkeypatch):
     yield
 
     # Best-effort reset in case a test mutated the global directly.
-    try:
+    with contextlib.suppress(Exception):
         factory._TOOLREGISTRY_REGISTER_TOOL_PATCHED = False
-    except Exception:
-        pass
 
 
 # -------------------------
@@ -269,7 +267,7 @@ def test_agent_factory_allow_reasoning_content_true(monkeypatch):
     make_agent = factory.init_agent_factory(cfg)
 
     agent = make_agent("sub")
-    assert getattr(agent, "_allow_reasoning_content") is True
+    assert agent._allow_reasoning_content is True
 
 
 def test_agent_factory_disables_reasoning_replay_for_litellm(monkeypatch):
@@ -285,7 +283,7 @@ def test_agent_factory_disables_reasoning_replay_for_litellm(monkeypatch):
 
     agent = factory.init_agent_factory(factory.AgentFactoryConfig())("sub")
 
-    assert getattr(agent, "_allow_reasoning_content") is False
+    assert agent._allow_reasoning_content is False
 
 
 def test_agent_factory_allow_reasoning_content_false_on_exception(monkeypatch):
@@ -307,7 +305,7 @@ def test_agent_factory_allow_reasoning_content_false_on_exception(monkeypatch):
     make_agent = factory.init_agent_factory(cfg)
 
     agent = make_agent("sub")
-    assert getattr(agent, "_allow_reasoning_content") is False
+    assert agent._allow_reasoning_content is False
 
 
 def test_agent_factory_trace_attributes_do_not_duplicate_strands_tool_metadata(monkeypatch):

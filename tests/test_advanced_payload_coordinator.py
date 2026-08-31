@@ -9,7 +9,6 @@ from urllib.parse import parse_qs, urlparse
 
 import modules.tools.advanced_payload_coordinator as apc
 
-
 # -------------------------
 # Small helpers
 # -------------------------

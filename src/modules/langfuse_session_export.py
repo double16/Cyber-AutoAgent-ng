@@ -18,6 +18,8 @@ from langfuse import Langfuse
 
 from modules.utils.redaction import REDACTED, redact
 
+__all__ = ["REDACTED"]
+
 DEFAULT_LANGFUSE_HOST = "http://localhost:3000"
 DEFAULT_OUTPUT_FORMAT = "yaml"
 OUTPUT_FORMATS = ("json", "yaml")

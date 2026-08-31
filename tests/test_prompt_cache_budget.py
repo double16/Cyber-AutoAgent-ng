@@ -8,10 +8,10 @@ reducing unnecessary context reductions when cache hits occur.
 import types
 
 from modules.handlers.conversation_budget import (
-    _ensure_prompt_within_budget,
-    register_conversation_manager,
-    clear_shared_conversation_manager,
     PROMPT_TELEMETRY_THRESHOLD,
+    _ensure_prompt_within_budget,
+    clear_shared_conversation_manager,
+    register_conversation_manager,
 )
 
 
@@ -37,7 +37,7 @@ class AgentStub:
         )
         # Optional prompt cache hint
         if cache_hint:
-            setattr(self, "_prompt_cache_hit", True)
+            self._prompt_cache_hit = True
 
 
 def _make_message(text):
@@ -52,7 +52,7 @@ def test_prompt_cache_hint_relaxes_threshold(monkeypatch):
     calls = []
 
     class CMStub:
-        def reduce_context(self, agent, *args, **kwargs):  # noqa: D401
+        def reduce_context(self, agent, *args, **kwargs):
             calls.append(len(getattr(agent, "messages", [])))
 
     register_conversation_manager(CMStub())

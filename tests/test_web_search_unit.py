@@ -1,4 +1,3 @@
-import asyncio
 
 import pytest
 from ddgs.exceptions import RatelimitException

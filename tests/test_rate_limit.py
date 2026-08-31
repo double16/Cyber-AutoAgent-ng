@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import pytest
-import httpx
 from unittest.mock import Mock
+
+import httpx
+import pytest
 
 import modules.rate_limit.rate_limit as rl
 from modules.config import types

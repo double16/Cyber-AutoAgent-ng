@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Agent creation and management for Cyber-AutoAgent."""
+import contextlib
 import fnmatch
 import importlib.util
 import json
@@ -11,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from math import ceil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from strands import Agent
 from strands.hooks import HookProvider
@@ -48,8 +49,8 @@ from modules.config.models.capabilities import (
     get_capabilities,
 )
 from modules.config.models.factory import (
-    require_prompt_token_limit,
     create_strands_model,
+    require_prompt_token_limit,
 )
 from modules.config.system.environment import resolve_seclists_root
 from modules.config.system.logger import get_logger
@@ -64,8 +65,11 @@ from modules.handlers.conversation_budget import (
     register_conversation_manager,
 )
 from modules.handlers.react import AgentEventHandler
-from modules.handlers.tool_recovery import EvaluatorArtifactReadLimitHook, TaskFailureRecoveryHook
 from modules.handlers.terminal_tool import TerminalToolHook
+from modules.handlers.tool_recovery import (
+    EvaluatorArtifactReadLimitHook,
+    TaskFailureRecoveryHook,
+)
 from modules.handlers.tool_repeat_guard import (
     DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
     DEFAULT_TOOL_REPEAT_THRESHOLD,
@@ -83,13 +87,9 @@ from modules.handlers.utils import (
 )
 from modules.tools import python_repl
 from modules.tools.advanced_payload_coordinator import advanced_payload_coordinator
-from modules.tools.auth_chain_analyzer import auth_chain_analyzer
 from modules.tools.artifact import create_artifact_reader, resolve_tool_result_max_chars
 from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
-from modules.tools.client_bundle_inventory import client_bundle_inventory
-from modules.tools.editor import create_absolute_path_editor
-from modules.tools.idor_specialist import idor_specialist
-from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
+from modules.tools.auth_chain_analyzer import auth_chain_analyzer
 from modules.tools.browser import (
     browser_evaluate_js,
     browser_get_cookies,
@@ -108,6 +108,9 @@ from modules.tools.channels import (
     channel_send,
     channel_status,
 )
+from modules.tools.client_bundle_inventory import client_bundle_inventory
+from modules.tools.editor import create_absolute_path_editor
+from modules.tools.idor_specialist import idor_specialist
 from modules.tools.mcp import (
     discover_mcp_tools,
 )
@@ -119,12 +122,12 @@ from modules.tools.memory import (
     memory_retrieve,
     record_finding_validation,
     record_objective_validation,
+    resolve_operation_targets,
     set_memory_event_emitter,
     store_finding,
-    store_objective_candidate,
     store_knowledge,
+    store_objective_candidate,
     store_observation,
-    resolve_operation_targets,
 )
 from modules.tools.oast import (
     oast_clear_http_responses,
@@ -133,6 +136,7 @@ from modules.tools.oast import (
     oast_poll,
     oast_register_http_response,
 )
+from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 from modules.tools.shell import shell
 from modules.tools.specialized_recon_orchestrator import specialized_recon_orchestrator
 from modules.tools.swarm import swarm
@@ -163,26 +167,26 @@ class AgentRuntimeResources:
     server_config: Any
     config_manager: Any
     callback_handler: AgentEventHandler
-    tools_list: List[Any]
+    tools_list: list[Any]
     tool_executor: ConcurrentToolExecutor
     system_prompt_payload: Any
     system_prompt: str
-    hooks: List[HookProvider]
+    hooks: list[HookProvider]
     conversation_manager: MappingConversationManager
-    sdk_context_manager: Optional[str]
-    trace_attributes: Dict[str, Any]
+    sdk_context_manager: str | None
+    trace_attributes: dict[str, Any]
     prompt_token_limit: int
-    core_tools_list: List[Any] = field(default_factory=list)
-    optional_tools_list: List[Any] = field(default_factory=list)
+    core_tools_list: list[Any] = field(default_factory=list)
+    optional_tools_list: list[Any] = field(default_factory=list)
     quarantined_shell_commands: set[str] = field(default_factory=set)
     termination_policy: str = ""
 
 
-def _tool_names(tools: List[Any]) -> set[str]:
+def _tool_names(tools: list[Any]) -> set[str]:
     return {get_tool_name(tool) for tool in tools}
 
 
-def _create_tool_repeat_guard(config_manager: Any, agent_logger: logging.Logger) -> Optional[ToolRepeatGuardHook]:
+def _create_tool_repeat_guard(config_manager: Any, agent_logger: logging.Logger) -> ToolRepeatGuardHook | None:
     """Build the configured repeat guard, or return None when disabled."""
 
     repeat_threshold = normalize_tool_repeat_threshold(
@@ -212,9 +216,9 @@ def _create_tool_repeat_guard(config_manager: Any, agent_logger: logging.Logger)
 def build_role_tools(
     runtime: AgentRuntimeResources,
     *,
-    selected_optional_tool_names: Optional[List[str]] = None,
+    selected_optional_tool_names: list[str] | None = None,
     include_create_tasks: bool = False,
-) -> List[Any]:
+) -> list[Any]:
     """Build a restricted tool list for a short-lived workflow agent."""
 
     selected_optional_tool_names = selected_optional_tool_names or []
@@ -237,7 +241,7 @@ def build_role_tools(
 def create_agent_runtime_resources(
     target: str,
     objective: str,
-    config: Optional[AgentConfig] = None,
+    config: AgentConfig | None = None,
 ) -> AgentRuntimeResources:
     """Initialize shared operation resources used by one or more agents."""
 
@@ -280,10 +284,7 @@ def create_agent_runtime_resources(
         config.model_id = server_config.llm.model_id
 
     # Use provided operation_id or generate new one
-    if not config.op_id:
-        operation_id = f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    else:
-        operation_id = config.op_id
+    operation_id = f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if not config.op_id else config.op_id
 
     # Keep environment and memory context aligned before any continuation reads occur.
     os.environ["CYBER_OPERATION_ID"] = operation_id
@@ -344,10 +345,7 @@ def create_agent_runtime_resources(
         os.getenv("CYBER_TOOL_MAX_RESULT_CHARS"),
     )
 
-    if max_result_chars < 4000:
-        computed_artifact_threshold = max_result_chars
-    else:
-        computed_artifact_threshold = max(ceil(max_result_chars / 3), 2000)
+    computed_artifact_threshold = max_result_chars if max_result_chars < 4000 else max(ceil(max_result_chars / 3), 2000)
     try:
         artifact_threshold = int(
             os.getenv("CYBER_TOOL_RESULT_ARTIFACT_THRESHOLD", str(computed_artifact_threshold))
@@ -446,15 +444,13 @@ def create_agent_runtime_resources(
                     "INFO",
                 )
             # Log module and tool discovery explicitly for validation
-            try:
+            with contextlib.suppress(Exception):
                 agent_logger.info(
                     "CYBERAUTOAGENT: module='%s', tools_discovered=%d, tools='%s'",
                     config.module,
                     len(tool_names),
                     ", ".join(tool_names),
                 )
-            except Exception:
-                pass
 
             # Create specific tool examples for system prompt
             tool_examples = []
@@ -853,7 +849,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     ) if sdk_context_manager is None else None
 
     # hooks to include in agents, order is important
-    hooks: List[HookProvider] = list(
+    hooks: list[HookProvider] = list(
         filter(
             bool,
             [
@@ -866,7 +862,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
             ],
         )
     )
-    subagent_hooks: List[HookProvider] = list(
+    subagent_hooks: list[HookProvider] = list(
         filter(
             bool,
             [
@@ -900,9 +896,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     preserve_recent_messages=PRESERVE_LAST_DEFAULT
     preserve_first_messages=PRESERVE_FIRST_DEFAULT
-    if not config_manager.getenv("CYBER_CONVERSATION_PRESERVE_LAST"):
-        if prompt_token_limit <= 49_152:
-            preserve_recent_messages = 2
+    if not config_manager.getenv("CYBER_CONVERSATION_PRESERVE_LAST") and prompt_token_limit <= 49_152:
+        preserve_recent_messages = 2
 
     # Create and register conversation manager for all agents.
     # Use environment variables for preservation to enable effective pruning
@@ -990,8 +985,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     def create_subagent_callback_handler(
             name: str,
             agent_type: str,
-            model_id: str = None,
-            provider_id: str = None,
+            model_id: str | None = None,
+            provider_id: str | None = None,
     ) -> AgentEventHandler:
         return AgentEventHandler(
             operation_id=operation_id,
@@ -1051,13 +1046,13 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 def create_agent(
     target: str,
     objective: str,
-    config: Optional[AgentConfig] = None,
-    runtime_resources: Optional[AgentRuntimeResources] = None,
+    config: AgentConfig | None = None,
+    runtime_resources: AgentRuntimeResources | None = None,
     *,
-    system_prompt: Optional[Any] = None,
-    tools: Optional[List[Any]] = None,
-    name: Optional[str] = None,
-    agent_type: Optional[str] = None,
+    system_prompt: Any | None = None,
+    tools: list[Any] | None = None,
+    name: str | None = None,
+    agent_type: str | None = None,
     include_tool_catalog: bool = True,
 ) -> Agent:
     """Create autonomous agent from shared runtime resources."""
@@ -1131,7 +1126,7 @@ def create_agent(
         if config.available_tools is None:
             config.available_tools = []
 
-        def quarantine_shell_command(executable: str) -> List[str]:
+        def quarantine_shell_command(executable: str) -> list[str]:
             alternatives = get_shell_command_alternatives(executable, config.available_tools)
             remove_shell_command(config.available_tools, executable)
             agent_logger.warning(
@@ -1190,42 +1185,32 @@ def create_agent(
         if isinstance((state := getattr(tool, "_cyber_context_reduction_state", None)), dict)
     ]
     if context_reduction_states:
-        setattr(agent, "_cyber_context_reduction_states", context_reduction_states)
+        agent._cyber_context_reduction_states = context_reduction_states
     # Allow reasoning deltas only when the provider/model supports them
     try:
         caps = get_capabilities(config.provider, config.model_id or "")
-        setattr(
-            agent,
-            "_allow_reasoning_content",
-            allows_reasoning_content_replay(
-                config.provider,
-                config.model_id or "",
-                caps,
-            ),
-        )
+        agent._allow_reasoning_content = allows_reasoning_content_replay(config.provider, config.model_id or "", caps)
     except Exception:
-        setattr(agent, "_allow_reasoning_content", False)
+        agent._allow_reasoning_content = False
     if runtime.prompt_token_limit:
-        setattr(agent, "_prompt_token_limit", runtime.prompt_token_limit)
+        agent._prompt_token_limit = runtime.prompt_token_limit
     try:
-        setattr(agent, "_cyber_agent_name", agent_kwargs["name"])
-        setattr(agent, "_cyber_agent_type", agent_type or getattr(callback_handler, "agent_type", "agent"))
-        setattr(agent, "_cyber_callback_handler", callback_handler)
+        agent._cyber_agent_name = agent_kwargs["name"]
+        agent._cyber_agent_type = agent_type or getattr(callback_handler, "agent_type", "agent")
+        agent._cyber_callback_handler = callback_handler
         if failure_recovery_hook is not None:
-            setattr(agent, "_cyber_failure_recovery_hook", failure_recovery_hook)
+            agent._cyber_failure_recovery_hook = failure_recovery_hook
         if evaluator_artifact_read_limit_hook is not None:
-            setattr(agent, "_cyber_evaluator_artifact_read_limit_hook", evaluator_artifact_read_limit_hook)
+            agent._cyber_evaluator_artifact_read_limit_hook = evaluator_artifact_read_limit_hook
         if getattr(callback_handler, "agent_run_id", None):
-            setattr(agent, "_cyber_agent_run_id", callback_handler.agent_run_id)
+            agent._cyber_agent_run_id = callback_handler.agent_run_id
         if getattr(callback_handler, "parent_agent_run_id", None):
-            setattr(agent, "_cyber_parent_agent_run_id", callback_handler.parent_agent_run_id)
+            agent._cyber_parent_agent_run_id = callback_handler.parent_agent_run_id
     except Exception:
         pass
     # Ensure legacy-compatible system prompt is directly accessible for tests
-    try:
-        setattr(agent, "system_prompt", runtime.system_prompt)
-    except Exception:
-        pass
+    with contextlib.suppress(Exception):
+        agent.system_prompt = runtime.system_prompt
 
     if include_tool_catalog and agent_kwargs["tools"]:
         agent.tool_registry.register_tool(tool_catalog_wrapper(agent, config.available_tools))

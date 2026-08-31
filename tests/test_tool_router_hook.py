@@ -18,7 +18,6 @@ from strands.hooks import AfterToolCallEvent
 
 from modules.handlers.tool_router import ToolRouterHook
 
-
 # ============================================================================
 # Test Fixtures
 # ============================================================================

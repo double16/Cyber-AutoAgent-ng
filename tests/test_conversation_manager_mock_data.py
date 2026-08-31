@@ -10,7 +10,7 @@ import copy
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 from strands.agent.conversation_manager import SummarizingConversationManager
@@ -38,7 +38,7 @@ class ModelConfig:
     char_to_token_ratio: float
     window_size: int
     preserve_first: int = 1
-    preserve_last: Optional[int] = None
+    preserve_last: int | None = None
     context_limit_tokens: int = 200000
 
 
@@ -98,7 +98,7 @@ class MockDataGenerator:
         self,
         tool_name: str,
         tool_input: dict[str, Any],
-        tool_use_id: Optional[str] = None,
+        tool_use_id: str | None = None,
     ) -> dict[str, Any]:
         """Create an assistant message with tool use."""
         return {
@@ -236,7 +236,7 @@ class MockAgent:
     def __init__(
         self,
         messages: list[dict[str, Any]],
-        config: Optional[ModelConfig] = None,
+        config: ModelConfig | None = None,
     ) -> None:
         self.messages = messages
         self.system_prompt = "You are a security assessment agent."
@@ -869,7 +869,7 @@ class TestStatelessBehavior:
         texts1 = [b.get("text", "") for b in compressed1]
         texts2 = [b.get("text", "") for b in compressed2]
 
-        for t1, t2 in zip(texts1, texts2):
+        for t1, t2 in zip(texts1, texts2, strict=False):
             if "X" in t1 or "truncated" in t1:
                 assert t1 == t2
 

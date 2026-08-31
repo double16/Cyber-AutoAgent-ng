@@ -1584,7 +1584,7 @@ def test_generate_final_report_skip_and_success(monkeypatch, tmp_path):
         lambda: SimpleNamespace(get_llm_config=lambda _provider: SimpleNamespace(model_id="report-model")),
     )
 
-    import modules.handlers.report_generator as report_generator
+    from modules.handlers import report_generator
 
     generated_calls = []
 
@@ -1827,7 +1827,9 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
 
 
 def test_evaluation_result_status_aliases_are_canonical():
-    from modules.handlers.react.agent_event_handler import _normalize_evaluation_result_status
+    from modules.handlers.react.agent_event_handler import (
+        _normalize_evaluation_result_status,
+    )
 
     assert _normalize_evaluation_result_status("successful") == "completed"
     assert _normalize_evaluation_result_status("no-data") == "no_results"
@@ -1835,7 +1837,9 @@ def test_evaluation_result_status_aliases_are_canonical():
 
 
 def test_evaluation_result_status_unknown_is_rejected():
-    from modules.handlers.react.agent_event_handler import _normalize_evaluation_result_status
+    from modules.handlers.react.agent_event_handler import (
+        _normalize_evaluation_result_status,
+    )
 
     with pytest.raises(ValueError):
         _normalize_evaluation_result_status("pending")

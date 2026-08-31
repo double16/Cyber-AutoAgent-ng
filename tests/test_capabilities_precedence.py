@@ -1,16 +1,16 @@
 """Test unified precedence order for model capabilities."""
 
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from modules.config.models.capabilities import (
     Capabilities,
+    ModelCapabilitiesResolver,
+    allows_reasoning_content_replay,
     get_capabilities,
     get_model_input_limit,
     get_model_output_limit,
     get_model_pricing,
-    ModelCapabilitiesResolver,
-    allows_reasoning_content_replay,
 )
 
 

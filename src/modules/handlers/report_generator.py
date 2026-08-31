@@ -1,4 +1,4 @@
-    #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Report Generation Handler Utility for Cyber-AutoAgent
 
@@ -8,20 +8,21 @@ This is NOT a Strands tool - it's a handler utility function.
 """
 
 import base64
-import json
+import contextlib
 import hashlib
+import json
 import math
 import os
 import re
 import shlex
 import subprocess
 import tomllib
+from collections import Counter
 from copy import deepcopy
 from csv import reader as csv_reader
-from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from strands.types.exceptions import MaxTokensReachedException
 
@@ -30,7 +31,12 @@ from modules.config import get_config_manager, get_report_refinement_cycles
 from modules.config.system.logger import get_logger
 from modules.config.types import DEFAULT_MAX_DURATION
 from modules.handlers.max_token_recovery import reset_agent_conversation_for_recovery
-from modules.handlers.utils import duration_max, get_output_path, sanitize_target_name, format_duration
+from modules.handlers.utils import (
+    duration_max,
+    format_duration,
+    get_output_path,
+    sanitize_target_name,
+)
 from modules.prompts.factory import (
     _extract_domain_lens,
     _transform_evidence_to_content,
@@ -42,9 +48,10 @@ from modules.prompts.factory import (
     get_report_executive_system_prompt,
     get_report_finding_system_prompt,
     get_report_next_steps_system_prompt,
-    safe_truncate,
     is_reportable_tool,
+    safe_truncate,
 )
+from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.tools.memory import (
     OperationTarget,
     _artifact_path_from_ref,
@@ -55,7 +62,6 @@ from modules.tools.memory import (
     list_persisted_operation_model_metrics,
     memory_is_cross_operation,
 )
-from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.utils.json_repair import parse_json_response
 from modules.utils.redaction import redact, redact_text
 
@@ -168,7 +174,7 @@ def _write_redacted_report_json(path: str, payload: Any) -> None:
         report_file.write("\n")
 
 
-def _normalize_completion_status(value: Any) -> Dict[str, Any]:
+def _normalize_completion_status(value: Any) -> dict[str, Any]:
     """Return a stable report completion status block."""
     if not isinstance(value, dict):
         return {
@@ -204,7 +210,7 @@ def _normalize_completion_status(value: Any) -> Dict[str, Any]:
     }
 
 
-def _completion_status_guidance(completion_status: Dict[str, Any]) -> str:
+def _completion_status_guidance(completion_status: dict[str, Any]) -> str:
     """Prompt guidance that prevents complete-run claims for partial assessments."""
     if completion_status.get("assessment_complete"):
         return (
@@ -220,7 +226,7 @@ def _completion_status_guidance(completion_status: Dict[str, Any]) -> str:
     )
 
 
-def _completion_status_notice(completion_status: Dict[str, Any]) -> str:
+def _completion_status_notice(completion_status: dict[str, Any]) -> str:
     """Deterministic report notice for incomplete assessments."""
     if completion_status.get("assessment_complete"):
         return ""
@@ -249,7 +255,7 @@ def _completion_status_notice(completion_status: Dict[str, Any]) -> str:
     )
 
 
-def _report_item_title(item: Dict[str, Any], default: str) -> str:
+def _report_item_title(item: dict[str, Any], default: str) -> str:
     """Return a compact title for report progress labels."""
     parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
     title = (
@@ -322,9 +328,9 @@ def _omit_cross_operation_artifact_references(value: Any) -> tuple[Any, int]:
 
 
 def _current_operation_report_memories(
-    memories: List[Dict[str, Any]],
+    memories: list[dict[str, Any]],
     operation_id: str,
-) -> tuple[List[Dict[str, Any]], int, set[str]]:
+) -> tuple[list[dict[str, Any]], int, set[str]]:
     """Keep prior-operation shared memories advisory by excluding them from report evidence."""
 
     current = []
@@ -352,12 +358,12 @@ def _normalize_artifact_reference(reference: str) -> str:
         return f"artifact:artifacts/{normalized.split(':', 1)[1]}"
     if lowered.startswith("artifact:"):
         return normalized
-    if lowered.startswith("artifacts/") or lowered.startswith("outputs/"):
+    if lowered.startswith(("artifacts/", "outputs/")):
         return f"artifact:{normalized}"
     return normalized
 
 
-def _artifact_reference_matches(value: str) -> List[tuple[str, str]]:
+def _artifact_reference_matches(value: str) -> list[tuple[str, str]]:
     """Return raw and normalized artifact references from one text value."""
     return [
         (match.group(0), _normalize_artifact_reference(match.group(0)))
@@ -365,12 +371,12 @@ def _artifact_reference_matches(value: str) -> List[tuple[str, str]]:
     ]
 
 
-def _file_artifact_references(value: Any) -> List[str]:
+def _file_artifact_references(value: Any) -> list[str]:
     """Return canonical file artifact references without treating target paths as files."""
     return sorted(reference for reference in _artifact_references(value) if reference.startswith("artifact:"))
 
 
-def _inventory_endpoint_values(task_records: List[Any]) -> Dict[str, str]:
+def _inventory_endpoint_values(task_records: list[Any]) -> dict[str, str]:
     """Load unambiguous endpoint display values from task-attached inventory manifests."""
     references: set[str] = set()
     for task in task_records:
@@ -379,10 +385,10 @@ def _inventory_endpoint_values(task_records: List[Any]) -> Dict[str, str]:
         references.update(_file_artifact_references(getattr(basis, "source_refs", ())))
         references.update(_file_artifact_references(getattr(task, "evidence", ())))
 
-    candidates: Dict[str, set[str]] = {}
+    candidates: dict[str, set[str]] = {}
     for reference in sorted(references):
         try:
-            with open(_artifact_path_from_ref(reference), "r", encoding="utf-8") as manifest_file:
+            with open(_artifact_path_from_ref(reference), encoding="utf-8") as manifest_file:
                 manifest = json.load(manifest_file)
         except (OSError, ValueError, json.JSONDecodeError):
             continue
@@ -404,7 +410,7 @@ def _inventory_endpoint_values(task_records: List[Any]) -> Dict[str, str]:
     return resolved
 
 
-def _resolve_inventory_ids_for_display(value: Any, endpoint_values: Dict[str, str], field_name: str = "") -> Any:
+def _resolve_inventory_ids_for_display(value: Any, endpoint_values: dict[str, str], field_name: str = "") -> Any:
     """Resolve known inventory endpoint IDs in display text without changing canonical identifiers."""
     if not endpoint_values or field_name in _INVENTORY_IDENTIFIER_FIELDS:
         return deepcopy(value)
@@ -422,7 +428,7 @@ def _resolve_inventory_ids_for_display(value: Any, endpoint_values: Dict[str, st
     return deepcopy(value)
 
 
-def _artifact_excerpt_keywords(item: Dict[str, Any]) -> set[str]:
+def _artifact_excerpt_keywords(item: dict[str, Any]) -> set[str]:
     """Build compact relevance terms from one report item without adding external facts."""
     parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
     source = " ".join(
@@ -443,11 +449,11 @@ def _artifact_excerpt_keywords(item: Dict[str, Any]) -> set[str]:
     }
 
 
-def _select_artifact_excerpt(path: str, keywords: set[str], max_lines: int = 12) -> List[tuple[int, str]]:
+def _select_artifact_excerpt(path: str, keywords: set[str], max_lines: int = 12) -> list[tuple[int, str]]:
     """Select bounded, evidence-relevant lines from an artifact while preserving their content."""
-    lines: Dict[int, str] = {}
-    scores: List[tuple[int, int]] = []
-    with open(path, "r", encoding="utf-8", errors="replace") as artifact_file:
+    lines: dict[int, str] = {}
+    scores: list[tuple[int, int]] = []
+    with open(path, encoding="utf-8", errors="replace") as artifact_file:
         for line_number, raw_line in enumerate(artifact_file, 1):
             if line_number > 10000:
                 break
@@ -483,10 +489,10 @@ def _select_artifact_excerpt(path: str, keywords: set[str], max_lines: int = 12)
     return [(line_number, lines[line_number]) for line_number in sorted(selected)]
 
 
-def _format_artifact_excerpt(reference: str, excerpt: List[tuple[int, str]]) -> str:
+def _format_artifact_excerpt(reference: str, excerpt: list[tuple[int, str]]) -> str:
     """Format one artifact excerpt with auditable line numbers and verbatim content."""
     line_numbers = [line_number for line_number, _line in excerpt]
-    ranges: List[str] = []
+    ranges: list[str] = []
     start = previous = line_numbers[0]
     for line_number in line_numbers[1:]:
         if line_number == previous + 1:
@@ -502,9 +508,9 @@ def _format_artifact_excerpt(reference: str, excerpt: List[tuple[int, str]]) -> 
     )
 
 
-def _append_artifact_evidence(text: str, item: Dict[str, Any]) -> str:
+def _append_artifact_evidence(text: str, item: dict[str, Any]) -> str:
     """Append bounded excerpts from artifacts attached to a finding or observation."""
-    excerpts: List[str] = []
+    excerpts: list[str] = []
     keywords = _artifact_excerpt_keywords(item)
     for reference in _file_artifact_references(item)[:4]:
         try:
@@ -520,7 +526,7 @@ def _append_artifact_evidence(text: str, item: Dict[str, Any]) -> str:
     return text.rstrip() + "\n\n#### Artifact Evidence Excerpts\n\n" + "\n".join(excerpts)
 
 
-def _ground_report_item(text: str, item: Dict[str, Any], *, observation: bool = False) -> str:
+def _ground_report_item(text: str, item: dict[str, Any], *, observation: bool = False) -> str:
     """Remove unsupported artifact citations without discarding the generated report structure."""
 
     allowed = _artifact_references(item)
@@ -544,9 +550,9 @@ def _ground_report_item(text: str, item: Dict[str, Any], *, observation: bool = 
 
 def _normalize_report_category(
     category: Any,
-    metadata: Dict[str, Any],
+    metadata: dict[str, Any],
     content: str,
-    parsed: Dict[str, str],
+    parsed: dict[str, str],
 ) -> str:
     """Enforce finding evidence requirements without mutating stored memory."""
 
@@ -614,9 +620,9 @@ def _normalize_report_category(
 
 
 def _apply_authoritative_finding_resolution(
-    metadata: Dict[str, Any],
-    finding_records_by_uid: Dict[str, Dict[str, Any]],
-) -> Dict[str, Any]:
+    metadata: dict[str, Any],
+    finding_records_by_uid: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     """Return report-local metadata with the persisted finding resolution applied.
 
     Finding records are the durable workflow authority. Memory metadata is retained
@@ -670,9 +676,9 @@ def _apply_authoritative_finding_resolution(
 
 def _resolved_finding_report_category(
     category: Any,
-    metadata: Dict[str, Any],
+    metadata: dict[str, Any],
     content: str,
-    parsed: Dict[str, str],
+    parsed: dict[str, str],
 ) -> str:
     """Classify a report item without allowing stale memory to downgrade a record."""
 
@@ -690,7 +696,7 @@ def _resolved_finding_report_category(
     return resolved_category
 
 
-def _verified_finding_assertions_met(metadata: Dict[str, Any]) -> bool:
+def _verified_finding_assertions_met(metadata: dict[str, Any]) -> bool:
     """Recheck the generic positive-evidence assertions for a verified finding."""
 
     candidate_assertions = metadata.get("candidate_evidence_assertions")
@@ -747,8 +753,8 @@ def _verified_finding_assertions_met(metadata: Dict[str, Any]) -> bool:
 
 
 def _reportable_finding_source_task_uids(
-    raw_memories: List[Dict[str, Any]],
-    finding_records_by_uid: Dict[str, Dict[str, Any]],
+    raw_memories: list[dict[str, Any]],
+    finding_records_by_uid: dict[str, dict[str, Any]],
     *,
     operation_id: str,
     cross_operation: bool,
@@ -820,9 +826,9 @@ def _emit_report_progress(
 
 def _format_target_coverage(
     plan: Any,
-    tasks: List[Any],
-    evidence: List[Dict[str, Any]],
-    target_values: Optional[Dict[str, str]] = None,
+    tasks: list[Any],
+    evidence: list[dict[str, Any]],
+    target_values: dict[str, str] | None = None,
 ) -> str:
     targets = list(getattr(plan, "targets", []) or [])
     if not targets and target_values:
@@ -869,7 +875,7 @@ def _target_value_matches(candidate: Any, target_value: str) -> bool:
     return candidate_text == target_text or candidate_text.startswith(f"{target_text}/")
 
 
-def _evidence_matches_target(item: Dict[str, Any], target: OperationTarget) -> bool:
+def _evidence_matches_target(item: dict[str, Any], target: OperationTarget) -> bool:
     """Resolve evidence to a registered target using IDs, locations, and endpoint URLs."""
 
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
@@ -886,11 +892,11 @@ def _evidence_matches_target(item: Dict[str, Any], target: OperationTarget) -> b
 
 
 def _validate_report_consistency(
-    sections: Dict[str, Any], completion_status: Dict[str, Any]
-) -> List[str]:
+    sections: dict[str, Any], completion_status: dict[str, Any]
+) -> list[str]:
     """Reconcile report summaries against their canonical workflow and evidence inputs."""
 
-    errors: List[str] = []
+    errors: list[str] = []
     evidence = sections.get("raw_evidence", [])
     evidence = evidence if isinstance(evidence, list) else []
     verified_count = sum(1 for item in evidence if isinstance(item, dict) and item.get("category") == "finding")
@@ -984,7 +990,7 @@ def _validate_report_consistency(
     return errors
 
 
-def _format_report_consistency_warnings(errors: List[str]) -> str:
+def _format_report_consistency_warnings(errors: list[str]) -> str:
     """Render unresolved deterministic report validation errors without altering evidence."""
 
     if not errors:
@@ -994,8 +1000,8 @@ def _format_report_consistency_warnings(errors: List[str]) -> str:
         '<a name="report-consistency-warnings"></a>',
         "## Report Consistency Warnings",
         "",
-        "The following report metadata inconsistencies were detected during deterministic validation. "
-        "Counts were regenerated from canonical workflow and evidence data where possible.",
+        ("The following report metadata inconsistencies were detected during deterministic validation. "
+        "Counts were regenerated from canonical workflow and evidence data where possible."),
         "",
     ]
     lines.extend(f"- {error}" for error in errors)
@@ -1017,7 +1023,7 @@ def _is_reportable_informational_observation(item: Any) -> bool:
     return source not in _WORKFLOW_BOOKKEEPING_SOURCES and not publication_key.startswith("task_acceptance:")
 
 
-def _canonical_report_data(sections: Dict[str, Any]) -> Dict[str, Any]:
+def _canonical_report_data(sections: dict[str, Any]) -> dict[str, Any]:
     """Return the Python-owned, JSON-safe contract used to assemble a report.
 
     This deliberately contains facts and rendered deterministic sections only.  Model
@@ -1074,7 +1080,7 @@ def _canonical_report_data(sections: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _informational_observation_context(sections: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _informational_observation_context(sections: dict[str, Any]) -> list[dict[str, Any]]:
     """Build explicitly labeled, narrative-only observation context for report agents."""
 
     observations = [
@@ -1098,11 +1104,11 @@ def _informational_observation_context(sections: Dict[str, Any]) -> List[Dict[st
     return context
 
 
-def _validate_narrative_consistency(text: Any, canonical: Dict[str, Any]) -> List[str]:
+def _validate_narrative_consistency(text: Any, canonical: dict[str, Any]) -> list[str]:
     """Find factual claims in model prose that Python cannot substantiate."""
     if not isinstance(text, str) or not text.strip():
         return []
-    warnings: List[str] = []
+    warnings: list[str] = []
     known_findings = {
         str(item.get("id")) for item in canonical.get("findings", []) if item.get("id")
     } | {
@@ -1140,7 +1146,7 @@ def _validate_narrative_consistency(text: Any, canonical: Dict[str, Any]) -> Lis
     return list(dict.fromkeys(warnings))
 
 
-def _canonical_report_json(sections: Dict[str, Any], narratives: Dict[str, Any], warnings: List[str]) -> Dict[str, Any]:
+def _canonical_report_json(sections: dict[str, Any], narratives: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     """Build the stable JSON report envelope without allowing narrative overrides."""
     canonical = _canonical_report_data(sections)
     return {
@@ -1153,7 +1159,7 @@ def _canonical_report_json(sections: Dict[str, Any], narratives: Dict[str, Any],
     }
 
 
-def _format_verified_findings_summary(sections: Dict[str, Any]) -> str:
+def _format_verified_findings_summary(sections: dict[str, Any]) -> str:
     """Render verified counts from canonical values, independent of model prose."""
     counts = sections.get("severity_counts", {})
     lines = [
@@ -1166,7 +1172,7 @@ def _format_verified_findings_summary(sections: Dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _item_artifact_count(item: Dict[str, Any]) -> int:
+def _item_artifact_count(item: dict[str, Any]) -> int:
     """Return the number of recorded artifact references for one report item."""
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
     artifacts = metadata.get("artifacts") or metadata.get("evidence_artifacts") or []
@@ -1175,7 +1181,7 @@ def _item_artifact_count(item: Dict[str, Any]) -> int:
     return len([artifact for artifact in artifacts if str(artifact).strip()])
 
 
-def _format_validation_failures_table(items: List[Dict[str, Any]]) -> str:
+def _format_validation_failures_table(items: list[dict[str, Any]]) -> str:
     """Render validation-required claims from canonical records."""
     if not items:
         return "No validation-required claims were recorded."
@@ -1199,7 +1205,7 @@ def _format_validation_failures_table(items: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _format_observations_table(items: List[Dict[str, Any]]) -> str:
+def _format_observations_table(items: list[dict[str, Any]]) -> str:
     """Render informational observations from canonical records."""
     if not items:
         return "No informational observations were recorded."
@@ -1221,7 +1227,7 @@ def _format_observations_table(items: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _format_executive_deterministic_sections(sections: Dict[str, Any]) -> str:
+def _format_executive_deterministic_sections(sections: dict[str, Any]) -> str:
     """Render executive facts after the model-authored interpretation."""
     completion = sections.get("completion_status", {})
     status = "Complete" if completion.get("assessment_complete") else "Incomplete"
@@ -1252,7 +1258,7 @@ def _format_executive_deterministic_sections(sections: Dict[str, Any]) -> str:
     )
 
 
-def _format_executive_narrative_fallback(sections: Dict[str, Any]) -> str:
+def _format_executive_narrative_fallback(sections: dict[str, Any]) -> str:
     """Render a safe executive narrative from persisted report records only."""
 
     completion = sections.get("completion_status", {})
@@ -1277,7 +1283,7 @@ def _format_executive_narrative_fallback(sections: Dict[str, Any]) -> str:
     )
 
 
-def _format_finding_with_narrative(item: Dict[str, Any], index: int, narrative: str) -> str:
+def _format_finding_with_narrative(item: dict[str, Any], index: int, narrative: str) -> str:
     """Combine Python-owned finding facts with a bounded LLM interpretation."""
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
     title = _escape_markdown_text(_report_item_title(item, f"Finding {index + 1}"))
@@ -1334,7 +1340,7 @@ _USABILITY_ONLY_IMPACT_CLAIMS = re.compile(
 _UNSUPPORTED_AWS_ROTATION = re.compile(r"(?im)^[^\n]*\brotate\b[^\n]*\baws\b[^\n]*$")
 
 
-def _impact_evidence_level(item: Dict[str, Any]) -> str:
+def _impact_evidence_level(item: dict[str, Any]) -> str:
     """Classify the strongest independently evidenced impact for one report item."""
 
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
@@ -1360,7 +1366,7 @@ def _allowed_impact_claims(level: str) -> str:
     return "State only the demonstrated exposure and conditional risk; do not claim successful access or impact."
 
 
-def _ground_impact_claims(narrative: str, item: Dict[str, Any]) -> str:
+def _ground_impact_claims(narrative: str, item: dict[str, Any]) -> str:
     """Remove generated impact claims that exceed the item's evidence level."""
 
     level = _impact_evidence_level(item)
@@ -1394,7 +1400,7 @@ def _ground_impact_claims(narrative: str, item: Dict[str, Any]) -> str:
     return grounded.rstrip() + "\n\n**Impact grounding correction:** Claims beyond the recorded evidence were removed."
 
 
-def _ground_report_impact_claims(narrative: str, findings: List[Dict[str, Any]]) -> str:
+def _ground_report_impact_claims(narrative: str, findings: list[dict[str, Any]]) -> str:
     """Apply the strictest verified-finding impact limit to a cross-finding narrative."""
 
     if not findings:
@@ -1403,7 +1409,7 @@ def _ground_report_impact_claims(narrative: str, findings: List[Dict[str, Any]])
     return _ground_impact_claims(narrative, {"metadata": {"impact_evidence_level": level}})
 
 
-def _remove_unbacked_sensitive_examples(narrative: str, item: Dict[str, Any]) -> str:
+def _remove_unbacked_sensitive_examples(narrative: str, item: dict[str, Any]) -> str:
     """Remove model-invented secret-shaped values from report narrative examples."""
 
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
@@ -1444,7 +1450,7 @@ def _markdown_table_cell(value: Any) -> str:
     return text.replace("|", "\\|")
 
 
-def _format_execution_history(task_rows: List[Dict[str, Any]], acceptance_rows: List[Dict[str, Any]]) -> str:
+def _format_execution_history(task_rows: list[dict[str, Any]], acceptance_rows: list[dict[str, Any]]) -> str:
     """Render task and acceptance history from canonical operation records."""
 
     lines = [
@@ -1497,7 +1503,7 @@ def _compact_text(value: Any, limit: int = 500) -> str:
     return safe_truncate(" ".join(str(value or "").split()), limit)
 
 
-def _compact_finding_context(finding: Dict[str, Any], target: str) -> Dict[str, Any]:
+def _compact_finding_context(finding: dict[str, Any], target: str) -> dict[str, Any]:
     """Expose only evidence needed for a finding's narrative interpretation."""
     metadata = finding.get("metadata", {}) if isinstance(finding.get("metadata"), dict) else {}
     parsed = finding.get("parsed", {}) if isinstance(finding.get("parsed"), dict) else {}
@@ -1521,12 +1527,12 @@ def _compact_next_steps_source(
     *,
     target: str,
     objective: str,
-    completion_status: Dict[str, Any],
-    sections: Dict[str, Any],
-    latest_run: Dict[str, Any],
-    configured_budget: Dict[str, int | float],
-    validation_candidates: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+    completion_status: dict[str, Any],
+    sections: dict[str, Any],
+    latest_run: dict[str, Any],
+    configured_budget: dict[str, int | float],
+    validation_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
     """Build a small, factual context for the recommendations-only report call."""
     latest_metrics = latest_run.get("metrics", {}) if isinstance(latest_run.get("metrics"), dict) else {}
     tool_failures = latest_run.get("tool_failures", {}) if isinstance(latest_run.get("tool_failures"), dict) else {}
@@ -1604,13 +1610,7 @@ def _format_operation_tasks(operation_tasks: Any) -> str:
             continue
         values.extend([""] * 12)
         lines.append(
-            "| {phase} | {title} | {status} | {targets} | {acceptance} |".format(
-                phase=_markdown_table_cell(values[3]),
-                title=_markdown_table_cell(values[0]),
-                status=_markdown_table_cell(values[4]),
-                targets=_markdown_table_cell(values[10]),
-                acceptance=_markdown_table_cell(values[11]),
-            )
+            f"| {_markdown_table_cell(values[3])} | {_markdown_table_cell(values[0])} | {_markdown_table_cell(values[4])} | {_markdown_table_cell(values[10])} | {_markdown_table_cell(values[11])} |"
         )
     return "\n".join(lines)
 
@@ -1629,7 +1629,7 @@ def _clean_observation_detail(content: str) -> str:
     return cleaned.strip()
 
 
-def _format_observation(item: Dict[str, Any], index: int) -> str:
+def _format_observation(item: dict[str, Any], index: int) -> str:
     """Render an informational observation without model-generated interpretation."""
 
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
@@ -1659,7 +1659,7 @@ def _latest_log_run_text(log_text: str) -> str:
     return log_text[line_start + 1 :]
 
 
-def _positive_number(value: Any, *, integer: bool = False) -> Optional[int | float]:
+def _positive_number(value: Any, *, integer: bool = False) -> int | float | None:
     """Normalize a positive configured budget value while rejecting unset sentinels."""
     if value is None or isinstance(value, bool):
         return None
@@ -1673,7 +1673,7 @@ def _positive_number(value: Any, *, integer: bool = False) -> Optional[int | flo
     return number if number > 0 else None
 
 
-def _normalize_budget_config(raw_budget: Any, *, default_duration: Optional[int] = None) -> Dict[str, int | float]:
+def _normalize_budget_config(raw_budget: Any, *, default_duration: int | None = None) -> dict[str, int | float]:
     """Filter a runtime budget to configured dimensions, always retaining required duration."""
     raw = raw_budget if isinstance(raw_budget, dict) else {}
     duration = _positive_number(
@@ -1682,7 +1682,7 @@ def _normalize_budget_config(raw_budget: Any, *, default_duration: Optional[int]
     )
     if duration is None:
         duration = _positive_number(default_duration, integer=True)
-    budget: Dict[str, int | float] = {}
+    budget: dict[str, int | float] = {}
     if duration is not None:
         budget["duration"] = duration
     tokens = _positive_number(raw.get("tokens", raw.get("maxTokens")), integer=True)
@@ -1711,7 +1711,7 @@ def _format_model_usage_table(
     rows: Any,
     fallback_provider: str,
     fallback_model: str,
-    fallback_context_window: Optional[int] = None,
+    fallback_context_window: int | None = None,
 ) -> str:
     """Render provider/model usage rows as a deterministic Markdown table."""
     normalized_rows = [row for row in rows or [] if isinstance(row, dict)]
@@ -1775,10 +1775,10 @@ def _remove_generated_execution_metrics(content: str) -> str:
 
 def _resolve_report_model_metrics(
     config_manager: Any,
-    latest_run: Dict[str, Any],
+    latest_run: dict[str, Any],
     callback_handler: Any,
-    operation_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    operation_id: str | None = None,
+) -> dict[str, Any]:
     """Resolve model metrics once, preferring live callback data when available."""
     main_provider = config_manager.get_provider()
     main_model = config_manager.get_llm_config(main_provider).model_id
@@ -1832,7 +1832,7 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _software_provenance() -> Optional[Dict[str, str]]:
+def _software_provenance() -> dict[str, str] | None:
     """Read the software name and version from the project manifest."""
     try:
         with (_project_root() / "pyproject.toml").open("rb") as manifest:
@@ -1846,7 +1846,7 @@ def _software_provenance() -> Optional[Dict[str, str]]:
     return None
 
 
-def _https_repository_url(remote_url: str) -> Optional[str]:
+def _https_repository_url(remote_url: str) -> str | None:
     """Normalize supported Git remote URL forms to an HTTPS repository URL."""
     remote = str(remote_url or "").strip()
     if not remote:
@@ -1862,7 +1862,7 @@ def _https_repository_url(remote_url: str) -> Optional[str]:
     return None
 
 
-def _git_provenance() -> Optional[Dict[str, str]]:
+def _git_provenance() -> dict[str, str] | None:
     """Return HTTPS repository URL and immutable commit hash when Git metadata is available."""
     root = _project_root()
     try:
@@ -1891,7 +1891,7 @@ def _git_provenance() -> Optional[Dict[str, str]]:
     return None
 
 
-def _fallback_context_window(provider: str, model_id: str) -> Optional[int]:
+def _fallback_context_window(provider: str, model_id: str) -> int | None:
     """Resolve the configured model's effective context window for an empty usage table."""
     try:
         from modules.config.models.factory import require_prompt_token_limit
@@ -1902,19 +1902,19 @@ def _fallback_context_window(provider: str, model_id: str) -> Optional[int]:
         return None
 
 
-def _split_operation_log_sessions(log_text: str) -> List[str]:
+def _split_operation_log_sessions(log_text: str) -> list[str]:
     """Split an appended operation log into chronological sessions."""
     marker_indexes = [match.start() for match in re.finditer(re.escape(_SESSION_START_MARKER), log_text)]
     if not marker_indexes:
         return [log_text] if log_text else []
     return [
-        log_text[start:end] for start, end in zip(marker_indexes, marker_indexes[1:] + [len(log_text)])
+        log_text[start:end] for start, end in zip(marker_indexes, [*marker_indexes[1:], len(log_text)], strict=False)
     ]
 
 
-def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
+def _parse_operation_log_session(run_text: str) -> dict[str, Any]:
     """Extract report inputs from one operation-log session."""
-    summary: Dict[str, Any] = {
+    summary: dict[str, Any] = {
         "session_started": None,
         "session_ended": None,
         "operation_id": None,
@@ -1938,10 +1938,10 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
     if _SESSION_START_MARKER in first_line:
         summary["session_started"] = first_line.split(_SESSION_START_MARKER, 1)[1].strip()
 
-    budget_candidate: Dict[str, Any] = {}
-    tools_used: List[str] = []
-    shell_command_names: List[str] = []
-    shell_commands_by_tool_id: Dict[str, List[str]] = {}
+    budget_candidate: dict[str, Any] = {}
+    tools_used: list[str] = []
+    shell_command_names: list[str] = []
+    shell_commands_by_tool_id: dict[str, list[str]] = {}
     tool_failures: Counter[str] = Counter()
     metrics = summary["metrics"]
     model_usage_snapshot_seen = False
@@ -1986,10 +1986,8 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
                     model_usage_snapshot_seen = True
                 elif not model_usage_snapshot_seen and isinstance(event_metrics.get("modelUsage"), list):
                     metrics["model_usage"] = event_metrics["modelUsage"]
-                try:
+                with contextlib.suppress(TypeError, ValueError):
                     metrics["cost"] = max(metrics["cost"], float(event_metrics.get("cost") or 0.0))
-                except (TypeError, ValueError):
-                    pass
         elif event_type == "operation_init":
             summary["operation_id"] = payload.get("operation_id") or summary["operation_id"]
             summary["operation_mode"] = payload.get("operation_mode") or summary["operation_mode"]
@@ -2029,7 +2027,7 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
     summary["tools_used"] = tools_used
     for command_values in shell_commands_by_tool_id.values():
         shell_command_names.extend(command_values)
-    reportable_tools: List[str] = []
+    reportable_tools: list[str] = []
     for tool_name in list(tools_used) + shell_command_names:
         normalized = str(tool_name).strip().split(":", 1)[0]
         if normalized and is_reportable_tool(normalized) and normalized not in reportable_tools:
@@ -2039,7 +2037,7 @@ def _parse_operation_log_session(run_text: str) -> Dict[str, Any]:
     return summary
 
 
-def _parse_operation_timestamp(value: Any) -> Optional[datetime]:
+def _parse_operation_timestamp(value: Any) -> datetime | None:
     """Parse operation lifecycle timestamps emitted by the log without raising."""
 
     text = str(value or "").strip().replace("Z", "+00:00")
@@ -2051,7 +2049,7 @@ def _parse_operation_timestamp(value: Any) -> Optional[datetime]:
         return None
 
 
-def _normalize_shell_command_names(value: Any) -> List[str]:
+def _normalize_shell_command_names(value: Any) -> list[str]:
     """Extract safe executable basenames from shell tool input.
 
     Shell commands are valuable methodology telemetry, but command text is not a
@@ -2060,14 +2058,14 @@ def _normalize_shell_command_names(value: Any) -> List[str]:
     """
 
     if isinstance(value, (list, tuple)):
-        commands: List[str] = []
+        commands: list[str] = []
         for item in value:
             commands.extend(_normalize_shell_command_names(item))
         return commands
     text = str(value or "").strip()
     if not text:
         return []
-    names: List[str] = []
+    names: list[str] = []
     executable_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
     assignments = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
     wrappers = {"sudo", "command", "builtin", "exec", "env", "timeout", "nice", "nohup"}
@@ -2093,7 +2091,7 @@ def _normalize_shell_command_names(value: Any) -> List[str]:
     return list(dict.fromkeys(names))
 
 
-def _is_report_only_session(summary: Dict[str, Any]) -> bool:
+def _is_report_only_session(summary: dict[str, Any]) -> bool:
     """Identify explicit and legacy report-only sessions without execution evidence."""
     if summary.get("operation_mode") == "report_only":
         return True
@@ -2114,7 +2112,7 @@ def _duration_seconds(value: Any) -> int:
     return total
 
 
-def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _merge_execution_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
     """Combine execution-only facts across continuation sessions."""
     if len(sessions) == 1:
         return sessions[0]
@@ -2122,10 +2120,10 @@ def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
     metrics = dict(summary.get("metrics", {}))
     for key in ("input_tokens", "output_tokens", "total_tokens", "cost"):
         metrics[key] = 0
-    tools_used: List[str] = []
-    reportable_tools_used: List[str] = []
+    tools_used: list[str] = []
+    reportable_tools_used: list[str] = []
     failures: Counter[str] = Counter()
-    usage_rows: Dict[tuple[str, str], Dict[str, Any]] = {}
+    usage_rows: dict[tuple[str, str], dict[str, Any]] = {}
     duration_seconds = 0
     for session in sessions:
         for tool_name in session.get("tools_used", []):
@@ -2181,11 +2179,11 @@ def _merge_execution_sessions(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
     return summary
 
 
-def _parse_latest_operation_log(log_path: str) -> Dict[str, Any]:
+def _parse_latest_operation_log(log_path: str) -> dict[str, Any]:
     """Extract canonical execution inputs, bypassing later report-only sessions."""
     if not os.path.exists(log_path):
         return _parse_operation_log_session("")
-    with open(log_path, "r", encoding="utf-8", errors="ignore") as log_file:
+    with open(log_path, encoding="utf-8", errors="ignore") as log_file:
         sessions = [_parse_operation_log_session(text) for text in _split_operation_log_sessions(log_file.read())]
     if not sessions:
         return _parse_operation_log_session("")
@@ -2233,7 +2231,7 @@ def _configured_nonnegative_int(config_manager: Any, name: str, default: int) ->
     return max(0, value)
 
 
-def _validate_report_critique(data: Dict[str, Any]) -> Dict[str, Any]:
+def _validate_report_critique(data: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize the report critic's structured decision."""
     if not isinstance(data.get("approved"), bool):
         raise ValueError("report critic approved must be a boolean")
@@ -2302,7 +2300,7 @@ def _invoke_report_agent(
     agent: Any,
     prompt: str,
     section_label: str,
-    circuit_breaker: Optional[_ReportModelCircuitBreaker],
+    circuit_breaker: _ReportModelCircuitBreaker | None,
 ) -> Any:
     """Call one report agent unless a prior provider failure opened the circuit."""
 
@@ -2328,7 +2326,7 @@ def _invoke_report_agent(
 
 
 def _create_report_agent(
-    circuit_breaker: Optional[_ReportModelCircuitBreaker],
+    circuit_breaker: _ReportModelCircuitBreaker | None,
     section_label: str,
     **kwargs: Any,
 ) -> Any:
@@ -2338,7 +2336,7 @@ def _create_report_agent(
         return None
     try:
         return ReportGenerator.create_report_agent(**kwargs)
-    except Exception as error:  # noqa: BLE001 - deterministic reporting remains available
+    except Exception as error:
         if circuit_breaker is not None:
             circuit_breaker.trip(section_label, error)
         logger.warning("Report %s agent creation failed: %s", section_label, error)
@@ -2349,7 +2347,7 @@ def _report_revision_prompt(
     section_label: str,
     source_prompt: str,
     previous_draft: str,
-    feedback: List[str],
+    feedback: list[str],
 ) -> str:
     """Feed the previous draft and critic feedback back into its actor."""
     return f"""Revise the report section using the critic feedback below. Preserve accurate content from the previous
@@ -2374,9 +2372,9 @@ def _run_report_critic(
     critic_agent: Any,
     prompt: str,
     json_retries: int,
-    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
+    circuit_breaker: _ReportModelCircuitBreaker | None = None,
     section_label: str = "report critic",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run a report critic with the workflow's tolerant JSON parsing and retry convention."""
     current_prompt = prompt
     remaining_json_retries = json_retries
@@ -2435,14 +2433,14 @@ def _run_report_refinement(
     refinement_cycles: int,
     json_retries: int,
     efficiency_callback: Any = None,
-    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
-) -> tuple[str, Optional[Dict[str, Any]]]:
+    circuit_breaker: _ReportModelCircuitBreaker | None = None,
+) -> tuple[str, dict[str, Any] | None]:
     """Generate and critic-guided revise one report section."""
     try:
         content = _extract_text_from_result(
             _invoke_report_agent(actor_agent, source_prompt, section_label, circuit_breaker)
         )
-    except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
+    except Exception as error:
         logger.warning("Report %s actor failed; using deterministic section fallback: %s", section_label, error)
         return "", None
     if not content or refinement_cycles == 0:
@@ -2460,7 +2458,7 @@ def _run_report_refinement(
                 circuit_breaker,
                 section_label,
             )
-        except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
+        except Exception as error:
             logger.warning("Report %s critic failed; using deterministic section fallback: %s", section_label, error)
             return "", None
         if critique["approved"]:
@@ -2475,7 +2473,7 @@ def _run_report_refinement(
                 section_label,
                 circuit_breaker,
             ))
-        except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
+        except Exception as error:
             logger.warning("Report %s revision failed; using deterministic section fallback: %s", section_label, error)
             return "", None
         if revised:
@@ -2495,7 +2493,7 @@ def _cleanup_report_agent(agent: Any, label: str) -> None:
         logger.warning("Unable to clean up %s: %s", label, error)
 
 
-def _append_inline_review_feedback(content: str, critique: Optional[Dict[str, Any]]) -> str:
+def _append_inline_review_feedback(content: str, critique: dict[str, Any] | None) -> str:
     """Keep unresolved critic feedback inside the section that produced it."""
     if not critique:
         return content
@@ -2509,14 +2507,14 @@ def _append_inline_review_feedback(content: str, critique: Optional[Dict[str, An
     )
 
 
-def _validate_string_list(data: Dict[str, Any], key: str) -> List[str]:
+def _validate_string_list(data: dict[str, Any], key: str) -> list[str]:
     value = data.get(key)
     if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
         raise ValueError(f"{key} must be a list of non-empty strings")
     return [item.strip() for item in value]
 
 
-def _validate_next_steps(data: Dict[str, Any], configured_budget: Dict[str, int | float]) -> Dict[str, Any]:
+def _validate_next_steps(data: dict[str, Any], configured_budget: dict[str, int | float]) -> dict[str, Any]:
     """Validate Appendix B data and forbid recommendations for unset budget dimensions."""
     normalized = {
         key: _validate_string_list(data, key)
@@ -2580,7 +2578,7 @@ def _validate_next_steps(data: Dict[str, Any], configured_budget: Dict[str, int 
     return normalized
 
 
-def _next_steps_recommend_rerun(data: Dict[str, Any]) -> bool:
+def _next_steps_recommend_rerun(data: dict[str, Any]) -> bool:
     """Return whether the generated guidance explicitly calls for a fresh operation."""
     recommendations = data.get("recommended_next_steps", [])
     if not isinstance(recommendations, list):
@@ -2590,10 +2588,10 @@ def _next_steps_recommend_rerun(data: Dict[str, Any]) -> bool:
 
 
 def _apply_next_steps_budget_scope(
-    data: Dict[str, Any],
-    configured_budget: Dict[str, int | float],
-    source: Dict[str, Any],
-) -> Dict[str, Any]:
+    data: dict[str, Any],
+    configured_budget: dict[str, int | float],
+    source: dict[str, Any],
+) -> dict[str, Any]:
     """Align incomplete-operation budget wording and duration with continuation semantics."""
     completion_status = source.get("completion_status", {})
     completion_status = completion_status if isinstance(completion_status, dict) else {}
@@ -2625,10 +2623,10 @@ def _apply_next_steps_budget_scope(
 
 
 def _next_steps_fallback(
-    configured_budget: Dict[str, int | float],
-    source: Dict[str, Any],
+    configured_budget: dict[str, int | float],
+    source: dict[str, Any],
     generation_error: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build Appendix B guidance from canonical operation state after invalid model output."""
     completion_status = source.get("completion_status", {})
     completion_status = completion_status if isinstance(completion_status, dict) else {}
@@ -2647,12 +2645,12 @@ def _next_steps_fallback(
         if isinstance(phase, dict) and str(phase.get("status") or "") not in {"done", "not_applicable"}
     ]
     incomplete = not bool(completion_status.get("assessment_complete")) or bool(incomplete_phases)
-    coverage_gaps: List[str] = []
-    recommended_next_steps: List[str] = []
-    completion_criteria: List[str] = []
-    agent_improvements: List[str] = []
-    tooling_improvements: List[str] = []
-    manual_investigations: List[str] = []
+    coverage_gaps: list[str] = []
+    recommended_next_steps: list[str] = []
+    completion_criteria: list[str] = []
+    agent_improvements: list[str] = []
+    tooling_improvements: list[str] = []
+    manual_investigations: list[str] = []
 
     for phase in incomplete_phases:
         phase_id = phase.get("phase_id", "unknown")
@@ -2737,11 +2735,11 @@ def _next_steps_fallback(
 def _run_next_steps_actor(
     actor_agent: Any,
     prompt: str,
-    configured_budget: Dict[str, int | float],
-    source: Dict[str, Any],
+    configured_budget: dict[str, int | float],
+    source: dict[str, Any],
     json_retries: int,
-    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
-) -> tuple[Dict[str, Any], bool]:
+    circuit_breaker: _ReportModelCircuitBreaker | None = None,
+) -> tuple[dict[str, Any], bool]:
     """Run the Appendix B actor with tolerant JSON repair and validation retries."""
     current_prompt = prompt
     last_error = "invalid model response"
@@ -2781,13 +2779,13 @@ def _run_next_steps_refinement(
     critic_agent: Any,
     source_prompt: str,
     section_requirements: str,
-    configured_budget: Dict[str, int | float],
-    source: Dict[str, Any],
+    configured_budget: dict[str, int | float],
+    source: dict[str, Any],
     refinement_cycles: int,
     json_retries: int,
     efficiency_callback: Any = None,
-    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
-) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    circuit_breaker: _ReportModelCircuitBreaker | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Generate and critic-guided revise the structured Appendix B data."""
     data, used_fallback = _run_next_steps_actor(
         actor_agent, source_prompt, configured_budget, source, json_retries, circuit_breaker
@@ -2812,7 +2810,7 @@ def _run_next_steps_refinement(
                 circuit_breaker,
                 "Appendix B: Recommended Next Steps",
             )
-        except Exception as error:  # noqa: BLE001 - report model failures must not block deterministic output
+        except Exception as error:
             logger.warning("Appendix B critic failed; using deterministic fallback: %s", error)
             return _apply_next_steps_budget_scope(
                 _next_steps_fallback(configured_budget, source, str(error)), configured_budget, source
@@ -2841,12 +2839,12 @@ Critic feedback:
     return _apply_next_steps_budget_scope(data, configured_budget, source), final_rejection
 
 
-def _format_list_section(title: str, items: List[str]) -> str:
+def _format_list_section(title: str, items: list[str]) -> str:
     lines = "\n".join(f"- {item}" for item in items) if items else "No applicable items were identified."
     return f"### {title}\n\n{lines}\n\n"
 
 
-def _format_next_steps_appendix(data: Dict[str, Any]) -> str:
+def _format_next_steps_appendix(data: dict[str, Any]) -> str:
     """Render validated Appendix B data into deterministic Markdown."""
     parts = [
         _PAGE_BREAK,
@@ -2879,9 +2877,9 @@ def _format_next_steps_appendix(data: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def _format_taxonomy_mappings(taxonomy: Dict[str, Any], annotation: Optional[Dict[str, Any]] = None) -> str:
+def _format_taxonomy_mappings(taxonomy: dict[str, Any], annotation: dict[str, Any] | None = None) -> str:
     """Render catalog-authoritative taxonomy mappings after report grounding."""
-    parts: List[str] = []
+    parts: list[str] = []
     for label, key in (("MITRE ATT&CK", "mitre_attack"), ("CWE", "cwe")):
         mappings = taxonomy.get(key, []) if isinstance(taxonomy, dict) else []
         parts.append(f"#### {label} Mapping\n\n")
@@ -2922,12 +2920,12 @@ def _format_taxonomy_mappings(taxonomy: Dict[str, Any], annotation: Optional[Dic
     return "".join(parts)
 
 
-def _format_taxonomy_coverage_tables(findings: List[Dict[str, Any]]) -> str:
+def _format_taxonomy_coverage_tables(findings: list[dict[str, Any]]) -> str:
     """Summarize catalog-validated mappings from verified findings for the executive summary."""
-    parts: List[str] = []
+    parts: list[str] = []
     for heading, key in (("CWE Coverage", "cwe"), ("MITRE ATT&CK Coverage", "mitre_attack")):
-        aggregate: Dict[str, Dict[str, Any]] = {}
-        annotation_statuses: Dict[str, int] = {}
+        aggregate: dict[str, dict[str, Any]] = {}
+        annotation_statuses: dict[str, int] = {}
         for finding in findings:
             metadata = finding.get("metadata", {}) if isinstance(finding.get("metadata"), dict) else {}
             annotation = metadata.get("taxonomy_annotation")
@@ -2974,22 +2972,22 @@ def _generate_methodology_appendix(
     *,
     target: str,
     operation_id: str,
-    sections: Dict[str, Any],
+    sections: dict[str, Any],
     provider: str,
-    model_id: Optional[str],
+    model_id: str | None,
     module_guidance: str,
     completion_guidance: str,
     module_appendix_prompt: str,
     refinement_cycles: int,
     json_retries: int,
     output_path: str,
-    report_parts_files: List[str],
+    report_parts_files: list[str],
     callback_handler: Any,
     report_metrics_callback: Any,
     report_step_index: int,
     report_step_total: int,
-    model_metrics: Dict[str, Any],
-    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
+    model_metrics: dict[str, Any],
+    circuit_breaker: _ReportModelCircuitBreaker | None = None,
 ) -> int:
     """Generate a bounded methodology narrative inside a deterministic appendix."""
     logger.info("Generating Appendix A: Assessment Methodology...")
@@ -3108,24 +3106,24 @@ def _generate_next_steps_appendix(
     target: str,
     objective: str,
     operation_id: str,
-    sections: Dict[str, Any],
-    completion_status: Dict[str, Any],
-    latest_run: Dict[str, Any],
-    configured_budget: Dict[str, Any],
-    report_validation_failures: List[tuple[int, Dict[str, Any]]],
+    sections: dict[str, Any],
+    completion_status: dict[str, Any],
+    latest_run: dict[str, Any],
+    configured_budget: dict[str, Any],
+    report_validation_failures: list[tuple[int, dict[str, Any]]],
     provider: str,
-    model_id: Optional[str],
+    model_id: str | None,
     module_guidance: str,
     completion_guidance: str,
     refinement_cycles: int,
     json_retries: int,
     output_path: str,
-    report_parts_files: List[str],
+    report_parts_files: list[str],
     callback_handler: Any,
     report_metrics_callback: Any,
     report_step_index: int,
     report_step_total: int,
-    circuit_breaker: Optional[_ReportModelCircuitBreaker] = None,
+    circuit_breaker: _ReportModelCircuitBreaker | None = None,
 ) -> int:
     """Generate and persist the structured recommended-next-steps appendix."""
     logger.info("Generating Appendix B: Recommended Next Steps...")
@@ -3233,7 +3231,7 @@ Canonical operation data:
     return report_step_index
 
 
-def _format_parameter_adjustments_section(registry: Optional[Any] = None) -> str:
+def _format_parameter_adjustments_section(registry: Any | None = None) -> str:
     """Render the model and agent parameter-adjustment subsection of Appendix A."""
     from modules.config.models.agent_profiles import get_agent_settings_registry
 
@@ -3243,8 +3241,8 @@ def _format_parameter_adjustments_section(registry: Optional[Any] = None) -> str
 
     parts = [
         "### Model & Agent Parameter Adjustments\n\n",
-        "This section documents initial baseline model parameters, runtime parameter adaptations "
-        "(such as reasoning loop recovery and token limit escalations), and provider capability fallback events.\n\n",
+        ("This section documents initial baseline model parameters, runtime parameter adaptations "
+        "(such as reasoning loop recovery and token limit escalations), and provider capability fallback events.\n\n"),
         "### Agent Role Configurations\n\n",
         "| Agent Role | Parameter | Baseline | Final | Status |\n",
         "| :--- | :--- | :--- | :--- | :--- |\n",
@@ -3285,14 +3283,14 @@ def _format_parameter_adjustments_section(registry: Optional[Any] = None) -> str
 
 def _assemble_security_assessment_report(
     *,
-    filename: Optional[str],
+    filename: str | None,
     output_path: str,
     objective: str,
     operation_id: str,
     completion_notice: str,
     has_observations: bool,
-    report_parts_files: List[str],
-    model_metrics: Dict[str, Any],
+    report_parts_files: list[str],
+    model_metrics: dict[str, Any],
 ) -> str:
     """Combine report parts and append deterministic operation metadata."""
     report_filename = filename or os.path.join(output_path, "security_assessment_report.md")
@@ -3316,7 +3314,7 @@ def _assemble_security_assessment_report(
         ]
     )
     for part_file in report_parts_files:
-        with open(part_file, "r", encoding="utf-8") as part_file_handle:
+        with open(part_file, encoding="utf-8") as part_file_handle:
             parts.extend([part_file_handle.read(), "\n\n"])
 
     provenance_lines = []
@@ -3338,7 +3336,7 @@ def _assemble_security_assessment_report(
     return report_filename
 
 
-def _format_deterministic_finding(item: Dict[str, Any], index: int) -> str:
+def _format_deterministic_finding(item: dict[str, Any], index: int) -> str:
     """Render a stored finding without model-authored analysis."""
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
     title = _escape_markdown_text(_report_item_title(item, f"Finding {index + 1}"))
@@ -3357,8 +3355,8 @@ def _format_deterministic_finding(item: Dict[str, Any], index: int) -> str:
 
 
 def _format_deterministic_methodology(
-    sections: Dict[str, Any],
-    model_metrics: Dict[str, Any],
+    sections: dict[str, Any],
+    model_metrics: dict[str, Any],
 ) -> str:
     """Render methodology facts without LLM-generated explanatory prose."""
     latest_run = sections.get("latest_run", {}) if isinstance(sections.get("latest_run"), dict) else {}
@@ -3395,11 +3393,11 @@ def generate_deterministic_fallback_report(
     target: str,
     objective: str,
     operation_id: str,
-    config_params: Optional[Dict[str, Any]] = None,
+    config_params: dict[str, Any] | None = None,
     callback_handler: Any = None,
-    filename: Optional[str] = None,
-    error: Optional[Exception] = None,
-) -> Dict[str, Any]:
+    filename: str | None = None,
+    error: Exception | None = None,
+) -> dict[str, Any]:
     """Write a factual report when model-authored report generation cannot complete.
 
     The fallback deliberately reuses the normal report pipeline's canonical data and
@@ -3483,8 +3481,8 @@ def generate_deterministic_fallback_report(
     error_text = str(error or "Model-authored report generation did not complete.")
     parts = [
         "# SECURITY ASSESSMENT REPORT\n\n",
-        "> **Deterministic fallback report:** Model-authored report content was unavailable. "
-        "This report contains only recorded evidence and workflow data.\n\n",
+        ("> **Deterministic fallback report:** Model-authored report content was unavailable. "
+        "This report contains only recorded evidence and workflow data.\n\n"),
         _completion_status_notice(completion_status),
         "## REPORT GENERATION STATUS\n\n",
         f"- **Status:** fallback\n- **Reason:** `{_escape_markdown_text(error_text)}`\n\n",
@@ -3558,7 +3556,7 @@ def generate_deterministic_fallback_report(
     }
 
 
-def _fallback_sections_from_operation_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def _fallback_sections_from_operation_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Create minimal canonical report sections when the SQLite store is unavailable."""
 
     tasks = [item for item in snapshot.get("tasks", []) if isinstance(item, dict)]
@@ -3589,9 +3587,9 @@ def generate_security_report(
     target: str,
     objective: str,
     operation_id: str,
-    config_params: Optional[Dict[str, Any]] = None,
+    config_params: dict[str, Any] | None = None,
     callback_handler = None,
-    filename: Optional[str] = None,
+    filename: str | None = None,
 ) -> None:
     """
     Generate a comprehensive security assessment report based on the operation results.
@@ -3717,8 +3715,8 @@ def generate_security_report(
 
         output_path = get_output_path(target_name=sanitize_target_name(target), operation_id=operation_id)
 
-        narratives: Dict[str, Any] = {}
-        narrative_warnings: List[str] = []
+        narratives: dict[str, Any] = {}
+        narrative_warnings: list[str] = []
         # Persist the contract before model calls so interrupted reports still expose
         # authoritative facts and an explicit empty narrative envelope.
         _write_redacted_report_json(
@@ -4040,8 +4038,8 @@ Finding narrative context:
                 '<a name="objective-validation"></a>',
                 "## OBJECTIVE VALIDATION",
                 "",
-                "Objective completion is reported independently from vulnerability confirmation. A rejected objective "
-                "candidate does not invalidate a verified vulnerability used to obtain it.",
+                ("Objective completion is reported independently from vulnerability confirmation. A rejected objective "
+                "candidate does not invalidate a verified vulnerability used to obtain it."),
                 "",
             ]
             for index, item in report_objective_results:
@@ -4371,7 +4369,7 @@ def _sanitize_mermaid_diagrams(text: str) -> str:
     return _RE_MERMAID_BLOCK.sub(process_mermaid_block, text)
 
 
-def _get_module_report_prompt(module_name: Optional[str]) -> Optional[str]:
+def _get_module_report_prompt(module_name: str | None) -> str | None:
     """Get the module-specific report prompt if available.
 
     Args:
@@ -4418,8 +4416,8 @@ def _get_module_report_prompt(module_name: Optional[str]) -> Optional[str]:
 
 
 def _trim_evidence_for_report(
-        items: List[Dict[str, Any]], limit: int
-) -> List[Dict[str, Any]]:
+        items: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
     """Keep at most `limit` evidence items, favoring higher severity."""
     if limit <= 0 or len(items) <= limit:
         return items
@@ -4454,8 +4452,8 @@ def build_report_sections(
         target: str,
         objective: str,
         module: str = "web",
-        tools_used: List[str] = None,
-) -> Dict[str, Any]:
+        tools_used: list[str] | None = None,
+) -> dict[str, Any]:
     """
     Build structured sections for the security assessment report.
 
@@ -4500,7 +4498,7 @@ def build_report_sections(
 
         memory_client = get_memory_client(silent=True)
 
-        raw_memories: List[Dict[str, Any]] = memory_client.list_memories(
+        raw_memories: list[dict[str, Any]] = memory_client.list_memories(
             run_id=operation_id if not cross_operation else None,
             limit=MAX_REPORT_FINDINGS * 10,
         )
@@ -4584,7 +4582,7 @@ def build_report_sections(
         operation_tasks = []
         task_history_rows = []
         acceptance_history_rows = []
-        phase_coverage_state: Dict[int, Dict[str, Any]] = {}
+        phase_coverage_state: dict[int, dict[str, Any]] = {}
         for task in task_records:
             task_status_counts[str(task.status)] += 1
             acceptance_results = memory_client.list_task_acceptance_results(
@@ -4972,7 +4970,7 @@ def build_report_sections(
             tools_summary = format_tools_summary([])
 
         # Build canonical findings (first per severity) with stable anchors
-        canonical_findings: Dict[str, Dict[str, Any]] = {}
+        canonical_findings: dict[str, dict[str, Any]] = {}
         for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
             sev_items = [
                 e
@@ -5141,7 +5139,7 @@ def build_report_sections(
         }
 
 
-def _parse_structured_evidence(content: str) -> Dict[str, str]:
+def _parse_structured_evidence(content: str) -> dict[str, str]:
     """
     Parse structured evidence from memory content.
 
@@ -5195,7 +5193,7 @@ def _parse_structured_evidence(content: str) -> Dict[str, str]:
     return components
 
 
-def _format_detailed_findings(findings: List[Dict[str, Any]], severity: str) -> str:
+def _format_detailed_findings(findings: list[dict[str, Any]], severity: str) -> str:
     """
     Format findings with evidence-first structure.
 
@@ -5300,7 +5298,7 @@ def _format_detailed_findings(findings: List[Dict[str, Any]], severity: str) -> 
     return "\n".join(output)
 
 
-def _format_summary_table(findings: List[Dict[str, Any]]) -> str:
+def _format_summary_table(findings: list[dict[str, Any]]) -> str:
     """
     Create a summary table for remaining findings.
 

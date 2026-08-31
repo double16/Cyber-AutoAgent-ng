@@ -4,11 +4,11 @@ import os
 import shutil
 import sys
 import tempfile
-import requests
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from modules.config.models.capabilities import (
     get_model_input_limit,

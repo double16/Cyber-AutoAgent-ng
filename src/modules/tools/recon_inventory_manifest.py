@@ -9,7 +9,8 @@ import os
 import re
 import tempfile
 from collections import Counter
-from typing import Any, Dict, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Any
 from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 
 from strands import tool
@@ -50,7 +51,10 @@ def resolve_inventory_target(target: str, target_id: str = "target-1") -> tuple[
     """Resolve the active task's registered target value and logical target ID when available."""
 
     try:
-        from modules.tools.memory import _get_active_plan, resolve_bound_executable_target
+        from modules.tools.memory import (
+            _get_active_plan,
+            resolve_bound_executable_target,
+        )
 
         resolved = resolve_bound_executable_target(target)
         plan = _get_active_plan()
@@ -97,7 +101,7 @@ def _in_scope(value: str, target: str) -> bool:
 
 
 def _stable_id(kind: str, target_id: str, value: str) -> str:
-    digest = hashlib.sha256(f"{target_id}\0{kind}\0{value}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{target_id}\0{kind}\0{value}".encode()).hexdigest()[:16]
     return f"{kind}-{digest}"
 
 
@@ -110,7 +114,7 @@ def _record(
     response_length: Any = None,
     words: Any = None,
     lines: Any = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     record = {
         "url": url,
         "method": str(method or "GET").upper(),
@@ -123,7 +127,7 @@ def _record(
     return record
 
 
-def _json_values(text: str) -> List[Any]:
+def _json_values(text: str) -> list[Any]:
     stripped = text.strip()
     if not stripped:
         return []
@@ -140,7 +144,7 @@ def _json_values(text: str) -> List[Any]:
         return values
 
 
-def _urls_from_text(text: str) -> List[Dict[str, Any]]:
+def _urls_from_text(text: str) -> list[dict[str, Any]]:
     records = []
     for line in text.splitlines():
         status_match = STATUS_PATTERN.search(line)
@@ -149,7 +153,7 @@ def _urls_from_text(text: str) -> List[Dict[str, Any]]:
     return records
 
 
-def _parse_katana(text: str) -> List[Dict[str, Any]]:
+def _parse_katana(text: str) -> list[dict[str, Any]]:
     records = []
     for value in _json_values(text):
         if not isinstance(value, dict):
@@ -162,7 +166,7 @@ def _parse_katana(text: str) -> List[Dict[str, Any]]:
     return records or _urls_from_text(text)
 
 
-def _parse_feroxbuster(text: str) -> List[Dict[str, Any]]:
+def _parse_feroxbuster(text: str) -> list[dict[str, Any]]:
     records = []
     for value in _json_values(text):
         values = value.get("results", []) if isinstance(value, dict) and isinstance(value.get("results"), list) else [value]
@@ -178,7 +182,7 @@ def _parse_feroxbuster(text: str) -> List[Dict[str, Any]]:
     return records or _urls_from_text(text)
 
 
-def _parse_ffuf(text: str) -> List[Dict[str, Any]]:
+def _parse_ffuf(text: str) -> list[dict[str, Any]]:
     values = _json_values(text)
     records = []
     for value in values:
@@ -212,7 +216,7 @@ def _parse_ffuf(text: str) -> List[Dict[str, Any]]:
     return records or _urls_from_text(text)
 
 
-def _mark_ffuf_wildcard_records(records: List[Dict[str, Any]]) -> None:
+def _mark_ffuf_wildcard_records(records: list[dict[str, Any]]) -> None:
     """Mark high-confidence wildcard responses without discarding auditability.
 
     ffuf often reports every wordlist entry as a 200 when an SPA serves the same
@@ -238,7 +242,7 @@ def _mark_ffuf_wildcard_records(records: List[Dict[str, Any]]) -> None:
             record["wildcard_suspected"] = True
 
 
-def _parse_httpx(text: str) -> List[Dict[str, Any]]:
+def _parse_httpx(text: str) -> list[dict[str, Any]]:
     records = []
     for value in _json_values(text):
         if isinstance(value, dict) and (value.get("url") or value.get("input")):
@@ -256,7 +260,7 @@ def _parse_httpx(text: str) -> List[Dict[str, Any]]:
     return records or _urls_from_text(text)
 
 
-def _parse_gobuster(text: str) -> List[Dict[str, Any]]:
+def _parse_gobuster(text: str) -> list[dict[str, Any]]:
     records = _urls_from_text(text)
     for line in text.splitlines():
         match = re.match(r"\s*(/[^\s]*)", line)
@@ -267,13 +271,13 @@ def _parse_gobuster(text: str) -> List[Dict[str, Any]]:
     return records
 
 
-def _parse_url_list(text: str) -> List[Dict[str, Any]]:
+def _parse_url_list(text: str) -> list[dict[str, Any]]:
     """Treat every non-empty line as one auditable URL candidate."""
 
     return [_record(line.strip()) for line in io.StringIO(text) if line.strip()]
 
 
-def _parse_specialized_recon(text: str) -> List[Dict[str, Any]]:
+def _parse_specialized_recon(text: str) -> list[dict[str, Any]]:
     """Normalize specialized_recon_orchestrator's recon_result_v1 output."""
 
     values = _json_values(text)
@@ -289,7 +293,7 @@ def _parse_specialized_recon(text: str) -> List[Dict[str, Any]]:
     return records
 
 
-def _parse_auth_chain(text: str) -> List[Dict[str, Any]]:
+def _parse_auth_chain(text: str) -> list[dict[str, Any]]:
     """Normalize auth_chain_analyzer's structured JSON output."""
 
     values = _json_values(text)
@@ -406,7 +410,7 @@ def _infer_format(text: str) -> str:
     raise ValueError(f"Unable to infer recon source format; choose one of: {', '.join(SUPPORTED_RECON_FORMATS)}")
 
 
-def _structured_inventory_fields(text: str, source_format: str) -> tuple[List[Dict[str, Any]], List[str], List[Any]]:
+def _structured_inventory_fields(text: str, source_format: str) -> tuple[list[dict[str, Any]], list[str], list[Any]]:
     """Return workflow, technology, and parameter supplements for native structured outputs."""
 
     values = _json_values(text)
@@ -430,19 +434,19 @@ def _structured_inventory_fields(text: str, source_format: str) -> tuple[List[Di
 
 
 def records_to_inventory_manifest(
-    records: Iterable[Dict[str, Any]],
+    records: Iterable[dict[str, Any]],
     *,
     target_id: str,
     target: str = "",
     source_ref: str = "",
-    workflows: Optional[Iterable[Dict[str, Any]]] = None,
-    technologies: Optional[Iterable[str]] = None,
-    parameters: Optional[Iterable[str]] = None,
-) -> Dict[str, Any]:
+    workflows: Iterable[dict[str, Any]] | None = None,
+    technologies: Iterable[str] | None = None,
+    parameters: Iterable[str] | None = None,
+) -> dict[str, Any]:
     """Build a canonical manifest dictionary from normalized recon records."""
 
-    items: List[Dict[str, Any]] = []
-    gaps: List[Dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    gaps: list[dict[str, Any]] = []
     seen = set()
     candidate_count = 0
     for record in records:
@@ -613,11 +617,14 @@ def records_to_inventory_manifest(
     }
 
 
-def write_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
+def write_inventory_manifest(path: str, manifest: dict[str, Any]) -> dict[str, Any]:
     """Atomically write and validate one inventory manifest."""
 
     absolute_path = _inventory_manifest_output_path(path)
-    from modules.tools.memory import _load_inventory_manifest, canonical_artifact_reference
+    from modules.tools.memory import (
+        _load_inventory_manifest,
+        canonical_artifact_reference,
+    )
 
     directory = os.path.dirname(absolute_path)
     os.makedirs(directory, exist_ok=True)
@@ -674,7 +681,7 @@ def _read_inventory_source(
     source_format: str = "auto",
     target_id: str = "target-1",
     target: str = "",
-) -> tuple[str, str, Dict[str, Any]]:
+) -> tuple[str, str, dict[str, Any]]:
     """Read one supported artifact into a validated in-memory inventory manifest."""
 
     from modules.tools.artifact import resolve_operation_artifact_path
@@ -682,7 +689,7 @@ def _read_inventory_source(
 
     source_path = resolve_operation_artifact_path(source_artifact)
     source_ref = canonical_artifact_reference(source_path)
-    with open(source_path, "r", encoding="utf-8", errors="replace") as source:
+    with open(source_path, encoding="utf-8", errors="replace") as source:
         text = source.read()
     normalized_format = str(source_format or "auto").strip().lower().replace("-", "_")
     normalized_format = RECON_FORMAT_ALIASES.get(normalized_format, normalized_format)
@@ -724,7 +731,7 @@ def _read_inventory_source(
     return source_ref, normalized_format, manifest
 
 
-def _inventory_item_identity(item: Dict[str, Any]) -> str:
+def _inventory_item_identity(item: dict[str, Any]) -> str:
     """Return the stable semantic identity used while combining inventories."""
 
     return json.dumps(
@@ -749,11 +756,11 @@ def _merge_inventory_value(existing: Any, incoming: Any) -> Any:
     return existing
 
 
-def _merge_inventory_manifests(sources: Iterable[tuple[str, Dict[str, Any]]]) -> Dict[str, Any]:
+def _merge_inventory_manifests(sources: Iterable[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
     """Merge source manifests without losing source references or duplicate suppression."""
 
-    items_by_identity: Dict[str, Dict[str, Any]] = {}
-    gaps: List[Any] = []
+    items_by_identity: dict[str, dict[str, Any]] = {}
+    gaps: list[Any] = []
     source_count = 0
     candidate_count = 0
     for source_ref, manifest in sources:
@@ -799,7 +806,7 @@ def consolidate_recon_artifacts(
     *,
     target_id: str = "target-1",
     target: str = "",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create one validated inventory manifest from supported operation artifacts.
 
     This controller-facing entry point intentionally is not decorated as a tool.

@@ -2,8 +2,8 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-import modules.tools.idor_specialist as ids
 
+import modules.tools.idor_specialist as ids
 
 # -------------------------
 # Mocking helpers
@@ -250,7 +250,7 @@ def test_perform_login_basic(mock_request):
     mock_resp.cookies.get_dict.return_value = {"session": "123"}
     mock_request.return_value = mock_resp
 
-    cookies, headers = ids._perform_login(
+    cookies, _headers = ids._perform_login(
         "http://example.com/login",
         {"user": "admin", "pass": "pass"},
         auth_type="basic"
@@ -267,7 +267,7 @@ def test_perform_login_jwt(mock_request):
     mock_resp.json.return_value = {"token": "jwt_token"}
     mock_request.return_value = mock_resp
 
-    cookies, headers = ids._perform_login(
+    _cookies, headers = ids._perform_login(
         "http://example.com/login",
         {"user": "admin"},
         auth_type="jwt"

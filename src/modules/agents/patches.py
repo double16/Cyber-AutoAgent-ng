@@ -18,29 +18,34 @@ important parts of the flow are:
 """
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import re
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Optional, Type
+from typing import Any
 from uuid import uuid4
-from strands.hooks.events import AfterToolCallEvent
+
 from strands.hooks import HookProvider, HookRegistry
+from strands.hooks.events import AfterToolCallEvent
 
 from modules.config.system import get_logger
-from modules.utils.reasoning_sanitization import ReasoningSanitizationState, sanitize_reasoning_event
+from modules.utils.reasoning_sanitization import (
+    ReasoningSanitizationState,
+    sanitize_reasoning_event,
+)
 from modules.utils.tool_call_normalization import normalize_tool_call_payload
-
 
 logger = get_logger("Agents.CyberAutoAgent")
 
 
 @dataclass
 class _ToolUseIdStreamState:
-    current_tool_use_id: Optional[str] = None
-    where_set: Optional[str] = None
+    current_tool_use_id: str | None = None
+    where_set: str | None = None
 
-    def __call__(self, *, where: str, marker: str, id_factory: Optional[Callable[[str], str]]) -> str:
+    def __call__(self, *, where: str, marker: str, id_factory: Callable[[str], str] | None) -> str:
         assert where
         assert marker
         assert id_factory
@@ -72,8 +77,8 @@ class _JsonToolcallStreamState:
     rejected: str = ""  # buffered text that was determined NOT to be a tool call and must be emitted
 
     # Pending synthetic tool use to emit over subsequent chunks
-    pending_name: Optional[str] = None
-    pending_input_json: Optional[str] = None
+    pending_name: str | None = None
+    pending_input_json: str | None = None
     pending_stage: int = 0  # 0=none, 1=need start, 2=need delta input, 3=need messageStop, 4=done
 
     def reset(self) -> None:
@@ -95,7 +100,7 @@ class _JsonToolcallStreamState:
 
     def should_start(self, fragment: str) -> bool:
         s = fragment.lstrip()
-        return ("```json" in fragment.lower()) or s.startswith("{") or s.startswith("```")
+        return "```json" in fragment.lower() or s.startswith(("{", "```"))
 
     def queue_tool_use(self, tc_obj: dict) -> None:
         name = tc_obj.get("name")
@@ -222,10 +227,7 @@ def _json_toolcall_complete(buf: str) -> bool:
         return False
 
     s = buf.strip()
-    if s.startswith("{") and s.endswith("}") and _brace_balance(s) == 0:
-        return True
-
-    return False
+    return bool(s.startswith("{") and s.endswith("}") and _brace_balance(s) == 0)
 
 
 def _extract_text_from_blocks(content: Any) -> str:
@@ -319,11 +321,11 @@ def _clear_text_blocks(content: Any) -> None:
             block["text"] = ""
 
 def patch_model_class_tool_use_id(
-        model_cls: Type[Any],
+        model_cls: type[Any],
         *,
-        id_factory: Optional[Callable[[str], str]] = None,
+        id_factory: Callable[[str], str] | None = None,
         attr_prefix: str = "_tooluseid_class_patch",
-) -> Type[Any]:
+) -> type[Any]:
     """
     Monkey-patch model_cls.stream at the *class* level so toolUseId is unique per invocation.
 
@@ -355,7 +357,7 @@ def patch_model_class_tool_use_id(
         def id_factory(marker: str) -> str:
             return f"tooluse_{marker or 'U'}-{uuid4().hex}"
 
-    orig_stream = getattr(model_cls, "stream")
+    orig_stream = model_cls.stream
     setattr(model_cls, orig_attr, orig_stream)
 
     @functools.wraps(orig_stream)
@@ -425,28 +427,28 @@ def patch_model_class_tool_use_id(
 
             yield ev
 
-    setattr(model_cls, "stream", stream_patched)
+    model_cls.stream = stream_patched
     setattr(model_cls, enabled_attr, True)
     return model_cls
 
 
 def unpatch_model_class_tool_use_id(
-        model_cls: Type[Any],
+        model_cls: type[Any],
         *,
         attr_prefix: str = "_tooluseid_class_patch",
-) -> Type[Any]:
+) -> type[Any]:
     """Restore the original model_cls.stream if it was patched by patch_model_class_tool_use_id()."""
     enabled_attr = f"{attr_prefix}_enabled"
     orig_attr = f"{attr_prefix}_orig_stream"
 
     if getattr(model_cls, enabled_attr, False) and hasattr(model_cls, orig_attr):
-        setattr(model_cls, "stream", getattr(model_cls, orig_attr))
+        model_cls.stream = getattr(model_cls, orig_attr)
         setattr(model_cls, enabled_attr, False)
     return model_cls
 
 
 class ToolUseIdHook(HookProvider):
-    def register_hooks(self, registry: "HookRegistry", **kwargs: Any) -> None:
+    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
         registry.add_callback(AfterToolCallEvent, self.revert_tool_use_id)
 
     def revert_tool_use_id(self, event: AfterToolCallEvent):
@@ -534,7 +536,7 @@ def _extract_json_toolcall(text: str, *, allow_missing_end_brace: bool = False) 
     return {"name": normalized.name, "arguments": normalized.arguments}
 
 
-def _to_openai_tool_calls(toolcall_obj: dict, *, id_factory: Optional[Callable[[], str]] = None) -> list[dict]:
+def _to_openai_tool_calls(toolcall_obj: dict, *, id_factory: Callable[[], str] | None = None) -> list[dict]:
     """Convert {"name": ..., "arguments": ...} to OpenAI-style tool_calls."""
     name = toolcall_obj.get("name")
     args = toolcall_obj.get("arguments", {})
@@ -616,7 +618,7 @@ def patch_ollama_model_token_usage(
         - Idempotent: repeated calls do not stack patches.
     """
     mod = __import__(module_name, fromlist=[cls_name])
-    OllamaModel: Type[Any] = getattr(mod, cls_name)
+    OllamaModel: type[Any] = getattr(mod, cls_name)
 
     if not hasattr(OllamaModel, "format_chunk"):
         logger.warning(f"{module_name}.{cls_name} has no format_chunk method")
@@ -694,7 +696,7 @@ def patch_ollama_model_json_toolcalls(
       - Safe: never raises from coercion logic.
     """
     mod = __import__(module_name, fromlist=[cls_name])
-    OllamaModel: Type[Any] = getattr(mod, cls_name)
+    OllamaModel: type[Any] = getattr(mod, cls_name)
 
     existing = getattr(OllamaModel, _OLLAMA_MODEL_JSON_TOOLCALL_PATCH_ATTR, None)
     if isinstance(existing, dict) and existing.get("is_patched") is True:
@@ -761,7 +763,7 @@ def patch_ollama_model_json_toolcalls(
                     state: _JsonToolcallStreamState = getattr(self, "_caa_json_toolcall_stream_state", None)
                     if state is None:
                         state = _JsonToolcallStreamState()
-                        setattr(self, "_caa_json_toolcall_stream_state", state)
+                        self._caa_json_toolcall_stream_state = state
 
                     # If we previously detected a JSON tool call in streamed text, emit the pending
                     # synthetic events (start -> delta input -> messageStop) before processing the
@@ -770,48 +772,47 @@ def patch_ollama_model_json_toolcalls(
 
                     # If we are buffering suspected JSON tool call text and the provider indicates the
                     # message is stopping, flush buffered text *only if* we never detected a tool call.
-                    if "messageStop" in out and not state.has_pending():
-                        if state.is_buffering():
-                            buffered = state.flush_buffer()
+                    if "messageStop" in out and not state.has_pending() and state.is_buffering():
+                        buffered = state.flush_buffer()
 
-                            # Final chance: the last closing brace may be missing. Only attempt this
-                            # recovery at messageStop.
-                            tc_final = _extract_json_toolcall(buffered, allow_missing_end_brace=True)
-                            if tc_final:
-                                state.queue_tool_use(tc_final)
-                                out.clear()
-                                out.update(
-                                    {
-                                        "contentBlockStart": {
-                                            "start": {
-                                                "toolUse": {
-                                                    "name": state.pending_name,
-                                                    "toolUseId": state.pending_name,
-                                                }
-                                            }
-                                        },
-                                        "contentBlockDelta": {
-                                            "delta": {
-                                                "toolUse": {
-                                                    "input": state.pending_input_json or "{}",
-                                                }
-                                            }
-                                        },
-                                        "messageStop": {"stopReason": "tool_use"},
-                                    }
-                                )
-                                state.reset_pending()
-                                return out
-
-                            # Not a tool call; emit buffered text as a single final delta alongside messageStop.
+                        # Final chance: the last closing brace may be missing. Only attempt this
+                        # recovery at messageStop.
+                        tc_final = _extract_json_toolcall(buffered, allow_missing_end_brace=True)
+                        if tc_final:
+                            state.queue_tool_use(tc_final)
                             out.clear()
                             out.update(
                                 {
-                                    "contentBlockDelta": {"delta": {"text": buffered}},
-                                    "messageStop": out.get("messageStop"),
+                                    "contentBlockStart": {
+                                        "start": {
+                                            "toolUse": {
+                                                "name": state.pending_name,
+                                                "toolUseId": state.pending_name,
+                                            }
+                                        }
+                                    },
+                                    "contentBlockDelta": {
+                                        "delta": {
+                                            "toolUse": {
+                                                "input": state.pending_input_json or "{}",
+                                            }
+                                        }
+                                    },
+                                    "messageStop": {"stopReason": "tool_use"},
                                 }
                             )
+                            state.reset_pending()
                             return out
+
+                        # Not a tool call; emit buffered text as a single final delta alongside messageStop.
+                        out.clear()
+                        out.update(
+                            {
+                                "contentBlockDelta": {"delta": {"text": buffered}},
+                                "messageStop": out.get("messageStop"),
+                            }
+                        )
+                        return out
 
                     # If we previously detected a JSON tool call in streamed text, emit the pending
                     # synthetic events (start -> delta input -> messageStop) before processing the
@@ -911,10 +912,8 @@ def patch_ollama_model_json_toolcalls(
                     msg = getattr(out, "message", None)
                     coerced = _coerce_message_json_toolcall(msg)
                     if coerced:
-                        try:
-                            setattr(out, "stop_reason", "tool_use")
-                        except Exception:
-                            pass
+                        with contextlib.suppress(Exception):
+                            out.stop_reason = "tool_use"
 
                     # Some providers return dicts.
                     if isinstance(out, dict):
@@ -953,10 +952,8 @@ def patch_ollama_model_json_toolcalls(
             msg = getattr(out, "message", None)
             coerced = _coerce_message_json_toolcall(msg)
             if coerced:
-                try:
-                    setattr(out, "stop_reason", "tool_use")
-                except Exception:
-                    pass
+                with contextlib.suppress(Exception):
+                    out.stop_reason = "tool_use"
 
             if isinstance(out, dict):
                 # Mirror the same coercion logic used for formatter patches.

@@ -12,14 +12,14 @@ from urllib.parse import urljoin, urlparse, urlunparse
 
 from strands import tool
 
+from modules.tools.artifact import resolve_operation_artifact_path
+from modules.tools.memory import canonical_artifact_reference
 from modules.tools.recon_inventory_manifest import (
     _canonical_url,
     records_to_inventory_manifest,
     resolve_inventory_target,
     write_inventory_manifest,
 )
-from modules.tools.artifact import resolve_operation_artifact_path
-from modules.tools.memory import canonical_artifact_reference
 
 _QUOTED_PATH_PATTERN = re.compile(r"[\"'`](/[^\"'`\\\s]{0,300})[\"'`]")
 _URL_PATTERN = re.compile(r"https?://[^\s\"'`<>]+", re.IGNORECASE)

@@ -7,7 +7,7 @@ import pytest
 
 # Initialize the agent package before importing the hook, which imports its patches submodule.
 importlib.import_module("cyberautoagent")
-import modules.handlers.agent_repair_hook as tcrh  # noqa: E402
+import modules.handlers.agent_repair_hook as tcrh
 
 
 class FakeCallbackHandler:
@@ -50,8 +50,8 @@ class FakeBeforeModelCallEvent:
 @pytest.mark.parametrize(
     "xmlish",
     [
-        "<parameter=cmd>id</parameter></function>"
-        "<function=shell><parameter=cmd>id</parameter></function>"
+        ("<parameter=cmd>id</parameter></function>"
+        "<function=shell><parameter=cmd>id</parameter></function>")
     ]
 )
 def test_after_model_call_sets_retry_and_flag_on_xmlish_tool_markup(xmlish):
@@ -155,4 +155,4 @@ def test_state_bag_prefers_event_dict_attributes_then_falls_back_to_agent_hook_s
     e2 = types.SimpleNamespace(agent=agent)  # no invocation_state/state/context/metadata
     bag2 = hook._state_bag(e2)
     assert isinstance(bag2, dict)
-    assert getattr(agent, "_hook_state") is bag2
+    assert agent._hook_state is bag2

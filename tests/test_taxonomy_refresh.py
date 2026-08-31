@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import modules.config.taxonomy_refresh as taxonomy_refresh
-
+from modules.config import taxonomy_refresh
 
 _REFRESHED = {
     "cwe": [{"id": "CWE-79"}],

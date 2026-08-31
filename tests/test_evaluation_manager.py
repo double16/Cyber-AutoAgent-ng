@@ -4,9 +4,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from modules.evaluation import manager as mod
 from modules.evaluation import evaluation as eval_mod
+from modules.evaluation import manager as mod
 from modules.prompts import factory as prompts
+
 
 class RecordingEmitter:
     def emit(self, event):

@@ -1,5 +1,6 @@
 """Filesystem-backed result caching for expensive web operation tools."""
 
+import contextlib
 import hashlib
 import json
 import os
@@ -7,7 +8,6 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
-
 
 RESULT_CACHE_TTL_SECONDS = 30 * 60
 RESULT_CACHE_DIR = Path.home() / ".cache" / "cyber-autoagent" / "tool-results"
@@ -48,7 +48,5 @@ def cache_result(namespace: str, cache_key: str, result: str) -> None:
         os.replace(temporary_path, cache_dir / f"{cache_key}.json")
     except OSError:
         if temporary_path:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(temporary_path)
-            except OSError:
-                pass

@@ -24,7 +24,11 @@ from modules.agents.multi_agent_workflow import (
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
 from modules.handlers.max_token_recovery import MaxTokenClassification
-from modules.handlers.tool_recovery import ExecutionReceipt, ToolOutcome, ToolOutcomeJournal
+from modules.handlers.tool_recovery import (
+    ExecutionReceipt,
+    ToolOutcome,
+    ToolOutcomeJournal,
+)
 from modules.tools import memory as memory_mod
 from modules.tools.memory import (
     AcceptanceBasis,
@@ -253,7 +257,7 @@ def Task(*args, **kwargs):
     """Construct strict tasks while preserving the older positional style inside workflow tests."""
 
     positional_fields = ("task_uid", "title", "objective", "phase", "status", "status_reason", "evidence")
-    for field_name, value in zip(positional_fields, args):
+    for field_name, value in zip(positional_fields, args, strict=False):
         kwargs[field_name] = value
     task_uid = str(kwargs.get("task_uid", "task"))
     kwargs.setdefault("acceptance", _acceptance(f"criterion:{task_uid}"))
@@ -2999,8 +3003,8 @@ def test_incomplete_execution_gate_forces_controller_owned_execution_repair():
     assert decision.status == "partial_failure"
     assert decision.repair_kind == "execution"
     assert decision.unresolved_evidence_gaps == (
-        "criterion-1-execution-1: Produce execution evidence for crawl against target:target-1. "
-        + "(subject: target:target-1)",
+        ("criterion-1-execution-1: Produce execution evidence for crawl against target:target-1. "
+         "(subject: target:target-1)"),
     )
     assert "execution gate is incomplete" in decision.reason
 
@@ -13116,16 +13120,7 @@ def test_task_prompts_reject_host_wide_scans_for_explicit_url_service_targets():
     executor_contract = controller._task_executor_contract()
     tool_policy = controller._tool_selection_policy()
     normalized = " ".join(
-        "\n".join(
-            [
-                builder_prompt,
-                critic_prompt,
-                revision_prompt,
-                creator_contract,
-                executor_contract,
-                tool_policy,
-            ]
-        ).split()
+        f"{builder_prompt}\n{critic_prompt}\n{revision_prompt}\n{creator_contract}\n{executor_contract}\n{tool_policy}".split()
     )
 
     assert "explicit `scheme://host:port` URL" in normalized

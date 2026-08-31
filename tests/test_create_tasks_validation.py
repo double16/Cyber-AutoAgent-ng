@@ -1,5 +1,6 @@
 from modules.tools.memory import TaskProposal, TaskProposalLimits
 
+
 def test_task_proposal_limits_relaxation():
     # description should be allowed in limits
     limits = TaskProposalLimits(max_requests=50, description="Safety limit")

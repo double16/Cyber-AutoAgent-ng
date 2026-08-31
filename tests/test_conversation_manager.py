@@ -221,7 +221,7 @@ def test_pruning_conversation_manager_removes_reasoning():
     manager.reduce_context(agent)
 
     assert len(agent.messages) == 4
-    assert not any(["reasoningContent" in message["content"][0] for message in agent.messages[:-1]])
+    assert not any("reasoningContent" in message["content"][0] for message in agent.messages[:-1])
 
 
 def test_pruning_conversation_manager_removes_redacted_reasoning():
@@ -239,7 +239,7 @@ def test_pruning_conversation_manager_removes_redacted_reasoning():
     manager.reduce_context(agent)
 
     assert len(agent.messages) == 4
-    assert not any(["reasoningContent" in message["content"][0] for message in agent.messages[:-1]])
+    assert not any("reasoningContent" in message["content"][0] for message in agent.messages[:-1])
 
 
 def test_pruning_conversation_manager_reduces_reasoning_loop():

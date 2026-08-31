@@ -6,24 +6,24 @@ This module provides configuration utilities specific to LiteLLM universal gatew
 including model ID parsing, embedding defaults, and configuration alignment.
 """
 
-import importlib.util
 import asyncio
+import importlib.util
 import threading
 import weakref
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import litellm
 
 from modules.config.system.env_reader import EnvironmentReader
 from modules.config.system.logger import get_logger
 from modules.config.types import (
-    LITELLM_EMBEDDING_DEFAULTS,
     DEFAULT_LITELLM_EMBEDDING,
     EMBEDDING_DIMENSIONS,
-    ModelProvider,
-    LLMConfig,
+    LITELLM_EMBEDDING_DEFAULTS,
     EmbeddingConfig,
+    LLMConfig,
     MemoryLLMConfig,
+    ModelProvider,
 )
 
 logger = get_logger("Config.LiteLLMProvider")
@@ -45,7 +45,7 @@ class _LoopLocalLiteLLMLoggingWorker:
         self._lock = threading.RLock()
         self._caa_loop_local_proxy = True
 
-    def _all_workers(self) -> List[Any]:
+    def _all_workers(self) -> list[Any]:
         with self._lock:
             workers = list(self._retired_workers)
             seen_worker_ids = {id(worker) for worker in workers}
@@ -133,7 +133,7 @@ def configure_litellm_runtime() -> None:
 configure_litellm_runtime()
 
 
-def split_litellm_model_id(model_id: str) -> Tuple[str, str, str]:
+def split_litellm_model_id(model_id: str) -> tuple[str, str, str]:
     """Split LiteLLM model id into provider prefix and base id.
 
     Args:
@@ -157,7 +157,7 @@ def split_litellm_model_id(model_id: str) -> Tuple[str, str, str]:
     return "", model_id, f"{model_id}:{variant}" if variant else model_id
 
 
-def get_context_window_fallbacks(provider: str) -> Optional[List[Dict[str, List[str]]]]:
+def get_context_window_fallbacks(provider: str) -> list[dict[str, list[str]]] | None:
     """Optional model fallback mappings for context window resolution.
 
     Currently returns None by default. Kept as an extension point if a future
@@ -173,7 +173,7 @@ def get_context_window_fallbacks(provider: str) -> Optional[List[Dict[str, List[
 
 
 def align_litellm_defaults(
-    defaults: Dict[str, Any], env_reader: EnvironmentReader
+    defaults: dict[str, Any], env_reader: EnvironmentReader
 ) -> None:
     """Ensure LiteLLM configuration components stay aligned with the selected model.
 
@@ -278,9 +278,7 @@ def align_litellm_defaults(
                     dims = 768
                 elif "MiniLM" in embed_model:
                     dims = 384
-                elif "titan" in embed_model and "v2" in embed_model:
-                    dims = 1024
-                elif "mxbai-embed-large" in embed_model:
+                elif ("titan" in embed_model and "v2" in embed_model) or "mxbai-embed-large" in embed_model:
                     dims = 1024
                 else:
                     dims = 1536

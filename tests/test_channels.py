@@ -1,7 +1,9 @@
 import asyncio
 import base64
+import contextlib
 import sys
 import time
+
 import pytest
 
 from modules.handlers.utils import get_tool_spec
@@ -147,10 +149,8 @@ async def test_reverse_connect_duplex_send_both_ways_and_close():
     closed = await mod.channel_close(channel_id=cid)
     assert closed.success is True
     writer.close()
-    try:
+    with contextlib.suppress(Exception):
         await writer.wait_closed()
-    except Exception:
-        pass
 
 
 @pytest.mark.asyncio

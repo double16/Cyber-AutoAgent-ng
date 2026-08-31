@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Self
 
 import pytest
 
@@ -34,13 +34,13 @@ class _HttpxStubFactory:
     """
 
     def __init__(self):
-        self.calls: List[Tuple[str, str, Dict[str, Any]]] = []
-        self._handlers: Dict[Tuple[str, str], Callable[..., _StubResponse]] = {}
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self._handlers: dict[tuple[str, str], Callable[..., _StubResponse]] = {}
 
     def on(self, method: str, url: str, handler: Callable[..., _StubResponse]) -> None:
         self._handlers[(method.upper(), url)] = handler
 
-    def __call__(self, *args: Any, **kwargs: Any) -> "_HttpxStubClient":
+    def __call__(self, *args: Any, **kwargs: Any) -> _HttpxStubClient:
         return _HttpxStubClient(self)
 
 
@@ -48,7 +48,7 @@ class _HttpxStubClient:
     def __init__(self, factory: _HttpxStubFactory):
         self._f = factory
 
-    async def __aenter__(self) -> "_HttpxStubClient":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
@@ -76,7 +76,7 @@ class _HttpxStubClient:
 
 
 class _Cfg:
-    def __init__(self, env: Dict[str, str]):
+    def __init__(self, env: dict[str, str]):
         self._env = env
 
     def getenv(self, key: str, default: str = "") -> str:

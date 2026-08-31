@@ -33,11 +33,11 @@ import time
 import traceback
 import warnings
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import litellm
 import requests
@@ -92,6 +92,10 @@ from modules.handlers.max_token_recovery import (
     reset_agent_conversation_for_recovery,
 )
 from modules.handlers.react import AgentEventHandler
+from modules.handlers.terminal_tool import (
+    TERMINAL_TOOL_COMPLETED_STATE_KEY,
+    TERMINAL_TOOL_REJECTED_STATE_KEY,
+)
 from modules.handlers.tool_repeat_guard import REPEATED_TOOL_LOOP_STATE_KEY
 from modules.handlers.utils import (
     Colors,
@@ -104,24 +108,24 @@ from modules.handlers.utils import (
     sanitize_target_name,
     update_latest_output_pointer,
 )
-from modules.handlers.terminal_tool import (
-    TERMINAL_TOOL_COMPLETED_STATE_KEY,
-    TERMINAL_TOOL_REJECTED_STATE_KEY,
-)
 from modules.tools import browser, channel_close_all
 from modules.tools.memory import (
     OperationTarget,
     create_application_store,
-    get_memory_client,
     get_application_database_path,
+    get_memory_client,
     require_existing_operation,
     resolve_operation_targets,
 )
 from modules.tools.oast import close_oast_providers
 from modules.tools.tool_catalog import get_shell_command_help_context
-from modules.utils.telemetry import flush_traces
 from modules.utils.sdk_error_sanitization import sanitize_sdk_error
-from modules.utils.target_validation import TargetValidationResult, TargetValidator, validate_operation_targets
+from modules.utils.target_validation import (
+    TargetValidationResult,
+    TargetValidator,
+    validate_operation_targets,
+)
+from modules.utils.telemetry import flush_traces
 
 load_dotenv()
 
@@ -130,7 +134,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Backward-compatibility: provide a placeholder symbol so tests can patch it
 # The real value is set later during runtime execution.
-def get_initial_prompt():  # noqa: D401
+def get_initial_prompt():
     """Placeholder function; patched in tests and set at runtime."""
     return ""
 
@@ -186,9 +190,9 @@ def run_target_preflight(
     objective: str,
     operation_id: str,
     logger: Any,
-    emitter: Optional[EventEmitter] = None,
-    validator: Optional[TargetValidator] = None,
-    targets: Optional[list[OperationTarget]] = None,
+    emitter: EventEmitter | None = None,
+    validator: TargetValidator | None = None,
+    targets: list[OperationTarget] | None = None,
 ) -> tuple[list[OperationTarget], list[TargetValidationResult]]:
     """Resolve or validate, emit, and log one preflight result per target."""
 
@@ -242,7 +246,7 @@ def restore_continuation_state(
     module: str,
     continuation_requested: bool,
     logger: Any,
-) -> tuple[str, Optional[list[OperationTarget]]]:
+) -> tuple[str, list[OperationTarget] | None]:
     """Restore the persisted objective and executable target registry for continuation."""
 
     if not continuation_requested:
@@ -530,7 +534,7 @@ def extract_last_assistant_text(messages: Any) -> str:
     return ""
 
 
-def _tool_count_deltas(callback_handler: Any, baseline: Optional[dict[str, int]] = None) -> dict[str, int]:
+def _tool_count_deltas(callback_handler: Any, baseline: dict[str, int] | None = None) -> dict[str, int]:
     """Return non-negative tool-call counts observed after a run-pass baseline."""
 
     tool_counts = getattr(callback_handler, "tool_counts", {}) or {}
@@ -544,7 +548,7 @@ def _tool_count_deltas(callback_handler: Any, baseline: Optional[dict[str, int]]
 def _required_tools_satisfied(
     callback_handler: Any,
     run_policy: AgentRunPolicy,
-    baseline: Optional[dict[str, int]] = None,
+    baseline: dict[str, int] | None = None,
 ) -> bool:
     """Return true when this run pass has observed enough required tool calls."""
 
@@ -573,7 +577,7 @@ def _run_policy_allows_terminal_text(
     callback_handler: Any,
     run_policy: AgentRunPolicy,
     actionless_attempt_count: int,
-    baseline: Optional[dict[str, int]] = None,
+    baseline: dict[str, int] | None = None,
 ) -> bool:
     """Return true when an actionless turn is a valid final response under policy."""
 
@@ -615,7 +619,7 @@ def run_agent_until_terminal_state(
     max_duration: int | None,
     logger: Any,
     recoverable_retries: int = 2,
-    run_policy: Optional[AgentRunPolicy] = None,
+    run_policy: AgentRunPolicy | None = None,
 ) -> AgentRunResult:
     """Run one agent until it reaches a normal terminal state or raises a fatal failure."""
     run_policy = run_policy or AgentRunPolicy()
@@ -903,7 +907,7 @@ def run_workflow_agent_with_max_token_recovery(
     *,
     agent: Any,
     prompt: str,
-    run_policy: Optional[AgentRunPolicy],
+    run_policy: AgentRunPolicy | None,
     callback_handler: Any,
     initial_prompt: str,
     budget_cfg: BudgetConfig,
@@ -916,8 +920,8 @@ def run_workflow_agent_with_max_token_recovery(
     current_prompt = prompt
     current_run_policy = run_policy
     max_token_recovery_attempts = 0
-    pending_reasoning_repair: Optional[tuple[str, str, str]] = None
-    pending_token_escalation: Optional[str] = None
+    pending_reasoning_repair: tuple[str, str, str] | None = None
+    pending_token_escalation: str | None = None
 
     while True:
         try:
@@ -935,13 +939,17 @@ def run_workflow_agent_with_max_token_recovery(
             # If we had a pending reasoning repair and recovery succeeded, lock in the permanent promotion
             if pending_reasoning_repair:
                 rep_role, rep_level, rep_reason = pending_reasoning_repair
-                from modules.config.models.agent_profiles import get_agent_settings_registry
+                from modules.config.models.agent_profiles import (
+                    get_agent_settings_registry,
+                )
                 get_agent_settings_registry().apply_reasoning_repair(rep_role, rep_level, rep_reason, permanent=True)
                 pending_reasoning_repair = None
 
             # If we had a pending token recovery and recovery succeeded, record token recovery success (3 strikes -> permanent)
             if pending_token_escalation:
-                from modules.config.models.agent_profiles import get_agent_settings_registry
+                from modules.config.models.agent_profiles import (
+                    get_agent_settings_registry,
+                )
                 get_agent_settings_registry().record_token_recovery_success(pending_token_escalation, boost_amount=2048)
                 pending_token_escalation = None
 
@@ -960,7 +968,7 @@ def run_workflow_agent_with_max_token_recovery(
             classification, removed = classify_and_discard_max_token_output(
                 agent, active_reasoning_level=current_settings.reasoning_level.value
             )
-            setattr(error, "max_token_classification", classification)
+            error.max_token_classification = classification
             repeated_pattern = is_repeated_max_token_pattern(agent, classification)
             output_limit = getattr(getattr(agent, "model", None), "_output_tokens", None)
             can_retry = max_token_recovery_attempts < 1 and not repeated_pattern
@@ -992,7 +1000,7 @@ def run_workflow_agent_with_max_token_recovery(
                     record_efficiency_event = getattr(agent_callback, "record_efficiency_event", None)
                     if callable(record_efficiency_event):
                         record_efficiency_event("max_token_exhaustion", agent=agent)
-                setattr(error, "_max_token_efficiency_recorded", True)
+                error._max_token_efficiency_recorded = True
             if not can_retry:
                 raise
 
@@ -1210,15 +1218,11 @@ def _build_report_completion_status(plan: Any, callback_handler: Any) -> dict[st
 def close_log_outputs() -> None:
     """Close intercepted log streams when present."""
     if hasattr(sys.stdout, "close") and hasattr(sys.stdout, "log"):
-        try:
+        with suppress(Exception):
             sys.stdout.close()
-        except Exception:
-            pass
     if hasattr(sys.stderr, "close") and hasattr(sys.stderr, "log"):
-        try:
+        with suppress(Exception):
             sys.stderr.close()
-        except Exception:
-            pass
 
 
 def cleanup_operation_resources(
@@ -1230,7 +1234,7 @@ def cleanup_operation_resources(
     operation_start: float,
     telemetry: Any,
     logger: Any,
-    operation_targets: Optional[list[OperationTarget]] = None,
+    operation_targets: list[OperationTarget] | None = None,
 ) -> None:
     """Close operation resources and persist final report/evaluation state."""
     browser.close_browser()
@@ -1775,15 +1779,11 @@ def main():
             pass
 
         if hasattr(sys.stdout, "close") and callable(sys.stdout.close):
-            try:
+            with suppress(Exception):
                 sys.stdout.close()
-            except Exception:
-                pass
         if hasattr(sys.stderr, "close") and callable(sys.stderr.close):
-            try:
+            with suppress(Exception):
                 sys.stderr.close()
-            except Exception:
-                pass
 
     atexit.register(cleanup_logging)
 
@@ -1875,7 +1875,7 @@ def main():
 
     # Initialize timing
     operation_start = time.time()
-    callback_handler: Optional[AgentEventHandler] = None
+    callback_handler: AgentEventHandler | None = None
     agent = None
 
     print(f"\n{Colors.DIM}{'─' * 80}{Colors.RESET}\n")
@@ -1928,7 +1928,7 @@ def main():
             def run_workflow_agent(
                 agent: Any,
                 prompt: str,
-                run_policy: Optional[AgentRunPolicy],
+                run_policy: AgentRunPolicy | None,
             ) -> tuple[AgentRunResult, str]:
                 """Run one workflow pass while preserving its structured terminal result."""
 
@@ -1963,7 +1963,7 @@ def main():
                 prompt: str,
                 tools: list[Any],
                 system_prompt: str,
-                run_policy: Optional[AgentRunPolicy] = None,
+                run_policy: AgentRunPolicy | None = None,
             ) -> str:
                 agent = create_agent(
                     target=args.target,
@@ -2005,7 +2005,7 @@ def main():
 
                     def run_retained_executor(
                         prompt: str,
-                        run_policy: Optional[AgentRunPolicy] = None,
+                        run_policy: AgentRunPolicy | None = None,
                     ) -> TaskExecutorCycleResult:
                         snapshot = journal.snapshot() if journal is not None else 0
                         try:
@@ -2220,7 +2220,7 @@ def main():
                 if callback_handler:
                     callback_handler.emit_termination(
                         "user_abort", "Operation cancelled by user"
-                    )  # noqa: SLF001
+                    )
             except Exception:
                 pass
         else:
@@ -2259,10 +2259,8 @@ def ensure_workspace_marker_files():
     for p in [Path("/"), Path("/tmp"), Path("/var/tmp"), Path("/app/outputs")]:
         if p.is_dir() and os.access(p, os.W_OK):
             for f in [p / "THIS IS THE WORKSPACE.txt", p / "THIS IS _NOT_ THE TARGET.txt"]:
-                try:
+                with suppress(Exception):
                     f.write_text("This is the operation workspace, NOT the target.")
-                except Exception:
-                    pass
 
 
 if __name__ == "__main__":

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import socket
-import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock
+
+import pytest
 
 import modules.utils.pick_nic as mod
 

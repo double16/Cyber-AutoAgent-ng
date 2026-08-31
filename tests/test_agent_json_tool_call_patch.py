@@ -14,7 +14,6 @@ import pytest
 
 import modules.agents.patches as m
 
-
 # -----------------------------
 # Helpers for building fake modules/classes
 # -----------------------------
@@ -35,7 +34,7 @@ def _install_fake_ollama_module(monkeypatch, *, cls):
     models_mod = sys.modules.get("strands.models") or types.ModuleType("strands.models")
     ollama_mod = types.ModuleType("modules.config.models.ollama")
 
-    setattr(ollama_mod, "OllamaModel", cls)
+    ollama_mod.OllamaModel = cls
 
     monkeypatch.setitem(sys.modules, "strands", strands_mod)
     monkeypatch.setitem(sys.modules, "strands.models", models_mod)

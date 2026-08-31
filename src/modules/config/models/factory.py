@@ -8,29 +8,29 @@ applying provider-specific settings, and managing credentials.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import logging
 import os
 import sys
 from functools import lru_cache
 from math import floor
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 import ollama
-from google.genai.types import HttpRetryOptions, HttpOptions
-
+from google.genai.types import HttpOptions, HttpRetryOptions
 from strands.models import Model
 
+from modules.config.models.agent_profiles import LLMRoleType
+from modules.config.models.capabilities import (
+    get_capabilities,
+    get_model_input_limit,
+    get_provider_default_limit,
+)
 from modules.config.providers import get_ollama_host, split_litellm_model_id
 from modules.config.providers.ollama_config import get_ollama_timeout
 from modules.config.system import EnvironmentReader
 from modules.config.system.logger import get_logger
-from modules.config.models.agent_profiles import LLMRoleType
-from modules.config.models.capabilities import (
-    get_model_input_limit,
-    get_provider_default_limit,
-    get_capabilities,
-)
 from modules.handlers.utils import print_status
 
 logger = get_logger("Config.ModelFactory")
@@ -43,10 +43,8 @@ if TYPE_CHECKING:
     from modules.config.models.ollama import OllamaModel
 
 PROMPT_TOKEN_FALLBACK_LIMIT = 0
-try:
+with contextlib.suppress(ValueError):
     PROMPT_TOKEN_FALLBACK_LIMIT = int(os.getenv("CYBER_CONTEXT_LIMIT", "0"))
-except ValueError:
-    pass
 
 
 def _get_config_manager():
@@ -58,7 +56,7 @@ def _get_config_manager():
 # === Helper Functions ===
 
 
-def _get_prompt_limit_from_model(model_id: Optional[str]) -> Optional[int]:
+def _get_prompt_limit_from_model(model_id: str | None) -> int | None:
     """Get INPUT token limit (context window) from LiteLLM registry.
 
     Tries multiple forms of the model ID to find the limit in LiteLLM's database.
@@ -74,8 +72,8 @@ def _get_prompt_limit_from_model(model_id: Optional[str]) -> Optional[int]:
     try:
         import litellm
 
-        prefix, remainder, remainder_variant = split_litellm_model_id(model_id)
-        candidates: List[str] = []
+        _prefix, remainder, _remainder_variant = split_litellm_model_id(model_id)
+        candidates: list[str] = []
         # Common forms to try with LiteLLM's registry
         if remainder:
             candidates.append(remainder)  # e.g. openrouter/polaris-alpha
@@ -86,7 +84,7 @@ def _get_prompt_limit_from_model(model_id: Optional[str]) -> Optional[int]:
         candidates.append(model_id)
 
         for cand in candidates:
-            limit: Optional[int] = None
+            limit: int | None = None
             try:
                 # Try get_context_window first (most accurate if available)
                 get_cw = getattr(litellm, "get_context_window", None)
@@ -152,8 +150,8 @@ def _get_prompt_limit_from_model(model_id: Optional[str]) -> Optional[int]:
 # TODO: include input tokens in LLMConfig
 @lru_cache
 def _resolve_prompt_token_limit(
-    provider: str, model_id: Optional[str]
-) -> Optional[int]:
+    provider: str, model_id: str | None
+) -> int | None:
     """
     Resolve INPUT token limit (context window capacity) for the model.
 
@@ -200,7 +198,7 @@ def _resolve_prompt_token_limit(
             # check if num_ctx is defined in the model
             show_response = ollama_client.show(model=model_id)
             if show_response.parameters:
-                ollama_parameters = dict()
+                ollama_parameters = {}
                 for line in show_response.parameters.splitlines(keepends=False):
                     k, v = line.split(sep=None, maxsplit=1)
                     ollama_parameters[k] = v
@@ -270,7 +268,7 @@ def _resolve_prompt_token_limit(
     return None
 
 
-def require_prompt_token_limit(provider: str, model_id: Optional[str]) -> int:
+def require_prompt_token_limit(provider: str, model_id: str | None) -> int:
     """Return the resolved context window or fail before constructing an unbounded agent."""
 
     limit = _resolve_prompt_token_limit(provider, model_id)
@@ -286,7 +284,7 @@ def apply_model_context_window(model: Model, provider: str, model_id: str) -> in
     """Apply the already resolved context window to the provider model and Strands."""
 
     limit = require_prompt_token_limit(provider, model_id)
-    update: Dict[str, Any] = {"context_window_limit": limit}
+    update: dict[str, Any] = {"context_window_limit": limit}
     if provider == "ollama":
         config = model.get_config()
         options = dict(config.get("options") or {}) if isinstance(config, dict) else {}
@@ -302,15 +300,15 @@ def apply_model_context_window(model: Model, provider: str, model_id: str) -> in
     return limit
 
 
-def _parse_context_window_fallbacks() -> Optional[List[Dict[str, List[str]]]]:
+def _parse_context_window_fallbacks() -> list[dict[str, list[str]]] | None:
     """Parse context window fallbacks from environment or configuration.
 
     Returns:
         List of fallback mappings or None if not configured
     """
 
-    def _parse_spec(spec: str) -> Optional[List[Dict[str, List[str]]]]:
-        fallbacks: List[Dict[str, List[str]]] = []
+    def _parse_spec(spec: str) -> list[dict[str, list[str]]] | None:
+        fallbacks: list[dict[str, list[str]]] = []
         for clause in spec.split(";"):
             clause = clause.strip()
             if not clause or ":" not in clause:
@@ -336,7 +334,7 @@ def _parse_context_window_fallbacks() -> Optional[List[Dict[str, List[str]]]]:
             config_manager.get_context_window_fallbacks("litellm") or []
         )
         if config_fallbacks:
-            copied: List[Dict[str, List[str]]] = []
+            copied: list[dict[str, list[str]]] = []
             for mapping in config_fallbacks:
                 for model_name, targets in mapping.items():
                     copied.append({model_name: list(targets)})
@@ -346,7 +344,7 @@ def _parse_context_window_fallbacks() -> Optional[List[Dict[str, List[str]]]]:
     return None
 
 
-def _apply_context_window_fallbacks(client_args: Dict[str, Any]) -> None:
+def _apply_context_window_fallbacks(client_args: dict[str, Any]) -> None:
     """Attach context window fallbacks to LiteLLM if configured.
 
     Args:
@@ -408,20 +406,20 @@ def _handle_model_creation_error(provider: str, error: Exception) -> None:
 
 @dataclasses.dataclass(frozen=True)
 class _CreateModelParameters:
-    llm_temp: Optional[float]
+    llm_temp: float | None
     llm_max: int
     profile_max_tokens: int
     role: LLMRoleType
-    top_k: Optional[int] = None
-    top_p: Optional[float] = None
+    top_k: int | None = None
+    top_p: float | None = None
     reasoning_level: Any = None
 
 
 def _get_parameters_by_role(
     provider: str,
     model_id: str,
-    role: Optional[Union[LLMRoleType, str]],
-    config: Dict[str, Any],
+    role: LLMRoleType | str | None,
+    config: dict[str, Any],
 ) -> _CreateModelParameters:
     from modules.config.models.agent_profiles import (
         ReasoningLevel,
@@ -463,9 +461,9 @@ def create_bedrock_model(
     model_id: str,
     region_name: str,
     provider: str = "bedrock",
-    role: Optional[Union[LLMRoleType, str]] = None,
+    role: LLMRoleType | str | None = None,
     **kwargs,
-) -> "BedrockModel":
+) -> BedrockModel:
     """Create AWS Bedrock model instance using centralized configuration.
 
     Args:
@@ -526,7 +524,10 @@ def create_bedrock_model(
                     additional_fields[k] = v
 
         create_parameters = _get_parameters_by_role(provider, model_id, role, config)
-        from modules.config.models.agent_profiles import ReasoningLevel, translate_reasoning_to_provider
+        from modules.config.models.agent_profiles import (
+            ReasoningLevel,
+            translate_reasoning_to_provider,
+        )
 
         translated = translate_reasoning_to_provider(
             provider,
@@ -550,7 +551,7 @@ def create_bedrock_model(
             effort or "none",
         )
 
-        bedrock_model_config: Dict[str, Any] = {
+        bedrock_model_config: dict[str, Any] = {
             "model_id": config["model_id"],
             "region_name": config["region_name"],
             "temperature": (
@@ -567,9 +568,9 @@ def create_bedrock_model(
             bedrock_model_config["top_p"] = create_parameters.top_p
 
         model = BedrockModel(**bedrock_model_config)
-        setattr(model, "_output_tokens", create_parameters.llm_max)
-        setattr(model, "_cyber_llm_role", create_parameters.role.value)
-        setattr(model, "_cyber_provider", provider)
+        model._output_tokens = create_parameters.llm_max
+        model._cyber_llm_role = create_parameters.role.value
+        model._cyber_provider = provider
 
         return model
 
@@ -591,7 +592,10 @@ def create_bedrock_model(
     reasoning_level = create_parameters.reasoning_level
     role = create_parameters.role
 
-    from modules.config.models.agent_profiles import ReasoningLevel, translate_reasoning_to_provider
+    from modules.config.models.agent_profiles import (
+        ReasoningLevel,
+        translate_reasoning_to_provider,
+    )
     translated = translate_reasoning_to_provider(provider, model_id, reasoning_level, llm_max)
     effort = kwargs.get("effort") or translated.get("effort")
 
@@ -624,9 +628,9 @@ def create_bedrock_model(
         bedrock_model_config["top_p"] = top_p
 
     model = BedrockModel(**bedrock_model_config)
-    setattr(model, "_output_tokens", llm_max)
-    setattr(model, "_cyber_llm_role", role.value)
-    setattr(model, "_cyber_provider", provider)
+    model._output_tokens = llm_max
+    model._cyber_llm_role = role.value
+    model._cyber_provider = provider
 
     return model
 
@@ -634,8 +638,8 @@ def create_bedrock_model(
 def create_ollama_model(
     model_id: str,
     provider: str = "ollama",
-    role: Optional[Union[LLMRoleType, str]] = None,
-) -> "OllamaModel":
+    role: LLMRoleType | str | None = None,
+) -> OllamaModel:
     """Create Ollama model instance using centralized configuration.
 
     Args:
@@ -649,9 +653,9 @@ def create_ollama_model(
     Raises:
         Exception: If model creation fails
     """
+    from modules.agents.patches import patch_ollama_model_json_toolcalls
     from modules.config.models import get_capabilities
     from modules.config.models.ollama import OllamaModel
-    from modules.agents.patches import patch_ollama_model_json_toolcalls
     # patch_ollama_model_token_usage()
 
     # The AgentRepairHook will detect and patch. For models we know need the patch, do it before model use.
@@ -687,8 +691,11 @@ def create_ollama_model(
     if top_p is not None and "top_p" not in options:
         options["top_p"] = top_p
 
-    additional_args = dict()
-    from modules.config.models.agent_profiles import ReasoningLevel, get_agent_settings_registry
+    additional_args = {}
+    from modules.config.models.agent_profiles import (
+        ReasoningLevel,
+        get_agent_settings_registry,
+    )
     if reasoning_level == ReasoningLevel.NONE:
         additional_args["think"] = False
     else:
@@ -714,9 +721,9 @@ def create_ollama_model(
         options=options,
         stream=sdk_config.enable_streaming,
     )
-    setattr(model, "_output_tokens", llm_max)
-    setattr(model, "_cyber_llm_role", role.value)
-    setattr(model, "_cyber_provider", provider)
+    model._output_tokens = llm_max
+    model._cyber_llm_role = role.value
+    model._cyber_provider = provider
     return model
 
 
@@ -724,8 +731,8 @@ def create_litellm_model(
     model_id: str,
     region_name: str,
     provider: str = "litellm",
-    role: Optional[Union[LLMRoleType, str]] = None,
-) -> "LiteLLMModel":
+    role: LLMRoleType | str | None = None,
+) -> LiteLLMModel:
     """Create LiteLLM model instance for universal provider access.
 
     Args:
@@ -748,7 +755,7 @@ def create_litellm_model(
     sdk_config = config_manager.get_sdk_config(provider)
 
     # Prepare client args based on model prefix
-    client_args: Dict[str, Any] = {}
+    client_args: dict[str, Any] = {}
 
     # Configure AWS Bedrock models via LiteLLM
     if model_id.startswith(("bedrock/", "sagemaker/")):
@@ -807,17 +814,15 @@ def create_litellm_model(
         pass
 
     # Observability: one-liner
-    try:
+    with contextlib.suppress(Exception):
         logger.info(
             "Model build: role=%s provider=litellm model=%s max_tokens=%s",
             role,
             config.get("model_id"),
             llm_max,
         )
-    except Exception:
-        pass
 
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "max_tokens": llm_max,
     }
     if capabilities.supports_temperature and llm_temp is not None:
@@ -879,9 +884,9 @@ def create_litellm_model(
         params=params,
         stream=sdk_config.enable_streaming,
     )
-    setattr(model, "_output_tokens", llm_max)
-    setattr(model, "_cyber_llm_role", role.value)
-    setattr(model, "_cyber_provider", provider)
+    model._output_tokens = llm_max
+    model._cyber_llm_role = role.value
+    model._cyber_provider = provider
     return model
 
 
@@ -889,8 +894,8 @@ def create_gemini_model(
     model_id: str,
     region_name: str,
     provider: str = "gemini",
-    role: Optional[Union[LLMRoleType, str]] = None,
-) -> "GeminiModel":
+    role: LLMRoleType | str | None = None,
+) -> GeminiModel:
     """Create the native Gemini model instance using Google's genai SDK.
 
     This avoids LiteLLM's transformation layer and uses Google's native SDK directly,
@@ -938,7 +943,7 @@ def create_gemini_model(
     top_p = create_parameters.top_p
     reasoning_level = create_parameters.reasoning_level
 
-    params: Dict[str, Any] = {}
+    params: dict[str, Any] = {}
     if capabilities.supports_temperature and llm_temp is not None:
         params["temperature"] = llm_temp
     if top_p is not None:
@@ -971,16 +976,16 @@ def create_gemini_model(
         model_id=clean_model_id,
         params=params,
     )
-    setattr(model, "_output_tokens", llm_max)
-    setattr(model, "_cyber_llm_role", create_parameters.role.value)
-    setattr(model, "_cyber_provider", provider)
+    model._output_tokens = llm_max
+    model._cyber_llm_role = create_parameters.role.value
+    model._cyber_provider = provider
     return model
 
 
 def create_strands_model(
-        provider: Optional[str] = None,
-        model_id: Optional[str] = None,
-        role: Optional[Union[LLMRoleType, str]] = None,
+        provider: str | None = None,
+        model_id: str | None = None,
+        role: LLMRoleType | str | None = None,
 ) -> Model:
     """ Create model based on provider type """
     agent_logger = logging.getLogger("CyberAutoAgent")
@@ -1065,7 +1070,7 @@ def get_provider_from_agent(agent) -> str:
     return provider
 
 
-def get_provider_from_model(model) -> Optional[str]:
+def get_provider_from_model(model) -> str | None:
     clazz = model.__class__.__name__.lower()
     if "ollama" in clazz:
         return "ollama"
@@ -1078,7 +1083,7 @@ def get_provider_from_model(model) -> Optional[str]:
     return None
 
 
-def get_model_timeout(model: Optional[Model] = None, default_timeout: Optional[int] = None) -> Optional[int]:
+def get_model_timeout(model: Model | None = None, default_timeout: int | None = None) -> int | None:
     from modules.config.models.ollama import OllamaModel
 
     if model is None:
@@ -1093,7 +1098,7 @@ def get_model_timeout(model: Optional[Model] = None, default_timeout: Optional[i
     return model_timeout if model_timeout else default_timeout
 
 
-def configure_model_rate_limits(provider: Optional[str] = None):
+def configure_model_rate_limits(provider: str | None = None):
     config_manager = _get_config_manager()
     if not provider:
         provider = config_manager.get_provider()
@@ -1107,31 +1112,32 @@ def configure_model_rate_limits(provider: Optional[str] = None):
     # limiter must be per-provider
     from modules.rate_limit.rate_limit import (
         ThreadSafeRateLimiter,
+        patch_langchain_chat_class_generate,
         patch_model_provider_class,
-        patch_langchain_chat_class_generate
     )
 
     if provider == "ollama":
-        from modules.config.models.ollama import OllamaModel
         from langchain_ollama import ChatOllama
+
+        from modules.config.models.ollama import OllamaModel
         limiter = ThreadSafeRateLimiter(rate_limit_config)
         patch_model_provider_class(OllamaModel, limiter)
         patch_langchain_chat_class_generate(ChatOllama, limiter)
     elif provider == "bedrock":
-        from strands.models import BedrockModel
         from langchain_aws import ChatBedrock
+        from strands.models import BedrockModel
         limiter = ThreadSafeRateLimiter(rate_limit_config)
         patch_model_provider_class(BedrockModel, limiter)
         patch_langchain_chat_class_generate(ChatBedrock, limiter)
     elif provider == "litellm":
-        from strands.models.litellm import LiteLLMModel
         from langchain_litellm import ChatLiteLLM
+        from strands.models.litellm import LiteLLMModel
         limiter = ThreadSafeRateLimiter(rate_limit_config)
         patch_model_provider_class(LiteLLMModel, limiter)
         patch_langchain_chat_class_generate(ChatLiteLLM, limiter)
     elif provider == "gemini":
-        from strands.models.gemini import GeminiModel
         from langchain_google_genai import ChatGoogleGenerativeAI
+        from strands.models.gemini import GeminiModel
         limiter = ThreadSafeRateLimiter(rate_limit_config)
         patch_model_provider_class(GeminiModel, limiter)
         patch_langchain_chat_class_generate(ChatGoogleGenerativeAI, limiter)

@@ -8,10 +8,10 @@ from types import SimpleNamespace
 from modules.handlers.utils import (
     create_output_directory,
     filter_none_values,
+    get_output_path,
     get_tool_description,
     get_tool_name,
     get_tool_spec,
-    get_output_path,
     sanitize_target_name,
     tool_append_description,
     tool_rename,

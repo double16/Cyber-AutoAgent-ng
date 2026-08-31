@@ -8,7 +8,7 @@ the React UI and logging infrastructure.
 
 import json
 import time
-from typing import Any, Dict, Optional
+from typing import Any
 
 from strands.hooks import (
     AfterToolCallEvent,
@@ -30,7 +30,7 @@ _TOOL_EXECUTED_KEY = "_cyber_executed"
 _VALIDATION_ERROR_PREFIX = "Validation failed for input parameters:"
 
 
-def classify_tool_outcome(result: Any, cancel_message: Optional[str] = None) -> tuple[str, bool]:
+def classify_tool_outcome(result: Any, cancel_message: str | None = None) -> tuple[str, bool]:
     """Classify whether a tool ran and how its invocation ended."""
 
     if cancel_message is not None:
@@ -58,8 +58,8 @@ class ReactHooks(HookProvider):
     """
 
     def __init__(
-            self, emitter: Optional[EventEmitter] = None, operation_id: Optional[str] = None,
-            agent_config: Optional[AgentConfig] = None,
+            self, emitter: EventEmitter | None = None, operation_id: str | None = None,
+            agent_config: AgentConfig | None = None,
             emit_tool_lifecycle: bool = True,
     ):
         """
@@ -71,7 +71,7 @@ class ReactHooks(HookProvider):
             operation_id: Operation identifier for event correlation.
         """
         self.emitter = emitter or get_emitter(operation_id=operation_id)
-        self.tool_start_times: Dict[str, float] = {}
+        self.tool_start_times: dict[str, float] = {}
         self.agent_config = agent_config
         self.emit_tool_lifecycle = emit_tool_lifecycle
 
@@ -214,7 +214,7 @@ class ReactHooks(HookProvider):
             if isinstance(result, dict):
                 result[_TOOL_OUTCOME_KEY] = outcome
                 result[_TOOL_EXECUTED_KEY] = executed
-            success, output = self._process_tool_result(result)
+            success, _output = self._process_tool_result(result)
 
             # Log completion at INFO level
             logger.info(
@@ -259,7 +259,7 @@ class ReactHooks(HookProvider):
         except Exception as e:
             logger.error("Error processing after tool event: %s", e, exc_info=True)
 
-    def _parse_tool_input(self, input_data: Any) -> Dict[str, Any]:
+    def _parse_tool_input(self, input_data: Any) -> dict[str, Any]:
         """
         Parse tool input into a structured dictionary.
 
@@ -280,7 +280,7 @@ class ReactHooks(HookProvider):
 
         return {"raw": str(input_data)}
 
-    def _calculate_duration(self, tool_id: Optional[str]) -> float:
+    def _calculate_duration(self, tool_id: str | None) -> float:
         """
         Calculate tool execution duration.
 

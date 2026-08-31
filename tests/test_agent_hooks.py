@@ -6,8 +6,8 @@ from strands.types.exceptions import MaxTokensReachedException
 
 # this import helps the hooks import avoid a circular dependency
 importlib.import_module("cyberautoagent")
-from modules.handlers.agent_repair_hook import AgentRepairHook  # noqa: E402
-from modules.handlers.react.hooks import ReactHooks  # noqa: E402
+from modules.handlers.agent_repair_hook import AgentRepairHook
+from modules.handlers.react.hooks import ReactHooks
 
 
 class RecordingEmitter:

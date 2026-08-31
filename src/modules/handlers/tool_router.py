@@ -11,9 +11,9 @@ import logging
 import re
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from strands.hooks import AfterToolCallEvent, HookProvider  # type: ignore
 from strands.types.tools import ToolResultContent
@@ -36,8 +36,8 @@ class ToolRouterHook(HookProvider):
     def __init__(
         self,
         max_result_chars: int = 30000,
-        artifacts_dir: Optional[str | Path] = None,
-        artifact_threshold: Optional[int] = None,
+        artifacts_dir: str | Path | None = None,
+        artifact_threshold: int | None = None,
     ) -> None:
         self._max_result_chars = max_result_chars
         if isinstance(artifacts_dir, Path):
@@ -183,7 +183,7 @@ class ToolRouterHook(HookProvider):
                     block_modified = True
                     continue
 
-                artifact_path: Optional[Path] = None
+                artifact_path: Path | None = None
                 externalized = False
 
                 # Try to externalize large outputs to preserve full evidence
@@ -224,8 +224,8 @@ class ToolRouterHook(HookProvider):
                     artifact_ref = self._artifact_reference(artifact_path)
                     summary_lines.extend(
                         [
-                            f"[Tool output: {original_size:,} chars | Inline: {len(snippet):,} chars | "
-                            f"Artifact ID: artifact_id:{artifact_path.name} | Artifact ref: {artifact_ref}]",
+                            (f"[Tool output: {original_size:,} chars | Inline: {len(snippet):,} chars | "
+                            f"Artifact ID: artifact_id:{artifact_path.name} | Artifact ref: {artifact_ref}]"),
                             "",
                             snippet,
                             "",
@@ -285,7 +285,7 @@ class ToolRouterHook(HookProvider):
             # REPLACE event.result (SDK compliant)
             event.result = new_result
 
-    def _persist_artifact(self, tool_name: str, payload: str | bytes, extension: str = "log") -> Optional[Path]:
+    def _persist_artifact(self, tool_name: str, payload: str | bytes, extension: str = "log") -> Path | None:
         """Validate artifact path operations."""
         # Validate inputs
         if not self._artifact_dir:
@@ -308,7 +308,7 @@ class ToolRouterHook(HookProvider):
                 pass
 
             safe_tool = re.sub(r"[^a-zA-Z0-9_.-]", "_", tool_name or "tool")
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
             filename = (
                 f"{safe_tool[:40] or 'tool'}_{timestamp}_{uuid.uuid4().hex[:6]}.artifact.{extension}"
             )

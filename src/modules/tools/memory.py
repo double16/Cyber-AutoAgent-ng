@@ -53,13 +53,20 @@ import subprocess
 import tempfile
 import threading
 import uuid
-from collections.abc import Iterable
-from functools import wraps
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from functools import wraps
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Annotated, Any, Callable, Dict, List, Literal, Optional, Protocol, Tuple
+from typing import (  # noqa: UP035 - `List` preserves a runtime tool schema contract
+    Annotated,
+    Any,
+    List,
+    Literal,
+    Optional,
+    Protocol,
+)
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
 import litellm
@@ -87,11 +94,11 @@ from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
 from modules.storage import SQLiteMigrationRunner
-from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.tools.artifact_references import (
     normalize_artifact_reference_token,
     split_delimited_reference_values,
 )
+from modules.tools.semantic_enum import normalize_semantic_enum
 
 # Set up logging
 logger = get_logger("Tools.Memory")
@@ -117,7 +124,7 @@ class SecretExposure:
 
 _SECRET_EXPOSURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("private_key", re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----")),
-    ("connection_string", re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s\"']+", re.I)),
+    ("connection_string", re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s\"']+", re.IGNORECASE)),
     ("jwt", re.compile(r"\beyJ[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\.[a-zA-Z0-9_-]{8,}\b")),
     ("provider_api_key", re.compile(r"\b(?:AIza[\w-]{20,}|sk-[\w-]{20,}|AKIA[0-9A-Z]{16})\b")),
     ("named_secret", re.compile(
@@ -126,7 +133,7 @@ _SECRET_EXPOSURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def detect_secret_exposures(artifact_ref: str) -> List[SecretExposure]:
+def detect_secret_exposures(artifact_ref: str) -> list[SecretExposure]:
     """Return broad, redaction-safe secret matches from one canonical artifact.
 
     Callers must establish that the artifact is target-owned before using these
@@ -144,16 +151,16 @@ def detect_secret_exposures(artifact_ref: str) -> List[SecretExposure]:
         for match in pattern.finditer(text):
             value = match.group(1) if kind == "named_secret" and match.lastindex else match.group(0)
             value = value.strip()
-            if len(value) < 8 or re.fullmatch(r"(?:redacted|masked|example|changeme|\*+)", value, re.I):
+            if len(value) < 8 or re.fullmatch(r"(?:redacted|masked|example|changeme|\*+)", value, re.IGNORECASE):
                 continue
             matches.add((kind, hashlib.sha256(value.encode("utf-8")).hexdigest()))
     return [SecretExposure(kind=kind, digest=digest) for kind, digest in sorted(matches)]
 
 # Global configuration and client
-_MEMORY_CONFIG: Optional[Dict[str, str]] = None
+_MEMORY_CONFIG: dict[str, str] | None = None
 _MEMORY_CLIENT: Optional["QdrantMemoryClient"] = None
 _DATABASE_STORE: Optional["ApplicationStore"] = None
-_MEMORY_EVENT_EMITTER: Optional[Callable[[Dict[str, Any]], None]] = None
+_MEMORY_EVENT_EMITTER: Callable[[dict[str, Any]], None] | None = None
 
 # Local Qdrant clients share one outputs-backed database within this process.
 _QDRANT_WRITE_LOCK = threading.Lock()
@@ -199,7 +206,7 @@ AcceptanceDisposition = Literal[
 def _normalize_semantic_enum(
     value: Any,
     *,
-    aliases: Dict[str, str],
+    aliases: dict[str, str],
     field_name: str,
 ) -> Any:
     """Normalize a model-facing enum alias while keeping unknown values invalid."""
@@ -436,7 +443,7 @@ class OperationTarget:
             source=str(obj.get("source", "objective") or "objective"),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "target_id": self.target_id,
             "value": self.value,
@@ -495,7 +502,7 @@ class EvidenceRequirement:
             raise ValueError("acceptance evidence requirement must be an object/dict")
         return EvidenceRequirement(kind=str(obj.get("kind", "")), min_count=int(obj.get("min_count", 1)))
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {"kind": self.kind, "min_count": self.min_count}
 
 
@@ -531,7 +538,7 @@ class ExecutionRequirement:
             subject_ref=str(obj.get("subject_ref", "")),
         )
 
-    def to_dict(self) -> Dict[str, str]:
+    def to_dict(self) -> dict[str, str]:
         return {"id": self.id, "description": self.description, "subject_ref": self.subject_ref}
 
 
@@ -541,8 +548,8 @@ class AcceptanceCriterion:
 
     id: str
     description: str
-    evidence_requirements: Tuple[EvidenceRequirement, ...]
-    execution_requirements: Tuple[ExecutionRequirement, ...] = ()
+    evidence_requirements: tuple[EvidenceRequirement, ...]
+    execution_requirements: tuple[ExecutionRequirement, ...] = ()
 
     def __post_init__(self) -> None:
         normalized_id = re.sub(r"\s+", "-", str(self.id or "").strip().lower())
@@ -583,7 +590,7 @@ class AcceptanceCriterion:
             execution_requirements=obj.get("execution_requirements", []),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "description": self.description,
@@ -601,8 +608,8 @@ ACCEPTANCE_SOURCE_REF_PATTERN = re.compile(
 class DiscoveryProcedure:
     """Deterministic limits for producing a finite inventory snapshot."""
 
-    methods: Tuple[str, ...]
-    limits: Dict[str, int]
+    methods: tuple[str, ...]
+    limits: dict[str, int]
     stop_condition: str
     gap_policy: str
     output_kind: ProcedureOutputKind
@@ -643,7 +650,7 @@ class DiscoveryProcedure:
             output_kind=str(obj.get("output_kind", "")),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "methods": list(self.methods),
             "limits": self.limits,
@@ -659,10 +666,10 @@ class AcceptanceBasis:
 
     kind: AcceptanceBasisKind
     description: str
-    source_refs: Tuple[str, ...]
-    procedure: Optional[DiscoveryProcedure] = None
+    source_refs: tuple[str, ...]
+    procedure: DiscoveryProcedure | None = None
     snapshot_hash: str = ""
-    item_ids: Tuple[str, ...] = ()
+    item_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         description = str(self.description or "").strip()
@@ -709,7 +716,7 @@ class AcceptanceBasis:
             item_ids=obj.get("item_ids", []),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         result = {
             "kind": self.kind,
             "description": self.description,
@@ -730,7 +737,7 @@ class AcceptanceContract:
 
     mode: AcceptanceMode
     basis: AcceptanceBasis
-    criteria: Tuple[AcceptanceCriterion, ...]
+    criteria: tuple[AcceptanceCriterion, ...]
     frozen_at: str = ""
     manifest_hash: str = ""
 
@@ -789,7 +796,7 @@ class AcceptanceContract:
             manifest_hash=str(obj.get("manifest_hash", "")),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
             "basis": self.basis.to_dict(),
@@ -799,7 +806,7 @@ class AcceptanceContract:
         }
 
 
-def _normalize_non_empty_strings(value: Any, field_name: str) -> Tuple[str, ...]:
+def _normalize_non_empty_strings(value: Any, field_name: str) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise ValueError(f"{field_name} must be a list")
     normalized = []
@@ -822,7 +829,7 @@ class CoverageResult:
 
     item_id: str
     status: AcceptanceResultStatus
-    evidence_refs: Tuple[str, ...]
+    evidence_refs: tuple[str, ...]
 
     def __post_init__(self) -> None:
         item_id = str(self.item_id or "").strip()
@@ -848,7 +855,7 @@ class CoverageResult:
             evidence_refs=obj.get("evidence_refs", []),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "item_id": self.item_id,
             "status": self.status,
@@ -864,8 +871,8 @@ class AcceptanceResult:
     status: AcceptanceResultStatus
     disposition: AcceptanceDisposition
     summary: str
-    evidence_refs: Tuple[str, ...]
-    coverage: Tuple[CoverageResult, ...] = ()
+    evidence_refs: tuple[str, ...]
+    coverage: tuple[CoverageResult, ...] = ()
 
     def __post_init__(self) -> None:
         criterion_id = re.sub(r"\s+", "-", str(self.criterion_id or "").strip().lower())
@@ -914,7 +921,7 @@ class AcceptanceResult:
             coverage=obj.get("coverage", []),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "criterion_id": self.criterion_id,
             "status": self.status,
@@ -939,17 +946,17 @@ class Task:
     acceptance: AcceptanceContract
     phase: int
     status: TaskStatus
-    status_reason: Optional[str] = None
-    evidence: List[str] = field(default_factory=list)
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    status_reason: str | None = None
+    evidence: list[str] = field(default_factory=list)
+    created_at: str | None = None
+    updated_at: str | None = None
     kind: str = "standard"
-    reference_id: Optional[str] = None
+    reference_id: str | None = None
     target_scope: TargetScope = "all"
-    target_ids: List[str] = field(default_factory=list)
-    replacement_of: Optional[str] = None
-    supersedes_criteria: List[str] = field(default_factory=list)
-    recovery_context: Dict[str, Any] = field(default_factory=dict)
+    target_ids: list[str] = field(default_factory=list)
+    replacement_of: str | None = None
+    supersedes_criteria: list[str] = field(default_factory=list)
+    recovery_context: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -1007,7 +1014,7 @@ class Task:
             target_ids=_normalize_target_ids(obj.get("target_ids", [])),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return filter_none_values({
             "task_uid": self.task_uid,
             "title": self.title,
@@ -1065,7 +1072,7 @@ class Task:
         return "\n".join(lines).strip()
 
     @staticmethod
-    def list_to_toon(tasks: List["Task"]) -> str:
+    def list_to_toon(tasks: list["Task"]) -> str:
         lines = [task.to_toon(include_format=False) for task in tasks]
         return f"task[{len(tasks)}]{{"+Task.csv_format()+"}:\n"+"\n".join(lines).strip()
 
@@ -1142,7 +1149,7 @@ class PlanPhase:
         )
         return "\n".join(lines).strip()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return filter_none_values({
             "id": self.id,
             "title": self.title,
@@ -1158,12 +1165,12 @@ class OperationPlan:
     objective: str
     current_phase: int
     total_phases: int
-    phases: List[PlanPhase] = field(default_factory=list)
-    constraints: List[str] = field(default_factory=list)
-    targets: List[OperationTarget] = field(default_factory=list)
+    phases: list[PlanPhase] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    targets: list[OperationTarget] = field(default_factory=list)
     assessment_complete: bool = False
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    created_at: str | None = None
+    updated_at: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.objective, str) or not self.objective.strip():
@@ -1241,7 +1248,7 @@ class OperationPlan:
             updated_at=obj.get("updated_at"),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return filter_none_values({
             "objective": self.objective,
             "current_phase": self.current_phase,
@@ -1289,7 +1296,7 @@ class OperationPlan:
         return "\n".join([*overview_lines, *constraint_lines, *target_lines, *phase_lines]).strip()
 
 
-def _get_memory_base_path(config: Optional[Dict] = None) -> str:
+def _get_memory_base_path(config: dict | None = None) -> str:
     """Return the operation-independent local Qdrant database directory."""
     output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or (config or {}).get(
         "output_dir", get_default_base_dir()
@@ -1297,12 +1304,12 @@ def _get_memory_base_path(config: Optional[Dict] = None) -> str:
     return os.path.join(output_dir, "qdrant")
 
 
-def _normalize_model_metric_rows(rows: Any) -> List[Dict[str, Any]]:
+def _normalize_model_metric_rows(rows: Any) -> list[dict[str, Any]]:
     """Validate report-compatible per-model metrics before durable append."""
     if not isinstance(rows, list) or not rows:
         raise ValueError("model metric capture requires at least one model row")
 
-    normalized_rows: List[Dict[str, Any]] = []
+    normalized_rows: list[dict[str, Any]] = []
     seen_models: set[tuple[str, str]] = set()
     for raw_row in rows:
         if not isinstance(raw_row, dict):
@@ -1316,7 +1323,7 @@ def _normalize_model_metric_rows(rows: Any) -> List[Dict[str, Any]]:
             raise ValueError("model metric capture contains duplicate provider/model rows")
         seen_models.add(identity)
 
-        def nonnegative_int(field: str, *, optional: bool = False) -> Optional[int]:
+        def nonnegative_int(field: str, *, optional: bool = False) -> int | None:
             value = raw_row.get(field)
             if value is None and optional:
                 return None
@@ -1408,12 +1415,12 @@ class ApplicationStore(Protocol):
         self,
         operation_id: str,
         *,
-        phase_status_updates: Optional[Dict[int, str]] = None,
-        current_phase: Optional[int] = None,
-        assessment_complete: Optional[bool] = None,
+        phase_status_updates: dict[int, str] | None = None,
+        current_phase: int | None = None,
+        assessment_complete: bool | None = None,
     ) -> OperationPlan: ...
 
-    def get_plan(self, operation_id: str) -> Optional[OperationPlan]: ...
+    def get_plan(self, operation_id: str) -> OperationPlan | None: ...
 
     def store_task(self, operation_id: str, task: Task) -> None: ...
 
@@ -1422,22 +1429,22 @@ class ApplicationStore(Protocol):
         operation_id: str,
         task_uid: str,
         *,
-        status: Optional[str] = None,
-        status_reason: Optional[str] = None,
-        phase: Optional[int] = None,
+        status: str | None = None,
+        status_reason: str | None = None,
+        phase: int | None = None,
         evidence_additions: Iterable[str] = (),
-        evidence_replacement: Optional[Iterable[str]] = None,
-        recovery_context_updates: Optional[Dict[str, Any]] = None,
+        evidence_replacement: Iterable[str] | None = None,
+        recovery_context_updates: dict[str, Any] | None = None,
         recovery_context_removals: Iterable[str] = (),
     ) -> Task: ...
 
-    def get_tasks(self, operation_id: str) -> List[Task]: ...
+    def get_tasks(self, operation_id: str) -> list[Task]: ...
 
     def append_operation_model_metrics(
-        self, operation_id: str, captured_at: str, rows: List[Dict[str, Any]]
+        self, operation_id: str, captured_at: str, rows: list[dict[str, Any]]
     ) -> None: ...
 
-    def list_operation_model_metrics(self, operation_id: str) -> List[Dict[str, Any]]: ...
+    def list_operation_model_metrics(self, operation_id: str) -> list[dict[str, Any]]: ...
 
     def store_finding_evidence_receipt(
         self,
@@ -1450,8 +1457,8 @@ class ApplicationStore(Protocol):
     ) -> None: ...
 
     def get_finding_evidence_receipts(
-        self, operation_id: str, receipt_uids: List[str]
-    ) -> List[Dict[str, str]]: ...
+        self, operation_id: str, receipt_uids: list[str]
+    ) -> list[dict[str, str]]: ...
 
     def rebind_finding_verification_task(
         self,
@@ -1695,22 +1702,20 @@ class SQLiteApplicationStore:
 
     def ensure_operation(self, operation_id: str) -> None:
         """Register an operation in this logical-target scope."""
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute(
-                    "INSERT INTO operations(logical_target, operation_id, created_at) VALUES (?, ?, ?) "
-                    "ON CONFLICT(logical_target, operation_id) DO NOTHING",
-                    (self.logical_target, operation_id, datetime.now().isoformat()),
-                )
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO operations(logical_target, operation_id, created_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(logical_target, operation_id) DO NOTHING",
+                (self.logical_target, operation_id, datetime.now().isoformat()),
+            )
 
     def has_operation(self, operation_id: str) -> bool:
         """Return whether this exact target and operation are registered."""
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT 1 FROM operations WHERE logical_target = ? AND operation_id = ?",
-                    (self.logical_target, operation_id),
-                ).fetchone()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM operations WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            ).fetchone()
         return row is not None
 
     def _register_operation(self, conn: sqlite3.Connection, operation_id: str) -> None:
@@ -1724,54 +1729,52 @@ class SQLiteApplicationStore:
         self,
         operation_id: str,
         captured_at: str,
-        rows: List[Dict[str, Any]],
+        rows: list[dict[str, Any]],
     ) -> None:
         """Append one immutable, per-model metrics capture for an operation."""
         normalized_rows = _normalize_model_metric_rows(rows)
         normalized_captured_at = str(captured_at).strip()
         if not normalized_captured_at:
             raise ValueError("model metric capture timestamp is required")
-        with self._lock:
-            with self._connect() as conn:
-                self._register_operation(conn, operation_id)
-                conn.executemany(
-                    """
+        with self._lock, self._connect() as conn:
+            self._register_operation(conn, operation_id)
+            conn.executemany(
+                """
                     INSERT INTO operation_model_metrics (
                         logical_target, operation_id, captured_at, provider, model, context_window_tokens,
                         input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost,
                         inference_time_ms, model_calls, correction_loops, correction_categories, efficiency
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    [
-                        (
-                            self.logical_target,
-                            operation_id,
-                            normalized_captured_at,
-                            row["provider"],
-                            row["model"],
-                            row["context_window_tokens"],
-                            row["input_tokens"],
-                            row["output_tokens"],
-                            row["cache_read_tokens"],
-                            row["cache_write_tokens"],
-                            row["total_tokens"],
-                            row["cost"],
-                            row["inference_time_ms"],
-                            row["model_calls"],
-                            row["correction_loops"],
-                            json.dumps(row["correction_categories"], sort_keys=True),
-                            row["efficiency"],
-                        )
-                        for row in normalized_rows
-                    ],
-                )
+                [
+                    (
+                        self.logical_target,
+                        operation_id,
+                        normalized_captured_at,
+                        row["provider"],
+                        row["model"],
+                        row["context_window_tokens"],
+                        row["input_tokens"],
+                        row["output_tokens"],
+                        row["cache_read_tokens"],
+                        row["cache_write_tokens"],
+                        row["total_tokens"],
+                        row["cost"],
+                        row["inference_time_ms"],
+                        row["model_calls"],
+                        row["correction_loops"],
+                        json.dumps(row["correction_categories"], sort_keys=True),
+                        row["efficiency"],
+                    )
+                    for row in normalized_rows
+                ],
+            )
 
-    def list_operation_model_metrics(self, operation_id: str) -> List[Dict[str, Any]]:
+    def list_operation_model_metrics(self, operation_id: str) -> list[dict[str, Any]]:
         """Return every persisted model-metrics capture in report display order."""
-        with self._lock:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    """
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
                     SELECT captured_at, provider, model, context_window_tokens, input_tokens, output_tokens,
                            cache_read_tokens, cache_write_tokens, total_tokens, cost, inference_time_ms,
                            model_calls, correction_loops, correction_categories, efficiency
@@ -1779,8 +1782,8 @@ class SQLiteApplicationStore:
                     WHERE logical_target = ? AND operation_id = ?
                     ORDER BY captured_at, provider, model
                     """,
-                    (self.logical_target, operation_id),
-                ).fetchall()
+                (self.logical_target, operation_id),
+            ).fetchall()
         return [
             {
                 "captured_at": row[0],
@@ -1810,10 +1813,9 @@ class SQLiteApplicationStore:
             plan_dict["created_at"] = now
         plan_dict["updated_at"] = now
 
-        with self._lock:
-            with self._connect() as conn:
-                self._register_operation(conn, operation_id)
-                conn.execute("""
+        with self._lock, self._connect() as conn:
+            self._register_operation(conn, operation_id)
+            conn.execute("""
                     INSERT INTO plans (
                         logical_target, operation_id, objective, current_phase, total_phases,
                         assessment_complete, plan_data, created_at, updated_at
@@ -1826,80 +1828,78 @@ class SQLiteApplicationStore:
                         plan_data=excluded.plan_data,
                         updated_at=excluded.updated_at
                 """, (
-                    self.logical_target,
-                    operation_id,
-                    plan.objective,
-                    plan.current_phase,
-                    plan.total_phases,
-                    plan.assessment_complete,
-                    json.dumps(plan_dict),
-                    plan_dict["created_at"],
-                    plan_dict["updated_at"]
-                ))
+                self.logical_target,
+                operation_id,
+                plan.objective,
+                plan.current_phase,
+                plan.total_phases,
+                plan.assessment_complete,
+                json.dumps(plan_dict),
+                plan_dict["created_at"],
+                plan_dict["updated_at"]
+            ))
 
     def patch_plan(
         self,
         operation_id: str,
         *,
-        phase_status_updates: Optional[Dict[int, str]] = None,
-        current_phase: Optional[int] = None,
-        assessment_complete: Optional[bool] = None,
+        phase_status_updates: dict[int, str] | None = None,
+        current_phase: int | None = None,
+        assessment_complete: bool | None = None,
     ) -> OperationPlan:
         """Atomically update controller-owned plan progress without replacing plan content."""
 
         updates = {int(phase_id): str(status) for phase_id, status in (phase_status_updates or {}).items()}
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
-                    (self.logical_target, operation_id),
-                ).fetchone()
-                if row is None:
-                    raise ValueError(f"Unknown operation plan: {operation_id}")
-                plan = OperationPlan.from_obj(json.loads(row[0]))
-                known_phase_ids = {phase.id for phase in plan.phases}
-                unknown_phase_ids = sorted(set(updates) - known_phase_ids)
-                if unknown_phase_ids:
-                    raise ValueError(f"Unknown plan phase IDs: {unknown_phase_ids}")
-                phases = [
-                    replace(phase, status=updates.get(phase.id, phase.status))
-                    for phase in plan.phases
-                ]
-                patched = replace(
-                    plan,
-                    phases=phases,
-                    current_phase=current_phase if current_phase is not None else plan.current_phase,
-                    assessment_complete=(
-                        assessment_complete if assessment_complete is not None else plan.assessment_complete
-                    ),
-                    updated_at=datetime.now().isoformat(),
-                )
-                conn.execute(
-                    "UPDATE plans SET current_phase = ?, assessment_complete = ?, plan_data = ?, updated_at = ? "
-                    "WHERE logical_target = ? AND operation_id = ?",
-                    (
-                        patched.current_phase,
-                        patched.assessment_complete,
-                        json.dumps(patched.to_dict()),
-                        patched.updated_at,
-                        self.logical_target,
-                        operation_id,
-                    ),
-                )
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown operation plan: {operation_id}")
+            plan = OperationPlan.from_obj(json.loads(row[0]))
+            known_phase_ids = {phase.id for phase in plan.phases}
+            unknown_phase_ids = sorted(set(updates) - known_phase_ids)
+            if unknown_phase_ids:
+                raise ValueError(f"Unknown plan phase IDs: {unknown_phase_ids}")
+            phases = [
+                replace(phase, status=updates.get(phase.id, phase.status))
+                for phase in plan.phases
+            ]
+            patched = replace(
+                plan,
+                phases=phases,
+                current_phase=current_phase if current_phase is not None else plan.current_phase,
+                assessment_complete=(
+                    assessment_complete if assessment_complete is not None else plan.assessment_complete
+                ),
+                updated_at=datetime.now().isoformat(),
+            )
+            conn.execute(
+                "UPDATE plans SET current_phase = ?, assessment_complete = ?, plan_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ?",
+                (
+                    patched.current_phase,
+                    patched.assessment_complete,
+                    json.dumps(patched.to_dict()),
+                    patched.updated_at,
+                    self.logical_target,
+                    operation_id,
+                ),
+            )
         return patched
 
-    def get_plan(self, operation_id: str) -> Optional[OperationPlan]:
+    def get_plan(self, operation_id: str) -> OperationPlan | None:
         """Retrieve a plan by operation_id."""
-        with self._lock:
-            with self._connect() as conn:
-                cursor = conn.execute(
-                    "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
-                    (self.logical_target, operation_id),
-                )
-                row = cursor.fetchone()
-                if row:
-                    return OperationPlan.from_obj(json.loads(row[0]))
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            )
+            row = cursor.fetchone()
+            if row:
+                return OperationPlan.from_obj(json.loads(row[0]))
         return None
 
     def store_task(self, operation_id: str, task: Task):
@@ -1974,12 +1974,12 @@ class SQLiteApplicationStore:
         operation_id: str,
         task_uid: str,
         *,
-        status: Optional[str] = None,
-        status_reason: Optional[str] = None,
-        phase: Optional[int] = None,
+        status: str | None = None,
+        status_reason: str | None = None,
+        phase: int | None = None,
         evidence_additions: Iterable[str] = (),
-        evidence_replacement: Optional[Iterable[str]] = None,
-        recovery_context_updates: Optional[Dict[str, Any]] = None,
+        evidence_replacement: Iterable[str] | None = None,
+        recovery_context_updates: dict[str, Any] | None = None,
         recovery_context_removals: Iterable[str] = (),
     ) -> Task:
         """Atomically update mutable task fields without replacing unrelated task state."""
@@ -1987,53 +1987,52 @@ class SQLiteApplicationStore:
         additions = [str(item) for item in evidence_additions if str(item)]
         updates = dict(recovery_context_updates or {})
         removals = {str(item) for item in recovery_context_removals if str(item)}
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                self._register_operation(conn, operation_id)
-                row = conn.execute(
-                    "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, "
-                    "created_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
-                    "target_scope, target_ids FROM tasks "
-                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
-                    (self.logical_target, operation_id, task_uid),
-                ).fetchone()
-                if row is None:
-                    raise ValueError(f"Unknown task_uid for operation: {task_uid}")
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._register_operation(conn, operation_id)
+            row = conn.execute(
+                "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, "
+                "created_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
+                "target_scope, target_ids FROM tasks "
+                "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                (self.logical_target, operation_id, task_uid),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown task_uid for operation: {task_uid}")
 
-                evidence = (
-                    list(dict.fromkeys(str(item) for item in evidence_replacement if str(item)))
-                    if evidence_replacement is not None
-                    else list(json.loads(row[6] or "[]"))
-                )
-                if evidence_replacement is None:
-                    for reference in additions:
-                        if reference not in evidence:
-                            evidence.append(reference)
-                recovery_context = dict(json.loads(row[12] or "{}"))
-                for key in removals:
-                    recovery_context.pop(key, None)
-                recovery_context.update(updates)
-                now = datetime.now().isoformat()
-                next_phase = int(phase) if phase is not None else int(row[3])
-                next_status = str(status) if status is not None else str(row[4])
-                next_reason = str(status_reason) if status_reason is not None else str(row[5] or "")
-                conn.execute(
-                    "UPDATE tasks SET phase = ?, status = ?, status_reason = ?, evidence = ?, "
-                    "recovery_context = ?, updated_at = ? "
-                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
-                    (
-                        next_phase,
-                        next_status,
-                        next_reason,
-                        json.dumps(evidence),
-                        json.dumps(recovery_context, sort_keys=True),
-                        now,
-                        self.logical_target,
-                        operation_id,
-                        task_uid,
-                    ),
-                )
+            evidence = (
+                list(dict.fromkeys(str(item) for item in evidence_replacement if str(item)))
+                if evidence_replacement is not None
+                else list(json.loads(row[6] or "[]"))
+            )
+            if evidence_replacement is None:
+                for reference in additions:
+                    if reference not in evidence:
+                        evidence.append(reference)
+            recovery_context = dict(json.loads(row[12] or "{}"))
+            for key in removals:
+                recovery_context.pop(key, None)
+            recovery_context.update(updates)
+            now = datetime.now().isoformat()
+            next_phase = int(phase) if phase is not None else int(row[3])
+            next_status = str(status) if status is not None else str(row[4])
+            next_reason = str(status_reason) if status_reason is not None else str(row[5] or "")
+            conn.execute(
+                "UPDATE tasks SET phase = ?, status = ?, status_reason = ?, evidence = ?, "
+                "recovery_context = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                (
+                    next_phase,
+                    next_status,
+                    next_reason,
+                    json.dumps(evidence),
+                    json.dumps(recovery_context, sort_keys=True),
+                    now,
+                    self.logical_target,
+                    operation_id,
+                    task_uid,
+                ),
+            )
         return Task(
             title=row[0],
             objective=row[1],
@@ -2054,92 +2053,89 @@ class SQLiteApplicationStore:
             target_ids=json.loads(row[14] or "[]"),
         )
 
-    def get_tasks(self, operation_id: str) -> List[Task]:
+    def get_tasks(self, operation_id: str) -> list[Task]:
         """Retrieve all tasks for an operation."""
         tasks = []
-        with self._lock:
-            with self._connect() as conn:
-                cursor = conn.execute(
-                    "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
-                    "created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
-                    "target_scope, target_ids "
-                    "FROM tasks WHERE logical_target = ? AND operation_id = ?",
-                    (self.logical_target, operation_id),
-                )
-                for row in cursor:
-                    tasks.append(
-                        Task(
-                            title=row[0],
-                            objective=row[1],
-                            acceptance=AcceptanceContract.from_obj(json.loads(row[2])),
-                            phase=row[3],
-                            status=row[4],
-                            status_reason=row[5],
-                            evidence=json.loads(row[6]),
-                            task_uid=row[7],
-                            created_at=row[8],
-                            updated_at=row[9],
-                            kind=row[10] or "standard",
-                            reference_id=row[11],
-                            replacement_of=row[12],
-                            supersedes_criteria=json.loads(row[13] or "[]"),
-                            recovery_context=json.loads(row[14] or "{}"),
-                            target_scope=row[15] or "all",
-                            target_ids=json.loads(row[16] or "[]"),
-                        )
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
+                "created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
+                "target_scope, target_ids "
+                "FROM tasks WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            )
+            for row in cursor:
+                tasks.append(
+                    Task(
+                        title=row[0],
+                        objective=row[1],
+                        acceptance=AcceptanceContract.from_obj(json.loads(row[2])),
+                        phase=row[3],
+                        status=row[4],
+                        status_reason=row[5],
+                        evidence=json.loads(row[6]),
+                        task_uid=row[7],
+                        created_at=row[8],
+                        updated_at=row[9],
+                        kind=row[10] or "standard",
+                        reference_id=row[11],
+                        replacement_of=row[12],
+                        supersedes_criteria=json.loads(row[13] or "[]"),
+                        recovery_context=json.loads(row[14] or "{}"),
+                        target_scope=row[15] or "all",
+                        target_ids=json.loads(row[16] or "[]"),
                     )
+                )
         return tasks
 
     def store_acceptance_results(
         self,
         operation_id: str,
         task_uid: str,
-        results: List[AcceptanceResult],
+        results: list[AcceptanceResult],
     ) -> None:
         """Atomically upsert executor results for a frozen task manifest."""
 
         now = datetime.now().isoformat()
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                self._register_operation(conn, operation_id)
-                conn.executemany(
-                    """
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._register_operation(conn, operation_id)
+            conn.executemany(
+                """
                     INSERT INTO task_acceptance_results (
                         logical_target, operation_id, task_uid, criterion_id, status, disposition, summary,
                         evidence_refs, coverage, updated_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(logical_target, operation_id, task_uid, criterion_id) DO NOTHING
                     """,
-                    [
-                        (
-                            self.logical_target,
-                            operation_id,
-                            task_uid,
-                            result.criterion_id,
-                            result.status,
-                            result.disposition,
-                            result.summary,
-                            json.dumps(result.evidence_refs),
-                            json.dumps([item.to_dict() for item in result.coverage]),
-                            now,
-                        )
-                        for result in results
-                    ],
-                )
+                [
+                    (
+                        self.logical_target,
+                        operation_id,
+                        task_uid,
+                        result.criterion_id,
+                        result.status,
+                        result.disposition,
+                        result.summary,
+                        json.dumps(result.evidence_refs),
+                        json.dumps([item.to_dict() for item in result.coverage]),
+                        now,
+                    )
+                    for result in results
+                ],
+            )
 
-    def get_acceptance_results(self, operation_id: str, task_uid: str) -> List[AcceptanceResult]:
+    def get_acceptance_results(self, operation_id: str, task_uid: str) -> list[AcceptanceResult]:
         """Return the current acceptance ledger for one task."""
 
-        with self._lock:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    "SELECT criterion_id, status, disposition, summary, evidence_refs, coverage "
-                    "FROM task_acceptance_results WHERE logical_target = ? "
-                    "AND operation_id = ? AND task_uid = ? "
-                    "ORDER BY criterion_id",
-                    (self.logical_target, operation_id, task_uid),
-                ).fetchall()
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT criterion_id, status, disposition, summary, evidence_refs, coverage "
+                "FROM task_acceptance_results WHERE logical_target = ? "
+                "AND operation_id = ? AND task_uid = ? "
+                "ORDER BY criterion_id",
+                (self.logical_target, operation_id, task_uid),
+            ).fetchall()
         return [
             AcceptanceResult(
                 criterion_id=row[0],
@@ -2160,13 +2156,12 @@ class SQLiteApplicationStore:
     ) -> bool:
         """Return whether this immutable acceptance ledger was published to operation memory."""
 
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT publication_key FROM task_acceptance_memory_publications "
-                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
-                    (self.logical_target, operation_id, task_uid),
-                ).fetchone()
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT publication_key FROM task_acceptance_memory_publications "
+                "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                (self.logical_target, operation_id, task_uid),
+            ).fetchone()
         return row is not None and row[0] == publication_key
 
     def mark_acceptance_memory_published(
@@ -2177,11 +2172,10 @@ class SQLiteApplicationStore:
     ) -> None:
         """Record successful publication for replay-safe acceptance handling."""
 
-        with self._lock:
-            with self._connect() as conn:
-                self._register_operation(conn, operation_id)
-                conn.execute(
-                    """
+        with self._lock, self._connect() as conn:
+            self._register_operation(conn, operation_id)
+            conn.execute(
+                """
                     INSERT INTO task_acceptance_memory_publications (
                         logical_target, operation_id, task_uid, publication_key, updated_at
                     ) VALUES (?, ?, ?, ?, ?)
@@ -2189,22 +2183,21 @@ class SQLiteApplicationStore:
                         publication_key=excluded.publication_key,
                         updated_at=excluded.updated_at
                     """,
-                    (self.logical_target, operation_id, task_uid, publication_key, datetime.now().isoformat()),
-                )
+                (self.logical_target, operation_id, task_uid, publication_key, datetime.now().isoformat()),
+            )
 
-    def store_preflight_results(self, operation_id: str, results: List[Dict[str, Any]]) -> None:
+    def store_preflight_results(self, operation_id: str, results: list[dict[str, Any]]) -> None:
         """Persist immutable preflight facts for one operation's executable targets."""
 
         now = datetime.now().isoformat()
-        with self._lock:
-            with self._connect() as conn:
-                self._register_operation(conn, operation_id)
-                for result in results:
-                    target_id = str(result.get("target_id") or "").strip()
-                    if not target_id:
-                        raise ValueError("preflight result requires target_id")
-                    conn.execute(
-                        """
+        with self._lock, self._connect() as conn:
+            self._register_operation(conn, operation_id)
+            for result in results:
+                target_id = str(result.get("target_id") or "").strip()
+                if not target_id:
+                    raise ValueError("preflight result requires target_id")
+                conn.execute(
+                    """
                         INSERT INTO operation_preflight_results (
                             logical_target, operation_id, target_id, target, target_type, status, checks, reason,
                             resolved_addresses, has_global_address, has_private_or_reserved_address,
@@ -2212,37 +2205,36 @@ class SQLiteApplicationStore:
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(logical_target, operation_id, target_id) DO NOTHING
                         """,
-                        (
-                            self.logical_target,
-                            operation_id,
-                            target_id,
-                            str(result.get("target") or ""),
-                            str(result.get("target_type") or ""),
-                            str(result.get("status") or "skip"),
-                            json.dumps(list(result.get("checks") or [])),
-                            str(result.get("reason") or ""),
-                            json.dumps(list(result.get("resolved_addresses") or [])),
-                            bool(result.get("has_global_address")),
-                            bool(result.get("has_private_or_reserved_address")),
-                            bool(result.get("route_reachable")),
-                            now,
-                        ),
-                    )
+                    (
+                        self.logical_target,
+                        operation_id,
+                        target_id,
+                        str(result.get("target") or ""),
+                        str(result.get("target_type") or ""),
+                        str(result.get("status") or "skip"),
+                        json.dumps(list(result.get("checks") or [])),
+                        str(result.get("reason") or ""),
+                        json.dumps(list(result.get("resolved_addresses") or [])),
+                        bool(result.get("has_global_address")),
+                        bool(result.get("has_private_or_reserved_address")),
+                        bool(result.get("route_reachable")),
+                        now,
+                    ),
+                )
 
-    def list_preflight_results(self, operation_id: str) -> List[Dict[str, Any]]:
+    def list_preflight_results(self, operation_id: str) -> list[dict[str, Any]]:
         """Return the original persisted preflight facts for an operation."""
 
-        with self._lock:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    """
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
                     SELECT target_id, target, target_type, status, checks, reason, resolved_addresses,
                            has_global_address, has_private_or_reserved_address, route_reachable, recorded_at
                     FROM operation_preflight_results
                     WHERE logical_target = ? AND operation_id = ? ORDER BY target_id
                     """,
-                    (self.logical_target, operation_id),
-                ).fetchall()
+                (self.logical_target, operation_id),
+            ).fetchall()
         return [
             {
                 "target_id": row[0],
@@ -2260,14 +2252,13 @@ class SQLiteApplicationStore:
             for row in rows
         ]
 
-    def get_finding_by_fingerprint(self, operation_id: str, fingerprint: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT finding_uid, candidate_data, verification_task_uid, validation_data, resolution "
-                    "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
-                    (self.logical_target, operation_id, fingerprint),
-                ).fetchone()
+    def get_finding_by_fingerprint(self, operation_id: str, fingerprint: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT finding_uid, candidate_data, verification_task_uid, validation_data, resolution "
+                "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
+                (self.logical_target, operation_id, fingerprint),
+            ).fetchone()
         if not row:
             return None
         return {
@@ -2278,14 +2269,13 @@ class SQLiteApplicationStore:
             "resolution": row[4],
         }
 
-    def get_finding(self, operation_id: str, finding_uid: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
-                    "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
-                    (self.logical_target, operation_id, finding_uid),
-                ).fetchone()
+    def get_finding(self, operation_id: str, finding_uid: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
+                "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                (self.logical_target, operation_id, finding_uid),
+            ).fetchone()
         if not row:
             return None
         return {
@@ -2297,18 +2287,17 @@ class SQLiteApplicationStore:
             "resolution": row[4],
         }
 
-    def list_findings(self, operation_id: str) -> List[Dict[str, Any]]:
+    def list_findings(self, operation_id: str) -> list[dict[str, Any]]:
         """Return finding records for deterministic workflow scheduling decisions."""
 
-        with self._lock:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    "SELECT finding_uid, fingerprint, candidate_data, verification_task_uid, "
-                    "validation_data, resolution FROM finding_records "
-                    "WHERE logical_target = ? AND operation_id = ? "
-                    "ORDER BY created_at, finding_uid",
-                    (self.logical_target, operation_id),
-                ).fetchall()
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT finding_uid, fingerprint, candidate_data, verification_task_uid, "
+                "validation_data, resolution FROM finding_records "
+                "WHERE logical_target = ? AND operation_id = ? "
+                "ORDER BY created_at, finding_uid",
+                (self.logical_target, operation_id),
+            ).fetchall()
         return [
             {
                 "finding_uid": row[0],
@@ -2326,28 +2315,27 @@ class SQLiteApplicationStore:
         operation_id: str,
         finding_uid: str,
         fingerprint: str,
-        candidate_data: Dict[str, Any],
+        candidate_data: dict[str, Any],
         verification_task_uid: str,
     ) -> None:
         now = datetime.now().isoformat()
-        with self._lock:
-            with self._connect() as conn:
-                self._register_operation(conn, operation_id)
-                conn.execute(
-                    "INSERT INTO finding_records "
-                    "(logical_target, finding_uid, operation_id, fingerprint, candidate_data, "
-                    "verification_task_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        self.logical_target,
-                        finding_uid,
-                        operation_id,
-                        fingerprint,
-                        json.dumps(candidate_data),
-                        verification_task_uid,
-                        now,
-                        now,
-                    ),
-                )
+        with self._lock, self._connect() as conn:
+            self._register_operation(conn, operation_id)
+            conn.execute(
+                "INSERT INTO finding_records "
+                "(logical_target, finding_uid, operation_id, fingerprint, candidate_data, "
+                "verification_task_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self.logical_target,
+                    finding_uid,
+                    operation_id,
+                    fingerprint,
+                    json.dumps(candidate_data),
+                    verification_task_uid,
+                    now,
+                    now,
+                ),
+            )
 
     def store_finding_evidence_receipt(
         self,
@@ -2360,41 +2348,39 @@ class SQLiteApplicationStore:
     ) -> None:
         """Persist one task-bound, artifact-backed finding-evidence receipt."""
 
-        with self._lock:
-            with self._connect() as conn:
-                self._register_operation(conn, operation_id)
-                conn.execute(
-                    "INSERT INTO finding_evidence_receipts "
-                    "(logical_target, operation_id, receipt_uid, source_task_uid, artifact_ref, marker, "
-                    "artifact_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        self.logical_target,
-                        operation_id,
-                        receipt_uid,
-                        source_task_uid,
-                        artifact_ref,
-                        marker,
-                        artifact_fingerprint,
-                        datetime.now().isoformat(),
-                    ),
-                )
+        with self._lock, self._connect() as conn:
+            self._register_operation(conn, operation_id)
+            conn.execute(
+                "INSERT INTO finding_evidence_receipts "
+                "(logical_target, operation_id, receipt_uid, source_task_uid, artifact_ref, marker, "
+                "artifact_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self.logical_target,
+                    operation_id,
+                    receipt_uid,
+                    source_task_uid,
+                    artifact_ref,
+                    marker,
+                    artifact_fingerprint,
+                    datetime.now().isoformat(),
+                ),
+            )
 
     def get_finding_evidence_receipts(
-        self, operation_id: str, receipt_uids: List[str]
-    ) -> List[Dict[str, str]]:
+        self, operation_id: str, receipt_uids: list[str]
+    ) -> list[dict[str, str]]:
         """Load receipts scoped to this target and operation in caller-supplied order."""
 
         if not receipt_uids:
             return []
         placeholders = ", ".join("?" for _ in receipt_uids)
-        with self._lock:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    "SELECT receipt_uid, source_task_uid, artifact_ref, marker, artifact_fingerprint "
-                    "FROM finding_evidence_receipts WHERE logical_target = ? AND operation_id = ? "
-                    f"AND receipt_uid IN ({placeholders})",
-                    (self.logical_target, operation_id, *receipt_uids),
-                ).fetchall()
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT receipt_uid, source_task_uid, artifact_ref, marker, artifact_fingerprint "
+                "FROM finding_evidence_receipts WHERE logical_target = ? AND operation_id = ? "
+                f"AND receipt_uid IN ({placeholders})",
+                (self.logical_target, operation_id, *receipt_uids),
+            ).fetchall()
         by_uid = {
             str(row[0]): {
                 "receipt_uid": str(row[0]),
@@ -2410,52 +2396,51 @@ class SQLiteApplicationStore:
     def link_finding_source_task(self, operation_id: str, finding_uid: str, task_uid: str) -> None:
         """Durably associate an idempotent finding candidate with a source task."""
 
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT candidate_data FROM finding_records "
-                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
-                    (self.logical_target, operation_id, finding_uid),
-                ).fetchone()
-                if row is None:
-                    raise ValueError(f"Unknown finding_uid for source-task link: {finding_uid}")
-                candidate_data = json.loads(row[0])
-                source_task_uids = list(candidate_data.get("source_task_uids", []))
-                if task_uid not in source_task_uids:
-                    source_task_uids.append(task_uid)
-                    candidate_data["source_task_uids"] = source_task_uids
-                    receipts = candidate_data.setdefault("source_task_receipts", [])
-                    if not any(
-                        isinstance(receipt, dict) and receipt.get("task_uid") == task_uid
-                        for receipt in receipts
-                    ):
-                        receipts.append(
-                            {
-                                "task_uid": task_uid,
-                                "finding_uid": finding_uid,
-                                "status": "persisted",
-                                "evidence_refs": list(
-                                    dict.fromkeys(
-                                        [
-                                            *candidate_data.get("artifacts", []),
-                                            f"finding:{finding_uid}",
-                                        ]
-                                    )
-                                ),
-                            }
-                        )
-                    conn.execute(
-                        "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
-                        "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
-                        (
-                            json.dumps(candidate_data),
-                            datetime.now().isoformat(),
-                            self.logical_target,
-                            operation_id,
-                            finding_uid,
-                        ),
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT candidate_data FROM finding_records "
+                "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                (self.logical_target, operation_id, finding_uid),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown finding_uid for source-task link: {finding_uid}")
+            candidate_data = json.loads(row[0])
+            source_task_uids = list(candidate_data.get("source_task_uids", []))
+            if task_uid not in source_task_uids:
+                source_task_uids.append(task_uid)
+                candidate_data["source_task_uids"] = source_task_uids
+                receipts = candidate_data.setdefault("source_task_receipts", [])
+                if not any(
+                    isinstance(receipt, dict) and receipt.get("task_uid") == task_uid
+                    for receipt in receipts
+                ):
+                    receipts.append(
+                        {
+                            "task_uid": task_uid,
+                            "finding_uid": finding_uid,
+                            "status": "persisted",
+                            "evidence_refs": list(
+                                dict.fromkeys(
+                                    [
+                                        *candidate_data.get("artifacts", []),
+                                        f"finding:{finding_uid}",
+                                    ]
+                                )
+                            ),
+                        }
                     )
+                conn.execute(
+                    "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                    (
+                        json.dumps(candidate_data),
+                        datetime.now().isoformat(),
+                        self.logical_target,
+                        operation_id,
+                        finding_uid,
+                    ),
+                )
 
     def rebind_finding_verification_task(
         self,
@@ -2466,164 +2451,158 @@ class SQLiteApplicationStore:
     ) -> bool:
         """Atomically transfer an unresolved finding's verification-task ownership."""
 
-        with self._lock:
-            with self._connect() as conn:
-                cursor = conn.execute(
-                    "UPDATE finding_records SET verification_task_uid = ?, updated_at = ? "
-                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ? "
-                    "AND verification_task_uid = ? AND resolution IS NULL AND validation_data IS NULL",
-                    (
-                        replacement_task_uid,
-                        datetime.now().isoformat(),
-                        self.logical_target,
-                        operation_id,
-                        finding_uid,
-                        expected_task_uid,
-                    ),
-                )
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE finding_records SET verification_task_uid = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ? "
+                "AND verification_task_uid = ? AND resolution IS NULL AND validation_data IS NULL",
+                (
+                    replacement_task_uid,
+                    datetime.now().isoformat(),
+                    self.logical_target,
+                    operation_id,
+                    finding_uid,
+                    expected_task_uid,
+                ),
+            )
         return cursor.rowcount == 1
 
     def store_finding_validation(
         self,
         operation_id: str,
         finding_uid: str,
-        validation_data: Dict[str, Any],
+        validation_data: dict[str, Any],
     ) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute(
-                    "UPDATE finding_records SET validation_data = ?, updated_at = ? "
-                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
-                    (
-                        json.dumps(validation_data),
-                        datetime.now().isoformat(),
-                        self.logical_target,
-                        operation_id,
-                        finding_uid,
-                    ),
-                )
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE finding_records SET validation_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                (
+                    json.dumps(validation_data),
+                    datetime.now().isoformat(),
+                    self.logical_target,
+                    operation_id,
+                    finding_uid,
+                ),
+            )
 
     def update_finding_taxonomy_annotation(
         self,
         operation_id: str,
         finding_uid: str,
-        annotation: Dict[str, Any],
+        annotation: dict[str, Any],
     ) -> bool:
         """Atomically attach one taxonomy annotation to an unresolved finding candidate."""
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT candidate_data FROM finding_records "
-                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
-                    (self.logical_target, operation_id, finding_uid),
-                ).fetchone()
-                if row is None:
-                    raise ValueError(f"Unknown finding_uid for taxonomy annotation: {finding_uid}")
-                candidate_data = json.loads(row[0])
-                existing = candidate_data.get("taxonomy_annotation")
-                if isinstance(existing, dict) and existing.get("status") == "completed":
-                    return False
-                candidate_data["taxonomy"] = annotation.get("taxonomy", {"cwe": [], "mitre_attack": []})
-                candidate_data["taxonomy_annotation"] = annotation
-                conn.execute(
-                    "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
-                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
-                    (
-                        json.dumps(candidate_data),
-                        datetime.now().isoformat(),
-                        self.logical_target,
-                        operation_id,
-                        finding_uid,
-                    ),
-                )
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT candidate_data FROM finding_records "
+                "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                (self.logical_target, operation_id, finding_uid),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown finding_uid for taxonomy annotation: {finding_uid}")
+            candidate_data = json.loads(row[0])
+            existing = candidate_data.get("taxonomy_annotation")
+            if isinstance(existing, dict) and existing.get("status") == "completed":
+                return False
+            candidate_data["taxonomy"] = annotation.get("taxonomy", {"cwe": [], "mitre_attack": []})
+            candidate_data["taxonomy_annotation"] = annotation
+            conn.execute(
+                "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                (
+                    json.dumps(candidate_data),
+                    datetime.now().isoformat(),
+                    self.logical_target,
+                    operation_id,
+                    finding_uid,
+                ),
+            )
         return True
 
     def update_finding_attack_enrichment(
         self,
         operation_id: str,
         finding_uid: str,
-        enrichment: Dict[str, Any],
+        enrichment: dict[str, Any],
     ) -> bool:
         """Persist final ATT&CK enrichment and merge it into the finding taxonomy."""
 
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
-                row = conn.execute(
-                    "SELECT candidate_data FROM finding_records "
-                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
-                    (self.logical_target, operation_id, finding_uid),
-                ).fetchone()
-                if row is None:
-                    raise ValueError(f"Unknown finding_uid for ATT&CK enrichment: {finding_uid}")
-                candidate_data = json.loads(row[0])
-                existing_enrichment = candidate_data.get("final_attack_enrichment")
-                if isinstance(existing_enrichment, dict) and existing_enrichment.get("status") == "completed":
-                    return False
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT candidate_data FROM finding_records "
+                "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                (self.logical_target, operation_id, finding_uid),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown finding_uid for ATT&CK enrichment: {finding_uid}")
+            candidate_data = json.loads(row[0])
+            existing_enrichment = candidate_data.get("final_attack_enrichment")
+            if isinstance(existing_enrichment, dict) and existing_enrichment.get("status") == "completed":
+                return False
 
-                candidate_data["final_attack_enrichment"] = enrichment
-                if enrichment.get("status") == "completed":
-                    taxonomy = dict(candidate_data.get("taxonomy") or {})
-                    taxonomy.setdefault("cwe", [])
-                    existing_attack = taxonomy.get("mitre_attack")
-                    existing_attack = existing_attack if isinstance(existing_attack, list) else []
-                    enrichment_taxonomy = enrichment.get("taxonomy")
-                    enrichment_taxonomy = enrichment_taxonomy if isinstance(enrichment_taxonomy, dict) else {}
-                    proposed_attack = enrichment_taxonomy.get("mitre_attack")
-                    proposed_attack = proposed_attack if isinstance(proposed_attack, list) else []
-                    merged: Dict[str, Dict[str, Any]] = {}
-                    for mapping in [*existing_attack, *proposed_attack]:
-                        if not isinstance(mapping, dict) or not str(mapping.get("id") or "").strip():
-                            continue
-                        identifier = str(mapping["id"]).upper()
-                        current = merged.get(identifier)
-                        if current is None or float(mapping.get("confidence", 0.0)) > float(
-                            current.get("confidence", 0.0)
-                        ):
-                            merged[identifier] = dict(mapping)
-                        elif float(mapping.get("confidence", 0.0)) == float(current.get("confidence", 0.0)):
-                            evidence = [
-                                *list(current.get("evidence") or []),
-                                *list(mapping.get("evidence") or []),
-                            ]
-                            current["evidence"] = list(dict.fromkeys(evidence))
-                    taxonomy["mitre_attack"] = [merged[identifier] for identifier in sorted(merged)]
-                    if enrichment_taxonomy.get("provenance"):
-                        taxonomy["provenance"] = enrichment_taxonomy["provenance"]
-                    candidate_data["taxonomy"] = taxonomy
+            candidate_data["final_attack_enrichment"] = enrichment
+            if enrichment.get("status") == "completed":
+                taxonomy = dict(candidate_data.get("taxonomy") or {})
+                taxonomy.setdefault("cwe", [])
+                existing_attack = taxonomy.get("mitre_attack")
+                existing_attack = existing_attack if isinstance(existing_attack, list) else []
+                enrichment_taxonomy = enrichment.get("taxonomy")
+                enrichment_taxonomy = enrichment_taxonomy if isinstance(enrichment_taxonomy, dict) else {}
+                proposed_attack = enrichment_taxonomy.get("mitre_attack")
+                proposed_attack = proposed_attack if isinstance(proposed_attack, list) else []
+                merged: dict[str, dict[str, Any]] = {}
+                for mapping in [*existing_attack, *proposed_attack]:
+                    if not isinstance(mapping, dict) or not str(mapping.get("id") or "").strip():
+                        continue
+                    identifier = str(mapping["id"]).upper()
+                    current = merged.get(identifier)
+                    if current is None or float(mapping.get("confidence", 0.0)) > float(
+                        current.get("confidence", 0.0)
+                    ):
+                        merged[identifier] = dict(mapping)
+                    elif float(mapping.get("confidence", 0.0)) == float(current.get("confidence", 0.0)):
+                        evidence = [
+                            *list(current.get("evidence") or []),
+                            *list(mapping.get("evidence") or []),
+                        ]
+                        current["evidence"] = list(dict.fromkeys(evidence))
+                taxonomy["mitre_attack"] = [merged[identifier] for identifier in sorted(merged)]
+                if enrichment_taxonomy.get("provenance"):
+                    taxonomy["provenance"] = enrichment_taxonomy["provenance"]
+                candidate_data["taxonomy"] = taxonomy
 
-                conn.execute(
-                    "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
-                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
-                    (
-                        json.dumps(candidate_data),
-                        datetime.now().isoformat(),
-                        self.logical_target,
-                        operation_id,
-                        finding_uid,
-                    ),
-                )
+            conn.execute(
+                "UPDATE finding_records SET candidate_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                (
+                    json.dumps(candidate_data),
+                    datetime.now().isoformat(),
+                    self.logical_target,
+                    operation_id,
+                    finding_uid,
+                ),
+            )
         return True
 
     def resolve_finding(self, operation_id: str, finding_uid: str, resolution: str) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute(
-                    "UPDATE finding_records SET resolution = ?, updated_at = ? "
-                    "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
-                    (resolution, datetime.now().isoformat(), self.logical_target, operation_id, finding_uid),
-                )
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE finding_records SET resolution = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
+                (resolution, datetime.now().isoformat(), self.logical_target, operation_id, finding_uid),
+            )
 
-    def get_objective_candidate(self, operation_id: str, candidate_uid: str) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
-                    "FROM objective_validation_records "
-                    "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
-                    (self.logical_target, operation_id, candidate_uid),
-                ).fetchone()
+    def get_objective_candidate(self, operation_id: str, candidate_uid: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
+                "FROM objective_validation_records "
+                "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
+                (self.logical_target, operation_id, candidate_uid),
+            ).fetchone()
         if not row:
             return None
         return {
@@ -2639,25 +2618,23 @@ class SQLiteApplicationStore:
         self,
         operation_id: str,
         fingerprint: str,
-    ) -> Optional[Dict[str, Any]]:
-        with self._lock:
-            with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT candidate_uid FROM objective_validation_records "
-                    "WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
-                    (self.logical_target, operation_id, fingerprint),
-                ).fetchone()
+    ) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT candidate_uid FROM objective_validation_records "
+                "WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
+                (self.logical_target, operation_id, fingerprint),
+            ).fetchone()
         return self.get_objective_candidate(operation_id, row[0]) if row else None
 
-    def list_objective_candidates(self, operation_id: str) -> List[Dict[str, Any]]:
-        with self._lock:
-            with self._connect() as conn:
-                rows = conn.execute(
-                    "SELECT candidate_uid FROM objective_validation_records "
-                    "WHERE logical_target = ? AND operation_id = ? "
-                    "ORDER BY created_at, candidate_uid",
-                    (self.logical_target, operation_id),
-                ).fetchall()
+    def list_objective_candidates(self, operation_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT candidate_uid FROM objective_validation_records "
+                "WHERE logical_target = ? AND operation_id = ? "
+                "ORDER BY created_at, candidate_uid",
+                (self.logical_target, operation_id),
+            ).fetchall()
         return [self.get_objective_candidate(operation_id, row[0]) for row in rows]
 
     def store_objective_candidate(
@@ -2665,67 +2642,64 @@ class SQLiteApplicationStore:
         operation_id: str,
         candidate_uid: str,
         fingerprint: str,
-        candidate_data: Dict[str, Any],
+        candidate_data: dict[str, Any],
         verification_task_uid: str,
     ) -> None:
         now = datetime.now().isoformat()
-        with self._lock:
-            with self._connect() as conn:
-                self._register_operation(conn, operation_id)
-                conn.execute(
-                    "INSERT INTO objective_validation_records "
-                    "(logical_target, candidate_uid, operation_id, fingerprint, candidate_data, "
-                    "verification_task_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        self.logical_target,
-                        candidate_uid,
-                        operation_id,
-                        fingerprint,
-                        json.dumps(candidate_data),
-                        verification_task_uid,
-                        now,
-                        now,
-                    ),
-                )
+        with self._lock, self._connect() as conn:
+            self._register_operation(conn, operation_id)
+            conn.execute(
+                "INSERT INTO objective_validation_records "
+                "(logical_target, candidate_uid, operation_id, fingerprint, candidate_data, "
+                "verification_task_uid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    self.logical_target,
+                    candidate_uid,
+                    operation_id,
+                    fingerprint,
+                    json.dumps(candidate_data),
+                    verification_task_uid,
+                    now,
+                    now,
+                ),
+            )
 
     def store_objective_validation(
         self,
         operation_id: str,
         candidate_uid: str,
-        validation_data: Dict[str, Any],
+        validation_data: dict[str, Any],
     ) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute(
-                    "UPDATE objective_validation_records SET validation_data = ?, updated_at = ? "
-                    "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
-                    (
-                        json.dumps(validation_data),
-                        datetime.now().isoformat(),
-                        self.logical_target,
-                        operation_id,
-                        candidate_uid,
-                    ),
-                )
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE objective_validation_records SET validation_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
+                (
+                    json.dumps(validation_data),
+                    datetime.now().isoformat(),
+                    self.logical_target,
+                    operation_id,
+                    candidate_uid,
+                ),
+            )
 
     def resolve_objective_candidate(self, operation_id: str, candidate_uid: str, resolution: str) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.execute(
-                    "UPDATE objective_validation_records SET resolution = ?, updated_at = ? "
-                    "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
-                    (resolution, datetime.now().isoformat(), self.logical_target, operation_id, candidate_uid),
-                )
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE objective_validation_records SET resolution = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
+                (resolution, datetime.now().isoformat(), self.logical_target, operation_id, candidate_uid),
+            )
 
 
-def _application_database_path(config: Optional[Dict[str, Any]] = None) -> str:
+def _application_database_path(config: dict[str, Any] | None = None) -> str:
     """Return the output-root application database path."""
     resolved = config or {}
     output_dir = os.environ.get("CYBER_AGENT_OUTPUT_DIR") or resolved.get("output_dir", get_default_base_dir())
     return os.path.join(output_dir, "cyber_autoagent.db")
 
 
-def get_application_database_path(config: Optional[Dict[str, Any]] = None) -> str:
+def get_application_database_path(config: dict[str, Any] | None = None) -> str:
     """Return the resolved application database path without opening it."""
     return _application_database_path(config or _MEMORY_CONFIG)
 
@@ -2763,7 +2737,7 @@ def create_application_store(
     return SQLiteApplicationStore(db_path, logical_target=logical_target, read_only=read_only)
 
 
-def _get_database_store(read_only: Optional[bool] = None) -> ApplicationStore:
+def _get_database_store(read_only: bool | None = None) -> ApplicationStore:
     """Get the application store for the current logical-target context."""
     global _DATABASE_STORE
     configured_read_only = bool((_MEMORY_CONFIG or {}).get("read_only", False))
@@ -2790,20 +2764,20 @@ def _get_database_store(read_only: Optional[bool] = None) -> ApplicationStore:
 
 
 def persist_operation_model_metrics(
-    rows: List[Dict[str, Any]],
+    rows: list[dict[str, Any]],
     captured_at: str,
-    operation_id: Optional[str] = None,
+    operation_id: str | None = None,
 ) -> None:
     """Append one normal-assessment model-metrics capture to the application store."""
     _get_database_store().append_operation_model_metrics(operation_id or _operation_id(), captured_at, rows)
 
 
-def list_persisted_operation_model_metrics(operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def list_persisted_operation_model_metrics(operation_id: str | None = None) -> list[dict[str, Any]]:
     """Read every model-metrics capture for the current logical target and operation."""
     return _get_database_store().list_operation_model_metrics(operation_id or _operation_id())
 
 
-def _normalize_evidence(val: Any) -> List[str]:
+def _normalize_evidence(val: Any) -> list[str]:
     if val is None:
         return []
 
@@ -2821,7 +2795,7 @@ def _normalize_evidence(val: Any) -> List[str]:
         return str(x).strip()
 
     if isinstance(val, list):
-        out: List[str] = []
+        out: list[str] = []
         for x in val:
             s = _to_s(x)
             if s:
@@ -2832,7 +2806,7 @@ def _normalize_evidence(val: Any) -> List[str]:
     return [s] if s else []
 
 
-def _normalize_target_ids(value: Any) -> List[str]:
+def _normalize_target_ids(value: Any) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
@@ -2863,7 +2837,7 @@ _RE_CONTEXTUAL_FQDN_TARGET = re.compile(
 )
 
 
-def _classify_target_literal(value: str, *, allow_bare_hostname: bool = False) -> Optional[TargetType]:
+def _classify_target_literal(value: str, *, allow_bare_hostname: bool = False) -> TargetType | None:
     stripped = value.strip().strip(".,;)")
     if not stripped:
         return None
@@ -2890,8 +2864,8 @@ def _canonical_target_value(value: str, target_type: TargetType) -> str:
     return stripped
 
 
-def _target_candidates_from_text(text: str, *, allow_bare_hostname: bool, source: str) -> List[Tuple[str, str]]:
-    candidates: List[Tuple[str, str]] = []
+def _target_candidates_from_text(text: str, *, allow_bare_hostname: bool, source: str) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
     patterns = (
         _RE_URL_PATTERN,
         _RE_CIDR_TARGET,
@@ -2913,7 +2887,7 @@ def _target_candidates_from_text(text: str, *, allow_bare_hostname: bool, source
     return candidates
 
 
-def resolve_operation_targets(logical_target: str, objective: str = "") -> List[OperationTarget]:
+def resolve_operation_targets(logical_target: str, objective: str = "") -> list[OperationTarget]:
     """Resolve executable targets while keeping the CLI target as logical naming.
 
     Objective network literals win. Paths in an objective are remote-resource hints, not local filesystem targets.
@@ -2932,7 +2906,7 @@ def resolve_operation_targets(logical_target: str, objective: str = "") -> List[
         if not raw_candidates and str(logical_target or "").strip():
             raw_candidates = [(str(logical_target), "logical_target_fallback")]
 
-    targets: List[OperationTarget] = []
+    targets: list[OperationTarget] = []
     seen: set[str] = set()
     for value, source in raw_candidates:
         target_type = _classify_target_literal(
@@ -2967,21 +2941,21 @@ def resolve_operation_targets(logical_target: str, objective: str = "") -> List[
     return targets
 
 
-def _user_id(user_id: Optional[str] = None) -> str:
+def _user_id(user_id: str | None = None) -> str:
     if user_id:
         return user_id
     return (_MEMORY_CONFIG or {}).get("user_id", "cyber-agent")
 
 
-def _agent_id(agent_id: Optional[str] = None) -> Optional[str]:
+def _agent_id(agent_id: str | None = None) -> str | None:
     return agent_id
 
 
-def _operation_id(operation_id: Optional[str] = None) -> str:
+def _operation_id(operation_id: str | None = None) -> str:
     return operation_id or (_MEMORY_CONFIG or {}).get("operation_id", os.getenv("CYBER_OPERATION_ID", "default_operation"))
 
 
-def memory_create_time(m: Dict[str, Any]) -> str:
+def memory_create_time(m: dict[str, Any]) -> str:
     """Best-effort created_at extraction (metadata preferred, then top-level)."""
     meta = m.get("metadata", {})
     return str(m.get("created_at", meta.get("created_at", "")))
@@ -3092,14 +3066,14 @@ def _clean_memory_text(value: Any, field_name: str) -> str:
     return cleaned
 
 
-def _clean_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    cleaned: Dict[str, Any] = {}
+def _clean_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
     for key, value in (metadata or {}).items():
         cleaned[key] = _clean_memory_text(value, key) if isinstance(value, str) else value
     return cleaned
 
 
-def _memory_result_items(result: Any) -> List[Dict[str, Any]]:
+def _memory_result_items(result: Any) -> list[dict[str, Any]]:
     """Normalize supported memory result envelopes into memory records."""
 
     if isinstance(result, dict):
@@ -3123,7 +3097,7 @@ def _memory_id_from_result(result: Any) -> str:
     return ""
 
 
-def _exact_memory_match(result: Any, content: str) -> Optional[Dict[str, Any]]:
+def _exact_memory_match(result: Any, content: str) -> dict[str, Any] | None:
     """Return an exact cleaned-content match from a memory search result."""
 
     for item in _memory_result_items(result):
@@ -3151,7 +3125,7 @@ def _search_memory_entry(client: Any, content: str, user_id: str, operation_id: 
 def _store_memory_entry(
     content: str,
     category: str,
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> _MemoryStoreResult:
     """Store one category-fixed semantic memory with duplicate protection."""
 
@@ -3188,7 +3162,7 @@ def _store_memory_entry(
     return _MemoryStoreResult(created=True, memory_id=memory_id)
 
 
-def set_memory_event_emitter(emitter: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+def set_memory_event_emitter(emitter: Callable[[dict[str, Any]], None] | None) -> None:
     """Set the callback used to publish successful durable memory writes."""
 
     global _MEMORY_EVENT_EMITTER
@@ -3238,8 +3212,8 @@ def _validated_artifact_paths(
     *,
     require_one: bool = False,
     allow_delimited_strings: bool = False,
-) -> List[str]:
-    validated: List[str] = []
+) -> list[str]:
+    validated: list[str] = []
     for raw_path in split_delimited_reference_values(
         artifacts,
         allow_delimited_strings=allow_delimited_strings,
@@ -3280,10 +3254,10 @@ def _validate_finding_validation_input_shape(
         raise ValueError("validation_manifest must be an artifact reference string")
 
 
-def _artifact_fingerprints(references: List[str]) -> Dict[str, str]:
+def _artifact_fingerprints(references: list[str]) -> dict[str, str]:
     """Snapshot evidence identity without assuming an HTTP or tool output format."""
 
-    fingerprints: Dict[str, str] = {}
+    fingerprints: dict[str, str] = {}
     for reference in references:
         path = Path(_artifact_path_from_ref(reference))
         try:
@@ -3315,7 +3289,7 @@ def _json_pointer_value(payload: Any, pointer: str) -> Any:
     return current
 
 
-def _assertion_matches_artifact(assertion: Dict[str, Any], reference: str) -> bool:
+def _assertion_matches_artifact(assertion: dict[str, Any], reference: str) -> bool:
     """Evaluate one canonical, data-only assertion against an artifact."""
 
     path = Path(_artifact_path_from_ref(reference))
@@ -3357,7 +3331,7 @@ def _assertion_matches_artifact(assertion: Dict[str, Any], reference: str) -> bo
     return False
 
 
-def _canonical_assertion_predicate(assertion: Dict[str, Any]) -> str:
+def _canonical_assertion_predicate(assertion: dict[str, Any]) -> str:
     """Return an artifact-independent identity for a canonical evidence assertion."""
 
     predicate = {key: value for key, value in assertion.items() if key not in {"artifact", "marker"}}
@@ -3372,17 +3346,17 @@ def _canonical_assertion_predicate(assertion: Dict[str, Any]) -> str:
 
 def _validated_evidence_assertions(
     assertions: Any,
-    allowed_artifacts: List[str],
+    allowed_artifacts: list[str],
     *,
     require_one: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Normalize and validate typed evidence predicates against cited artifacts."""
 
     if assertions is None:
         assertions = []
     if not isinstance(assertions, list):
         raise ValueError("evidence_assertions must be a list")
-    validated: List[Dict[str, str]] = []
+    validated: list[dict[str, str]] = []
     for assertion in assertions:
         if not isinstance(assertion, dict):
             raise ValueError("each evidence assertion must be an object")
@@ -3394,7 +3368,7 @@ def _validated_evidence_assertions(
             raise ValueError(
                 "evidence assertion type must be literal_text, byte_sequence, json_value, or secret_exposure"
             )
-        normalized: Dict[str, Any] = {"artifact": reference, "type": assertion_type}
+        normalized: dict[str, Any] = {"artifact": reference, "type": assertion_type}
         if assertion_type == "literal_text":
             value = _clean_memory_text(assertion.get("value", assertion.get("marker")), "evidence assertion value")
             if not value:
@@ -3436,7 +3410,7 @@ def _validated_evidence_assertions(
 def _matching_evidence_assertions(
     candidate_assertions: Any,
     validation_assertions: Any,
-    validation_artifacts: List[str],
+    validation_artifacts: list[str],
     validation_fingerprints: Any,
 ) -> bool:
     """Return whether validation re-proved every candidate evidence predicate."""
@@ -3479,8 +3453,8 @@ def _matching_evidence_assertions(
 )
 def store_observation(
     content: str,
-    artifacts: Optional[List[str]] = None,
-    metadata: Optional[Dict[str, Any]] = None,
+    artifacts: Optional[List[str]] = None,  # noqa: UP006, UP045 - runtime tool schema compatibility
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Store one operation-specific fact, failed attempt, or informational result.
 
@@ -3532,7 +3506,7 @@ def store_observation(
 
 
 @tool
-def store_knowledge(content: str, metadata: Optional[Dict[str, Any]] = None) -> str:
+def store_knowledge(content: str, metadata: dict[str, Any] | None = None) -> str:
     """Store one reusable technique, lesson, or durable internal note.
 
     Knowledge remains retrievable but is excluded from security assessment reports.
@@ -3579,7 +3553,7 @@ def _active_finding_source_task_uid(store: Any, operation_id: str) -> str:
     return task.task_uid if task is not None else ""
 
 
-def _active_finding_source_task(store: Any, operation_id: str) -> Optional[Task]:
+def _active_finding_source_task(store: Any, operation_id: str) -> Task | None:
     """Return the sole active non-verification task when a workflow executor owns the call."""
 
     active = [
@@ -3590,7 +3564,7 @@ def _active_finding_source_task(store: Any, operation_id: str) -> Optional[Task]
     return active[0] if len(active) == 1 else None
 
 
-def _effective_url_port(parsed: Any) -> Optional[int]:
+def _effective_url_port(parsed: Any) -> int | None:
     """Return an explicit or conventional URL port without assuming HTTP-only targets."""
 
     try:
@@ -3601,7 +3575,7 @@ def _effective_url_port(parsed: Any) -> Optional[int]:
     return {"http": 80, "https": 443}.get(str(parsed.scheme or "").lower())
 
 
-def _selected_finding_targets(plan: OperationPlan, task: Optional[Task]) -> List[OperationTarget]:
+def _selected_finding_targets(plan: OperationPlan, task: Task | None) -> list[OperationTarget]:
     """Return operation targets assigned to a finding-producing task."""
 
     selected_ids = set(task.target_ids) if task is not None and task.target_scope == "subset" else set()
@@ -3634,7 +3608,7 @@ def _single_edit_hostname_match(left: str, right: str) -> bool:
     if left == right:
         return True
     if len(left) == len(right):
-        differences = [index for index, pair in enumerate(zip(left, right)) if pair[0] != pair[1]]
+        differences = [index for index, pair in enumerate(zip(left, right, strict=False)) if pair[0] != pair[1]]
         if len(differences) == 1:
             return True
         return (
@@ -3685,9 +3659,9 @@ def _path_is_within(candidate: str, root: str) -> bool:
 
 def _canonicalize_finding_target(
     target_value: str,
-    plan: Optional[OperationPlan],
-    source_task: Optional[Task],
-) -> Tuple[str, List[str]]:
+    plan: OperationPlan | None,
+    source_task: Task | None,
+) -> tuple[str, list[str]]:
     """Resolve a finding location without changing explicitly supplied target identity."""
 
     if not isinstance(plan, OperationPlan):
@@ -3801,8 +3775,8 @@ def _finding_tool_result(finding_uid: str, verification_task_uid: str, status: s
 
 
 def _record_source_task_finding_receipt(
-    source_task: Optional[Task],
-    candidate: Dict[str, Any],
+    source_task: Task | None,
+    candidate: dict[str, Any],
     finding_uid: str,
 ) -> None:
     """Record candidate persistence without treating it as task-acceptance evidence.
@@ -3901,9 +3875,9 @@ def store_finding(
     technique: str,
     expected_result: str,
     observed_result: str,
-    reproduction_steps: List[str],
+    reproduction_steps: list[str],
     artifacts: NonEmptyArtifactRefs,
-    evidence_assertions: Optional[List[Dict[str, Any]]] = None,
+    evidence_assertions: list[dict[str, Any]] | None = None,
 ) -> str:
     """Submit one finding candidate and create its dedicated verification task.
 
@@ -4071,7 +4045,7 @@ def store_finding(
     return _finding_tool_result(finding_uid, task_uid, "pending_validation")
 
 
-def _load_finding_validation_guards() -> List[Dict[str, Any]]:
+def _load_finding_validation_guards() -> list[dict[str, Any]]:
     """Load the small, declarative catalog of unambiguous validation contradictions."""
 
     try:
@@ -4124,8 +4098,8 @@ def _load_finding_validation_guards() -> List[Dict[str, Any]]:
 
 
 def _finding_validation_contradictions(
-    candidate: Dict[str, Any], evidence_artifacts: List[str]
-) -> List[str]:
+    candidate: dict[str, Any], evidence_artifacts: list[str]
+) -> list[str]:
     """Return catalog rule IDs contradicted by every cited confirmation artifact."""
 
     if not evidence_artifacts:
@@ -4175,7 +4149,7 @@ def _is_flat_json_object(text: str) -> bool:
     )
 
 
-def _finding_confirmation_requirements(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _finding_confirmation_requirements(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     """Return opt-in positive confirmation requirements matched by a finding claim."""
 
     claim_text = " ".join(
@@ -4189,7 +4163,7 @@ def _finding_confirmation_requirements(candidate: Dict[str, Any]) -> List[Dict[s
     return requirements
 
 
-def _frozen_finding_confirmation_requirements(candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _frozen_finding_confirmation_requirements(candidate: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the candidate's immutable confirmation requirements, with a legacy fallback."""
 
     packet = candidate.get("verification_packet")
@@ -4214,7 +4188,7 @@ def _load_finding_validation_binding(
     operation_id: str,
     finding_uid: str,
     verification_task_uid: str,
-) -> Tuple[Dict[str, Any], Dict[str, Any], List[Dict[str, Any]]]:
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     """Load one finding only when its persisted task ownership is exact."""
 
     record = store.get_finding(operation_id, finding_uid)
@@ -4242,10 +4216,10 @@ def _load_finding_validation_binding(
     return record, candidate, _frozen_finding_confirmation_requirements(candidate)
 
 
-def finding_validation_manifest_schema(requirements: List[Dict[str, Any]]) -> Dict[str, Any]:
+def finding_validation_manifest_schema(requirements: list[dict[str, Any]]) -> dict[str, Any]:
     """Return the model-facing JSON shape for the candidate's required checks."""
 
-    checks: Dict[str, Any] = {}
+    checks: dict[str, Any] = {}
     for requirement in requirements:
         rule_id = str(requirement["id"])
         kind = str(requirement["kind"])
@@ -4270,7 +4244,7 @@ def finding_validation_manifest_schema(requirements: List[Dict[str, Any]]) -> Di
     return {"checks": checks}
 
 
-def _confirmation_manifest_error(message: str, requirements: List[Dict[str, Any]]) -> ValueError:
+def _confirmation_manifest_error(message: str, requirements: list[dict[str, Any]]) -> ValueError:
     """Return a schema error that gives the executor a complete repair target."""
 
     shape = json.dumps(finding_validation_manifest_schema(requirements), sort_keys=True)
@@ -4278,9 +4252,9 @@ def _confirmation_manifest_error(message: str, requirements: List[Dict[str, Any]
 
 
 def _required_manifest_reference(
-    check: Dict[str, Any],
+    check: dict[str, Any],
     field_name: str,
-    requirements: List[Dict[str, Any]],
+    requirements: list[dict[str, Any]],
 ) -> str:
     """Return one non-empty manifest artifact reference with actionable schema errors."""
 
@@ -4294,7 +4268,7 @@ def _required_manifest_reference(
 
 def _resolve_confirmation_artifact_reference(
     reference: str,
-    requirements: List[Dict[str, Any]],
+    requirements: list[dict[str, Any]],
     field_name: str,
 ) -> str:
     """Resolve a manifest artifact reference or give the executor its repair target."""
@@ -4307,7 +4281,7 @@ def _resolve_confirmation_artifact_reference(
         ) from error
 
 
-def _read_json_artifact(reference: str, requirements: List[Dict[str, Any]]) -> Tuple[str, Dict[str, Any]]:
+def _read_json_artifact(reference: str, requirements: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
     canonical = _resolve_confirmation_artifact_reference(reference, requirements, "reference")
     try:
         payload = json.loads(Path(_artifact_path_from_ref(canonical)).read_text(encoding="utf-8"))
@@ -4320,7 +4294,7 @@ def _read_json_artifact(reference: str, requirements: List[Dict[str, Any]]) -> T
     return canonical, payload
 
 
-def _response_signature(reference: str, requirements: List[Dict[str, Any]]) -> Dict[str, str]:
+def _response_signature(reference: str, requirements: list[dict[str, Any]]) -> dict[str, str]:
     """Derive a stable response signature from one resolved response artifact."""
 
     canonical = _resolve_confirmation_artifact_reference(reference, requirements, "response artifact")
@@ -4330,7 +4304,7 @@ def _response_signature(reference: str, requirements: List[Dict[str, Any]]) -> D
         raise _confirmation_manifest_error(
             f"validation response artifact is unreadable: {canonical}: {error}", requirements
         ) from error
-    status_match = re.search(r"\bHTTP(?:/\d(?:\.\d)?)?\s+(\d{3})\b|\bstatus(?:_code)?\s*[:=]\s*(\d{3})\b", text, re.I)
+    status_match = re.search(r"\bHTTP(?:/\d(?:\.\d)?)?\s+(\d{3})\b|\bstatus(?:_code)?\s*[:=]\s*(\d{3})\b", text, re.IGNORECASE)
     status = next((value for value in status_match.groups() if value), "") if status_match else ""
     body = re.split(r"\r?\n\r?\n", text, maxsplit=1)[-1]
     return {
@@ -4340,7 +4314,7 @@ def _response_signature(reference: str, requirements: List[Dict[str, Any]]) -> D
     }
 
 
-def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -> Dict[str, Any]:
+def _validate_confirmation_manifest(candidate: dict[str, Any], reference: str) -> dict[str, Any]:
     """Validate narrow, artifact-derived positive predicates for matched claim families."""
 
     requirements = _frozen_finding_confirmation_requirements(candidate)
@@ -4348,7 +4322,7 @@ def _validate_confirmation_manifest(candidate: Dict[str, Any], reference: str) -
     checks = manifest.get("checks")
     if not isinstance(checks, dict):
         raise _confirmation_manifest_error("validation_manifest must contain a checks object", requirements)
-    derived: Dict[str, Any] = {}
+    derived: dict[str, Any] = {}
     for requirement in requirements:
         rule_id = requirement["id"]
         check = checks.get(rule_id)
@@ -4469,14 +4443,14 @@ def record_finding_validation(
     finding_uid: str,
     outcome: str,
     summary: str,
-    reproduction_steps: List[str],
+    reproduction_steps: list[str],
     evidence_strategy: str = "direct",
-    evidence_artifacts: Optional[List[str]] = None,
-    control_artifacts: Optional[List[str]] = None,
-    evidence_assertions: Optional[List[Dict[str, str]]] = None,
-    validation_manifest: Optional[str] = None,
+    evidence_artifacts: list[str] | None = None,
+    control_artifacts: list[str] | None = None,
+    evidence_assertions: list[dict[str, str]] | None = None,
+    validation_manifest: str | None = None,
     *,
-    expected_verification_task_uid: Optional[str] = None,
+    expected_verification_task_uid: str | None = None,
 ) -> str:
     """Record a validation outcome, deterministically re-proving candidate evidence for confirmations."""
 
@@ -4521,7 +4495,7 @@ def record_finding_validation(
     record, candidate, requirements = _load_finding_validation_binding(
         store, op_id, finding_uid, expected_task_uid
     )
-    manifest_attestation: Dict[str, Any] = {}
+    manifest_attestation: dict[str, Any] = {}
     if normalized_outcome == "confirmed":
         if requirements:
             if not validation_manifest:
@@ -4615,7 +4589,7 @@ def build_record_finding_validation_tool(task: Task) -> Any:
     store = _get_database_store()
     record = store.get_finding(_operation_id(), finding_uid)
     if record is None:
-        requirements: List[Dict[str, Any]] = []
+        requirements: list[dict[str, Any]] = []
         logger.warning(
             "Finding validation tool built before its candidate was available task=%s finding=%s",
             task.task_uid,
@@ -4644,11 +4618,11 @@ def build_record_finding_validation_tool(task: Task) -> Any:
     def record_bound_finding_validation(
         outcome: str,
         summary: str,
-        reproduction_steps: List[str],
+        reproduction_steps: list[str],
         evidence_strategy: str = "direct",
-        evidence_artifacts: Optional[List[str]] = None,
-        control_artifacts: Optional[List[str]] = None,
-        validation_manifest: Optional[str] = None,
+        evidence_artifacts: list[str] | None = None,
+        control_artifacts: list[str] | None = None,
+        validation_manifest: str | None = None,
     ) -> str:
         return record_finding_validation(
             finding_uid,
@@ -4670,7 +4644,7 @@ The controller binds this tool to the only finding and verification task assigne
 artifacts and an outcome; Python re-proves the candidate's immutable markers and records frozen task acceptance.
 For confirmed outcomes, provide any required validation manifest as an existing artifact reference, never inline JSON.
 """
-    input_schema: Dict[str, Any] = {
+    input_schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "outcome": {"type": "string", "enum": ["confirmed", "not_confirmed"]},
@@ -4694,7 +4668,7 @@ For confirmed outcomes, provide any required validation manifest as an existing 
     )
 
 
-def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_reason: str) -> Optional[str]:
+def finalize_finding_validation(task: Task, evaluator_status: str, evaluator_reason: str) -> str | None:
     """Materialize the evaluator-approved resolution for a verification task."""
 
     if task.kind != "finding_validation" or not task.reference_id:
@@ -4767,7 +4741,7 @@ def finding_validation_submitted(task: Task) -> bool:
     return bool(record and record.get("validation_data"))
 
 
-def finding_validation_outcome(task: Task) -> Optional[str]:
+def finding_validation_outcome(task: Task) -> str | None:
     """Return the durable outcome for a submitted finding-validation task."""
 
     if task.kind != "finding_validation" or not task.reference_id:
@@ -4782,12 +4756,12 @@ def _objective_candidate_fingerprint(objective_type: str, candidate_value: str) 
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _objective_constraints(objective_type: str) -> Dict[str, Any]:
+def _objective_constraints(objective_type: str) -> dict[str, Any]:
     """Extract deterministic constraints for supported objective types from the operation plan."""
 
     plan = _get_database_store().get_plan(_operation_id())
     objective = plan.objective if plan else ""
-    constraints: Dict[str, Any] = {}
+    constraints: dict[str, Any] = {}
     if objective_type == "flag":
         length_match = re.search(r"\blength\s+(?:is\s+)?(\d+)\b", objective, flags=re.IGNORECASE)
         if length_match:
@@ -4802,7 +4776,7 @@ def _objective_constraints(objective_type: str) -> Dict[str, Any]:
     return constraints
 
 
-def _objective_constraint_failures(candidate_value: str, constraints: Dict[str, Any]) -> List[str]:
+def _objective_constraint_failures(candidate_value: str, constraints: dict[str, Any]) -> list[str]:
     failures = []
     exact_length = constraints.get("exact_length")
     if isinstance(exact_length, int) and len(candidate_value) != exact_length:
@@ -4815,12 +4789,12 @@ def _objective_constraint_failures(candidate_value: str, constraints: Dict[str, 
     return failures
 
 
-def _objective_evidence_contains_candidate(candidate_value: str, evidence_artifacts: List[str]) -> bool:
+def _objective_evidence_contains_candidate(candidate_value: str, evidence_artifacts: list[str]) -> bool:
     """Return whether an objective candidate appears in at least one bounded text artifact."""
 
     for artifact_ref in evidence_artifacts:
         try:
-            with open(_artifact_path_from_ref(artifact_ref), "r", encoding="utf-8", errors="replace") as artifact_file:
+            with open(_artifact_path_from_ref(artifact_ref), encoding="utf-8", errors="replace") as artifact_file:
                 if candidate_value in artifact_file.read(1_000_000):
                     return True
         except OSError:
@@ -4857,8 +4831,8 @@ def store_objective_candidate(
     objective_type: str,
     candidate_value: str,
     summary: str,
-    reproduction_steps: List[str],
-    evidence_artifacts: List[str],
+    reproduction_steps: list[str],
+    evidence_artifacts: list[str],
 ) -> str:
     """Store an operation-objective candidate and create an independent validation task."""
 
@@ -4974,7 +4948,7 @@ def record_objective_validation(
     outcome: str,
     confidence: int,
     summary: str,
-    evidence_artifacts: List[str],
+    evidence_artifacts: list[str],
     validator: str,
 ) -> str:
     """Record the result of the active objective-validation task without changing finding status."""
@@ -5058,7 +5032,7 @@ def build_record_objective_validation_tool(task: Task) -> Any:
         raise ValueError(
             "Objective validation binding mismatch: "
             f"candidate_uid={candidate_uid}, expected_verification_task_uid={task.task_uid}, "
-            f"stored_verification_task_uid={str(record.get('verification_task_uid') or '')}"
+            f"stored_verification_task_uid={record.get('verification_task_uid') or ''!s}"
         )
     logger.info("Bound objective validation tool task=%s candidate=%s", task.task_uid, candidate_uid)
 
@@ -5066,7 +5040,7 @@ def build_record_objective_validation_tool(task: Task) -> Any:
         outcome: str,
         confidence: int,
         summary: str,
-        evidence_artifacts: List[str],
+        evidence_artifacts: list[str],
         validator: str,
     ) -> str:
         return record_objective_validation(
@@ -5108,7 +5082,7 @@ def objective_validation_submitted(task: Task) -> bool:
     return bool(record and record.get("validation_data"))
 
 
-def objective_validation_outcome(task: Task) -> Optional[str]:
+def objective_validation_outcome(task: Task) -> str | None:
     if task.kind != "objective_validation" or not task.reference_id:
         return None
     record = _get_database_store().get_objective_candidate(_operation_id(), task.reference_id)
@@ -5116,7 +5090,7 @@ def objective_validation_outcome(task: Task) -> Optional[str]:
     return str(validation.get("outcome")) if isinstance(validation, dict) else None
 
 
-def finalize_objective_validation(task: Task, evaluator_status: str, evaluator_reason: str) -> Optional[str]:
+def finalize_objective_validation(task: Task, evaluator_status: str, evaluator_reason: str) -> str | None:
     if task.kind != "objective_validation" or not task.reference_id:
         return None
     op_id = _operation_id()
@@ -5212,11 +5186,11 @@ class _StrictTaskWireModel(BaseModel):
 
 
 class TaskProposalLimits(_StrictTaskWireModel):
-    max_duration_minutes: Optional[PositiveInt] = None
-    max_requests: Optional[PositiveInt] = None
-    max_items: Optional[PositiveInt] = None
-    max_depth: Optional[PositiveInt] = None
-    description: Optional[str] = Field(default=None, description="Allowed but ignored model-facing field")
+    max_duration_minutes: PositiveInt | None = None
+    max_requests: PositiveInt | None = None
+    max_items: PositiveInt | None = None
+    max_depth: PositiveInt | None = None
+    description: str | None = Field(default=None, description="Allowed but ignored model-facing field")
 
 
 DEFAULT_TASK_PROPOSAL_LIMITS = {
@@ -5234,42 +5208,42 @@ class TaskProposal(_StrictTaskWireModel):
 
     title: str = Field(min_length=1)
     objective: str = Field(min_length=1, validation_alias=AliasChoices("objective", "description"))
-    basis_description: Optional[str] = Field(default=None, description="Finite boundary; defaults to objective")
-    methods: List[str] = Field(default_factory=list, description="Procedure methods; use [] for snapshot proposals")
+    basis_description: str | None = Field(default=None, description="Finite boundary; defaults to objective")
+    methods: list[str] = Field(default_factory=list, description="Procedure methods; use [] for snapshot proposals")
     limits: TaskProposalLimits = Field(
         default_factory=lambda: TaskProposalLimits(**DEFAULT_TASK_PROPOSAL_LIMITS),
         validation_alias=AliasChoices("limits", "limit"),
         description="Optional procedure bounds; defaults to 50 requests and 10 minutes",
     )
-    snapshot_refs: List[str] = Field(
+    snapshot_refs: list[str] = Field(
         default_factory=list,
         description="Existing task, memory, artifact, or finding references; use [] for procedure proposals",
     )
-    finding_refs: List[str] = Field(
+    finding_refs: list[str] = Field(
         default_factory=list,
         description="Canonical persisted finding references required by finding-dependent work",
     )
     output_kind: ProcedureOutputKind = Field(default="artifact", description="Procedure deliverable type")
-    criteria: List[TaskProposalCriterion] = Field(min_length=1, max_length=1)
-    target_ids: List[str] = Field(default_factory=list)
-    replacement_of: Optional[str] = Field(
+    criteria: list[TaskProposalCriterion] = Field(min_length=1, max_length=1)
+    target_ids: list[str] = Field(default_factory=list)
+    replacement_of: str | None = Field(
         default=None,
         description="UID of a failed task whose acceptance work this task replaces",
     )
-    supersedes_criteria: List[str] = Field(
+    supersedes_criteria: list[str] = Field(
         default_factory=list,
         description="Parent acceptance criterion IDs resolved by this replacement task",
     )
-    workstream: Optional[str] = Field(
+    workstream: str | None = Field(
         default=None,
         description="Module-declared planning workstream when the active phase has a task contract",
     )
     task_role: str = Field(default="mapping", description="Planning role: mapping, synthesis, or direct_single_step")
-    depends_on_workstreams: List[str] = Field(
+    depends_on_workstreams: list[str] = Field(
         default_factory=list,
         description="Declared workstream prerequisites for a synthesis task",
     )
-    inapplicability_reason: Optional[str] = Field(
+    inapplicability_reason: str | None = Field(
         default=None,
         description="Concrete reason required for a direct single-step planning exception",
     )
@@ -5493,14 +5467,14 @@ def _compact_task_proposal_validation_error(error: ValidationError) -> str:
     return "Task proposal validation failed: " + "; ".join(diagnostics)
 
 
-TaskProposalList = List[TaskProposal]
+TaskProposalList = list[TaskProposal]
 
 
 @dataclass
 class TaskProposalRepairGuard:
     """Restore previously valid proposals before a corrective task-creation mutation."""
 
-    baseline: List[Optional[TaskProposal]] = field(default_factory=list)
+    baseline: list[TaskProposal | None] = field(default_factory=list)
     valid_indexes: set[int] = field(default_factory=set)
 
     def capture(self, tasks: Any) -> None:
@@ -5643,7 +5617,7 @@ def _get_plan_current_phase() -> int:
     return int(_get_active_plan().current_phase)
 
 
-def _finding_validation_task_phase(plan: Optional[OperationPlan], current_phase: int) -> int:
+def _finding_validation_task_phase(plan: OperationPlan | None, current_phase: int) -> int:
     """Choose the planned owner for a controller-created finding-validation task."""
 
     if plan is None:
@@ -5684,7 +5658,7 @@ def _finding_validation_task_phase(plan: Optional[OperationPlan], current_phase:
     return ordered_phases[future_validation_index].id if future_validation_index is not None else current_phase
 
 
-def _target_ids_for_literal(target_value: str) -> List[str]:
+def _target_ids_for_literal(target_value: str) -> list[str]:
     try:
         plan = _get_active_plan()
     except ValueError:
@@ -5699,10 +5673,10 @@ def _target_ids_for_literal(target_value: str) -> List[str]:
 
 def _validate_task_target_scope(
     *,
-    target_ids: List[str],
-    plan: Optional[OperationPlan],
-    proposal: Optional[TaskProposal] = None,
-) -> Tuple[TargetScope, List[str]]:
+    target_ids: list[str],
+    plan: OperationPlan | None,
+    proposal: TaskProposal | None = None,
+) -> tuple[TargetScope, list[str]]:
     if plan is None or not plan.targets:
         return "all", []
     valid_ids = {target.target_id for target in plan.targets}
@@ -5737,7 +5711,7 @@ _BROAD_PORT_SCOPE_PATTERN = re.compile(
 )
 
 
-def _explicit_target_port(target: OperationTarget) -> Optional[int]:
+def _explicit_target_port(target: OperationTarget) -> int | None:
     """Return a registered service port, if the target has one."""
 
     value = str(target.value or "").strip()
@@ -5748,7 +5722,7 @@ def _explicit_target_port(target: OperationTarget) -> Optional[int]:
         raise ValueError(f"invalid registered target boundary for {target.target_id}: {value}") from error
 
 
-def _explicit_target_host(target: OperationTarget) -> Optional[str]:
+def _explicit_target_host(target: OperationTarget) -> str | None:
     value = str(target.value or "").strip()
     parsed = urlsplit(value if "://" in value else f"//{value}")
     return parsed.hostname
@@ -5765,12 +5739,12 @@ def _proposal_scope_text(proposal: TaskProposal) -> str:
     )
 
 
-def _proposal_port_references(proposal: TaskProposal) -> Tuple[List[int], List[Tuple[int, int]], bool]:
+def _proposal_port_references(proposal: TaskProposal) -> tuple[list[int], list[tuple[int, int]], bool]:
     """Extract explicit port references from proposal scope text."""
 
     text = _proposal_scope_text(proposal)
-    numbers: List[int] = []
-    ranges: List[Tuple[int, int]] = []
+    numbers: list[int] = []
+    ranges: list[tuple[int, int]] = []
 
     if _BROAD_PORT_SELECTOR_PATTERN.search(text):
         return numbers, ranges, True
@@ -5800,7 +5774,7 @@ def _proposal_port_references(proposal: TaskProposal) -> Tuple[List[int], List[T
     return numbers, ranges, False
 
 
-def _validate_proposal_service_scope(proposal: TaskProposal, selected_targets: List[OperationTarget]) -> None:
+def _validate_proposal_service_scope(proposal: TaskProposal, selected_targets: list[OperationTarget]) -> None:
     """Enforce exact registered ports for proposals scoped to explicit service targets."""
 
     target_ports = {
@@ -5819,7 +5793,7 @@ def _validate_proposal_service_scope(proposal: TaskProposal, selected_targets: L
 
     numbers, ranges, ambiguous_selector = _proposal_port_references(proposal)
     allowed_ports = {port for _value, port in target_ports}
-    allowed_ports_by_host: Dict[str, set[int]] = {}
+    allowed_ports_by_host: dict[str, set[int]] = {}
     for target in selected_targets:
         port = _explicit_target_port(target)
         host = _explicit_target_host(target)
@@ -5890,7 +5864,7 @@ def _is_valid_bare_scope_host_port(reference: str) -> bool:
     return bool(_SCOPE_HOSTNAME_PATTERN.fullmatch(host))
 
 
-def _bare_scope_host_is_assigned(reference: str, targets: List[OperationTarget]) -> bool:
+def _bare_scope_host_is_assigned(reference: str, targets: list[OperationTarget]) -> bool:
     """Return whether a bare host:port token names an assigned host or in-scope IP."""
 
     parsed = urlsplit(f"//{reference}")
@@ -5912,7 +5886,7 @@ def _bare_scope_host_is_assigned(reference: str, targets: List[OperationTarget])
     return False
 
 
-def _selected_task_targets(plan: OperationPlan, task: Task) -> List[OperationTarget]:
+def _selected_task_targets(plan: OperationPlan, task: Task) -> list[OperationTarget]:
     """Return only the executable targets assigned to a task."""
 
     if task.target_scope == "subset":
@@ -5925,8 +5899,8 @@ def _explicit_service_references(
     text: str,
     *,
     include_bare_host_ports: bool = True,
-    assigned_targets: Optional[List[OperationTarget]] = None,
-) -> List[str]:
+    assigned_targets: list[OperationTarget] | None = None,
+) -> list[str]:
     """Extract URL or host:port literals without interpreting artifact paths as targets."""
 
     references = []
@@ -5953,7 +5927,7 @@ def _explicit_service_references(
     return references
 
 
-def task_service_scope_validation_details(plan: OperationPlan, task: Task, text: str) -> List[Dict[str, Any]]:
+def task_service_scope_validation_details(plan: OperationPlan, task: Task, text: str) -> list[dict[str, Any]]:
     """Return structured service-boundary violations for task text.
 
     A task assigned to an explicit service may mention a route or query, but every explicit URL or host:port
@@ -6025,7 +5999,7 @@ def task_service_scope_validation_details(plan: OperationPlan, task: Task, text:
     return violations
 
 
-def task_service_scope_violations(plan: OperationPlan, task: Task, text: str) -> List[str]:
+def task_service_scope_violations(plan: OperationPlan, task: Task, text: str) -> list[str]:
     """Return human-readable exact service-boundary violations for task text."""
 
     messages = []
@@ -6133,7 +6107,7 @@ def _is_inventory_manifest_candidate(reference: str) -> bool:
     if "inventory" in basename or "manifest" in basename:
         return True
     try:
-        with open(path, "r", encoding="utf-8") as artifact_file:
+        with open(path, encoding="utf-8") as artifact_file:
             payload = json.load(artifact_file)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
@@ -6183,7 +6157,7 @@ def _canonical_evidence_reference(reference: str) -> str:
     try:
         return canonical_artifact_reference(text)
     except ValueError as error:
-        if text.startswith(("artifact:", "artifact_id:")) or os.path.isabs(text) or text.startswith("artifacts/"):
+        if text.startswith(("artifact:", "artifact_id:", "artifacts/")) or os.path.isabs(text):
             raise
         raise _acceptance_evidence_reference_error() from error
 
@@ -6193,11 +6167,11 @@ class _InventoryLinkParser(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.references: List[str] = []
-        self.forms: List[Dict[str, Any]] = []
-        self._active_form: Optional[Dict[str, Any]] = None
+        self.references: list[str] = []
+        self.forms: list[dict[str, Any]] = []
+        self._active_form: dict[str, Any] | None = None
 
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
         values = dict(attrs)
         if normalized_tag == "form":
@@ -6225,7 +6199,7 @@ class _InventoryLinkParser(HTMLParser):
             self._active_form = None
 
 
-def _inventory_target_bases() -> Dict[str, str]:
+def _inventory_target_bases() -> dict[str, str]:
     try:
         targets = _get_active_plan().targets
     except Exception:
@@ -6238,7 +6212,7 @@ def _inventory_target_bases() -> Dict[str, str]:
     return bases
 
 
-def _deterministic_inventory_candidates() -> Tuple[List[Dict[str, Any]], int]:
+def _deterministic_inventory_candidates() -> tuple[list[dict[str, Any]], int]:
     """Extract normalized in-scope routes from current-operation HTML artifacts."""
 
     bases = _inventory_target_bases()
@@ -6247,14 +6221,14 @@ def _deterministic_inventory_candidates() -> Tuple[List[Dict[str, Any]], int]:
     artifact_dir = os.path.join(_operation_output_root(), "artifacts")
     if not os.path.isdir(artifact_dir):
         return [], 0
-    candidates: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    candidates: dict[tuple[str, str], dict[str, Any]] = {}
     source_count = 0
     for filename in sorted(os.listdir(artifact_dir))[:200]:
         path = os.path.join(artifact_dir, filename)
         if not os.path.isfile(path) or os.path.getsize(path) > 2_000_000:
             continue
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as artifact_file:
+            with open(path, encoding="utf-8", errors="ignore") as artifact_file:
                 content = artifact_file.read()
         except OSError:
             continue
@@ -6284,7 +6258,7 @@ def _deterministic_inventory_candidates() -> Tuple[List[Dict[str, Any]], int]:
                 )
                 value = urlunsplit((absolute.scheme.lower(), absolute.netloc.lower(), path_value, query, ""))
                 route_key = urlunsplit((absolute.scheme.lower(), absolute.netloc.lower(), path_value.rstrip("/") or "/", "", ""))
-                attributes: Dict[str, Any] = {"discovered_by": "html_link_extraction"}
+                attributes: dict[str, Any] = {"discovered_by": "html_link_extraction"}
                 if query_pairs:
                     attributes["query_parameters"] = sorted({name for name, _value in query_pairs})
                 matching_forms = [
@@ -6312,7 +6286,7 @@ def _deterministic_inventory_candidates() -> Tuple[List[Dict[str, Any]], int]:
     return list(candidates.values()), source_count
 
 
-def _reconcile_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[str, Any]:
+def _reconcile_inventory_manifest(path: str, manifest: dict[str, Any]) -> dict[str, Any]:
     candidates, source_count = _deterministic_inventory_candidates()
     existing_routes = {
         (str(item["target_id"]), (_normalized_route(str(item["value"])) or ("", ""))[0])
@@ -6326,7 +6300,7 @@ def _reconcile_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[s
         key = (candidate["target_id"], route[0] if route else "")
         if not route or key in existing_routes:
             continue
-        digest = hashlib.sha256(f"{key[0]}:{key[1]}".encode("utf-8")).hexdigest()[:12]
+        digest = hashlib.sha256(f"{key[0]}:{key[1]}".encode()).hexdigest()[:12]
         item_id = f"auto-endpoint-{digest}"
         suffix = 2
         while item_id in existing_ids:
@@ -6346,7 +6320,7 @@ def _reconcile_inventory_manifest(path: str, manifest: Dict[str, Any]) -> Dict[s
     return manifest
 
 
-def _write_inventory_manifest_atomically(path: str, manifest: Dict[str, Any]) -> None:
+def _write_inventory_manifest_atomically(path: str, manifest: dict[str, Any]) -> None:
     temporary_path = f"{path}.{uuid.uuid4().hex}.tmp"
     with open(temporary_path, "w", encoding="utf-8") as manifest_file:
         json.dump(manifest, manifest_file, indent=2, sort_keys=True)
@@ -6354,7 +6328,7 @@ def _write_inventory_manifest_atomically(path: str, manifest: Dict[str, Any]) ->
     os.replace(temporary_path, path)
 
 
-def _is_out_of_scope_inventory_item(item: Any, target_values: Dict[str, str]) -> bool:
+def _is_out_of_scope_inventory_item(item: Any, target_values: dict[str, str]) -> bool:
     """Return whether one URL-bearing inventory item is outside its registered target boundary."""
 
     if not isinstance(item, dict) or str(item.get("kind", "")).strip() not in {"endpoint", "parameter"}:
@@ -6371,12 +6345,12 @@ def _is_out_of_scope_inventory_item(item: Any, target_values: Dict[str, str]) ->
     return parsed.scheme.lower() != boundary.scheme.lower() or parsed.netloc.lower() != boundary.netloc.lower()
 
 
-def _normalize_inventory_target_ids(items: Any, target_values: Dict[str, str]) -> bool:
+def _normalize_inventory_target_ids(items: Any, target_values: dict[str, str]) -> bool:
     """Replace an unambiguous raw target value with its controller-owned logical target ID."""
 
     if not isinstance(items, list) or not target_values:
         return False
-    value_to_ids: Dict[str, List[str]] = {}
+    value_to_ids: dict[str, list[str]] = {}
     for target_id, value in target_values.items():
         value_to_ids.setdefault(str(value).strip(), []).append(target_id)
     changed = False
@@ -6391,7 +6365,7 @@ def _normalize_inventory_target_ids(items: Any, target_values: Dict[str, str]) -
     return changed
 
 
-def _normalize_inventory_interaction(item_id: str, attributes: Dict[str, Any]) -> bool:
+def _normalize_inventory_interaction(item_id: str, attributes: dict[str, Any]) -> bool:
     """Validate and normalize optional protocol-neutral interaction metadata in place."""
 
     interaction = attributes.get("interaction")
@@ -6462,7 +6436,7 @@ def _normalize_inventory_interaction(item_id: str, attributes: Dict[str, Any]) -
     return changed
 
 
-def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tuple[Dict[str, Any], str]:
+def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> tuple[dict[str, Any], str]:
     path = _artifact_path_from_ref(reference)
     try:
         with open(path, "rb") as manifest_file:
@@ -6633,7 +6607,7 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> Tupl
     return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _canonical_inventory_url(value: str, registered_target: Optional[str]) -> str:
+def _canonical_inventory_url(value: str, registered_target: str | None) -> str:
     """Canonicalize one HTTP inventory route and enforce its registered service boundary."""
 
     raw_value = str(value or "").strip().replace(r'\"', '"')
@@ -6678,7 +6652,7 @@ def _task_evidence_artifact_paths(task: Task) -> set[str]:
     return paths
 
 
-def _freeze_and_validate_acceptance(contract: AcceptanceContract, existing_tasks: List[Task]) -> AcceptanceContract:
+def _freeze_and_validate_acceptance(contract: AcceptanceContract, existing_tasks: list[Task]) -> AcceptanceContract:
     basis = contract.basis
     if basis.kind == "procedure":
         try:
@@ -6748,7 +6722,7 @@ def _normalize_id(text: str) -> str:
     return text
 
 
-def _extract_sensitive_patterns(text: str) -> List[str]:
+def _extract_sensitive_patterns(text: str) -> list[str]:
     """Extract URLs and potential file paths from text for strict matching."""
     # URL regex
     urls = _RE_URL_PATTERN.findall(text)
@@ -6760,10 +6734,10 @@ def _extract_sensitive_patterns(text: str) -> List[str]:
     # Normalize IDs in all extracted patterns
     all_patterns = [_normalize_id(p) for p in urls + paths]
 
-    return sorted(list(set(all_patterns)))
+    return sorted(set(all_patterns))
 
 
-def _task_proposal_criterion_ids(criteria: List[TaskProposalCriterion]) -> List[str]:
+def _task_proposal_criterion_ids(criteria: list[TaskProposalCriterion]) -> list[str]:
     """Generate short task-scoped IDs; descriptions retain the semantic meaning."""
 
     return [f"criterion-{position}" for position, _criterion in enumerate(criteria, start=1)]
@@ -6775,7 +6749,7 @@ class _NormalizedTaskProposal:
 
     proposal: TaskProposal
     basis_kind: AcceptanceBasisKind
-    limits: Optional[Dict[str, int]]
+    limits: dict[str, int] | None
 
 
 def _normalize_task_proposal(proposal: TaskProposal) -> _NormalizedTaskProposal:
@@ -6786,7 +6760,7 @@ def _normalize_task_proposal(proposal: TaskProposal) -> _NormalizedTaskProposal:
     return _NormalizedTaskProposal(proposal=proposal, basis_kind=basis_kind, limits=limits)
 
 
-def _proposal_procedure_methods(proposal: TaskProposal) -> List[str]:
+def _proposal_procedure_methods(proposal: TaskProposal) -> list[str]:
     """Return deterministic internal methods for controller-owned synthesis."""
 
     if proposal.task_role == "synthesis" and not proposal.methods:
@@ -6797,7 +6771,7 @@ def _proposal_procedure_methods(proposal: TaskProposal) -> List[str]:
 def canonical_procedure_methods(
     methods: Iterable[str],
     targets: Iterable[OperationTarget] = (),
-) -> List[str]:
+) -> list[str]:
     """Normalize procedure methods using the structured target boundary.
 
     HTTP(S) service targets use ``crawl`` for route and resource discovery;
@@ -6855,7 +6829,7 @@ def _proposal_execution_requirements(
     proposal: TaskProposal,
     plan: OperationPlan,
     criterion_id: str,
-) -> Tuple[ExecutionRequirement, ...]:
+) -> tuple[ExecutionRequirement, ...]:
     """Derive narrow, controller-owned execution obligations for procedure work."""
 
     if proposal.inferred_basis_kind != "procedure":
@@ -6897,7 +6871,7 @@ def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -
             )],
             execution_requirements=_proposal_execution_requirements(proposal, plan, criterion_id),
         )
-        for criterion_id, criterion in zip(criterion_ids, proposal.criteria)
+        for criterion_id, criterion in zip(criterion_ids, proposal.criteria, strict=False)
     ]
     if normalized.basis_kind == "procedure":
         selected_target_ids = proposal.target_ids or [target.target_id for target in plan.targets]
@@ -6986,7 +6960,7 @@ def _phase_specific_coverage_criterion(
     phase_title: str,
     phase_objective: str,
     route_label: str,
-    item_ids: List[str],
+    item_ids: list[str],
 ) -> AcceptanceCriterion:
     """Bind every expanded route task to its active phase's distinct work."""
 
@@ -7007,14 +6981,14 @@ def _phase_specific_coverage_criterion(
 
 
 _INVENTORY_WIDE_PHASE_SCOPE_PATTERNS = (
-    re.compile(r"\ball\s+(?:discovered|reachable)\b", re.I),
-    re.compile(r"\b(?:all|every)\s+(?:discovered\s+)?(?:entities|endpoints|items|routes|workflows)\b", re.I),
-    re.compile(r"\b(?:across|throughout)\s+(?:the\s+)?(?:baseline\s+)?(?:inventory|application)\b", re.I),
-    re.compile(r"\b(?:the\s+)?entire\s+(?:baseline\s+)?(?:inventory|application)\b", re.I),
-    re.compile(r"\bin\s+(?:the\s+)?baseline\s+inventory\b", re.I),
-    re.compile(r"\bfrom\s+the\s+baseline\s+inventory\b", re.I),
-    re.compile(r"\b(?:across|throughout)\s+key\s+workflows\b", re.I),
-    re.compile(r"\bkey\s+workflows\b", re.I),
+    re.compile(r"\ball\s+(?:discovered|reachable)\b", re.IGNORECASE),
+    re.compile(r"\b(?:all|every)\s+(?:discovered\s+)?(?:entities|endpoints|items|routes|workflows)\b", re.IGNORECASE),
+    re.compile(r"\b(?:across|throughout)\s+(?:the\s+)?(?:baseline\s+)?(?:inventory|application)\b", re.IGNORECASE),
+    re.compile(r"\b(?:the\s+)?entire\s+(?:baseline\s+)?(?:inventory|application)\b", re.IGNORECASE),
+    re.compile(r"\bin\s+(?:the\s+)?baseline\s+inventory\b", re.IGNORECASE),
+    re.compile(r"\bfrom\s+the\s+baseline\s+inventory\b", re.IGNORECASE),
+    re.compile(r"\b(?:across|throughout)\s+key\s+workflows\b", re.IGNORECASE),
+    re.compile(r"\bkey\s+workflows\b", re.IGNORECASE),
 )
 
 
@@ -7025,8 +6999,8 @@ def _route_scoped_phase_objective(phase_objective: str) -> str:
     for pattern in _INVENTORY_WIDE_PHASE_SCOPE_PATTERNS:
         scoped = pattern.sub("", scoped)
     scoped = re.sub(r"\s+", " ", scoped)
-    scoped = re.sub(r"\bmap\s+for\b", "Map", scoped, flags=re.I)
-    scoped = re.sub(r"\b(?:for|of|in|to)\s*(?=[,.;:]|$)", "", scoped, flags=re.I)
+    scoped = re.sub(r"\bmap\s+for\b", "Map", scoped, flags=re.IGNORECASE)
+    scoped = re.sub(r"\b(?:for|of|in|to)\s*(?=[,.;:]|$)", "", scoped, flags=re.IGNORECASE)
     scoped = re.sub(r"\s+([,.;:])", r"\1", scoped).strip(" ,.;:")
     return scoped
 
@@ -7045,7 +7019,7 @@ def _is_generic_snapshot_proposal(proposal: TaskProposal) -> bool:
     return objective in generic_values or criterion in generic_values
 
 
-def _task_inventory_artifact_refs(task: Task) -> List[str]:
+def _task_inventory_artifact_refs(task: Task) -> list[str]:
     references = [canonical_artifact_reference(path) for path in sorted(_task_evidence_artifact_paths(task))]
     store = _get_database_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
@@ -7064,7 +7038,7 @@ def _task_inventory_artifact_refs(task: Task) -> List[str]:
     return valid
 
 
-def _resolve_proposal_snapshot_refs(proposal: TaskProposal, existing_tasks: List[Task]) -> TaskProposal:
+def _resolve_proposal_snapshot_refs(proposal: TaskProposal, existing_tasks: list[Task]) -> TaskProposal:
     if proposal.inferred_basis_kind != "snapshot":
         return proposal
     references = []
@@ -7095,7 +7069,7 @@ def _resolve_proposal_snapshot_refs(proposal: TaskProposal, existing_tasks: List
     return proposal.model_copy(update={"snapshot_refs": references})
 
 
-def _inventory_snapshot(reference: str) -> Optional[Tuple[Dict[str, Any], str]]:
+def _inventory_snapshot(reference: str) -> tuple[dict[str, Any], str] | None:
     """Return a validated inventory snapshot, or None for another snapshot type."""
 
     if not reference.startswith("artifact:"):
@@ -7106,13 +7080,13 @@ def _inventory_snapshot(reference: str) -> Optional[Tuple[Dict[str, Any], str]]:
         return None
 
 
-def _proposal_inventory_snapshot(proposal: TaskProposal) -> Optional[Tuple[Dict[str, Any], str]]:
+def _proposal_inventory_snapshot(proposal: TaskProposal) -> tuple[dict[str, Any], str] | None:
     if proposal.inferred_basis_kind != "snapshot" or len(proposal.snapshot_refs) != 1:
         return None
     return _inventory_snapshot(proposal.snapshot_refs[0])
 
 
-def _normalized_route(value: str) -> Optional[Tuple[str, str]]:
+def _normalized_route(value: str) -> tuple[str, str] | None:
     """Return a stable route key and display URL for an absolute HTTP(S) value."""
 
     parsed = urlsplit(value)
@@ -7135,7 +7109,7 @@ _PROPOSAL_RELATIVE_ENDPOINT_PATTERN = re.compile(
 _PROPOSAL_WORKFLOW_WORDING_PATTERN = re.compile(r"\b(?:workflow|flow)\b", re.IGNORECASE)
 
 
-def _normalized_http_route_path(value: str) -> Optional[str]:
+def _normalized_http_route_path(value: str) -> str | None:
     """Return a normalized HTTP route path without scheme, authority, or query."""
 
     parsed = urlsplit(value)
@@ -7147,8 +7121,8 @@ def _normalized_http_route_path(value: str) -> Optional[str]:
 
 def _procedure_proposal_endpoint_routes(
     proposal: TaskProposal,
-    selected_targets: List[OperationTarget],
-) -> List[str]:
+    selected_targets: list[OperationTarget],
+) -> list[str]:
     """Return distinct HTTP endpoint routes explicitly named by a procedure proposal."""
 
     http_targets = [
@@ -7181,7 +7155,7 @@ def _procedure_proposal_endpoint_routes(
 
 def _validate_procedure_proposal_route_atomicity(
     proposal: TaskProposal,
-    selected_targets: List[OperationTarget],
+    selected_targets: list[OperationTarget],
 ) -> None:
     """Reject accidental multi-route HTTP work while allowing declared workflows."""
 
@@ -7199,14 +7173,14 @@ def _validate_procedure_proposal_route_atomicity(
 
 
 def _coverage_route_groups(
-    manifest: Dict[str, Any],
+    manifest: dict[str, Any],
     *,
     prompt_token_limit: int,
-) -> List[Tuple[str, str, str, List[str]]]:
+) -> list[tuple[str, str, str, list[str]]]:
     """Group typed inventory units without representing non-endpoints as routes."""
 
     char_cap = max(1_000, int(prompt_token_limit or 48_000) * 4 // 5)
-    groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
     endpoints_by_id = {
         str(item["id"]): item
         for item in manifest["items"]
@@ -7258,7 +7232,7 @@ def _coverage_route_groups(
     ]
 
 
-def _completed_coverage_item_ids(existing_tasks: List[Task], snapshot_hash: str, phase: int) -> set[str]:
+def _completed_coverage_item_ids(existing_tasks: list[Task], snapshot_hash: str, phase: int) -> set[str]:
     completed: set[str] = set()
     store = _get_database_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
@@ -7282,12 +7256,12 @@ def _frozen_task_identity(
     objective: str,
     acceptance: AcceptanceContract,
     target_scope: TargetScope,
-    target_ids: List[str],
+    target_ids: list[str],
     phase: int,
 ) -> str:
     """Return the deterministic work identity used to deduplicate compiled tasks."""
 
-    acceptance_identity: Dict[str, Any]
+    acceptance_identity: dict[str, Any]
     if acceptance.mode == "coverage":
         acceptance_identity = {
             "basis_kind": acceptance.basis.kind,
@@ -7322,7 +7296,7 @@ def _semantic_cross_phase_task_identity(
     objective: str,
     acceptance: AcceptanceContract,
     target_scope: TargetScope,
-    target_ids: List[str],
+    target_ids: list[str],
 ) -> str:
     """Return an exact work identity while ignoring controller-owned phase references."""
 
@@ -7352,14 +7326,14 @@ def _create_tasks_from_proposals(
     tasks: TaskProposalList,
     *,
     prompt_token_limit: int,
-    coverage_item_ids: Optional[set[str]] = None,
-    expected_snapshot_ref: Optional[str] = None,
+    coverage_item_ids: set[str] | None = None,
+    expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
-    required_finding_refs: Optional[set[str]] = None,
-    finding_ref_aliases: Optional[Dict[str, str]] = None,
+    required_finding_refs: set[str] | None = None,
+    finding_ref_aliases: dict[str, str] | None = None,
     phase_task_contract: Any = None,
-    proposal_preflight_validator: Optional[Callable[[List[TaskProposal]], None]] = None,
+    proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
     reject_duplicate_proposals: bool = False,
 ) -> str:
     """Create pending tasks for the active phase from concise task proposals.
@@ -7383,7 +7357,9 @@ def _create_tasks_from_proposals(
     except ValidationError as error:
         raise ValueError(_compact_task_proposal_validation_error(error)) from error
     if phase_task_contract is not None:
-        from modules.operation_plugins.planning_contracts import validate_phase_task_proposals
+        from modules.operation_plugins.planning_contracts import (
+            validate_phase_task_proposals,
+        )
 
         validate_phase_task_proposals(phase_task_contract, proposals)
     if proposal_preflight_validator is not None:
@@ -7401,10 +7377,10 @@ def _create_tasks_from_proposals(
     current_phase = plan.current_phase
 
     existing_tasks = _get_database_store().get_tasks(op_id)
-    staged_tasks: List[Task] = []
+    staged_tasks: list[Task] = []
     duplicate_count = 0
     snapshot_exhausted = False
-    unresolved_gaps: List[str] = []
+    unresolved_gaps: list[str] = []
 
     for proposal_index, proposal in enumerate(proposals):
         proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
@@ -7719,7 +7695,7 @@ def _create_tasks_from_proposals(
     for task in staged_tasks:
         client.store_task(task=task, user_id=user_id)
 
-    response: Dict[str, Any] = {
+    response: dict[str, Any] = {
         "complete": True,
         "created_count": len(staged_tasks),
         "duplicate_count": duplicate_count,
@@ -7758,17 +7734,17 @@ def create_tasks(tasks: TaskProposalList) -> str:
 def build_create_tasks_tool(
     prompt_token_limit: int = 48_000,
     *,
-    coverage_item_ids: Optional[set[str]] = None,
-    expected_snapshot_ref: Optional[str] = None,
+    coverage_item_ids: set[str] | None = None,
+    expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
-    required_finding_refs: Optional[set[str]] = None,
-    finding_ref_aliases: Optional[Dict[str, str]] = None,
+    required_finding_refs: set[str] | None = None,
+    finding_ref_aliases: dict[str, str] | None = None,
     phase_task_contract: Any = None,
-    proposal_preflight_validator: Optional[Callable[[List[TaskProposal]], None]] = None,
+    proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
     reject_duplicate_proposals: bool = False,
-    repair_guard: Optional[TaskProposalRepairGuard] = None,
-    invocation_observer: Optional[Callable[[Dict[str, Any], Any, Optional[Exception]], None]] = None,
+    repair_guard: TaskProposalRepairGuard | None = None,
+    invocation_observer: Callable[[dict[str, Any], Any, Exception | None], None] | None = None,
 ) -> Any:
     """Build a task-creator-local tool that permits exactly one successful mutation."""
 
@@ -8048,10 +8024,10 @@ def _snapshot_task_artifact_reference(task: Task, reference: str) -> str:
         ) from error
 
 
-def _snapshot_task_acceptance_artifacts(task: Task, results: List[AcceptanceResult]) -> List[AcceptanceResult]:
+def _snapshot_task_acceptance_artifacts(task: Task, results: list[AcceptanceResult]) -> list[AcceptanceResult]:
     """Return ledger results whose artifact evidence cannot be overwritten by later tasks."""
 
-    references: Dict[str, str] = {}
+    references: dict[str, str] = {}
 
     def snapshot(reference: str) -> str:
         if reference not in references:
@@ -8110,7 +8086,7 @@ def _validate_acceptance_disposition(result: AcceptanceResult) -> None:
         )
 
 
-def _record_task_acceptance(task_uid: str, results: List[AcceptanceResult]) -> str:
+def _record_task_acceptance(task_uid: str, results: list[AcceptanceResult]) -> str:
     """Persist acceptance results against the controller-selected task."""
     normalized_uid = str(task_uid or "").strip()
     if not normalized_uid:
@@ -8226,7 +8202,7 @@ def _task_acceptance_response(
     memory_created: bool,
     memory_warning: str,
 ) -> str:
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "complete": complete,
         "recorded_count": recorded_count,
         "required_count": required_count,
@@ -8249,8 +8225,8 @@ def _bounded_acceptance_memory_text(value: Any, limit: int) -> str:
 
 def _task_acceptance_memory_payload(
     task: Task,
-    results: List[AcceptanceResult],
-) -> Tuple[str, Dict[str, Any], str]:
+    results: list[AcceptanceResult],
+) -> tuple[str, dict[str, Any], str]:
     """Build one bounded, deterministic downstream memory for an immutable acceptance ledger."""
 
     canonical_results = [result.to_dict() for result in sorted(results, key=lambda item: item.criterion_id)]
@@ -8262,7 +8238,7 @@ def _task_acceptance_memory_payload(
         f'Task acceptance for "{task.title}".',
         f"Objective: {_bounded_acceptance_memory_text(task.objective, TASK_ACCEPTANCE_MEMORY_SUMMARY_MAX_CHARS)}.",
     ]
-    evidence_refs: List[str] = []
+    evidence_refs: list[str] = []
     status_metadata = []
     for result in sorted(results, key=lambda item: item.criterion_id):
         status_metadata.append(f"{result.criterion_id}:{result.status}:{result.disposition}")
@@ -8271,7 +8247,7 @@ def _task_acceptance_memory_payload(
             f"{_bounded_acceptance_memory_text(result.summary, TASK_ACCEPTANCE_MEMORY_SUMMARY_MAX_CHARS)}"
         )
         if result.coverage:
-            coverage_counts: Dict[str, int] = {}
+            coverage_counts: dict[str, int] = {}
             for item in result.coverage:
                 coverage_counts[item.status] = coverage_counts.get(item.status, 0) + 1
             coverage_summary = ", ".join(
@@ -8303,8 +8279,8 @@ def _task_acceptance_memory_payload(
 
 def _publish_task_acceptance_memory(
     task: Task,
-    results: List[AcceptanceResult],
-) -> Tuple[bool, bool, str]:
+    results: list[AcceptanceResult],
+) -> tuple[bool, bool, str]:
     """Best-effort publish accepted task information as one replay-safe observation."""
 
     content, metadata, publication_key = _task_acceptance_memory_payload(task, results)
@@ -8326,7 +8302,7 @@ def _publish_task_acceptance_memory(
         return False, False, warning
 
 
-def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult]) -> None:
+def _store_task_acceptance_evidence(task: Task, results: list[AcceptanceResult]) -> None:
     """Replace task evidence from the immutable ledger without losing task metadata."""
 
     evidence = []
@@ -8348,7 +8324,7 @@ def _store_task_acceptance_evidence(task: Task, results: List[AcceptanceResult])
     )
 
 
-def _source_task_finding_refs(task_uid: str) -> List[str]:
+def _source_task_finding_refs(task_uid: str) -> list[str]:
     """Return canonical finding references durably linked to one executor task."""
 
     store = _get_database_store()
@@ -8366,8 +8342,8 @@ def _source_task_finding_refs(task_uid: str) -> List[str]:
 def _bind_acceptance_finding_reference(
     task_uid: str,
     disposition: AcceptanceDisposition,
-    evidence_refs: List[str],
-) -> List[str]:
+    evidence_refs: list[str],
+) -> list[str]:
     """Bind a candidate disposition to the current task's durable finding relation."""
 
     if disposition != "finding_candidate":
@@ -8397,13 +8373,13 @@ def _bind_acceptance_finding_reference(
     return normalized
 
 
-def _task_execution_receipts(task: Task, criterion: AcceptanceCriterion) -> Dict[str, List[str]]:
+def _task_execution_receipts(task: Task, criterion: AcceptanceCriterion) -> dict[str, list[str]]:
     """Return validated controller receipts persisted in the task recovery context."""
 
     raw_receipts = task.recovery_context.get("execution_evidence_receipts", {})
     if not isinstance(raw_receipts, dict):
         return {}
-    receipts: Dict[str, List[str]] = {}
+    receipts: dict[str, list[str]] = {}
     allowed_ids = {requirement.id for requirement in criterion.execution_requirements}
     for requirement_id, references in raw_receipts.items():
         if requirement_id not in allowed_ids or not isinstance(references, list):
@@ -8425,10 +8401,8 @@ def _task_execution_receipts(task: Task, criterion: AcceptanceCriterion) -> Dict
 
 def build_record_task_acceptance_tool(
     task_uid: str,
-    task: Optional[Task] = None,
-    execution_evidence_resolver: Optional[
-        Callable[[Task, AcceptanceCriterion], Dict[str, List[str]]]
-    ] = None,
+    task: Task | None = None,
+    execution_evidence_resolver: Callable[[Task, AcceptanceCriterion], dict[str, list[str]]] | None = None,
 ) -> Any:
     """Build a model-facing acceptance tool bound to one controller-selected task."""
 
@@ -8506,7 +8480,7 @@ def build_record_task_acceptance_tool(
         status: str,
         disposition: str,
         summary: str,
-        evidence_refs: List[str],
+        evidence_refs: list[str],
     ) -> str:
         status = _normalize_acceptance_status_alias(status)
         disposition = _normalize_acceptance_disposition_alias(disposition)
@@ -8701,7 +8675,7 @@ def build_record_task_acceptance_tool(
     )
 
 
-def _memory_list_markdown(memories: List[Dict[str, Any]]) -> str:
+def _memory_list_markdown(memories: list[dict[str, Any]]) -> str:
     if not memories:
         return ""
     memories.sort(key=memory_create_time, reverse=True)
@@ -8746,13 +8720,13 @@ def memory_list() -> str:
             return ""
         return _memory_list_markdown(results_list)
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e!s}"
 
 
 @tool
 def memory_retrieve(
     query: str,
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Semantic search across memories.
 
@@ -8821,7 +8795,7 @@ def memory_retrieve(
             logger.warning("RETRIEVE returned 0 results for query='%s'", query)
         return _memory_list_markdown(results_list)
     except Exception as e:
-        return f"Error: {str(e)}"
+        return f"Error: {e!s}"
 
 
 class _LiteLLMEmbeddings:
@@ -8832,7 +8806,7 @@ class _LiteLLMEmbeddings:
             raise ValueError("A LiteLLM embedding model is required")
         self.model = model
 
-    def embed_query(self, text: str) -> List[float]:
+    def embed_query(self, text: str) -> list[float]:
         response = litellm.embedding(model=self.model, input=[text])
         data = response.data if hasattr(response, "data") else response["data"]
         item = data[0]
@@ -8847,7 +8821,7 @@ class QdrantMemoryClient:
 
     def __init__(
         self,
-        config: Optional[Dict[str, Any]] = None,
+        config: dict[str, Any] | None = None,
         has_existing_memories: bool = False,
         silent: bool = False,
     ) -> None:
@@ -8879,7 +8853,7 @@ class QdrantMemoryClient:
         return mode
 
     @staticmethod
-    def _target_values(config: Dict[str, Any]) -> List[str]:
+    def _target_values(config: dict[str, Any]) -> list[str]:
         raw_values = config.get("target_values")
         if isinstance(raw_values, str):
             raw_values = [raw_values]
@@ -8942,13 +8916,13 @@ class QdrantMemoryClient:
 
     def _scope_filter(
         self,
-        metadata: Optional[Dict[str, Any]] = None,
-        operation_id: Optional[str] = None,
+        metadata: dict[str, Any] | None = None,
+        operation_id: str | None = None,
     ) -> qdrant_models.Filter:
         target_values = [str(value).strip() for value in self.target_values if str(value).strip()]
         if not target_values:
             raise ValueError("Qdrant memory retrieval requires at least one canonical OperationTarget value")
-        must: List[Any] = [
+        must: list[Any] = [
             qdrant_models.FieldCondition(
                 key="target_values",
                 match=qdrant_models.MatchAny(any=target_values),
@@ -8975,7 +8949,7 @@ class QdrantMemoryClient:
         return qdrant_models.Filter(must=must)
 
     @staticmethod
-    def _point_to_memory(point: Any) -> Dict[str, Any]:
+    def _point_to_memory(point: Any) -> dict[str, Any]:
         payload = dict(point.payload or {})
         return {
             "id": str(point.id),
@@ -8987,7 +8961,7 @@ class QdrantMemoryClient:
             "score": getattr(point, "score", None),
         }
 
-    def _memory_matches_target_values(self, memory: Dict[str, Any]) -> bool:
+    def _memory_matches_target_values(self, memory: dict[str, Any]) -> bool:
         """Return whether a retrieved memory shares at least one current target value."""
 
         stored_values = memory.get("target_values") if isinstance(memory, dict) else None
@@ -8999,10 +8973,10 @@ class QdrantMemoryClient:
     def store_memory(
         self,
         content: str,
-        user_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         content = str(content or "").strip()
         if not content:
             raise ValueError("memory content is required")
@@ -9034,13 +9008,13 @@ class QdrantMemoryClient:
 
     def list_memories(
         self,
-        user_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
+        user_id: str | None = None,
+        agent_id: str | None = None,
         *,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         page: int = 1,
-        run_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         del user_id, agent_id
         effective_limit = max(int(limit or os.getenv("MEMORY_LIST_LIMIT", "100")), 1)
         effective_page = max(int(page), 1)
@@ -9056,16 +9030,16 @@ class QdrantMemoryClient:
         memories = [self._point_to_memory(point) for point in page_points]
         return [
             memory
-            for point, memory in zip(page_points, memories)
+            for point, memory in zip(page_points, memories, strict=False)
             if bool((point.payload or {}).get("active", True)) and self._memory_matches_target_values(memory)
         ]
 
     def get_memory_by_id(
         self,
         memory_id: str,
-        user_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
+        user_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, Any] | None:
         del user_id, agent_id
         points = self.qdrant.retrieve(
             collection_name=self.collection_name,
@@ -9084,22 +9058,22 @@ class QdrantMemoryClient:
     def search_memories(
         self,
         query: str,
-        user_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        run_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         return self.search(query, limit=20, user_id=user_id, agent_id=agent_id, run_id=run_id)
 
     def search(
         self,
         query: str,
-        filters: Optional[Dict[str, Any]] = None,
+        filters: dict[str, Any] | None = None,
         limit: int = 100,
         *,
-        user_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        run_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        run_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         del user_id, agent_id
         vector = self.embeddings.embed_query(str(query or ""))
         result = self.qdrant.query_points(
@@ -9121,9 +9095,9 @@ class QdrantMemoryClient:
     def store_plan(
         self,
         plan: OperationPlan,
-        user_id: Optional[str] = None,
-        operation_id: Optional[str] = None
-    ) -> Dict:
+        user_id: str | None = None,
+        operation_id: str | None = None
+    ) -> dict:
         """Store a strategic plan.
 
         Args:
@@ -9179,10 +9153,10 @@ class QdrantMemoryClient:
     def patch_plan(
         self,
         *,
-        phase_status_updates: Optional[Dict[int, str]] = None,
-        current_phase: Optional[int] = None,
-        assessment_complete: Optional[bool] = None,
-        operation_id: Optional[str] = None,
+        phase_status_updates: dict[int, str] | None = None,
+        current_phase: int | None = None,
+        assessment_complete: bool | None = None,
+        operation_id: str | None = None,
     ) -> OperationPlan:
         """Patch controller-owned plan progress while retaining immutable plan content."""
 
@@ -9213,9 +9187,9 @@ class QdrantMemoryClient:
 
     def get_active_plan(
             self,
-            user_id: Optional[str] = None,
-            operation_id: Optional[str] = None
-    ) -> Optional[OperationPlan]:
+            user_id: str | None = None,
+            operation_id: str | None = None
+    ) -> OperationPlan | None:
         """Get the most recent plan.
 
         Args:
@@ -9234,10 +9208,10 @@ class QdrantMemoryClient:
             return None
 
     def _select_latest_by_uid(
-            self, entries: List[Dict[str, Any]], uid_key: str
-    ) -> Dict[str, Dict[str, Any]]:
+            self, entries: list[dict[str, Any]], uid_key: str
+    ) -> dict[str, dict[str, Any]]:
         """Group entries by uid_key and keep the newest by created_at."""
-        latest: Dict[str, Dict[str, Any]] = {}
+        latest: dict[str, dict[str, Any]] = {}
         for e in entries or []:
             meta = e.get("metadata", {}) or {}
             uid = str(meta.get(uid_key, "") or "")
@@ -9255,8 +9229,8 @@ class QdrantMemoryClient:
             self,
             *,
             user_id: str,
-            run_id: Optional[str],
-    ) -> List[Task]:
+            run_id: str | None,
+    ) -> list[Task]:
         """Return latest-version task objects for a run_id (operation)"""
         op_id = _operation_id(run_id)
         tasks = _get_database_store().get_tasks(op_id)
@@ -9264,7 +9238,7 @@ class QdrantMemoryClient:
         tasks.sort(key=lambda x: x.created_at or "", reverse=True)
         return tasks
 
-    def _task_from_memory(self, mem: Dict[str, Any]) -> Optional[Task]:
+    def _task_from_memory(self, mem: dict[str, Any]) -> Task | None:
         meta = (mem.get("metadata", {}) or {})
         try:
             return Task.from_obj(meta)
@@ -9275,7 +9249,7 @@ class QdrantMemoryClient:
             self,
             *,
             task: Task,
-            user_id: Optional[str] = None,
+            user_id: str | None = None,
     ):
         """Store (or update) a task."""
         op_id = _operation_id()
@@ -9301,14 +9275,14 @@ class QdrantMemoryClient:
             self,
             *,
             task_uid: str,
-            status: Optional[str] = None,
-            status_reason: Optional[str] = None,
-            phase: Optional[int] = None,
+            status: str | None = None,
+            status_reason: str | None = None,
+            phase: int | None = None,
             evidence_additions: Iterable[str] = (),
-            evidence_replacement: Optional[Iterable[str]] = None,
-            recovery_context_updates: Optional[Dict[str, Any]] = None,
+            evidence_replacement: Iterable[str] | None = None,
+            recovery_context_updates: dict[str, Any] | None = None,
             recovery_context_removals: Iterable[str] = (),
-            user_id: Optional[str] = None,
+            user_id: str | None = None,
     ) -> Task:
         """Patch one persisted task without replacing independent task state."""
 
@@ -9361,16 +9335,16 @@ class QdrantMemoryClient:
             user_id: str,
             phase: int,
             new_status: Literal["done", "partial_failure", "blocked", "superseded"],
-            new_status_reason: Optional[str] = None,
-            task_uid: Optional[str] = None,
-    ) -> Tuple[Optional[Task], Optional[Task]]:
+            new_status_reason: str | None = None,
+            task_uid: str | None = None,
+    ) -> tuple[Task | None, Task | None]:
         """Update a task in a given phase and activate the next pending task in that phase."""
         op_id = _operation_id()
         phase_tasks = _get_database_store().get_tasks(op_id)
         phase_tasks = [t for t in phase_tasks if int(t.phase) == int(phase)]
 
         # Pick target task: explicit uid, else current active
-        target: Optional[Task] = None
+        target: Task | None = None
         if task_uid:
             for t in phase_tasks:
                 if t.task_uid == task_uid:
@@ -9383,7 +9357,7 @@ class QdrantMemoryClient:
                     target = t
                     break
 
-        updated: Optional[Task] = None
+        updated: Task | None = None
         if target:
             updated = self.patch_task(
                 task_uid=target.task_uid,
@@ -9393,7 +9367,7 @@ class QdrantMemoryClient:
             )
 
         # After updating, find next pending
-        next_active: Optional[Task] = None
+        next_active: Task | None = None
         if new_status in ("done", "partial_failure", "blocked", "superseded"):
             # Check for another active (shouldn't be any)
             still_active = [t for t in phase_tasks if t.status == "active" and t.task_uid != (target.task_uid if target else None)]
@@ -9414,9 +9388,9 @@ class QdrantMemoryClient:
     def get_or_activate_next_task_in_phase(
             self,
             *,
-            user_id: Optional[str] = None,
+            user_id: str | None = None,
             phase: int,
-    ) -> Tuple[Optional[Task], bool]:
+    ) -> tuple[Task | None, bool]:
         """Return the active task for a phase, or promote the next pending task to active."""
         user_id = _user_id(user_id)
         op_id = _operation_id()
@@ -9445,11 +9419,11 @@ class QdrantMemoryClient:
     def list_tasks(
             self,
             *,
-            user_id: Optional[str] = None,
-            phase: Optional[int] = None,
-            status: Optional[List[str]] = None,
-            operation_id: Optional[str] = None,
-    ) -> List[Task]:
+            user_id: str | None = None,
+            phase: int | None = None,
+            status: list[str] | None = None,
+            operation_id: str | None = None,
+    ) -> list[Task]:
         """List tasks for a phase and, when provided, an explicit operation."""
         tasks = _get_database_store().get_tasks(_operation_id(operation_id))
         result = []
@@ -9463,13 +9437,13 @@ class QdrantMemoryClient:
     def list_task_acceptance_results(
             self,
             task_uid: str,
-            operation_id: Optional[str] = None,
-    ) -> List[AcceptanceResult]:
+            operation_id: str | None = None,
+    ) -> list[AcceptanceResult]:
         """Return the frozen-manifest result ledger for one task and operation."""
 
         return _get_database_store().get_acceptance_results(_operation_id(operation_id), task_uid)
 
-    def list_finding_records(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_finding_records(self, operation_id: str | None = None) -> list[dict[str, Any]]:
         """Return finding records for an explicit or current operation."""
 
         return _get_database_store().list_findings(_operation_id(operation_id))
@@ -9489,17 +9463,17 @@ class QdrantMemoryClient:
             replacement_task_uid,
         )
 
-    def list_objective_validation_records(self) -> List[Dict[str, Any]]:
+    def list_objective_validation_records(self) -> list[dict[str, Any]]:
         """Return objective-validation records for the current operation."""
 
         return _get_database_store().list_objective_candidates(_operation_id())
 
-    def store_preflight_results(self, results: List[Dict[str, Any]], operation_id: Optional[str] = None) -> None:
+    def store_preflight_results(self, results: list[dict[str, Any]], operation_id: str | None = None) -> None:
         """Persist preflight facts once so later workflow stages do not re-resolve targets."""
 
         _get_database_store().store_preflight_results(operation_id or _operation_id(), results)
 
-    def list_preflight_results(self, operation_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def list_preflight_results(self, operation_id: str | None = None) -> list[dict[str, Any]]:
         """Return persisted preflight facts for an explicit or current operation."""
 
         return _get_database_store().list_preflight_results(_operation_id(operation_id))
@@ -9507,7 +9481,7 @@ class QdrantMemoryClient:
     def update_finding_taxonomy_annotation(
         self,
         finding_uid: str,
-        annotation: Dict[str, Any],
+        annotation: dict[str, Any],
     ) -> bool:
         """Persist one controller-owned taxonomy annotation for a finding candidate."""
 
@@ -9520,7 +9494,7 @@ class QdrantMemoryClient:
     def update_finding_attack_enrichment(
         self,
         finding_uid: str,
-        enrichment: Dict[str, Any],
+        enrichment: dict[str, Any],
     ) -> bool:
         """Persist one controller-owned final ATT&CK enrichment result."""
 
@@ -9530,7 +9504,7 @@ class QdrantMemoryClient:
             enrichment,
         )
 
-    def get_memory_overview(self, user_id: Optional[str] = None) -> Dict:
+    def get_memory_overview(self, user_id: str | None = None) -> dict:
         """Get an overview of stored memories."""
         user_id = _user_id(user_id)
         op_id = _operation_id()
@@ -9592,12 +9566,12 @@ class QdrantMemoryClient:
 
 
 def initialize_memory_system(
-    config: Optional[Dict] = None,
-    operation_id: Optional[str] = None,
-    target_name: Optional[str] = None,
+    config: dict | None = None,
+    operation_id: str | None = None,
+    target_name: str | None = None,
     has_existing_memories: bool = False,
     silent: bool = False,
-    logical_target: Optional[str] = None,
+    logical_target: str | None = None,
 ) -> None:
     """Initialize the memory system with custom configuration.
 

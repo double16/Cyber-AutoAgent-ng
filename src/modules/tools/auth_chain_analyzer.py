@@ -2,18 +2,18 @@
 """Authentication Chain Analyzer - Intelligent analysis of complex authentication flows"""
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import subprocess
 import tempfile
-import urllib3
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
-
+import urllib3
 from strands import tool
 
 from modules.tools.result_cache import (
@@ -39,8 +39,8 @@ def _coerce_str(arg: bytes | str | None) -> str:
 def auth_chain_analyzer(
         target_url: str,
         auth_type: str = "auto",
-        output_file: Optional[str] = None,
-        inventory_manifest: Optional[str] = None,
+        output_file: str | None = None,
+        inventory_manifest: str | None = None,
 ) -> str:
     """
     Map auth flows + identify/validate auth bypass surfaces for a target. Supported: JWT, OAuth, SAML, cookies, sessions.
@@ -111,11 +111,11 @@ def auth_chain_analyzer(
         },
     }
 
-    report: Dict[str, Any] = {
+    report: dict[str, Any] = {
         "tool": "auth_chain_analyzer",
         "target": target_url,
         "auth_type": auth_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "summary": {},
         "evidence": {},
         "findings": [],
@@ -221,8 +221,8 @@ def auth_chain_analyzer(
 
         report["summary"] = {
             "auth_endpoints": len(results.get("auth_endpoints", []) or []),
-            "mechanisms": sorted(list(set(mech_types))),
-            "tokens": sorted(list(set(token_types))),
+            "mechanisms": sorted(set(mech_types)),
+            "tokens": sorted(set(token_types)),
             "confirmed_exploits": len(confirmed),
             "high_confidence_hypotheses": len(
                 [s for s in next_steps if isinstance(s, dict) and (s.get("confidence", 0) or 0) >= 0.7]),
@@ -267,7 +267,7 @@ def auth_chain_analyzer(
             "tool": "auth_chain_analyzer",
             "target": target_url,
             "auth_type": auth_type,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "error": str(e),
         }
         if inventory_manifest:
@@ -282,7 +282,7 @@ def auth_chain_analyzer(
     return output
 
 
-def _write_result_file(output_file: Optional[str], result: str) -> None:
+def _write_result_file(output_file: str | None, result: str) -> None:
     """Write a tool result when the caller requested an output artifact."""
     if not output_file:
         return
@@ -294,10 +294,10 @@ def _write_result_file(output_file: Optional[str], result: str) -> None:
 
 
 def _write_auth_inventory_manifest(
-        report: Dict[str, Any],
+        report: dict[str, Any],
         inventory_manifest: str,
         target_url: str,
-        results: Optional[Dict[str, Any]] = None,
+        results: dict[str, Any] | None = None,
 ) -> None:
     """Materialize a requested inventory manifest from an auth analysis report."""
     try:
@@ -363,7 +363,7 @@ def _write_auth_inventory_manifest(
         }
 
 
-def _append_unique(list: List, item: Any):
+def _append_unique(list: list, item: Any):
     if item not in list:
         list.append(item)
 
@@ -372,7 +372,7 @@ def _http_request(
     method: str,
     url: str,
     *,
-    headers: Dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
     timeout: float = 10.0,
     stream: bool = False,
     verify_tls: bool = False,
@@ -398,9 +398,9 @@ def _http_request(
 
 
 
-def _response_set_cookie_lines(resp: requests.Response) -> List[str]:
+def _response_set_cookie_lines(resp: requests.Response) -> list[str]:
     """Return Set-Cookie lines (supports multiple Set-Cookie headers)."""
-    lines: List[str] = []
+    lines: list[str] = []
 
     # urllib3 HTTPHeaderDict supports getlist/get_all for duplicate headers.
     raw_headers = getattr(resp, "raw", None)
@@ -428,7 +428,7 @@ def _response_set_cookie_lines(resp: requests.Response) -> List[str]:
 
 
 # Wildcard baseline/wildcard detection helpers
-def _wildcard_baseline_signature(base_url: str) -> Dict[str, Any]:
+def _wildcard_baseline_signature(base_url: str) -> dict[str, Any]:
     """Create a baseline signature for a URL that is extremely unlikely to exist.
 
     Some targets respond with the same status/body/headers for unknown paths (wildcard).
@@ -438,7 +438,7 @@ def _wildcard_baseline_signature(base_url: str) -> Dict[str, Any]:
     probe_path = f"/__caa_wildcard_probe_{os.getpid()}_{abs(hash(base_url)) % 10_000_000}__"
     probe_url = base_url.rstrip("/") + probe_path
 
-    sig: Dict[str, Any] = {
+    sig: dict[str, Any] = {
         "url": probe_url,
         "path": probe_path,
         "code": None,
@@ -484,7 +484,7 @@ def _wildcard_baseline_signature(base_url: str) -> Dict[str, Any]:
     return sig
 
 
-def _looks_like_wildcard(candidate: Dict[str, Any], baseline: Dict[str, Any]) -> bool:
+def _looks_like_wildcard(candidate: dict[str, Any], baseline: dict[str, Any]) -> bool:
     """Heuristic comparison of a candidate endpoint response to a wildcard baseline."""
     if not baseline or baseline.get("code") is None:
         return False
@@ -542,7 +542,7 @@ def _looks_like_wildcard(candidate: Dict[str, Any], baseline: Dict[str, Any]) ->
     return False
 
 
-def _discover_auth_endpoints(target_url: str) -> List[Dict[str, Any]]:
+def _discover_auth_endpoints(target_url: str) -> list[dict[str, Any]]:
     """Discover authentication-related endpoints"""
     auth_endpoints = []
     seen_paths: set[str] = set()
@@ -667,24 +667,7 @@ def _discover_auth_endpoints(target_url: str) -> List[Dict[str, Any]]:
     wordlist_path = None
     try:
         # Create a focused auth wordlist
-        auth_wordlist = "\n".join(
-            [
-                "admin",
-                "login",
-                "auth",
-                "oauth",
-                "signin",
-                "portal",
-                "dashboard",
-                "user",
-                "account",
-                "profile",
-                "session",
-                "token",
-                "sso",
-                "saml",
-            ]
-        )
+        auth_wordlist = "admin\nlogin\nauth\noauth\nsignin\nportal\ndashboard\nuser\naccount\nprofile\nsession\ntoken\nsso\nsaml"
 
         with tempfile.NamedTemporaryFile(prefix="auth_wordlist_", suffix=".txt", delete=False, mode="w") as f:
             f.write(auth_wordlist)
@@ -715,10 +698,8 @@ def _discover_auth_endpoints(target_url: str) -> List[Dict[str, Any]]:
         pass
     finally:
         if wordlist_path:
-            try:
+            with contextlib.suppress(Exception):
                 os.remove(wordlist_path)
-            except Exception:
-                pass
 
     if feroxbuster_out:
         for line in feroxbuster_out.splitlines():
@@ -820,7 +801,7 @@ def _classify_auth_endpoint(path: str, headers: str) -> str:
     return "Generic Authentication"
 
 
-def _analyze_auth_mechanisms(target_url: str, auth_endpoints: List[Dict], auth_type: str) -> List[Dict[str, Any]]:
+def _analyze_auth_mechanisms(target_url: str, auth_endpoints: list[dict], auth_type: str) -> list[dict[str, Any]]:
     """Analyze authentication mechanisms in detail"""
     mechanisms = []
 
@@ -839,7 +820,7 @@ def _analyze_auth_mechanisms(target_url: str, auth_endpoints: List[Dict], auth_t
                     "saml": "SAML",
                     "session": "Session-based",
                 }
-                requested = type_map.get(auth_type.lower(), None) if isinstance(auth_type, str) else None
+                requested = type_map.get(auth_type.lower()) if isinstance(auth_type, str) else None
                 if requested and endpoint.get("type") != requested:
                     continue
 
@@ -910,7 +891,7 @@ def _analyze_auth_mechanisms(target_url: str, auth_endpoints: List[Dict], auth_t
     return mechanisms
 
 
-def _analyze_jwt_mechanism(endpoint: Dict, content: str) -> Dict[str, Any]:
+def _analyze_jwt_mechanism(endpoint: dict, content: str) -> dict[str, Any]:
     """Analyze JWT authentication mechanism"""
     jwt_info = {
         "type": "JWT",
@@ -949,7 +930,7 @@ def _analyze_jwt_mechanism(endpoint: Dict, content: str) -> Dict[str, Any]:
     return jwt_info
 
 
-def _analyze_oauth_mechanism(endpoint: Dict, content: str) -> Dict[str, Any]:
+def _analyze_oauth_mechanism(endpoint: dict, content: str) -> dict[str, Any]:
     """Analyze OAuth authentication mechanism"""
     oauth_info = {
         "type": "OAuth",
@@ -991,7 +972,7 @@ def _analyze_oauth_mechanism(endpoint: Dict, content: str) -> Dict[str, Any]:
     return oauth_info
 
 
-def _analyze_saml_mechanism(endpoint: Dict, content: str) -> Dict[str, Any]:
+def _analyze_saml_mechanism(endpoint: dict, content: str) -> dict[str, Any]:
     """Analyze SAML authentication mechanism"""
     saml_info = {
         "type": "SAML",
@@ -1025,7 +1006,7 @@ def _analyze_saml_mechanism(endpoint: Dict, content: str) -> Dict[str, Any]:
     return saml_info
 
 
-def _analyze_session_mechanism(endpoint: Dict, content: str) -> Dict[str, Any]:
+def _analyze_session_mechanism(endpoint: dict, content: str) -> dict[str, Any]:
     """Analyze session-based authentication mechanism"""
     session_info = {
         "type": "Session-based",
@@ -1054,7 +1035,7 @@ def _analyze_session_mechanism(endpoint: Dict, content: str) -> Dict[str, Any]:
     return session_info
 
 
-def _analyze_tokens_and_sessions(target_url: str, mechanisms: List[Dict]) -> Dict[str, Any]:
+def _analyze_tokens_and_sessions(target_url: str, mechanisms: list[dict]) -> dict[str, Any]:
     """Analyze tokens and session management"""
     token_analysis = {"tokens": [], "session_info": {}}
 
@@ -1103,9 +1084,9 @@ def _analyze_tokens_and_sessions(target_url: str, mechanisms: List[Dict]) -> Dic
     return token_analysis
 
 
-def _analyze_cookie_security(cookie_line: str) -> Dict[str, Any] | None:
+def _analyze_cookie_security(cookie_line: str) -> dict[str, Any] | None:
     """Analyze cookie security properties"""
-    cookie_line = re.sub(r"^set-cookie:\s*", "", cookie_line, flags=re.I)
+    cookie_line = re.sub(r"^set-cookie:\s*", "", cookie_line, flags=re.IGNORECASE)
     parts = cookie_line.strip().split(";")
     if not parts:
         return None
@@ -1149,7 +1130,7 @@ def _analyze_cookie_security(cookie_line: str) -> Dict[str, Any] | None:
     }
 
 
-def _analyze_session_security(session_cookies: List[Dict]) -> List[str]:
+def _analyze_session_security(session_cookies: list[dict]) -> list[str]:
     """Analyze overall session security"""
     analysis = []
 
@@ -1176,7 +1157,7 @@ def _analyze_session_security(session_cookies: List[Dict]) -> List[str]:
     return analysis
 
 
-def _analyze_jwt_with_tools(target_url: str, jwt_mechanisms: List[Dict]) -> List[Dict[str, Any]]:
+def _analyze_jwt_with_tools(target_url: str, jwt_mechanisms: list[dict]) -> list[dict[str, Any]]:
     """Analyze JWT tokens using jwt_tool if available"""
     jwt_tokens = []
     jwt_tool = None
@@ -1220,7 +1201,7 @@ def _analyze_jwt_with_tools(target_url: str, jwt_mechanisms: List[Dict]) -> List
     return jwt_tokens
 
 
-def _parse_jwt_tool_output(output: str) -> Dict[str, Any]:
+def _parse_jwt_tool_output(output: str) -> dict[str, Any]:
     """Parse jwt_tool output for key information.
 
 ====================
@@ -1266,7 +1247,7 @@ nbf = NotBefore
     return analysis
 
 
-def _map_authentication_flows(target_url: str, results: Dict) -> Dict[str, Any]:
+def _map_authentication_flows(target_url: str, results: dict) -> dict[str, Any]:
     """Map complete authentication flows and identify vulnerabilities"""
     flow_analysis = {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []}
 
@@ -1335,7 +1316,7 @@ def _map_authentication_flows(target_url: str, results: Dict) -> Dict[str, Any]:
     return flow_analysis
 
 
-def _generate_auth_steps(mechanism: Dict) -> List[Dict[str, Any]]:
+def _generate_auth_steps(mechanism: dict) -> list[dict[str, Any]]:
     """Generate authentication flow steps for a mechanism"""
     steps = []
 
@@ -1397,7 +1378,7 @@ def _generate_auth_steps(mechanism: Dict) -> List[Dict[str, Any]]:
     return steps
 
 
-def _test_advanced_auth_bypasses(target_url: str, results: Dict) -> List[Dict[str, Any]]:
+def _test_advanced_auth_bypasses(target_url: str, results: dict) -> list[dict[str, Any]]:
     """Test advanced authentication bypass techniques"""
     bypass_results = []
 
@@ -1619,7 +1600,7 @@ def _test_advanced_auth_bypasses(target_url: str, results: Dict) -> List[Dict[st
     return bypass_results
 
 
-def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
+def _generate_auth_recommendations(results: dict) -> list[dict[str, Any]]:
     """Generate agent next-steps to drive discovery, verification, and exploitation.
 
     Output is designed for machine consumption:
@@ -1629,7 +1610,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
       - confidence: float 0..1
     """
 
-    steps: List[Dict[str, Any]] = []
+    steps: list[dict[str, Any]] = []
 
     target = results.get("target", "")
     endpoints = results.get("auth_endpoints", []) or []
@@ -1643,7 +1624,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
 
     successful = [v for v in vulns if isinstance(v, dict) and v.get("successful", False)]
 
-    def _add(step: Dict[str, Any]):
+    def _add(step: dict[str, Any]):
         # Normalize fields
         step.setdefault("confidence", 0.6)
         step.setdefault("capabilities", [])
@@ -1900,7 +1881,7 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
 
     # De-duplicate by id while preserving order; sort by priority then insertion
     seen_ids: set[str] = set()
-    uniq: List[Dict[str, Any]] = []
+    uniq: list[dict[str, Any]] = []
     for s in steps:
         sid = s.get("id")
         if not sid or sid in seen_ids:
@@ -1908,10 +1889,8 @@ def _generate_auth_recommendations(results: Dict) -> List[Dict[str, Any]]:
         seen_ids.add(sid)
         uniq.append(s)
 
-    try:
+    with contextlib.suppress(Exception):
         uniq.sort(key=lambda x: int(x.get("priority", 999)))
-    except Exception:
-        pass
 
     return uniq
 

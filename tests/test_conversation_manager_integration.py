@@ -12,24 +12,33 @@ Validates expected behavior with mock data to ensure:
 - Clean logs without spurious warnings
 """
 
-import math
 import logging
+import math
+import types
 from typing import Any
 from unittest.mock import Mock, patch
-import types
 
 import pytest
-
 from strands.types.tools import ToolSpec
+
 from modules.config.manager import ConfigManager
-from modules.config.models.dev_client import ModelsDevClient, ModelLimits, ModelCapabilities
+from modules.config.models.dev_client import (
+    ModelCapabilities,
+    ModelLimits,
+    ModelsDevClient,
+)
 from modules.handlers.conversation_budget import (
-    _get_char_to_token_ratio_dynamic,
-    _estimate_prompt_tokens_for_agent,
-    _ensure_prompt_within_budget,
+    _MODEL_RATIO_HISTORY,
+    _RATIO_BASELINE_BLEND,
+    _RATIO_LOCK,
+    _RATIO_WINDOW_WEIGHTS,
+    _RATIO_WINDOWS,
     MappingConversationManager,
-    token_calc, _RATIO_LOCK, _MODEL_RATIO_HISTORY, _RATIO_WINDOW_WEIGHTS,
-    _update_ratio_from_telemetry, _RATIO_BASELINE_BLEND, _RATIO_WINDOWS,
+    _ensure_prompt_within_budget,
+    _estimate_prompt_tokens_for_agent,
+    _get_char_to_token_ratio_dynamic,
+    _update_ratio_from_telemetry,
+    token_calc,
 )
 
 
@@ -732,8 +741,8 @@ class TestThresholdAlignment:
         - Compression truncates to 8K (TOOL_COMPRESS_TRUNCATE)
         """
         from modules.handlers.conversation_budget import (
-            TOOL_COMPRESS_THRESHOLD,
             _TOOL_ARTIFACT_THRESHOLD,
+            TOOL_COMPRESS_THRESHOLD,
         )
 
         # Compression threshold must MATCH artifact threshold (not 1.5x)
@@ -749,9 +758,9 @@ class TestThresholdAlignment:
     def test_mapper_acts_as_safety_net(self):
         """Test that mapper compresses results that bypass externalization."""
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
             TOOL_COMPRESS_THRESHOLD,
             TOOL_COMPRESS_TRUNCATE,
+            LargeToolResultMapper,
         )
 
         mapper = LargeToolResultMapper(
@@ -794,8 +803,8 @@ class TestThresholdAlignment:
         3. Mapper correctly reports 'no compression needed'
         """
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
             TOOL_COMPRESS_THRESHOLD,
+            LargeToolResultMapper,
         )
 
         mapper = LargeToolResultMapper(max_tool_chars=TOOL_COMPRESS_THRESHOLD)
@@ -890,8 +899,8 @@ class TestFullPipelineSimulation:
     def test_pipeline_with_mixed_output_sizes(self):
         """Simulate realistic operation with mixed tool output sizes."""
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
             TOOL_COMPRESS_THRESHOLD,
+            LargeToolResultMapper,
         )
 
         mapper = LargeToolResultMapper(max_tool_chars=TOOL_COMPRESS_THRESHOLD)
@@ -928,7 +937,7 @@ class TestFullPipelineSimulation:
             }
 
             # Apply mapper (simulates LargeToolResultMapper in pipeline)
-            mapped = mapper(message, i, messages + [message])
+            mapped = mapper(message, i, [*messages, message])
             if mapped != message:
                 compression_count += 1
             messages.append(mapped)
@@ -1113,9 +1122,9 @@ class TestThresholdGapFailureMode:
         This test validates the fix works correctly.
         """
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
-            TOOL_COMPRESS_THRESHOLD,
             _TOOL_ARTIFACT_THRESHOLD,
+            TOOL_COMPRESS_THRESHOLD,
+            LargeToolResultMapper,
         )
 
         # Verify the fix is applied: thresholds should now match
@@ -1178,13 +1187,13 @@ class TestThresholdGapFailureMode:
         This test validates the fix works for realistic workloads.
         """
         from modules.handlers.conversation_budget import (
+            TOOL_COMPRESS_THRESHOLD,
             LargeToolResultMapper,
             MappingConversationManager,
-            TOOL_COMPRESS_THRESHOLD,
         )
 
         mapper = LargeToolResultMapper(max_tool_chars=TOOL_COMPRESS_THRESHOLD)
-        manager = MappingConversationManager(
+        MappingConversationManager(
             window_size=100,  # Large window to allow accumulation
             preserve_first_messages=1,
             preserve_recent_messages=5,
@@ -1218,7 +1227,7 @@ class TestThresholdGapFailureMode:
             }
 
             # Check if mapper compresses this message
-            mapped = mapper(message, i, messages + [message])
+            mapped = mapper(message, i, [*messages, message])
             original_size = len(preview)
             mapped_text = mapped["content"][0]["toolResult"]["content"][0]["text"]
             mapped_size = len(mapped_text)
@@ -1275,9 +1284,9 @@ class TestThresholdGapFailureMode:
         increases total size rather than decreasing it.
         """
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
             TOOL_COMPRESS_THRESHOLD,
             TOOL_COMPRESS_TRUNCATE,
+            LargeToolResultMapper,
         )
 
         mapper = LargeToolResultMapper(
@@ -1427,7 +1436,7 @@ class TestTelemetryCalibratedRatios:
 
             # replicate window math used by implementation:
             n = len(history)
-            ks = [max(1, int(round(n * pct))) for pct in _RATIO_WINDOWS]
+            ks = [max(1, round(n * pct)) for pct in _RATIO_WINDOWS]
             k10, k30, k50 = ks[0], ks[1], ks[2]
 
             avg10 = sum(history[-k10:]) / k10  # last 1 -> 6.0

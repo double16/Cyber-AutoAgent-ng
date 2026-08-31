@@ -128,6 +128,22 @@ force_grid_wrap = 0
 use_parentheses = true
 ensure_newline_before_comments = true
 
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM", "PIE", "ISC", "RUF"]
+# These rules are intentionally unsuitable for this codebase: several inspect dynamically supplied
+# values, preserve user-facing Unicode, or create less-readable control flow in test fixtures.
+ignore = [
+    "B008", "B012", "B017", "B018", "B019", "B023", "B904",
+    "E402", "E722",
+    "RUF001", "RUF002", "RUF003", "RUF012", "RUF043",
+    "SIM102", "SIM105", "SIM108", "SIM115", "SIM117",
+    "UP031",
+]
+
 [tool.mypy]
 python_version = "3.12"
 warn_return_any = true

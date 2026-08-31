@@ -6,18 +6,21 @@
 import json
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any, TypeVar, cast, List
+from typing import Any, TypeVar, Unpack, cast, override
 
 import ollama
 from ollama import ChatResponse
 from pydantic import BaseModel
-from typing_extensions import TypedDict, Unpack, override
-
+from strands.models._validation import (
+    _has_location_source,
+    validate_config_keys,
+    warn_on_tool_choice_not_supported,
+)
+from strands.models.model import Model
 from strands.types.content import ContentBlock, Messages
 from strands.types.streaming import StopReason, StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
-from strands.models._validation import _has_location_source, validate_config_keys, warn_on_tool_choice_not_supported
-from strands.models.model import Model
+from typing_extensions import TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -442,7 +445,7 @@ class OllamaModel(Model):
         yield self.format_chunk({"chunk_type": "message_start"})
         yield self.format_chunk({"chunk_type": "content_start", "data_type": "text"})
 
-        def produce_chunks(event: ChatResponse) -> List[StreamEvent]:
+        def produce_chunks(event: ChatResponse) -> list[StreamEvent]:
             chunks = []
 
             for tool_call in event.message.tool_calls or []:

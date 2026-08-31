@@ -4,10 +4,9 @@ from types import SimpleNamespace
 import pytest
 
 from modules.handlers.utils import get_tool_spec
-from modules.tools import recon_inventory_manifest as manifest_tool
 from modules.prompts.factory import ModulePromptLoader
-from modules.tools import artifact
-from modules.tools import memory
+from modules.tools import artifact, memory
+from modules.tools import recon_inventory_manifest as manifest_tool
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 
 
@@ -16,8 +15,8 @@ from modules.tools.recon_inventory_manifest import recon_output_to_inventory_man
     [
         (
             "katana",
-            '{"request":{"endpoint":"https://target.test/a","method":"POST"},'
-            '"response":{"status_code":201}}',
+            ('{"request":{"endpoint":"https://target.test/a","method":"POST"},'
+            '"response":{"status_code":201}}'),
             "https://target.test/a",
             201,
         ),

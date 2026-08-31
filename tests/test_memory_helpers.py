@@ -1,8 +1,8 @@
 import json
 
 from modules.tools import memory as mod
-from tests.helpers.acceptance import make_acceptance
 from tests.helpers import memory_tasks
+from tests.helpers.acceptance import make_acceptance
 
 
 def test_normalize_evidence_and_identifier_defaults(monkeypatch):

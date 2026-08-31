@@ -13,7 +13,6 @@ from typing import Any
 
 import yaml
 
-
 _VALID_MODES = frozenset({"fanout", "fanout_with_synthesis"})
 _VALID_ROLES = frozenset({"mapping", "synthesis", "direct_single_step"})
 _VALID_SYNTHESIS_EXECUTIONS = frozenset({"controller"})

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# ruff: noqa: E402
 """
 Cyber-AutoAgent Evaluation Module
 =================================
@@ -14,14 +13,15 @@ import os
 import sys
 import time
 import types
-from typing import Any, Callable, Dict, List, Optional
+from collections.abc import Callable
+from typing import Any
 
 from langchain_aws import BedrockEmbeddings, ChatBedrock
-from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_litellm import ChatLiteLLM
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.load.dump import dumps
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_litellm import ChatLiteLLM
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langfuse import Langfuse
 
 # HACK BEGIN
@@ -31,8 +31,11 @@ dummy_chat.ChatVertexAI = type("ChatVertexAI", (object,), {})
 sys.modules["langchain_community.chat_models.vertexai"] = dummy_chat
 
 import langchain_community.llms
+
 langchain_community.llms.VertexAI = type("VertexAI", (object,), {})
 # HACK END
+
+import contextlib
 
 from ragas.dataset_schema import MultiTurnSample, SingleTurnSample
 from ragas.embeddings import LangchainEmbeddingsWrapper
@@ -48,10 +51,10 @@ from modules.config.manager import get_config_manager
 from modules.config.system.logger import get_logger
 from modules.tools.semantic_enum import normalize_semantic_enum
 
-from .trace_parser import TraceParser
 from ..config.providers.ollama_config import get_ollama_timeout
 from ..config.system import EnvironmentReader
 from ..handlers.events import EventEmitter
+from .trace_parser import TraceParser
 
 logger = get_logger("Evaluation.Evaluation")
 
@@ -118,7 +121,7 @@ class EvaluationUsageCallback(BaseCallbackHandler):
         self,
         model_id: str,
         provider_id: str,
-        callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.model_id = model_id
         self.provider_id = provider_id
@@ -222,17 +225,17 @@ class CyberAgentEvaluator:
     def __init__(
         self,
         emitter: EventEmitter,
-        report_path: Optional[str] = None,
-        usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-        progress_callback: Optional[Callable[[], None]] = None,
+        report_path: str | None = None,
+        usage_callback: Callable[[dict[str, Any]], None] | None = None,
+        progress_callback: Callable[[], None] | None = None,
     ):
         """Initialize evaluator with Langfuse and evaluation metrics."""
         self._emitter = emitter
         self.report_path = report_path
-        self._evaluation_operation_id: Optional[str] = None
+        self._evaluation_operation_id: str | None = None
         self._evaluation_step_index = 0
         self._evaluation_step_total = 0
-        self._current_evaluation_scope: Optional[str] = None
+        self._current_evaluation_scope: str | None = None
         self._usage_callback = usage_callback
         self._progress_callback = progress_callback
         config_manager = get_config_manager()
@@ -357,7 +360,7 @@ class CyberAgentEvaluator:
         self._chat_model.callbacks = [self._usage_tracker]
 
         # Internal cache for last evaluation context summary hash (used in score metadata)
-        self._last_eval_summary_sha256: Optional[str] = None
+        self._last_eval_summary_sha256: str | None = None
 
     def setup_metrics(self):
         """Configure evaluation metrics using ragas prebuilt capabilities."""
@@ -449,7 +452,7 @@ class CyberAgentEvaluator:
 
     async def evaluate_operation_traces(
         self, operation_id: str
-    ) -> Dict[str, Dict[str, float]]:
+    ) -> dict[str, dict[str, float]]:
         """
         Evaluate an operation with at most two Ragas runs.
 
@@ -539,7 +542,7 @@ class CyberAgentEvaluator:
 
         return results
 
-    def _trace_attributes(self, trace: Any) -> Dict[str, Any]:
+    def _trace_attributes(self, trace: Any) -> dict[str, Any]:
         metadata = getattr(trace, "metadata", {})
         if not isinstance(metadata, dict):
             return {}
@@ -551,7 +554,7 @@ class CyberAgentEvaluator:
         role = attributes.get("agent.role") or attributes.get("langfuse.agent.type")
         return str(role or "").strip().lower()
 
-    def _select_execution_traces(self, traces: List[Any]) -> List[Any]:
+    def _select_execution_traces(self, traces: list[Any]) -> list[Any]:
         selected = [trace for trace in traces if self._trace_role(trace) in EXECUTION_AGENT_ROLES]
         if selected:
             return sorted(selected, key=self._trace_sort_key)
@@ -571,7 +574,7 @@ class CyberAgentEvaluator:
             or getattr(trace, "id", "")
         )
 
-    def _operation_objective(self, traces: List[Any]) -> str:
+    def _operation_objective(self, traces: list[Any]) -> str:
         for trace in traces:
             objective = self.trace_parser._extract_objective(trace)
             if objective:
@@ -613,7 +616,7 @@ class CyberAgentEvaluator:
             logger.warning("Unable to create %s score host trace: %s", scope, error)
             return fallback_trace_id
 
-    def _build_operation_evaluation_trace(self, operation_id: str, traces: List[Any]) -> Any:
+    def _build_operation_evaluation_trace(self, operation_id: str, traces: list[Any]) -> Any:
         objective = self._operation_objective(traces)
         observations = []
         seen_observation_ids = set()
@@ -655,12 +658,12 @@ class CyberAgentEvaluator:
             },
         )
 
-    def _build_report_evaluation_trace(self, operation_id: str, traces: List[Any]) -> Optional[Any]:
+    def _build_report_evaluation_trace(self, operation_id: str, traces: list[Any]) -> Any | None:
         if not self.report_path or not os.path.isfile(self.report_path):
             logger.info("Assembled report unavailable; skipping report Ragas evaluation")
             return None
         try:
-            with open(self.report_path, "r", encoding="utf-8", errors="ignore") as report_file:
+            with open(self.report_path, encoding="utf-8", errors="ignore") as report_file:
                 report_content = report_file.read(MAX_REPORT_EVALUATION_CHARS)
         except OSError as error:
             logger.warning("Unable to read assembled report for evaluation: %s", error)
@@ -694,7 +697,7 @@ class CyberAgentEvaluator:
             },
         )
 
-    async def _find_operation_traces(self, operation_id: str) -> List[Any]:
+    async def _find_operation_traces(self, operation_id: str) -> list[Any]:
         """
         Find all traces associated with an operation ID.
 
@@ -759,8 +762,8 @@ class CyberAgentEvaluator:
     async def _evaluate_single_trace(
         self,
         trace: Any,
-        metric_scope: Optional[str] = None,
-    ) -> Dict[str, float]:
+        metric_scope: str | None = None,
+    ) -> dict[str, float]:
         """
         Evaluate a single trace with configured metrics.
 
@@ -885,7 +888,7 @@ class CyberAgentEvaluator:
 
     async def evaluate_trace(
         self, trace_id: str, _max_retries: int = 5
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """
         Evaluate agent trace with configured metrics.
 
@@ -959,10 +962,8 @@ class CyberAgentEvaluator:
             )
             return None
         # Cache for rubric judge use
-        try:
+        with contextlib.suppress(Exception):
             self._last_parsed_trace = parsed_trace
-        except Exception:
-            pass
 
         # Log operation metrics for debugging
         memory_ops = self.trace_parser.count_memory_operations(parsed_trace.tool_calls)
@@ -974,7 +975,7 @@ class CyberAgentEvaluator:
             self._last_eval_stats = {
                 "memory_ops": int(memory_ops),
                 "evidence_count": int(evidence_count),
-                "tool_calls_count": int(len(parsed_trace.tool_calls)),
+                "tool_calls_count": len(parsed_trace.tool_calls),
             }
         except Exception:
             self._last_eval_stats = {
@@ -1028,7 +1029,7 @@ class CyberAgentEvaluator:
                         # Attach contexts list when available
                         if hasattr(evaluation_data, "retrieved_contexts"):
                             contexts = (
-                                getattr(evaluation_data, "retrieved_contexts") or []
+                                evaluation_data.retrieved_contexts or []
                             )
                             if isinstance(contexts, list):
                                 contexts.append(context_summary)
@@ -1040,7 +1041,7 @@ class CyberAgentEvaluator:
                         # Also attach as auxiliary context if supported
                         if hasattr(evaluation_data, "retrieved_contexts"):
                             contexts = (
-                                getattr(evaluation_data, "retrieved_contexts") or []
+                                evaluation_data.retrieved_contexts or []
                             )
                             if isinstance(contexts, list):
                                 contexts.append(context_summary)
@@ -1063,9 +1064,8 @@ class CyberAgentEvaluator:
             topics = self._synthesize_topics(
                 parsed_trace, locals().get("context_summary", "")
             )
-            if topics:
-                if hasattr(evaluation_data, "reference_topics"):
-                    evaluation_data.reference_topics = topics
+            if topics and hasattr(evaluation_data, "reference_topics"):
+                evaluation_data.reference_topics = topics
         except Exception as e:
             logger.debug("Topic synthesis failed: %s", e)
             # only set fallback if attribute exists and was not already set
@@ -1087,20 +1087,18 @@ class CyberAgentEvaluator:
                     "SingleTurnSample has no meaningful response for trace %s",
                     parsed_trace.trace_id,
                 )
-        elif isinstance(evaluation_data, MultiTurnSample):
-            if not getattr(evaluation_data, "user_input", None):
-                logger.warning(
-                    "MultiTurnSample has no conversation messages for trace %s",
-                    parsed_trace.trace_id,
-                )
+        elif isinstance(evaluation_data, MultiTurnSample) and not getattr(evaluation_data, "user_input", None):
+            logger.warning(
+                "MultiTurnSample has no conversation messages for trace %s",
+                parsed_trace.trace_id,
+            )
 
         # If SingleTurnSample supports reference_topics and no topics were set, fallback minimally
         try:
             if isinstance(evaluation_data, SingleTurnSample) and hasattr(
                 evaluation_data, "reference_topics"
-            ):
-                if not getattr(evaluation_data, "reference_topics", None):
-                    evaluation_data.reference_topics = DEFAULT_SECURITY_TOPICS
+            ) and not getattr(evaluation_data, "reference_topics", None):
+                evaluation_data.reference_topics = DEFAULT_SECURITY_TOPICS
         except Exception:
             pass
 
@@ -1157,7 +1155,7 @@ class CyberAgentEvaluator:
         self._emit_evaluation_step_complete("evaluation_data", "completed")
         return evaluation_data
 
-    def _metrics_for_scope(self, metric_scope: Optional[str]) -> List[Any]:
+    def _metrics_for_scope(self, metric_scope: str | None) -> list[Any]:
         if metric_scope != "report":
             return self.all_metrics
         return [
@@ -1198,9 +1196,9 @@ class CyberAgentEvaluator:
         kind: str,
         status: str,
         *,
-        metric: Optional[str] = None,
-        step_index: Optional[int] = None,
-        message: Optional[str] = None,
+        metric: str | None = None,
+        step_index: int | None = None,
+        message: str | None = None,
     ) -> None:
         """Emit a best-effort semantic completion event for evaluation work."""
         if self._evaluation_operation_id is None:
@@ -1217,7 +1215,7 @@ class CyberAgentEvaluator:
             return
 
         scope = self._current_evaluation_scope or "operation"
-        event: Dict[str, Any] = {
+        event: dict[str, Any] = {
             "type": "evaluation_step_complete",
             "operation_id": self._evaluation_operation_id,
             "operation_stage": "ragas_evaluation",
@@ -1299,8 +1297,8 @@ class CyberAgentEvaluator:
     async def _evaluate_all_metrics(
         self,
         eval_data,
-        metrics: Optional[List[Any]] = None,
-    ) -> Dict[str, float]:
+        metrics: list[Any] | None = None,
+    ) -> dict[str, float]:
         """Evaluate all configured metrics on evaluation data (SingleTurn or MultiTurn)."""
         scores = {}
         metrics = self.all_metrics if metrics is None else metrics
@@ -1438,7 +1436,7 @@ class CyberAgentEvaluator:
         logger.info("Final metric scores: %s", scores)
         return scores
 
-    async def _upload_scores_to_langfuse(self, trace_id: str, scores: Dict[str, float]):
+    async def _upload_scores_to_langfuse(self, trace_id: str, scores: dict[str, float]):
         """Upload evaluation scores to Langfuse with metadata."""
         # Allow scores to contain tuples (value, metadata) for rubric metrics
         for metric_name, value in scores.items():
@@ -1472,14 +1470,13 @@ class CyberAgentEvaluator:
                     pass
 
             score_comment = (
-                "Automated ragas evaluation: %s (%s)"
-                % (metric_name, metric_category)
+                f"Automated ragas evaluation: {metric_name} ({metric_category})"
                 if "/rubric/" not in metric_name and not metric_name.startswith("rubric/")
-                else "Rubric judge evaluation: %s" % metric_name
+                else f"Rubric judge evaluation: {metric_name}"
             )
             # Use v4 collection API when available, else fall back to legacy
             score_fallback = True
-            if hasattr(self.langfuse, "scores") and hasattr(getattr(self.langfuse, "scores"), "create"):
+            if hasattr(self.langfuse, "scores") and hasattr(self.langfuse.scores, "create"):
                 try:
                     self.langfuse.scores.create(
                         trace_id=trace_id,
@@ -1560,7 +1557,7 @@ class CyberAgentEvaluator:
     # Internal helpers (LLM-driven)
     # -----------------------------
 
-    async def _infer_evaluation_policy(self, eval_data) -> Dict[str, Any]:
+    async def _infer_evaluation_policy(self, eval_data) -> dict[str, Any]:
         """LLM-derived policy for capping/disabling metrics without hard-coded rules.
 
         Returns JSON like: {"caps": {"metric": 0.7, ...}, "disable": ["metric_name", ...]}
@@ -1634,7 +1631,10 @@ class CyberAgentEvaluator:
             "Return JSON with keys: caps (object of metric->cap 0..1), disable (array of metrics)."
         )
         try:
-            from langchain_core.messages import SystemMessage, HumanMessage  # type: ignore
+            from langchain_core.messages import (  # type: ignore
+                HumanMessage,
+                SystemMessage,
+            )
 
             msgs = [
                 SystemMessage(content=system_prompt),
@@ -1664,7 +1664,7 @@ class CyberAgentEvaluator:
             )
             return {}
 
-    async def _rubric_judge_scores(self, eval_data) -> Dict[str, Any]:
+    async def _rubric_judge_scores(self, eval_data) -> dict[str, Any]:
         """Optionally, compute rubric-based scores with rationales using the evaluator LLM.
 
         Returns a dict of metric_name -> (score_float, metadata_dict) when enabled, else {}.
@@ -1784,7 +1784,10 @@ class CyberAgentEvaluator:
 
         # Invoke judge (apply judge temperature/max tokens when supported)
         try:
-            from langchain_core.messages import SystemMessage, HumanMessage  # type: ignore
+            from langchain_core.messages import (  # type: ignore
+                HumanMessage,
+                SystemMessage,
+            )
 
             msgs = [
                 SystemMessage(content=system_prompt),
@@ -1795,7 +1798,7 @@ class CyberAgentEvaluator:
             try:
                 # Prefer per-call parameter binding if available
                 if hasattr(self._chat_model, "bind") and callable(
-                    getattr(self._chat_model, "bind")
+                    self._chat_model.bind
                 ):
                     bound = self._chat_model.bind(
                         temperature=eval_cfg.judge_temperature,
@@ -1869,19 +1872,17 @@ class CyberAgentEvaluator:
         rationale = parsed.get("rationale", "")
 
         # Prepare outputs: include structured metadata per metric
-        rubric_results: Dict[str, Any] = {}
+        rubric_results: dict[str, Any] = {}
 
-        def meta(extra: Dict[str, Any]) -> Dict[str, Any]:
+        def meta(extra: dict[str, Any]) -> dict[str, Any]:
             md = {
                 "rubric_profile": rubric_profile,
                 "insufficient_evidence": insufficient,
                 "rationale": rationale[:2000] if isinstance(rationale, str) else "",
                 "subscores": scores_obj,
             }
-            try:
+            with contextlib.suppress(Exception):
                 md.update(extra)
-            except Exception:
-                pass
             return md
 
         # Overall metric
@@ -2007,7 +2008,10 @@ class CyberAgentEvaluator:
         """Helper to invoke the configured LangChain chat model with a simple system+user prompt."""
         try:
             # LangChain ChatModels accept a list of messages; fallback to simple string if needed
-            from langchain_core.messages import SystemMessage, HumanMessage  # type: ignore
+            from langchain_core.messages import (  # type: ignore
+                HumanMessage,
+                SystemMessage,
+            )
 
             msgs = [
                 SystemMessage(content=system_prompt),
@@ -2028,7 +2032,7 @@ class CyberAgentEvaluator:
 
     def _synthesize_topics(
         self, parsed_trace: Any, context_summary: str = ""
-    ) -> List[str]:
+    ) -> list[str]:
         """
         Use the evaluator LLM to generate a small set (6–12) of security topics for topic adherence
         based on target, objective, recent tools, and (if available) the synthesized context summary.
@@ -2041,7 +2045,7 @@ class CyberAgentEvaluator:
                 or ""
             )
             target = getattr(parsed_trace, "target", None) or ""
-            tool_names: List[str] = []
+            tool_names: list[str] = []
             try:
                 for tc in (parsed_trace.tool_calls or [])[-20:]:
                     name = (

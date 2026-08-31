@@ -230,7 +230,7 @@ def build_task_executor_max_token_prompt(
 
     if task_objective and classification.kind == "reasoning_loop":
         action = next_required_action or (
-            f"Call {sorted(required_tools)[0]} with the required evidence." if required_tools else "Call one next registered tool."
+            f"Call {min(required_tools)} with the required evidence." if required_tools else "Call one next registered tool."
         )
         outcome = latest_tool_outcome or "No completed tool outcome is available."
         cause = (

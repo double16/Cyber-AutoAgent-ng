@@ -3,22 +3,19 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 from strands import ToolContext
 
 
 def active_task_message(
     memory: Any,
-    active_task: Optional[Any] = None,
+    active_task: Any | None = None,
     activated: bool = True,
-    closed_task: Optional[Any] = None,
-    current_phase: Optional[int] = None,
+    closed_task: Any | None = None,
+    current_phase: int | None = None,
 ) -> str:
-    if closed_task:
-        closed_info = {"closed": {"task_uid": closed_task.task_uid, "status": closed_task.status}}
-    else:
-        closed_info = {}
+    closed_info = {"closed": {"task_uid": closed_task.task_uid, "status": closed_task.status}} if closed_task else {}
 
     if active_task is None:
         return f"""<active_task phase="{current_phase}" status="none">
@@ -41,15 +38,15 @@ def store_plan(memory: Any, plan: Any, tool_context: ToolContext = None) -> str:
         try:
             try:
                 plan_obj = memory.OperationPlan.from_obj(json.loads(plan))
-            except ValueError as error:
+            except ValueError:
                 if plan.endswith("}}"):
                     plan_obj = memory.OperationPlan.from_obj(json.loads(plan[0:-1]))
                 else:
-                    raise error
+                    raise
         except ValueError as error:
             raise ValueError(
                 "store_plan requires JSON object/dict with fields: objective, current_phase, total_phases, phases. "
-                f"Got string that is not valid JSON: {str(error)}"
+                f"Got string that is not valid JSON: {error!s}"
             ) from error
     elif isinstance(plan, dict):
         plan_obj = memory.OperationPlan.from_obj(plan)
@@ -90,7 +87,7 @@ def store_plan(memory: Any, plan: Any, tool_context: ToolContext = None) -> str:
     return result_str
 
 
-def list_uncompleted_tasks(memory: Any, phase: Optional[int] = None) -> str:
+def list_uncompleted_tasks(memory: Any, phase: int | None = None) -> str:
     client = memory._ensure_memory_client()
     user_id = memory._user_id()
     try:
@@ -111,9 +108,9 @@ def activate_next_task_message(memory: Any, phase: int) -> str:
 def mark_task_done(
     memory: Any,
     status: Literal["done", "partial_failure", "blocked"],
-    task_uid: Optional[str] = None,
-    reason: Optional[str] = None,
-    phase: Optional[int] = None,
+    task_uid: str | None = None,
+    reason: str | None = None,
+    phase: int | None = None,
 ) -> str:
     client = memory._ensure_memory_client()
     user_id = memory._user_id()

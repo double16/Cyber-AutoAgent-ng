@@ -62,7 +62,12 @@ def bypass_live_memory_client(monkeypatch):
 
 
 def test_restore_continuation_state_uses_persisted_objective_and_targets(tmp_path):
-    from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, SQLiteApplicationStore
+    from modules.tools.memory import (
+        OperationPlan,
+        OperationTarget,
+        PlanPhase,
+        SQLiteApplicationStore,
+    )
 
     operation_id = "OP_20260812_120000"
     store = SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical")

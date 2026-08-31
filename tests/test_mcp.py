@@ -5,8 +5,8 @@ from unittest.mock import Mock
 import pytest
 from strands.types.exceptions import MCPClientInitializationError
 
-from modules.tools.mcp import shorten_description
 from modules.tools import mcp as mod
+from modules.tools.mcp import shorten_description
 
 
 class ShortenEnglishTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class ShortenEnglishTests(unittest.TestCase):
         self.assertLessEqual(len(result), 35)
         # Should end on a space boundary, not in the middle of a word
         self.assertTrue(result[-1].isalpha())
-        self.assertTrue(result.endswith("sentence") or result.endswith("without"))
+        self.assertTrue(result.endswith(("sentence", "without")))
 
     def test_hard_cut_when_no_spaces(self):
         text = "averyverylongwordwithnospaces"
@@ -81,7 +81,7 @@ def test_keepalive_start_stop_and_ping(monkeypatch):
 
     assert handle is mod._start_keepalive(client)
     mod._stop_keepalive(client)
-    assert getattr(client, "_cyber_keepalive_handle") is None
+    assert client._cyber_keepalive_handle is None
 
 
 def test_send_ping_requires_active_session():

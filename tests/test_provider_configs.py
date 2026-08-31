@@ -9,7 +9,12 @@ from modules.config.providers.ollama_config import (
     get_ollama_options,
     get_ollama_timeout,
 )
-from modules.config.types import EmbeddingConfig, LLMConfig, MemoryLLMConfig, ModelProvider
+from modules.config.types import (
+    EmbeddingConfig,
+    LLMConfig,
+    MemoryLLMConfig,
+    ModelProvider,
+)
 
 
 class Env:
@@ -218,7 +223,7 @@ def test_configure_litellm_runtime_installs_logging_worker_proxy():
         first_proxy = logging_worker.GLOBAL_LOGGING_WORKER
         litellm_config.configure_litellm_runtime()
 
-        assert getattr(first_proxy, "_caa_loop_local_proxy") is True
+        assert first_proxy._caa_loop_local_proxy is True
         assert logging_worker.GLOBAL_LOGGING_WORKER is first_proxy
         assert litellm_config.litellm.drop_params is True
         assert litellm_config.litellm.modify_params is True

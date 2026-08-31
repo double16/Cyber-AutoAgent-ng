@@ -8,13 +8,19 @@ import logging
 import re
 import shlex
 from collections import deque
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
+from typing import Any
 
-from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider, HookRegistry
+from strands.hooks import (
+    AfterToolCallEvent,
+    BeforeToolCallEvent,
+    HookProvider,
+    HookRegistry,
+)
 
-from modules.tools.shell_provenance import shell_execution_provenance
 from modules.tools.artifact_references import normalize_artifact_reference_token
+from modules.tools.shell_provenance import shell_execution_provenance
 from modules.utils.redaction import redact
 
 logger = logging.getLogger(__name__)
@@ -142,7 +148,7 @@ def _result_text(result: Any) -> str:
     return "\n".join(chunks)
 
 
-def _result_success(result: Any, exception: Optional[Exception] = None) -> bool:
+def _result_success(result: Any, exception: Exception | None = None) -> bool:
     if exception is not None or isinstance(result, Exception):
         return False
     if not isinstance(result, dict):
@@ -185,7 +191,7 @@ def _artifact_references(*values: Any) -> tuple[str, ...]:
     return tuple(references[:16])
 
 
-def _shell_executable(tool_input: Dict[str, Any]) -> str:
+def _shell_executable(tool_input: dict[str, Any]) -> str:
     command = tool_input.get("command", "")
     if isinstance(command, list):
         if not command:
@@ -337,7 +343,7 @@ def _uses_curl_write_out(tool_input: Any) -> bool:
     return "-w" in parts or "--write-out" in parts or "--write-out=" in command
 
 
-def _captured_http_status(output: str, *, allow_write_out_status: bool = False) -> Optional[str]:
+def _captured_http_status(output: str, *, allow_write_out_status: bool = False) -> str | None:
     status_line = _HTTP_STATUS_LINE_PATTERN.search(output)
     if status_line:
         return status_line.group(1)
@@ -426,7 +432,7 @@ class ToolOutcome:
     output_fingerprint: str = ""
     raw_output_summary: str = ""
     artifact_refs: tuple[str, ...] = ()
-    structured_input: Optional[Dict[str, Any]] = None
+    structured_input: dict[str, Any] | None = None
     execution_receipts: tuple[ExecutionReceipt, ...] = ()
 
 
@@ -434,7 +440,7 @@ class ToolOutcomeJournal:
     """Bounded per-agent journal used by task execution and evaluation."""
 
     def __init__(self, max_entries: int = 200) -> None:
-        self._entries: Deque[ToolOutcome] = deque(maxlen=max_entries)
+        self._entries: deque[ToolOutcome] = deque(maxlen=max_entries)
         self._sequence = 0
 
     def __len__(self) -> int:
@@ -489,10 +495,10 @@ class ToolOutcomeJournal:
     def snapshot(self) -> int:
         return self._sequence
 
-    def since(self, sequence: int) -> List[ToolOutcome]:
+    def since(self, sequence: int) -> list[ToolOutcome]:
         return [entry for entry in self._entries if entry.sequence > sequence]
 
-    def entries(self) -> List[ToolOutcome]:
+    def entries(self) -> list[ToolOutcome]:
         return list(self._entries)
 
 
@@ -635,9 +641,9 @@ class TaskFailureRecoveryHook(HookProvider):
         journal: ToolOutcomeJournal,
         max_policy_violations: int = 2,
         max_corrections: int = 2,
-        quarantine_callback: Optional[Callable[[str], List[str]]] = None,
-        quarantined_executables: Optional[set[str]] = None,
-        efficiency_callback: Optional[Callable[[str], None]] = None,
+        quarantine_callback: Callable[[str], list[str]] | None = None,
+        quarantined_executables: set[str] | None = None,
+        efficiency_callback: Callable[[str], None] | None = None,
     ) -> None:
         self.journal = journal
         self.max_policy_violations = max(1, int(max_policy_violations))
@@ -650,14 +656,14 @@ class TaskFailureRecoveryHook(HookProvider):
         self.failed_input_fingerprint = ""
         self.failed_output = ""
         self.failure_category = ""
-        self.alternative_executables: List[str] = []
+        self.alternative_executables: list[str] = []
         self.quarantined_executables = quarantined_executables if quarantined_executables is not None else set()
         self.efficiency_callback = efficiency_callback
         self._correction_attempts = 0
         self._session_correction_attempts: dict[tuple[str, str], int] = {}
         self._active_correction_key: tuple[str, str] | None = None
         self._policy_violations = 0
-        self._recovery_roles: Dict[str, str] = {}
+        self._recovery_roles: dict[str, str] = {}
         self._artifact_retry_used = False
         self.finding_submission_repair_active = False
         self._finding_repair_requires_artifact_read = False

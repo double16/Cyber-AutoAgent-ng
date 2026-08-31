@@ -145,8 +145,9 @@ def test_create_bedrock_model_standard_and_thinking(monkeypatch, config_manager)
 
 
 def test_create_bedrock_model_passes_configured_profile_top_p(monkeypatch, config_manager):
-    import modules.config.models.agent_profiles as profiles
     import strands.models
+
+    import modules.config.models.agent_profiles as profiles
 
     registry = profiles.AgentSettingsRegistry(
         custom_defaults={
@@ -169,10 +170,11 @@ def test_create_bedrock_model_passes_configured_profile_top_p(monkeypatch, confi
 def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     import modules.config.models as models_pkg
     models_pkg.reset_agent_settings_registry()
-    import modules.config.models.ollama as ollama_mod
-    import modules.agents.patches as patches
     import strands.models.gemini as gemini_mod
     import strands.models.litellm as litellm_mod
+
+    import modules.config.models.ollama as ollama_mod
+    from modules.agents import patches
 
     monkeypatch.setattr(ollama_mod, "OllamaModel", FakeModel)
     monkeypatch.setattr(models_pkg, "get_capabilities", lambda *_args: fake_capabilities())
@@ -207,7 +209,7 @@ def test_create_ollama_model_passes_max_string_reasoning(monkeypatch, config_man
     import modules.config.models as models_pkg
     import modules.config.models.agent_profiles as profiles
     import modules.config.models.ollama as ollama_mod
-    import modules.agents.patches as patches
+    from modules.agents import patches
 
     registry = profiles.AgentSettingsRegistry(
         custom_defaults={
@@ -228,10 +230,10 @@ def test_create_ollama_model_passes_max_string_reasoning(monkeypatch, config_man
 
 
 def test_create_ollama_model_passes_xhigh_string_reasoning(monkeypatch, config_manager):
-    import modules.agents.patches as patches
     import modules.config.models as models_pkg
     import modules.config.models.agent_profiles as profiles
     import modules.config.models.ollama as ollama_mod
+    from modules.agents import patches
 
     registry = profiles.AgentSettingsRegistry(
         custom_defaults={
@@ -252,10 +254,10 @@ def test_create_ollama_model_passes_xhigh_string_reasoning(monkeypatch, config_m
 
 
 def test_create_ollama_model_reuses_learned_think_fallback(monkeypatch, config_manager):
+    import modules.config.models as models_pkg
     import modules.config.models.agent_profiles as profiles
     import modules.config.models.ollama as ollama_mod
-    import modules.agents.patches as patches
-    import modules.config.models as models_pkg
+    from modules.agents import patches
 
     registry = profiles.AgentSettingsRegistry()
     registry.record_parameter_fallback("ollama", "any-thinking-model", "think", True)
@@ -270,12 +272,13 @@ def test_create_ollama_model_reuses_learned_think_fallback(monkeypatch, config_m
 
 
 def test_provider_models_receive_plan_critic_profile(monkeypatch, config_manager):
-    import modules.agents.patches as patches
-    import modules.config.models as models_pkg
-    import modules.config.models.ollama as ollama_mod
     import strands.models
     import strands.models.gemini as gemini_mod
     import strands.models.litellm as litellm_mod
+
+    import modules.config.models as models_pkg
+    import modules.config.models.ollama as ollama_mod
+    from modules.agents import patches
 
     models_pkg.reset_agent_settings_registry()
     monkeypatch.setattr(strands.models, "BedrockModel", FakeModel)
@@ -298,11 +301,12 @@ def test_provider_models_receive_plan_critic_profile(monkeypatch, config_manager
 
 
 def test_create_models_propagate_enabled_sdk_streaming(monkeypatch, config_manager):
-    import modules.config.models as models_pkg
-    import modules.config.models.ollama as ollama_mod
-    import modules.agents.patches as patches
     import strands.models
     import strands.models.litellm as litellm_mod
+
+    import modules.config.models as models_pkg
+    import modules.config.models.ollama as ollama_mod
+    from modules.agents import patches
 
     config_manager.sdk_config = SDKConfig(enable_streaming=True)
     monkeypatch.setattr(strands.models, "BedrockModel", FakeModel)

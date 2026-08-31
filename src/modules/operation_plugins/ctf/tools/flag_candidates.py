@@ -3,7 +3,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from strands import tool
 
@@ -15,13 +15,13 @@ _MAX_ARTIFACT_BYTES = 1_000_000
 _MAX_CANDIDATES = 20
 
 
-def _artifact_matches(artifact_ref: str) -> List[Dict[str, Any]]:
+def _artifact_matches(artifact_ref: str) -> list[dict[str, Any]]:
     """Return bounded, deduplicated flag-shaped matches without exposing them to the tool response."""
 
     artifact_path = Path(memory_tools._artifact_path_from_ref(artifact_ref))
     with artifact_path.open(encoding="utf-8", errors="replace") as artifact_file:
         text = artifact_file.read(_MAX_ARTIFACT_BYTES)
-    matches: List[Dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
     seen = set()
     for match_type, pattern in (("braced", _BRACED_FLAG), ("hex", _HEX_FLAG)):
         for match in pattern.finditer(text):
@@ -60,7 +60,7 @@ def _artifact_matches(artifact_ref: str) -> List[Dict[str, Any]]:
         }
     }
 )
-def discover_flag_candidates(evidence_artifacts: List[str], max_candidates: int = 10) -> str:
+def discover_flag_candidates(evidence_artifacts: list[str], max_candidates: int = 10) -> str:
     """Scan CTF artifacts for flag shapes and register opaque, artifact-backed validation candidates."""
 
     if (
@@ -74,7 +74,7 @@ def discover_flag_candidates(evidence_artifacts: List[str], max_candidates: int 
         require_one=True,
         allow_delimited_strings=True,
     )
-    discovered: List[Dict[str, Any]] = []
+    discovered: list[dict[str, Any]] = []
     seen_values = set()
     for artifact_ref in artifacts:
         for match in _artifact_matches(artifact_ref):

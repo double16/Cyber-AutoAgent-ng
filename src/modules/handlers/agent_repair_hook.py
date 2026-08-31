@@ -101,10 +101,7 @@ class AgentRepairHook(HookProvider):
 
             # Ollama fails to parse tool_calls due to malformed JSON/XML emitted by the model.
             if event.exception is not None:
-                if hasattr(event.exception, "status_code"):
-                    status_code = getattr(event.exception, "status_code")
-                else:
-                    status_code = -1
+                status_code = event.exception.status_code if hasattr(event.exception, "status_code") else -1
 
                 error_str = str(event.exception)
                 error_str_l = error_str.lower()
@@ -146,9 +143,7 @@ class AgentRepairHook(HookProvider):
                 # Look for tool call using json "name" and "arguments"/"parameters"
                 if not _JSON_TOOL_CALL_PATCH_ATTEMPT:
                     json_tool_call_candidate = None
-                    if json_m := _JSON_FENCE_RE.search(assistant_text):
-                        json_tool_call_candidate = json_m.group(1)
-                    elif json_m := _JSON_BARE_RE.search(assistant_text):
+                    if (json_m := _JSON_FENCE_RE.search(assistant_text)) or (json_m := _JSON_BARE_RE.search(assistant_text)):
                         json_tool_call_candidate = json_m.group(1)
                     if json_tool_call_candidate is not None \
                             and '"name"' in json_tool_call_candidate \
@@ -230,6 +225,6 @@ class AgentRepairHook(HookProvider):
             bag = getattr(agent, "_hook_state", None)
             if not isinstance(bag, dict):
                 bag = {}
-                setattr(agent, "_hook_state", bag)
+                agent._hook_state = bag
             return bag
         return {}

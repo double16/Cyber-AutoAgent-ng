@@ -7,7 +7,6 @@ with the report generation tool to maintain clean architecture and
 avoid code duplication.
 """
 
-from typing import Optional
 
 from strands import Agent
 from strands.handlers import PrintingCallbackHandler
@@ -107,9 +106,9 @@ class ReportGenerator:
     def create_report_agent(
         provider: str,
         system_prompt: str,
-        model_id: Optional[str] = None,
-        operation_id: Optional[str] = None,
-        target: Optional[str] = None,
+        model_id: str | None = None,
+        operation_id: str | None = None,
+        target: str | None = None,
         callback_handler = None,
         agent_role: str = "report_agent",
     ) -> Agent:

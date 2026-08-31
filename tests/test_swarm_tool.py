@@ -1,11 +1,11 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch, Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
-import modules.tools.swarm as swarm_mod
 import modules.agents.factory as agent_factory_mod
+import modules.tools.swarm as swarm_mod
 
 
 class FakeSwarm:
@@ -31,7 +31,8 @@ class _FakeAgent:
         _FakeAgent.instances.append(self)
 
 
-_AGENT_FACTORY = lambda **kwargs: _FakeAgent(**kwargs)
+def _AGENT_FACTORY(**kwargs):
+    return _FakeAgent(**kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -249,7 +250,7 @@ def test_swarm_creates_custom_agents_and_error_paths(monkeypatch):
     assert created[0]["name"] == "Recon"
 
     monkeypatch.setattr(swarm_mod, "_create_custom_agents", Mock(side_effect=RuntimeError("boom")))
-    setattr(swarm_mod.swarm, "agent_factory", FakeAgent)
+    swarm_mod.swarm.agent_factory = FakeAgent
     result = swarm_mod.swarm(task="do it", agents=[{"name": "a"}])
     assert result["status"] == "error"
     assert "boom" in result["content"][0]["text"]

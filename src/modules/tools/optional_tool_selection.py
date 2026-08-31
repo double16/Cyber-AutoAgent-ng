@@ -54,7 +54,7 @@ def load_optional_tool_selection_rules() -> list[dict[str, Any]]:
             or not all(isinstance(name, str) and name.strip() for name in tool_names)
             or not all(kind in _SUPPORTED_OUTPUT_KINDS for kind in output_kinds)
             or not all(kind in _SUPPORTED_EVIDENCE_KINDS for kind in evidence_kinds)
-            or not output_kinds and not evidence_kinds
+            or (not output_kinds and not evidence_kinds)
         ):
             raise ValueError(f"optional tool selection rule {rule_id or '<unknown>'} is invalid")
         seen_ids.add(rule_id)

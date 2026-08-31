@@ -10,10 +10,9 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from enum import Enum, StrEnum
-from typing import Any, Dict, List, Optional, Tuple, Union
-
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ class LLMRoleType(StrEnum):
     UNKNOWN = "unknown"
 
 
-class ReasoningLevel(str, Enum):
+class ReasoningLevel(StrEnum):
     """Standardized reasoning levels for LLM agent roles."""
 
     NONE = "none"
@@ -57,7 +56,7 @@ class ReasoningLevel(str, Enum):
         return self in (ReasoningLevel.MEDIUM, ReasoningLevel.HIGH, ReasoningLevel.XHIGH, ReasoningLevel.MAX)
 
     @classmethod
-    def from_value(cls, value: Union[ReasoningLevel, str, None]) -> ReasoningLevel:
+    def from_value(cls, value: ReasoningLevel | str | None) -> ReasoningLevel:
         """Parse or normalize a reasoning level value."""
         if value is None:
             return cls.NONE
@@ -74,10 +73,10 @@ class ReasoningLevel(str, Enum):
 class AgentModelSettings:
     """Model execution settings tailored for a specific agent role."""
 
-    temperature: Optional[float] = None
+    temperature: float | None = None
     reasoning_level: ReasoningLevel = ReasoningLevel.NONE
-    top_k: Optional[int] = None
-    top_p: Optional[float] = None
+    top_k: int | None = None
+    top_p: float | None = None
     max_tokens: int = 4096
 
     def copy(self) -> AgentModelSettings:
@@ -90,7 +89,7 @@ class AgentModelSettings:
             max_tokens=self.max_tokens,
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize configuration to a dictionary."""
         return {
             "temperature": self.temperature,
@@ -113,7 +112,7 @@ class ParameterAdjustmentRecord:
     trigger_reason: str
     permanent: bool
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert record to a JSON-serializable dictionary."""
         return {
             "timestamp": self.timestamp,
@@ -126,14 +125,14 @@ class ParameterAdjustmentRecord:
         }
 
 
-ROLE_ALIASES: Dict[str, LLMRoleType] = {
+ROLE_ALIASES: dict[str, LLMRoleType] = {
     "plan_builder": LLMRoleType.PLAN_CREATOR,
     "report_executive": LLMRoleType.REPORT_AGENT,
     "report_finding": LLMRoleType.REPORT_AGENT,
 }
 
 
-DEFAULT_AGENT_PROFILES: Dict[LLMRoleType, AgentModelSettings] = {
+DEFAULT_AGENT_PROFILES: dict[LLMRoleType, AgentModelSettings] = {
     LLMRoleType.PLAN_CREATOR: AgentModelSettings(
         temperature=0.2,
         reasoning_level=ReasoningLevel.MEDIUM,
@@ -230,7 +229,7 @@ def _validate_default_agent_profiles() -> None:
         raise ValueError(f"Agent profile aliases reference unknown roles: {invalid_aliases}")
 
 
-def normalize_agent_type(agent_type: Optional[Union[LLMRoleType, str]]) -> LLMRoleType:
+def normalize_agent_type(agent_type: LLMRoleType | str | None) -> LLMRoleType:
     """Normalize agent type name or alias to canonical role."""
     if isinstance(agent_type, LLMRoleType):
         return agent_type
@@ -249,13 +248,13 @@ def normalize_agent_type(agent_type: Optional[Union[LLMRoleType, str]]) -> LLMRo
 class AgentSettingsRegistry:
     """Centralized registry for per-agent profiles and runtime adaptation state."""
 
-    def __init__(self, custom_defaults: Optional[Dict[str, AgentModelSettings]] = None):
+    def __init__(self, custom_defaults: dict[str, AgentModelSettings] | None = None):
         self._lock = threading.RLock()
-        self._baselines: Dict[str, AgentModelSettings] = {}
-        self._active: Dict[str, AgentModelSettings] = {}
-        self._token_recovery_counts: Dict[str, int] = {}
-        self._learned_fallbacks: Dict[Tuple[str, str], Dict[str, Any]] = {}
-        self._adjustment_records: List[ParameterAdjustmentRecord] = []
+        self._baselines: dict[str, AgentModelSettings] = {}
+        self._active: dict[str, AgentModelSettings] = {}
+        self._token_recovery_counts: dict[str, int] = {}
+        self._learned_fallbacks: dict[tuple[str, str], dict[str, Any]] = {}
+        self._adjustment_records: list[ParameterAdjustmentRecord] = []
 
         if custom_defaults is None:
             _validate_default_agent_profiles()
@@ -267,9 +266,9 @@ class AgentSettingsRegistry:
 
     def get_settings(
         self,
-        agent_type: Optional[str] = None,
-        provider: Optional[str] = None,
-        model_id: Optional[str] = None,
+        agent_type: str | None = None,
+        provider: str | None = None,
+        model_id: str | None = None,
     ) -> AgentModelSettings:
         """Retrieve active model settings for the specified agent role."""
         with self._lock:
@@ -297,7 +296,7 @@ class AgentSettingsRegistry:
     def apply_reasoning_repair(
         self,
         agent_type: str,
-        level: Union[ReasoningLevel, str],
+        level: ReasoningLevel | str,
         reason: str,
         permanent: bool = True,
     ) -> None:
@@ -322,7 +321,7 @@ class AgentSettingsRegistry:
 
             if permanent:
                 record = ParameterAdjustmentRecord(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=datetime.now(UTC).isoformat(),
                     agent_type=canonical,
                     parameter_name="reasoning_level",
                     old_value=baseline_level.value,
@@ -336,7 +335,7 @@ class AgentSettingsRegistry:
         self,
         agent_type: str,
         boost_amount: int = 2048,
-        ceiling: Optional[int] = None,
+        ceiling: int | None = None,
     ) -> int:
         """Temporarily boost max_tokens for an agent role during a repair attempt."""
         with self._lock:
@@ -363,7 +362,7 @@ class AgentSettingsRegistry:
         self,
         agent_type: str,
         boost_amount: int = 2048,
-        ceiling: Optional[int] = None,
+        ceiling: int | None = None,
     ) -> bool:
         """Track successful non-reasoning token recovery and escalate limits upon 3 strikes.
 
@@ -390,7 +389,7 @@ class AgentSettingsRegistry:
                 self._active[canonical] = current_settings
 
                 record = ParameterAdjustmentRecord(
-                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    timestamp=datetime.now(UTC).isoformat(),
                     agent_type=canonical,
                     parameter_name="max_tokens",
                     old_value=baseline_tokens,
@@ -423,7 +422,7 @@ class AgentSettingsRegistry:
             self._learned_fallbacks[key][param_name] = fallback_value
 
             record = ParameterAdjustmentRecord(
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
                 agent_type=f"{provider}/{model_id}",
                 parameter_name=param_name,
                 old_value="configured",
@@ -433,21 +432,21 @@ class AgentSettingsRegistry:
             )
             self._adjustment_records.append(record)
 
-    def get_learned_fallbacks(self, provider: str, model_id: str) -> Dict[str, Any]:
+    def get_learned_fallbacks(self, provider: str, model_id: str) -> dict[str, Any]:
         """Retrieve learned parameter constraints for a provider/model pair."""
         with self._lock:
             key = (provider.lower(), model_id.lower())
             return dict(self._learned_fallbacks.get(key, {}))
 
-    def export_adjustment_records(self) -> List[ParameterAdjustmentRecord]:
+    def export_adjustment_records(self) -> list[ParameterAdjustmentRecord]:
         """Export all recorded runtime parameter adjustments."""
         with self._lock:
             return list(self._adjustment_records)
 
-    def export_profile_comparison(self) -> Dict[str, Dict[str, Any]]:
+    def export_profile_comparison(self) -> dict[str, dict[str, Any]]:
         """Compare baseline and final settings across all registered agent roles."""
         with self._lock:
-            comparison: Dict[str, Dict[str, Any]] = {}
+            comparison: dict[str, dict[str, Any]] = {}
             all_roles = sorted(set(list(self._baselines.keys()) + list(self._active.keys())))
             for role in all_roles:
                 base = self._baselines.get(role, DEFAULT_AGENT_PROFILES[LLMRoleType.UNKNOWN])
@@ -476,7 +475,7 @@ class AgentSettingsRegistry:
                 self._active[canonical] = setting.copy()
 
 
-_GLOBAL_AGENT_SETTINGS_REGISTRY: Optional[AgentSettingsRegistry] = None
+_GLOBAL_AGENT_SETTINGS_REGISTRY: AgentSettingsRegistry | None = None
 _GLOBAL_REGISTRY_LOCK = threading.RLock()
 
 
@@ -502,10 +501,10 @@ def translate_reasoning_to_provider(
     model_id: str,
     reasoning_level: ReasoningLevel,
     max_tokens: int = 4096,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Translate canonical ReasoningLevel into provider-specific parameter arguments."""
     provider_key = (provider or "").lower()
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
 
     if reasoning_level == ReasoningLevel.NONE:
         if provider_key == "ollama":
@@ -557,7 +556,7 @@ def translate_reasoning_to_provider(
     return result
 
 
-def mutate_agent_model_reasoning(agent: Any, level: Union[ReasoningLevel, str]) -> None:
+def mutate_agent_model_reasoning(agent: Any, level: ReasoningLevel | str) -> None:
     """Dynamically modify reasoning settings on an existing agent or model instance."""
     target_level = ReasoningLevel.from_value(level)
     model = getattr(agent, "model", agent)
@@ -629,7 +628,7 @@ def mutate_agent_model_reasoning(agent: Any, level: Union[ReasoningLevel, str]) 
             model.client_args["thinking_config"] = {"thinking_budget": budget}
 
 
-def mutate_agent_model_max_tokens(agent: Any, boost_amount: int = 2048, ceiling: Optional[int] = None) -> int:
+def mutate_agent_model_max_tokens(agent: Any, boost_amount: int = 2048, ceiling: int | None = None) -> int:
     """Dynamically increase max_tokens on an existing agent or model instance."""
     model = getattr(agent, "model", agent)
     if model is None:
@@ -647,9 +646,9 @@ def mutate_agent_model_max_tokens(agent: Any, boost_amount: int = 2048, ceiling:
     if ceiling is not None and ceiling > 0:
         new_tokens = min(new_tokens, ceiling)
 
-    setattr(model, "_output_tokens", new_tokens)
+    model._output_tokens = new_tokens
     if hasattr(model, "max_tokens"):
-        setattr(model, "max_tokens", new_tokens)
+        model.max_tokens = new_tokens
     if hasattr(model, "config") and isinstance(model.config, dict):
         model.config["max_tokens"] = new_tokens
     if hasattr(model, "params") and isinstance(model.params, dict):

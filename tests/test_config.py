@@ -4,21 +4,25 @@ Unit tests for the centralized model configuration system.
 """
 
 import os
-from unittest.mock import MagicMock, patch, Mock
 from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 # Import the modules we're testing
 from modules.config.manager import (
+    MAX_TOKENS_REASONING_LIMIT,
     ConfigManager,
     get_config_manager,
-    get_report_refinement_cycles,
     get_default_model_configs,
     get_model_config,
-    get_ollama_host, MAX_TOKENS_REASONING_LIMIT,
+    get_ollama_host,
+    get_report_refinement_cycles,
 )
+from modules.config.system import validation
 from modules.config.types import (
+    DEFAULT_TEMPERATURE_EXECUTION,
+    DEFAULT_TEMPERATURE_SWARM,
     EmbeddingConfig,
     EvaluationConfig,
     LLMConfig,
@@ -33,9 +37,7 @@ from modules.config.types import (
     ServerConfig,
     SwarmConfig,
     get_default_base_dir,
-    DEFAULT_TEMPERATURE_EXECUTION, DEFAULT_TEMPERATURE_SWARM,
 )
-from modules.config.system import validation
 from modules.tools.mcp import resolve_env_vars_in_dict, resolve_env_vars_in_list
 
 

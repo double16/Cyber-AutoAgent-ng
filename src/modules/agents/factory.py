@@ -5,12 +5,13 @@ for managing context, tool calls, observability, etc.
 import functools
 import inspect
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Any, Dict, Optional
+from typing import Any
 
 from strands import Agent
-from strands.hooks import HookProvider
 from strands.agent.conversation_manager import ConversationManager
+from strands.hooks import HookProvider
 
 from modules.config import get_config_manager
 from modules.config.models import (
@@ -18,13 +19,13 @@ from modules.config.models import (
     create_strands_model,
     get_capabilities,
 )
+from modules.config.models.factory import _resolve_prompt_token_limit
 from modules.config.system import get_logger
 from modules.handlers.conversation_budget import get_shared_conversation_manager
-from modules.config.models.factory import _resolve_prompt_token_limit
 
 logger = get_logger("Agents.CyberAutoAgent")
 
-_SHARED_AGENT_FACTORY: Optional[Callable[..., "Agent"]] = None
+_SHARED_AGENT_FACTORY: Callable[..., "Agent"] | None = None
 _SHARED_AGENT_FACTORY_LOCK = threading.RLock()
 
 # Guard to ensure we only patch ToolRegistry once
@@ -50,7 +51,7 @@ def _is_stateful_model_manager_error(exc: Exception) -> bool:
 
 
 def create_agent_with_stateful_retry(
-    agent_kwargs: Dict[str, Any],
+    agent_kwargs: dict[str, Any],
     model_id: str = "",
     agent_cls: Any = None,
 ) -> "Agent":
@@ -105,25 +106,25 @@ def patch_toolregistry_register_tool() -> None:
         if args:
             tool_obj = args[0]
             tool_obj = agent_factory_wrapper(tool_obj)
-            args = (tool_obj,) + args[1:]
+            args = (tool_obj, *args[1:])
         elif "tool" in kwargs:
             kwargs["tool"] = agent_factory_wrapper(kwargs["tool"])
         return original_register_tool(self, *args, **kwargs)
 
-    setattr(patched_register_tool, "__cyber_agent_factory_wrapper_patched__", True)
-    setattr(ToolRegistry, "register_tool", patched_register_tool)
+    patched_register_tool.__cyber_agent_factory_wrapper_patched__ = True
+    ToolRegistry.register_tool = patched_register_tool
     _TOOLREGISTRY_REGISTER_TOOL_PATCHED = True
     logger.debug("Patched ToolRegistry.register_tool to call agent_factory_wrapper")
 
 
 @dataclass
 class AgentFactoryConfig:
-    hooks: Optional[List[HookProvider]] = None
-    callback_handler: Optional[Callable[..., Any]] = None
-    callback_handler_factory: Optional[Callable[..., Any]] = None
-    conversation_manager: Optional[ConversationManager] = None
-    context_manager: Optional[str] = None
-    base_trace_attributes: Optional[Dict[str, Any]] = None
+    hooks: list[HookProvider] | None = None
+    callback_handler: Callable[..., Any] | None = None
+    callback_handler_factory: Callable[..., Any] | None = None
+    conversation_manager: ConversationManager | None = None
+    context_manager: str | None = None
+    base_trace_attributes: dict[str, Any] | None = None
 
 
 def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
@@ -142,8 +143,8 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
 
     def agent_factory(
             name: str,
-            model_spec: Optional[Dict[str, Any]] = None,
-            agent_type: Optional[str] = None,
+            model_spec: dict[str, Any] | None = None,
+            agent_type: str | None = None,
             **kwargs,
     ) -> "Agent":
         """
@@ -239,7 +240,7 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
             # ToolUseIdHook must be last, so prepend agent specific hooks
             agent_hooks = list(kwargs["hooks"]) + agent_hooks
             kwargs.pop("hooks")
-        if not any([isinstance(h, ToolUseIdHook) for h in agent_hooks]):
+        if not any(isinstance(h, ToolUseIdHook) for h in agent_hooks):
             # we must have this for providers whose toolUseId is broken
             agent_hooks.append(ToolUseIdHook())
 
@@ -252,7 +253,7 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
                 provider_id=provider,
             )
 
-        agent_kwargs: Dict[str, Any] = {
+        agent_kwargs: dict[str, Any] = {
             "model": strands_model,
             "name": name,
             "callback_handler": callback_handler,
@@ -276,8 +277,8 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
         agent = create_agent_with_stateful_retry(agent_kwargs, swarm_model_id)
 
         if prompt_token_limit:
-            setattr(agent, "_prompt_token_limit", prompt_token_limit)
-        setattr(agent, "_allow_reasoning_content", allow_reasoning_content)
+            agent._prompt_token_limit = prompt_token_limit
+        agent._allow_reasoning_content = allow_reasoning_content
 
         logger.debug(f"Created agent '{name}'")
 
@@ -299,13 +300,13 @@ def agent_factory_wrapper(agent_tool: Callable) -> Callable:
         return agent_tool
     target_func = agent_tool
     if hasattr(agent_tool, "_tool_func"):
-        target_func = getattr(agent_tool, "_tool_func")
+        target_func = agent_tool._tool_func
 
     with _SHARED_AGENT_FACTORY_LOCK:
         agent_factory = _SHARED_AGENT_FACTORY
     assert agent_factory is not None
 
-    setattr(agent_tool, "agent_factory", agent_factory)
+    agent_tool.agent_factory = agent_factory
 
     # Strands 1.44 can expose DecoratedFunctionTool._tool_func as a bound
     # method. Bound method objects do not allow arbitrary attributes, but the
@@ -313,7 +314,7 @@ def agent_factory_wrapper(agent_tool: Callable) -> Callable:
     if inspect.ismethod(target_func):
         target_func = target_func.__func__
     try:
-        setattr(target_func, "agent_factory", agent_factory)
+        target_func.agent_factory = agent_factory
     except AttributeError:
         logger.debug("Unable to attach agent_factory to %r", target_func, exc_info=True)
 

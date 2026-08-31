@@ -4612,7 +4612,7 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
 
 
 def test_memory_helpers_and_tool_wrappers(fake_memory_client, monkeypatch, tmp_path):
-    client, store = fake_memory_client
+    client, _store = fake_memory_client
     proof = Path(mod._operation_output_root()) / "proof.txt"
     proof.parent.mkdir(parents=True, exist_ok=True)
     proof.write_text("proof")

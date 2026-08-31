@@ -7,7 +7,6 @@ from datetime import datetime
 from importlib import resources
 from pathlib import Path
 
-
 _MIGRATION_NAME = re.compile(r"^(?P<version>\d{4})_(?P<name>[a-z0-9_]+)\.sql$")
 
 

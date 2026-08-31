@@ -594,7 +594,7 @@ def test_memory_task_lifecycle(tmp_path, monkeypatch):
 
         task_memories = _list_tasks()
         assert len(task_memories) == 3
-        assert set([task.status for task in task_memories]) == {"blocked", "done"}
+        assert {task.status for task in task_memories} == {"blocked", "done"}
 
     finally:
         memory._MEMORY_CLIENT = None
