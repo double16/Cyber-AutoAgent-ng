@@ -3171,7 +3171,7 @@ def test_acceptance_artifact_is_snapshotted_to_task_owned_storage(fake_memory_cl
     )
 
     recorded = store.get_acceptance_results("op1", task.task_uid)[0]
-    assert recorded.evidence_refs[0].startswith("artifact:task_evidence/")
+    assert recorded.evidence_refs[0].startswith("artifact:artifacts/task_evidence/")
     assert Path(mod._artifact_path_from_ref(recorded.evidence_refs[0])).read_text() == "first result"
     assert any(
         "operation_root=%s" in message
@@ -3844,7 +3844,7 @@ def test_bound_acceptance_validates_coverage_ledger_and_manifest_hash(fake_memor
     assert json.loads(result)["complete"] is True
     assert store.get_acceptance_results("op1", task.task_uid)[0].coverage[0].item_id == "endpoint-1"
     assert store.get_acceptance_results("op1", task.task_uid)[0].coverage[0].status == "assessed_negative"
-    assert store.get_tasks("op1")[0].evidence[0].startswith("artifact:task_evidence/")
+    assert store.get_tasks("op1")[0].evidence[0].startswith("artifact:artifacts/task_evidence/")
 
 
 def test_bound_acceptance_rejects_changed_snapshot_and_wrong_evidence_kind(fake_memory_client):
@@ -4229,7 +4229,7 @@ def test_inventory_acceptance_allows_target_bound_filesystem_looking_route(fake_
 
     assert result["complete"] is True
     recorded = store.get_acceptance_results("op1", task.task_uid)[0]
-    assert recorded.evidence_refs[0].startswith("artifact:task_evidence/")
+    assert recorded.evidence_refs[0].startswith("artifact:artifacts/task_evidence/")
 
 
 def test_store_plan_does_not_complete_terminal_phases_with_actionable_tasks(fake_memory_client):
@@ -4335,7 +4335,7 @@ def test_bound_record_task_acceptance_validates_active_frozen_manifest(fake_memo
     published = _client._fake_backend.add_calls[0]
     assert published["messages"][0]["content"].startswith('Task acceptance for "Map parameters".')
     assert "Criterion endpoint:/login.php [satisfied; observation]: Login form mapped" in published["messages"][0]["content"]
-    assert "artifact:task_evidence/" in published["messages"][0]["content"]
+    assert "artifact:artifacts/task_evidence/" in published["messages"][0]["content"]
     assert published["metadata"]["category"] == "observation"
     assert published["metadata"]["source"] == "task_acceptance"
     assert published["metadata"]["task_uid"] == "task-1"

@@ -7990,7 +7990,7 @@ def _snapshot_task_artifact_reference(task: Task, reference: str) -> str:
         ) from error
     operation_root = Path(_operation_output_root())
     task_segment = hashlib.sha256(task.task_uid.encode("utf-8")).hexdigest()[:16]
-    destination_dir = operation_root / "task_evidence" / task_segment
+    destination_dir = operation_root / "artifacts" / "task_evidence" / task_segment
     try:
         destination_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
