@@ -44,12 +44,15 @@ def test_multi_agent_adaptation_e2e_scenario():
             raise err
         if role == "task_evaluator":
             return '{"evaluation": "pass", "reasoning": "done"}'
-        return '{"plan": {"phases": []}}'
+        return (
+            '{"objective":"Assess target","constraints":[],"current_phase":1,'
+            '"phases":[{"id":1,"title":"Recon","status":"pending","criteria":"Map target"}]}'
+        )
 
     workflow.text_runner = text_runner
 
     res = workflow._run_json_text_agent("plan_creator", "Generate plan", [], "sys")
-    assert "plan" in res
+    assert res["phases"][0]["title"] == "Recon"
     assert registry.get_settings("plan_creator").reasoning_level == ReasoningLevel.NONE
 
     # Simulate Task Evaluator hitting non-reasoning token exhaustion 3 times -> promoted max_tokens

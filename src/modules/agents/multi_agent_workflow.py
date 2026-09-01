@@ -7,10 +7,10 @@ execution, task creation, and task/phase evaluation.
 
 The controller deliberately owns plan, phase, and task mutation in Python. Role
 agents are short-lived and scoped to one narrow objective. They return structured
-JSON decisions or execute the task prompt they were given; they do not decide
+typed decisions or execute the task prompt they were given; they do not decide
 which phase is active, activate tasks, close tasks, or mark the assessment
-complete. The task-creator role may call ``create_tasks`` so Python can persist
-planned work; ordinary executors report newly discovered work through evidence and memory tools.
+complete. The task-creator role returns typed proposals that Python validates and persists;
+ordinary executors report newly discovered work through evidence and memory tools.
 
 The workflow is:
 
@@ -52,6 +52,7 @@ from urllib.parse import urlparse
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
+from pydantic import BaseModel, ValidationError
 from strands.types.exceptions import MaxTokensReachedException
 
 from modules.agents.cyber_autoagent import (
@@ -60,6 +61,13 @@ from modules.agents.cyber_autoagent import (
     create_agent,
 )
 from modules.agents.run_policy import AgentRunPolicy
+from modules.agents.structured_outputs import (
+    WORKFLOW_OUTPUT_MODELS,
+    StructuredOutputUnavailableError,
+    TaskProposalBatchOutput,
+    is_structured_output_unavailable,
+    structured_output_dict,
+)
 from modules.config.taxonomy_catalog import (
     get_taxonomy_catalog,
     validate_taxonomy_mappings,
@@ -111,7 +119,7 @@ from modules.tools.memory import (
     _operation_output_root,
     _route_scoped_phase_objective,
     _write_inventory_manifest_atomically,
-    build_create_tasks_tool,
+    build_create_tasks_submitter,
     build_record_finding_validation_tool,
     build_record_objective_validation_tool,
     build_record_task_acceptance_tool,
@@ -155,6 +163,7 @@ from modules.utils.sdk_error_sanitization import sanitize_sdk_error
 logger = logging.getLogger(__name__)
 
 AgentTextRunner = Callable[[str, str, list[Any], str], str]
+AgentStructuredRunner = Callable[[str, str, list[Any], str, type[BaseModel]], dict[str, Any]]
 AgentWorkRunner = Callable[..., Any]
 AgentExecutorSession = Callable[[str, AgentRunPolicy | None], Any]
 AgentExecutorSessionFactory = Callable[
@@ -283,17 +292,6 @@ class TaskExecutorCycleResult:
     repeat_loop_detected: bool = False
     repeat_loop_signature: str = ""
     repeat_loop_reason: str = ""
-
-
-@dataclass
-class TaskCreatorToolInvocationLedger:
-    """Retain task-creator tool calls so text fallback never duplicates a real call."""
-
-    invocation_count: int = 0
-
-    def observe(self, tool_input: dict[str, Any], result: Any, error: Exception | None) -> None:
-        del tool_input, result, error
-        self.invocation_count += 1
 
 
 FINDING_OBSERVATION_REPAIR_CONFIDENCE = 0.90
@@ -516,6 +514,80 @@ def default_text_runner(runtime: AgentRuntimeResources) -> AgentTextRunner:
                     removed,
                 )
                 raise
+        finally:
+            try:
+                agent.cleanup()
+            except Exception as error:
+                logger.warning("Unable to clean up role agent %s: %s", role, error)
+
+    return run
+
+
+def default_structured_runner(runtime: AgentRuntimeResources) -> AgentStructuredRunner:
+    """Create a production runner that asks Strands for schema-validated output."""
+
+    def run(
+        role: str,
+        prompt: str,
+        tools: list[Any],
+        system_prompt: str,
+        output_model: type[BaseModel],
+    ) -> dict[str, Any]:
+        agent = create_agent(
+            runtime.config.target,
+            runtime.config.objective,
+            config=runtime.config,
+            runtime_resources=runtime,
+            system_prompt=system_prompt,
+            tools=tools,
+            name=f"Cyber-AutoAgent {runtime.operation_id} {role}",
+            agent_type=role,
+            include_tool_catalog=role == "task_executor",
+        )
+        try:
+            result = agent(prompt, structured_output_model=output_model)
+            artifact_read_limit_hook = getattr(agent, "_cyber_evaluator_artifact_read_limit_hook", None)
+            if getattr(artifact_read_limit_hook, "exhausted", False):
+                raise EvaluatorArtifactReadLimitExceeded(
+                    "task evaluator exceeded its bounded artifact-read allowance twice"
+                )
+            output = getattr(result, "structured_output", None)
+            if output is None:
+                raise StructuredOutputUnavailableError("Strands returned no structured output")
+            return structured_output_dict(output)
+        except MaxTokensReachedException as error:
+            sanitize_sdk_error(error)
+            from modules.config.models.agent_profiles import get_agent_settings_registry
+
+            active_settings = get_agent_settings_registry().get_settings(role)
+            classification, removed, failure_snapshot = capture_and_discard_max_token_output(
+                agent, active_reasoning_level=active_settings.reasoning_level.value
+            )
+            error.max_token_classification = classification
+            error.max_token_failure_snapshot = failure_snapshot
+            callback_handler = getattr(runtime, "callback_handler", None)
+            if not getattr(error, "_max_token_efficiency_recorded", False):
+                recorder = getattr(callback_handler, "record_max_token_exhaustion", None)
+                if callable(recorder):
+                    recorder(
+                        role=role,
+                        classification=classification.kind,
+                        exhaustion_ordinal=1,
+                        agent=agent,
+                        failure_snapshot=failure_snapshot,
+                        failure_type=type(error).__name__,
+                    )
+                error._max_token_efficiency_recorded = True
+            logger.warning(
+                "MAX_TOKEN_RECOVERY role=%s classification=%s repetition_ratio=%.3f "
+                "discarded_tokens=%s partial_removed=%s action=propagate",
+                role,
+                classification.kind,
+                classification.repetition_ratio,
+                classification.discarded_tokens,
+                removed,
+            )
+            raise
         finally:
             try:
                 agent.cleanup()
@@ -961,6 +1033,7 @@ class MultiAgentWorkflowController:
         budget: BudgetConfig,
         state_store: WorkflowStateStore | None = None,
         text_runner: AgentTextRunner | None = None,
+        structured_runner: AgentStructuredRunner | None = None,
         work_runner: AgentWorkRunner | None = None,
         executor_session_factory: AgentExecutorSessionFactory | None = None,
         operation_targets: list[OperationTarget] | None = None,
@@ -985,6 +1058,13 @@ class MultiAgentWorkflowController:
         )
         self.state = state_store or WorkflowStateStore(runtime.operation_id, self.operation_targets)
         self.text_runner = text_runner or default_text_runner(runtime)
+        self.structured_runner = structured_runner or (
+            default_structured_runner(runtime) if text_runner is None else None
+        )
+        self._structured_output_fallbacks = getattr(runtime, "structured_output_fallbacks", None)
+        if not isinstance(self._structured_output_fallbacks, dict):
+            self._structured_output_fallbacks = {}
+            runtime.structured_output_fallbacks = self._structured_output_fallbacks
         self.work_runner = work_runner or self.text_runner
         self.executor_session_factory = executor_session_factory
         self.max_iterations = max_iterations
@@ -8715,41 +8795,18 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
         )
         batches = self._task_creation_batches(plan, phase, system_prompt)
         self._validate_task_creation_feasibility(phase, batches)
-        run_policy = AgentRunPolicy(
-            required_tool_names={"create_tasks"},
-            terminal_after_required_tools=True,
-            require_successful_required_tools=True,
-            allow_text_final_after_tools=False,
-            actionless_mode="required_tool",
-            max_actionless_calls=3,
-            max_agent_calls=3,
-            max_model_turns=6,
-            terminal_reason="task_creator_done",
-            terminal_message="Task creator completed after create_tasks",
-        )
         failure_reasons = []
         attempts = 0
         failed_batch_count = 0
         max_attempts = 1 + self._task_creator_correction_count()
         for batch in batches:
-            task_creator_ledger = TaskCreatorToolInvocationLedger()
             repair_guard = TaskProposalRepairGuard()
-            task_creator_tool_kwargs = {
-                "invocation_observer": task_creator_ledger.observe,
-            }
-            if "repair_guard" in inspect.signature(self._task_creator_tools).parameters:
-                task_creator_tool_kwargs["repair_guard"] = repair_guard
-            tools = self._task_creator_tools(
-                phase,
-                batch,
-                **task_creator_tool_kwargs,
-            )
+            submit_tasks = self._task_creator_submitter(phase, batch, repair_guard=repair_guard)
             prompt = self._task_creator_prompt(plan, phase, batch)
-            before_batch_uids = {task.task_uid for task in self.state.list_tasks()}
             before_batch_actionable = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
             self._log_workflow(
                 "task creator starting phase=%s batch=%s/%s estimated_input_tokens=%s "
-                "context_limit=%s route_group_count=%s item_count=%s tools=%s before_count=%s",
+                "context_limit=%s route_group_count=%s item_count=%s output_mode=structured before_count=%s",
                 self._phase_label(phase),
                 batch.index,
                 batch.total,
@@ -8757,115 +8814,109 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
                 int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000),
                 len(batch.groups),
                 len(batch.item_ids),
-                ",".join(get_tool_name(tool) for tool in tools),
                 before_count,
             )
             batch_failure_reason = ""
-            previous_creator_result = None
+            rejected_proposals = ""
             batch_attempts = 0
             previous_attempt_max_tokens = False
-            with self._task_creator_session(tools, system_prompt) as run_creator:
-                for attempt in range(1, max_attempts + 1):
-                    batch_attempts = attempt
-                    if attempt > 1 and not previous_attempt_max_tokens:
-                        self._record_efficiency_correction("task_creator_cycle")
-                    creator_result = None
-                    rejected_proposals = self._task_creator_rejected_proposals(previous_creator_result)
-                    attempt_prompt = (
-                        prompt
-                        if attempt == 1
-                        else (
-                            self._task_creator_max_token_recovery_prompt(phase)
-                            if previous_attempt_max_tokens
-                            else self._task_creator_repair_prompt(
-                                batch_failure_reason,
-                                rejected_proposals,
-                                phase=phase,
-                            )
+            legacy_fallback_active = (
+                self.structured_runner is None
+                or self._structured_output_fallback_key() in self._structured_output_fallbacks
+            )
+            for attempt in range(1, max_attempts + 1):
+                batch_attempts = attempt
+                if attempt > 1 and not previous_attempt_max_tokens:
+                    self._record_efficiency_correction("task_creator_cycle")
+                attempt_prompt = (
+                    prompt
+                    if attempt == 1
+                    else (
+                        self._task_creator_max_token_recovery_prompt(phase)
+                        if previous_attempt_max_tokens
+                        else self._task_creator_repair_prompt(
+                            batch_failure_reason,
+                            rejected_proposals,
+                            phase=phase,
                         )
                     )
-                    activity_context = {
-                        "phase_id": phase.id,
-                        "phase_title": self._short(phase.title, 160),
-                        "batch_index": batch.index,
-                        "batch_total": batch.total,
-                    }
+                )
+                activity_context = {
+                    "phase_id": phase.id,
+                    "phase_title": self._short(phase.title, 160),
+                    "batch_index": batch.index,
+                    "batch_total": batch.total,
+                }
+                self._emit_workflow_activity(
+                    "task_creator",
+                    "started",
+                    attempt=attempt,
+                    attempt_total=max_attempts,
+                    context=activity_context,
+                )
+                try:
+                    if not legacy_fallback_active and self.structured_runner is not None:
+                        try:
+                            payload = self.structured_runner(
+                                "task_creator",
+                                attempt_prompt,
+                                [],
+                                system_prompt,
+                                TaskProposalBatchOutput,
+                            )
+                        except Exception as error:
+                            if not is_structured_output_unavailable(error):
+                                raise
+                            legacy_fallback_active = True
+                            self._activate_structured_output_fallback("task_creator", error)
+                            response = self.text_runner("task_creator", attempt_prompt, [], system_prompt)
+                            payload = parse_json_response(response, require_object=True)
+                    else:
+                        response = self.text_runner("task_creator", attempt_prompt, [], system_prompt)
+                        payload = parse_json_response(response, require_object=True)
+                    validated = TaskProposalBatchOutput.model_validate(payload)
+                    repair_guard.capture(validated.tasks)
+                    rejected_proposals = json.dumps(payload.get("tasks", []), ensure_ascii=False)
+                    result = json.loads(submit_tasks(validated.tasks))
+                    batch_failure_reason = (
+                        "" if int(result.get("created_count", 0)) > 0 else "task submission produced no new tasks"
+                    )
+                    previous_attempt_max_tokens = False
                     self._emit_workflow_activity(
                         "task_creator",
-                        "started",
+                        "completed",
                         attempt=attempt,
                         attempt_total=max_attempts,
                         context=activity_context,
                     )
-                    try:
-                        invocation_count_before_run = task_creator_ledger.invocation_count
-                        creator_result = run_creator(attempt_prompt, run_policy)
-                        previous_attempt_max_tokens = False
-                        self._emit_workflow_activity(
-                            "task_creator",
-                            "completed",
-                            attempt=attempt,
-                            attempt_total=max_attempts,
-                            context=activity_context,
-                        )
-                        replay_failure_reason = ""
-                        if task_creator_ledger.invocation_count == invocation_count_before_run:
-                            creator_result, replay_failure_reason = self._replay_task_creator_json_submission(
-                                creator_result,
-                                tools,
-                                phase=phase,
-                                batch=batch,
-                                attempt=attempt,
-                            )
-                        batch_failure_reason = replay_failure_reason or self._task_creator_failure_reason(creator_result)
-                    except MaxTokensReachedException as error:
-                        previous_attempt_max_tokens = True
-                        max_token_classification = str(
-                            getattr(getattr(error, "max_token_classification", None), "kind", "output_truncation")
-                        )
-                        if not getattr(error, "_max_token_efficiency_recorded", False):
-                            self._record_max_token_exhaustion(
-                                "task_creator",
-                                max_token_classification,
-                                attempt,
-                                getattr(error, "max_token_failure_snapshot", None),
-                                type(error).__name__,
-                            )
-                            error._max_token_efficiency_recorded = True
-                        self._emit_workflow_activity(
-                            "task_creator",
-                            "failed",
-                            attempt=attempt,
-                            attempt_total=max_attempts,
-                            context=activity_context,
-                        )
-                        batch_failure_reason = (
-                            f"task creator reached its model token limit: {self._short(error, 300)}"
-                        )
-                    previous_creator_result = creator_result
-                    rejected_payload = self._task_creator_rejected_task_payload(creator_result)
-                    if rejected_payload is not None:
-                        repair_guard.capture(rejected_payload)
-                    self._reassign_new_task_creator_tasks_to_active_phase(phase, before_batch_uids)
-                    after_batch_actionable = len(
-                        self.state.list_tasks(phase=phase.id, status=["active", "pending"])
+                except MaxTokensReachedException as error:
+                    previous_attempt_max_tokens = True
+                    batch_failure_reason = f"task creator reached its model token limit: {self._short(error, 300)}"
+                    self._emit_workflow_activity(
+                        "task_creator",
+                        "failed",
+                        attempt=attempt,
+                        attempt_total=max_attempts,
+                        context=activity_context,
                     )
-                    if after_batch_actionable > before_batch_actionable:
-                        batch_failure_reason = ""
-                        break
-                    if "finding-dependent task proposal" in batch_failure_reason:
-                        self._log_workflow(
-                            "task creator finding reference rejected deterministically phase=%s reason=%s",
-                            phase.id,
-                            self._short(batch_failure_reason),
-                        )
-                        break
-                    raw_result = (
-                        creator_result.text if isinstance(creator_result, TaskExecutorCycleResult) else creator_result
+                except Exception as error:
+                    previous_attempt_max_tokens = False
+                    batch_failure_reason = self._short(error, 1000)
+                    self._emit_workflow_activity(
+                        "task_creator",
+                        "failed",
+                        attempt=attempt,
+                        attempt_total=max_attempts,
+                        context=activity_context,
                     )
-                    if raw_result is not None and getattr(raw_result, "reason", "") == run_policy.terminal_reason:
-                        batch_failure_reason = "create_tasks succeeded but produced no new actionable tasks"
-                        continue
+                after_batch_actionable = len(
+                    self.state.list_tasks(phase=phase.id, status=["active", "pending"])
+                )
+                if after_batch_actionable > before_batch_actionable:
+                    batch_failure_reason = ""
+                    break
+                if "finding-dependent task proposal" in batch_failure_reason:
+                    break
             attempts += batch_attempts
             after_batch_actionable = len(self.state.list_tasks(phase=phase.id, status=["active", "pending"]))
             batch_created = max(0, after_batch_actionable - before_batch_actionable)
@@ -9212,20 +9263,6 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
             )
         return "\n".join(lines)
 
-    def _reassign_new_task_creator_tasks_to_active_phase(self, phase: PlanPhase, before_task_uids: set[str]) -> None:
-        """Keep task_creator output scoped to the active phase without changing existing queued work."""
-
-        for task in self.state.list_tasks():
-            if task.task_uid in before_task_uids or task.phase == phase.id:
-                continue
-            self.state.reassign_task_phase(task, phase.id)
-            self._log_workflow(
-                "task creator task reclassified task=%s requested_phase=%s effective_phase=%s",
-                self._task_label(task),
-                task.phase,
-                phase.id,
-            )
-
     def _task_creator_contract(
         self,
         plan: OperationPlan,
@@ -9301,7 +9338,7 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
 "target_ids":["target-1"]}]}
 ```'''
         )
-        return f"""## create_tasks Payload Contract (Non-negotiable)
+        return f"""## TaskProposal Structured Output Contract (Non-negotiable)
 Every proposal MUST follow this exact structure:
 1. `limits` MUST be a dictionary/object (e.g., {{"max_requests": 50}}), NOT a list. DO NOT add extra fields to `limits` like `discovery_procedure_limits` or `scope`.
 2. `criteria` MUST be a list containing exactly one object with a `description` key: [{{"description": "..."}}].
@@ -9309,9 +9346,8 @@ Every proposal MUST follow this exact structure:
 4. `methods`, `snapshot_refs`, and `finding_refs` MUST be arrays (can be empty []). Use `depends_on_workstreams` for workstream prerequisites.
 5. DO NOT invent new field names such as `workstream_dependencies`, `methods_list`, or `methods_description`. Use ONLY canonical fields.
 
-Make exactly one successful `create_tasks` call. A rejected validation attempt does not count as the successful call.
-Python continues this conversation after a rejection, up to {max_corrections} correction(s). Preserve prior fixes and
-stop after this call.
+Return exactly one schema-valid task proposal payload. Python continues after a rejected validation attempt, up to
+{max_corrections} correction(s). Preserve prior fixes and stop after returning the corrected payload.
 
 `basis_description` is optional and defaults to the objective.
 Python assigns active phase {phase.id} and pending status, infers target scope from `target_ids`, and compiles the full
@@ -9368,65 +9404,11 @@ Replacement shape (use only a listed failed or blocked parent):
 "replacement_of":"parent-task-uid","supersedes_criteria":["criterion-1"]}}]}}
 ```
 
-Before calling the tool, verify every proposal against this checklist: all required fields are present; exactly one
+Before returning the payload, verify every proposal against this checklist: all required fields are present; exactly one
 basis mode is selected; procedure bounds are finite positive integers; snapshot references are canonical; and moving
 inventory-wide scope is used only with a snapshot reference. For a replacement, also verify that every submitted
 `supersedes_criteria` value occurs verbatim in its parent's `replacement_parent_criteria` row.
 """
-
-    @staticmethod
-    def _task_creator_rejected_task_payload(result: Any) -> list[Any] | None:
-        """Extract the last rejected proposal list for controller-owned repair guarding."""
-
-        if not isinstance(result, TaskExecutorCycleResult):
-            return None
-        failed = [
-            outcome
-            for outcome in result.outcomes
-            if outcome.tool_name == "create_tasks" and not outcome.success
-        ]
-        if not failed:
-            return None
-        try:
-            payload = json.loads(failed[-1].input_summary)
-        except (TypeError, ValueError):
-            return None
-        tasks = payload.get("tasks") if isinstance(payload, dict) else None
-        if not isinstance(tasks, list):
-            return None
-        return tasks
-
-    @classmethod
-    def _task_creator_rejected_proposals(cls, result: Any) -> str:
-        """Extract a bounded proposal summary so corrections preserve rejected task intent."""
-
-        tasks = cls._task_creator_rejected_task_payload(result)
-        if tasks is None:
-            return ""
-        summary = []
-        for proposal in tasks:
-            if not isinstance(proposal, dict):
-                summary.append({"payload": proposal})
-                continue
-            summary.append(
-                {
-                    "payload": proposal,
-                    "title": str(proposal.get("title") or ""),
-                    "objective": str(proposal.get("objective") or ""),
-                    "basis_description": str(proposal.get("basis_description") or ""),
-                    "methods": proposal.get("methods") if isinstance(proposal.get("methods"), list) else [],
-                    "limits": proposal.get("limits") if isinstance(proposal.get("limits"), dict) else {},
-                    "snapshot_refs": (
-                        proposal.get("snapshot_refs")
-                        if isinstance(proposal.get("snapshot_refs"), list)
-                        else []
-                    ),
-                    "output_kind": str(proposal.get("output_kind") or ""),
-                    "criteria": proposal.get("criteria") if isinstance(proposal.get("criteria"), list) else [],
-                    "target_ids": proposal.get("target_ids") if isinstance(proposal.get("target_ids"), list) else [],
-                }
-            )
-        return json.dumps(summary, ensure_ascii=False, sort_keys=True)[:8000]
 
     def _task_creator_repair_prompt(
         self,
@@ -9434,7 +9416,7 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
         rejected_proposals: str = "",
         phase: PlanPhase | None = None,
     ) -> str:
-        """Return a compact correction turn for the retained task-creator conversation."""
+        """Return a compact correction prompt for a rejected structured proposal."""
 
         proposal_context = (
             "\nOriginal proposal list (the controller will restore every already-valid proposal):\n"
@@ -9496,12 +9478,12 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
                 "`criteria:[{\"description\":\"finite result\"}]`.\n"
             )
 
-        return f"""The preceding `create_tasks` call was rejected or produced no new actionable task.
+        return f"""The preceding structured task proposal was rejected or produced no new actionable task.
 Validation result: {failure_reason or "no actionable task was created"}
 {common_fixes}
 {repair_scope}
 Preserve every correction already made in this conversation and every valid proposal intent.
-Make exactly one corrected `create_tasks` call.
+Return exactly one corrected structured task proposal payload.
 If procedure and snapshot proposals were mixed, split them into separate valid proposal objects; do not silently
 discard valid proposal intent, restart the proposal, explain, execute, inspect, or gather evidence.
 Every `tasks[i]` must contain its own `objective` and `limits`. Never put `objective` beside `tasks`, and never emit
@@ -9527,142 +9509,8 @@ Use a listed canonical `finding:<uid>` reference only when the failed proposal i
             else ""
         )
         return f"""The task creator reached its model token limit; the prior response was discarded.
-Submit exactly one valid `create_tasks` call for active phase {phase.id}. Do not explain, inspect, execute, gather
-evidence, or restate the plan. Return only the tool call payload.{finding_context}"""
-
-    def _task_creator_failure_reason(self, result: Any) -> str:
-        """Return the most specific controller-observed task-creation failure."""
-
-        if isinstance(result, TaskExecutorCycleResult):
-            if result.max_tokens_exhausted:
-                return result.max_tokens_reason or "task creator reached its model token limit"
-            failed_calls = [
-                outcome for outcome in result.outcomes
-                if outcome.tool_name == "create_tasks" and not outcome.success
-            ]
-            if failed_calls:
-                return failed_calls[-1].output_summary
-            unavailable_calls = [
-                outcome for outcome in result.outcomes
-                if not outcome.success and "unknown tool" in outcome.output_summary.lower()
-            ]
-            if unavailable_calls:
-                attempted = ", ".join(dict.fromkeys(outcome.tool_name for outcome in unavailable_calls))
-                return (
-                    f"Only create_tasks is registered for this role; unavailable tool call(s): {attempted}. "
-                    "Call create_tasks using its registered schema."
-                )
-            result = result.text
-        return str(
-            getattr(result, "message", "")
-            or getattr(result, "reason", "")
-            or extract_result_text(result)
-            or "no actionable task was created"
-        )
-
-    def _replay_task_creator_json_submission(
-        self,
-        creator_result: Any,
-        tools: list[Any],
-        *,
-        phase: PlanPhase,
-        batch: TaskCreationBatch,
-        attempt: int,
-    ) -> tuple[Any, str]:
-        """Submit a complete text-returned create_tasks payload through the bound tool once."""
-
-        response_text = extract_result_text(creator_result)
-        replay_context = {
-            "phase_id": phase.id,
-            "batch_index": batch.index,
-            "batch_total": batch.total,
-            "attempt": attempt,
-        }
-        try:
-            parsed = parse_json_response_with_metadata(response_text, require_object=True)
-            payload = parsed.value
-        except (json.JSONDecodeError, ValueError) as error:
-            self._emit_workflow_event(
-                {
-                    "type": "task_creator_json_submission_replay",
-                    "status": "ineligible",
-                    "reason": error.__class__.__name__,
-                    **replay_context,
-                }
-            )
-            return creator_result, ""
-
-        if set(payload) != {"tasks"} or not isinstance(payload.get("tasks"), list):
-            self._emit_workflow_event(
-                {
-                    "type": "task_creator_json_submission_replay",
-                    "status": "ineligible",
-                    "reason": "invalid_create_tasks_argument_shape",
-                    **replay_context,
-                }
-            )
-            return creator_result, ""
-
-        create_tasks_tool = next((tool for tool in tools if get_tool_name(tool) == "create_tasks"), None)
-        if create_tasks_tool is None:
-            raise WorkflowInvariantError("task_creator requires a create_tasks tool for JSON submission replay")
-
-        self._record_efficiency_correction("task_creator_json_submission_replay")
-        payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        payload_fingerprint = hashlib.sha256(payload_text.encode("utf-8", errors="replace")).hexdigest()
-        try:
-            tool_result = create_tasks_tool(**payload)
-            decoded_result = json.loads(str(tool_result))
-            success = isinstance(decoded_result, dict) and decoded_result.get("complete") is True
-            output_summary = self._short(tool_result, 500)
-            replay_failure_reason = "" if success else "create_tasks replay did not report completion"
-        except Exception as error:
-            tool_result = error
-            success = False
-            output_summary = self._short(error, 500)
-            replay_failure_reason = output_summary or "create_tasks replay failed"
-
-        synthetic = ToolOutcome(
-            sequence=max(
-                (outcome.sequence for outcome in getattr(creator_result, "outcomes", [])),
-                default=0,
-            ) + 1,
-            tool_use_id="controller-task-creator-json-submission",
-            tool_name="create_tasks",
-            success=success,
-            correctable=not success,
-            input_summary=payload_text[:6000],
-            output_summary=output_summary,
-            input_fingerprint=payload_fingerprint,
-            output_fingerprint=hashlib.sha256(
-                str(tool_result).encode("utf-8", errors="replace")
-            ).hexdigest(),
-        )
-        if isinstance(creator_result, TaskExecutorCycleResult):
-            creator_result.outcomes.append(synthetic)
-        else:
-            creator_result = TaskExecutorCycleResult(text=response_text, outcomes=[synthetic])
-
-        replay_status = "accepted" if success else "rejected"
-        self._emit_workflow_event(
-            {
-                "type": "task_creator_json_submission_replay",
-                "status": replay_status,
-                "payload_sha256": payload_fingerprint,
-                "task_count": len(payload["tasks"]),
-                **replay_context,
-            }
-        )
-        self._log_workflow(
-            "task creator JSON submission replay status=%s phase=%s batch=%s/%s attempt=%s task_count=%s",
-            replay_status,
-            phase.id,
-            batch.index,
-            batch.total,
-            attempt,
-            len(payload["tasks"]),
-        )
-        return creator_result, replay_failure_reason
+Return exactly one valid structured task proposal payload for active phase {phase.id}. Do not explain, inspect, execute, gather
+evidence, or restate the plan. Return only the structured payload.{finding_context}"""
 
     def _run_worker_agent(
         self,
@@ -9737,33 +9585,19 @@ evidence, or restate the plan. Return only the tool call payload.{finding_contex
 
         yield run_executor
 
-    @contextmanager
-    def _task_creator_session(
+    def _task_creator_submitter(
         self,
-        tools: list[Any],
-        system_prompt: str,
-    ) -> Iterator[AgentExecutorSession]:
-        """Create one retained task-creator conversation for the complete correction sequence."""
-
-        if self.executor_session_factory is None:
-            raise WorkflowInvariantError("task_creator requires a retained worker session factory")
-        with self.executor_session_factory("task_creator", tools, system_prompt) as run_creator:
-            yield run_creator
-
-    def _task_creator_tools(
-        self,
-        phase: PlanPhase | None = None,
-        batch: TaskCreationBatch | None = None,
-        invocation_observer: Callable[[dict[str, Any], Any, Exception | None], None] | None = None,
+        phase: PlanPhase,
+        batch: TaskCreationBatch,
+        *,
         repair_guard: TaskProposalRepairGuard | None = None,
-    ) -> list[Any]:
-        if not any(get_tool_name(tool) == "create_tasks" for tool in self.runtime.core_tools_list):
-            raise WorkflowInvariantError("create_tasks tool is required for task_creator")
+    ) -> Callable[[Any], str]:
+        """Bind controller-owned task validation and persistence for one structured batch."""
+
         required_finding_refs = None
         finding_ref_aliases = None
-        finding_dependent = phase is not None and (
-            phase.task_creation_mode == "finding_dependent"
-            or (phase.task_creation_mode == "standard" and phase.requires_finding_candidates)
+        finding_dependent = phase.task_creation_mode == "finding_dependent" or (
+            phase.task_creation_mode == "standard" and phase.requires_finding_candidates
         )
         if finding_dependent:
             eligible_records = self._eligible_finding_records(phase)
@@ -9771,38 +9605,34 @@ evidence, or restate the plan. Return only the tool call payload.{finding_contex
             finding_ref_aliases = {}
             for record in eligible_records:
                 canonical = f"finding:{record['finding_uid']}"
-                finding_ref_aliases.update({
-                    canonical: canonical,
-                    str(record["finding_uid"]): canonical,
-                    f"task:{record.get('verification_task_uid', '')}": canonical,
-                    str(record.get("verification_task_uid") or ""): canonical,
-                })
+                finding_ref_aliases.update(
+                    {
+                        canonical: canonical,
+                        str(record["finding_uid"]): canonical,
+                        f"task:{record.get('verification_task_uid', '')}": canonical,
+                        str(record.get("verification_task_uid") or ""): canonical,
+                    }
+                )
             if len(required_finding_refs) == 1:
                 finding_ref_aliases[str(self.runtime.operation_id)] = next(iter(required_finding_refs))
-        def observe_preflight(tool_input: dict[str, Any], result: Any, error: Exception | None) -> None:
-            if invocation_observer is not None:
-                invocation_observer(tool_input, result, error)
-            if phase is not None:
-                self._emit_task_preflight_validation(phase, tool_input, result, error)
 
-        return [build_create_tasks_tool(
+        def observe_preflight(tool_input: dict[str, Any], result: Any, error: Exception | None) -> None:
+            self._emit_task_preflight_validation(phase, tool_input, result, error)
+
+        return build_create_tasks_submitter(
             prompt_token_limit=getattr(self.runtime, "prompt_token_limit", 48_000),
-            coverage_item_ids=batch.item_ids if batch and batch.snapshot_ref else None,
-            expected_snapshot_ref=batch.snapshot_ref if batch else None,
-            phase_title=phase.title if phase else "",
-            phase_objective=phase.criteria if phase else "",
+            coverage_item_ids=batch.item_ids if batch.snapshot_ref else None,
+            expected_snapshot_ref=batch.snapshot_ref,
+            phase_title=phase.title,
+            phase_objective=phase.criteria,
             required_finding_refs=required_finding_refs,
             finding_ref_aliases=finding_ref_aliases,
             phase_task_contract=self._phase_task_contract(phase),
-            proposal_preflight_validator=(
-                lambda proposals: self._validate_generated_task_proposals(phase, proposals)
-                if phase is not None
-                else None
-            ),
+            proposal_preflight_validator=lambda proposals: self._validate_generated_task_proposals(phase, proposals),
             reject_duplicate_proposals=True,
             repair_guard=repair_guard,
             invocation_observer=observe_preflight,
-        )]
+        )
 
     def _phase_task_contract(self, phase: PlanPhase) -> Any:
         """Load the active module's opt-in, declarative planning contract."""
@@ -10402,6 +10232,36 @@ Allowed evidence references:
                     self._log_workflow("final ATT&CK enrichment persistence failed finding=%s", finding_uid)
                 self._log_workflow("final ATT&CK enrichment failed finding=%s error=%s", finding_uid, self._short(error))
 
+    def _structured_output_fallback_key(self) -> str:
+        """Return the active provider/model key for operation-local compatibility state."""
+
+        config = self.runtime.config
+        return f"{getattr(config, 'provider', 'unknown')}:{getattr(config, 'model_id', 'unknown')}"
+
+    def _activate_structured_output_fallback(self, role: str, error: BaseException) -> str:
+        """Downgrade this provider/model to the validated JSON path for this operation."""
+
+        key = self._structured_output_fallback_key()
+        reason = self._short(error, 300)
+        self._structured_output_fallbacks[key] = reason
+        self._emit_workflow_event(
+            {
+                "type": "structured_output_fallback",
+                "role": role,
+                "provider": getattr(self.runtime.config, "provider", "unknown"),
+                "model": getattr(self.runtime.config, "model_id", "unknown"),
+                "reason": reason,
+                "output_mode": "legacy_json_repair",
+            }
+        )
+        self._log_workflow(
+            "json agent role=%s provider_model=%s output_mode=legacy_json_repair reason=%s",
+            role,
+            key,
+            reason,
+        )
+        return reason
+
     def _run_json_text_agent(
         self,
         role: str,
@@ -10415,6 +10275,9 @@ Allowed evidence references:
         raise_on_evaluator_failure: bool = False,
         tool_factory: Callable[[], list[Any]] | None = None,
     ) -> dict[str, Any]:
+        output_model = WORKFLOW_OUTPUT_MODELS.get(role)
+        if output_model is None:
+            raise WorkflowInvariantError(f"No structured-output contract is registered for role {role}")
         current_prompt = prompt
         last_response = ""
         last_error: Exception | None = None
@@ -10427,6 +10290,9 @@ Allowed evidence references:
         pending_reasoning: tuple[str, str] | None = None
         pending_token_escalation: tuple[str, int] | None = None
         artifact_synthesis_active = False
+        structured_runner = getattr(self, "structured_runner", None)
+        fallback_key = self._structured_output_fallback_key()
+        legacy_fallback_active = structured_runner is None or fallback_key in self._structured_output_fallbacks
         schema_retry_limit = 1 if role == "task_evaluator" else self.json_retries
         maximum_attempts = 1 + self.json_retries + schema_retry_limit + 1
         for attempt in range(maximum_attempts):
@@ -10445,7 +10311,26 @@ Allowed evidence references:
                 attempt_tools = [] if artifact_synthesis_active else (
                     tool_factory() if tool_factory is not None else tools
                 )
-                response = self.text_runner(role, current_prompt, attempt_tools, system_prompt)
+                data: dict[str, Any] | None = None
+                if not legacy_fallback_active and structured_runner is not None:
+                    try:
+                        data = structured_runner(
+                            role,
+                            current_prompt,
+                            attempt_tools,
+                            system_prompt,
+                            output_model,
+                        )
+                        response = json.dumps(data, ensure_ascii=False)
+                        self._log_workflow("json agent role=%s output_mode=structured", role)
+                    except Exception as error:
+                        if not is_structured_output_unavailable(error):
+                            raise
+                        legacy_fallback_active = True
+                        self._activate_structured_output_fallback(role, error)
+                        response = self.text_runner(role, current_prompt, attempt_tools, system_prompt)
+                else:
+                    response = self.text_runner(role, current_prompt, attempt_tools, system_prompt)
                 if pending_reasoning:
                     target_lvl, rsn = pending_reasoning
                     from modules.config.models.agent_profiles import (
@@ -10554,7 +10439,33 @@ Allowed evidence references:
                 retry_base_prompt = current_prompt if artifact_synthesis_active else prompt
                 current_prompt = self._json_max_token_retry_prompt(retry_base_prompt, kind)
                 continue
+            except (ValidationError, ValueError) as error:
+                self._emit_workflow_activity(
+                    role,
+                    "failed",
+                    attempt=activity_attempt,
+                    attempt_total=activity_total,
+                    cycle=cycle,
+                    cycle_total=cycle_total,
+                )
+                last_error = error
+                last_failure_was_parse = False
+                last_failure_was_schema = True
+                if schema_retries >= schema_retry_limit:
+                    break
+                schema_retries += 1
+                correction_category = "evaluator_correction" if role == "task_evaluator" else "structured_retry"
+                self._record_efficiency_correction(correction_category)
+                self._log_workflow(
+                    "json agent role=%s invalid_structured_output retrying error=%s",
+                    role,
+                    self._short(error),
+                )
+                retry_base_prompt = current_prompt if artifact_synthesis_active else prompt
+                current_prompt = self._json_retry_prompt(retry_base_prompt, error, "")
+                continue
             last_response = response
+            schema_parse_error: ValidationError | None = None
             if role in {"phase_evaluator", "task_evaluator"} and not str(response or "").strip():
                 error = json.JSONDecodeError("Expecting value", str(response or ""), 0)
                 self._emit_workflow_activity(
@@ -10571,16 +10482,25 @@ Allowed evidence references:
                 self._log_workflow("json agent role=%s returned empty evaluator response", role)
                 break
             try:
-                parsed_response = parse_json_response_with_metadata(response, require_object=True)
-                data = parsed_response.value
+                if data is None:
+                    parsed_response = parse_json_response_with_metadata(response, require_object=True)
+                    data = structured_output_dict(output_model.model_validate(parsed_response.value))
+                    if parsed_response.metadata.extracted or parsed_response.metadata.repaired:
+                        self._log_workflow(
+                            "json agent role=%s normalized_response extracted=%s repaired=%s",
+                            role,
+                            parsed_response.metadata.extracted,
+                            parsed_response.metadata.repaired,
+                        )
                 last_response_keys = sorted(data.keys())
-                if parsed_response.metadata.extracted or parsed_response.metadata.repaired:
-                    self._log_workflow(
-                        "json agent role=%s normalized_response extracted=%s repaired=%s",
-                        role,
-                        parsed_response.metadata.extracted,
-                        parsed_response.metadata.repaired,
-                    )
+            except ValidationError as error:
+                schema_parse_error = error
+                try:
+                    raw_data = parse_json_response(response, require_object=True)
+                    last_response_keys = sorted(raw_data.keys())
+                except Exception:
+                    last_response_keys = []
+                data = {}
             except (json.JSONDecodeError, ValueError) as error:
                 self._emit_workflow_activity(
                     role,
@@ -10612,6 +10532,8 @@ Allowed evidence references:
                 )
                 continue
             try:
+                if schema_parse_error is not None:
+                    raise schema_parse_error
                 if data_validator:
                     data_validator(data)
             except (json.JSONDecodeError, ValueError) as error:
@@ -11559,7 +11481,7 @@ Output only the revised task prompt:
         if batch and batch.snapshot_ref:
             existing_task_context = self._task_creator_batch_existing_task_context(phase, batch)
             batch_context = f"""## Controller-Owned Creation Batch
-Batch {batch.index} of {batch.total}. The `create_tasks` tool is restricted to this exact snapshot and item set.
+Batch {batch.index} of {batch.total}. The structured proposal is restricted to this exact snapshot and item set.
 Snapshot: {batch.snapshot_ref}
 Estimated input tokens: {batch.estimated_input_tokens}
 Resolved context window: {int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)}
@@ -11583,11 +11505,11 @@ Every proposal in this phase must include the appropriate canonical `finding:<ui
 """
         elif mode == "finding_validation":
             finding_section = """## Finding validation ownership
-Finding-verification tasks are controller-owned. Do not call create_tasks for this phase.
+Finding-verification tasks are controller-owned. Do not propose tasks for this phase.
 """
         return f"""Create durable task records for the assessment plan. Your only action is one successful
-`create_tasks` call. Do not execute, validate, scan, inspect, browse, shell out, or gather evidence. Stop immediately
-after the call succeeds.
+structured task-proposal payload. Do not execute, validate, scan, inspect, browse, shell out, or gather evidence. Stop
+immediately after returning the payload.
 
 Create cohesive, independently completable tasks with exactly one acceptance criterion. Prioritize actionable work
 for active phase {phase.id}. Create prerequisite inventory work first; do not create dependent snapshot tasks until

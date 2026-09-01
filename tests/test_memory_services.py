@@ -1190,6 +1190,24 @@ def test_task_proposal_explicit_limits_override_defaults():
     assert proposal.limits.max_duration_minutes is None
 
 
+def test_task_proposal_max_attempts_alias_normalizes_to_max_requests():
+    payload = task_proposal("Check", "Check target")
+    payload["limits"] = {"max_attempts": 7}
+
+    proposal = mod.TaskProposal.model_validate(payload)
+
+    assert proposal.limits.max_requests == 7
+    assert "max_attempts" not in proposal.limits.model_dump()
+
+
+def test_task_proposal_max_attempts_alias_rejects_conflicting_request_limit():
+    payload = task_proposal("Check", "Check target")
+    payload["limits"] = {"max_attempts": 7, "max_requests": 8}
+
+    with pytest.raises(ValueError, match="conflicts"):
+        mod.TaskProposal.model_validate(payload)
+
+
 def test_task_proposal_scalar_positive_limit_normalizes_to_max_requests():
     payload = task_proposal("Check", "Check target")
     payload["limits"] = 7

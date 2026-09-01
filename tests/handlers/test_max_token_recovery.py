@@ -1,5 +1,6 @@
 """Unit and integration tests for reasoning loop recovery, reasoning token exhaustion, and 3-strike escalation."""
 
+import json
 from unittest.mock import MagicMock
 
 from strands.types.exceptions import MaxTokensReachedException
@@ -136,7 +137,14 @@ def test_json_agent_workflow_adaptation_recovery():
             err = MaxTokensReachedException("Hit max tokens")
             err.max_token_classification = MaxTokenClassification("reasoning_loop", 0.8, "hash123", 1000, is_reasoning_induced=True)
             raise err
-        return '{"tasks": []}'
+        return json.dumps({"tasks": [{
+            "title": "Analyze target",
+            "objective": "Analyze the assigned target",
+            "methods": ["analyze"],
+            "limits": {"max_items": 1},
+            "snapshot_refs": [],
+            "criteria": [{"description": "Store the bounded result"}],
+        }]})
 
     workflow.text_runner = failing_then_succeeding_runner
 
@@ -147,7 +155,7 @@ def test_json_agent_workflow_adaptation_recovery():
         system_prompt="sys prompt",
     )
 
-    assert result == {"tasks": []}
+    assert result["tasks"][0]["title"] == "Analyze target"
     assert call_count[0] == 2
     # Verify task_creator has been adapted to reasoning level NONE permanently
     assert registry.get_settings("task_creator").reasoning_level == ReasoningLevel.NONE
@@ -183,7 +191,7 @@ def test_plan_critic_max_tokens_reduction_and_retry():
                 "reasoning_exhaustion", 0.0, None, 1000, is_reasoning_induced=True
             )
             raise err
-        return '{"approved": true, "critique": "looks good"}'
+        return '{"approved": true, "feedback": []}'
 
     workflow.text_runner = plan_critic_runner
 
@@ -194,7 +202,7 @@ def test_plan_critic_max_tokens_reduction_and_retry():
         system_prompt="sys prompt",
     )
 
-    assert result == {"approved": True, "critique": "looks good"}
+    assert result == {"approved": True, "feedback": []}
     # First attempt ran with MEDIUM, retry attempt ran with reasoning disabled.
     assert attempt_reasoning_levels == [ReasoningLevel.MEDIUM, ReasoningLevel.NONE]
     # Now permanently disabled.
@@ -234,7 +242,7 @@ def test_active_low_reasoning_max_tokens_retries_with_reasoning_disabled():
                 "reasoning_exhaustion", 0.0, None, 1000, is_reasoning_induced=True
             )
             raise error
-        return '{"approved": true, "critique": "looks good"}'
+        return '{"approved": true, "feedback": []}'
 
     workflow.text_runner = plan_critic_runner
 
@@ -245,7 +253,7 @@ def test_active_low_reasoning_max_tokens_retries_with_reasoning_disabled():
         system_prompt="sys prompt",
     )
 
-    assert result == {"approved": True, "critique": "looks good"}
+    assert result == {"approved": True, "feedback": []}
     assert attempt_reasoning_levels == [ReasoningLevel.LOW, ReasoningLevel.NONE]
     assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.NONE
     records = registry.export_adjustment_records()
@@ -286,7 +294,7 @@ def test_non_reasoning_max_tokens_boost_and_retry():
                 "output_truncation", 0.0, None, 1000, is_reasoning_induced=False
             )
             raise err
-        return '{"status": "satisfied", "summary": "done"}'
+        return '{"cwe": [], "mitre_attack": []}'
 
     workflow.text_runner = evaluator_runner
 
@@ -297,7 +305,7 @@ def test_non_reasoning_max_tokens_boost_and_retry():
         system_prompt="sys prompt",
     )
 
-    assert result == {"status": "satisfied", "summary": "done"}
+    assert result == {"cwe": [], "mitre_attack": []}
     # First attempt ran with 4096, retry attempt ran with boosted 6144
     assert attempt_max_tokens == [4096, 6144]
     # Since 1st recovery (< 3 strikes), baseline remains 4096

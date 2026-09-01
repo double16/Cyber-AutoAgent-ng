@@ -103,7 +103,7 @@ fi
 
 Do not install packages or create a replacement database as part of forensic review.
 
-**Step 2: Validate the database without modifying it**
+**Step 2: Validate the database**
 
 NOTE: the integrity check requires write access, therefore `-readonly` is omitted.
 

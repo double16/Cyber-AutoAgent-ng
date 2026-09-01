@@ -24,9 +24,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ValidationError
 from strands.types.exceptions import MaxTokensReachedException
 
 from modules.agents.report_agent import ReportGenerator
+from modules.agents.structured_outputs import (
+    ReportCritiqueOutput,
+    ReportNextStepsOutput,
+    is_structured_output_unavailable,
+    structured_output_dict,
+)
 from modules.config import get_config_manager, get_report_refinement_cycles
 from modules.config.system.logger import get_logger
 from modules.config.types import DEFAULT_MAX_DURATION
@@ -2301,6 +2308,7 @@ def _invoke_report_agent(
     prompt: str,
     section_label: str,
     circuit_breaker: _ReportModelCircuitBreaker | None,
+    output_model: type[BaseModel] | None = None,
 ) -> Any:
     """Call one report agent unless a prior provider failure opened the circuit."""
 
@@ -2309,16 +2317,20 @@ def _invoke_report_agent(
     if circuit_breaker is not None and circuit_breaker.tripped:
         raise RuntimeError(f"report model circuit breaker is open: {circuit_breaker.reason}")
     try:
-        result = agent(
-            prompt,
-            invocation_state={"report_section": section_label},
-            limits=_REPORT_AGENT_LIMITS,
-        )
+        invocation_kwargs = {
+            "invocation_state": {"report_section": section_label},
+            "limits": _REPORT_AGENT_LIMITS,
+        }
+        if output_model is not None:
+            invocation_kwargs["structured_output_model"] = output_model
+        result = agent(prompt, **invocation_kwargs)
         if getattr(result, "stop_reason", None) == "limit_turns":
             raise RuntimeError("report agent exceeded its configured turn limit")
         return result
     except Exception as error:
-        if isinstance(error, MaxTokensReachedException):
+        if isinstance(error, (MaxTokensReachedException, NotImplementedError, AttributeError, ValidationError)) or (
+            is_structured_output_unavailable(error)
+        ):
             raise
         if circuit_breaker is not None:
             circuit_breaker.trip(section_label, error)
@@ -2379,11 +2391,39 @@ def _run_report_critic(
     current_prompt = prompt
     remaining_json_retries = json_retries
     max_token_retry_used = False
+    legacy_fallback_active = False
     while True:
         try:
-            response = _extract_text_from_result(
-                _invoke_report_agent(critic_agent, current_prompt, section_label, circuit_breaker)
-            )
+            if legacy_fallback_active:
+                response = _extract_text_from_result(
+                    _invoke_report_agent(critic_agent, current_prompt, section_label, circuit_breaker)
+                )
+                data = parse_json_response(response, require_object=True)
+            else:
+                try:
+                    result = _invoke_report_agent(
+                        critic_agent,
+                        current_prompt,
+                        section_label,
+                        circuit_breaker,
+                        ReportCritiqueOutput,
+                    )
+                    output = getattr(result, "structured_output", None)
+                    if isinstance(output, (BaseModel, dict)):
+                        data = structured_output_dict(output)
+                    else:
+                        legacy_fallback_active = True
+                        data = parse_json_response(_extract_text_from_result(result), require_object=True)
+                except Exception as error:
+                    if not is_structured_output_unavailable(error):
+                        raise
+                    legacy_fallback_active = True
+                    logger.info("Report critic using JSON compatibility output after structured-output failure: %s", error)
+                    response = _extract_text_from_result(
+                        _invoke_report_agent(critic_agent, current_prompt, section_label, circuit_breaker)
+                    )
+                    data = parse_json_response(response, require_object=True)
+            return _validate_report_critique(data)
         except MaxTokensReachedException:
             if not max_token_retry_used:
                 max_token_retry_used = True
@@ -2394,17 +2434,16 @@ short feedback items. Review request:\n""" + prompt
                 continue
             raise
         except Exception as error:
-            logger.warning("Report critic model call failed: %s", error)
-            raise
-        try:
-            return _validate_report_critique(parse_json_response(response, require_object=True))
-        except Exception as error:
             logger.warning(
-                "Report critic returned an invalid review (attempt %s/%s): %s",
+                "Report critic returned an invalid structured review (attempt %s/%s): %s",
                 json_retries - remaining_json_retries + 1,
                 json_retries + 1,
                 error,
             )
+            if circuit_breaker is not None and circuit_breaker.tripped:
+                raise
+            if not isinstance(error, (ValidationError, ValueError, json.JSONDecodeError)):
+                raise
             if remaining_json_retries > 0:
                 remaining_json_retries -= 1
                 current_prompt = f"""Your previous response could not be parsed as the required JSON object.
@@ -2743,15 +2782,44 @@ def _run_next_steps_actor(
     """Run the Appendix B actor with tolerant JSON repair and validation retries."""
     current_prompt = prompt
     last_error = "invalid model response"
+    legacy_fallback_active = False
     for attempt in range(json_retries + 1):
         try:
-            response = _extract_text_from_result(_invoke_report_agent(
-                actor_agent,
-                current_prompt,
-                "Appendix B: Recommended Next Steps",
-                circuit_breaker,
-            ))
-            parsed = parse_json_response(response, require_object=True)
+            if legacy_fallback_active:
+                response = _extract_text_from_result(_invoke_report_agent(
+                    actor_agent,
+                    current_prompt,
+                    "Appendix B: Recommended Next Steps",
+                    circuit_breaker,
+                ))
+                parsed = parse_json_response(response, require_object=True)
+            else:
+                try:
+                    result = _invoke_report_agent(
+                        actor_agent,
+                        current_prompt,
+                        "Appendix B: Recommended Next Steps",
+                        circuit_breaker,
+                        ReportNextStepsOutput,
+                    )
+                    output = getattr(result, "structured_output", None)
+                    if isinstance(output, (BaseModel, dict)):
+                        parsed = structured_output_dict(output)
+                    else:
+                        legacy_fallback_active = True
+                        parsed = parse_json_response(_extract_text_from_result(result), require_object=True)
+                except Exception as error:
+                    if not is_structured_output_unavailable(error):
+                        raise
+                    legacy_fallback_active = True
+                    logger.info("Report next-steps actor using JSON compatibility output after structured-output failure: %s", error)
+                    response = _extract_text_from_result(_invoke_report_agent(
+                        actor_agent,
+                        current_prompt,
+                        "Appendix B: Recommended Next Steps",
+                        circuit_breaker,
+                    ))
+                    parsed = parse_json_response(response, require_object=True)
             return _validate_next_steps(parsed, configured_budget), False
         except Exception as error:
             last_error = str(error)

@@ -5192,6 +5192,21 @@ class TaskProposalLimits(_StrictTaskWireModel):
     max_depth: PositiveInt | None = None
     description: str | None = Field(default=None, description="Allowed but ignored model-facing field")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_request_limit_alias(cls, value: Any) -> Any:
+        """Accept the unambiguous legacy ``max_attempts`` spelling at the task boundary."""
+
+        if not isinstance(value, dict) or "max_attempts" not in value:
+            return value
+        normalized = dict(value)
+        alias_value = normalized.pop("max_attempts")
+        if "max_requests" in normalized and normalized["max_requests"] != alias_value:
+            raise ValueError("limits.max_attempts conflicts with limits.max_requests")
+        normalized.setdefault("max_requests", alias_value)
+        logger.info("Normalized task proposal limit alias max_attempts -> max_requests")
+        return normalized
+
 
 DEFAULT_TASK_PROPOSAL_LIMITS = {
     "max_requests": 50,
@@ -5308,6 +5323,12 @@ class TaskProposal(_StrictTaskWireModel):
             normalized["limits"] = {"max_requests": limits}
             logger.info("Normalized scalar task proposal limits -> max_requests")
         elif isinstance(limits, dict):
+            if "max_attempts" in limits:
+                alias_value = limits.pop("max_attempts")
+                if "max_requests" in limits and limits["max_requests"] != alias_value:
+                    raise ValueError("limits.max_attempts conflicts with limits.max_requests")
+                limits.setdefault("max_requests", alias_value)
+                logger.info("Normalized task proposal limit alias max_attempts -> max_requests")
             # Remove common hallucinations in limits
             for extra_limit in ["discovery_procedure_limits", "scope"]:
                 if extra_limit in limits:
@@ -7731,7 +7752,7 @@ def create_tasks(tasks: TaskProposalList) -> str:
     return _create_tasks_from_proposals(tasks, prompt_token_limit=prompt_token_limit)
 
 
-def build_create_tasks_tool(
+def build_create_tasks_submitter(
     prompt_token_limit: int = 48_000,
     *,
     coverage_item_ids: set[str] | None = None,
@@ -7745,15 +7766,12 @@ def build_create_tasks_tool(
     reject_duplicate_proposals: bool = False,
     repair_guard: TaskProposalRepairGuard | None = None,
     invocation_observer: Callable[[dict[str, Any], Any, Exception | None], None] | None = None,
-) -> Any:
-    """Build a task-creator-local tool that permits exactly one successful mutation."""
+) -> Callable[[TaskProposalList], str]:
+    """Build a controller-owned submitter that permits exactly one successful mutation."""
 
     completed = False
 
-    @tool(name="create_tasks", inputSchema=_TASK_PROPOSAL_INPUT_SCHEMA)
-    def create_tasks_once(tasks: TaskProposalList) -> str:
-        """Create the active phase's durable tasks and stop after the first successful call."""
-
+    def submit_tasks(tasks: TaskProposalList) -> str:
         nonlocal completed
         tool_input = {"tasks": tasks}
         try:
@@ -7784,6 +7802,47 @@ def build_create_tasks_tool(
         if int(json.loads(result).get("created_count", 0)) > 0:
             completed = True
         return result
+
+    return submit_tasks
+
+
+def build_create_tasks_tool(
+    prompt_token_limit: int = 48_000,
+    *,
+    coverage_item_ids: set[str] | None = None,
+    expected_snapshot_ref: str | None = None,
+    phase_title: str = "",
+    phase_objective: str = "",
+    required_finding_refs: set[str] | None = None,
+    finding_ref_aliases: dict[str, str] | None = None,
+    phase_task_contract: Any = None,
+    proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
+    reject_duplicate_proposals: bool = False,
+    repair_guard: TaskProposalRepairGuard | None = None,
+    invocation_observer: Callable[[dict[str, Any], Any, Exception | None], None] | None = None,
+) -> Any:
+    """Build the agent-callable task-creation tool over the controller submitter."""
+
+    submit_tasks = build_create_tasks_submitter(
+        prompt_token_limit=prompt_token_limit,
+        coverage_item_ids=coverage_item_ids,
+        expected_snapshot_ref=expected_snapshot_ref,
+        phase_title=phase_title,
+        phase_objective=phase_objective,
+        required_finding_refs=required_finding_refs,
+        finding_ref_aliases=finding_ref_aliases,
+        phase_task_contract=phase_task_contract,
+        proposal_preflight_validator=proposal_preflight_validator,
+        reject_duplicate_proposals=reject_duplicate_proposals,
+        repair_guard=repair_guard,
+        invocation_observer=invocation_observer,
+    )
+
+    @tool(name="create_tasks", inputSchema=_TASK_PROPOSAL_INPUT_SCHEMA)
+    def create_tasks_once(tasks: TaskProposalList) -> str:
+        """Create the active phase's durable tasks and stop after the first successful call."""
+
+        return submit_tasks(tasks)
 
     create_tasks_once.__name__ = "create_tasks"
     return create_tasks_once

@@ -7,6 +7,19 @@ def test_task_proposal_limits_relaxation():
     assert limits.max_requests == 50
     assert limits.description == "Safety limit"
 
+
+def test_task_proposal_limits_accepts_max_attempts_alias():
+    limits = TaskProposalLimits(max_attempts=3)
+
+    assert limits.max_requests == 3
+
+
+def test_task_proposal_limits_rejects_conflicting_alias_values():
+    import pytest
+
+    with pytest.raises(ValueError, match="conflicts"):
+        TaskProposalLimits(max_attempts=3, max_requests=4)
+
 def test_task_proposal_normalization_limits_list():
     # limits as [] should be converted to {}
     data = {

@@ -977,6 +977,42 @@ def _agent_result(text):
     return result
 
 
+def test_report_critic_prefers_schema_validated_output():
+    calls = []
+
+    class StructuredCritic:
+        def __call__(self, prompt, **kwargs):
+            calls.append(kwargs)
+            model = kwargs["structured_output_model"]
+            return MagicMock(
+                stop_reason="end_turn",
+                structured_output=model(approved=True, feedback=[]),
+            )
+
+    result = _run_report_critic(StructuredCritic(), "Review", json_retries=1)
+
+    assert result == {"approved": True, "feedback": []}
+    assert calls[0]["structured_output_model"].__name__ == "ReportCritiqueOutput"
+
+
+def test_report_critic_falls_back_after_structured_output_tool_failure():
+    strands_error = type("StructuredOutputException", (RuntimeError,), {})
+
+    class Critic:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, _prompt, **kwargs):
+            self.calls += 1
+            if "structured_output_model" in kwargs:
+                raise strands_error("forced structured output tool was not invoked")
+            return _agent_result('{"approved": true, "feedback": []}')
+
+    critic = Critic()
+    assert _run_report_critic(critic, "Review", json_retries=1) == {"approved": True, "feedback": []}
+    assert critic.calls == 2
+
+
 def test_report_refinement_feeds_each_critic_rejection_back_to_actor():
     actor = MagicMock(
         side_effect=[

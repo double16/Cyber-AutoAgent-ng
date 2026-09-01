@@ -22,7 +22,7 @@ The workflow controller creates focused agents as needed:
 |------|---------|-----------------------------|
 | `plan_creator` | Create or revise an initial high-level plan | No; returns structured plan data for Python to store |
 | `plan_critic` | Approve a proposed plan or return actionable revision feedback | No |
-| `task_creator` | Create concrete tasks for the current phase | May call `create_tasks` only |
+| `task_creator` | Return typed task proposals for the current phase | No; Python validates and persists the payload |
 | `task_prompt_builder` | Build a task-specific execution prompt and select applicable memory/tools | No |
 | `task_prompt_critic` | Approve a proposed task prompt or return actionable revision feedback | No |
 | `task_executor` | Execute one active task objective | Records acceptance results and may create contracted follow-up work |
@@ -33,16 +33,17 @@ Task and phase evaluators are review-only roles. They receive only `editor` for 
 `memory_retrieve` for reviewing existing memories. They do not receive shell or execution tools and must not perform the
 task, phase, or operation objective while classifying existing evidence.
 
-Agents may create follow-up work with `create_tasks` when their role permits it. Plan reads/writes, task activation, active-task lookup, task closure, and uncompleted-task listing are applied directly by Python rather than agent-callable tools.
+Task executors may create contracted follow-up work with `create_tasks` when their role permits it. Task creators return
+schema-validated proposals for controller persistence. Plan reads/writes, task activation, active-task lookup, task
+closure, and uncompleted-task listing are applied directly by Python rather than agent-callable tools.
 
 The task creator receives a deterministic controller-owned prompt and a flat `TaskProposal` contract. A proposal
 contains its title, objective, required limits object, one concise criterion, and optional procedure, snapshot, and
 target fields. For snapshot proposals, Python silently discards `limits` and `output_kind`; procedure methods remain
 invalid. Python compiles the full
 immutable acceptance contract, assigns pending status and the active phase, and infers target scope from `target_ids`.
-The controller permits a configurable number of corrected calls after an initial rejection (four by default) in the
-same retained conversation and stops the role when that allowance is exhausted. It never retries after tasks are
-successfully stored.
+The controller permits a configurable number of corrected structured payloads after an initial rejection and stops the
+role when that allowance is exhausted. It never retries after tasks are successfully stored.
 
 Agents also do not have a stop tool. Operation completion is a Python workflow decision; the controller emits a `termination_reason` event with reason `complete`.
 
@@ -430,11 +431,14 @@ recognized names into their correct runtime categories.
 
 Prompt-builder agents also receive compact task history. Successful tasks become useful context for prioritizing similar paths, while `partial_failure` and `blocked` tasks provide dead-end context so workers can pivot without rewriting module prompts on disk.
 
-`create_tasks` is exposed only to task creation roles and task executors that may create follow-up work. Other plan/task mutation tools are withheld from worker agents.
+`create_tasks` is exposed only to task executors that may create follow-up work. Task creators and other workflow roles
+receive no plan/task mutation tool.
 
 ## Task Creation
 
-Task creation still uses the `create_tasks` tool so agents can turn discoveries into durable work. There is no separate
+Task creators return typed `TaskProposal` batches and Python submits them through the same controller-owned validation
+and persistence service used by the `create_tasks` tool. Task executors retain that tool for contracted discoveries.
+There is no separate
 active-task fetch tool; active task context is selected by Python and included in the task executor prompt. Agents
 submit flat `TaskProposal` objects, and Python compiles each into a controller-frozen acceptance contract containing a
 basis, source references, unique criteria, and evidence requirements. The rules are:

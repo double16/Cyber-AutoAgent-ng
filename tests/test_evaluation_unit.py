@@ -640,6 +640,28 @@ def test_metric_category_and_chat_helpers(monkeypatch):
     assert ev._chat_invoke("sys", "user") == "fallback"
 
 
+def test_chat_structured_helper_binds_output_schema(monkeypatch):
+    ev = evaluator(monkeypatch)
+    structured = Mock(return_value=mod.EvaluationPolicyOutput(caps={"evidence": 0.5}, disable=[]))
+    bound = SimpleNamespace(invoke=structured)
+    with_structured_output = Mock(return_value=bound)
+    ev._chat_model = SimpleNamespace(with_structured_output=with_structured_output)
+
+    result = ev._chat_invoke_structured("system", "user", mod.EvaluationPolicyOutput)
+
+    assert result == {"caps": {"evidence": 0.5}, "disable": []}
+    with_structured_output.assert_called_once_with(mod.EvaluationPolicyOutput)
+    structured.assert_called_once()
+
+
+def test_chat_structured_helper_reports_unsupported_models(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_model = SimpleNamespace(invoke=Mock())
+
+    with pytest.raises(NotImplementedError, match="with_structured_output"):
+        ev._chat_invoke_structured("system", "user", mod.EvaluationPolicyOutput)
+
+
 @pytest.mark.asyncio
 async def test_infer_policy_and_rubric_judge(monkeypatch):
     ev = evaluator(monkeypatch)

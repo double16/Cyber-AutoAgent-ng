@@ -23,6 +23,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_litellm import ChatLiteLLM
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langfuse import Langfuse
+from pydantic import BaseModel
 
 # HACK BEGIN
 # for ragas/llms/base.by import of missing "langchain_community.chat_models.vertexai"
@@ -47,6 +48,13 @@ from ragas.metrics import (
 )
 from ragas.run_config import RunConfig
 
+from modules.agents.structured_outputs import (
+    EvaluationPolicyOutput,
+    RubricJudgeOutput,
+    TopicsOutput,
+    is_structured_output_unavailable,
+    structured_output_dict,
+)
 from modules.config.manager import get_config_manager
 from modules.config.system.logger import get_logger
 from modules.tools.semantic_enum import normalize_semantic_enum
@@ -1631,21 +1639,16 @@ class CyberAgentEvaluator:
             "Return JSON with keys: caps (object of metric->cap 0..1), disable (array of metrics)."
         )
         try:
-            from langchain_core.messages import (  # type: ignore
-                HumanMessage,
-                SystemMessage,
-            )
-
-            msgs = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-            resp = self._chat_model.invoke(msgs)
-            text = getattr(resp, "content", None)
-            if isinstance(text, list):
-                text = " ".join(str(part) for part in text)
-            text = text if isinstance(text, str) else str(resp)
-            data = json.loads(text)
+            try:
+                data = self._chat_invoke_structured(
+                    system_prompt,
+                    user_prompt,
+                    EvaluationPolicyOutput,
+                )
+            except Exception as error:
+                if not is_structured_output_unavailable(error):
+                    raise
+                data = json.loads(self._chat_invoke(system_prompt, user_prompt))
             if isinstance(data, dict):
                 self._emit_evaluation_step_complete("evaluation_policy", "completed")
                 return data
@@ -1784,65 +1787,35 @@ class CyberAgentEvaluator:
 
         # Invoke judge (apply judge temperature/max tokens when supported)
         try:
-            from langchain_core.messages import (  # type: ignore
-                HumanMessage,
-                SystemMessage,
-            )
-
-            msgs = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-
-            resp = None
+            judge_model = self._chat_model
+            if hasattr(self._chat_model, "bind") and callable(self._chat_model.bind):
+                judge_model = self._chat_model.bind(
+                    temperature=eval_cfg.judge_temperature,
+                    max_tokens=eval_cfg.judge_max_tokens,
+                )
             try:
-                # Prefer per-call parameter binding if available
-                if hasattr(self._chat_model, "bind") and callable(
-                    self._chat_model.bind
-                ):
-                    bound = self._chat_model.bind(
-                        temperature=eval_cfg.judge_temperature,
-                        max_tokens=eval_cfg.judge_max_tokens
-                    )
-                    resp = bound.invoke(msgs)
-                else:
-                    resp = self._chat_model.invoke(msgs)
-            except Exception:
-                # Fallback: direct invoke
-                resp = self._chat_model.invoke(msgs)
-
-            text = getattr(resp, "content", None)
-            if isinstance(text, list):
-                text = " ".join(str(part) for part in text)
-            text = text if isinstance(text, str) else str(resp)
+                parsed = self._chat_invoke_structured(
+                    system_prompt,
+                    user_prompt,
+                    RubricJudgeOutput,
+                    chat_model=judge_model,
+                )
+            except Exception as error:
+                if not is_structured_output_unavailable(error):
+                    raise
+                text = self._chat_invoke(system_prompt, user_prompt)
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    start = text.find("{")
+                    end = text.rfind("}")
+                    parsed = json.loads(text[start : end + 1]) if start != -1 and end != -1 else {}
         except Exception as e:
             logger.debug("Rubric judge LLM call failed: %s", e)
             self._emit_evaluation_step_complete(
                 "rubric_judge", "failed", message="Rubric judge failed"
             )
             return {}
-
-        # Parse JSON robustly
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            # Attempt to extract JSON blob
-            try:
-                start = text.find("{")
-                end = text.rfind("}")
-                parsed = (
-                    json.loads(text[start : end + 1])
-                    if start != -1 and end != -1
-                    else {}
-                )
-            except Exception as e:
-                logger.debug(
-                    "Rubric judge JSON parse failed: %s | text=%s", e, text[:500]
-                )
-                self._emit_evaluation_step_complete(
-                    "rubric_judge", "failed", message="Rubric judge returned invalid data"
-                )
-                return {}
 
         if not isinstance(parsed, dict):
             self._emit_evaluation_step_complete(
@@ -2030,6 +2003,28 @@ class CyberAgentEvaluator:
             content = getattr(resp, "content", None)
             return content if isinstance(content, str) else str(resp)
 
+    def _chat_invoke_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        output_model: type[BaseModel],
+        *,
+        chat_model: Any | None = None,
+    ) -> dict[str, Any]:
+        """Invoke a LangChain chat model through its schema-bound interface."""
+
+        from langchain_core.messages import HumanMessage, SystemMessage  # type: ignore
+
+        model = chat_model or self._chat_model
+        with_structured_output = getattr(model, "with_structured_output", None)
+        if not callable(with_structured_output):
+            raise NotImplementedError("chat model does not expose with_structured_output")
+        structured_model = with_structured_output(output_model)
+        result = structured_model.invoke(
+            [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+        )
+        return structured_output_dict(result)
+
     def _synthesize_topics(
         self, parsed_trace: Any, context_summary: str = ""
     ) -> list[str]:
@@ -2088,11 +2083,19 @@ class CyberAgentEvaluator:
                 'Output: ["contract analysis", "oracle manipulation", "reentrancy testing", "flash loan", "liquidation logic", "event monitoring"]'
             )
 
-            text = self._chat_invoke(system_prompt, user_prompt)
-            if not text:
-                return []
-            # Attempt to parse strict JSON array
-            topics = json.loads(text)
+            try:
+                topics = self._chat_invoke_structured(
+                    system_prompt,
+                    user_prompt,
+                    TopicsOutput,
+                )["topics"]
+            except Exception as error:
+                if not is_structured_output_unavailable(error):
+                    raise
+                text = self._chat_invoke(system_prompt, user_prompt)
+                if not text:
+                    return []
+                topics = json.loads(text)
             if isinstance(topics, list):
                 cleaned = []
                 for t in topics:

@@ -179,6 +179,7 @@ class AgentRuntimeResources:
     core_tools_list: list[Any] = field(default_factory=list)
     optional_tools_list: list[Any] = field(default_factory=list)
     quarantined_shell_commands: set[str] = field(default_factory=set)
+    structured_output_fallbacks: dict[str, str] = field(default_factory=dict)
     termination_policy: str = ""
 
 
@@ -1145,7 +1146,7 @@ def create_agent(
             efficiency_callback=callback_handler.record_efficiency_event,
         )
         agent_hooks.append(failure_recovery_hook)
-    if agent_type in {"task_creator", "task_executor"}:
+    if agent_type == "task_executor":
         agent_hooks.append(TerminalToolHook(agent_type))
 
     tool_executor = runtime.tool_executor
