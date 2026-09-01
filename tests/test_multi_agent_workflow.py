@@ -11005,6 +11005,75 @@ def test_task_creator_retries_rejected_structured_submission(monkeypatch):
     assert "route scope rejected" in prompts[1]
 
 
+def test_task_creator_stops_repeated_controller_rejection_early(monkeypatch):
+    state = FakeState(_plan())
+    prompts = []
+    submissions = []
+
+    def structured_runner(role, prompt, tools, system_prompt, output_model):
+        del role, tools, system_prompt, output_model
+        prompts.append(prompt)
+        return _structured_task_payload("Rejected task")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_TASK_CREATOR_MAX_CORRECTIONS": 3}),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: pytest.fail("legacy JSON fallback must not run"),
+        structured_runner=structured_runner,
+    )
+
+    def bind_submitter(_phase, _batch, repair_guard=None):
+        def submit(tasks):
+            assert repair_guard is not None
+            restored = repair_guard.restore(tasks)
+            submissions.append(restored[0].title)
+            error = memory_mod.TaskProposalValidationError(
+                "acceptance criterion uses moving scope",
+                proposal_index=0,
+                criterion_index=0,
+                criterion_id="bounded-result",
+                criterion_description="Assess all reachable endpoints",
+            )
+            repair_guard.mark_rejected(error)
+            raise error
+
+        return submit
+
+    monkeypatch.setattr(controller, "_task_creator_submitter", bind_submitter)
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert outcome.created_count == 0
+    assert outcome.attempts == 2
+    assert submissions == ["Rejected task", "Rejected task"]
+    assert "criterion_description='Assess all reachable endpoints'" in prompts[1]
+    assert "Change only the criterion identified" in prompts[1]
+
+
+def test_task_preflight_event_includes_proposal_validation_diagnostic(monkeypatch):
+    events = []
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda *_args: "{}",
+    )
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+    error = memory_mod.TaskProposalValidationError(
+        "acceptance criterion uses moving scope",
+        proposal_index=0,
+        criterion_index=0,
+        criterion_id="bounded-result",
+        criterion_description="Assess all reachable endpoints",
+    )
+
+    controller._emit_task_preflight_validation(_plan().phases[0], {"tasks": [{}]}, None, error)
+
+    assert events[0]["code"] == "rejected"
+    assert events[0]["diagnostic"] == error.diagnostic
+
+
 def test_task_creator_uses_legacy_json_repair_only_when_structured_output_is_unsupported(monkeypatch):
     state = FakeState(_plan())
     legacy_calls = []

@@ -45,7 +45,10 @@ immutable acceptance contract, assigns pending status and the active phase, and 
 The controller permits a configurable number of corrected structured payloads after an initial rejection and stops the
 role when that allowance is exhausted. It never retries after tasks are successfully stored.
 
-Agents also do not have a stop tool. Operation completion is a Python workflow decision; the controller emits a `termination_reason` event with reason `complete`.
+Agents do not receive a model-callable stop tool. When a task executor exhausts recovery for `store_finding`, its
+controller hook requests the Strands SDK to stop only that active agent invocation after the current tool batch.
+The workflow controller then decides the task outcome; operation completion remains a Python workflow decision, and
+the controller emits a `termination_reason` event with reason `complete` only when the operation is complete.
 
 The task executor's workflow boundary is controller-owned and shared by every module. Module prompts add distinct access,
 safety, domain-execution, and evidence policies without redefining task lifecycle behavior. Module termination policies

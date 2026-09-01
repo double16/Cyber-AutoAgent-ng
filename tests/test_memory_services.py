@@ -734,6 +734,51 @@ def test_strict_acceptance_components_cover_positive_and_negative_shapes():
     assert mod._normalize_non_empty_strings(["one", "one"], "field") == ("one",)
 
 
+def test_proposal_acceptance_error_identifies_the_rejected_criterion():
+    plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Inventory", status="active")],
+    )
+    proposal = TypeAdapter(mod.TaskProposal).validate_python({
+        "title": "Unbounded inventory",
+        "objective": "Run bounded discovery",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 10},
+        "criteria": [{"description": "Assess all reachable endpoints"}],
+    })
+
+    with pytest.raises(mod.TaskProposalValidationError) as error:
+        mod._proposal_acceptance_contract(proposal, plan, proposal_index=2)
+
+    assert error.value.diagnostic == {
+        "proposal_index": 2,
+        "criterion_index": 0,
+        "criterion_id": "criterion-1",
+        "criterion_description": "Assess all reachable endpoints",
+        "source": "model_proposal",
+    }
+    assert "proposal_index=2" in str(error.value)
+
+
+def test_task_proposal_repair_guard_releases_only_controller_rejected_proposal():
+    baseline = [
+        TypeAdapter(mod.TaskProposal).validate_python(task_proposal("Keep", "Bounded work", "keep")),
+        TypeAdapter(mod.TaskProposal).validate_python(task_proposal("Repair", "Bounded work", "repair")),
+    ]
+    guard = mod.TaskProposalRepairGuard()
+    guard.capture(baseline)
+    guard.mark_rejected(mod.TaskProposalValidationError("criterion rejected", proposal_index=1))
+    submitted = guard.restore([
+        TypeAdapter(mod.TaskProposal).validate_python(task_proposal("Changed", "Bounded work", "changed")),
+        TypeAdapter(mod.TaskProposal).validate_python(task_proposal("Corrected", "Bounded work", "corrected")),
+    ])
+
+    assert [proposal.title for proposal in submitted] == ["Keep", "Corrected"]
+    assert "Corrected" in guard.last_submitted_signature
+
+
 def test_procedure_output_kind_enforces_matching_evidence_requirements():
     def contract(output_kind, requirements):
         return mod.AcceptanceContract(
@@ -4963,6 +5008,39 @@ def test_inventory_snapshot_fanout_preserves_distinct_acceptance_intent(fake_mem
     descriptions = [task.acceptance.criteria[0].description for task in store.tasks]
     assert any("session transition boundaries" in description for description in descriptions)
     assert any("role-based access boundaries" in description for description in descriptions)
+
+
+def test_create_tasks_identifies_controller_generated_coverage_criterion_error(fake_memory_client, monkeypatch):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    monkeypatch.setattr(
+        mod,
+        "_phase_specific_coverage_criterion",
+        lambda *_args: (_ for _ in ()).throw(ValueError("controller criterion rejected")),
+    )
+    proposal = {
+        "title": "Assess inventory",
+        "objective": "Assess the frozen inventory",
+        "methods": [],
+        "limits": {},
+        "snapshot_refs": [f"artifact:{manifest}"],
+        "criteria": [{"description": "Assess the assigned inventory unit"}],
+        "target_ids": ["target-1"],
+    }
+
+    with pytest.raises(mod.TaskProposalValidationError) as error:
+        mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert error.value.diagnostic["proposal_index"] == 0
+    assert error.value.diagnostic["source"] == "controller_generated"
+    assert error.value.diagnostic["criterion_description"] == "Assess the assigned inventory unit"
 
 
 def test_exhausted_snapshot_with_gap_creates_inventory_refinement(fake_memory_client):

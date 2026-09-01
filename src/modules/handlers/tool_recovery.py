@@ -95,6 +95,7 @@ _STRUCTURED_VALIDATION_PATTERNS = tuple(
 _READ_ONLY_TOOLS = {"memory_retrieve", "read_artifact", "tool_catalog"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 TOOL_RECOVERY_EXHAUSTED_STATE_KEY = "tool_recovery_exhausted"
+STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY = "store_finding_recovery_exhausted"
 EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY = "evaluator_artifact_read_limit_exhausted"
 ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER = "ARTIFACT_TOTAL_READ_LIMIT_REACHED"
 ARTIFACT_PAGE_LIMIT_REACHED_MARKER = "ARTIFACT_PAGE_LIMIT_REACHED"
@@ -784,16 +785,25 @@ class TaskFailureRecoveryHook(HookProvider):
             self._stop_event_loop(event, "policy_violation_limit")
 
     def _stop_event_loop(self, event: BeforeToolCallEvent | AfterToolCallEvent, reason: str) -> None:
+        """Request that Strands stops this invocation after the current tool batch.
+
+        ``request_state`` belongs to the active Strands invocation. It must not
+        be replaced with an operation-level termination signal: the workflow
+        controller remains responsible for deciding the task and operation state.
+        """
         request_state = event.invocation_state.setdefault("request_state", {})
         if not isinstance(request_state, dict):
             return
         request_state["stop_event_loop"] = True
-        request_state[TOOL_RECOVERY_EXHAUSTED_STATE_KEY] = {
+        exhaustion_state = {
             "reason": reason,
             "policy_violations": self._policy_violations,
             "max_policy_violations": self.max_policy_violations,
             "failed_tool": self.failed_tool_name,
         }
+        request_state[TOOL_RECOVERY_EXHAUSTED_STATE_KEY] = exhaustion_state
+        if self.failed_tool_name == "store_finding":
+            request_state[STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY] = dict(exhaustion_state)
 
     def _is_correction(self, tool_name: str, tool_input: Any) -> bool:
         if tool_name != self.failed_tool_name:

@@ -5491,12 +5491,46 @@ def _compact_task_proposal_validation_error(error: ValidationError) -> str:
 TaskProposalList = list[TaskProposal]
 
 
+class TaskProposalValidationError(ValueError):
+    """Expose the proposal field responsible for controller-side task validation failure."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        proposal_index: int | None = None,
+        criterion_index: int | None = None,
+        criterion_id: str = "",
+        criterion_description: str = "",
+        source: str = "model_proposal",
+    ) -> None:
+        self.diagnostic = {
+            "proposal_index": proposal_index,
+            "criterion_index": criterion_index,
+            "criterion_id": criterion_id,
+            "criterion_description": criterion_description,
+            "source": source,
+        }
+        detail_parts = [message]
+        if proposal_index is not None:
+            detail_parts.append(f"proposal_index={proposal_index}")
+        if criterion_index is not None:
+            detail_parts.append(f"criterion_index={criterion_index}")
+        if criterion_id:
+            detail_parts.append(f"criterion_id={criterion_id}")
+        if criterion_description:
+            detail_parts.append(f"criterion_description={criterion_description!r}")
+        detail_parts.append(f"source={source}")
+        super().__init__("; ".join(detail_parts))
+
+
 @dataclass
 class TaskProposalRepairGuard:
     """Restore previously valid proposals before a corrective task-creation mutation."""
 
     baseline: list[TaskProposal | None] = field(default_factory=list)
     valid_indexes: set[int] = field(default_factory=set)
+    last_submitted_signature: str = ""
 
     def capture(self, tasks: Any) -> None:
         """Remember individually valid proposals from a rejected batch without guessing repairs."""
@@ -5520,6 +5554,14 @@ class TaskProposalRepairGuard:
         self.baseline = baseline
         self.valid_indexes = valid_indexes
 
+    def mark_rejected(self, error: Exception) -> None:
+        """Allow the model to repair the one proposal rejected by controller validation."""
+
+        diagnostic = getattr(error, "diagnostic", {})
+        proposal_index = diagnostic.get("proposal_index") if isinstance(diagnostic, dict) else None
+        if isinstance(proposal_index, int) and proposal_index in self.valid_indexes:
+            self.valid_indexes.remove(proposal_index)
+
     def restore(self, tasks: TaskProposalList) -> TaskProposalList:
         """Prevent an LLM correction from changing proposals that were already valid."""
 
@@ -5532,6 +5574,11 @@ class TaskProposalRepairGuard:
             baseline = self.baseline[index]
             if baseline is not None:
                 restored[index] = baseline
+        self.last_submitted_signature = json.dumps(
+            [proposal.model_dump(mode="json") for proposal in restored],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         return restored
 
 
@@ -6873,27 +6920,42 @@ def _proposal_execution_requirements(
     )
 
 
-def _proposal_acceptance_contract(proposal: TaskProposal, plan: OperationPlan) -> AcceptanceContract:
+def _proposal_acceptance_contract(
+    proposal: TaskProposal,
+    plan: OperationPlan,
+    *,
+    proposal_index: int | None = None,
+) -> AcceptanceContract:
     """Compile a small task proposal into the full immutable acceptance contract."""
 
     normalized = _normalize_task_proposal(proposal)
     criterion_ids = _task_proposal_criterion_ids(proposal.criteria)
-    criteria = [
-        AcceptanceCriterion(
-            id=criterion_id,
-            description=criterion.description,
-            evidence_requirements=[EvidenceRequirement(
-                kind=(
-                    proposal.output_kind
-                    if normalized.basis_kind == "procedure"
-                    else "durable_evidence"
-                ),
-                min_count=1,
-            )],
-            execution_requirements=_proposal_execution_requirements(proposal, plan, criterion_id),
-        )
-        for criterion_id, criterion in zip(criterion_ids, proposal.criteria, strict=False)
-    ]
+    criteria = []
+    for criterion_index, (criterion_id, criterion) in enumerate(
+        zip(criterion_ids, proposal.criteria, strict=False)
+    ):
+        try:
+            criteria.append(AcceptanceCriterion(
+                id=criterion_id,
+                description=criterion.description,
+                evidence_requirements=[EvidenceRequirement(
+                    kind=(
+                        proposal.output_kind
+                        if normalized.basis_kind == "procedure"
+                        else "durable_evidence"
+                    ),
+                    min_count=1,
+                )],
+                execution_requirements=_proposal_execution_requirements(proposal, plan, criterion_id),
+            ))
+        except ValueError as error:
+            raise TaskProposalValidationError(
+                str(error),
+                proposal_index=proposal_index,
+                criterion_index=criterion_index,
+                criterion_id=criterion_id,
+                criterion_description=criterion.description,
+            ) from error
     if normalized.basis_kind == "procedure":
         selected_target_ids = proposal.target_ids or [target.target_id for target in plan.targets]
         source_refs = [
@@ -7490,7 +7552,7 @@ def _create_tasks_from_proposals(
             }
         _validate_procedure_proposal_route_atomicity(proposal, selected_targets, proposal_index)
         acceptance = _freeze_and_validate_acceptance(
-            _proposal_acceptance_contract(proposal, plan),
+            _proposal_acceptance_contract(proposal, plan, proposal_index=proposal_index),
             [*existing_tasks, *staged_tasks],
         )
         if coverage_item_ids is not None and acceptance.mode != "coverage":
@@ -7538,24 +7600,33 @@ def _create_tasks_from_proposals(
                 remaining_ids = [item_id for item_id in item_ids if item_id not in completed_ids]
                 if not remaining_ids:
                     continue
-                group_acceptance = AcceptanceContract(
-                    mode="coverage",
-                    basis=AcceptanceBasis(
-                        kind="snapshot",
-                        description=f"Frozen inventory entries for {route_label}",
-                        source_refs=acceptance.basis.source_refs,
-                        snapshot_hash=acceptance.basis.snapshot_hash,
-                        item_ids=remaining_ids,
-                    ),
-                    criteria=[_phase_specific_coverage_criterion(
-                        group_kind,
-                        proposal_intent,
-                        phase_title,
-                        phase_objective,
-                        route_label,
-                        remaining_ids,
-                    )],
-                )
+                try:
+                    group_acceptance = AcceptanceContract(
+                        mode="coverage",
+                        basis=AcceptanceBasis(
+                            kind="snapshot",
+                            description=f"Frozen inventory entries for {route_label}",
+                            source_refs=acceptance.basis.source_refs,
+                            snapshot_hash=acceptance.basis.snapshot_hash,
+                            item_ids=remaining_ids,
+                        ),
+                        criteria=[_phase_specific_coverage_criterion(
+                            group_kind,
+                            proposal_intent,
+                            phase_title,
+                            phase_objective,
+                            route_label,
+                            remaining_ids,
+                        )],
+                    )
+                except ValueError as error:
+                    raise TaskProposalValidationError(
+                        str(error),
+                        proposal_index=proposal_index,
+                        criterion_index=0,
+                        criterion_description=proposal_intent,
+                        source="controller_generated",
+                    ) from error
                 phase_label = str(phase_title or title).strip()
                 phase_work = _route_scoped_phase_objective(phase_objective) or objective.strip()
                 group_title = f"{title_prefixes[group_kind]} {route_label} [{group_target_id}]"

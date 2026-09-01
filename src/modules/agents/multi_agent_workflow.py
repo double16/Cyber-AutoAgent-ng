@@ -2994,9 +2994,10 @@ class MultiAgentWorkflowController:
         task_count = len(tool_input.get("tasks", [])) if isinstance(tool_input.get("tasks"), list) else 0
         message = str(error or "")
         code = "accepted"
+        diagnostic = getattr(error, "diagnostic", None) if error is not None else None
         if error is not None:
             code = message.split(":", 2)[1] if message.startswith("task_preflight:") else "rejected"
-        self._emit_workflow_event({
+        event = {
             "type": "task_preflight_validation",
             "phase": phase.id,
             "proposal_count": task_count,
@@ -3008,7 +3009,10 @@ class MultiAgentWorkflowController:
                 if error is None and isinstance(result, str)
                 else 0
             ),
-        })
+        }
+        if isinstance(diagnostic, dict):
+            event["diagnostic"] = diagnostic
+        self._emit_workflow_event(event)
 
     def _task_pre_execution_feedback(self, task: Task) -> list[str]:
         """Detect runtime capability or artifact drift immediately before execution."""
@@ -8819,6 +8823,7 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
             )
             batch_failure_reason = ""
             rejected_proposals = ""
+            previous_failure_signature: tuple[str, str] | None = None
             batch_attempts = 0
             previous_attempt_max_tokens = False
             legacy_fallback_active = (
@@ -8881,8 +8886,12 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
                     payload = normalized_payload.value
                     validated = TaskProposalBatchOutput.model_validate(payload)
                     repair_guard.capture(validated.tasks)
-                    rejected_proposals = json.dumps(payload.get("tasks", []), ensure_ascii=False)
-                    result = json.loads(submit_tasks(validated.tasks))
+                    try:
+                        result = json.loads(submit_tasks(validated.tasks))
+                    finally:
+                        rejected_proposals = repair_guard.last_submitted_signature or json.dumps(
+                            payload.get("tasks", []), ensure_ascii=False, sort_keys=True
+                        )
                     batch_failure_reason = (
                         "" if int(result.get("created_count", 0)) > 0 else "task submission produced no new tasks"
                     )
@@ -8920,6 +8929,18 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
                 if after_batch_actionable > before_batch_actionable:
                     batch_failure_reason = ""
                     break
+                if not previous_attempt_max_tokens and batch_failure_reason:
+                    failure_signature = (batch_failure_reason, rejected_proposals)
+                    if failure_signature == previous_failure_signature:
+                        self._log_workflow(
+                            "task creator stopped repeated rejected submission phase=%s batch=%s/%s attempt=%s",
+                            phase.id,
+                            batch.index,
+                            batch.total,
+                            attempt,
+                        )
+                        break
+                    previous_failure_signature = failure_signature
                 if "finding-dependent task proposal" in batch_failure_reason:
                     break
             attempts += batch_attempts
@@ -9495,6 +9516,12 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
                 "either name one bounded subject or use an existing canonical snapshot_ref. Do not infer a "
                 "snapshot reference and do not change unrelated valid proposals.\n"
             )
+        if "moving scope" in lower_reason and "criterion_description=" in failure_reason:
+            common_fixes += (
+                "- FIX: Change only the criterion identified by proposal_index and criterion_description in the "
+                "validation result. Replace its moving collection with the declared finite basis; retain every "
+                "other proposal unchanged.\n"
+            )
         if "explicit service targets" in lower_reason or "registered port" in lower_reason:
             common_fixes += (
                 "- FIX: Preserve the exact registered service boundary, including scheme, host, and port. "
@@ -9645,6 +9672,8 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
                 finding_ref_aliases[str(self.runtime.operation_id)] = next(iter(required_finding_refs))
 
         def observe_preflight(tool_input: dict[str, Any], result: Any, error: Exception | None) -> None:
+            if error is not None and repair_guard is not None:
+                repair_guard.mark_rejected(error)
             self._emit_task_preflight_validation(phase, tool_input, result, error)
 
         return build_create_tasks_submitter(

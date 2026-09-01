@@ -9,6 +9,7 @@ from src.modules.handlers.tool_recovery import (
     ARTIFACT_READ_REPEAT_GUARD_MARKER,
     ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER,
     EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY,
+    STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY,
     TOOL_RECOVERY_EXHAUSTED_STATE_KEY,
     EvaluatorArtifactReadLimitHook,
     TaskFailureRecoveryHook,
@@ -650,8 +651,75 @@ def test_non_shell_failed_correction_exhausts_recovery():
     retry = _before("retry", "create_tasks", retry_input)
     hook._before_tool(retry)
     assert retry.cancel_tool is False
-    hook._after_tool(_after("retry", "create_tasks", retry_input, status="error", text="validation error"))
+    retry_failure = _after("retry", "create_tasks", retry_input, status="error", text="validation error")
+    hook._after_tool(retry_failure)
     assert hook.exhausted is True
+    assert STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY not in retry_failure.invocation_state["request_state"]
+
+
+def test_exhausted_store_finding_correction_requests_stop_for_current_invocation():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10, max_corrections=1)
+    failed_input = {"title": "Candidate", "artifacts": ["artifacts/evidence.txt"]}
+    hook._after_tool(
+        _after(
+            "failed",
+            "store_finding",
+            failed_input,
+            status="error",
+            text="At least one evidence assertion is required",
+        )
+    )
+
+    correction = _before(
+        "correction",
+        "store_finding",
+        {**failed_input, "evidence_assertions": [{"artifact": "artifacts/evidence.txt", "marker": "proof"}]},
+    )
+    hook._before_tool(correction)
+    correction_failure = _after(
+        "correction",
+        "store_finding",
+        correction.tool_use["input"],
+        status="error",
+        text="evidence assertion marker was not found in artifact:artifacts/evidence.txt",
+    )
+    hook._after_tool(correction_failure)
+
+    request_state = correction_failure.invocation_state["request_state"]
+    assert hook.exhausted is True
+    assert request_state["stop_event_loop"] is True
+    assert request_state[STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY] == {
+        "reason": "correction_failed",
+        "policy_violations": 0,
+        "max_policy_violations": 10,
+        "failed_tool": "store_finding",
+    }
+    assert request_state[TOOL_RECOVERY_EXHAUSTED_STATE_KEY] == request_state[
+        STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY
+    ]
+
+
+def test_blocked_store_finding_recovery_requests_stop_for_current_invocation():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=1)
+    failed_input = {"title": "Candidate", "artifacts": []}
+    hook._after_tool(
+        _after(
+            "failed",
+            "store_finding",
+            failed_input,
+            status="error",
+            text="At least one existing artifact is required",
+        )
+    )
+
+    blocked = _before("blocked", "store_finding", failed_input)
+    hook._before_tool(blocked)
+
+    request_state = blocked.invocation_state["request_state"]
+    assert hook.exhausted is True
+    assert request_state["stop_event_loop"] is True
+    assert request_state[STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY]["reason"] == "policy_violation_limit"
+    assert request_state[STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY]["failed_tool"] == "store_finding"
 
 
 def test_finding_validation_corrections_survive_shell_inspection_and_stop_on_final_failure():
