@@ -29,6 +29,42 @@ def test_task_proposal_batch_schema_accepts_canonical_procedure():
     assert output.tasks[0].output_kind == "artifact"
 
 
+def test_task_proposal_batch_schema_accepts_case_only_key_variants_recursively():
+    output = TaskProposalBatchOutput.model_validate(
+        {
+            "Tasks": [
+                {
+                    "Title": "Inspect route",
+                    "Objective": "Inspect the assigned route",
+                    "Methods": ["request"],
+                    "Limits": {"MAX_REQUESTS": 5},
+                    "Snapshot_Refs": [],
+                    "Criteria": [{"Description": "Store the bounded response evidence"}],
+                }
+            ]
+        }
+    )
+
+    assert output.tasks[0].title == "Inspect route"
+    assert output.tasks[0].limits.max_requests == 5
+
+
+def test_task_proposal_batch_schema_rejects_case_collisions_with_different_values():
+    with pytest.raises(ValidationError, match="conflicting JSON keys after lowercasing"):
+        TaskProposalBatchOutput.model_validate(
+            {
+                "tasks": [],
+                "Tasks": [
+                    {
+                        "title": "Inspect route",
+                        "objective": "Inspect the assigned route",
+                        "criteria": [{"description": "Store evidence"}],
+                    }
+                ],
+            }
+        )
+
+
 def test_task_proposal_batch_schema_rejects_unknown_fields_and_mixed_basis():
     with pytest.raises(ValidationError):
         TaskProposalBatchOutput.model_validate(

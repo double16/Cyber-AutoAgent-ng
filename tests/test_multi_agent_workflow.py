@@ -3504,6 +3504,35 @@ def test_json_agent_emits_workflow_activity_lifecycle_events():
     assert "original" not in activities[0]["content"]
 
 
+def test_json_agent_normalizes_case_only_keys_from_prompted_json():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda *_args: '{"STATUS":"done","REASON":"Evidence is sufficient"}',
+    )
+
+    assert controller._run_json_text_agent("task_evaluator", "original", [], "system") == {
+        "status": "done",
+        "reason": "Evidence is sufficient",
+    }
+
+
+def test_json_agent_normalizes_case_only_keys_from_structured_runner():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda *_args: pytest.fail("prompted JSON fallback must not run"),
+        structured_runner=lambda *_args: {"STATUS": "done", "REASON": "Evidence is sufficient"},
+    )
+
+    assert controller._run_json_text_agent("task_evaluator", "original", [], "system") == {
+        "status": "done",
+        "reason": "Evidence is sufficient",
+    }
+
+
 def test_taxonomy_annotator_runs_once_at_terminal_completion(monkeypatch):
     runtime = _runtime()
     seen_trace_attributes = []
@@ -10892,6 +10921,52 @@ def test_task_creator_returns_structured_payload_for_controller_submission(monke
     assert structured_calls[0][2].__name__ == "TaskProposalBatchOutput"
 
 
+def test_task_creator_normalizes_case_only_keys_from_structured_runner(monkeypatch):
+    state = FakeState(_plan())
+
+    def structured_runner(*_args):
+        return {
+            "Tasks": [
+                {
+                    "Title": "Structured task",
+                    "Objective": "Analyze the assigned target",
+                    "Methods": ["analyze"],
+                    "Limits": {"MAX_ITEMS": 1},
+                    "Snapshot_Refs": [],
+                    "Finding_Refs": [],
+                    "Criteria": [{"Description": "Store the bounded analysis result"}],
+                    "Target_IDs": [],
+                }
+            ]
+        }
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: pytest.fail("legacy JSON fallback must not run"),
+        structured_runner=structured_runner,
+    )
+
+    def bind_submitter(_phase, _batch, repair_guard=None):
+        def submit(tasks):
+            assert repair_guard is not None
+            assert tasks[0].title == "Structured task"
+            state.store_task(
+                Task(task_uid="case-normalized", title="Structured task", objective="run", phase=1, status="pending")
+            )
+            return '{"complete":true,"created_count":1,"duplicate_count":0}'
+
+        return submit
+
+    monkeypatch.setattr(controller, "_task_creator_submitter", bind_submitter)
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert outcome.created_count == 1
+    assert outcome.attempts == 1
+
+
 def test_task_creator_retries_rejected_structured_submission(monkeypatch):
     state = FakeState(_plan())
     prompts = []
@@ -10956,6 +11031,41 @@ def test_task_creator_uses_legacy_json_repair_only_when_structured_output_is_uns
 
     assert controller._create_tasks(_plan(), _plan().phases[0]).created_count == 1
     assert legacy_calls == [True]
+
+
+def test_task_creator_normalizes_case_only_keys_from_prompted_json(monkeypatch):
+    state = FakeState(_plan())
+
+    def unsupported(*_args):
+        raise NotImplementedError("structured output unavailable")
+
+    payload = _structured_task_payload()
+    payload["Tasks"] = payload.pop("tasks")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: json.dumps(payload),
+        structured_runner=unsupported,
+    )
+
+    def bind_submitter(_phase, _batch, repair_guard=None):
+        def submit(tasks):
+            assert repair_guard is not None
+            assert tasks[0].title == "Structured task"
+            state.store_task(
+                Task(task_uid="legacy-case", title="Structured task", objective="run", phase=1, status="pending")
+            )
+            return '{"complete":true,"created_count":1,"duplicate_count":0}'
+
+        return submit
+
+    monkeypatch.setattr(controller, "_task_creator_submitter", bind_submitter)
+
+    outcome = controller._create_tasks(_plan(), _plan().phases[0])
+
+    assert outcome.created_count == 1
+    assert outcome.attempts == 1
 
 
 def test_finding_dependent_task_creator_allows_only_verified_canonical_finding_refs(monkeypatch):

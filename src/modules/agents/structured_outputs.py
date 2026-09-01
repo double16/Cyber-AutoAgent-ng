@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from modules.tools.memory import TaskProposal
+from modules.utils.json_repair import normalize_json_key_case
 
 
 class StructuredOutputUnavailableError(RuntimeError):
@@ -45,6 +46,13 @@ class StrictStructuredOutput(BaseModel):
     """Closed schema used at model output boundaries."""
 
     model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_model_authored_key_case(cls, value: Any) -> Any:
+        """Accept case-only key variants while retaining the canonical closed schema."""
+
+        return normalize_json_key_case(value).value
 
 
 class PlanPhaseOutput(StrictStructuredOutput):

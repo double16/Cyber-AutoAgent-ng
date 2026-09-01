@@ -3,11 +3,28 @@ import json
 import pytest
 
 from modules.utils.json_repair import (
+    normalize_json_key_case,
     parse_json_response,
     parse_json_response_with_metadata,
     repair_json_text,
     strip_js_comments,
 )
+
+
+def test_normalize_json_key_case_normalizes_nested_dictionary_keys_without_changing_values():
+    result = normalize_json_key_case(
+        {"Tasks": [{"Title": "Keep VALUE", "Metadata": {"Target_ID": "target-1"}}]}
+    )
+
+    assert result.normalized is True
+    assert result.value == {"tasks": [{"title": "Keep VALUE", "metadata": {"target_id": "target-1"}}]}
+
+
+def test_normalize_json_key_case_accepts_identical_case_collisions_and_rejects_conflicts():
+    assert normalize_json_key_case({"tasks": ["same"], "Tasks": ["same"]}).value == {"tasks": ["same"]}
+
+    with pytest.raises(ValueError, match=r"conflicting JSON keys after lowercasing at \$: 'tasks' and 'Tasks'"):
+        normalize_json_key_case({"tasks": ["first"], "Tasks": ["second"]})
 
 
 def test_parse_json_response_repairs_logged_embedded_quotes_and_invalid_apostrophe_escape():

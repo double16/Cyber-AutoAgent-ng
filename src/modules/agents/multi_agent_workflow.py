@@ -155,6 +155,7 @@ from modules.tools.tool_catalog import (
     get_shell_command_specs,
 )
 from modules.utils.json_repair import (
+    normalize_json_key_case,
     parse_json_response,
     parse_json_response_with_metadata,
 )
@@ -8874,6 +8875,10 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
                     else:
                         response = self.text_runner("task_creator", attempt_prompt, [], system_prompt)
                         payload = parse_json_response(response, require_object=True)
+                    normalized_payload = normalize_json_key_case(payload)
+                    if normalized_payload.normalized:
+                        self._log_workflow("normalized lowercase JSON keys for task_creator structured output")
+                    payload = normalized_payload.value
                     validated = TaskProposalBatchOutput.model_validate(payload)
                     repair_guard.capture(validated.tasks)
                     rejected_proposals = json.dumps(payload.get("tasks", []), ensure_ascii=False)
@@ -10507,7 +10512,8 @@ Allowed evidence references:
             try:
                 if data is None:
                     parsed_response = parse_json_response_with_metadata(response, require_object=True)
-                    data = structured_output_dict(output_model.model_validate(parsed_response.value))
+                    normalized_payload = normalize_json_key_case(parsed_response.value)
+                    data = structured_output_dict(output_model.model_validate(normalized_payload.value))
                     if parsed_response.metadata.extracted or parsed_response.metadata.repaired:
                         self._log_workflow(
                             "json agent role=%s normalized_response extracted=%s repaired=%s",
@@ -10515,6 +10521,13 @@ Allowed evidence references:
                             parsed_response.metadata.extracted,
                             parsed_response.metadata.repaired,
                         )
+                    if normalized_payload.normalized:
+                        self._log_workflow("json agent role=%s normalized lowercase response keys", role)
+                else:
+                    normalized_payload = normalize_json_key_case(data)
+                    data = structured_output_dict(output_model.model_validate(normalized_payload.value))
+                    if normalized_payload.normalized:
+                        self._log_workflow("json agent role=%s normalized lowercase response keys", role)
                 last_response_keys = sorted(data.keys())
             except ValidationError as error:
                 schema_parse_error = error

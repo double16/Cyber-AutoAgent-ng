@@ -27,6 +27,52 @@ class JSONParseResult:
     metadata: JSONParseMetadata
 
 
+@dataclass(frozen=True)
+class JSONKeyCaseNormalizationResult:
+    """A JSON-compatible value after case-only dictionary-key normalization."""
+
+    value: Any
+    normalized: bool
+
+
+def normalize_json_key_case(value: Any) -> JSONKeyCaseNormalizationResult:
+    """Recursively lowercase JSON dictionary keys without changing values.
+
+    Case-only variants are a compatibility boundary for model-authored JSON. Keys that collide after
+    normalization remain safe only when their normalized values are identical; otherwise the model
+    response is ambiguous and rejected.
+    """
+
+    normalized = False
+
+    def normalize(current: Any, path: str) -> Any:
+        nonlocal normalized
+        if isinstance(current, list):
+            return [normalize(item, f"{path}[{index}]") for index, item in enumerate(current)]
+        if not isinstance(current, dict):
+            return current
+
+        result: dict[Any, Any] = {}
+        original_keys: dict[Any, Any] = {}
+        for key, item in current.items():
+            canonical_key = key.lower() if isinstance(key, str) else key
+            normalized_item = normalize(item, f"{path}.{canonical_key}")
+            if canonical_key in result:
+                if result[canonical_key] != normalized_item:
+                    raise ValueError(
+                        f"conflicting JSON keys after lowercasing at {path}: "
+                        f"{original_keys[canonical_key]!r} and {key!r}"
+                    )
+                normalized = True
+                continue
+            result[canonical_key] = normalized_item
+            original_keys[canonical_key] = key
+            normalized = normalized or canonical_key != key
+        return result
+
+    return JSONKeyCaseNormalizationResult(value=normalize(value, "$"), normalized=normalized)
+
+
 def strip_js_comments(text: str) -> str:
     """Remove JavaScript comments without changing comment-like string content."""
 
