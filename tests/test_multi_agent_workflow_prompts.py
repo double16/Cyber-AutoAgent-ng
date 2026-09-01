@@ -24,6 +24,35 @@ def test_task_creator_repair_prompt_targeted_fixes():
     reason = "tasks.0.criteria.0 Input should be a valid dictionary"
     prompt = workflow._task_creator_repair_prompt(failure_reason=reason)
     assert "- FIX: Each criterion in the list must be an object" in prompt
+
+
+def test_task_creator_repair_prompt_distinguishes_scope_and_http_route_errors():
+    workflow = MagicMock(spec=MultiAgentWorkflowController)
+    workflow._task_creator_repair_prompt = MultiAgentWorkflowController._task_creator_repair_prompt.__get__(workflow)
+
+    route_prompt = workflow._task_creator_repair_prompt(
+        failure_reason="task_proposal:multi_route_http: proposal[1] contains multiple distinct endpoint routes: /, /login"
+    )
+    assert "HTTP-only route-splitting error" in route_prompt
+    assert "Preserve its methods" in route_prompt
+    assert "one proposal per endpoint route" in route_prompt
+
+    scope_prompt = workflow._task_creator_repair_prompt(
+        failure_reason="procedure proposal cannot consume an inventory-wide moving collection; use canonical snapshot_refs"
+    )
+    assert "generic moving-scope error" in scope_prompt
+    assert "existing canonical snapshot_ref" in scope_prompt
+    assert "HTTP-only route-splitting error" not in scope_prompt
+
+    boundary_prompt = workflow._task_creator_repair_prompt(
+        failure_reason="explicit service targets permit only their registered port"
+    )
+    assert "exact registered service boundary" in boundary_prompt
+
+    finding_prompt = workflow._task_creator_repair_prompt(
+        failure_reason="finding-dependent task proposal includes unavailable finding_refs"
+    )
+    assert "canonical finding_refs" in finding_prompt
     
     # Test extra fields fix
     reason = "tasks.0.name Extra inputs are not permitted [type=extra_forbidden]"

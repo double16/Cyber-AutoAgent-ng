@@ -7157,6 +7157,19 @@ def _procedure_proposal_endpoint_routes(
 
     text = _proposal_scope_text(proposal)
     routes = set()
+    relative_routes = set()
+    for match in _PROPOSAL_RELATIVE_ENDPOINT_PATTERN.finditer(_proposal_scope_text(proposal)):
+        raw_path = match.group("path").rstrip(".,;)]}")
+        if not raw_path:
+            continue
+        normalized = re.sub(r"/{2,}", "/", urlsplit(raw_path).path or "/")
+        relative_routes.add(normalized.rstrip("/") or "/")
+
+    registered_base_urls = {
+        str(target.value).strip().rstrip("/")
+        for target in http_targets
+        if _normalized_http_route_path(str(target.value).strip()) == "/"
+    }
     for reference in _explicit_service_references(
         text,
         include_bare_host_ports=False,
@@ -7164,19 +7177,17 @@ def _procedure_proposal_endpoint_routes(
     ):
         normalized = _normalized_http_route_path(reference)
         if normalized is not None:
+            if reference.rstrip("/") in registered_base_urls and relative_routes:
+                continue
             routes.add(normalized)
-    for match in _PROPOSAL_RELATIVE_ENDPOINT_PATTERN.finditer(text):
-        raw_path = match.group("path").rstrip(".,;)]}")
-        if not raw_path:
-            continue
-        normalized = re.sub(r"/{2,}", "/", urlsplit(raw_path).path or "/")
-        routes.add(normalized.rstrip("/") or "/")
+    routes.update(relative_routes)
     return sorted(routes)
 
 
 def _validate_procedure_proposal_route_atomicity(
     proposal: TaskProposal,
     selected_targets: list[OperationTarget],
+    proposal_index: int | None = None,
 ) -> None:
     """Reject accidental multi-route HTTP work while allowing declared workflows."""
 
@@ -7185,11 +7196,13 @@ def _validate_procedure_proposal_route_atomicity(
     routes = _procedure_proposal_endpoint_routes(proposal, selected_targets)
     if len(routes) <= 1 or _PROPOSAL_WORKFLOW_WORDING_PATTERN.search(_proposal_scope_text(proposal)):
         return
+    index_context = f"proposal[{proposal_index}] " if proposal_index is not None else ""
     raise ValueError(
-        "procedure proposal contains multiple distinct endpoint routes: "
+        f"task_proposal:multi_route_http:{index_context}title={proposal.title!r} contains multiple "
+        "distinct endpoint routes: "
         + ", ".join(routes)
-        + ". Resubmit separate route-scoped proposals. Use workflow or flow wording only for a genuine ordered "
-        "multi-step workflow."
+        + ". Resubmit one procedure proposal per route. Preserve methods, limits, targets, and workstream; "
+        "use workflow or flow wording only for a genuine ordered multi-step workflow."
     )
 
 
@@ -7475,7 +7488,7 @@ def _create_tasks_from_proposals(
                 "depends_on_workstreams": list(proposal.depends_on_workstreams),
                 "inapplicability_reason": proposal.inapplicability_reason,
             }
-        _validate_procedure_proposal_route_atomicity(proposal, selected_targets)
+        _validate_procedure_proposal_route_atomicity(proposal, selected_targets, proposal_index)
         acceptance = _freeze_and_validate_acceptance(
             _proposal_acceptance_contract(proposal, plan),
             [*existing_tasks, *staged_tasks],

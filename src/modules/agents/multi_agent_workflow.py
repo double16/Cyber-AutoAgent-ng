@@ -9477,6 +9477,29 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
                 "- FIX: Every task needs exactly one criterion object: "
                 "`criteria:[{\"description\":\"finite result\"}]`.\n"
             )
+        if "multi_route_http" in lower_reason or "multiple distinct endpoint routes" in lower_reason:
+            common_fixes += (
+                "- FIX: This is an HTTP-only route-splitting error. Locate the proposal index named in the "
+                "error and split only that procedure into one proposal per endpoint route. Preserve its methods, "
+                "positive limits, target_ids, workstream, task_role, and criterion intent. Do not switch methods "
+                "to solve this error, and do not split or modify the controller-owned synthesis proposal.\n"
+            )
+        if "moving collection" in lower_reason or "inventory-wide" in lower_reason:
+            common_fixes += (
+                "- FIX: This is a generic moving-scope error. A procedure must describe finite bounded work; "
+                "either name one bounded subject or use an existing canonical snapshot_ref. Do not infer a "
+                "snapshot reference and do not change unrelated valid proposals.\n"
+            )
+        if "explicit service targets" in lower_reason or "registered port" in lower_reason:
+            common_fixes += (
+                "- FIX: Preserve the exact registered service boundary, including scheme, host, and port. "
+                "Do not broaden a service target into host-wide or all-port work.\n"
+            )
+        if "finding_refs" in lower_reason or "finding-dependent" in lower_reason:
+            common_fixes += (
+                "- FIX: Finding-dependent work must use only the canonical finding_refs supplied by the "
+                "controller; do not invent references from titles, hypotheses, or task IDs.\n"
+            )
 
         return f"""The preceding structured task proposal was rejected or produced no new actionable task.
 Validation result: {failure_reason or "no actionable task was created"}

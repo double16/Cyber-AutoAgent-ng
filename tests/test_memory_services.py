@@ -978,6 +978,64 @@ def test_create_tasks_accepts_single_http_route_method_and_query_variants(fake_m
     assert len(store.tasks) == 1
 
 
+def test_create_tasks_accepts_batch_of_separate_http_route_proposals(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test:3001", type="network")],
+    )
+    proposals = [
+        task_proposal(
+            "Request login endpoint",
+            "Request endpoint /login on http://target.test:3001",
+            "Capture /login evidence",
+            target_ids=["target-1"],
+        ),
+        task_proposal(
+            "Request root endpoint",
+            "Request endpoint / on http://target.test:3001",
+            "Capture / evidence",
+            target_ids=["target-1"],
+        ),
+        task_proposal(
+            "Request JavaScript endpoint",
+            "Request endpoint /static/app.js on http://target.test:3001",
+            "Capture /static/app.js evidence",
+            target_ids=["target-1"],
+        ),
+    ]
+
+    result = mod._create_tasks_from_proposals(proposals, prompt_token_limit=48_000)
+
+    assert json.loads(result)["created_count"] == 3
+    assert len(store.tasks) == 3
+
+
+def test_http_route_atomicity_treats_registered_base_url_as_scope_not_route(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Testing", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test:3001", type="network")],
+    )
+    proposal = task_proposal(
+        "Request login endpoint",
+        "Request endpoint /login on http://target.test:3001",
+        "Capture /login evidence",
+        target_ids=["target-1"],
+    )
+
+    result = mod._create_tasks_from_proposals([proposal], prompt_token_limit=48_000)
+
+    assert json.loads(result)["created_count"] == 1
+    assert len(store.tasks) == 1
+
+
 def test_create_tasks_accepts_declared_multi_route_workflow(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(
