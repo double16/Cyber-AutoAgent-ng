@@ -8828,7 +8828,7 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
             previous_attempt_max_tokens = False
             legacy_fallback_active = (
                 self.structured_runner is None
-                or self._structured_output_fallback_key() in self._structured_output_fallbacks
+                or self._structured_output_fallback_key() in self._structured_output_fallback_registry()
             )
             for attempt in range(1, max_attempts + 1):
                 batch_attempts = attempt
@@ -10292,21 +10292,38 @@ Allowed evidence references:
     def _structured_output_fallback_key(self) -> str:
         """Return the active provider/model key for operation-local compatibility state."""
 
-        config = self.runtime.config
+        runtime = getattr(self, "runtime", None)
+        config = getattr(runtime, "config", None)
         return f"{getattr(config, 'provider', 'unknown')}:{getattr(config, 'model_id', 'unknown')}"
+
+    def _structured_output_fallback_registry(self) -> dict[str, str]:
+        """Return fallback state, including for minimally constructed test controllers."""
+
+        fallbacks = getattr(self, "_structured_output_fallbacks", None)
+        if isinstance(fallbacks, dict):
+            return fallbacks
+
+        fallbacks = {}
+        self._structured_output_fallbacks = fallbacks
+        runtime = getattr(self, "runtime", None)
+        if runtime is not None:
+            runtime.structured_output_fallbacks = fallbacks
+        return fallbacks
 
     def _activate_structured_output_fallback(self, role: str, error: BaseException) -> str:
         """Downgrade this provider/model to the validated JSON path for this operation."""
 
         key = self._structured_output_fallback_key()
         reason = self._short(error, 300)
-        self._structured_output_fallbacks[key] = reason
+        self._structured_output_fallback_registry()[key] = reason
+        runtime = getattr(self, "runtime", None)
+        config = getattr(runtime, "config", None)
         self._emit_workflow_event(
             {
                 "type": "structured_output_fallback",
                 "role": role,
-                "provider": getattr(self.runtime.config, "provider", "unknown"),
-                "model": getattr(self.runtime.config, "model_id", "unknown"),
+                "provider": getattr(config, "provider", "unknown"),
+                "model": getattr(config, "model_id", "unknown"),
                 "reason": reason,
                 "output_mode": "legacy_json_repair",
             }
@@ -10349,7 +10366,7 @@ Allowed evidence references:
         artifact_synthesis_active = False
         structured_runner = getattr(self, "structured_runner", None)
         fallback_key = self._structured_output_fallback_key()
-        legacy_fallback_active = structured_runner is None or fallback_key in self._structured_output_fallbacks
+        legacy_fallback_active = structured_runner is None or fallback_key in self._structured_output_fallback_registry()
         schema_retry_limit = 1 if role == "task_evaluator" else self.json_retries
         maximum_attempts = 1 + self.json_retries + schema_retry_limit + 1
         for attempt in range(maximum_attempts):

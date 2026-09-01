@@ -5,6 +5,7 @@
 
 import json
 import logging
+import uuid
 from collections.abc import AsyncGenerator
 from typing import Any, TypeVar, Unpack, cast, override
 
@@ -18,6 +19,7 @@ from strands.models._validation import (
 )
 from strands.models.model import Model
 from strands.types.content import ContentBlock, Messages
+from strands.types.exceptions import ContextWindowOverflowException
 from strands.types.streaming import StopReason, StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 from typing_extensions import TypedDict
@@ -36,6 +38,13 @@ class OllamaModel(Model):
     - Streaming responses
     - Tool/function calling
     """
+
+    OVERFLOW_MESSAGES = {
+        "the prompt is longer than the context length",
+        "the input length exceeds the context length",
+        "exceeds the available context",
+        "exceeded max context length",
+    }
 
     class OllamaConfig(TypedDict, total=False):
         """Configuration parameters for Ollama models.
@@ -129,14 +138,16 @@ class OllamaModel(Model):
             return [{"role": role, "images": [content["image"]["source"]["bytes"]]}]
 
         if "toolUse" in content:
+            tool_use = content["toolUse"]
+            tool_name = tool_use.get("name") or tool_use["toolUseId"]
             return [
                 {
                     "role": role,
                     "tool_calls": [
                         {
                             "function": {
-                                "name": content["toolUse"]["toolUseId"],
-                                "arguments": content["toolUse"]["input"],
+                                "name": tool_name,
+                                "arguments": tool_use["input"],
                             }
                         }
                     ],
@@ -150,7 +161,7 @@ class OllamaModel(Model):
                 for formatted_tool_result_content in self._format_request_message_contents(
                     "tool",
                     (
-                        {"text": json.dumps(tool_result_content["json"])}
+                        {"text": json.dumps(tool_result_content["json"], ensure_ascii=False)}
                         if "json" in tool_result_content
                         else cast(ContentBlock, tool_result_content)
                     ),
@@ -258,7 +269,8 @@ class OllamaModel(Model):
                     return {"contentBlockStart": {"start": {}}}
 
                 tool_name = event["data"].function.name
-                return {"contentBlockStart": {"start": {"toolUse": {"name": tool_name, "toolUseId": tool_name}}}}
+                tool_use_id = f"tooluse_{uuid.uuid4().hex[:24]}"
+                return {"contentBlockStart": {"start": {"toolUse": {"name": tool_name, "toolUseId": tool_use_id}}}}
 
             case "content_delta":
                 match event["data_type"]:
@@ -509,7 +521,12 @@ class OllamaModel(Model):
         formatted_request["stream"] = False
 
         client = ollama.AsyncClient(self.host, **self.client_args)
-        response = await self._chat_with_fallback(client, formatted_request)
+        try:
+            response = await self._chat_with_fallback(client, formatted_request)
+        except ollama.ResponseError as error:
+            if any(message in str(error).lower() for message in self.OVERFLOW_MESSAGES):
+                raise ContextWindowOverflowException(str(error)) from error
+            raise
 
         try:
             content = response.message.content.strip()

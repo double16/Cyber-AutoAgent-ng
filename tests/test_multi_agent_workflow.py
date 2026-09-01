@@ -363,6 +363,7 @@ def test_workflow_falls_back_after_strands_structured_output_failure_and_caches_
     assert controller._run_json_text_agent("plan_critic", "critic", [], "system")["approved"] is True
     assert calls == ["structured", "text:plan_creator", "text:plan_critic"]
     assert runtime.structured_output_fallbacks["ollama:muse-glimmer:30b-mlx"]
+    assert controller._structured_output_fallback_registry() is runtime.structured_output_fallbacks
     assert any(event["type"] == "structured_output_fallback" for event in runtime.callback_handler.events)
 
 

@@ -75,3 +75,13 @@ def test_multi_agent_adaptation_e2e_scenario():
         "| `task_evaluator` | `max_tokens` | `4096` | `6144` | "
         "3-strike token exhaustion escalation | True |" in adjustments
     )
+
+
+def test_minimal_controller_initializes_structured_output_fallback_state():
+    controller = MultiAgentWorkflowController.__new__(MultiAgentWorkflowController)
+
+    fallbacks = controller._structured_output_fallback_registry()
+
+    assert controller._structured_output_fallback_key() == "unknown:unknown"
+    assert fallbacks == {}
+    assert controller._structured_output_fallback_registry() is fallbacks
