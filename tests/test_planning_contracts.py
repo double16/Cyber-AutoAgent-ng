@@ -249,6 +249,28 @@ def test_contract_parser_rejects_invalid_declarations(raw, message):
         contracts._parse_contract("fixture", raw)
 
 
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ({"phase_id": 1, "mode": "fanout", "min_mapping_tasks": 0, "mapping_workstreams": ["a"]}, "min_mapping_tasks"),
+        ({"phase_id": 1, "mode": "fanout", "min_mapping_tasks": 1, "mapping_workstreams": [""]}, "mapping_workstreams"),
+        (
+            {
+                "phase_id": 1,
+                "mode": "fanout",
+                "min_mapping_tasks": 1,
+                "mapping_workstreams": ["a"],
+                "allow_direct_single_step": True,
+            },
+            "direct_single_step_workstreams",
+        ),
+    ],
+)
+def test_contract_parser_rejects_remaining_invalid_collection_shapes(raw, message):
+    with pytest.raises(ValueError, match=message):
+        contracts._parse_contract("fixture", raw)
+
+
 def test_task_proposal_schema_exposes_planning_metadata():
     proposal = TaskProposal.model_validate(
         {

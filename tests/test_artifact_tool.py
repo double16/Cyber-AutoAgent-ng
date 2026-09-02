@@ -16,8 +16,10 @@ from modules.tools.artifact import (
     ARTIFACT_READ_REPEAT_GUARD_MARKER,
     ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER,
     artifact_max_bytes_for_context_window,
+    artifact_review_metadata,
     create_artifact_reader,
     create_bounded_artifact_reader,
+    resolve_operation_artifact_path,
     resolve_tool_result_max_chars,
 )
 
@@ -31,6 +33,7 @@ def test_artifact_page_budget_scales_with_context_window_and_clamps():
 
 
 def test_tool_result_max_chars_converts_context_tokens_to_characters():
+    assert resolve_tool_result_max_chars(40_000) == 16_000
     assert resolve_tool_result_max_chars(40_000) == 16_000
     assert resolve_tool_result_max_chars(100_000) == 30_000
     assert resolve_tool_result_max_chars(40_000, "12000") == 12_000
@@ -67,7 +70,10 @@ def test_read_artifact_serialized_line_page_stays_below_router_limit(tmp_path: P
     artifact.write_text("\n".join(lines) + "\n", encoding="utf-8")
     reader = create_artifact_reader(40_000, max_output_chars=4_000)
 
-    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
         first = ast.literal_eval(reader("evidence.txt", max_lines=200))
         second = ast.literal_eval(reader("evidence.txt", start_line=first["end_line"] + 1, max_lines=200))
 
@@ -120,6 +126,27 @@ def test_artifact_reader_uses_its_context_window_not_legacy_byte_override(monkey
     with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
         assert "x" * 100 in reader("evidence.txt")
 
+
+def test_bounded_artifact_reader_uses_valid_and_invalid_environment_read_limits(monkeypatch):
+    monkeypatch.setenv("CYBER_WORKFLOW_ARTIFACT_READ_LIMIT", "invalid")
+    create_bounded_artifact_reader(context_window_tokens=48_000)
+    monkeypatch.setenv("CYBER_WORKFLOW_ARTIFACT_READ_LIMIT", "2")
+    create_bounded_artifact_reader(context_window_tokens=48_000)
+
+
+def test_artifact_reader_rejects_invalid_output_and_byte_page_parameters(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("evidence", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="max_output_chars"):
+        create_artifact_reader(48_000, max_output_chars=0)
+    with pytest.raises(ValueError, match="max_reads_per_artifact"):
+        create_bounded_artifact_reader(context_window_tokens=48_000, max_reads_per_artifact=0)
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        with pytest.raises(ValueError, match="byte paging requires"):
+            READ_ARTIFACT("evidence.txt", start_byte=0)
+    with pytest.raises(ValueError, match="max_bytes"):
+        artifact_review_metadata("evidence.txt", 0)
 
 def test_read_artifact_rejects_oversized_minified_page_without_returning_content(tmp_path: Path):
     artifact = tmp_path / "minified.js"
@@ -243,6 +270,22 @@ def test_read_artifact_falls_back_to_operation_root_for_relative_paths(tmp_path:
 
     assert "root file" in result
     assert "artifact:tools/evidence.txt" in result
+
+
+def test_resolve_operation_artifact_path_accepts_canonical_and_absolute_references(tmp_path: Path):
+    artifact = tmp_path / "artifacts" / "evidence.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("evidence", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        assert resolve_operation_artifact_path("artifact:artifacts/evidence.txt") == str(artifact)
+        assert resolve_operation_artifact_path(str(artifact)) == str(artifact)
+
+        with pytest.raises(ValueError, match="Artifact does not exist"):
+            resolve_operation_artifact_path("artifact:artifacts/missing.txt")
 
 
 def test_read_artifact_lists_immediate_files_when_given_a_directory(tmp_path: Path):

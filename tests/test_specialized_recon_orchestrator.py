@@ -306,6 +306,24 @@ def test_public_hostname_detection_rejects_non_public_hosts():
     assert sro._normalize_target_endpoint("[fd00::1]:8443") == "[fd00::1]:8443"
 
 
+def test_target_helpers_cover_empty_invalid_and_non_string_inputs():
+    assert sro._normalize_target_host("") == ""
+    assert sro._normalize_target_endpoint("") == ""
+    assert sro._format_host_with_port("", 443) == ""
+    assert sro._format_host_with_port("example.com", None) == "example.com"
+    assert sro._format_host_with_port("2001:db8::1", 443) == "[2001:db8::1]:443"
+    assert sro._safe_url_port(sro.urlparse("https://example.test:invalid")) is None
+    assert sro._is_public_hostname("") is False
+    assert sro._is_public_hostname("bad host.example") is False
+    assert sro._is_public_hostname("-bad.example") is False
+    assert sro._is_public_hostname("bad-.example") is False
+    assert sro._is_public_hostname("bad..example") is False
+    assert sro._should_run_subdomain_enum("") is False
+    assert sro._coerce_str(None) == ""
+    assert sro._coerce_str(b"value") == "value"
+    assert sro._coerce_str(42) == "42"
+
+
 def test_orchestrator_skips_public_osint_for_non_public_hostname(monkeypatch):
     monkeypatch.setattr(sro, "_setup_specialized_tools",
                         lambda errors=None: {"success": True, "tools": [], "failed": []})

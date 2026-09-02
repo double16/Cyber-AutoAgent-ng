@@ -2,9 +2,11 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import requests
 
 from modules.config.providers import litellm_config
 from modules.config.providers.ollama_config import (
+    get_ollama_host,
     get_ollama_keep_alive,
     get_ollama_options,
     get_ollama_timeout,
@@ -317,6 +319,25 @@ def test_align_litellm_defaults_infers_unknown_embedding_dimensions(monkeypatch)
     assert defaults["embedding"].dimensions == 3072
 
 
+@pytest.mark.parametrize(
+    ("model", "dimensions"),
+    [
+        ("custom-ada-002", 1536),
+        ("custom-text-embedding-004", 768),
+        ("custom-MiniLM", 384),
+        ("custom-titan-v2", 1024),
+        ("custom-unknown", 1536),
+    ],
+)
+def test_align_litellm_defaults_infers_other_unknown_embedding_dimensions(monkeypatch, model, dimensions):
+    defaults = _defaults()
+    monkeypatch.setattr(litellm_config.litellm, "get_max_tokens", lambda model: None)
+
+    litellm_config.align_litellm_defaults(defaults, Env({"CYBER_AGENT_EMBEDDING_MODEL": model}))
+
+    assert defaults["embedding"].dimensions == dimensions
+
+
 def test_ollama_timeout_keep_alive_and_options(monkeypatch):
     warnings = []
     monkeypatch.setattr(
@@ -332,3 +353,42 @@ def test_ollama_timeout_keep_alive_and_options(monkeypatch):
     assert get_ollama_options(Env({"OLLAMA_CONTEXT_LENGTH": "4096"})) == {"num_ctx": 4096}
     assert get_ollama_options(Env({"OLLAMA_CONTEXT_LENGTH": "1024"})) == {}
     assert get_ollama_options(Env({"OLLAMA_CONTEXT_LENGTH": "bad"})) == {}
+
+
+def test_get_ollama_host_prefers_explicit_environment_value(monkeypatch):
+    monkeypatch.setattr("modules.config.providers.ollama_config.os.path.exists", lambda _path: True)
+
+    assert get_ollama_host(Env({"OLLAMA_HOST": "http://configured:11434"})) == "http://configured:11434"
+
+
+def test_get_ollama_host_uses_native_default_outside_docker(monkeypatch):
+    monkeypatch.setattr("modules.config.providers.ollama_config.os.path.exists", lambda _path: False)
+
+    assert get_ollama_host(Env()) == "http://localhost:11434"
+
+
+def test_get_ollama_host_finds_second_docker_candidate(monkeypatch):
+    calls = []
+    monkeypatch.setattr("modules.config.providers.ollama_config.os.path.exists", lambda _path: True)
+
+    def get(url, timeout):
+        calls.append((url, timeout))
+        return SimpleNamespace(status_code=503 if "localhost" in url else 200)
+
+    monkeypatch.setattr("modules.config.providers.ollama_config.requests.get", get)
+
+    assert get_ollama_host(Env()) == "http://host.docker.internal:11434"
+    assert calls == [
+        ("http://localhost:11434/api/version", 2),
+        ("http://host.docker.internal:11434/api/version", 2),
+    ]
+
+
+def test_get_ollama_host_falls_back_after_docker_connection_errors(monkeypatch):
+    monkeypatch.setattr("modules.config.providers.ollama_config.os.path.exists", lambda _path: True)
+    monkeypatch.setattr(
+        "modules.config.providers.ollama_config.requests.get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(requests.ConnectionError("unavailable")),
+    )
+
+    assert get_ollama_host(Env()) == "http://host.docker.internal:11434"

@@ -30,6 +30,48 @@ def test_parsed_trace_properties_and_tool_outputs():
     ]
 
 
+def test_parsed_trace_single_turn_and_output_limit_edge_cases():
+    trace = ParsedTrace(
+        trace_id="t",
+        trace_name="Trace",
+        objective="Assess",
+        messages=[ParsedMessage("system", "x" * 100)],
+        tool_calls=[
+            ParsedToolCall("first", {}, output="None"),
+            ParsedToolCall("second", {}, output="x" * 900),
+        ],
+    )
+
+    assert trace.is_multi_turn is True
+    assert trace.has_tool_usage is True
+    assert trace.get_tool_outputs(limit=1) == [f"Tool [second]: {'x' * 800}"]
+    empty = ParsedTrace("t", "Trace", "", [], [])
+    assert empty.is_multi_turn is False
+    assert empty.has_tool_usage is False
+
+
+def test_trace_helpers_parse_unusual_outputs_and_ignore_irrelevant_observations():
+    parser = TraceParser()
+    assert parser._extract_content_from_output({"content": [{"type": "image", "text": "ignored"}]}) == ""
+    assert parser._extract_content_from_output({"text": "direct"}) == "direct"
+    assert parser._extract_content_from_output({"message": "message"}) == "message"
+    assert parser._extract_content_from_output(7) is None
+
+    assert parser._parse_observation_message(SimpleNamespace(type="EVENT", input="short")) is None
+    assert parser._extract_tool_as_message(SimpleNamespace(name="unrelated", input={"x": 1}, output="no")) is None
+    assert parser._parse_tool_observation(SimpleNamespace(name="unrelated", input={}, output=None)) is None
+
+    tool = parser._parse_tool_observation({
+        "name": "advanced_payload_coordinator",
+        "input": [{"role": "tool"}],
+        "output": [{"text": "result"}],
+        "startTime": 1.5,
+    })
+    assert tool.name == "advanced_payload_coordinator"
+    assert tool.input_data["raw_input"]
+    assert tool.output == "result"
+
+
 def test_extract_objective_from_metadata_input_and_name():
     parser = TraceParser()
 

@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -21,7 +22,7 @@ def test_sqlite_plan_store_init(tmp_path):
     assert os.path.exists(db_path)
 
     # Check if tables were created
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'")
         assert cursor.fetchone() is not None
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'")

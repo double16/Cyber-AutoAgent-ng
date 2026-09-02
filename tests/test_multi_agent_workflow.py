@@ -16021,3 +16021,481 @@ def test_synthesis_repair_cycle_resets_flags():
     assert cycle_count == 2
     assert evaluator_calls == 2
     assert state.tasks[0].status == "done"
+
+
+def test_workflow_retry_and_correction_limits_use_configured_values_and_safe_fallbacks():
+    controller = MultiAgentWorkflowController.__new__(MultiAgentWorkflowController)
+    controller.runtime = SimpleNamespace(config_manager=None)
+
+    assert controller._json_retry_count() == 1
+    assert controller._plan_refinement_iteration_count() == 1
+    assert controller._task_prompt_refinement_iteration_count() == 1
+    assert controller._task_execution_cycle_count() == 2
+    assert controller._task_creator_correction_count() == 4
+    assert controller._task_acceptance_correction_count() == 2
+    assert controller._task_endpoint_evidence_correction_count() == 1
+    assert controller._task_evaluator_correction_count() == 1
+
+    configured_values = {
+        "CYBER_WORKFLOW_JSON_RETRIES": -1,
+        "CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS": -1,
+        "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": -1,
+        "CYBER_WORKFLOW_TASK_EXECUTION_CYCLES": -1,
+        "CYBER_TASK_CREATOR_MAX_CORRECTIONS": -1,
+        "CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS": -1,
+        "CYBER_ENDPOINT_EVIDENCE_MAX_CORRECTIONS": -1,
+        "CYBER_TASK_EVALUATOR_MAX_CORRECTIONS": -1,
+    }
+    controller.runtime = SimpleNamespace(
+        config_manager=SimpleNamespace(getenv_int=lambda name, default: configured_values[name])
+    )
+
+    assert controller._json_retry_count() == 0
+    assert controller._plan_refinement_iteration_count() == 0
+    assert controller._task_prompt_refinement_iteration_count() == 0
+    assert controller._task_execution_cycle_count() == 1
+    assert controller._task_creator_correction_count() == 0
+    assert controller._task_acceptance_correction_count() == 0
+    assert controller._task_endpoint_evidence_correction_count() == 0
+    assert controller._task_evaluator_correction_count() == 0
+
+
+def test_workflow_validation_helpers_route_by_task_kind(monkeypatch):
+    finding_task = Task(
+        task_uid="finding-validation",
+        title="Validate finding",
+        objective="Validate finding",
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    objective_task = Task(
+        task_uid="objective-validation",
+        title="Validate objective",
+        objective="Validate objective",
+        phase=1,
+        status="active",
+        kind="objective_validation",
+        reference_id="objective-1",
+    )
+    standard_task = Task(
+        task_uid="standard",
+        title="Standard task",
+        objective="Assess",
+        phase=1,
+        status="active",
+    )
+    monkeypatch.setattr(workflow_mod, "finding_validation_submitted", lambda task: task is finding_task)
+    monkeypatch.setattr(workflow_mod, "objective_validation_submitted", lambda task: task is objective_task)
+    monkeypatch.setattr(workflow_mod, "finding_validation_outcome", lambda task: "confirmed")
+    monkeypatch.setattr(workflow_mod, "objective_validation_outcome", lambda task: "rejected")
+
+    assert MultiAgentWorkflowController._validation_tool_name(finding_task) == "record_finding_validation"
+    assert MultiAgentWorkflowController._validation_tool_name(objective_task) == "record_objective_validation"
+    assert MultiAgentWorkflowController._validation_tool_name(standard_task) == ""
+    assert MultiAgentWorkflowController._validation_submitted(finding_task)
+    assert MultiAgentWorkflowController._validation_submitted(objective_task)
+    assert MultiAgentWorkflowController._validation_submitted(standard_task)
+    assert MultiAgentWorkflowController._validation_outcome(finding_task) == "confirmed"
+    assert MultiAgentWorkflowController._validation_outcome(objective_task) == "rejected"
+    assert MultiAgentWorkflowController._validation_outcome(standard_task) is None
+
+
+def test_finding_candidate_acceptance_requires_one_candidate_only_criterion():
+    candidate_requirement = EvidenceRequirement(kind="finding_candidate")
+    candidate_task = Task(
+        task_uid="candidate-only",
+        title="Record candidate",
+        objective="Record candidate",
+        phase=1,
+        status="active",
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Frozen candidate scope",
+                source_refs=["task:candidate-source"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="candidate",
+                description="Record a candidate",
+                evidence_requirements=[candidate_requirement],
+            )],
+        ),
+    )
+    mixed_requirement_task = replace(
+        candidate_task,
+        task_uid="mixed",
+        acceptance=replace(
+            candidate_task.acceptance,
+            criteria=[replace(
+                candidate_task.acceptance.criteria[0],
+                evidence_requirements=[candidate_requirement, EvidenceRequirement(kind="artifact")],
+            )],
+            manifest_hash="",
+        ),
+    )
+    multiple_criteria_task = replace(
+        candidate_task,
+        task_uid="multiple-criteria",
+        acceptance=replace(
+            candidate_task.acceptance,
+            criteria=[
+                candidate_task.acceptance.criteria[0],
+                replace(candidate_task.acceptance.criteria[0], id="candidate-second"),
+            ],
+            manifest_hash="",
+        ),
+    )
+    validation_task = replace(candidate_task, task_uid="validation", kind="finding_validation")
+
+    assert MultiAgentWorkflowController._finding_candidate_acceptance_is_deterministic(candidate_task)
+    assert not MultiAgentWorkflowController._finding_candidate_acceptance_is_deterministic(mixed_requirement_task)
+    assert not MultiAgentWorkflowController._finding_candidate_acceptance_is_deterministic(multiple_criteria_task)
+    assert not MultiAgentWorkflowController._finding_candidate_acceptance_is_deterministic(validation_task)
+
+
+def test_extract_result_text_ignores_empty_or_non_text_content_blocks():
+    message_only = SimpleNamespace(message={"content": [{"image": "ignored"}, "not-a-block"]})
+    content_only = SimpleNamespace(content=[{"image": "ignored"}, "not-a-block"])
+
+    assert extract_result_text(message_only) == str(message_only)
+    assert extract_result_text(content_only) == str(content_only)
+
+
+def test_default_structured_runner_rejects_missing_output_and_exhausted_artifact_reader(monkeypatch):
+    cleanup_calls = []
+
+    class Agent:
+        def __init__(self, result, exhausted=False):
+            self.result = result
+            self._cyber_evaluator_artifact_read_limit_hook = SimpleNamespace(exhausted=exhausted)
+
+        def __call__(self, _prompt, structured_output_model=None):
+            return self.result
+
+        def cleanup(self):
+            cleanup_calls.append("cleanup")
+
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(provider="litellm", target="example.com", objective="test"),
+        operation_id="OP_TEST",
+    )
+    agents = [Agent(SimpleNamespace()), Agent(SimpleNamespace(structured_output={}), exhausted=True)]
+    monkeypatch.setattr(workflow_mod, "create_agent", lambda *args, **kwargs: agents.pop(0))
+    runner = workflow_mod.default_structured_runner(runtime)
+    output_model = workflow_mod.WORKFLOW_OUTPUT_MODELS["plan_critic"]
+
+    with pytest.raises(workflow_mod.StructuredOutputUnavailableError):
+        runner("plan_critic", "prompt", [], "system", output_model)
+    with pytest.raises(workflow_mod.EvaluatorArtifactReadLimitExceeded):
+        runner("plan_critic", "prompt", [], "system", output_model)
+
+    assert cleanup_calls == ["cleanup", "cleanup"]
+
+
+def test_workflow_state_store_uses_atomic_patch_when_available_and_replaces_as_fallback(monkeypatch):
+    plan = OperationPlan(
+        objective="Assess",
+        current_phase=1,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Discovery", status="active"),
+            PlanPhase(id=2, title="Review", status="pending"),
+        ],
+    )
+
+    class Client:
+        def __init__(self):
+            self.plan = plan
+            self.patches = []
+
+        def get_active_plan(self, **_kwargs):
+            return self.plan
+
+        def patch_plan(self, **kwargs):
+            self.patches.append(kwargs)
+            return self.plan
+
+        def store_plan(self, *, plan, **_kwargs):
+            self.plan = plan
+
+    client = Client()
+    monkeypatch.setattr(WorkflowStateStore, "client", property(lambda _store: client))
+    store = WorkflowStateStore("OP_TEST")
+
+    assert store.patch_plan(phase_status_updates={1: "done"}) is plan
+    assert client.patches[0]["phase_status_updates"] == {1: "done"}
+
+    client.patch_plan = None
+    updated = store.patch_plan(phase_status_updates={1: "done"}, current_phase=2, assessment_complete=True)
+
+    assert updated.phases[0].status == "done"
+    assert updated.current_phase == 2
+    assert updated.assessment_complete is True
+
+
+def test_workflow_state_store_rebinds_validation_tasks_and_rejects_invalid_replacements(monkeypatch):
+    source = Task(
+        task_uid="validation-source",
+        title="Validate finding",
+        objective="Validate finding",
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    replacement = replace(source, task_uid="validation-replacement", replacement_of=source.task_uid)
+    stored = []
+    patches = []
+    client = SimpleNamespace(
+        store_task=lambda *, task: stored.append(task),
+        rebind_finding_verification_task=lambda *_args: False,
+        patch_task=lambda **kwargs: patches.append(kwargs) or replacement,
+    )
+    monkeypatch.setattr(WorkflowStateStore, "client", property(lambda _store: client))
+    store = WorkflowStateStore("OP_TEST")
+
+    with pytest.raises(ValueError, match="requires finding-validation"):
+        store.rebind_finding_verification_task(replace(source, kind="standard"), replacement)
+    with pytest.raises(ValueError, match="must retain"):
+        store.rebind_finding_verification_task(source, replace(replacement, reference_id="finding-2"))
+
+    assert not store.rebind_finding_verification_task(source, replacement)
+    assert stored == [replacement]
+    assert patches[0]["status"] == "superseded"
+
+
+def test_workflow_state_store_fallback_patch_preserves_task_identity_and_updates_mutable_fields(monkeypatch):
+    task = Task(
+        task_uid="mutable-task",
+        title="Mutable task",
+        objective="Assess",
+        phase=1,
+        status="active",
+        evidence=["artifact:existing"],
+        recovery_context={"remove": True},
+    )
+
+    class Client:
+        patch_task = None
+
+        def __init__(self):
+            self.tasks = [task]
+
+        def list_tasks(self, **_kwargs):
+            return list(self.tasks)
+
+        def store_task(self, *, task):
+            self.tasks = [task]
+
+    client = Client()
+    monkeypatch.setattr(WorkflowStateStore, "client", property(lambda _store: client))
+    store = WorkflowStateStore("OP_TEST")
+
+    updated = store.patch_task(
+        task.task_uid,
+        status="pending",
+        evidence_additions=["artifact:existing", "", "artifact:new"],
+        recovery_context_updates={"added": "value"},
+        recovery_context_removals=["remove"],
+    )
+
+    assert updated.status == "pending"
+    assert updated.evidence == ["artifact:existing", "artifact:new"]
+    assert updated.recovery_context == {"added": "value"}
+    with pytest.raises(ValueError, match="Unknown task_uid"):
+        store.patch_task("unknown")
+
+
+def test_workflow_state_store_activates_pending_or_completes_terminal_plans(monkeypatch):
+    pending_plan = OperationPlan(
+        objective="Assess",
+        current_phase=1,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Done", status="done"),
+            PlanPhase(id=2, title="Pending", status="pending"),
+        ],
+        assessment_complete=True,
+    )
+    terminal_plan = replace(
+        pending_plan,
+        phases=[
+            PlanPhase(id=1, title="Done", status="done"),
+            PlanPhase(id=2, title="Not applicable", status="not_applicable"),
+        ],
+    )
+    patches = []
+    client = SimpleNamespace(
+        list_tasks=lambda **_kwargs: [],
+        list_objective_validation_records=None,
+        patch_plan=lambda **kwargs: patches.append(kwargs) or pending_plan,
+    )
+    monkeypatch.setattr(WorkflowStateStore, "client", property(lambda _store: client))
+    store = WorkflowStateStore("OP_TEST")
+
+    assert store.ensure_active_phase(pending_plan) is pending_plan
+    assert patches[0]["phase_status_updates"] == {2: "active"}
+
+    assert store.ensure_active_phase(terminal_plan) is pending_plan
+    assert patches[-1]["assessment_complete"] is True
+
+
+def test_workflow_state_store_creates_plan_and_activates_first_phase_when_needed(monkeypatch):
+    stored = []
+    client = SimpleNamespace(store_plan=lambda *, plan, **_kwargs: stored.append(plan), get_active_plan=lambda **_kwargs: None)
+    monkeypatch.setattr(WorkflowStateStore, "client", property(lambda _store: client))
+    store = WorkflowStateStore("OP_TEST", [OperationTarget("target-1", "https://target.test", "network")])
+
+    with pytest.raises(WorkflowInvariantError, match="no phases"):
+        store.create_plan_from_dict({"objective": "Assess"})
+
+    plan = store.create_plan_from_dict({
+        "objective": "Assess",
+        "phases": [{"id": 1, "title": "Discovery", "status": "pending"}],
+    })
+
+    assert plan.phases[0].status == "active"
+    assert plan.targets[0].target_id == "target-1"
+    assert stored == [plan]
+
+
+def test_workflow_inventory_endpoint_validation_rejects_invalid_and_out_of_scope_items():
+    assert MultiAgentWorkflowController._inventory_item_semantic_rejection_reason({"kind": "note"}) == ""
+    assert MultiAgentWorkflowController._inventory_item_semantic_rejection_reason(
+        {"kind": "endpoint", "value": "ftp://target.test"}
+    ) == "invalid_network_endpoint"
+    assert MultiAgentWorkflowController._inventory_item_semantic_rejection_reason(
+        {"kind": "endpoint", "value": "https://target.test/%zz"}
+    ) == "invalid_endpoint_syntax"
+    assert MultiAgentWorkflowController._inventory_item_semantic_rejection_reason(
+        {"kind": "endpoint", "value": "https://target.test:invalid"}
+    ) == "invalid_network_endpoint"
+    assert MultiAgentWorkflowController._inventory_item_semantic_rejection_reason(
+        {"kind": "endpoint", "value": "https://target.test/valid"}
+    ) == ""
+
+
+def test_workflow_trace_contexts_restore_runtime_attributes_and_record_token_fallbacks():
+    controller = MultiAgentWorkflowController.__new__(MultiAgentWorkflowController)
+    recorded = []
+
+    class CallbackHandler:
+        def record_max_token_exhaustion(self, **payload):
+            if "failure_snapshot" in payload:
+                raise TypeError("legacy callback")
+            recorded.append(payload)
+
+        def record_efficiency_event(self, category):
+            recorded.append({"category": category})
+
+    controller.runtime = SimpleNamespace(
+        operation_id="OP_TEST",
+        config=SimpleNamespace(target="target.test"),
+        callback_handler=CallbackHandler(),
+        trace_attributes={"session.id": "previous"},
+    )
+    plan = _plan()
+    phase = plan.phases[0]
+    task = Task(task_uid="trace-task", title="Trace task", objective="Assess", phase=phase.id, status="active")
+
+    with controller._task_trace_context(plan, phase, task) as attributes:
+        assert controller.runtime.trace_attributes["workflow.task.uid"] == task.task_uid
+        assert attributes["session.id"] == "OP_TEST"
+    assert controller.runtime.trace_attributes == {"session.id": "previous"}
+
+    with controller._taxonomy_annotation_trace_context("finding-1"):
+        assert controller.runtime.trace_attributes["workflow.finding.uid"] == "finding-1"
+    assert controller.runtime.trace_attributes == {"session.id": "previous"}
+
+    controller._record_max_token_exhaustion("planner", "reasoning_loop", 1, failure_snapshot={"partial": True})
+    assert recorded[0] == {
+        "role": "planner",
+        "classification": "reasoning_loop",
+        "exhaustion_ordinal": 1,
+    }
+
+    controller.runtime.callback_handler.record_max_token_exhaustion = None
+    controller._record_max_token_exhaustion("planner", "reasoning_loop", 2)
+    assert recorded[-1] == {"category": "max_token_exhaustion"}
+
+    network_target = OperationTarget("network", "https://target.test:8443", "network")
+    range_target = OperationTarget("range", "10.0.0.0/24", "network_range")
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason({}, {"network": network_target}) == (
+        "unknown_target_id"
+    )
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason(
+        {"target_id": "missing", "kind": "endpoint", "value": "https://target.test"},
+        {"network": network_target},
+    ) == "unknown_target_id"
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason(
+        {"target_id": "network", "kind": "note", "value": "note"},
+        {"network": network_target},
+    ) == ""
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason(
+        {"target_id": "network", "kind": "endpoint", "value": "http://target.test:8443"},
+        {"network": network_target},
+    ) == "scheme_mismatch"
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason(
+        {"target_id": "network", "kind": "endpoint", "value": "https://other.test:8443"},
+        {"network": network_target},
+    ) == "host_mismatch"
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason(
+        {"target_id": "network", "kind": "endpoint", "value": "https://target.test"},
+        {"network": network_target},
+    ) == "port_mismatch"
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason(
+        {"target_id": "range", "kind": "endpoint", "value": "https://10.0.1.1"},
+        {"range": range_target},
+    ) == "network_range_mismatch"
+    assert MultiAgentWorkflowController._inventory_item_target_rejection_reason(
+        {"target_id": "range", "kind": "endpoint", "value": "https://10.0.0.2"},
+        {"range": range_target},
+    ) == ""
+
+
+def test_generated_proposal_preflight_rejects_unsatisfied_contracts_and_capabilities():
+    controller = MultiAgentWorkflowController.__new__(MultiAgentWorkflowController)
+    phase = PlanPhase(id=1, title="Discovery", status="active")
+    controller.state = SimpleNamespace(get_plan=lambda: _plan())
+    controller._available_task_execution_capabilities = lambda: {"request"}
+
+    controller._phase_task_contract = lambda _phase: SimpleNamespace(phase_id=2, mode="fanout")
+    with pytest.raises(ValueError, match="phase_alignment"):
+        controller._validate_generated_task_proposals(phase, [])
+
+    controller._phase_task_contract = lambda _phase: SimpleNamespace(
+        phase_id=1,
+        mode="fanout_with_synthesis",
+        synthesis_execution="runtime",
+    )
+    with pytest.raises(ValueError, match="contract_unsatisfiable"):
+        controller._validate_generated_task_proposals(phase, [])
+
+    controller._phase_task_contract = lambda _phase: None
+    skipped = SimpleNamespace(inferred_basis_kind="snapshot", task_role="mapping")
+    synthesis = SimpleNamespace(inferred_basis_kind="procedure", task_role="synthesis")
+    controller._validate_generated_task_proposals(phase, [skipped, synthesis])
+
+    without_methods = SimpleNamespace(inferred_basis_kind="procedure", task_role="mapping", methods=[])
+    with pytest.raises(ValueError, match="no declared method"):
+        controller._validate_generated_task_proposals(phase, [without_methods])
+
+    unavailable = SimpleNamespace(
+        inferred_basis_kind="procedure",
+        task_role="mapping",
+        methods=["crawl"],
+        target_ids=[],
+    )
+    with pytest.raises(ValueError, match="no available runtime capability"):
+        controller._validate_generated_task_proposals(phase, [unavailable])
+
+    available = SimpleNamespace(
+        inferred_basis_kind="procedure",
+        task_role="mapping",
+        methods=["request"],
+        target_ids=["target-1"],
+    )
+    controller._validate_generated_task_proposals(phase, [available])

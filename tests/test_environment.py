@@ -12,6 +12,40 @@ from modules.config.system import environment as mod
 from modules.config.system import logger as logger_mod
 
 
+def test_clean_operation_memory_skips_missing_operation_id(monkeypatch):
+    captured = []
+
+    class Logger:
+        def debug(self, *_args):
+            captured.append("debug")
+
+        def warning(self, message):
+            captured.append(message)
+
+    monkeypatch.setattr(mod, "get_logger", lambda _name: Logger())
+
+    mod.clean_operation_memory("", ["https://example.test"])
+
+    assert captured[-1] == "No operation ID provided, skipping memory cleanup"
+
+
+def test_clean_operation_memory_skips_missing_target_values(monkeypatch):
+    captured = []
+
+    class Logger:
+        def debug(self, *_args):
+            captured.append("debug")
+
+        def warning(self, message):
+            captured.append(message)
+
+    monkeypatch.setattr(mod, "get_logger", lambda _name: Logger())
+
+    mod.clean_operation_memory("operation-1", [])
+
+    assert captured[-1] == "No target values provided, skipping memory cleanup"
+
+
 def test_resolve_seclists_root_prefers_valid_configured_override(monkeypatch, tmp_path):
     configured_root = tmp_path / "custom-seclists"
     (configured_root / "Discovery").mkdir(parents=True)
@@ -150,6 +184,98 @@ def test_shell_command_missing_and_nonzero_canary_are_unavailable(monkeypatch):
     assert health.reason == "bad arguments"
 
 
+def test_environment_probe_helpers_handle_os_errors_and_empty_failure_output(monkeypatch, tmp_path):
+    class BrokenPath:
+        def is_dir(self):
+            raise OSError("unreadable")
+
+    assert mod._is_seclists_root(BrokenPath()) is False
+    assert mod._bounded_probe_reason("x" * 400).endswith("...")
+    with pytest.raises(ValueError, match="non-empty strings"):
+        mod._probe_config({"args": [""]})
+
+    monkeypatch.setattr(mod.shutil, "which", lambda _command: "/usr/bin/scanner")
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=9, stdout="", stderr=""),
+    )
+    health = mod.check_shell_command("scanner", {"args": ["--help"]})
+    assert health.reason == "canary exited with code 9"
+    assert health.available is False
+
+
+def test_environment_helpers_fall_back_when_path_resolution_fails(monkeypatch):
+    class ResolvesWithError:
+        def resolve(self):
+            raise OSError("unresolvable")
+
+        def absolute(self):
+            return "/fallback/seclists"
+
+    candidate = ResolvesWithError()
+    monkeypatch.delenv("CYBER_SECLISTS_DIR", raising=False)
+    monkeypatch.setattr(mod, "_SECLISTS_ROOT_CANDIDATES", (candidate,))
+    monkeypatch.setattr(mod, "_is_seclists_root", lambda path: path is candidate)
+
+    assert mod.resolve_seclists_root() == "/fallback/seclists"
+    assert mod.ToolHealth("broken", "/tool").available is False
+
+
+def test_auto_setup_replaces_python_httpx_launcher(monkeypatch, tmp_path):
+    class ToolsPath:
+        def exists(self):
+            return True
+
+        def is_dir(self):
+            return False
+
+        def unlink(self):
+            return None
+
+        def mkdir(self, exist_ok=False):
+            assert exist_ok is True
+
+    class ConfigPath:
+        def with_name(self, _name):
+            return self
+
+        def open(self, *_args, **_kwargs):
+            return io.StringIO("cyber_tools: {}")
+
+    removed = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mod, "Path", lambda value: ToolsPath() if value == "tools" else ConfigPath())
+    monkeypatch.setattr(mod.shutil, "which", lambda command: "/opt/httpx" if command == "httpx" else None)
+    monkeypatch.setattr(mod.os, "access", lambda *_args: True)
+    monkeypatch.setattr(mod.os, "stat", lambda _path: SimpleNamespace(st_size=20))
+    monkeypatch.setattr("builtins.open", lambda *_args, **_kwargs: io.BytesIO(b"#!/bin/sh"))
+    monkeypatch.setattr(mod.os, "remove", removed.append)
+
+    assert mod.auto_setup() == []
+    assert removed == ["/opt/httpx"]
+
+
+def test_auto_setup_continues_after_tools_permission_and_httpx_errors(monkeypatch, tmp_path):
+    class BrokenToolsPath:
+        def exists(self):
+            raise PermissionError("denied")
+
+    class ConfigPath:
+        def with_name(self, _name):
+            return self
+
+        def open(self, *_args, **_kwargs):
+            return io.StringIO("cyber_tools: {}")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mod, "Path", lambda value: BrokenToolsPath() if value == "tools" else ConfigPath())
+    monkeypatch.setattr(mod.shutil, "which", lambda command: "/opt/httpx" if command == "httpx" else None)
+    monkeypatch.setattr(mod.os, "access", lambda *_args: (_ for _ in ()).throw(OSError("denied")))
+
+    assert mod.auto_setup() == []
+
+
 def test_tee_output_writes_terminal_and_clean_log(tmp_path):
     terminal = io.StringIO()
     log_file = tmp_path / "session.log"
@@ -190,6 +316,27 @@ def test_tee_output_flush_and_file_like_methods(tmp_path):
     assert tee.isatty() is True
     tee.close()
     assert (tmp_path / "session.log").read_text() == "held"
+
+
+def test_tee_output_tolerates_unflushable_terminal_and_closed_log(tmp_path):
+    class WriteOnlyTerminal:
+        def write(self, _message):
+            return None
+
+    class BrokenLog:
+        def write(self, _message):
+            raise OSError("closed")
+
+        def close(self):
+            raise OSError("closed")
+
+    tee = mod.TeeOutput(WriteOnlyTerminal(), str(tmp_path / "session.log"))
+    tee.log.close()
+    tee.log = BrokenLog()
+
+    tee.write("message\\n")
+    tee.close()
+
 
 
 def test_auto_setup_discovers_available_and_unavailable_tools(monkeypatch, tmp_path, capsys):

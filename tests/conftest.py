@@ -88,6 +88,25 @@ def restore_provider_override_environment():
             os.environ[key] = value
 
 
+@pytest.fixture(autouse=True)
+def close_memory_client_after_test():
+    """Close local Qdrant persistence created by a test before it is garbage-collected."""
+    yield
+    from modules.tools import memory
+
+    memory.clear_memory_client()
+
+
+@pytest.fixture(autouse=True)
+def restore_rate_limit_provider_patches():
+    """Prevent class-level rate-limit wrappers from leaking between tests."""
+    yield
+    from modules.config.models.ollama import OllamaModel
+    from modules.rate_limit.rate_limit import unpatch_model_provider_class
+
+    unpatch_model_provider_class(OllamaModel)
+
+
 @pytest.fixture
 def temp_data_dir():
     """Create a temporary directory for test data"""

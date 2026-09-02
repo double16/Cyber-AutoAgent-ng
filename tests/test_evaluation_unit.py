@@ -883,3 +883,70 @@ async def test_evaluate_single_trace_applies_policy_caps_and_uploads(monkeypatch
     assert scores["tuple"] == (0.4, {"m": 1})
     assert "drop" not in scores
     assert uploaded[0][0] == "trace-id"
+def test_trace_helpers_select_roles_and_objective(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev.trace_parser = SimpleNamespace(_extract_objective=lambda trace: getattr(trace, "objective", ""))
+    traces = [
+        SimpleNamespace(id="z", metadata={"attributes": {"agent.role": "specialist"}}, timestamp="2", objective=""),
+        SimpleNamespace(id="a", metadata={"attributes": {"langfuse.agent.type": "operation_controller"}}, timestamp="1", objective="goal"),
+        SimpleNamespace(id="x", metadata={}, timestamp=None, created_at="3", objective="fallback"),
+    ]
+    assert ev._trace_role(traces[0]) == "specialist"
+    assert len(ev._select_execution_traces(traces)) == 3
+    assert ev._operation_objective(traces) == "goal"
+    assert ev._trace_sort_key(traces[2]) == "3"
+    assert ev._trace_attributes(SimpleNamespace(metadata="bad")) == {}
+
+
+def test_metric_categories_cover_namespaces(monkeypatch):
+    ev = evaluator(monkeypatch)
+    assert ev._get_metric_category("tool_selection_accuracy") == "cybersecurity_specific"
+    assert ev._get_metric_category("custom/penetration_test_quality") == "agent_performance"
+    assert ev._get_metric_category("rubric/overall") == "rubric_judge"
+    assert ev._get_metric_category("answer_relevancy") == "response_quality"
+    assert ev._get_metric_category("unknown") == "general"
+
+
+def test_chat_invoke_handles_list_content_and_fallback(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_model = SimpleNamespace(invoke=Mock(return_value=SimpleNamespace(content=["a", "b"])))
+    assert ev._chat_invoke("system", "user") == "a b"
+    fallback = SimpleNamespace(invoke=Mock(side_effect=[RuntimeError("list unsupported"), SimpleNamespace(content="ok")]))
+    ev._chat_model = fallback
+    assert ev._chat_invoke("system", "user") == "ok"
+
+
+def test_synthesize_context_summary_handles_config_failure_and_llm_failure(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_model = SimpleNamespace(invoke=Mock(side_effect=RuntimeError("offline")))
+    parsed = SimpleNamespace(objective="assess", target="https://t", tool_calls=[], messages=[])
+    assert ev._synthesize_context_summary(parsed) == ""
+@pytest.mark.asyncio
+async def test_policy_structured_fallback_and_invalid_payload(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP"
+    ev._current_evaluation_scope = "operation"
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    ev._chat_invoke = Mock(return_value='{"caps": {}, "disable": []}')
+    data = SimpleNamespace(user_input="objective", retrieved_contexts=[], reference_topics=[])
+    assert await ev._infer_evaluation_policy(data) == {"caps": {}, "disable": []}
+    ev._chat_invoke_structured = Mock(return_value=["invalid"])
+    assert await ev._infer_evaluation_policy(data) == {}
+
+
+@pytest.mark.asyncio
+async def test_rubric_strict_profile_handles_list_context_and_structured_fallback(monkeypatch):
+    cfg = SimpleNamespace(
+        max_wait_secs=0, poll_interval_secs=0, min_tool_calls=0, min_evidence=0,
+        rubric_enabled=True, skip_if_insufficient_evidence=False, rubric_profile="strict",
+        judge_system_prompt="", judge_user_template="{context} {target} {objective}", judge_temperature=0.1,
+        judge_max_tokens=64, summary_max_chars=100,
+    )
+    ev = evaluator(monkeypatch, cfg)
+    ev._last_parsed_trace = SimpleNamespace(objective="obj", target="target", tool_calls=[])
+    ev._chat_model = SimpleNamespace(bind=Mock(return_value=SimpleNamespace()), invoke=Mock())
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    ev._chat_invoke = Mock(return_value='{"scores": {"safety": 0.9}, "overall": 0.8, "rationale": "safe"}')
+    result = await ev._rubric_judge_scores(SimpleNamespace(user_input=["a", "b"], retrieved_contexts=["ctx"]))
+    assert result["rubric/overall_quality"][0] == 0.8
+    assert "rubric/overall_quality" in result

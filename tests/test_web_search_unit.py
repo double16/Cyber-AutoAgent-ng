@@ -1,6 +1,6 @@
 
 import pytest
-from ddgs.exceptions import RatelimitException
+from ddgs.exceptions import RatelimitException, TimeoutException
 
 from modules.tools import web_search as mod
 
@@ -68,6 +68,18 @@ async def test_with_backoff_does_not_retry_permanent_errors():
 
 
 @pytest.mark.asyncio
+async def test_with_backoff_retries_empty_results_then_raises_timeout(monkeypatch):
+    async def fast_sleep(*_):
+        return None
+
+    monkeypatch.setattr(mod.asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(mod.random, "uniform", lambda *_: 0)
+
+    with pytest.raises(TimeoutException, match="no results"):
+        await mod.with_backoff(lambda *_: [], retries=1, base=0.1)("q", 1)
+
+
+@pytest.mark.asyncio
 async def test_web_search_clamps_limit_and_returns_dicts(monkeypatch):
     async def fake_search(query, limit):
         assert query == "x"
@@ -77,3 +89,29 @@ async def test_web_search_clamps_limit_and_returns_dicts(monkeypatch):
     monkeypatch.setattr(mod, "with_backoff", lambda fn: fake_search)
 
     assert await mod.web_search("x", limit=500) == [{"title": "T", "url": "U", "snippet": "S"}]
+
+
+@pytest.mark.asyncio
+async def test_web_search_clamps_low_limits_and_retries_transient_message_errors(monkeypatch):
+    calls = []
+
+    def temporarily_unavailable(*_args):
+        calls.append(True)
+        if len(calls) == 1:
+            raise RuntimeError("temporarily unavailable")
+        return [mod.WebSearchHit(title="T", url="U", snippet="S")]
+
+    async def fast_sleep(*_args):
+        return None
+
+    monkeypatch.setattr(mod.asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(mod.random, "uniform", lambda *_args: 0)
+    assert await mod.with_backoff(temporarily_unavailable, retries=1, base=0.1)("q", 1)
+
+    async def fake_search(query, limit):
+        assert query == "x"
+        assert limit == 1
+        return [mod.WebSearchHit(title="T", url="U", snippet="S")]
+
+    monkeypatch.setattr(mod, "with_backoff", lambda _fn: fake_search)
+    assert await mod.web_search("x", limit=0) == [{"title": "T", "url": "U", "snippet": "S"}]

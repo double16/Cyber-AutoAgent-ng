@@ -3,7 +3,9 @@ import types
 
 import pytest
 
+import modules.handlers.conversation_budget as cb
 from modules.handlers.conversation_budget import (
+    LargeToolResultMapper,
     _ensure_prompt_within_budget,
     _estimate_prompt_tokens_for_agent,
     _strip_reasoning_content,
@@ -138,3 +140,76 @@ def test_strip_reasoning_content_allowed_preserving_recent_messages(message_coun
     assert len(agent.messages) == 1
     assert len(agent.messages[0]["content"]) > 0
 
+
+def test_token_calc_and_message_text_helpers_cover_edge_shapes(monkeypatch):
+    assert cb.token_calc(0) == 0
+    monkeypatch.setattr(cb, "_get_char_to_token_ratio_dynamic", lambda _model: 0)
+    assert cb.token_calc(10, "model") > 0
+    assert cb._iter_message_texts({"content": "invalid"}) == []
+    message = {
+        "content": [
+            {"text": "hello", "json": "ignored"},
+            {"json": {"a": 1}},
+            {"toolUse": {"input": {"x": 2}}},
+            {"toolResult": {"content": [{"text": "result"}, {"json": {"ok": True}}]}},
+            "not-a-dict",
+        ]
+    }
+    texts = cb._iter_message_texts(message)
+    assert "hello" in texts and "result" in texts
+    assert cb._iter_message_texts(message, block_limit={"text"}) == ["hello"]
+
+
+def test_plan_state_and_preservation_helpers_cover_protected_pairs():
+    messages = [
+        {"role": "user", "content": [{"text": "objective"}]},
+        {"role": "assistant", "content": [{"toolUse": {"id": "p", "name": "plan", "input": {}}}]},
+        {"role": "tool", "content": [{"toolResult": {"toolUseId": "p", "content": "plan_overview[]"}}]},
+        {"role": "assistant", "content": [{"text": "later"}]},
+    ]
+    assert cb._is_plan_tool_result_message(messages[2]) is True
+    assert cb._get_latest_plan_tool_result(messages) == 2
+    protected = cb._protected_indices_for_plan_state(messages)
+    assert protected == {1, 2}
+    assert cb._message_has_tool_use(messages[1]) is True
+    assert cb._message_has_tool_result(messages[2]) is True
+    reduced = [messages[3]]
+    assert cb._restore_preserved_messages(reduced, messages, 1) >= 2
+
+
+def test_environment_helpers_parse_invalid_values(monkeypatch):
+    monkeypatch.setenv("TEST_INT", "bad")
+    monkeypatch.setenv("TEST_FLOAT", "bad")
+    assert cb._get_env_int("TEST_INT", 7) == 7
+    assert cb._get_env_float("TEST_FLOAT", 1.5) == 1.5
+    monkeypatch.delenv("TEST_INT")
+    monkeypatch.delenv("TEST_FLOAT")
+    assert cb._get_env_int("TEST_INT", 7) == 7
+    assert cb._get_env_float("TEST_FLOAT", 1.5) == 1.5
+
+
+def test_large_tool_result_mapper_compresses_text_json_and_tool_use():
+    mapper = LargeToolResultMapper(max_tool_chars=10, truncate_at=5, sample_limit=2)
+    message = {
+        "role": "tool",
+        "content": [
+            {"toolResult": {"content": [{"text": "abcdefghijklmnopqrstuvwxyz"}, {"json": {"a": "x" * 20, "b": 2}}]}},
+            {"toolUse": {"name": "shell", "toolUseId": "1", "input": {"code": "x" * 20}}},
+            {"text": "unchanged"},
+        ],
+    }
+    compressed = mapper(message, 0, [message])
+    assert compressed is not message
+    assert compressed["content"][0]["toolResult"]["content"][0]["text"].startswith("[compressed tool result")
+    assert "truncated from" in compressed["content"][1]["toolUse"]["input"]["code"]
+    assert message["content"][0]["toolResult"]["content"][0]["text"] == "abcdefghijklmnopqrstuvwxyz"
+
+
+def test_large_tool_result_mapper_helpers_cover_small_and_invalid_values():
+    mapper = LargeToolResultMapper(max_tool_chars=100, truncate_at=10)
+    assert mapper({"content": []}, 0, []) == {"content": []}
+    assert mapper._compress("invalid") == "invalid"
+    assert mapper._tool_length({"content": [{"text": "x"}, {"json": {"a": 1}}, {}]}) > 0
+    assert mapper._summarize_json({"a": "x" * 100}, 200).startswith("[json dict")
+    assert mapper._summarize_json([1, 2, 3], 20).startswith("[json list")
+    assert mapper._summarize_json("value", 10) == "[json truncated from 10 chars]"

@@ -404,6 +404,16 @@ def test_database_store_is_shared_when_operation_context_changes(tmp_path, monke
     assert second.db_path == str(tmp_path / "cyber_autoagent.db")
 
 
+def test_clear_memory_client_closes_qdrant_backend(monkeypatch):
+    client = Mock()
+    monkeypatch.setattr(mod, "_MEMORY_CLIENT", client)
+
+    mod.clear_memory_client()
+
+    client.close.assert_called_once_with()
+    assert mod._MEMORY_CLIENT is None
+
+
 def test_sqlite_store_initialization_recovers_corrupt_database_before_operation(tmp_path, monkeypatch):
     database = tmp_path / "cyber_autoagent.db"
     database.write_bytes(b"not a sqlite database")
@@ -421,6 +431,31 @@ def test_sqlite_store_initialization_recovers_corrupt_database_before_operation(
     assert recovered == [str(database)]
     assert store._sqlite_integrity_check(str(database)).lower() == "ok"
     assert len(list(tmp_path.glob("cyber_autoagent.corrupt-*.db"))) == 1
+
+
+def test_sqlite_connect_closes_when_connection_setup_fails(monkeypatch, tmp_path):
+    class FailingConnection:
+        closed = False
+        execute_count = 0
+
+        def execute(self, _statement):
+            self.execute_count += 1
+            if self.execute_count == 2:
+                raise sqlite3.OperationalError("pragma failed")
+
+        def close(self):
+            self.closed = True
+
+    connection = FailingConnection()
+    monkeypatch.setattr(mod.sqlite3, "connect", lambda *_args, **_kwargs: connection)
+    store = object.__new__(mod.SQLiteApplicationStore)
+    store.db_path = str(tmp_path / "database.db")
+    store.read_only = False
+
+    with pytest.raises(sqlite3.OperationalError, match="pragma failed"):
+        store._connect()
+
+    assert connection.closed is True
 
 
 def test_sqlite_store_initialization_replaces_database_when_recovery_fails(tmp_path, monkeypatch):

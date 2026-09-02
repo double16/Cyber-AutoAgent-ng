@@ -85,6 +85,11 @@ def test_command_executor_execute_reports_timeout_with_partial_output():
     assert "Command timed out after 30 seconds" in error
 
 
+def test_safe_text_normalizes_none_and_non_utf8_bytes():
+    assert shell_module._safe_text(None) == ""
+    assert shell_module._safe_text(b"\xfftext") == "ÿtext"
+
+
 def test_execute_single_command_preserves_command_options():
     result = execute_single_command({"command": "printf hi", "timeout": 60}, "/tmp", 30)
 

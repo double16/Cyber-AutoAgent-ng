@@ -1918,3 +1918,248 @@ def test_transform_sdk_event_alternate_payloads_and_streaming_updates(monkeypatc
     handler = make_handler()
     # No step limit anymore; ensure processing works without raising
     handler._process_tool_announcement({"name": "shell", "id": "limit", "input": {"cmd": "id"}})
+def test_stream_input_parser_handles_all_sdk_shapes():
+    handler = make_handler()
+    assert handler._parse_tool_input_from_stream(None) == {}
+    assert handler._parse_tool_input_from_stream({}) == {}
+    assert handler._parse_tool_input_from_stream({"value": '{"x": 1}'}) == {"x": 1}
+    assert handler._parse_tool_input_from_stream({"value": "[1, 2]"}) == {"value": [1, 2]}
+    assert handler._parse_tool_input_from_stream({"value": "partial{"}) == {"value": "partial{"}
+    assert handler._parse_tool_input_from_stream({"a": 1}) == {"a": 1}
+    assert handler._parse_tool_input_from_stream(' {"x": 2} ') == {"x": 2}
+    assert handler._parse_tool_input_from_stream("plain") == {"value": "plain"}
+    assert handler._parse_tool_input_from_stream(7) == {"value": "7"}
+
+
+def test_extract_output_text_supports_each_content_key_and_scalars():
+    handler = make_handler()
+    items = [
+        {"text": "a"},
+        {"json": {"b": 2}},
+        {"content": "c"},
+        {"output": "d"},
+        {"result": "e"},
+        {"message": "f"},
+        {"data": "g"},
+        {"other": 8},
+        "i",
+        10,
+    ]
+    output = handler._extract_output_text(items)
+    assert output.startswith("a")
+    assert '"b": 2' in output
+    assert output.endswith("i10")
+
+
+def test_shell_parsers_cover_empty_headers_errors_and_fallbacks():
+    handler = make_handler()
+    assert handler._parse_editor_tool_output("") == ""
+    assert handler._parse_editor_tool_output("  changed  ") == "changed"
+    assert handler._parse_shell_tool_output("") == ""
+    assert handler._parse_shell_tool_output("⎿ echo hi\nresult") == "result"
+    detailed = handler._parse_shell_tool_output_detailed(
+        "Command: ls\nStatus: error\nExit Code: 2\nError: denied"
+    )
+    assert detailed == "Error: denied"
+    assert handler._parse_shell_tool_output_detailed("Command: ls\nStatus: success") == "Command succeeded: ls\n(No output)"
+    assert handler._parse_shell_tool_output_detailed("unstructured") == "unstructured"
+    assert handler._parse_http_tool_output("  response  ") == "response"
+
+
+def test_budget_progress_and_input_extraction_cover_caps_and_bad_values(monkeypatch):
+    handler = make_handler()
+    handler.coordinator = None
+    handler.budget_max_duration = 1
+    handler.budget_max_tokens = 100
+    handler.budget_max_cost = 2.0
+    monkeypatch.setattr(handler, "_operation_elapsed_seconds", lambda: 120.0)
+    progress, percent = handler._calculate_budget_progress(50, 1.0)
+    assert progress == 2.0 and percent == 200
+    assert handler._extract_code_from_input(None) == ""
+    assert handler._extract_code_from_input("print(1)") == "print(1)"
+    assert handler._extract_code_from_input({"source": "x"}) == "x"
+    assert handler._extract_code_from_input({"input": [1, 2]}) == "[\n  1,\n  2\n]"
+    assert handler._extract_code_from_input({"other": True}).startswith("{")
+    assert handler._extract_code_from_input(9) == "9"
+
+
+def test_operation_coordinator_provider_and_termination_edge_cases():
+    emitter = MagicMock()
+    coordinator = OperationEventCoordinator("OP", emitter)
+    coordinator.set_operation_health_provider(lambda: ["not-a-dict"])
+    assert coordinator.operation_health_snapshot() is None
+    coordinator.set_operation_state_snapshot_provider(lambda: {"state": "ok"})
+    assert coordinator.operation_state_snapshot() == {"state": "ok"}
+    coordinator.set_operation_state_snapshot_provider(lambda: (_ for _ in ()).throw(RuntimeError("bad")))
+    assert coordinator.operation_state_snapshot() is None
+    assert coordinator.mark_termination("done", "finished") is True
+    assert coordinator.mark_termination("again") is False
+    assert coordinator.termination_emitted is True
+    assert coordinator.termination_reason == "done"
+    assert coordinator.termination_message == "finished"
+
+
+def test_usage_and_cost_paths_cover_pricing_resolution(monkeypatch):
+    handler = make_handler()
+    handler.models_client = SimpleNamespace(
+        get_pricing=Mock(side_effect=[RuntimeError("provider miss"), SimpleNamespace(input=1.0, output=2.0, cache_read=0, cache_write=0)])
+    )
+    cost = handler._compute_cost_from_metrics(1_000_000, 2_000_000, 0, 0, provider_override="aws", model_id_override="m")
+    assert cost == pytest.approx(5.0)
+    handler.models_client.get_pricing.reset_mock()
+    handler.models_client.get_pricing.side_effect = [None, None]
+    assert handler._compute_cost_from_metrics(1, 1, 0, 0, provider_override="aws", model_id_override="missing") >= 0
+    handler.process_metrics(SimpleNamespace(accumulated_usage={"inputTokens": 3, "outputTokens": 4}), agent=SimpleNamespace())
+    assert handler._current_usage_totals()["input_tokens"] >= 0
+
+
+@pytest.mark.parametrize(
+    "metrics, expected",
+    [
+        ({"inferenceTimeMs": 12}, 12.0),
+        ({"latencyMs": -4}, 0.0),
+        (SimpleNamespace(metrics={"inference_time_ms": "3.5"}), 3.5),
+        (SimpleNamespace(accumulated_metrics={"latency_ms": 8}), 8.0),
+        (SimpleNamespace(metadata={"inferenceTimeMs": "bad"}), 0.0),
+        ({"other": 1}, 0.0),
+    ],
+)
+def test_extract_inference_time_ms_accepts_sdk_variants(metrics, expected):
+    assert AgentEventHandler._extract_inference_time_ms(metrics) == expected
+
+
+def test_reasoning_stream_and_tool_id_helpers_cover_filters():
+    handler = make_handler()
+    handler._handle_streaming_reasoning("[metadata]")
+    handler._handle_streaming_reasoning('{"delta": true}')
+    handler._handle_streaming_reasoning("use the browser")
+    assert handler.reasoning_buffer == ["use the browser"]
+    assert handler._tool_use_id({"_toolUseId": "a", "id": "b"}) == "a"
+    assert handler._tool_use_id({"id": "b"}) == "b"
+    assert handler._tool_use_id({"toolUseId": "c"}) == "c"
+    assert handler._tool_use_id({}) is None
+    assert handler._is_valid_input({}) is True
+    assert handler._is_valid_input("x") is True
+    assert handler._is_valid_input(1) is False
+
+
+def test_process_shell_and_http_output_handles_empty_duplicate_and_content():
+    handler = make_handler()
+    handler._process_shell_output("", [], "success", "s1")
+    handler._process_shell_output("", [], "success", "s1")
+    handler._process_shell_output("Output:\nhello", [], "success", "s2")
+    handler._process_shell_output("Output:\nhello", [], "success", "s2")
+    handler._process_http_output("", [], "success", "h1")
+    handler._process_http_output("status: 200", [], "success", "h2")
+    handler._process_http_output("status: 200", [], "success", "h2")
+    assert any(event.get("content") == "Command completed" for event in handler._events)
+    assert any(event.get("content") == "Request completed" for event in handler._events)
+    assert len([event for event in handler._events if event.get("type") == "output"]) == 4
+
+
+def test_alternate_result_normalization_skips_duplicates_and_metrics(monkeypatch):
+    handler = make_handler()
+    seen = []
+    monkeypatch.setattr(handler, "_process_tool_result_from_message", lambda value: seen.append(value))
+    metrics = SimpleNamespace(metrics={})
+    handler._handle_alternate_results(
+        {
+            "result": metrics,
+            "tool_result": "duplicate",
+            "execution_result": "exec text",
+            "response": {"status": "ok"},
+            "output": "output text",
+        },
+        tool_result_already=True,
+    )
+    assert len(seen) == 3
+    assert seen[0]["content"][0]["text"] == "exec text"
+    assert seen[-1]["content"][0]["text"] == "output text"
+
+
+def test_reasoning_buffer_merge_collapse_and_action_header_paths(monkeypatch):
+    handler = make_handler()
+    handler._accumulate_reasoning_text("Great")
+    handler._accumulate_reasoning_text("Great! I can continue")
+    handler._accumulate_reasoning_text("reasoning")
+    assert handler.reasoning_buffer == ["Great! I can continue"]
+    assert handler._collapse_repeated_sentences("One. One. Two!") == "One. Two!"
+    assert handler._collapse_repeated_sentences(42) == "42"
+    handler.action_count = 1
+    handler._record_action_boundary = Mock()
+    handler.record_efficiency_event = Mock()
+    handler._begin_reasoning_action_if_needed()
+    assert handler._reasoning_action_header_emitted is True
+    handler._reasoning_action_header_emitted = False
+    monkeypatch.setattr(handler, "should_stop", lambda: True)
+    handler._begin_reasoning_action_if_needed()
+
+
+def test_process_message_handles_roles_and_sdk_tool_shapes(monkeypatch):
+    handler = make_handler()
+    announcements = []
+    results = []
+    monkeypatch.setattr(handler, "_process_tool_announcement", lambda value: announcements.append(value))
+    monkeypatch.setattr(handler, "_process_tool_result_from_message", lambda value: results.append(value))
+    handler._process_message({"role": "assistant", "content": [{"text": "thinking"}]})
+    handler._process_message({"role": "assistant", "content": [{"type": "tool_use", "id": "t"}]})
+    handler._process_message({"role": "user", "content": [{"text": "input"}]})
+    handler._process_message(
+        {
+            "role": "assistant",
+            "content": [
+                {"toolUse": {"name": "shell"}},
+                {"toolResult": {"status": "ok"}},
+                {"toolResponse": {"status": "ok2"}},
+                {"type": "tool_result", "status": "ok3"},
+            ],
+        },
+        skip_reasoning_extraction=True,
+    )
+    assert len(announcements) == 2
+    assert len(results) == 3
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ({"handoff_to": "agent", "message": "go"}, True),
+        ({"handoff_to": "agent"}, False),
+        ("invalid", False),
+        (None, False),
+    ],
+)
+def test_handoff_input_complete_validation(value, expected):
+    assert make_handler()._handoff_input_complete(value) is expected
+
+
+def test_coordinator_and_metadata_edge_branches():
+    coordinator = OperationEventCoordinator("OP", MagicMock())
+    coordinator.record_tool("")
+    coordinator.record_tool("shell")
+    coordinator.record_tool("shell")
+    assert coordinator.tool_counts == {"shell": 2}
+    coordinator._report_exact_counts = True
+    coordinator.record_memory(evidence=True, category="finding", content_length=10)
+    assert coordinator.memory_ops == 1
+    handler = make_handler()
+    assert handler._metadata_from_agent(None) == {}
+    metadata = handler._metadata_from_agent(
+        SimpleNamespace(
+            _cyber_agent_type="specialist",
+            _cyber_agent_name="worker",
+            _cyber_agent_run_id="run-1",
+            _cyber_parent_agent_run_id="parent-1",
+        )
+    )
+    assert metadata["agent_type"] == "specialist"
+    assert metadata["agent_name"] == "worker"
+    assert metadata["parent_agent_run_id"] == "parent-1"
+
+
+def test_parent_termination_emits_agent_scoped_event():
+    handler = make_handler()
+    handler.parent_agent_run_id = "parent"
+    handler.emit_termination("failed", "child failed")
+    assert handler._events[-1]["type"] == "agent_termination"
+    assert handler._events[-1]["scope"] == "agent"

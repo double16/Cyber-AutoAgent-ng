@@ -496,6 +496,31 @@ def test_create_tool_repeat_guard_disable_switch_skips_cycle_configuration():
     agent_logger.info.assert_called_once_with("Repeated tool-call guard disabled")
 
 
+def test_tool_name_and_role_selection_helpers_filter_optional_and_task_creation_tools():
+    def core_tool():
+        return None
+
+    def create_tasks():
+        return None
+
+    def optional_tool():
+        return None
+
+    runtime = SimpleNamespace(
+        core_tools_list=[core_tool, create_tasks],
+        tools_list=[],
+        optional_tools_list=[optional_tool],
+    )
+
+    assert cyber_agent_module._tool_names([core_tool, optional_tool]) == {"core_tool", "optional_tool"}
+    assert cyber_agent_module.build_role_tools(runtime) == [core_tool]
+    assert cyber_agent_module.build_role_tools(
+        runtime,
+        selected_optional_tool_names=["optional_tool"],
+        include_create_tasks=True,
+    ) == [core_tool, create_tasks, optional_tool]
+
+
 def test_create_agent_reuses_runtime_resources(monkeypatch):
     class FakeAgent:
         def __init__(self, **kwargs):

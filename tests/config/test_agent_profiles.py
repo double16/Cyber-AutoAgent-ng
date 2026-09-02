@@ -1,7 +1,9 @@
 """Unit tests for agent model parameter registry, recommended defaults, and runtime adaptation."""
 
 
+from modules.config.models import agent_profiles as profiles
 from modules.config.models.agent_profiles import (
+    AgentModelSettings,
     AgentSettingsRegistry,
     LLMRoleType,
     ReasoningLevel,
@@ -130,6 +132,7 @@ def test_normalize_agent_type_uses_canonical_roles_and_limits_aliases():
     assert normalize_agent_type("phase_evaluator") is LLMRoleType.PHASE_EVALUATOR
     assert normalize_agent_type("primary") is LLMRoleType.UNKNOWN
     assert normalize_agent_type("not-a-role") is LLMRoleType.UNKNOWN
+    assert normalize_agent_type(None) is LLMRoleType.UNKNOWN
 
 
 def test_phase_evaluator_adaptation_does_not_modify_task_evaluator():
@@ -247,3 +250,82 @@ def test_translate_reasoning_to_provider():
 
     gemini_xhigh = translate_reasoning_to_provider("gemini", "gemini-2.5", ReasoningLevel.XHIGH, max_tokens=16384)
     assert gemini_xhigh["thinking_budget"] == 12288
+
+
+def test_registry_applies_learned_fallbacks_and_token_boost_controls():
+    registry = AgentSettingsRegistry()
+    registry.record_parameter_fallback("OpenAI", "Model-A", "temperature", None)
+    registry.record_parameter_fallback("OpenAI", "Model-A", "top_k", None)
+    registry.record_parameter_fallback("OpenAI", "Model-A", "top_p", None)
+
+    settings = registry.get_settings("task_executor", provider="openai", model_id="model-a")
+    assert (settings.temperature, settings.top_k, settings.top_p) == (None, None, None)
+    assert registry.get_learned_fallbacks("OPENAI", "MODEL-A") == {
+        "temperature": None,
+        "top_k": None,
+        "top_p": None,
+    }
+
+    previous = settings.max_tokens
+    assert registry.boost_max_tokens_for_retry("task_executor", boost_amount=10_000, ceiling=9_000) == 9_000
+    registry.revert_token_boost("task_executor", previous)
+    assert registry.get_settings("task_executor").max_tokens == previous
+    registry.apply_reasoning_repair("task_executor", "low", "temporary", permanent=False)
+    assert registry.export_adjustment_records()[-1].parameter_name == "top_p"
+
+
+def test_agent_profile_mutators_cover_litellm_bedrock_and_missing_models():
+    assert profiles.mutate_agent_model_max_tokens(None) == 0
+
+    model = type("LiteLLM", (), {"client_args": {}, "_output_tokens": 2000})()
+    profiles.mutate_agent_model_reasoning(model, ReasoningLevel.HIGH)
+    assert model.client_args["reasoning_effort"] == "high"
+    assert model.client_args["thinking"]["budget_tokens"] == 1600
+    profiles.mutate_agent_model_reasoning(model, ReasoningLevel.NONE)
+    assert model.client_args == {}
+
+    bedrock = type("Bedrock", (), {"additional_request_fields": {}})()
+    profiles.mutate_agent_model_reasoning(bedrock, ReasoningLevel.XHIGH)
+    assert bedrock.additional_request_fields["output_config"]["effort"] == "max"
+
+    configurable = type("Configurable", (), {"config": {"max_tokens": 100}, "params": {"max_output_tokens": 100}})()
+    assert profiles.mutate_agent_model_max_tokens(configurable, 50, ceiling=120) == 120
+    assert configurable.params["max_output_tokens"] == 120
+
+
+def test_custom_profile_registry_creates_unknown_role_baseline():
+    registry = AgentSettingsRegistry({LLMRoleType.PLAN_CREATOR: AgentModelSettings(max_tokens=12)})
+
+    assert registry.get_settings("missing").max_tokens == 8192
+
+
+def test_registry_reset_and_global_helpers_restore_default_state(monkeypatch):
+    registry = AgentSettingsRegistry()
+    registry.record_parameter_fallback("provider", "model", "temperature", None)
+    registry.apply_reasoning_repair("task_executor", "none", "temporary")
+
+    registry.reset()
+
+    assert registry.get_settings("task_executor").reasoning_level is ReasoningLevel.MEDIUM
+    assert registry.get_learned_fallbacks("provider", "model") == {}
+    monkeypatch.setattr(profiles, "_GLOBAL_AGENT_SETTINGS_REGISTRY", None)
+    assert profiles.get_agent_settings_registry() is profiles.get_agent_settings_registry()
+    assert profiles.reset_agent_settings_registry() is not None
+
+
+def test_agent_profile_mutators_cover_bedrock_cleanup_and_token_parameter_sources():
+    bedrock = type(
+        "Bedrock",
+        (),
+        {"additional_request_fields": {"output_config": {}, "thinking": {}, "anthropic_beta": ["effort-2025", "other"]}},
+    )()
+    profiles.mutate_agent_model_reasoning(bedrock, ReasoningLevel.NONE)
+    assert bedrock.additional_request_fields == {"anthropic_beta": ["other"]}
+
+    config_model = type("Config", (), {"config": {}})()
+    profiles.mutate_agent_model_reasoning(config_model, ReasoningLevel.HIGH)
+    assert config_model.config["additional_args"]["think"] == "high"
+
+    params_model = type("Params", (), {"params": {"max_tokens": 10}})()
+    assert profiles.mutate_agent_model_max_tokens(params_model, 5) == 15
+    assert params_model.params["max_tokens"] == 15

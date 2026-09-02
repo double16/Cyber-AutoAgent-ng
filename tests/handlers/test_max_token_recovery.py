@@ -12,6 +12,7 @@ from modules.config.models.agent_profiles import (
     mutate_agent_model_reasoning,
     reset_agent_settings_registry,
 )
+from modules.handlers import max_token_recovery as recovery
 from modules.handlers.max_token_recovery import (
     MaxTokenClassification,
     capture_and_discard_max_token_output,
@@ -75,6 +76,59 @@ def test_max_token_snapshot_bounds_internal_secret_diagnostics():
     assert snapshot.recorded_reasoning.endswith("…[truncated]")
     assert "internal-secret" in snapshot.partial_output
     assert "internal-token" in snapshot.recorded_reasoning
+
+
+def test_message_parsing_and_discard_only_remove_assistant_tail():
+    message = {
+        "role": "assistant",
+        "content": [
+            {"text": "output"},
+            {"reasoningContent": {"text": "reasoning"}},
+            "ignored",
+        ],
+    }
+    agent = MagicMock(messages=[{"role": "user"}, message])
+
+    assert recovery._message_parts(message) == ("output reasoning", "reasoning", True)
+    assert recovery._message_text(None) == ""
+    assert recovery.discard_incomplete_assistant_message(agent) == ("output reasoning", True, True)
+    assert agent.messages == [{"role": "user"}]
+    assert recovery.discard_incomplete_assistant_message(MagicMock(messages=[{"role": "user"}])) == ("", False, False)
+
+
+def test_recovery_state_helpers_reset_and_track_pattern_hashes():
+    agent = MagicMock(messages=[{"role": "assistant"}])
+    agent._max_token_pattern_hashes = {"prior"}
+    classification = MaxTokenClassification("reasoning_loop", 0.8, "pattern", 1, True)
+
+    assert recovery.is_repeated_max_token_pattern(agent, classification) is False
+    assert recovery.is_repeated_max_token_pattern(agent, classification) is True
+    assert recovery.is_repeated_max_token_pattern(agent, MaxTokenClassification("output_truncation", 0, None, 0)) is False
+    assert recovery.reset_agent_conversation_for_recovery(agent) is True
+    assert agent.messages == []
+    assert agent._max_token_pattern_hashes == set()
+    assert recovery.reset_agent_conversation_for_recovery(MagicMock(messages="not-a-list")) is False
+
+
+def test_max_token_recovery_prompt_uses_task_specific_and_generic_paths():
+    loop = MaxTokenClassification("reasoning_loop", 0.8, "pattern", 4, True)
+    task_prompt = recovery.build_task_executor_max_token_prompt(
+        loop,
+        completed_tools=[],
+        required_tools={"record_task_acceptance"},
+        task_objective="Validate the assigned route",
+    )
+    generic_prompt = recovery.build_task_executor_max_token_prompt(
+        MaxTokenClassification("output_truncation", 0, None, 4),
+        completed_tools=["shell"],
+        required_tools={"shell", "artifact"},
+        completed_outcomes=["", "artifact stored"],
+    )
+
+    assert "Call record_task_acceptance" in task_prompt
+    assert "Task objective: Validate the assigned route" in task_prompt
+    assert "Successful tools already observed: shell" in generic_prompt
+    assert "- artifact stored" in generic_prompt
 
 
 def test_mutate_agent_model_reasoning_and_tokens():

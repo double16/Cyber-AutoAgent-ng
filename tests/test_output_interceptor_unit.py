@@ -79,3 +79,63 @@ def test_intercept_output_replaces_streams_only_in_react_mode(monkeypatch):
 
     assert sys.stdout is original_stdout
     assert sys.stderr is original_stderr
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_type"),
+    [
+        ("────────────────────", "separator"),
+        ("✅ completed", "status"),
+        ("ordinary", "output"),
+    ],
+)
+def test_interceptor_classifies_special_output(content, expected_type):
+    stream = io.StringIO()
+    interceptor = mod.OutputInterceptor(stream)
+
+    interceptor.write(f"{content}\n")
+
+    assert _payloads(stream)[0]["type"] == expected_type
+
+
+def test_interceptor_recursion_delegates_and_stream_capabilities_are_preserved():
+    stream = io.StringIO()
+    interceptor = mod.OutputInterceptor(stream)
+    interceptor._in_event_emission = True
+
+    assert interceptor.write("raw") == 3
+    assert stream.getvalue() == "raw"
+    assert interceptor.readable() is False
+    assert interceptor.writable() is True
+    assert interceptor.seekable() is False
+    assert interceptor.isatty() is False
+
+
+def test_interceptor_buffers_nested_tool_execution_and_flushes_error():
+    stderr = mod.OutputInterceptor(io.StringIO(), "error")
+    mod.set_tool_execution_state(True)
+    mod.set_tool_execution_state(True)
+    stderr.write("first\nsecond\n")
+    mod.set_tool_execution_state(False)
+    assert mod.is_in_tool_execution() is True
+    mod.set_tool_execution_state(False)
+
+    assert mod.get_buffered_error_output() == "first\nsecond"
+
+
+def test_setup_output_interception_installs_streams_and_print_wrapper(monkeypatch):
+    original_stdout, original_stderr = sys.stdout, sys.stderr
+    original_print = __import__("builtins").print
+    stream = io.StringIO()
+    monkeypatch.setenv("CYBER_UI_MODE", "react")
+    monkeypatch.setattr(sys, "stdout", stream)
+    monkeypatch.setattr(sys, "stderr", stream)
+
+    mod.setup_output_interception()
+    try:
+        __import__("builtins").print("hello", "world", flush=True)
+        assert _payloads(stream)[0]["content"] == "hello world"
+    finally:
+        monkeypatch.setattr(__import__("builtins"), "print", original_print)
+        monkeypatch.setattr(sys, "stdout", original_stdout)
+        monkeypatch.setattr(sys, "stderr", original_stderr)

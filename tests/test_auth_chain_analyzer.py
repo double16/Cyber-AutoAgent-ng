@@ -45,6 +45,13 @@ def _loads(out: str) -> dict:
     return json.loads(out)
 
 
+def test_auth_chain_coerce_str_handles_none_bytes_text_and_other_values():
+    assert aca._coerce_str(None) == ""
+    assert aca._coerce_str(b"token") == "token"
+    assert aca._coerce_str("token") == "token"
+    assert aca._coerce_str(42) == "42"
+
+
 def test_auth_chain_reuses_cache_for_normalized_target(monkeypatch):
     calls = {"discover": 0}
 
@@ -305,6 +312,40 @@ def test_response_set_cookie_lines_prefers_duplicate_headers_get_all():
     )
     lines = aca._response_set_cookie_lines(resp)
     assert lines == ["set-cookie: a=1; Secure", "set-cookie: b=2; HttpOnly"]
+
+
+def test_response_cookie_and_wildcard_helpers_cover_fallback_signals(monkeypatch):
+    getlist_headers = SimpleNamespace(getlist=lambda _name: ["sid=one", "csrf=two"])
+    assert aca._response_set_cookie_lines(DummyResp(raw=SimpleNamespace(headers=getlist_headers))) == [
+        "set-cookie: sid=one",
+        "set-cookie: csrf=two",
+    ]
+    assert aca._response_set_cookie_lines(DummyResp(headers={"Set-Cookie": "sid=one"})) == ["set-cookie: sid=one"]
+
+    monkeypatch.setattr(aca, "_http_request", lambda *_args, **_kwargs: None)
+    assert aca._wildcard_baseline_signature("https://target.test")["code"] is None
+
+    response = DummyResp(
+        status_code=302,
+        headers={"Location": "/login", "Content-Type": "text/html", "Content-Length": "invalid", "ETag": "tag"},
+        raw=DummyRaw(prefix_bytes=b"body"),
+    )
+    monkeypatch.setattr(aca, "_http_request", lambda *_args, **_kwargs: response)
+    signature = aca._wildcard_baseline_signature("https://target.test")
+    assert signature["code"] == "302"
+    assert signature["clen"] is None
+    assert signature["body_prefix"] == b"body".hex()
+
+    baseline = {"code": "200", "clen": 10, "ctype": "text/html", "location": "/login", "etag": "tag"}
+    assert aca._looks_like_wildcard({"status": "404"}, baseline) is False
+    assert aca._looks_like_wildcard({"status": "200", "content_length": "10"}, baseline) is True
+    assert aca._looks_like_wildcard({"status": "200", "ctype": "text/html; charset=utf-8", "location": "/login"}, baseline) is True
+    assert aca._looks_like_wildcard({"status": "200", "ctype": "text/html", "etag": "tag"}, baseline) is True
+    assert aca._looks_like_wildcard({"status": "200", "body_prefix": "same"}, {"code": "200", "body_prefix": "same"}) is True
+    assert aca._looks_like_wildcard(
+        {"status": "200", "word_count": 4, "line_count": 2},
+        {"code": "200", "word_count": 4, "line_count": 2},
+    ) is True
 
 
 def test_analyze_cookie_security_flags_and_modern_none_without_secure():
@@ -718,3 +759,119 @@ def test_generate_auth_recommendations_fallback_when_no_signal():
     assert len(steps) == 1
     assert steps[0]["id"] == "BROADEN_DISCOVERY"
     assert steps[0]["priority"] == 1
+
+
+def test_main_forwards_auth_type_and_requested_artifact_paths(monkeypatch, capsys, tmp_path):
+    analyzer = Mock(return_value='{"ok": true}')
+    monkeypatch.setattr(aca, "auth_chain_analyzer", analyzer)
+    output_file = tmp_path / "auth.json"
+    manifest_file = tmp_path / "inventory.json"
+    monkeypatch.setattr("sys.argv", [
+        "auth_chain_analyzer.py",
+        "example.test",
+        "--auth-type", "jwt",
+        "--output-file", str(output_file),
+        "--inventory-manifest", str(manifest_file),
+    ])
+
+    assert aca.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"ok": True}
+    assert analyzer.call_args.args == ("example.test",)
+    assert analyzer.call_args.kwargs == {
+        "auth_type": "jwt",
+        "output_file": str(output_file),
+        "inventory_manifest": str(manifest_file),
+    }
+
+
+def test_auth_endpoint_classifier_covers_token_and_api_variants():
+    assert aca._classify_auth_endpoint("/jwt/token", "") == "JWT"
+    assert aca._classify_auth_endpoint("/oauth/token", "") == "OAuth"
+    assert aca._classify_auth_endpoint("/refresh", "") == "API Authentication"
+    assert aca._classify_auth_endpoint("/api/login", "") == "Session-based"
+    assert aca._classify_auth_endpoint("/api/authenticate", "") == "API Authentication"
+    assert aca._classify_auth_endpoint("/administrator", "") == "Administrative"
+
+
+def test_mechanism_analyzers_cover_negative_and_content_free_paths():
+    jwt = aca._analyze_jwt_mechanism({"path": "/token"}, "")
+    assert jwt["properties"] == {"token_endpoint": True}
+    assert aca._analyze_jwt_mechanism({"path": "/jwks"}, "not-json")["properties"]["jwks_endpoint"] is True
+
+    oauth = aca._analyze_oauth_mechanism({"path": "/callback"}, "")
+    assert oauth["description"] == "OAuth callback endpoint"
+    saml = aca._analyze_saml_mechanism({"path": "/saml"}, "")
+    assert saml["properties"] == {}
+    session = aca._analyze_session_mechanism({"path": "/login"}, "plain text")
+    assert session["properties"] == {}
+
+
+def test_analyze_auth_mechanisms_dispatches_all_types_and_auto_detects(monkeypatch):
+    endpoints = [
+        {"path": "/jwt", "full_url": "https://t/jwt", "type": "JWT"},
+        {"path": "/oauth", "full_url": "https://t/oauth", "type": "OAuth"},
+        {"path": "/saml", "full_url": "https://t/saml", "type": "SAML"},
+        {"path": "/login", "full_url": "https://t/login", "type": "Session-based"},
+    ]
+    monkeypatch.setattr(aca, "_http_request", lambda *args, **kwargs: DummyResp(text="content"))
+    monkeypatch.setattr(aca, "_analyze_jwt_mechanism", lambda endpoint, content: {"type": "JWT"})
+    monkeypatch.setattr(aca, "_analyze_oauth_mechanism", lambda endpoint, content: {"type": "OAuth"})
+    monkeypatch.setattr(aca, "_analyze_saml_mechanism", lambda endpoint, content: {"type": "SAML"})
+    monkeypatch.setattr(aca, "_analyze_session_mechanism", lambda endpoint, content: {"type": "Session-based"})
+    assert {m["type"] for m in aca._analyze_auth_mechanisms("https://t", endpoints, "auto")} == {
+        "JWT", "OAuth", "SAML", "Session-based"
+    }
+
+    responses = iter([DummyResp(text="JWT bearer OAuth client_id session csrf")])
+    monkeypatch.setattr(aca, "_http_request", lambda *args, **kwargs: next(responses))
+    detected = aca._analyze_auth_mechanisms("https://t", [], "auto")
+    assert {m["type"] for m in detected} == {"JWT", "OAuth", "Session-based"}
+
+
+def test_analyze_tokens_handles_cookie_errors_and_jwt_tool_failures(monkeypatch):
+    monkeypatch.setattr(aca, "_http_request", lambda *args, **kwargs: DummyResp(raw=None))
+    monkeypatch.setattr(aca, "_analyze_jwt_with_tools", Mock(return_value=[]))
+    out = aca._analyze_tokens_and_sessions("https://t", [{"type": "JWT"}])
+    assert out == {"tokens": [], "session_info": {"session_cookies": 0, "security_analysis": ["No session cookies identified"]}}
+
+    def failed_run(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(aca.subprocess, "run", failed_run)
+    assert aca._analyze_jwt_with_tools("https://t", [{"type": "JWT", "properties": {"sample_tokens": ["x"]}}]) == []
+
+
+def test_map_flows_handles_duplicate_session_and_jwt_hypotheses():
+    flow = aca._map_authentication_flows(
+        "https://t",
+        {
+            "auth_mechanisms": [],
+            "flow_analysis": {"session_management": {"security_analysis": ["Missing Secure flag", "Missing Secure flag"]}},
+            "tokens_discovered": [
+                {"type": "JWT", "analysis": {"algorithm": "HS256", "vulnerabilities": ["weak"]}},
+                {"type": "Cookie", "analysis": {}},
+            ],
+            "auth_endpoints": [],
+        },
+    )
+    assert len(flow["bypass_opportunities"]) == 2
+
+
+def test_recommendations_include_each_signal_and_remove_duplicate_ids():
+    results = {
+        "target": "https://t",
+        "auth_endpoints": [
+            {"path": "/login", "type": "Session-based"},
+            {"path": "/admin", "type": "Administrative"},
+        ],
+        "auth_mechanisms": [{"type": "JWT", "endpoint": "/jwt"}, {"type": "OAuth", "endpoint": "/oauth"}, {"type": "SAML", "endpoint": "/saml"}],
+        "tokens_discovered": [{"type": "Cookie", "name": "sid"}, {"type": "JWT", "token_preview": "eyJ.x.y"}],
+        "vulnerabilities": [],
+        "flow_analysis": {
+            "session_management": {"session_cookies": 1, "security_analysis": ["Missing Secure flag"]},
+            "bypass_opportunities": [{"type": "header", "technique": "header", "description": "check"}],
+            "privilege_escalation": [{"endpoint": "/admin"}],
+        },
+    }
+    ids = [step["id"] for step in aca._generate_auth_recommendations(results)]
+    assert {"MAP_AUTH_ENTRYPOINTS", "ADMIN_ENDPOINT_AUTHZ_MATRIX", "SESSION_REPLAY_AND_FIXATION", "JWT_CLAIM_TAMPER_VERIFY", "OAUTH_REDIRECT_AND_STATE_TESTS", "SAML_ASSERTION_VALIDATION_TESTS", "VERIFY_BYPASS_HYPOTHESIS_1", "PRIV_ESC_TARGETED_VALIDATION"} <= set(ids)

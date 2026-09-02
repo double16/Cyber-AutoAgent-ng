@@ -3,6 +3,7 @@ from modules.handlers.tool_failure_summary import (
     UNKNOWN_TOOL_FAILURE_MESSAGE,
     failure_summary,
     normalize_failed_tool_result,
+    tool_result_text,
 )
 
 
@@ -39,3 +40,25 @@ def test_failure_summary_redacts_and_bounds_existing_text():
 
     assert "token=[REDACTED]" in summary
     assert len(summary) <= FAILURE_SUMMARY_MAX_CHARS + len("…[truncated]")
+
+
+def test_tool_failure_summary_handles_nonstandard_result_shapes_and_non_failures():
+    assert tool_result_text(None) == ""
+    assert tool_result_text({"content": " plain text "}) == "plain text"
+    assert tool_result_text({"content": [{"text": "one"}, "ignored", {"text": "two"}]}) == "one\ntwo"
+
+    unchanged, summary = normalize_failed_tool_result({"status": "success"})
+    normalized, fallback_summary = normalize_failed_tool_result(
+        None,
+        RuntimeError(),
+        tool_use_id="tool-2",
+    )
+
+    assert unchanged == {"status": "success"}
+    assert summary == ""
+    assert normalized == {
+        "content": [{"text": UNKNOWN_TOOL_FAILURE_MESSAGE}],
+        "status": "error",
+        "toolUseId": "tool-2",
+    }
+    assert fallback_summary == UNKNOWN_TOOL_FAILURE_MESSAGE

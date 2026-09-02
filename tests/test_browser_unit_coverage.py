@@ -168,6 +168,84 @@ def test_llm_json_patch_helpers_and_response_format_detection():
 
 
 @pytest.mark.asyncio
+async def test_llm_json_patch_normalizes_valid_content_and_preserves_invalid_responses():
+    class Response(dict):
+        def __init__(self, choices):
+            super().__init__(choices=choices)
+            self.choices = choices
+
+    valid_choice = SimpleNamespace(message=SimpleNamespace(content="```json\n[\"one\"]\n```"))
+    invalid_choice = SimpleNamespace(message=SimpleNamespace(content="not json"))
+    inner = SimpleNamespace(
+        create_response=AsyncMock(return_value=Response([valid_choice, invalid_choice]))
+    )
+    patch = mod.LLMClientJSONResponsePatch(inner)
+
+    response = await patch.create_response(
+        messages=[{"role": "user", "content": "hello"}],
+        model="test",
+        response_format=ElementsModel,
+    )
+
+    assert json.loads(valid_choice.message.content) == {"elements": ["one"]}
+    assert invalid_choice.message.content == "not json"
+    assert response.choices == [valid_choice, invalid_choice]
+    assert inner.create_response.await_args.kwargs["messages"][1]["role"] == "system"
+
+    passthrough = await patch.create_response(messages=[], model="test")
+    assert passthrough is response
+
+
+@pytest.mark.asyncio
+async def test_browser_goto_url_uses_http_fallback_after_non_retriable_navigation_error(monkeypatch, tmp_path):
+    class Timeout:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    class ApiResponse:
+        status = 403
+        headers = {"server": "cloudflare", "x-test": "present"}
+
+        async def text(self):
+            return "Cloudflare challenge"
+
+    class RequestClient:
+        async def get(self, *_args, **_kwargs):
+            return ApiResponse()
+
+    class Browser:
+        artifacts_dir = str(tmp_path)
+        context = SimpleNamespace(request=RequestClient())
+        page = SimpleNamespace(goto=AsyncMock(side_effect=RuntimeError("blocked by target")))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        def timeout(self):
+            return Timeout()
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+        async def reset(self):
+            raise AssertionError("non-retriable failures must use fallback without a reset")
+
+    monkeypatch.setattr(mod, "get_browser", lambda: Browser())
+
+    result = await mod.browser_goto_url("https://example.com/path")
+
+    assert "HTTP fallback executed" in result
+    assert "Detected Cloudflare/WAF indicators" in result
+    assert len(list(tmp_path.glob("http_fallback_*.txt"))) == 3
+
+
+@pytest.mark.asyncio
 async def test_simplify_requests_for_llm_writes_har_and_network_summary(tmp_path):
     service = mod.BrowserService.__new__(mod.BrowserService)
     service.artifacts_dir = str(tmp_path)

@@ -5,19 +5,101 @@ import os
 import tempfile
 from types import SimpleNamespace
 
+from modules.handlers import utils as utils_module
 from modules.handlers.utils import (
+    b64,
     create_output_directory,
+    duration_max,
+    emit_command,
+    emit_error,
+    emit_event,
+    emit_output,
+    emit_status,
+    emit_step_start,
     filter_none_values,
+    format_duration,
     get_output_path,
+    get_terminal_width,
     get_tool_description,
     get_tool_name,
     get_tool_spec,
     sanitize_target_name,
+    sanitize_toon_value,
     tool_append_description,
     tool_rename,
     update_latest_output_pointer,
     validate_output_path,
 )
+
+
+def test_terminal_helpers_cover_width_fallback_and_separator_rendering(monkeypatch, capsys):
+    monkeypatch.setattr("modules.handlers.utils.shutil.get_terminal_size", lambda _fallback: os.terminal_size((200, 24)))
+    assert get_terminal_width(default=100) == 100
+    monkeypatch.setattr("modules.handlers.utils.shutil.get_terminal_size", lambda _fallback: (_ for _ in ()).throw(OSError()))
+    assert get_terminal_width(default=77) == 77
+
+    monkeypatch.setattr("modules.handlers.utils.get_terminal_width", lambda: 3)
+    from modules.handlers.utils import print_separator
+
+    print_separator("-", "<", ">")
+    print_separator("+")
+    assert capsys.readouterr().out == "<--->\n+++\n"
+
+
+def test_banner_section_and_status_cover_suppressed_and_cli_rendering(monkeypatch, capsys):
+    monkeypatch.setenv("CYBERAGENT_NO_BANNER", "true")
+    utils_module.print_banner()
+    utils_module.print_section("Title", "content")
+    utils_module.print_status("hidden")
+    assert capsys.readouterr().out == ""
+
+    monkeypatch.delenv("CYBERAGENT_NO_BANNER")
+    monkeypatch.setenv("CYBER_UI_MODE", "cli")
+    monkeypatch.setattr(utils_module.tomllib, "load", lambda _file: {"project": {"version": "1.2.3"}})
+    utils_module.print_banner()
+    utils_module.print_section("Title", "content", emoji="*")
+    utils_module.print_status("custom", "CUSTOM")
+    output = capsys.readouterr().out
+    assert "1.2.3" in output
+    assert "Title" in output
+    assert "[INFO]" in output
+
+
+def test_event_helpers_and_formatters_cover_public_output_shapes(monkeypatch):
+    emitted = []
+    monkeypatch.setattr("modules.handlers.utils.emit_event", lambda *args, **kwargs: emitted.append((args, kwargs)))
+
+    emit_step_start(1, 2, "shell")
+    emit_command(["id"])
+    emit_command("pwd")
+    emit_output("  output  ")
+    emit_output("   ")
+    emit_error("bad")
+    emit_status("ready", "success")
+
+    assert emitted == [
+        (("step_start", "shell"), {"step": 1, "total_steps": 2}),
+        (("command_array", ["id"]), {}),
+        (("command", "pwd"), {}),
+        (("output", "output"), {}),
+        (("error", "bad"), {"level": "error"}),
+        (("status", "ready"), {"level": "success"}),
+    ]
+    assert b64(b"abc") == "YWJj"
+    assert sanitize_toon_value(" a,\n b ") == "a; b"
+    assert duration_max("1m 5s", "2m 1s") == "2m 1s"
+    assert duration_max() is None
+    assert [format_duration(value) for value in (5, 65, 3660, 90000, "bad")] == [
+        "5s", "1m 5s", "1h 1m", "1d 1h", "N/A"
+    ]
+
+
+def test_emit_event_writes_a_structured_payload(capsys):
+    emit_event("status", "ready", operation_id="OP-1")
+
+    output = capsys.readouterr().out
+    assert output.startswith("__CYBER_EVENT__")
+    assert '"operation_id":"OP-1"' in output
 
 
 def test_get_tool_spec_supports_tool_spec_and_tool_spec_constant():

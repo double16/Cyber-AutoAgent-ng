@@ -354,6 +354,96 @@ def test_agent_factory_sets_prompt_token_limit_only_when_truthy(monkeypatch):
     assert not hasattr(agent, "_prompt_token_limit")
 
 
+def test_stateful_helpers_and_agent_creation_retry():
+    assert factory.model_uses_server_side_state(types.SimpleNamespace(stateful=True)) is True
+    assert factory.model_uses_server_side_state(types.SimpleNamespace(stateful="true")) is False
+    assert factory._is_stateful_model_manager_error(ValueError(
+        "context_manager and conversation_manager cannot be used with a stateful model"
+    )) is True
+    assert factory._is_stateful_model_manager_error(RuntimeError("no")) is False
+
+    calls = []
+
+    def stateful_agent(**kwargs):
+        calls.append(kwargs)
+        if "conversation_manager" in kwargs:
+            raise ValueError("context_manager and conversation_manager cannot be used with a stateful model")
+        return kwargs
+
+    result = factory.create_agent_with_stateful_retry(
+        {"conversation_manager": object(), "context_manager": "sliding", "model": object()}, "model", stateful_agent
+    )
+    assert "conversation_manager" not in result
+    assert "context_manager" not in result
+    assert len(calls) == 2
+
+
+def test_stateful_helpers_tolerate_state_lookup_errors_and_propagate_unrelated_errors():
+    class BrokenModel:
+        @property
+        def stateful(self):
+            raise RuntimeError("unavailable")
+
+    assert factory.model_uses_server_side_state(BrokenModel()) is False
+
+    with pytest.raises(ValueError, match="different construction error"):
+        factory.create_agent_with_stateful_retry(
+            {"conversation_manager": object()},
+            agent_cls=lambda **kwargs: (_ for _ in ()).throw(ValueError("different construction error")),
+        )
+
+
+def test_agent_factory_wrapper_handles_noncallable_and_bound_tool(monkeypatch):
+    def shared_factory():
+        return None
+
+    monkeypatch.setattr(factory, "_SHARED_AGENT_FACTORY", shared_factory)
+
+    marker = object()
+    assert factory.agent_factory_wrapper(marker) is marker
+
+    class Tool:
+        def __call__(self):
+            return "tool"
+
+        def method(self):
+            return "ok"
+
+    tool = Tool()
+    tool._tool_func = tool.method
+    assert factory.agent_factory_wrapper(tool) is tool
+    assert tool.agent_factory is shared_factory
+    assert tool.method.__func__.agent_factory is shared_factory
+
+    builtin_tool = Tool()
+    builtin_tool._tool_func = len
+    assert factory.agent_factory_wrapper(builtin_tool) is builtin_tool
+
+
+def test_patch_toolregistry_supports_keyword_tool_and_skips_duplicate(monkeypatch):
+    ToolRegistry = install_fake_toolregistry(monkeypatch)
+    seen = []
+    monkeypatch.setattr(factory, "agent_factory_wrapper", lambda tool: seen.append(tool) or tool)
+
+    factory.patch_toolregistry_register_tool()
+    registry = ToolRegistry()
+    tool = object()
+    assert registry.register_tool(tool=tool) is tool
+    assert seen == [tool]
+
+    factory.patch_toolregistry_register_tool()
+    assert factory._TOOLREGISTRY_REGISTER_TOOL_PATCHED is True
+
+
+def test_patch_toolregistry_skips_registry_without_callable_register_tool(monkeypatch):
+    ToolRegistry = install_fake_toolregistry(monkeypatch)
+    monkeypatch.setattr(ToolRegistry, "register_tool", None)
+
+    factory.patch_toolregistry_register_tool()
+
+    assert factory._TOOLREGISTRY_REGISTER_TOOL_PATCHED is False
+
+
 # -------------------------
 # ToolRegistry.register_tool monkey-patch tests
 # -------------------------

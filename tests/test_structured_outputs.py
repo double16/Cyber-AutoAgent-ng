@@ -6,6 +6,7 @@ from modules.agents.structured_outputs import (
     TaskProposalBatchOutput,
     WorkflowDecisionOutput,
     is_structured_output_unavailable,
+    structured_output_dict,
 )
 
 
@@ -129,3 +130,22 @@ def test_structured_output_unavailable_classifier_recognizes_strands_and_preserv
     assert is_structured_output_unavailable(RuntimeError("ToolChoice is not supported by this provider"))
     assert not is_structured_output_unavailable(ConnectionError("connection refused"))
     assert not is_structured_output_unavailable(ValidationError.from_exception_data("Output", []))
+
+
+def test_structured_output_unavailable_classifier_follows_exception_chains():
+    unavailable = NotImplementedError("transport unavailable")
+    wrapped = RuntimeError("outer error")
+    wrapped.__cause__ = unavailable
+
+    assert is_structured_output_unavailable(wrapped)
+    assert is_structured_output_unavailable(AttributeError("missing structured API"))
+    assert is_structured_output_unavailable(RuntimeError("structured output is not supported"))
+
+
+def test_structured_output_dict_accepts_models_and_dicts_but_rejects_text():
+    model = WorkflowDecisionOutput(status="complete", repair=None)
+
+    assert structured_output_dict(model) == {"status": "complete"}
+    assert structured_output_dict({"status": "complete"}) == {"status": "complete"}
+    with pytest.raises(ValueError, match="Pydantic model or dict"):
+        structured_output_dict("complete")

@@ -135,7 +135,13 @@ def test_get_oast_provider_invalid_target(target):
         "https://google.com",
     ],
 )
-def test_get_oast_provider_global_paths(target):
+def test_get_oast_provider_global_paths(target, monkeypatch):
+    monkeypatch.setattr(
+        oast_mod.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(None, None, None, None, ("8.8.8.8", 80))],
+    )
+
     p = oast_mod.get_oast_provider(target)
     assert isinstance(p, oast_mod.WebhookSiteProvider)
 
@@ -836,3 +842,174 @@ async def test_oast_poll_timeout_clamps_to_600(monkeypatch):
     out = await oast_mod.oast_poll("t", timeout=999999.0)
     assert out.interactions == []
     assert t.now >= 1600.0  # 1000 + 600 seconds (clamped)
+
+
+def test_base_provider_reports_uninitialized_and_unsupported_operations():
+    provider = oast_mod.OASTProvider()
+    provider.name = "base"
+
+    with pytest.raises(Exception, match="base session not initialized"):
+        provider._check_inited()
+    with pytest.raises(NotImplementedError, match="does not support"):
+        asyncio.run(
+            provider.register_http_response(
+                oast_mod.HttpRequestMatch(), oast_mod.HttpResponseSpec()
+            )
+        )
+    asyncio.run(provider.clear_http_responses())
+
+
+@pytest.mark.asyncio
+async def test_webhook_provider_handles_empty_rules_failures_and_scheme_clear(monkeypatch, httpx_stub):
+    monkeypatch.setattr(oast_mod, "_get_config_manager", lambda: _Cfg({}))
+    provider = oast_mod.WebhookSiteProvider()
+    assert "No registered response rules" in provider._build_webhookscript("token")
+
+    health = await provider.health()
+    assert health.status == "error"
+
+    provider._response_rules = [
+        oast_mod.RegisterHttpResponseInput(
+            scheme="http", match=oast_mod.HttpRequestMatch(method="GET", target="x"),
+            response=oast_mod.HttpResponseSpec(body="one"),
+        ),
+        oast_mod.RegisterHttpResponseInput(
+            scheme="https", match=oast_mod.HttpRequestMatch(method="POST", target_prefix="api"),
+            response=oast_mod.HttpResponseSpec(body="two"),
+        ),
+    ]
+    assert len(provider._response_rules) == 2
+    await provider.clear_http_responses("HTTP")
+    assert [rule.scheme for rule in provider._response_rules] == ["https"]
+
+    provider.inited = True
+    provider.webhook_token_id = "token"
+    provider._response_action_id = "action"
+    httpx_stub.on(
+        "DELETE", "https://webhook.site/token/token/actions/action", lambda **_kw: _StubResponse(500)
+    )
+    await provider.clear_http_responses()
+    assert provider._response_action_id is None
+
+
+@pytest.mark.asyncio
+async def test_webhook_poll_keeps_items_without_uuid_and_close_all_providers(monkeypatch, httpx_stub):
+    monkeypatch.setattr(oast_mod, "_get_config_manager", lambda: _Cfg({}))
+    provider = oast_mod.WebhookSiteProvider()
+    provider.inited = True
+    provider.webhook_token_id = "token"
+    httpx_stub.on(
+        "GET",
+        "https://webhook.site/token/token/requests",
+        lambda **_kw: _StubResponse(200, {"data": [{"body": "no-id"}]}),
+    )
+    assert (await provider.poll_new()).interactions == [{"body": "no-id"}]
+
+    class _Closable(oast_mod.OASTProvider):
+        name = "closable"
+
+        def __init__(self):
+            super().__init__()
+            self.closed = False
+
+        async def deregister(self):
+            self.closed = True
+
+    closable = _Closable()
+    oast_mod._OAST_PROVIDERS["test"] = closable
+    await oast_mod.close_oast_providers()
+    assert closable.closed is True
+    assert not oast_mod._OAST_PROVIDERS
+
+
+@pytest.mark.asyncio
+async def test_local_listener_handles_init_cleanup_and_client_error_paths(monkeypatch, tmp_path):
+    provider = oast_mod.LocalListenerOASTProvider("127.0.0.1")
+    endpoints = oast_mod.Endpoints(http="http://x", https="https://x")
+
+    async def _endpoints():
+        return endpoints
+
+    monkeypatch.setattr(provider, "endpoints", _endpoints)
+    provider.inited = True
+    assert await provider.init() == endpoints
+
+    provider.inited = False
+    monkeypatch.setattr(provider, "_start_http", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    real_deregister = provider.deregister
+    called = []
+
+    async def _clean():
+        called.append(True)
+
+    monkeypatch.setattr(provider, "deregister", _clean)
+    with pytest.raises(RuntimeError, match="boom"):
+        await provider.init()
+    assert called == [True]
+    monkeypatch.setattr(provider, "deregister", real_deregister)
+
+    class _Server:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    provider._http_server = _Server()
+    provider._https_server = _Server()
+    provider._tmpdir = str(tmp_path / "missing")
+    await provider.deregister()
+    assert provider._http_server is None and provider._https_server is None
+
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"not a request\r\n\r\n")
+    reader.feed_eof()
+    writer = _CaptureWriter()
+    await provider._handle_client(reader, writer, scheme="http")
+    assert writer.closed is True
+
+
+@pytest.mark.asyncio
+async def test_local_listener_client_trims_events_and_parser_ignores_invalid_content_length(monkeypatch):
+    monkeypatch.setattr(oast_mod, "b64", lambda value: base64.b64encode(value).decode("ascii"))
+    provider = oast_mod.LocalListenerOASTProvider("127.0.0.1")
+    provider._events.extend({"id": str(index)} for index in range(102))
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"GET / HTTP/1.1\r\nBroken\r\nContent-Length: invalid\r\n\r\n")
+    reader.feed_eof()
+    writer = _CaptureWriter()
+    await provider._handle_client(reader, writer, scheme="https")
+    assert len(provider._events) == 101
+    assert writer.data.startswith(b"HTTP/1.1 200")
+
+    raw = provider._format_http_response(oast_mod.HttpResponseSpec(status=999, body=""))
+    assert raw.startswith(b"HTTP/1.1 999 OK")
+
+
+def test_get_oast_provider_handles_resolution_failures_and_private_hostname(monkeypatch):
+    monkeypatch.setattr(oast_mod, "pick_local_addr", lambda address: ("127.0.0.1", 0))
+    monkeypatch.setattr(
+        oast_mod.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(None, None, None, None, ("10.0.0.4", 80))],
+    )
+    provider = oast_mod.get_oast_provider("internal.test")
+    assert isinstance(provider, oast_mod.LocalListenerOASTProvider)
+
+    oast_mod._OAST_PROVIDERS.clear()
+    monkeypatch.setattr(oast_mod.socket, "getaddrinfo", lambda *_args, **_kwargs: (_ for _ in ()).throw(oast_mod.socket.gaierror()))
+    with pytest.raises(ValueError, match="target IP"):
+        oast_mod.get_oast_provider("unresolvable.test")
+
+
+@pytest.mark.asyncio
+async def test_oast_wrappers_return_errors_and_reject_invalid_serialized_input(monkeypatch):
+    monkeypatch.setattr(oast_mod, "get_oast_provider", lambda _target: (_ for _ in ()).throw(RuntimeError("bad target")))
+    assert (await oast_mod.oast_health("target")).detail == "bad target"
+
+    monkeypatch.setattr(oast_mod, "get_oast_provider", lambda _target: oast_mod.OASTProvider())
+
+    with pytest.raises(TypeError, match="line_errors"):
+        await oast_mod.oast_register_http_response("target", "not-json")
+    with pytest.raises(TypeError, match="line_errors"):
+        await oast_mod.oast_clear_http_responses("target", "not-json")

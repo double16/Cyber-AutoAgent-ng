@@ -96,6 +96,64 @@ def test_tool_router_registers_only_after_tool_output_handling():
     assert not hasattr(hook, "_on_before_tool_async")
 
 
+def test_router_initialization_registration_and_artifact_references(tmp_path, caplog):
+    hook = ToolRouterHook(max_result_chars=10, artifacts_dir=str(tmp_path), artifact_threshold=20)
+    registrations = []
+    registry = types.SimpleNamespace(
+        add_callback=lambda event_type, callback: registrations.append((event_type, callback))
+    )
+
+    hook.register_hooks(registry)
+
+    assert hook._artifact_dir == tmp_path
+    assert registrations == [(AfterToolCallEvent, hook._truncate_large_results_async)]
+    assert "artifact_threshold" in caplog.text
+    assert hook._artifact_reference(tmp_path / "nested" / "evidence.log") == (
+        f"artifact:{tmp_path.name}/nested/evidence.log"
+    )
+    assert hook._artifact_reference(tmp_path.parent / "outside.log") == "artifact:outside.log"
+    with pytest.raises(ValueError, match="not configured"):
+        ToolRouterHook()._artifact_reference(tmp_path / "evidence.log")
+
+
+def test_router_ignores_malformed_events_and_preserves_unknown_content(tmp_path):
+    hook = ToolRouterHook(artifacts_dir=tmp_path)
+
+    asyncio.run(hook._truncate_large_results_async(None))
+    asyncio.run(hook._truncate_large_results_async(types.SimpleNamespace(result=None, tool_use={})))
+    asyncio.run(hook._truncate_large_results_async(types.SimpleNamespace(result={"content": "bad"}, tool_use={})))
+
+    event = types.SimpleNamespace(result={"content": [42, {"document": "bad"}]}, tool_use={"name": "tool"})
+    asyncio.run(hook._truncate_large_results_async(event))
+
+    assert event.result == {"content": [42]}
+
+
+def test_router_persistence_rejects_invalid_or_empty_payload_and_cleans_small_directory(tmp_path):
+    hook = ToolRouterHook(artifacts_dir=tmp_path)
+
+    assert hook._persist_artifact("tool", object()) is None
+    assert hook._persist_artifact("tool", "") is None
+    assert ToolRouterHook()._persist_artifact("tool", "output") is None
+
+    artifact = hook._persist_artifact("unsafe/tool", b"bytes", "bin")
+    assert artifact is not None
+    assert artifact.read_bytes() == b"bytes"
+    hook._cleanup_old_artifacts()
+    assert hook._artifact_count == 1
+
+
+def test_router_creates_inline_summary_when_externalization_fails(tmp_path, monkeypatch):
+    hook = ToolRouterHook(max_result_chars=100, artifacts_dir=tmp_path, artifact_threshold=5)
+    monkeypatch.setattr(hook, "_persist_artifact", lambda *args: None)
+    event = MockAfterToolCallEvent(create_tool_result("large output"))
+
+    asyncio.run(hook._truncate_large_results_async(event))
+
+    assert "persistence disabled" in event.result["content"][0]["text"]
+    assert "[Inline: 12 chars]" in event.result["content"][0]["text"]
+
+
 # ============================================================================
 # NEW TESTS: AfterToolCallEvent SDK Contract Compliance
 # ============================================================================

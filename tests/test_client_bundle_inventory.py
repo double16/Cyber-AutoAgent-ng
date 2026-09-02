@@ -204,3 +204,49 @@ def test_client_bundle_inventory_rejects_output_outside_operation(
             "../outside.json",
             "artifacts/manifest.json",
         )
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/api/users", True),
+        ("/assets/app.js", False),
+        ("https://example.test/api/users", False),
+        ("//example.test/api/users", False),
+        ("relative-route", False),
+    ],
+)
+def test_client_bundle_inventory_filters_non_route_literals(path, expected):
+    assert bundle_tool._is_candidate_route(path) is expected
+
+
+def test_client_bundle_inventory_reports_webcrack_failures(monkeypatch):
+    monkeypatch.setattr(bundle_tool.shutil, "which", lambda _command: "/usr/bin/webcrack")
+    monkeypatch.setattr(
+        bundle_tool.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("missing executable")),
+    )
+
+    assert bundle_tool._format_bundle_with_webcrack("bundle.js") == (None, "failed")
+
+
+def test_client_bundle_inventory_rejects_empty_output_path():
+    with pytest.raises(ValueError, match="output_file is required"):
+        bundle_tool._operation_output_path("")
+
+
+def test_client_bundle_inventory_rejects_unresolved_target(monkeypatch, tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "app.js").write_text("const api = '/api/products';", encoding="utf-8")
+    _operation_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(bundle_tool, "resolve_inventory_target", lambda *_args: ("not-a-url", "target-1"))
+
+    with pytest.raises(ValueError, match="registered HTTP"):
+        bundle_tool.client_bundle_inventory(
+            "artifact:artifacts/app.js",
+            "artifacts/extraction.json",
+            "artifacts/manifest.json",
+            target="configured-target",
+        )

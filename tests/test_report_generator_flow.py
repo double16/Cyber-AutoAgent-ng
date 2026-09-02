@@ -66,6 +66,119 @@ from modules.handlers.report_generator import (
     generate_deterministic_fallback_report,
     generate_security_report,
 )
+
+
+def test_report_helpers_cover_incomplete_status_and_nested_artifact_sanitization():
+    status = report_generator_module._normalize_completion_status(
+        {
+            "assessment_complete": False,
+            "workflow_complete": False,
+            "termination_reason": "budget",
+            "termination_message": "limit reached",
+            "unresolved_task_count": 2,
+            "incomplete_phase_ids": [1, "2"],
+        }
+    )
+
+    notice = report_generator_module._completion_status_notice(status)
+    assert "Unresolved actionable tasks: 2" in notice
+    assert "limit reached" in notice
+    assert "partial assessment" in report_generator_module._completion_status_guidance(status)
+    assert report_generator_module._completion_status_notice({"assessment_complete": True}) == ""
+
+    sanitized, omitted = _omit_cross_operation_artifact_references(
+        {"items": ["artifact:artifacts/old.txt", ("outputs/old.json",)]}
+    )
+    assert omitted == 2
+    assert "prior-operation artifact omitted" in str(sanitized)
+    assert _has_artifact_reference({"artifact": "artifacts/evidence.txt"}) is True
+
+
+def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch, tmp_path):
+    manifest = tmp_path / "inventory.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "items": [
+                    "invalid",
+                    {"id": "endpoint-1", "value": "https://one.test"},
+                    {"id": "endpoint-2", "value": "https://first.test"},
+                    {"id": "endpoint-2", "value": "https://second.test"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    task = type(
+        "Task",
+        (),
+        {
+            "acceptance": type(
+                "Acceptance",
+                (),
+                {"basis": type("Basis", (), {"source_refs": ("artifact:artifacts/manifest.json",)})()},
+            )(),
+            "evidence": (),
+        },
+    )()
+    monkeypatch.setattr(report_generator_module, "_artifact_path_from_ref", lambda _reference: str(manifest))
+
+    endpoint_values = _inventory_endpoint_values([task])
+    assert endpoint_values == {"endpoint-1": "https://one.test"}
+    assert report_generator_module._resolve_inventory_ids_for_display(
+        {"description": ["endpoint-1", ("endpoint-1",)]}, endpoint_values
+    ) == {"description": ["https://one.test", ("https://one.test",)]}
+    assert report_generator_module._resolve_inventory_ids_for_display(
+        "endpoint-1", endpoint_values, "source_refs"
+    ) == "endpoint-1"
+    assert report_generator_module._resolve_inventory_ids_for_display("endpoint-1", {}) == "endpoint-1"
+
+    invalid_manifest = tmp_path / "invalid-inventory.json"
+    invalid_manifest.write_text(json.dumps({"items": {}}), encoding="utf-8")
+    invalid_task = type(
+        "Task",
+        (),
+        {
+            "acceptance": type(
+                "Acceptance",
+                (),
+                {"basis": type("Basis", (), {"source_refs": ("artifact:artifacts/invalid.json",)})()},
+            )(),
+            "evidence": (),
+        },
+    )()
+    monkeypatch.setattr(
+        report_generator_module,
+        "_artifact_path_from_ref",
+        lambda reference: str(invalid_manifest) if "invalid" in reference else str(manifest),
+    )
+    assert _inventory_endpoint_values([invalid_task]) == {}
+
+
+def test_artifact_reference_and_excerpt_helpers_cover_fallback_paths(tmp_path):
+    assert report_generator_module._normalize_completion_status(
+        {"assessment_complete": True, "incomplete_reason": "stale value"}
+    )["incomplete_reason"] is None
+    assert report_generator_module._normalize_artifact_reference("artifact_id:abc") == "artifact:artifacts/abc"
+    assert report_generator_module._normalize_artifact_reference("outputs/result.txt") == "artifact:outputs/result.txt"
+    assert report_generator_module._normalize_artifact_reference("plain reference") == "plain reference"
+    assert _artifact_references(["artifact:artifacts/a.txt", {"nested": "outputs/b.txt"}]) == {
+        "artifact:artifacts/a.txt",
+        "artifact:outputs/b.txt",
+    }
+
+    empty = tmp_path / "empty.txt"
+    empty.write_text("\n\n", encoding="utf-8")
+    assert _select_artifact_excerpt(str(empty), {"proof"}) == []
+
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("\n".join(f"line {number}" for number in range(20)), encoding="utf-8")
+    assert len(_select_artifact_excerpt(str(artifact), set(), max_lines=3)) == 3
+
+    sanitized_tuple, tuple_omitted = _omit_cross_operation_artifact_references(("artifact:artifacts/a.txt",))
+    sanitized_set, set_omitted = _omit_cross_operation_artifact_references({"artifact:artifacts/a.txt"})
+    assert tuple_omitted == set_omitted == 1
+    assert "prior-operation artifact omitted" in str((sanitized_tuple, sanitized_set))
 from modules.tools.memory import (
     OperationPlan,
     OperationTarget,
@@ -2913,6 +3026,78 @@ def test_generate_security_report_validation_failures(
     assert "## OBJECTIVE VALIDATION" in objective_content
     assert "Rejected or unresolved" in objective_content
     assert "flag{wrong}" in objective_content
+
+
+def test_report_prompt_helpers_handle_malformed_optional_data():
+    context = report_generator_module._compact_finding_context(
+        {
+            "metadata": {"artifacts": "artifact:artifacts/proof.txt", "severity": "LOW"},
+            "parsed": "not a mapping",
+        },
+        "https://example.test",
+    )
+    next_steps = report_generator_module._compact_next_steps_source(
+        target="https://example.test",
+        objective="Assess",
+        completion_status={},
+        sections={"phase_coverage": ["invalid", {"phase_id": 1, "title": "Recon"}]},
+        latest_run={"metrics": "invalid", "tool_failures": "invalid"},
+        configured_budget={"duration": 10},
+        validation_candidates=[],
+    )
+
+    assert context["artifact_references"] == ["artifact:artifacts/proof.txt"]
+    assert context["severity"] == "LOW"
+    assert next_steps["phase_coverage"] == [{"phase_id": 1, "title": "Recon"}]
+    assert next_steps["execution_metrics"] == {
+        "duration": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "cost": None,
+    }
+    assert next_steps["tool_failure_counts"] == {}
+
+
+def test_report_table_and_budget_helpers_cover_fallbacks():
+    assert report_generator_module._format_operation_plan(None) == "No operation plan was recorded."
+    assert report_generator_module._format_operation_plan({"phases": ["invalid"]}) == (
+        "No operation plan phases were recorded."
+    )
+    assert report_generator_module._format_operation_tasks(None) == "No operation tasks were recorded."
+    assert report_generator_module._format_operation_tasks({"items": []}) == "No operation tasks were recorded."
+    assert report_generator_module._latest_log_run_text("old log") == "old log"
+    assert report_generator_module._positive_number("unset") is None
+    assert report_generator_module._positive_number("invalid") is None
+    assert report_generator_module._positive_number(0) is None
+    assert report_generator_module._normalize_budget_config("invalid", default_duration=15) == {"duration": 15}
+    assert report_generator_module._format_inference_time("invalid") == "N/A"
+    assert report_generator_module._format_inference_time(0) == "N/A"
+
+
+def test_model_usage_rendering_and_metrics_removal_cover_empty_paths():
+    table = report_generator_module._format_model_usage_table([], "provider", "model")
+
+    assert "| provider | model | N/A |" in table
+    assert report_generator_module._remove_generated_execution_metrics("Narrative") == "Narrative"
+    assert report_generator_module._has_meaningful_model_usage("invalid") is False
+    assert report_generator_module._has_meaningful_model_usage(["invalid", {"total_tokens": "bad"}]) is False
+
+
+def test_report_metrics_callback_and_circuit_breaker_cover_noop_paths():
+    report_generator_module._ReportMetricsCallback(None)(result=MagicMock())
+    handler = MagicMock()
+    report_generator_module._ReportMetricsCallback(handler)(event_loop_metrics={"tokens": 1})
+    handler.record_report_metrics.assert_called_once_with({"tokens": 1}, agent=None)
+
+    breaker = report_generator_module._ReportModelCircuitBreaker()
+    breaker.trip("executive", RuntimeError("provider unavailable"))
+    breaker.trip("finding", RuntimeError("later error"))
+
+    assert breaker.tripped is True
+    assert breaker.reason == "executive: provider unavailable"
+    with pytest.raises(RuntimeError, match="circuit breaker is open"):
+        report_generator_module._invoke_report_agent(MagicMock(), "prompt", "finding", breaker)
 
 if __name__ == "__main__":
     pytest.main([__file__])

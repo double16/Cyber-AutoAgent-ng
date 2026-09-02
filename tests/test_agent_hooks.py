@@ -7,7 +7,7 @@ from strands.types.exceptions import MaxTokensReachedException
 # this import helps the hooks import avoid a circular dependency
 importlib.import_module("cyberautoagent")
 from modules.handlers.agent_repair_hook import AgentRepairHook
-from modules.handlers.react.hooks import ReactHooks
+from modules.handlers.react.hooks import ReactHooks, classify_tool_outcome
 
 
 class RecordingEmitter:
@@ -16,6 +16,16 @@ class RecordingEmitter:
 
     def emit(self, event):
         self.events.append(event)
+
+
+def test_classify_tool_outcome_distinguishes_blocked_validation_and_execution_errors():
+    assert classify_tool_outcome({"status": "success"}) == ("success", True)
+    assert classify_tool_outcome({}, "controller cancelled") == ("blocked", False)
+    assert classify_tool_outcome({"status": "error", "content": [{"text": "Validation failed for input parameters: x"}]}) == (
+        "validation_error",
+        False,
+    )
+    assert classify_tool_outcome({"status": "error", "content": [{"text": "execution failed"}]}) == ("error", True)
 
 
 
@@ -123,6 +133,28 @@ def test_react_hooks_swarm_rewrite():
     assert "model_provider" not in agent
     assert agent["model_settings"] == {"params": {"temperature": 0.1}}
     assert event.tool_use["input"]["agents"][1] == "plain-agent"
+
+
+def test_react_hooks_handles_unparseable_inputs_and_nonstandard_results():
+    hooks = ReactHooks(emitter=RecordingEmitter())
+
+    assert hooks._parse_tool_input("{not json") == {"raw": "{not json"}
+    assert hooks._parse_tool_input(42) == {"raw": "42"}
+    assert hooks._process_tool_result({"status": "success", "content": [{"text": "one"}, "ignored"]}) == (
+        True,
+        "one",
+    )
+
+    event = SimpleNamespace(
+        tool_use={"name": "handoff_to_agent", "id": "handoff-1", "input": {}},
+        result={"status": "success", "content": []},
+        exception=None,
+    )
+    hooks._on_before_tool(event)
+    hooks._on_after_tool(event)
+
+    assert hooks._calculate_duration("handoff-1") == 0.0
+    assert [item["type"] for item in hooks.emitter.events].count("tool_end") == 1
 
 
 def test_agent_repair_hook_json_patch_and_state_paths(monkeypatch):

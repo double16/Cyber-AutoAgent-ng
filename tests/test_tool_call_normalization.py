@@ -83,3 +83,14 @@ def test_repair_model_response_tool_input_leaves_unrecognized_or_invalid_values_
 
     assert repaired == payload
     assert fields == ()
+
+
+def test_tool_call_normalization_handles_non_mapping_repair_and_unregistered_free_calls():
+    assert repair_model_response_tool_input(["not", "a", "mapping"]) == (["not", "a", "mapping"], ())
+
+    normalized = normalize_tool_call_payload({"name": " shell ", "input": {"command": "id"}})
+    assert normalized.name == "shell"
+    assert normalized.arguments == {"command": "id"}
+
+    with pytest.raises(ValueError, match="JSON object"):
+        normalize_tool_call_payload(["not", "a", "mapping"])

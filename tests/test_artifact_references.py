@@ -41,6 +41,19 @@ def test_split_delimited_reference_values_rejects_empty_internal_values():
         )
 
 
+@pytest.mark.parametrize("value", [None, ("artifact:artifacts/one.txt",)])
+def test_split_delimited_reference_values_accepts_empty_and_tuple_values(value):
+    expected = [] if value is None else ["artifact:artifacts/one.txt"]
+
+    assert split_delimited_reference_values(value, allow_delimited_strings=False) == expected
+
+
+@pytest.mark.parametrize("value", [None, 7, "   "])
+def test_normalize_artifact_reference_token_rejects_invalid_values(value):
+    with pytest.raises((TypeError, ValueError)):
+        normalize_artifact_reference_token(value)
+
+
 @pytest.mark.parametrize(
     ("tool_name", "field_name"),
     [
@@ -112,3 +125,25 @@ def test_reference_input_hook_leaves_invalid_reference_values_for_standard_valid
     ArtifactReferenceInputNormalizationHook()._normalize_tool_input(event)
 
     assert event.tool_use["input"] == tool_input
+
+
+@pytest.mark.parametrize(
+    "tool_use",
+    [
+        {"name": "unknown_tool", "input": {"artifacts": "artifact:artifacts/one.txt"}},
+        {"name": "store_finding", "input": None},
+        {"name": "store_finding", "input": {"unrelated": "value"}},
+        {"name": "store_finding", "input": {"artifacts": None}},
+    ],
+)
+def test_reference_input_hook_leaves_unrelated_or_already_valid_inputs_unchanged(tool_use):
+    event = BeforeToolCallEvent(
+        agent=None,
+        selected_tool=None,
+        tool_use=tool_use,
+        invocation_state={},
+    )
+
+    ArtifactReferenceInputNormalizationHook()._normalize_tool_input(event)
+
+    assert event.tool_use is tool_use

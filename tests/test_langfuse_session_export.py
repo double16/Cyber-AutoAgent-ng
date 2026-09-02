@@ -255,3 +255,37 @@ def test_export_fails_when_session_has_no_retrievable_traces():
         assert "has no traces" in str(error)
     else:
         raise AssertionError("Expected an ExportError for an empty session")
+
+
+def test_export_helpers_handle_malformed_prompt_and_model_output_shapes():
+    assert exporter._messages({"role": "user", "content": "hello"}) == [{"role": "user", "content": "hello"}]
+    assert exporter._messages(123) == [{"role": "user", "content": "123"}]
+    assert exporter._messages([{"role": "assistant", "content": "ignored"}, "bad"]) == []
+    assert exporter._as_json("not-json") == "not-json"
+    assert exporter._timestamp(None) is None
+    assert exporter._timestamp(123) == "123"
+
+    reasoning, response, decisions = exporter._model_output(
+        [{"thinking": {"content": "plan"}}, {"tool_calls": [{"function": {"name": "shell", "arguments": "{}"}}]}, {"message": {"text": "answer"}}]
+    )
+    assert reasoning == ["plan"]
+    assert response == ["answer"]
+    assert decisions == [{"name": "shell", "arguments": {}}]
+
+
+def test_failure_records_reject_invalid_metadata_and_preserve_unmatched_failures():
+    exporter_instance = exporter.LangfuseSessionExporter(SimpleNamespace())
+    assert exporter_instance._failure_record(SimpleNamespace(metadata={})) is None
+
+    failure = {
+        "generation_id": "missing",
+        "agent_run_id": "",
+        "stop_reason": "max_tokens",
+        "failure_type": "unknown",
+        "max_token_classification": "unknown",
+        "usage": {},
+        "recorded_reasoning": "",
+        "partial_output": "",
+        "timestamp": "1",
+    }
+    assert exporter_instance._attach_failures([], [failure]) == [failure]

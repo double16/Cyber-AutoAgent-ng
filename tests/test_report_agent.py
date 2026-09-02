@@ -101,3 +101,25 @@ def test_report_execution_telemetry_records_model_and_unexpected_tool_events(cap
     assert "projected_input_tokens=42" in caplog.text
     assert "attempted unexpected tool use" in caplog.text
     assert "unexpected tool completed" in caplog.text
+
+
+def test_report_execution_telemetry_registers_hooks_and_records_invocation_fallbacks(caplog):
+    hook = ReportExecutionTelemetryHook()
+    callbacks = []
+    registry = MagicMock()
+    registry.add_callback.side_effect = lambda event, callback: callbacks.append((event, callback))
+    hook.register_hooks(registry)
+
+    caplog.set_level("INFO")
+    hook.after_model_call(MagicMock(invocation_state={}, stop_response=None, exception=RuntimeError("failed")))
+    hook.before_tool_call(MagicMock(invocation_state={}, selected_tool=None, tool_use={"name": "fallback"}))
+    hook.after_invocation(
+        MagicMock(
+            invocation_state={},
+            result=MagicMock(stop_reason="complete", metrics=MagicMock(latest_agent_invocation=MagicMock(cycles=[1, 2]))),
+        )
+    )
+
+    assert len(callbacks) == 5
+    assert "section=report" in caplog.text
+    assert "turns=2" in caplog.text

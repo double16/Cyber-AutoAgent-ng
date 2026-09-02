@@ -20,6 +20,13 @@ class FakeCompleted:
         self.stderr = stderr
 
 
+class FakeResponse:
+    def __init__(self, text="", status_code=200, headers=None):
+        self.text = text
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
 def b64s(s: str) -> str:
     return base64.b64encode(s.encode("utf-8")).decode("ascii")
 
@@ -1444,3 +1451,192 @@ def test_advanced_payload_small_helpers_and_normalization(monkeypatch):
     assert result["target"] == "https://example.com"
     assert result["test_type"] == "ssti"
     assert result["parameters_discovered"] == ["a", "b", "c", "d", "e", "f"]
+
+
+def test_request_helpers_select_body_headers_and_failure_paths(monkeypatch):
+    captured = {}
+
+    def request(method, url, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return SimpleNamespace(text="response")
+
+    monkeypatch.setattr(apc.requests, "request", request)
+    post = apc.RequestConfig("https://example.test", http_method="POST", headers={"X-Base": "1"})
+    assert apc._requests_get_text("https://example.test", {"id": "2"}, post) == "response"
+    assert captured["params"] is None
+    assert captured["data"] == {"id": "2"}
+
+    monkeypatch.setattr(apc.requests, "request", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+    assert apc._requests_get_text("https://example.test", {}, post) is None
+
+    monkeypatch.setattr(apc.requests, "head", lambda *_args, **kwargs: SimpleNamespace(headers={"X-Test": "value"}))
+    assert apc._requests_head_raw_headers("https://example.test", {"Origin": "x"}, post) == "X-Test: value"
+    monkeypatch.setattr(apc.requests, "head", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+    assert apc._requests_head_raw_headers("https://example.test", {}, post) is None
+
+
+def test_main_parses_valid_and_invalid_headers_and_cookies(monkeypatch, capsys):
+    tool = Mock(return_value='{"ok": true}')
+    monkeypatch.setattr(apc, "advanced_payload_coordinator", tool)
+    monkeypatch.setattr("sys.argv", [
+        "advanced_payload_coordinator.py",
+        "example.test",
+        "--test-type", "xss",
+        "--header", "X-Test: value",
+        "--header", "invalid",
+        "--cookie", "sid=abc",
+        "--cookie", "malformed",
+    ])
+
+    assert apc.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"ok": True}
+    assert tool.call_args.args[0] == "example.test"
+    assert tool.call_args.kwargs["headers"] == {"X-Test": "value"}
+    assert tool.call_args.kwargs["cookies"] == {"sid": "abc"}
+def test_output_parsers_cover_sstimap_and_lfimap_variants():
+    ssti = apc._parse_sstimap_output(
+        "\x1b[31m[+] SSTImap identified the following injection point:\n"
+        " Body parameter: name\n Engine: Jinja2\n Injection: {{7*7}}\n"
+        " Context: text\n OS: Linux\n Technique: render\n Capabilities:\n  RCE: yes\n\n"
+        "[+] Rerun SSTImap\n[+] SSTImap identified the following injection point:\n"
+        " Query parameter: q\n Injection: x"
+    )
+    assert len(ssti) == 2
+    assert ssti[0]["param_location"] == "body"
+    assert ssti[0]["capabilities"]["RCE"] == "yes"
+    assert ssti[1]["param_location"] == "query"
+    assert apc._parse_sstimap_output("nothing useful") == []
+    lfi = apc._parse_lfimap_output(
+        "file", "POST", "[*] Starting traversal attack...\n[*] Testing traversal payload: ../../etc/passwd\n"
+        "[*] Injecting POST data: file=../../etc/passwd\n[+] Payload successful!"
+    )
+    assert lfi[0]["param_location"] == "body"
+    assert lfi[0]["attack_type"] == "traversal"
+
+
+def test_payload_intelligence_and_recommendations_cover_all_vectors():
+    results = [
+        {"vulnerable": True, "payload_type": "Advanced XSS", "injection_type": "XSS", "evidence": "WAF", "payload": "String.fromCharCode(1)"},
+        {"vulnerable": True, "injection_type": "Command Injection", "payload_type": "Command Injection"},
+        {"vulnerable": True, "injection_type": "SSTI", "payload_type": "SSTI"},
+        {"vulnerable": True, "injection_type": "LDAP", "payload_type": "LDAP"},
+        {"vulnerable": True, "injection_type": "Other", "payload_type": "Other", "issue_type": "CORS"},
+    ]
+    intelligence = apc._analyze_payload_intelligence(results)
+    assert {"xss", "cmd_injection", "ssti", "cors", "ldap_injection"} <= set(intelligence["attack_vectors"])
+    assert "waf_evasion" in intelligence["bypass_techniques"]
+    recs = apc._generate_payload_recommendations("xss", {"payload_results": results, "intelligence": intelligence})
+    assert "capture_repro_steps" in recs
+    assert "validate_exploitation_chain" in recs
+    assert apc._generate_payload_recommendations("param_discovery", {"parameters_discovered": ["id"]}) == []
+def test_setup_payload_tools_records_available_and_failed(monkeypatch):
+    calls = []
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[0] == "which":
+            return FakeCompleted(returncode=0 if cmd[1] == "arjun" else 1, stdout="")
+        return FakeCompleted(returncode=1, stdout="")
+    monkeypatch.setattr(apc.subprocess, "run", fake_run)
+    result = apc.setup_payload_tools(tools_limit={"arjun", "dalfox"})
+    assert result["tools"] == ["arjun"]
+    assert result["failed"] == ["dalfox"]
+    assert any(call[0] == "go" for call in calls)
+
+
+def test_request_wrappers_cover_body_query_headers_and_errors(monkeypatch):
+    seen = []
+    monkeypatch.setattr(apc.requests, "request", lambda *args, **kwargs: (seen.append(kwargs), FakeResponse("ok"))[1])
+    get_cfg = apc.RequestConfig("https://t", "GET", cookies={"sid": "1"}, headers={"X": "y"})
+    post_cfg = apc.RequestConfig("https://t", "POST")
+    assert apc._requests_get_text("https://t", {"q": "x"}, get_cfg) == "ok"
+    assert seen[-1]["params"] == {"q": "x"} and seen[-1]["data"] is None
+    assert apc._requests_get_text("https://t", {"q": "x"}, post_cfg) == "ok"
+    assert seen[-1]["data"] == {"q": "x"} and seen[-1]["params"] is None
+    monkeypatch.setattr(apc.requests, "request", Mock(side_effect=RuntimeError("down")))
+    assert apc._requests_get_text("https://t", {}, get_cfg) is None
+
+    monkeypatch.setattr(apc.requests, "head", lambda *args, **kwargs: FakeResponse("", headers={"X-Test": "yes"}))
+    assert apc._requests_head_raw_headers("https://t", {"Origin": "https://evil"}, get_cfg) == "X-Test: yes"
+    monkeypatch.setattr(apc.requests, "head", Mock(side_effect=RuntimeError("down")))
+    assert apc._requests_head_raw_headers("https://t", {}, get_cfg) is None
+
+
+def test_parameter_discovery_uses_provided_url_and_baseline_differences(monkeypatch):
+    responses = iter([FakeResponse("", status_code=200, headers={"Content-Length": "100"})] + [
+        FakeResponse("", status_code=200, headers={"Content-Length": "200"}) for _ in range(40)
+    ])
+    monkeypatch.setattr(apc.requests, "request", lambda *args, **kwargs: next(responses))
+    cfg = apc.RequestConfig("https://example.test/page?existing=1", "GET")
+    found = apc.advanced_parameter_discovery(cfg, " provided, ", tools=[])
+    assert "provided" in found and "existing" in found
+    discovered = apc.advanced_parameter_discovery(apc.RequestConfig("https://example.test/page", "GET"), None, tools=[])
+    assert "id" in discovered
+def test_xss_dalfox_parses_vulnerable_reflected_and_negative_results(monkeypatch):
+    payloads = [
+        {"type": "V", "param": "q", "inject_type": "inHTML", "payload": "<x>", "message_str": "hit"},
+        {"type": "R", "param": "r", "inject_type": "inJS", "payload": "x", "evidence": "reflected"},
+        {"type": "R", "param": "r2", "inject_type": "inHTML", "payload": "y"},
+    ]
+    monkeypatch.setattr(apc.subprocess, "run", lambda *args, **kwargs: FakeCompleted(stdout=json.dumps(payloads)))
+    cfg = apc.RequestConfig("https://t/page", "POST", cookies={"sid": "1"}, headers={"X": "v"})
+    result = apc._coordinate_xss_testing(cfg, ["q", "r", "other"], tools=["dalfox"])
+    assert any(item.get("vulnerable") for item in result)
+    assert sum(item.get("vulnerable") is False for item in result) >= 2
+
+
+def test_corsy_reports_positive_and_negative(monkeypatch):
+    monkeypatch.setattr(apc.subprocess, "run", lambda *a, **k: FakeCompleted(stdout="severity: high"))
+    positive = apc._test_cors_configurations(apc.RequestConfig("https://t"), tools=["corsy"])
+    assert positive[0]["vulnerable"] is True
+    monkeypatch.setattr(apc.subprocess, "run", lambda *a, **k: FakeCompleted(stdout="clean"))
+    negative = apc._test_cors_configurations(apc.RequestConfig("https://t"), tools=["corsy"])
+    assert negative[0]["vulnerable"] is False
+
+
+def test_custom_injection_paths_detect_lfi_ssti_and_ldap(monkeypatch):
+    def fake_get(url, params, request_config, timeout=10):
+        value = next(iter(params.values()))
+        if "42*42" in value:
+            return "result 1764"
+        if value.startswith("../../"):
+            return "root:x:0:0"
+        if value.startswith("*"):
+            return "LDAP invalid dn"
+        return "safe"
+
+    monkeypatch.setattr(apc, "_requests_get_text", fake_get)
+    cfg = apc.RequestConfig("https://t/page", "GET")
+    kinds = set()
+    for focus in ("LFI", "SSTI", "LDAP Injection"):
+        result = apc._coordinate_injection_testing(cfg, ["p"], tools=[], focus_injection_types={focus})
+        kinds.update(item.get("injection_type") for item in result if item.get("vulnerable"))
+    assert {"SSTI", "LDAP Injection"} <= kinds
+def test_custom_xss_fallback_detects_raw_encoded_and_negative(monkeypatch):
+    calls = []
+    def fake_get(url, params, request_config, timeout=10):
+        calls.append(params)
+        payload = next(iter(params.values()))
+        param = next(iter(params))
+        if param == "raw":
+            return payload
+        if param == "encoded":
+            return payload.replace("<", "&lt;").replace(">", "&gt;")
+        return "safe response"
+    monkeypatch.setattr(apc, "_requests_get_text", fake_get)
+    cfg = apc.RequestConfig("https://t/page", "GET")
+    result = apc._coordinate_xss_testing(cfg, ["raw", "encoded", "none"], tools=[])
+    assert any(item.get("vulnerable") is True for item in result)
+    assert any(item.get("parameter") == "none" and item.get("vulnerable") is False for item in result)
+
+
+def test_custom_xss_fallback_survives_request_errors(monkeypatch):
+    monkeypatch.setattr(apc, "_requests_get_text", Mock(side_effect=RuntimeError("network")))
+    result = apc._coordinate_xss_testing(apc.RequestConfig("https://t/page"), ["q"], tools=[])
+    assert result == [{"parameter": "q", "vulnerable": False, "payload_type": "XSS tested", "tool": "custom"}]
+
+
+def test_top_level_coordinator_returns_structured_error(monkeypatch):
+    monkeypatch.setattr(apc, "setup_payload_tools", Mock(side_effect=RuntimeError("setup failed")))
+    result = json.loads(apc.advanced_payload_coordinator("example.test", test_type="xss", parameters="q"))
+    assert result["errors"]
+    assert "setup failed" in str(result["errors"])

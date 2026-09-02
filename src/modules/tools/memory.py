@@ -54,6 +54,7 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import wraps
@@ -1582,7 +1583,7 @@ class SQLiteApplicationStore:
     def _sqlite_integrity_check(db_path: str) -> str:
         """Return SQLite's integrity result, raising when the database cannot be inspected."""
 
-        with sqlite3.connect(db_path) as conn:
+        with closing(sqlite3.connect(db_path)) as conn, conn:
             row = conn.execute("PRAGMA integrity_check").fetchone()
         return str(row[0] if row else "missing integrity result").strip()
 
@@ -1632,7 +1633,7 @@ class SQLiteApplicationStore:
             if restored.returncode != 0:
                 return False
             SQLiteMigrationRunner(str(recovered_path)).migrate()
-            with sqlite3.connect(recovered_path) as connection:
+            with closing(sqlite3.connect(recovered_path)) as connection, connection:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             if self._sqlite_integrity_check(str(recovered_path)).lower() != "ok":
                 return False
@@ -1653,7 +1654,7 @@ class SQLiteApplicationStore:
             fresh_path = Path(temporary.name)
         try:
             SQLiteMigrationRunner(str(fresh_path)).migrate()
-            with sqlite3.connect(fresh_path) as connection:
+            with closing(sqlite3.connect(fresh_path)) as connection, connection:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             if self._sqlite_integrity_check(str(fresh_path)).lower() != "ok":
                 raise RuntimeError("fresh SQLite database failed integrity check")
@@ -1696,13 +1697,17 @@ class SQLiteApplicationStore:
             conn = sqlite3.connect(f"{Path(self.db_path).resolve().as_uri()}?mode=ro", uri=True)
         else:
             conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA busy_timeout = 5000")
-        conn.execute("PRAGMA foreign_keys = ON")
+        try:
+            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute("PRAGMA foreign_keys = ON")
+        except Exception:
+            conn.close()
+            raise
         return conn
 
     def ensure_operation(self, operation_id: str) -> None:
         """Register an operation in this logical-target scope."""
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO operations(logical_target, operation_id, created_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(logical_target, operation_id) DO NOTHING",
@@ -1711,7 +1716,7 @@ class SQLiteApplicationStore:
 
     def has_operation(self, operation_id: str) -> bool:
         """Return whether this exact target and operation are registered."""
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT 1 FROM operations WHERE logical_target = ? AND operation_id = ?",
                 (self.logical_target, operation_id),
@@ -1736,7 +1741,7 @@ class SQLiteApplicationStore:
         normalized_captured_at = str(captured_at).strip()
         if not normalized_captured_at:
             raise ValueError("model metric capture timestamp is required")
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             self._register_operation(conn, operation_id)
             conn.executemany(
                 """
@@ -1772,7 +1777,7 @@ class SQLiteApplicationStore:
 
     def list_operation_model_metrics(self, operation_id: str) -> list[dict[str, Any]]:
         """Return every persisted model-metrics capture in report display order."""
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 """
                     SELECT captured_at, provider, model, context_window_tokens, input_tokens, output_tokens,
@@ -1813,7 +1818,7 @@ class SQLiteApplicationStore:
             plan_dict["created_at"] = now
         plan_dict["updated_at"] = now
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             self._register_operation(conn, operation_id)
             conn.execute("""
                     INSERT INTO plans (
@@ -1850,7 +1855,7 @@ class SQLiteApplicationStore:
         """Atomically update controller-owned plan progress without replacing plan content."""
 
         updates = {int(phase_id): str(status) for phase_id, status in (phase_status_updates or {}).items()}
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
@@ -1892,7 +1897,7 @@ class SQLiteApplicationStore:
 
     def get_plan(self, operation_id: str) -> OperationPlan | None:
         """Retrieve a plan by operation_id."""
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             cursor = conn.execute(
                 "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
                 (self.logical_target, operation_id),
@@ -1911,7 +1916,7 @@ class SQLiteApplicationStore:
         task_dict["updated_at"] = now
 
         with self._lock:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 self._register_operation(conn, operation_id)
                 existing = conn.execute(
                     "SELECT acceptance_contract FROM tasks "
@@ -1987,7 +1992,7 @@ class SQLiteApplicationStore:
         additions = [str(item) for item in evidence_additions if str(item)]
         updates = dict(recovery_context_updates or {})
         removals = {str(item) for item in recovery_context_removals if str(item)}
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             self._register_operation(conn, operation_id)
             row = conn.execute(
@@ -2056,7 +2061,7 @@ class SQLiteApplicationStore:
     def get_tasks(self, operation_id: str) -> list[Task]:
         """Retrieve all tasks for an operation."""
         tasks = []
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             cursor = conn.execute(
                 "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
                 "created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
@@ -2097,7 +2102,7 @@ class SQLiteApplicationStore:
         """Atomically upsert executor results for a frozen task manifest."""
 
         now = datetime.now().isoformat()
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             self._register_operation(conn, operation_id)
             conn.executemany(
@@ -2128,7 +2133,7 @@ class SQLiteApplicationStore:
     def get_acceptance_results(self, operation_id: str, task_uid: str) -> list[AcceptanceResult]:
         """Return the current acceptance ledger for one task."""
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT criterion_id, status, disposition, summary, evidence_refs, coverage "
                 "FROM task_acceptance_results WHERE logical_target = ? "
@@ -2156,7 +2161,7 @@ class SQLiteApplicationStore:
     ) -> bool:
         """Return whether this immutable acceptance ledger was published to operation memory."""
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT publication_key FROM task_acceptance_memory_publications "
                 "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
@@ -2172,7 +2177,7 @@ class SQLiteApplicationStore:
     ) -> None:
         """Record successful publication for replay-safe acceptance handling."""
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             self._register_operation(conn, operation_id)
             conn.execute(
                 """
@@ -2190,7 +2195,7 @@ class SQLiteApplicationStore:
         """Persist immutable preflight facts for one operation's executable targets."""
 
         now = datetime.now().isoformat()
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             self._register_operation(conn, operation_id)
             for result in results:
                 target_id = str(result.get("target_id") or "").strip()
@@ -2225,7 +2230,7 @@ class SQLiteApplicationStore:
     def list_preflight_results(self, operation_id: str) -> list[dict[str, Any]]:
         """Return the original persisted preflight facts for an operation."""
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 """
                     SELECT target_id, target, target_type, status, checks, reason, resolved_addresses,
@@ -2253,7 +2258,7 @@ class SQLiteApplicationStore:
         ]
 
     def get_finding_by_fingerprint(self, operation_id: str, fingerprint: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT finding_uid, candidate_data, verification_task_uid, validation_data, resolution "
                 "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
@@ -2270,7 +2275,7 @@ class SQLiteApplicationStore:
         }
 
     def get_finding(self, operation_id: str, finding_uid: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
                 "FROM finding_records WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
@@ -2290,7 +2295,7 @@ class SQLiteApplicationStore:
     def list_findings(self, operation_id: str) -> list[dict[str, Any]]:
         """Return finding records for deterministic workflow scheduling decisions."""
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT finding_uid, fingerprint, candidate_data, verification_task_uid, "
                 "validation_data, resolution FROM finding_records "
@@ -2319,7 +2324,7 @@ class SQLiteApplicationStore:
         verification_task_uid: str,
     ) -> None:
         now = datetime.now().isoformat()
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             self._register_operation(conn, operation_id)
             conn.execute(
                 "INSERT INTO finding_records "
@@ -2348,7 +2353,7 @@ class SQLiteApplicationStore:
     ) -> None:
         """Persist one task-bound, artifact-backed finding-evidence receipt."""
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             self._register_operation(conn, operation_id)
             conn.execute(
                 "INSERT INTO finding_evidence_receipts "
@@ -2374,7 +2379,7 @@ class SQLiteApplicationStore:
         if not receipt_uids:
             return []
         placeholders = ", ".join("?" for _ in receipt_uids)
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT receipt_uid, source_task_uid, artifact_ref, marker, artifact_fingerprint "
                 "FROM finding_evidence_receipts WHERE logical_target = ? AND operation_id = ? "
@@ -2396,7 +2401,7 @@ class SQLiteApplicationStore:
     def link_finding_source_task(self, operation_id: str, finding_uid: str, task_uid: str) -> None:
         """Durably associate an idempotent finding candidate with a source task."""
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT candidate_data FROM finding_records "
@@ -2451,7 +2456,7 @@ class SQLiteApplicationStore:
     ) -> bool:
         """Atomically transfer an unresolved finding's verification-task ownership."""
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             cursor = conn.execute(
                 "UPDATE finding_records SET verification_task_uid = ?, updated_at = ? "
                 "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ? "
@@ -2473,7 +2478,7 @@ class SQLiteApplicationStore:
         finding_uid: str,
         validation_data: dict[str, Any],
     ) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "UPDATE finding_records SET validation_data = ?, updated_at = ? "
                 "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
@@ -2493,7 +2498,7 @@ class SQLiteApplicationStore:
         annotation: dict[str, Any],
     ) -> bool:
         """Atomically attach one taxonomy annotation to an unresolved finding candidate."""
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT candidate_data FROM finding_records "
@@ -2529,7 +2534,7 @@ class SQLiteApplicationStore:
     ) -> bool:
         """Persist final ATT&CK enrichment and merge it into the finding taxonomy."""
 
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT candidate_data FROM finding_records "
@@ -2588,7 +2593,7 @@ class SQLiteApplicationStore:
         return True
 
     def resolve_finding(self, operation_id: str, finding_uid: str, resolution: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "UPDATE finding_records SET resolution = ?, updated_at = ? "
                 "WHERE logical_target = ? AND operation_id = ? AND finding_uid = ?",
@@ -2596,7 +2601,7 @@ class SQLiteApplicationStore:
             )
 
     def get_objective_candidate(self, operation_id: str, candidate_uid: str) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT fingerprint, candidate_data, verification_task_uid, validation_data, resolution "
                 "FROM objective_validation_records "
@@ -2619,7 +2624,7 @@ class SQLiteApplicationStore:
         operation_id: str,
         fingerprint: str,
     ) -> dict[str, Any] | None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             row = conn.execute(
                 "SELECT candidate_uid FROM objective_validation_records "
                 "WHERE logical_target = ? AND operation_id = ? AND fingerprint = ?",
@@ -2628,7 +2633,7 @@ class SQLiteApplicationStore:
         return self.get_objective_candidate(operation_id, row[0]) if row else None
 
     def list_objective_candidates(self, operation_id: str) -> list[dict[str, Any]]:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             rows = conn.execute(
                 "SELECT candidate_uid FROM objective_validation_records "
                 "WHERE logical_target = ? AND operation_id = ? "
@@ -2646,7 +2651,7 @@ class SQLiteApplicationStore:
         verification_task_uid: str,
     ) -> None:
         now = datetime.now().isoformat()
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             self._register_operation(conn, operation_id)
             conn.execute(
                 "INSERT INTO objective_validation_records "
@@ -2670,7 +2675,7 @@ class SQLiteApplicationStore:
         candidate_uid: str,
         validation_data: dict[str, Any],
     ) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "UPDATE objective_validation_records SET validation_data = ?, updated_at = ? "
                 "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
@@ -2684,7 +2689,7 @@ class SQLiteApplicationStore:
             )
 
     def resolve_objective_candidate(self, operation_id: str, candidate_uid: str, resolution: str) -> None:
-        with self._lock, self._connect() as conn:
+        with self._lock, closing(self._connect()) as conn, conn:
             conn.execute(
                 "UPDATE objective_validation_records SET resolution = ?, updated_at = ? "
                 "WHERE logical_target = ? AND operation_id = ? AND candidate_uid = ?",
@@ -8988,6 +8993,12 @@ class QdrantMemoryClient:
             print(f"    Store Location: {location}")
             print(f"    Query Scope: {self.memory_mode}")
 
+    def close(self) -> None:
+        """Close the underlying Qdrant client and its local persistence database."""
+        close = getattr(self.qdrant, "close", None)
+        if callable(close):
+            close()
+
     @staticmethod
     def _memory_mode(value: Any) -> str:
         mode = str(value or "operation").strip().lower()
@@ -9754,6 +9765,7 @@ def initialize_memory_system(
     else:
         enhanced_config["user_id"] = f'"cyber-agent-{enhanced_config["target_name"]}"'
 
+    _close_memory_client()
     _MEMORY_CONFIG = enhanced_config
     os.environ["CYBER_OPERATION_ID"] = enhanced_config["operation_id"]
     _MEMORY_CLIENT = QdrantMemoryClient(enhanced_config, has_existing_memories, silent)
@@ -9801,9 +9813,21 @@ def get_memory_client(silent: bool = False) -> QdrantMemoryClient:
     return _MEMORY_CLIENT
 
 
-def clear_memory_client() -> None:
-    global _MEMORY_CLIENT, _MEMORY_CONFIG, _DATABASE_STORE, _MEMORY_EVENT_EMITTER
+def _close_memory_client() -> None:
+    """Close and clear the process-global memory client, if one exists."""
+    global _MEMORY_CLIENT
+    client = _MEMORY_CLIENT
     _MEMORY_CLIENT = None
+    if client is not None:
+        try:
+            client.close()
+        except Exception:  # pragma: no cover - cleanup must not mask the caller's failure
+            logger.debug("Unable to close Qdrant memory client", exc_info=True)
+
+
+def clear_memory_client() -> None:
+    global _MEMORY_CONFIG, _DATABASE_STORE, _MEMORY_EVENT_EMITTER
+    _close_memory_client()
     _MEMORY_CONFIG = None
     _DATABASE_STORE = None
     _MEMORY_EVENT_EMITTER = None
