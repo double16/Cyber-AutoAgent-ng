@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 from subprocess import DEVNULL
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -2071,3 +2072,90 @@ def test_result_file_and_input_validation_cover_cache_and_rejected_requests(monk
     output_file = tmp_path / "cached.json"
     assert apc.advanced_payload_coordinator("target.test", output_file=str(output_file)) == cached
     assert json.loads(output_file.read_text(encoding="utf-8"))["cached"] is True
+
+
+def test_parameter_discovery_orchestrates_arjun_json_stdout_headers_cookies_and_cleanup(monkeypatch, tmp_path):
+    output_path = tmp_path / "arjun-output.json"
+
+    class TemporaryFile:
+        name = str(output_path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        Path(command[command.index("-oJ") + 1]).write_text(
+            json.dumps({"https://target.test": {"params": ["arjun_id", "arjun_page"]}}),
+            encoding="utf-8",
+        )
+        return FakeCompleted(returncode=0, stdout="Parameters found: stdout_param")
+
+    monkeypatch.setattr(apc.tempfile, "NamedTemporaryFile", lambda **_kwargs: TemporaryFile())
+    monkeypatch.setattr(apc.subprocess, "run", run)
+    found = apc.advanced_parameter_discovery(
+        apc.RequestConfig(
+            "https://target.test/path?url_param=1",
+            "POST",
+            headers={"X-Test": "value"},
+            cookies={"sid": "cookie"},
+        ),
+        provided_params="provided",
+        tools=["arjun"],
+    )
+
+    assert {"provided", "url_param", "arjun_id", "arjun_page", "stdout_param"} <= set(found)
+    assert "--headers" in commands[0]
+    assert not output_path.exists()
+
+
+def test_comprehensive_coordinator_orchestrates_quiet_all_phase_success_paths(monkeypatch, capsys):
+    """Run the controller's complete phase graph with deterministic tool outcomes."""
+    monkeypatch.setattr(apc, "get_cached_result", lambda *_args: None)
+    monkeypatch.setattr(apc, "cache_result", lambda *_args: None)
+    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": ["dalfox"], "failed": []})
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda *_args, **_kwargs: ["q"])
+    monkeypatch.setattr(
+        apc,
+        "_coordinate_xss_testing",
+        lambda config, parameters, **_kwargs: [
+            {"parameter": parameters[0], "vulnerable": True, "payload_type": "Advanced XSS"}
+        ],
+    )
+    monkeypatch.setattr(
+        apc,
+        "_test_cors_configurations",
+        lambda *_args, **_kwargs: [{"vulnerable": True, "issue_type": "Permissive CORS"}],
+    )
+    monkeypatch.setattr(
+        apc,
+        "_coordinate_injection_testing",
+        lambda config, parameters, **_kwargs: [
+            {"parameter": parameters[0], "vulnerable": True, "injection_type": "Command Injection"}
+        ],
+    )
+
+    result = json.loads(
+        apc.advanced_payload_coordinator(
+            "target.test/path",
+            test_type="comprehensive",
+            tool_context=SimpleNamespace(),
+        )
+    )
+
+    assert result["counts"] == {
+        "parameters_discovered": 1,
+        "payload_results": 3,
+        "vulnerabilities": 3,
+        "attack_vectors": 3,
+        "bypass_techniques": 0,
+        "exploitation_chains": 2,
+        "tools_available": 1,
+        "tools_failed": 0,
+    }
+    assert capsys.readouterr().err == ""
