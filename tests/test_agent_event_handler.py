@@ -2163,3 +2163,63 @@ def test_parent_termination_emits_agent_scoped_event():
     handler.emit_termination("failed", "child failed")
     assert handler._events[-1]["type"] == "agent_termination"
     assert handler._events[-1]["scope"] == "agent"
+
+
+def test_report_reservation_uses_pricing_fallback_config_and_model_prices(monkeypatch):
+    coordinator = OperationEventCoordinator("OP", MagicMock())
+    coordinator.set_report_items([{"category": "finding", "content": "proof"}], refinement_cycles=0)
+    coordinator.mark_report_step_started()
+    override = coordinator.report_budget_estimate(
+        provider_id="ollama", model_id="local", pricing_fallback={"input": 2.0, "output": 3.0}, pricing_override=True
+    )
+    assert override.cost > 0
+    client = SimpleNamespace(get_pricing=Mock(return_value=SimpleNamespace(input=4.0, output=5.0)))
+    priced = coordinator.report_budget_estimate("aws", "model", models_client=client)
+    assert priced.cost > 0
+    client.get_pricing.assert_called()
+    monkeypatch.setattr(rb, "get_config_manager", Mock(side_effect=RuntimeError("missing config")))
+    fallback = coordinator._estimate_report_cost(100, 50, "aws", None, pricing_fallback={"input": 1.0, "output": 1.0})
+    assert fallback > 0
+
+
+def test_report_item_counting_handles_non_records_and_finished_steps():
+    coordinator = OperationEventCoordinator("OP", MagicMock())
+    coordinator.set_report_items(
+        [None, {"category": "signal", "memory": "signal"}, {"category": "discovery", "content": "discovery"}, {"category": "other"}],
+        refinement_cycles=-2,
+    )
+    assert coordinator.report_findings == 0
+    assert coordinator.report_observations == 2
+    assert coordinator._report_refinement_cycles == 0
+    for _ in range(10):
+        coordinator.mark_report_step_started()
+    estimate = coordinator.report_budget_estimate("ollama", "local")
+    assert estimate.remaining_steps == 0
+
+
+def test_termination_without_coordinator_is_idempotent():
+    handler = make_handler()
+    handler.coordinator = None
+
+    handler.emit_termination("complete", "finished")
+    handler.emit_termination("ignored", "must not replace completion")
+
+    assert handler.termination_reason == "complete"
+    assert handler.termination_message == "finished"
+
+
+def test_report_pricing_falls_back_after_provider_lookup_failure():
+    coordinator = OperationEventCoordinator("OP", MagicMock())
+    client = SimpleNamespace(get_pricing=Mock(side_effect=[RuntimeError("no provider price"), None]))
+
+    cost = coordinator._estimate_report_cost(
+        1_000_000,
+        1_000_000,
+        "aws",
+        "model",
+        models_client=client,
+        pricing_fallback={"input": 2.0, "output": 3.0},
+    )
+
+    assert cost == 5.0
+    assert client.get_pricing.call_count == 2

@@ -93,6 +93,33 @@ def test_evaluation_usage_callback_reads_message_metadata():
     ]
 
 
+def test_evaluation_usage_callback_supports_usage_detail_fallbacks_and_object_values():
+    usage = SimpleNamespace(
+        input_tokens=0,
+        output_tokens=0,
+        prompt_tokens_details={"cached_tokens": 4, "cache_creation_tokens": 6},
+    )
+    assert mod.EvaluationUsageCallback._cache_tokens(usage) == (4, 6)
+
+    response = SimpleNamespace(
+        llm_output={"usage": {"input_tokens": 9, "output_tokens": 2, "prompt_tokens_details": {"cached_tokens": 3}}},
+        generations=[],
+    )
+    assert mod.EvaluationUsageCallback._token_usage(response) == (9, 2, 3, 0)
+
+
+def test_evaluation_usage_callback_sums_mixed_generation_metadata_shapes():
+    response = SimpleNamespace(
+        llm_output=None,
+        generations=[
+            [SimpleNamespace(message=None)],
+            [SimpleNamespace(message=SimpleNamespace(usage_metadata={"input_tokens": 2, "output_tokens": 1}))],
+            [],
+        ],
+    )
+    assert mod.EvaluationUsageCallback._token_usage(response) == (2, 1, 0, 0)
+
+
 class FakeConfigManager:
     def __init__(self, cfg=None):
         self.cfg = cfg or SimpleNamespace(
@@ -134,6 +161,26 @@ def evaluator(monkeypatch, cfg=None):
     return ev
 
 
+def test_trace_selection_prefers_execution_roles_and_falls_back_to_legacy(monkeypatch):
+    ev = evaluator(monkeypatch)
+    assert ev._trace_attributes(SimpleNamespace(metadata=None)) == {}
+    assert ev._trace_attributes(SimpleNamespace(metadata={"attributes": "bad"})) == {"attributes": "bad"}
+    execution = SimpleNamespace(
+        id="exec", timestamp="2024-01-02", metadata={"attributes": {"agent.role": "task_executor"}}
+    )
+    planner = SimpleNamespace(
+        id="plan", timestamp="2024-01-01", metadata={"attributes": {"agent.role": "plan_creator"}}
+    )
+    assert ev._select_execution_traces([planner, execution]) == [execution]
+
+    legacy = SimpleNamespace(id="legacy", created_at="2024-01-03", metadata={})
+    non_exec = SimpleNamespace(id="report", metadata={"attributes": {"agent.role": "report_generation"}})
+    assert ev._select_execution_traces([non_exec, legacy]) == [legacy]
+    assert ev._trace_sort_key(SimpleNamespace(id="only-id")) == "only-id"
+    assert ev._trace_role(SimpleNamespace(metadata={"attributes": {"langfuse.agent.type": "Swarm_Agent"}})) == "swarm_agent"
+    assert ev._trace_role(SimpleNamespace(metadata={"attributes": {}})) == ""
+
+
 @pytest.mark.asyncio
 async def test_find_operation_traces_matches_session_metadata_and_name(monkeypatch):
     ev = evaluator(monkeypatch)
@@ -149,6 +196,22 @@ async def test_find_operation_traces_matches_session_metadata_and_name(monkeypat
     found = await ev._find_operation_traces("OP1")
 
     assert [trace.id for trace in found] == ["1", "2", "3", "4"]
+
+
+@pytest.mark.asyncio
+async def test_find_operation_traces_falls_back_and_handles_empty_results(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev.langfuse.api.trace.list.side_effect = [RuntimeError("session lookup unavailable"), SimpleNamespace(data=[])]
+
+    assert await ev._find_operation_traces("OP1") == []
+    assert ev.langfuse.api.trace.list.call_args_list[1].kwargs == {"limit": 200}
+
+
+@pytest.mark.asyncio
+async def test_find_operation_traces_handles_response_without_data(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev.langfuse.api.trace.list.return_value = SimpleNamespace()
+    assert await ev._find_operation_traces("OP1") == []
 
 
 @pytest.mark.asyncio
@@ -354,10 +417,41 @@ def test_build_operation_evaluation_trace_deduplicates_observations(monkeypatch)
     assert trace.metadata["attributes"]["evaluation.source_trace_count"] == 2
 
 
+def test_build_operation_evaluation_trace_uses_default_objective_and_empty_output(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev.trace_parser = SimpleNamespace(
+        _extract_objective=lambda _trace: "",
+        _fetch_observations=lambda _trace: [],
+        _extract_final_output=lambda _trace: "",
+    )
+    ev._score_host_trace_id = Mock(return_value="fallback")
+    trace = ev._build_operation_evaluation_trace("OP", [SimpleNamespace(id="source")])
+    assert trace.input == "Security assessment"
+    assert trace.output == ""
+    assert trace.observations == []
+
+
 def test_build_report_evaluation_trace_skips_missing_report(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.report_path = "/missing/security_assessment_report.md"
 
+    assert ev._build_report_evaluation_trace("OP", []) is None
+
+
+def test_build_report_evaluation_trace_skips_empty_report(monkeypatch, tmp_path):
+    ev = evaluator(monkeypatch)
+    report_path = tmp_path / "empty.md"
+    report_path.write_text("\n\t", encoding="utf-8")
+    ev.report_path = str(report_path)
+    assert ev._build_report_evaluation_trace("OP", []) is None
+
+
+def test_build_report_evaluation_trace_handles_read_error(monkeypatch, tmp_path):
+    ev = evaluator(monkeypatch)
+    report_path = tmp_path / "report.md"
+    report_path.write_text("content", encoding="utf-8")
+    ev.report_path = str(report_path)
+    monkeypatch.setattr("builtins.open", Mock(side_effect=OSError("unreadable")))
     assert ev._build_report_evaluation_trace("OP", []) is None
 
 
@@ -883,6 +977,94 @@ async def test_evaluate_single_trace_applies_policy_caps_and_uploads(monkeypatch
     assert scores["tuple"] == (0.4, {"m": 1})
     assert "drop" not in scores
     assert uploaded[0][0] == "trace-id"
+
+
+@pytest.mark.asyncio
+async def test_evaluate_single_trace_report_scope_skips_rubric_policy_and_handles_non_numeric_scores(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev.all_metrics = []
+    ev.evidence_quality = SimpleNamespace(name="evidence_quality")
+    ev.goal_accuracy = SimpleNamespace(name="goal_accuracy")
+    ev.topic_adherence = SimpleNamespace(name="topic_adherence")
+    ev._create_evaluation_data = Mock(side_effect=lambda _trace: _sample(SimpleNamespace()))
+    ev._evaluate_all_metrics = Mock(
+        side_effect=lambda _data, **_kwargs: _sample(
+            {"metric": "unavailable", "tuple": (0.4, {"source": "x"})}
+        )
+    )
+    ev._rubric_judge_scores = Mock(side_effect=AssertionError("report scope skips rubric"))
+    ev._infer_evaluation_policy = Mock(side_effect=AssertionError("report scope skips policy"))
+    ev._upload_scores_to_langfuse = Mock(side_effect=AssertionError("no trace id to upload"))
+
+    scores = await ev._evaluate_single_trace(SimpleNamespace(), metric_scope="report")
+
+    assert scores == {"report/metric": "unavailable", "report/tuple": (0.4, {"source": "x"})}
+
+
+@pytest.mark.asyncio
+async def test_evaluate_single_trace_ignores_malformed_policy_fields_and_preserves_bad_values(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev.all_metrics = []
+    ev._create_evaluation_data = Mock(side_effect=lambda _trace: _sample(SimpleNamespace()))
+    ev._evaluate_all_metrics = Mock(
+        side_effect=lambda _data, **_kwargs: _sample({"score": "not-a-number", "good": 0.8})
+    )
+    ev._rubric_judge_scores = Mock(side_effect=lambda _data: _sample({}))
+    ev._infer_evaluation_policy = Mock(side_effect=lambda _data: _sample({"caps": [], "disable": "score"}))
+    uploaded = []
+    ev._upload_scores_to_langfuse = Mock(side_effect=lambda trace_id, scores: uploaded.append((trace_id, scores)) or _sample(None))
+
+    scores = await ev._evaluate_single_trace(SimpleNamespace(id="trace"), metric_scope="operation")
+
+    assert scores == {"operation/score": "not-a-number", "operation/good": 0.8}
+    assert uploaded[0][0] == "trace"
+
+
+def test_setup_models_supports_all_configured_providers(monkeypatch):
+    class Config:
+        def __init__(self, provider):
+            self.provider = provider
+            self.server = SimpleNamespace(
+                evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model")),
+                embedding=SimpleNamespace(model_id="embed-model"),
+            )
+
+        def get_provider(self):
+            return self.provider
+
+        def get_server_config(self, _provider):
+            return self.server
+
+        def getenv(self, _name, default):
+            return default
+
+        def get_default_region(self):
+            return "us-east-1"
+
+    class Model:
+        def __init__(self, **_kwargs):
+            self.callbacks = []
+
+    monkeypatch.setattr(mod, "ChatOllama", Model)
+    monkeypatch.setattr(mod, "OllamaEmbeddings", Model)
+    monkeypatch.setattr(mod, "ChatLiteLLM", Model)
+    monkeypatch.setattr(mod, "BedrockEmbeddings", Model)
+    monkeypatch.setattr(mod, "ChatGoogleGenerativeAI", Model)
+    monkeypatch.setattr(mod, "GoogleGenerativeAIEmbeddings", Model)
+    monkeypatch.setattr(mod, "ChatBedrock", Model)
+    monkeypatch.setattr(mod, "LangchainLLMWrapper", lambda model: model)
+    monkeypatch.setattr(mod, "LangchainEmbeddingsWrapper", lambda model: model)
+    monkeypatch.setattr(mod, "get_ollama_timeout", lambda _reader: 1)
+
+    for provider in ("ollama", "litellm", "gemini", "bedrock"):
+        ev = evaluator(monkeypatch)
+        ev._usage_callback = lambda _payload: None
+        config = Config(provider)
+        monkeypatch.setattr(mod, "get_config_manager", lambda config=config: config)
+        ev.setup_models()
+        assert ev.llm is not None
+        assert ev.embeddings is not None
+        assert ev._chat_model.callbacks
 def test_trace_helpers_select_roles_and_objective(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.trace_parser = SimpleNamespace(_extract_objective=lambda trace: getattr(trace, "objective", ""))
@@ -950,3 +1132,190 @@ async def test_rubric_strict_profile_handles_list_context_and_structured_fallbac
     result = await ev._rubric_judge_scores(SimpleNamespace(user_input=["a", "b"], retrieved_contexts=["ctx"]))
     assert result["rubric/overall_quality"][0] == 0.8
     assert "rubric/overall_quality" in result
+
+
+@pytest.mark.asyncio
+async def test_metric_and_score_upload_orchestration_covers_success_skips_failures_and_fallbacks(monkeypatch):
+    """Exercise the evaluator's metric dispatch and durable-score compatibility fallbacks."""
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._evaluation_step_total = 4
+    ev._current_evaluation_scope = "operation"
+
+    class SuccessMetric:
+        name = "success"
+
+        async def single_turn_ascore(self, _data):
+            return 0.75
+
+    class UnsupportedMetric:
+        name = "unsupported"
+
+        async def multi_turn_ascore(self, _data):
+            return 0.1
+
+    class EmptyMetric:
+        name = "empty"
+
+        async def single_turn_ascore(self, _data):
+            return None
+
+    class BrokenMetric:
+        name = "broken"
+
+        async def single_turn_ascore(self, _data):
+            raise RuntimeError("metric unavailable")
+
+    sample = SimpleNamespace(user_input="objective", response="response", retrieved_contexts=[])
+    scores = await ev._evaluate_all_metrics(
+        sample,
+        metrics=[SuccessMetric(), UnsupportedMetric(), EmptyMetric(), BrokenMetric()],
+    )
+    assert scores == {"success": 0.75, "unsupported": 0.0, "empty": 0.0, "broken": 0.0}
+    statuses = [event["status"] for event in ev._emitter.events if event["type"] == "evaluation_step_complete"]
+    assert statuses == ["completed", "skipped", "failed", "failed"]
+
+    legacy_scores = Mock()
+    ev.langfuse = SimpleNamespace(
+        scores=SimpleNamespace(create=Mock(side_effect=RuntimeError("v4 unavailable"))),
+        score=legacy_scores,
+        flush=Mock(),
+    )
+    ev._last_eval_summary_sha256 = "summary-hash"
+    ev._last_eval_stats = {"evidence_count": 2}
+    ev._last_evaluation_scope = "operation"
+    await ev._upload_scores_to_langfuse(
+        "trace-1",
+        {"operation/success": 0.75, "rubric/overall": (0.8, {"rationale": "evidence"})},
+    )
+    assert legacy_scores.call_count == 2
+    assert legacy_scores.call_args_list[1].kwargs["metadata"]["rationale"] == "evidence"
+    ev.langfuse.flush.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_evaluate_trace_and_operation_lookup_cover_non_mapping_metadata_and_report_fallback(monkeypatch):
+    ev = evaluator(monkeypatch)
+    malformed = SimpleNamespace(id="bad", session_id="other", metadata=["not-a-dict"], name="OP_TEST trace")
+    matching = SimpleNamespace(id="match", session_id="OP_TEST", metadata=None, name="other")
+    ev.langfuse.api.trace.list.return_value = SimpleNamespace(data=[malformed, matching])
+    assert [trace.id for trace in await ev._find_operation_traces("OP_TEST")] == ["match"]
+
+    async def no_results(_operation_id):
+        return {}
+
+    async def report_results(_operation_id):
+        return {"report": {"rubric/overall": (0.6, {}), "bad": "n/a"}}
+
+    ev.evaluate_operation_traces = no_results
+    assert await ev.evaluate_trace("OP_EMPTY") == {}
+    ev.evaluate_operation_traces = report_results
+    assert await ev.evaluate_trace("OP_REPORT") == {"rubric/overall": (0.6, {}), "bad": "n/a"}
+
+
+@pytest.mark.asyncio
+async def test_create_evaluation_data_attaches_summary_topics_and_allows_low_evidence_report_trace(monkeypatch):
+    cfg = SimpleNamespace(
+        max_wait_secs=0,
+        poll_interval_secs=0,
+        min_tool_calls=5,
+        min_evidence=3,
+        rubric_enabled=False,
+        skip_if_insufficient_evidence=False,
+        rubric_profile="default",
+        judge_system_prompt="",
+        judge_user_template="",
+        judge_temperature=0.0,
+        judge_max_tokens=32,
+        summary_max_chars=100,
+    )
+    ev = evaluator(monkeypatch, cfg)
+    ev._evaluation_operation_id = "OP_TEST"
+    parsed = SimpleNamespace(
+        trace_id="report-trace",
+        messages=[{"role": "assistant", "content": "report"}],
+        tool_calls=[],
+        metadata={"attributes": {"agent.role": "report_generation", "agent.name": "ReportGenerator"}},
+        objective="Assess",
+        target="target",
+    )
+    sample = SingleTurnSample(
+        user_input="Assess",
+        response="",
+        retrieved_contexts=[],
+        reference_topics=[],
+    )
+
+    async def create_sample(_parsed):
+        return sample
+
+    ev.trace_parser = SimpleNamespace(
+        parse_trace=lambda _trace: parsed,
+        count_memory_operations=lambda _calls: 0,
+        count_evidence_findings=lambda _calls: 0,
+        create_evaluation_sample=create_sample,
+    )
+    ev._synthesize_context_summary = lambda _parsed: "current operation evidence"
+    ev._synthesize_topics = lambda _parsed, _summary: ["web testing"]
+
+    result = await ev._create_evaluation_data(SimpleNamespace(id="source"))
+
+    assert result is sample
+    assert sample.response == "current operation evidence"
+    assert sample.retrieved_contexts == ["current operation evidence"]
+    assert ev._last_eval_summary_sha256
+
+
+@pytest.mark.asyncio
+async def test_multiturn_metric_dispatch_covers_supported_skipped_none_and_error_paths(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._evaluation_step_total = 4
+
+    class FakeMulti:
+        user_input = ["one", "two"]
+        reference_topics = ["topic"]
+
+    class Success:
+        name = "multi-success"
+
+        async def multi_turn_ascore(self, _sample):
+            return 0.6
+
+    class Unsupported:
+        name = "multi-unsupported"
+
+        async def single_turn_ascore(self, _sample):
+            return 0.1
+
+    class Empty:
+        name = "multi-empty"
+
+        async def multi_turn_ascore(self, _sample):
+            return None
+
+    class Broken:
+        name = "multi-broken"
+
+        async def multi_turn_ascore(self, _sample):
+            raise RuntimeError("no metric")
+
+    monkeypatch.setattr(mod, "MultiTurnSample", FakeMulti)
+    assert await ev._evaluate_all_metrics(FakeMulti(), [Success(), Unsupported(), Empty(), Broken()]) == {
+        "multi-success": 0.6,
+        "multi-unsupported": 0.0,
+        "multi-empty": 0.0,
+        "multi-broken": 0.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_score_upload_uses_create_score_and_shutdown_legacy_paths(monkeypatch):
+    ev = evaluator(monkeypatch)
+    legacy = Mock()
+    ev.langfuse = SimpleNamespace(create_score=legacy, shutdown=Mock())
+    ev._last_eval_summary_sha256 = ""
+    ev._last_eval_stats = {}
+    await ev._upload_scores_to_langfuse("trace", {"answer_relevancy": 0.4})
+    legacy.assert_called_once()
+    ev.langfuse.shutdown.assert_called_once()

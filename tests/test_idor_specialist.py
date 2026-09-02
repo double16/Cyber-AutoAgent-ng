@@ -23,6 +23,17 @@ class FakeCompleted:
         self.stderr = stderr
 
 
+def test_idor_specialist_normalizes_invalid_type_and_rejects_bad_credentials(monkeypatch):
+    monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ids, "_analyze_idor_intelligence", lambda _results, has_alt: {})
+    monkeypatch.setattr(ids, "_generate_idor_recommendations", lambda _type, _results: [])
+    result = json.loads(ids.idor_specialist("example.test", test_type="unknown"))
+    assert result["target"] == "https://example.test"
+    assert result["test_type"] == "comprehensive"
+    error = json.loads(ids.idor_specialist("https://t", multi_credentials="not-json"))
+    assert "multi_credentials expected" in error["errors"][0]
+
+
 # -------------------------
 # Helper function tests
 # -------------------------

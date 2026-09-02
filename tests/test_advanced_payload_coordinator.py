@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 import modules.tools.advanced_payload_coordinator as apc
 
 # -------------------------
@@ -77,6 +79,81 @@ def test_advanced_payload_cache_key_includes_request_inputs(monkeypatch):
     apc.advanced_payload_coordinator("https://example.test", test_type="param_discovery", parameters="page")
 
     assert calls["setup"] == 2
+
+
+def test_advanced_payload_normalizes_unknown_test_type_to_comprehensive(monkeypatch):
+    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": []})
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(apc, "_coordinate_xss_testing", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(apc, "_coordinate_injection_testing", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(apc, "_test_cors_configurations", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(apc, "_analyze_payload_intelligence", lambda _results: {})
+    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda *_args: [])
+    result = json.loads(apc.advanced_payload_coordinator("example.test", test_type="unknown"))
+    assert result["test_type"] == "comprehensive"
+
+
+def test_advanced_payload_normalizes_supported_aliases(monkeypatch):
+    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": []})
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(apc, "_coordinate_xss_testing", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(apc, "_coordinate_injection_testing", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(apc, "_test_cors_configurations", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(apc, "_analyze_payload_intelligence", lambda _results: {})
+    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda *_args: [])
+    for alias, canonical in (("local_file", "lfi"), ("template", "ssti")):
+        result = json.loads(apc.advanced_payload_coordinator("example.test", test_type=alias))
+        assert result["test_type"] == canonical
+
+    for alias in ("cmd", "command"):
+        result = json.loads(apc.advanced_payload_coordinator("example.test", test_type=alias))
+        assert result["test_type"] == "command_injection"
+    result = json.loads(apc.advanced_payload_coordinator("example.test", test_type="ldap"))
+    assert result["test_type"] == "ldap_injection"
+    for alias, canonical in (("local_file_inclusion", "lfi"), ("template_injection", "ssti"), ("ldap_injection", "ldap_injection")):
+        result = json.loads(apc.advanced_payload_coordinator("example.test", test_type=alias))
+        assert result["test_type"] == canonical
+
+
+def test_advanced_payload_retries_xss_with_post_and_keeps_successful_results(monkeypatch):
+    methods = []
+    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": ["dalfox"], "failed": []})
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda *_args, **_kwargs: ["query"])
+
+    def xss(request_config, *_args, **_kwargs):
+        methods.append(request_config.http_method)
+        return [] if request_config.http_method == "GET" else [{"vulnerable": True, "parameter": "query"}]
+
+    monkeypatch.setattr(apc, "_coordinate_xss_testing", xss)
+    monkeypatch.setattr(apc, "_analyze_payload_intelligence", lambda _results: {"attack_vectors": []})
+    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda *_args: ["verify"])
+
+    result = json.loads(apc.advanced_payload_coordinator("https://xss-retry.example", test_type="xss"))
+
+    assert methods == ["GET", "POST"]
+    assert result["http_method"] == "POST"
+    assert result["vulnerabilities"] == [{"vulnerable": True, "parameter": "query"}]
+    assert result["recommendations"] == ["verify"]
+
+
+def test_advanced_payload_retries_injection_then_restores_get_when_post_has_no_finding(monkeypatch):
+    methods = []
+    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": ["commix"]})
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda *_args, **_kwargs: ["path"])
+
+    def injection(request_config, *_args, **_kwargs):
+        methods.append(request_config.http_method)
+        return [{"vulnerable": False, "parameter": "path"}]
+
+    monkeypatch.setattr(apc, "_coordinate_injection_testing", injection)
+    monkeypatch.setattr(apc, "_analyze_payload_intelligence", lambda _results: {"attack_vectors": []})
+    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda *_args: [])
+
+    result = json.loads(apc.advanced_payload_coordinator("https://lfi-retry.example", test_type="lfi"))
+
+    assert methods == ["GET", "POST"]
+    assert result["http_method"] == "GET"
+    assert result["payload_results"] == [{"vulnerable": False, "parameter": "path"}]
 
 
 # -------------------------
@@ -156,6 +233,32 @@ def test_requests_head_raw_headers_merges_headers(monkeypatch):
     out = apc._requests_head_raw_headers("http://example.test/page", {"Origin": "https://evil.com"}, rc)
     assert "A: b" in out
     assert "C: d" in out
+
+
+def test_request_helpers_cover_post_body_and_head_failures(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(method=method, params=kwargs["params"], data=kwargs["data"])
+        return SimpleNamespace(text="POST response")
+
+    monkeypatch.setattr(apc.requests, "request", fake_request)
+    config = apc.RequestConfig("https://example.test", http_method="POST")
+    assert apc._requests_get_text("https://example.test", {"a": "1"}, config) == "POST response"
+    assert captured == {"method": "POST", "params": None, "data": {"a": "1"}}
+
+    monkeypatch.setattr(apc.requests, "head", Mock(side_effect=RuntimeError("offline")))
+    assert apc._requests_head_raw_headers("https://example.test", {}, config) is None
+    assert apc._coerce_str(b"bytes") == "bytes"
+    assert apc._coerce_str(123) == "123"
+    assert apc._coerce_str(None) == ""
+
+
+def test_request_config_method_normalization_and_binary_coercion():
+    assert apc.RequestConfig("https://example.test", http_method="put").inject_in_body() is True
+    assert apc.RequestConfig("https://example.test", http_method="get").inject_in_body() is False
+    assert apc._b64(None) == ""
+    assert apc._b64(b"bytes") == b64s("bytes")
 
 
 # -------------------------
@@ -281,6 +384,29 @@ def test_parse_lfimap_output_parses_multiple_successful_attacks():
     assert "Injected data: <?php system($_GET['cmd']); ?>" in php_input["evidence"]
 
 
+def test_parse_lfimap_output_ignores_alerts_and_flushes_unknown_attack():
+    stdout = """
+[!] no attack context
+[+] orphan successful! ignored
+[*] Starting Custom Attack...
+[+] Custom successful! evidence
+"""
+    findings = apc._parse_lfimap_output("file", "POST", stdout)
+    assert findings == [
+        {
+            "vulnerable": True,
+            "injection_type": "LFI",
+            "payload_type": "LFI (Custom)",
+            "parameter": "file",
+            "param_location": "body",
+            "payload": None,
+            "attack_type": "Custom",
+            "payload_source": None,
+            "injected_data": None,
+            "evidence": "Attack: Custom; [+] Custom successful! evidence",
+            "tool": "lfimap",
+        }
+    ]
 def test_parse_lfimap_output_rfi():
     stdout = """
 [*] Starting RFI Attack...
@@ -350,6 +476,30 @@ def test_advanced_parameter_discovery_adds_provided_params():
     assert set(params) >= {"a", "b", "c"}
 
 
+def test_advanced_parameter_discovery_reads_arjun_json_and_passes_auth_headers(monkeypatch):
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        output_path = command[command.index("-oJ") + 1]
+        with open(output_path, "w", encoding="utf-8") as output:
+            json.dump({"https://example.test": {"params": ["from_arjun", "id"]}}, output)
+        return FakeCompleted(returncode=0, stdout="Parameters found: stdout_param")
+
+    monkeypatch.setattr(apc.subprocess, "run", run)
+    config = apc.RequestConfig(
+        "https://example.test/path",
+        headers={"X-Test": "one"},
+        cookies={"sid": "two"},
+    )
+
+    params = apc.advanced_parameter_discovery(config, tools=["arjun"])
+
+    assert {"from_arjun", "id", "stdout_param"}.issubset(params)
+    assert "--headers" in commands[0]
+    assert "Cookie: sid=two" in commands[0][commands[0].index("--headers") + 1]
+
+
 def test_advanced_parameter_discovery_common_params_only_if_none_found(monkeypatch):
     # Set up baseline request to succeed and make a status_code difference for one common param.
     seen = []
@@ -368,6 +518,19 @@ def test_advanced_parameter_discovery_common_params_only_if_none_found(monkeypat
     rc = apc.RequestConfig(target_url="http://example.test/page", http_method="GET")
     params = apc.advanced_parameter_discovery(rc, tools=[])
     assert "name" in params  # discovered via status code delta
+
+
+def test_advanced_parameter_discovery_detects_response_length_ratio(monkeypatch):
+    def fake_request(_method, _url, **kwargs):
+        params = kwargs.get("params") or {}
+        if not params:
+            return SimpleNamespace(status_code=200, headers={"Content-Length": "100"})
+        length = "200" if "id" in params else "100"
+        return SimpleNamespace(status_code=200, headers={"Content-Length": length})
+
+    monkeypatch.setattr(apc.requests, "request", fake_request)
+    rc = apc.RequestConfig(target_url="http://example.test/page", http_method="GET")
+    assert "id" in apc.advanced_parameter_discovery(rc, tools=[])
 
 
 # -------------------------
@@ -402,6 +565,24 @@ def test_coordinate_xss_testing_parses_dalfox_json_array(monkeypatch):
     assert v["parameter"] == "name"
     assert v["url"] == "http://example.test/page"
     assert v["payload"] == "<img src=x onerror=alert(1)>"
+
+def test_coordinate_xss_testing_returns_empty_for_no_parameters():
+    rc = apc.RequestConfig(target_url="https://example.test", http_method="GET")
+    assert apc._coordinate_xss_testing(rc, parameters=[], tools=None) == []
+
+
+def test_coordinate_xss_testing_limits_reflection_results_and_reports_uncovered_params(monkeypatch):
+    events = [
+        {"type": "R", "param": "name", "inject_type": "reflected", "payload": "one"},
+        {"type": "R", "param": "name", "inject_type": "reflected", "payload": "two"},
+        {"type": "R", "param": "name", "inject_type": "reflected", "payload": "three"},
+    ]
+    monkeypatch.setattr(apc.subprocess, "run", lambda *args, **kwargs: FakeCompleted(stdout=json.dumps(events)))
+    rc = apc.RequestConfig(target_url="https://example.test", http_method="GET")
+    results = apc._coordinate_xss_testing(rc, parameters=["name", "other"], tools=["dalfox"])
+    assert len([item for item in results if item.get("vulnerable") is False]) == 4
+    assert any(item.get("parameter") == "other" and item.get("payload_type") == "XSS tested" for item in results)
+
 
 def test_coordinate_xss_testing_parses_dalfox_jsonl(monkeypatch):
     # DalFox returns a JSON array; one vuln event and one non-vuln (or none).
@@ -495,6 +676,30 @@ def test_test_cors_configurations_manual_negative_when_no_headers(monkeypatch):
     assert res and res[0]["vulnerable"] is False
 
 
+def test_test_cors_configurations_corsy_positive_and_negative(monkeypatch):
+    monkeypatch.setattr(
+        apc.subprocess,
+        "run",
+        lambda *args, **kwargs: FakeCompleted(stdout="Severity: HIGH - wildcard origin"),
+    )
+    rc = apc.RequestConfig(target_url="https://example.test")
+    positive = apc._test_cors_configurations(rc, tools=["corsy"])
+    assert positive[0]["vulnerable"] is True
+
+    monkeypatch.setattr(
+        apc.subprocess,
+        "run",
+        lambda *args, **kwargs: FakeCompleted(stdout="No issues"),
+    )
+    negative = apc._test_cors_configurations(rc, tools=["corsy"])
+    assert negative[0]["vulnerable"] is False
+
+    monkeypatch.setattr(apc.subprocess, "run", Mock(side_effect=RuntimeError("missing corsy")))
+    monkeypatch.setattr(apc, "_requests_head_raw_headers", lambda *args, **kwargs: "Server: test")
+    fallback = apc._test_cors_configurations(rc, tools=["corsy"])
+    assert fallback[0]["vulnerable"] is False
+
+
 # -------------------------
 # _coordinate_injection_testing (custom + sstimap)
 # -------------------------
@@ -514,6 +719,23 @@ def test_coordinate_injection_testing_custom_detects_command_indicator(monkeypat
     vulns = [r for r in res if r.get("vulnerable")]
     assert vulns
     assert any(v["injection_type"] == "Command Injection" for v in vulns)
+
+
+def test_coordinate_injection_testing_detects_ssti_and_ldap_indicators(monkeypatch):
+    def fake_get_text(_url, params, _request_config, timeout=10):
+        payload = next(iter(params.values()))
+        if "42*42" in payload:
+            return "result=1764"
+        if "ldap" in payload.lower() or "*" in payload:
+            return "LDAP error: invalid DN"
+        return "ok"
+
+    monkeypatch.setattr(apc, "_requests_get_text", fake_get_text)
+    rc = apc.RequestConfig(target_url="http://example.test/page", http_method="GET")
+    ssti = apc._coordinate_injection_testing(rc, ["name"], tools=[], focus_injection_types={"SSTI"})
+    ldap = apc._coordinate_injection_testing(rc, ["name"], tools=[], focus_injection_types={"LDAP Injection"})
+    assert any(item["injection_type"] == "SSTI" for item in ssti if item.get("vulnerable"))
+    assert any(item["injection_type"] == "LDAP Injection" for item in ldap if item.get("vulnerable"))
 
 
 def test_coordinate_injection_testing_commix_parses_timeout_stdout(monkeypatch):
@@ -1514,6 +1736,22 @@ def test_output_parsers_cover_sstimap_and_lfimap_variants():
     assert lfi[0]["attack_type"] == "traversal"
 
 
+def test_parse_sstimap_output_skips_empty_blocks_and_uses_fallback_evidence():
+    stdout = """
+[+] SSTImap identified the following injection point:
+  Engine: Unknown
+  Notes: no parameter here
+[+] SSTImap identified the following injection point:
+  Injection: {{7*7}}
+  Evidence line without structured fields
+"""
+    findings = apc._parse_sstimap_output(stdout)
+    assert len(findings) == 1
+    assert findings[0]["parameter"] == "(unknown)"
+    assert findings[0]["param_location"] == "unknown"
+    assert "Injection: {{7*7}}" in findings[0]["evidence"]
+
+
 def test_payload_intelligence_and_recommendations_cover_all_vectors():
     results = [
         {"vulnerable": True, "payload_type": "Advanced XSS", "injection_type": "XSS", "evidence": "WAF", "payload": "String.fromCharCode(1)"},
@@ -1529,6 +1767,18 @@ def test_payload_intelligence_and_recommendations_cover_all_vectors():
     assert "capture_repro_steps" in recs
     assert "validate_exploitation_chain" in recs
     assert apc._generate_payload_recommendations("param_discovery", {"parameters_discovered": ["id"]}) == []
+
+
+def test_generate_payload_recommendations_handles_unclassified_vulnerability():
+    recs = apc._generate_payload_recommendations(
+        "comprehensive",
+        {
+            "payload_results": [{"vulnerable": True, "payload_type": "Unknown"}],
+            "intelligence": {},
+        },
+    )
+    assert recs[:3] == ["capture_repro_steps", "minimize_payload_to_stable_poc", "validate_impact_and_scope"]
+    assert "test_authenticated_endpoints_and_roles" in recs
 def test_setup_payload_tools_records_available_and_failed(monkeypatch):
     calls = []
     def fake_run(cmd, **kwargs):
@@ -1640,3 +1890,184 @@ def test_top_level_coordinator_returns_structured_error(monkeypatch):
     result = json.loads(apc.advanced_payload_coordinator("example.test", test_type="xss", parameters="q"))
     assert result["errors"]
     assert "setup failed" in str(result["errors"])
+
+
+def test_cors_manual_coordinator_covers_wildcard_error_and_clean_responses(monkeypatch):
+    cfg = apc.RequestConfig("https://target.test/path")
+    origins = []
+
+    def permissive(_url, headers, _request_config, timeout=10):
+        origins.append(headers["Origin"])
+        if len(origins) == 1:
+            raise RuntimeError("transient request failure")
+        return "Access-Control-Allow-Origin: *"
+
+    monkeypatch.setattr(apc, "_requests_head_raw_headers", permissive)
+    vulnerable = apc._test_cors_configurations(cfg, tools=[])
+    assert vulnerable[0]["vulnerable"] is True
+    assert vulnerable[0]["tool"] == "manual"
+
+    monkeypatch.setattr(apc, "_requests_head_raw_headers", lambda *_args, **_kwargs: "Vary: Origin")
+    clean = apc._test_cors_configurations(cfg, tools=[])
+    assert clean == [{
+        "vulnerable": False,
+        "issue_type": "CORS Configuration",
+        "description": "No obvious CORS misconfigurations detected",
+        "tool": "manual",
+    }]
+
+
+def test_injection_coordinator_handles_tool_timeout_and_negative_summary(monkeypatch):
+    timeout = apc.subprocess.TimeoutExpired("commix", 1, output="")
+    monkeypatch.setattr(apc.subprocess, "run", Mock(side_effect=timeout))
+    monkeypatch.setattr(apc, "_requests_get_text", lambda *_args, **_kwargs: "safe response")
+    cfg = apc.RequestConfig("https://target.test/page", "POST", headers={"X-Test": "1"})
+
+    result = apc._coordinate_injection_testing(
+        cfg,
+        ["q"],
+        tools=["sstimap", "lfimap", "commix"],
+        focus_injection_types={"Command Injection"},
+    )
+
+    assert result == [{
+        "vulnerable": False,
+        "url": "https://target.test/page",
+        "parameter": "q",
+        "method": "POST",
+        "injection_type": "Command Injection",
+        "tool": "custom",
+    }]
+
+
+def test_xss_dalfox_timeout_uses_partial_results_without_negative_summaries(monkeypatch):
+    partial = json.dumps([{
+        "type": "V",
+        "param": "q",
+        "inject_type": "inHTML",
+        "payload": "<svg>",
+        "evidence": "partial",
+    }])
+    monkeypatch.setattr(
+        apc.subprocess,
+        "run",
+        Mock(side_effect=apc.subprocess.TimeoutExpired("dalfox", 1, output=partial)),
+    )
+
+    result = apc._coordinate_xss_testing(apc.RequestConfig("https://target.test"), ["q", "other"], ["dalfox"])
+
+    assert result[0]["vulnerable"] is True
+    assert all(item.get("parameter") != "other" for item in result)
+
+
+def test_top_level_coordinator_exercises_get_to_post_runtime_orchestration(monkeypatch):
+    """Test the controller's retry decisions without invoking external security tools."""
+    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": ["dalfox"]})
+    discovery_methods = []
+
+    def discover(config, _parameters, tools):
+        discovery_methods.append(config.http_method)
+        return [] if config.http_method == "GET" else ["q"]
+
+    xss_methods = []
+
+    def xss(config, parameters, tools=None, verbose=False):
+        xss_methods.append(config.http_method)
+        if config.http_method == "POST":
+            return [{"parameter": parameters[0], "vulnerable": True, "payload_type": "XSS"}]
+        return [{"parameter": parameters[0], "vulnerable": False, "payload_type": "XSS tested"}]
+
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", discover)
+    monkeypatch.setattr(apc, "_coordinate_xss_testing", xss)
+    result = json.loads(apc.advanced_payload_coordinator("https://target.test", test_type="xss"))
+
+    assert discovery_methods == ["GET", "POST"]
+    assert xss_methods == ["POST"]
+    assert result["http_method"] == "POST"
+    assert result["counts"]["vulnerabilities"] == 1
+
+
+def test_top_level_injection_retry_restores_get_when_post_is_not_better(monkeypatch):
+    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": []})
+    injection_methods = []
+
+    def injection(config, parameters, tools=None, focus_injection_types=None, verbose=False):
+        injection_methods.append((config.http_method, focus_injection_types))
+        return [{"parameter": parameters[0], "vulnerable": False, "injection_type": "LFI"}]
+
+    monkeypatch.setattr(apc, "_coordinate_injection_testing", injection)
+    result = json.loads(
+        apc.advanced_payload_coordinator("https://target.test", test_type="lfi", parameters="file")
+    )
+
+    assert injection_methods == [("GET", {"LFI"}), ("POST", {"LFI"})]
+    assert result["http_method"] == "GET"
+    assert result["counts"]["payload_results"] == 1
+
+
+def test_setup_payload_tools_exercises_install_success_failure_and_exceptions(monkeypatch):
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        if command[0] == "which":
+            return FakeCompleted(returncode=1)
+        if command[:2] == ["go", "install"]:
+            return FakeCompleted(returncode=0)
+        if command[:2] == ["pip3", "install"] and command[-1] == "arjun":
+            return FakeCompleted(returncode=1)
+        if command[:2] == ["pip3", "install"] and command[-1] == "corsy":
+            raise OSError("installer unavailable")
+        return FakeCompleted(returncode=0)
+
+    monkeypatch.setattr(apc.subprocess, "run", run)
+    result = apc.setup_payload_tools(tools_limit={"dalfox", "arjun", "corsy", "paramspider"})
+
+    assert result["tools"] == ["dalfox", "paramspider"]
+    assert result["failed"] == ["arjun", "corsy"]
+    assert any(command[:2] == ["go", "install"] for command in calls)
+
+
+def test_parameter_discovery_parses_paramspider_output_and_tolerates_bad_urls(monkeypatch, tmp_path):
+    output = tmp_path / "example.test-results.txt"
+    output.write_text(
+        "https://example.test/path?alpha=1&beta=2\n"
+        "not a URL?still-not-valid\n"
+        "https://example.test/without-query\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(apc.subprocess, "run", lambda *_args, **_kwargs: FakeCompleted(returncode=0))
+    monkeypatch.setattr(apc.glob, "glob", lambda _pattern: [str(output), str(tmp_path / "missing.txt")])
+    monkeypatch.setattr(
+        apc.requests,
+        "request",
+        lambda *_args, **_kwargs: FakeResponse("", status_code=200, headers={"Content-Length": "1"}),
+    )
+
+    found = apc.advanced_parameter_discovery(
+        apc.RequestConfig("https://example.test/path?seed=1"),
+        provided_params="provided",
+        tools=["paramspider"],
+    )
+
+    assert {"provided", "seed", "alpha", "beta"} <= set(found)
+
+
+def test_result_file_and_input_validation_cover_cache_and_rejected_requests(monkeypatch, tmp_path):
+    output = tmp_path / "nested" / "result.json"
+    apc._write_result_file(str(output), "payload")
+    assert output.read_text(encoding="utf-8") == "payload"
+    apc._write_result_file(None, "ignored")
+
+    with pytest.raises(ValueError, match="target_url"):
+        apc.advanced_payload_coordinator("")
+    with pytest.raises(ValueError, match="SQLi"):
+        apc.advanced_payload_coordinator("target.test", test_type="sql_injection")
+    with pytest.raises(ValueError, match="Directory/file"):
+        apc.advanced_payload_coordinator("target.test", test_type="directory_brute_force")
+
+    cached = json.dumps({"cached": True})
+    monkeypatch.setattr(apc, "get_cached_result", lambda *_args: cached)
+    output_file = tmp_path / "cached.json"
+    assert apc.advanced_payload_coordinator("target.test", output_file=str(output_file)) == cached
+    assert json.loads(output_file.read_text(encoding="utf-8"))["cached"] is True

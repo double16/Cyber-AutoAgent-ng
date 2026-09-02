@@ -496,6 +496,28 @@ def test_create_tool_repeat_guard_disable_switch_skips_cycle_configuration():
     agent_logger.info.assert_called_once_with("Repeated tool-call guard disabled")
 
 
+def test_create_tool_repeat_guard_normalizes_invalid_values():
+    values = {
+        "CYBER_TOOL_REPEAT_THRESHOLD": 1,
+        "CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH": 0,
+    }
+    config_manager = SimpleNamespace(getenv_int=lambda name, default: values.get(name, default))
+    guard = cyber_agent_module._create_tool_repeat_guard(config_manager, Mock())
+    assert guard.repeat_threshold == cyber_agent_module.DEFAULT_TOOL_REPEAT_THRESHOLD
+    assert guard.max_cycle_length == cyber_agent_module.DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH
+
+
+def test_create_tool_repeat_guard_rejects_boolean_and_string_values():
+    values = {
+        "CYBER_TOOL_REPEAT_THRESHOLD": True,
+        "CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH": "invalid",
+    }
+    manager = SimpleNamespace(getenv_int=lambda name, default: values.get(name, default))
+    guard = cyber_agent_module._create_tool_repeat_guard(manager, Mock())
+    assert guard.repeat_threshold == cyber_agent_module.DEFAULT_TOOL_REPEAT_THRESHOLD
+    assert guard.max_cycle_length == cyber_agent_module.DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH
+
+
 def test_tool_name_and_role_selection_helpers_filter_optional_and_task_creation_tools():
     def core_tool():
         return None
@@ -519,6 +541,41 @@ def test_tool_name_and_role_selection_helpers_filter_optional_and_task_creation_
         selected_optional_tool_names=["optional_tool"],
         include_create_tasks=True,
     ) == [core_tool, create_tasks, optional_tool]
+
+
+def test_build_role_tools_falls_back_to_tools_list_and_ignores_unselected_optional():
+    def fallback_tool():
+        return None
+
+    def optional_tool():
+        return None
+
+    runtime = SimpleNamespace(
+        core_tools_list=[],
+        tools_list=[fallback_tool],
+        optional_tools_list=[optional_tool],
+    )
+
+    assert cyber_agent_module.build_role_tools(runtime) == [fallback_tool]
+    assert cyber_agent_module.build_role_tools(runtime, selected_optional_tool_names=["missing"]) == [fallback_tool]
+
+
+def test_build_role_tools_excludes_create_tasks_by_default_and_accepts_tuple_names():
+    def create_tasks():
+        return None
+
+    def other_tool():
+        return None
+
+    runtime = SimpleNamespace(
+        core_tools_list=[create_tasks, other_tool],
+        tools_list=[],
+        optional_tools_list=[create_tasks],
+    )
+    assert cyber_agent_module.build_role_tools(runtime) == [other_tool]
+    assert cyber_agent_module.build_role_tools(
+        runtime, selected_optional_tool_names=["create_tasks"], include_create_tasks=True
+    ) == [create_tasks, other_tool, create_tasks]
 
 
 def test_create_agent_reuses_runtime_resources(monkeypatch):
@@ -908,6 +965,232 @@ def test_create_agent_runtime_resources_applies_sdk_context_manager(monkeypatch)
     assert kwargs["conversation_manager"] is runtime.conversation_manager
     assert kwargs["context_manager"] == "auto"
     assert agent._allow_reasoning_content is False
+
+
+def test_create_agent_runtime_resources_builds_integrated_runtime_with_module_fallback(monkeypatch, tmp_path):
+    """Exercise the runtime initializer without external browser, memory, or telemetry services."""
+
+    class FakeConfigManager:
+        def validate_requirements(self, _provider):
+            return None
+
+        def get_server_config(self, _provider, **_overrides):
+            return SimpleNamespace(
+                llm=SimpleNamespace(model_id="default-model", max_tokens=256, temperature=0.1),
+                swarm=SimpleNamespace(llm=SimpleNamespace(model_id="swarm-model")),
+                output=SimpleNamespace(base_dir=str(tmp_path)),
+                sdk=SimpleNamespace(conversation_window_size=12),
+            )
+
+        def get_default_region(self):
+            return "us-test-1"
+
+        def get_qdrant_memory_config(self, _provider):
+            return {}
+
+        def ensure_operation_output_dirs(self, *_args, **_kwargs):
+            return {"root": str(tmp_path), "artifacts": str(tmp_path / "artifacts"), "tools": str(tmp_path / "tools")}
+
+        def getenv(self, name, default=None):
+            return {"CYBER_SDK_CONTEXT_MANAGER": "", "CYBER_UI_MODE": "cli"}.get(name, default)
+
+        def getenv_bool(self, _name, default=False):
+            return default
+
+        def getenv_int(self, _name, default):
+            return default
+
+    class FakeLoader:
+        last_loaded_execution_prompt_source = None
+        last_loaded_termination_policy_source = None
+
+        def discover_module_tools(self, _module):
+            return [str(tmp_path / "unloaded_tool.py")], ["web_search"]
+
+        def load_module_execution_prompt(self, _module, operation_root=None):
+            return "module guidance"
+
+        def load_module_termination_policy(self, _module):
+            return "finish when evidence is complete"
+
+    class FakeCallback:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+            self.emitter = object()
+            self.coordinator = object()
+            self.agent_run_id = "run-1"
+
+        def emit_ui_event(self, _event):
+            return None
+
+    class FakeHooks:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    config = AgentConfig(target="example.test", objective="assess", provider="ollama", op_id="OP_INTEGRATED")
+    config.module = "web"
+    config.available_tools = ["web_search"]
+    memory_client = SimpleNamespace(
+        get_memory_overview=lambda: {"has_memories": False},
+        get_active_plan=lambda **_kwargs: None,
+    )
+
+    monkeypatch.setattr(cyber_agent_module, "configure_sdk_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(cyber_agent_module, "get_config_manager", lambda: FakeConfigManager())
+    monkeypatch.setattr(cyber_agent_module, "resolve_operation_targets", lambda *_args: [SimpleNamespace(value="https://example.test")])
+    monkeypatch.setattr(cyber_agent_module, "sanitize_target_name", lambda _target: "example_test")
+    monkeypatch.setattr(cyber_agent_module, "require_prompt_token_limit", lambda *_args: 32_000)
+    monkeypatch.setattr(cyber_agent_module, "resolve_tool_result_max_chars", lambda *_args: 6000)
+    monkeypatch.setattr(cyber_agent_module, "initialize_browser", lambda **_kwargs: None)
+    monkeypatch.setattr(cyber_agent_module, "initialize_memory_system", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cyber_agent_module, "get_memory_client", lambda **_kwargs: memory_client)
+    monkeypatch.setattr(cyber_agent_module.prompts, "get_module_loader", lambda: FakeLoader())
+    monkeypatch.setattr(cyber_agent_module.prompts, "get_system_prompt", lambda **_kwargs: "base prompt")
+    monkeypatch.setattr(cyber_agent_module, "discover_mcp_tools", lambda _config: [])
+    monkeypatch.setattr(cyber_agent_module, "resolve_seclists_root", lambda: str(tmp_path / "seclists"))
+    monkeypatch.setattr(cyber_agent_module, "tool_append_description", lambda *_args: None)
+    monkeypatch.setattr(cyber_agent_module, "create_absolute_path_editor", lambda editor: editor)
+    monkeypatch.setattr(cyber_agent_module, "create_artifact_reader", lambda *_args, **_kwargs: "artifact_reader")
+    monkeypatch.setattr(cyber_agent_module, "get_capabilities", lambda *_args: SimpleNamespace(supports_tools=True))
+    monkeypatch.setattr(cyber_agent_module, "set_memory_event_emitter", lambda _emitter: None)
+    monkeypatch.setattr(cyber_agent_module, "init_agent_factory", lambda _config: None)
+    monkeypatch.setattr(cyber_agent_module, "ConcurrentToolExecutor", lambda: "executor")
+    monkeypatch.setattr(cyber_agent_module, "print_status", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cyber_agent_module, "ToolRepeatGuardHook", lambda *_args: "repeat-guard")
+
+    import modules.handlers.react.agent_event_handler as event_handler_module
+    import modules.handlers.react.hooks as hooks_module
+
+    monkeypatch.setattr(event_handler_module, "AgentEventHandler", FakeCallback)
+    monkeypatch.setattr(hooks_module, "ReactHooks", FakeHooks)
+
+    runtime = cyber_agent_module.create_agent_runtime_resources("example.test", "assess", config)
+
+    assert runtime.operation_id == "OP_INTEGRATED"
+    assert runtime.config.model_id == "default-model"
+    assert runtime.config.region_name == "us-test-1"
+    assert runtime.sdk_context_manager is None
+    assert runtime.termination_policy == "finish when evidence is complete"
+    assert "MODULE EXECUTION GUIDANCE" in runtime.system_prompt
+    assert runtime.tool_executor == "executor"
+    assert runtime.optional_tools_list
+
+
+def test_create_agent_runtime_resources_handles_degraded_integrations(monkeypatch, tmp_path):
+    """Keep agent construction usable when optional runtime integrations fail."""
+
+    class FailingConfigManager:
+        def validate_requirements(self, _provider):
+            return None
+
+        def get_server_config(self, _provider, **overrides):
+            assert overrides == {"model_id": "chosen-model"}
+            return SimpleNamespace(
+                llm=SimpleNamespace(model_id="ignored-default", max_tokens=512, temperature=0.2),
+                swarm=SimpleNamespace(llm=SimpleNamespace(model_id="swarm-model")),
+                output=SimpleNamespace(base_dir=str(tmp_path)),
+                sdk=SimpleNamespace(conversation_window_size=8),
+            )
+
+        def get_default_region(self):
+            raise AssertionError("explicit region must not be replaced")
+
+        def get_qdrant_memory_config(self, _provider):
+            return {}
+
+        def ensure_operation_output_dirs(self, *_args, **_kwargs):
+            raise OSError("read-only output")
+
+        def getenv(self, name, default=None):
+            return {"CYBER_SDK_CONTEXT_MANAGER": "auto", "CYBER_UI_MODE": "headless"}.get(name, default)
+
+        def getenv_bool(self, _name, default=False):
+            return default
+
+        def getenv_int(self, _name, default):
+            return default
+
+    class EmptyLoader:
+        def discover_module_tools(self, _module):
+            return [], []
+
+        def load_module_execution_prompt(self, _module, operation_root=None):
+            return ""
+
+        def load_module_termination_policy(self, _module):
+            return ""
+
+    class FakeCallback:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+            self.emitter = object()
+            self.coordinator = object()
+            self.agent_run_id = "run-degraded"
+
+        def emit_ui_event(self, _event):
+            return None
+
+    class FakeHooks:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    config = AgentConfig(
+        target="example.test",
+        objective="assess",
+        provider="ollama",
+        model_id="chosen-model",
+        region_name="explicit-region",
+        op_id="OP_DEGRADED",
+        bug_bounty_headers={"X-Research": "approved"},
+    )
+    config.module = "web"
+    config.available_tools = ["http_request"]
+
+    monkeypatch.setattr(cyber_agent_module, "configure_sdk_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(cyber_agent_module, "get_config_manager", lambda: FailingConfigManager())
+    monkeypatch.setattr(cyber_agent_module, "resolve_operation_targets", lambda *_args: [])
+    monkeypatch.setattr(cyber_agent_module, "sanitize_target_name", lambda _target: "example_test")
+    monkeypatch.setattr(cyber_agent_module, "require_prompt_token_limit", lambda *_args: 16_000)
+    monkeypatch.setattr(cyber_agent_module, "resolve_tool_result_max_chars", lambda *_args: 3_000)
+    monkeypatch.setattr(cyber_agent_module, "initialize_browser", lambda **_kwargs: None)
+    monkeypatch.setattr(cyber_agent_module, "initialize_memory_system", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cyber_agent_module, "get_memory_client", lambda **_kwargs: SimpleNamespace(
+        get_memory_overview=Mock(side_effect=RuntimeError("memory offline")),
+        get_active_plan=lambda **_kwargs: None,
+    ))
+    prompt_builder = Mock(return_value="base prompt")
+    monkeypatch.setattr(cyber_agent_module.prompts, "get_module_loader", lambda: EmptyLoader())
+    monkeypatch.setattr(cyber_agent_module.prompts, "get_system_prompt", prompt_builder)
+    monkeypatch.setattr(cyber_agent_module, "discover_mcp_tools", lambda _config: ["mcp-tool"])
+    monkeypatch.setattr(cyber_agent_module, "resolve_seclists_root", lambda: str(tmp_path / "seclists"))
+    monkeypatch.setattr(cyber_agent_module, "tool_append_description", lambda *_args: None)
+    monkeypatch.setattr(cyber_agent_module, "create_absolute_path_editor", lambda editor: editor)
+    monkeypatch.setattr(cyber_agent_module, "create_artifact_reader", lambda *_args, **_kwargs: "artifact-reader")
+    monkeypatch.setattr(cyber_agent_module, "get_capabilities", lambda *_args: SimpleNamespace(supports_tools=False))
+    def unavailable_browser(coroutine):
+        coroutine.close()
+        raise RuntimeError("no browser")
+
+    monkeypatch.setattr("asyncio.run", unavailable_browser)
+    monkeypatch.setattr(cyber_agent_module, "set_memory_event_emitter", lambda _emitter: None)
+    monkeypatch.setattr(cyber_agent_module, "init_agent_factory", lambda _config: None)
+    monkeypatch.setattr(cyber_agent_module, "ConcurrentToolExecutor", lambda: "executor")
+    monkeypatch.setattr(cyber_agent_module, "print_status", lambda *_args, **_kwargs: None)
+
+    import modules.handlers.react.agent_event_handler as event_handler_module
+    import modules.handlers.react.hooks as hooks_module
+
+    monkeypatch.setattr(event_handler_module, "AgentEventHandler", FakeCallback)
+    monkeypatch.setattr(hooks_module, "ReactHooks", FakeHooks)
+
+    runtime = cyber_agent_module.create_agent_runtime_resources("example.test", "assess", config)
+
+    assert runtime.config.model_id == "chosen-model"
+    assert runtime.config.region_name == "explicit-region"
+    assert runtime.sdk_context_manager == "auto"
+    assert runtime.termination_policy == ""
+    assert "BUG BOUNTY TRAFFIC MARKERS" in prompt_builder.call_args.kwargs["tools_context"]
+    assert "mcp-tool" in runtime.tools_list
 
 
 if __name__ == "__main__":
