@@ -33,9 +33,20 @@ from modules.handlers.utils import (
 
 
 def test_terminal_helpers_cover_width_fallback_and_separator_rendering(monkeypatch, capsys):
-    monkeypatch.setattr("modules.handlers.utils.shutil.get_terminal_size", lambda _fallback: os.terminal_size((200, 24)))
+    monkeypatch.setattr(
+        "modules.handlers.utils.shutil.get_terminal_size",
+        lambda *args, **kwargs: os.terminal_size((200, 24)),
+    )
     assert get_terminal_width(default=100) == 100
-    monkeypatch.setattr("modules.handlers.utils.shutil.get_terminal_size", lambda _fallback: (_ for _ in ()).throw(OSError()))
+    calls = {"count": 0}
+
+    def raise_once(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise OSError()
+        return os.terminal_size((80, 24))
+
+    monkeypatch.setattr("modules.handlers.utils.shutil.get_terminal_size", raise_once)
     assert get_terminal_width(default=77) == 77
 
     monkeypatch.setattr("modules.handlers.utils.get_terminal_width", lambda: 3)
