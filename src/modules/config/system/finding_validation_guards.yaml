@@ -39,3 +39,10 @@ rules:
       - no rate limiting
       - rate limiting
     confirmation_requirement: rate_limit_probe
+  - id: secret_exposure
+    claim_terms:
+      - secret exposure
+      - exposed connection string
+      - exposed api key
+      - exposed private key
+    confirmation_requirement: secret_exposure_revalidation

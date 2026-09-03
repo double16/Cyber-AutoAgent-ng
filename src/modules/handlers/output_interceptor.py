@@ -13,15 +13,15 @@ import os
 import sys
 import threading
 from contextlib import contextmanager
-from typing import List, TextIO, Dict, Any
+from typing import Any, TextIO
 
 from .utils import CyberEvent
 
 # Global state for tool execution and output buffering
 _in_tool_execution = 0
 _tool_execution_lock = threading.Lock()
-_tool_output_buffer: List[str] = []
-_tool_error_buffer: List[str] = []
+_tool_output_buffer: list[str] = []
+_tool_error_buffer: list[str] = []
 
 
 def set_tool_execution_state(is_executing: bool):
@@ -141,7 +141,7 @@ class OutputInterceptor(io.TextIOBase):
                 event_type = self.event_type
 
             # Add metadata to prevent truncation if this is during tool execution
-            metadata: Dict[str, Any] = {"source": "python_backend"}
+            metadata: dict[str, Any] = {"source": "python_backend"}
             if is_in_tool_execution():
                 metadata["fromToolBuffer"] = True
                 metadata["tool"] = "shell"  # Most tool outputs are from shell

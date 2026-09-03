@@ -16,10 +16,11 @@ from __future__ import annotations
 import logging
 import os
 import re
-import ollama
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional, Tuple
+from typing import Any
+
+import ollama
 
 from modules.config.providers import get_ollama_host
 from modules.config.providers.ollama_config import get_ollama_timeout
@@ -38,9 +39,11 @@ try:
     import litellm  # type: ignore
     from litellm.utils import (  # type: ignore
         LlmProviders,
-        ProviderConfigManager,
-        supports_reasoning as llm_supports_reasoning,
         ModelInfoBase,
+        ProviderConfigManager,
+    )
+    from litellm.utils import (
+        supports_reasoning as llm_supports_reasoning,
     )
 except Exception:  # pragma: no cover
     litellm = None  # type: ignore
@@ -50,7 +53,7 @@ except Exception:  # pragma: no cover
 
 
     def llm_supports_reasoning(
-            model: str, custom_llm_provider: Optional[str] = None
+            model: str, custom_llm_provider: str | None = None
     ) -> bool:  # type: ignore
         return False
 
@@ -58,7 +61,7 @@ except Exception:  # pragma: no cover
 # --- Helpers -------------------------------------------------------------------
 
 
-def _split_prefix(model_id: str) -> Tuple[str, str]:
+def _split_prefix(model_id: str) -> tuple[str, str]:
     if not isinstance(model_id, str):
         return "", ""
     if "/" in model_id:
@@ -67,7 +70,7 @@ def _split_prefix(model_id: str) -> Tuple[str, str]:
     return "", model_id
 
 
-def _static_supports_reasoning_model(model_id: Optional[str]) -> bool:
+def _static_supports_reasoning_model(model_id: str | None) -> bool:
     """Return True if the model is known to support extended reasoning blocks.
 
     This is a fast explicit check for models with native reasoning support.
@@ -142,14 +145,11 @@ class ModelCapabilitiesResolver:
         base_provider = provider
 
         if provider == "litellm":
-            pfx, provider_model = _split_prefix(model)
+            pfx, _provider_model = _split_prefix(model)
             if pfx:
                 base_provider = pfx
 
-        if base_provider != "ollama" and ":" in model:
-            model_no_variant = model.split(":")[0]
-        else:
-            model_no_variant = model
+        model_no_variant = model.split(":")[0] if base_provider != "ollama" and ":" in model else model
 
         supports_reason = False
         pass_reasoning_effort = False
@@ -234,7 +234,9 @@ class ModelCapabilitiesResolver:
 
         # Check Ollama capabilities
         if base_provider == "ollama":
-            # "reasoning_effort" is included in the config no matter if the model supports it
+            # LiteLLM can list reasoning_effort for Ollama despite it not being an
+            # Ollama request parameter. Ollama exposes reasoning support as
+            # ``thinking`` and receives its setting through ``think``.
             if "reasoning_effort" in allowed_params:
                 allowed_params.remove("reasoning_effort")
 
@@ -248,8 +250,6 @@ class ModelCapabilitiesResolver:
                         allowed_params.extend(["tools", "tool_choice"])
                     if "thinking" in show_response.capabilities:
                         allowed_params.append("thinking")
-                        if "gpt-oss" in model:
-                            allowed_params.append("reasoning_effort")
                     else:
                         if "thinking" in allowed_params:
                             allowed_params.remove("thinking")
@@ -263,6 +263,11 @@ class ModelCapabilitiesResolver:
         if ("thinking" in lowered) or ("reasoning_effort" in lowered):
             supports_reason = True
         pass_reasoning_effort = "reasoning_effort" in lowered
+        if base_provider == "ollama" and "thinking" in lowered:
+            # This existing internal flag selects string-valued reasoning levels
+            # during model construction. It does not cause a reasoning_effort
+            # parameter to be sent to Ollama.
+            pass_reasoning_effort = True
 
         # Update tool and temperature support from provider params if available
         if lowered:
@@ -310,7 +315,7 @@ def get_capabilities(provider: str, model_id: str) -> Capabilities:
 def allows_reasoning_content_replay(
     provider: str,
     model_id: str,
-    capabilities: Optional[Capabilities] = None,
+    capabilities: Capabilities | None = None,
 ) -> bool:
     """Return whether prior reasoning blocks may be replayed to the model API."""
 
@@ -360,7 +365,7 @@ MODEL_FAMILY_PATTERNS = [
 
 
 @lru_cache
-def get_model_input_limit(model_id: str) -> Optional[int]:
+def get_model_input_limit(model_id: str) -> int | None:
     """Get INPUT token limit for a model (context window capacity).
 
     Precedence:
@@ -390,7 +395,7 @@ def get_model_input_limit(model_id: str) -> Optional[int]:
     return None
 
 
-def get_provider_default_limit(provider: str) -> Optional[int]:
+def get_provider_default_limit(provider: str) -> int | None:
     """Conservative default INPUT limit for a provider (last resort)."""
     defaults = {
         "bedrock": 200000,  # Conservative for Claude 3.5
@@ -401,7 +406,7 @@ def get_provider_default_limit(provider: str) -> Optional[int]:
 
 
 @lru_cache
-def get_model_output_limit(model_id: str) -> Optional[int]:
+def get_model_output_limit(model_id: str) -> int | None:
     """Get OUTPUT token limit for a model (max completion length).
 
     Precedence:
@@ -443,7 +448,7 @@ def get_model_output_limit(model_id: str) -> Optional[int]:
 
 
 @lru_cache
-def get_model_pricing(model_id: str) -> Optional[tuple[float, float]]:
+def get_model_pricing(model_id: str) -> tuple[float, float] | None:
     """Get pricing for a model (cost per million tokens).
 
     Returns:
@@ -465,16 +470,211 @@ def get_model_pricing(model_id: str) -> Optional[tuple[float, float]]:
     return None
 
 
+def classify_parameter_error(error: Exception) -> str | None:
+    """Classify an exception to identify if a specific LLM parameter caused the failure."""
+    err_msg = str(error).lower()
+
+    if "temperature" in err_msg and any(
+        w in err_msg
+        for w in [
+            "unsupported",
+            "invalid",
+            "not supported",
+            "unknown",
+            "unexpected",
+            "extra fields",
+            "must be 1",
+            "fixed",
+            "does not support",
+        ]
+    ):
+        return "temperature"
+    if "top_k" in err_msg and any(
+        w in err_msg
+        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "extra fields", "does not support"]
+    ):
+        return "top_k"
+    if "top_p" in err_msg and any(
+        w in err_msg
+        for w in [
+            "unsupported",
+            "invalid",
+            "not supported",
+            "unknown",
+            "unexpected",
+            "extra fields",
+            "not allowed with",
+            "does not support",
+        ]
+    ):
+        return "top_p"
+    if "reasoning_effort" in err_msg and any(
+        w in err_msg
+        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "does not support"]
+    ):
+        return "reasoning_effort"
+    if "thinking" in err_msg and any(
+        w in err_msg
+        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "budget", "does not support"]
+    ):
+        return "thinking"
+    if "effort" in err_msg and any(
+        w in err_msg
+        for w in ["unsupported", "invalid", "not supported", "unknown", "unexpected", "does not support"]
+    ):
+        return "effort"
+
+    return None
+
+
+def apply_parameter_fallback_to_model(model: Any, provider: str, model_id: str, param_name: str) -> bool:
+    """Strip or downgrade the offending parameter from the model instance."""
+    modified = False
+
+    # 1. Handle OllamaModel
+    if hasattr(model, "config") and isinstance(model.config, dict):
+        if provider == "ollama" and param_name == "think":
+            additional_args = model.config.get("additional_args")
+            if isinstance(additional_args, dict) and additional_args.get("think") is not False:
+                previous_value = additional_args["think"]
+                if isinstance(previous_value, str):
+                    from modules.config.models.agent_profiles import ReasoningLevel
+
+                    additional_args["think"] = ReasoningLevel.from_value(previous_value).to_bool()
+                    modified = True
+                elif previous_value is True:
+                    additional_args["think"] = False
+                    modified = True
+        if param_name in ("temperature", "top_p", "top_k", "max_tokens"):
+            if model.config.get(param_name) is not None:
+                model.config[param_name] = None
+                modified = True
+            options = model.config.get("options")
+            if isinstance(options, dict) and param_name in options:
+                options.pop(param_name, None)
+                modified = True
+
+    # 2. Handle LiteLLMModel / Strands models with params and client_args
+    if hasattr(model, "params") and isinstance(model.params, dict) and param_name in model.params:
+        model.params.pop(param_name, None)
+        modified = True
+    if hasattr(model, "client_args") and isinstance(model.client_args, dict):
+        if param_name in model.client_args:
+            model.client_args.pop(param_name, None)
+            modified = True
+        if param_name in ("reasoning_effort", "thinking", "effort"):
+            if "reasoning_effort" in model.client_args:
+                model.client_args.pop("reasoning_effort", None)
+                modified = True
+            if "thinking" in model.client_args:
+                model.client_args.pop("thinking", None)
+                modified = True
+        if param_name == "thinking_config" or param_name == "thinking":
+            if "thinking_config" in model.client_args:
+                model.client_args.pop("thinking_config", None)
+                modified = True
+
+    # 3. Handle BedrockModel
+    if hasattr(model, "temperature") and param_name == "temperature":
+        if getattr(model, "temperature", None) is not None:
+            model.temperature = None
+            modified = True
+    if hasattr(model, "additional_request_fields") and isinstance(model.additional_request_fields, dict):
+        if param_name in ("effort", "thinking", "reasoning_effort"):
+            if "output_config" in model.additional_request_fields:
+                model.additional_request_fields.pop("output_config", None)
+                modified = True
+            if "thinking" in model.additional_request_fields:
+                model.additional_request_fields.pop("thinking", None)
+                modified = True
+
+    return modified
+
+
+def wrap_model_with_fallback(model: Any, provider: str, model_id: str) -> Any:
+    """Wrap model stream and structured_output methods with progressive parameter fallback."""
+    import functools
+
+    from modules.config.models.agent_profiles import get_agent_settings_registry
+
+    original_stream = getattr(model, "stream", None)
+    original_structured_output = getattr(model, "structured_output", None)
+
+    if callable(original_stream):
+        @functools.wraps(original_stream)
+        async def fallback_stream(*args, **kwargs):
+            registry = get_agent_settings_registry()
+            while True:
+                try:
+                    async for event in original_stream(*args, **kwargs):
+                        yield event
+                    return
+                except Exception as exc:
+                    param_name = classify_parameter_error(exc)
+                    if param_name:
+                        logger.warning(
+                            "Model API call failed due to parameter '%s' on %s/%s (%s). Retrying with parameter stripped.",
+                            param_name,
+                            provider,
+                            model_id,
+                            exc,
+                        )
+                        applied = apply_parameter_fallback_to_model(model, provider, model_id, param_name)
+                        registry.record_parameter_fallback(
+                            provider, model_id, param_name, None, f"Provider rejected parameter {param_name}"
+                        )
+                        if applied:
+                            continue
+                    raise
+
+        model.stream = fallback_stream
+
+    if callable(original_structured_output):
+        @functools.wraps(original_structured_output)
+        async def fallback_structured_output(*args, **kwargs):
+            registry = get_agent_settings_registry()
+            while True:
+                try:
+                    async for event in original_structured_output(*args, **kwargs):
+                        yield event
+                    return
+                except Exception as exc:
+                    param_name = classify_parameter_error(exc)
+                    if param_name:
+                        logger.warning(
+                            "Model structured output failed due to parameter '%s' on %s/%s (%s). Retrying with parameter stripped.",
+                            param_name,
+                            provider,
+                            model_id,
+                            exc,
+                        )
+                        applied = apply_parameter_fallback_to_model(model, provider, model_id, param_name)
+                        registry.record_parameter_fallback(
+                            provider, model_id, param_name, None, f"Provider rejected parameter {param_name}"
+                        )
+                        if applied:
+                            continue
+                    raise
+
+        model.structured_output = fallback_structured_output
+
+    return model
+
+
 __all__ = [
+    "MODEL_FAMILY_PATTERNS",
     # Capabilities
     "Capabilities",
     "ModelCapabilitiesResolver",
+    "apply_parameter_fallback_to_model",
+    # Parameter Fallback
+    "classify_parameter_error",
     "get_capabilities",
     # Limits
     "get_model_input_limit",
     "get_model_output_limit",
-    "get_provider_default_limit",
-    "MODEL_FAMILY_PATTERNS",
     # Pricing
     "get_model_pricing",
+    "get_provider_default_limit",
+    "wrap_model_with_fallback",
 ]

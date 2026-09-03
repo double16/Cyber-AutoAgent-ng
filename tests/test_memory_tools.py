@@ -1,8 +1,10 @@
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 import pytest
 
-from modules.tools.memory import memory_list, memory_retrieve, clear_memory_client
+from modules.tools.memory import clear_memory_client, memory_list, memory_retrieve
+
 
 @pytest.fixture(autouse=True)
 def memory_client_clear():

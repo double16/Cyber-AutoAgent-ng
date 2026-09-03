@@ -6,6 +6,7 @@ event protocol is shared by CLI/logging/automation surfaces.
 """
 
 import asyncio
+import contextlib
 import json
 import math
 import os
@@ -14,19 +15,22 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
+from opentelemetry import trace as otel_trace
 from strands.handlers import PrintingCallbackHandler
 
 from modules.config.system.logger import get_logger
-from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.handlers.utils import (
+    format_duration,
     get_output_path,
-    sanitize_target_name, format_duration,
+    sanitize_target_name,
 )
+from modules.tools.semantic_enum import normalize_semantic_enum
 
 from ...config import get_config_manager, get_report_refinement_cycles
 from ...config.models import get_models_client
@@ -43,6 +47,7 @@ from ..output_interceptor import (
     get_buffered_output,
     set_tool_execution_state,
 )
+from ..tool_failure_summary import failure_summary, tool_result_text
 from ..tool_recovery import ToolOutcomeJournal
 from .tool_emitters import ToolEventEmitter
 
@@ -120,14 +125,14 @@ class _AgentUsageEntry:
     cache_write_tokens: int = 0
     cost: float = 0.0
     inference_time_ms: float = 0.0
-    context_window_tokens: Optional[int] = None
+    context_window_tokens: int | None = None
 
 
 @dataclass
 class _ModelEfficiencyEntry:
     model_calls: int = 0
     correction_loops: int = 0
-    correction_categories: Dict[str, int] = field(default_factory=dict)
+    correction_categories: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -149,8 +154,8 @@ class OperationEventCoordinator:
             operation_id: str,
             emitter: EventEmitter,
             budget_max_duration: int = 0,
-            budget_max_tokens: Optional[int] = None,
-            budget_max_cost: Optional[float] = None,
+            budget_max_tokens: int | None = None,
+            budget_max_cost: float | None = None,
     ) -> None:
         self.operation_id = operation_id
         self.emitter = emitter
@@ -161,25 +166,25 @@ class OperationEventCoordinator:
         self._lock = threading.RLock()
         self._agent_sequence = 0
         self._termination_emitted = False
-        self._termination_reason: Optional[str] = None
-        self._termination_message: Optional[str] = None
+        self._termination_reason: str | None = None
+        self._termination_message: str | None = None
         self._report_generated = False
         self.memory_ops = 0
         self.evidence_count = 0
-        self.tool_counts: Dict[str, int] = {}
-        self._handler_usage: Dict[str, tuple[str, str, _AgentUsageEntry]] = {}
-        self._model_efficiency: Dict[tuple[str, str], _ModelEfficiencyEntry] = {}
+        self.tool_counts: dict[str, int] = {}
+        self._handler_usage: dict[str, tuple[str, str, _AgentUsageEntry]] = {}
+        self._model_efficiency: dict[tuple[str, str], _ModelEfficiencyEntry] = {}
         self.report_findings = 0
         self.report_observations = 0
         self.report_finding_content_tokens = 0
         self.report_observation_content_tokens = 0
-        self._report_finding_content_token_items: List[int] = []
-        self._report_observation_content_token_items: List[int] = []
+        self._report_finding_content_token_items: list[int] = []
+        self._report_observation_content_token_items: list[int] = []
         self._report_exact_counts = False
         self._report_steps_started = 0
         self._report_refinement_cycles = get_report_refinement_cycles()
-        self._operation_health_provider: Optional[Callable[[], Dict[str, Any]]] = None
-        self._operation_state_snapshot_provider: Optional[Callable[[], Dict[str, Any]]] = None
+        self._operation_health_provider: Callable[[], dict[str, Any]] | None = None
+        self._operation_state_snapshot_provider: Callable[[], dict[str, Any]] | None = None
 
     def next_agent_run_id(self, agent_name: str) -> str:
         with self._lock:
@@ -187,7 +192,7 @@ class OperationEventCoordinator:
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", agent_name or "agent").strip("_") or "agent"
             return f"{safe_name}-{self._agent_sequence}"
 
-    def emit(self, event: Dict[str, Any]) -> None:
+    def emit(self, event: dict[str, Any]) -> None:
         enriched_event = dict(event)
         if enriched_event.get("type") == "progress_update" and "health" not in enriched_event:
             health = self.operation_health_snapshot()
@@ -198,14 +203,14 @@ class OperationEventCoordinator:
 
     def set_operation_health_provider(
         self,
-        provider: Optional[Callable[[], Dict[str, Any]]],
+        provider: Callable[[], dict[str, Any]] | None,
     ) -> None:
         """Set the shared best-effort health provider for operation progress events."""
 
         with self._lock:
             self._operation_health_provider = provider
 
-    def operation_health_snapshot(self) -> Optional[Dict[str, Any]]:
+    def operation_health_snapshot(self) -> dict[str, Any] | None:
         """Return a JSON-safe operation health snapshot without disrupting event emission."""
 
         with self._lock:
@@ -221,14 +226,14 @@ class OperationEventCoordinator:
 
     def set_operation_state_snapshot_provider(
         self,
-        provider: Optional[Callable[[], Dict[str, Any]]],
+        provider: Callable[[], dict[str, Any]] | None,
     ) -> None:
         """Set the best-effort state snapshot provider for failure fallback reporting."""
 
         with self._lock:
             self._operation_state_snapshot_provider = provider
 
-    def operation_state_snapshot(self) -> Optional[Dict[str, Any]]:
+    def operation_state_snapshot(self) -> dict[str, Any] | None:
         with self._lock:
             provider = self._operation_state_snapshot_provider
         if provider is None:
@@ -244,8 +249,8 @@ class OperationEventCoordinator:
         self,
         handler_id: str,
         entry: _AgentUsageEntry,
-        provider_id: Optional[str] = None,
-        model_id: Optional[str] = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
     ) -> None:
         with self._lock:
             self._handler_usage[handler_id] = (
@@ -266,7 +271,7 @@ class OperationEventCoordinator:
                 total.inference_time_ms += float(entry.inference_time_ms)
             return total
 
-    def record_model_call(self, provider_id: Optional[str], model_id: Optional[str]) -> None:
+    def record_model_call(self, provider_id: str | None, model_id: str | None) -> None:
         """Record one completed model inference for efficiency accounting."""
         key = (str(provider_id or "unknown"), str(model_id or "unknown"))
         with self._lock:
@@ -275,8 +280,8 @@ class OperationEventCoordinator:
 
     def record_efficiency_correction(
         self,
-        provider_id: Optional[str],
-        model_id: Optional[str],
+        provider_id: str | None,
+        model_id: str | None,
         category: str,
     ) -> None:
         """Record one bounded correction/recovery loop for a model."""
@@ -289,10 +294,10 @@ class OperationEventCoordinator:
                 entry.correction_categories.get(normalized_category, 0) + 1
             )
 
-    def model_usage(self) -> List[Dict[str, Any]]:
+    def model_usage(self) -> list[dict[str, Any]]:
         """Return operation usage grouped by provider and model."""
         with self._lock:
-            grouped: Dict[tuple[str, str], _AgentUsageEntry] = {}
+            grouped: dict[tuple[str, str], _AgentUsageEntry] = {}
             for provider_id, model_id, entry in self._handler_usage.values():
                 key = (provider_id, model_id)
                 aggregate = grouped.setdefault(key, _AgentUsageEntry())
@@ -347,10 +352,10 @@ class OperationEventCoordinator:
     def record_memory(
             self,
             evidence: bool = False,
-            category: Optional[str] = None,
-            severity: Optional[str] = None,
+            category: str | None = None,
+            severity: str | None = None,
             content_length: int = 0,
-            model_id: Optional[str] = None,
+            model_id: str | None = None,
     ) -> None:
         with self._lock:
             self.memory_ops += 1
@@ -372,16 +377,16 @@ class OperationEventCoordinator:
 
     def set_report_items(
         self,
-        items: List[Dict[str, Any]],
-        model_id: Optional[str] = None,
+        items: list[dict[str, Any]],
+        model_id: str | None = None,
         refinement_cycles: int = 2,
     ) -> None:
         findings = 0
         observations = 0
         finding_content_tokens = 0
         observation_content_tokens = 0
-        finding_items: List[int] = []
-        observation_items: List[int] = []
+        finding_items: list[int] = []
+        observation_items: list[int] = []
         for item in items or []:
             if not isinstance(item, dict):
                 continue
@@ -414,10 +419,10 @@ class OperationEventCoordinator:
 
     def report_budget_estimate(
             self,
-            provider_id: Optional[str],
-            model_id: Optional[str],
+            provider_id: str | None,
+            model_id: str | None,
             models_client: Any = None,
-            pricing_fallback: Optional[Dict[str, float]] = None,
+            pricing_fallback: dict[str, float] | None = None,
             pricing_override: bool = False,
     ) -> ReportBudgetEstimate:
         with self._lock:
@@ -466,10 +471,10 @@ class OperationEventCoordinator:
             self,
             input_tokens: int,
             output_tokens: int,
-            provider_id: Optional[str],
-            model_id: Optional[str],
+            provider_id: str | None,
+            model_id: str | None,
             models_client: Any = None,
-            pricing_fallback: Optional[Dict[str, float]] = None,
+            pricing_fallback: dict[str, float] | None = None,
             pricing_override: bool = False,
     ) -> float:
         provider = str(provider_id or "").lower()
@@ -509,7 +514,7 @@ class OperationEventCoordinator:
 
         return fallback_cost
 
-    def mark_termination(self, reason: str, message: Optional[str] = None) -> bool:
+    def mark_termination(self, reason: str, message: str | None = None) -> bool:
         with self._lock:
             if self._termination_emitted:
                 return False
@@ -524,12 +529,12 @@ class OperationEventCoordinator:
             return self._termination_emitted
 
     @property
-    def termination_reason(self) -> Optional[str]:
+    def termination_reason(self) -> str | None:
         with self._lock:
             return self._termination_reason
 
     @property
-    def termination_message(self) -> Optional[str]:
+    def termination_message(self) -> str | None:
         with self._lock:
             return self._termination_message
 
@@ -545,17 +550,17 @@ class AgentEventHandler(PrintingCallbackHandler):
 
     def __init__(
         self,
-        operation_id: str = None,
-        provider_id: str = None,
-        model_id: str = None,
-            specialist_model_id: str = None,
+        operation_id: str | None = None,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+            specialist_model_id: str | None = None,
         emitter: EventEmitter = None,
-        init_context: Dict[str, Any] = None,
+        init_context: dict[str, Any] | None = None,
             coordinator: OperationEventCoordinator = None,
             agent_name: str = "Cyber-AutoAgent",
             agent_type: str = "operation_controller",
-            agent_run_id: str = None,
-            parent_agent_run_id: str = None,
+            agent_run_id: str | None = None,
+            parent_agent_run_id: str | None = None,
             emit_operation_init: bool = True,
             start_metrics_thread: bool = True,
     ):
@@ -592,7 +597,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         self.agent_name = agent_name or "Cyber-AutoAgent"
         self.agent_type = agent_type or "agent"
         self.parent_agent_run_id = parent_agent_run_id
-        self._active_agent_metadata: Optional[Dict[str, str]] = None
+        self._active_agent_metadata: dict[str, str] | None = None
         self.emit_operation_init = emit_operation_init
         self.start_metrics_thread = start_metrics_thread
         self.start_time = time.time()
@@ -659,8 +664,8 @@ class AgentEventHandler(PrintingCallbackHandler):
         self._aggregate_cost = 0.0
         self._agent_usage_cache: OrderedDict[str, _AgentUsageEntry] = OrderedDict()
         self._agent_usage_cache_size = _AGENT_USAGE_CACHE_SIZE
-        self._efficiency_usage_signatures: Dict[str, tuple[Any, ...]] = {}
-        self._report_efficiency_usage_signature: Optional[tuple[Any, ...]] = None
+        self._efficiency_usage_signatures: dict[str, tuple[Any, ...]] = {}
+        self._report_efficiency_usage_signature: tuple[Any, ...] | None = None
         self._report_metrics_input_baseline = 0
         self._report_metrics_output_baseline = 0
         self._report_metrics_cache_read_baseline = 0
@@ -734,19 +739,19 @@ class AgentEventHandler(PrintingCallbackHandler):
         # Operation state
         self._report_generated = False
         self._report_generation_active = False
-        self._evaluation_report_path: Optional[str] = None
-        self._completed_report_path: Optional[str] = None
+        self._evaluation_report_path: str | None = None
+        self._completed_report_path: str | None = None
         self._report_status = "not_started"
         self._assessment_completion_emitted = False
         self._operation_terminated_emitted = False
         self._operation_finalized_emitted = False
         self._model_usage_snapshot_emitted = False
-        self._model_usage_snapshot: Optional[Dict[str, Any]] = None
+        self._model_usage_snapshot: dict[str, Any] | None = None
 
         # Termination tracking (workflow completion, user abort, or budget limit)
         self._termination_emitted = False
-        self._termination_reason: Optional[str] = None
-        self._termination_message: Optional[str] = None
+        self._termination_reason: str | None = None
+        self._termination_message: str | None = None
         # Track python_repl preview emission per tool id to suppress generic completion
         self._python_preview_emitted = set()
 
@@ -833,7 +838,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         with self._state_lock:
             self._action_count = value
 
-    def emit_ui_event(self, event: Dict[str, Any]) -> None:
+    def emit_ui_event(self, event: dict[str, Any]) -> None:
         """
         Emit a structured event for downstream interfaces.
 
@@ -873,26 +878,26 @@ class AgentEventHandler(PrintingCallbackHandler):
 
     def set_operation_health_provider(
         self,
-        provider: Optional[Callable[[], Dict[str, Any]]],
+        provider: Callable[[], dict[str, Any]] | None,
     ) -> None:
         """Set the operation-wide health provider shared by every agent handler."""
 
         self.coordinator.set_operation_health_provider(provider)
 
-    def operation_health_snapshot(self) -> Optional[Dict[str, Any]]:
+    def operation_health_snapshot(self) -> dict[str, Any] | None:
         """Return the shared point-in-time operation health snapshot."""
 
         return self.coordinator.operation_health_snapshot()
 
     def set_operation_state_snapshot_provider(
         self,
-        provider: Optional[Callable[[], Dict[str, Any]]],
+        provider: Callable[[], dict[str, Any]] | None,
     ) -> None:
         """Set the operation-wide state snapshot provider shared by every agent handler."""
 
         self.coordinator.set_operation_state_snapshot_provider(provider)
 
-    def operation_health_budget_diagnostics(self) -> Dict[str, Any]:
+    def operation_health_budget_diagnostics(self) -> dict[str, Any]:
         """Return assessment progress and terminal-budget inputs for operation health."""
 
         termination_reason = self.coordinator.termination_reason if self.coordinator is not None else self._termination_reason
@@ -903,7 +908,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             "assessment_active": not self._report_generated,
         }
 
-    def _metadata_from_agent(self, agent: Any) -> Dict[str, str]:
+    def _metadata_from_agent(self, agent: Any) -> dict[str, str]:
         """Return Cyber-AutoAgent event metadata attached to a Strands agent."""
         if not agent:
             return {}
@@ -963,16 +968,12 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self._termination_message = message
 
                 # Flush any accumulated reasoning so it doesn't appear after termination
-                try:
+                with contextlib.suppress(Exception):
                     self._emit_accumulated_reasoning(force=True)
-                except Exception:
-                    pass
 
                 # End any active thinking indicator in the UI
-                try:
+                with contextlib.suppress(Exception):
                     self.emit_ui_event({"type": "thinking_end"})
-                except Exception:
-                    pass
 
                 self.emit_budget_progress_update(step="TERMINATED")
 
@@ -999,7 +1000,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         self,
         *,
         step: Any = None,
-        total_tools: Optional[int] = None,
+        total_tools: int | None = None,
     ) -> None:
         """Emit a generic budget progress snapshot for the current operation state."""
         event = {
@@ -1013,7 +1014,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             event["totalTools"] = total_tools
         self.emit_ui_event(event)
 
-    def _transform_sdk_event(self, kwargs: Dict[str, Any]) -> None:
+    def _transform_sdk_event(self, kwargs: dict[str, Any]) -> None:
         """Adapt SDK callbacks to UI events.
 
         Delegates to small helpers to keep this method readable and testable.
@@ -1077,7 +1078,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 agent=agent,
             )
             if isinstance(error, BaseException):
-                setattr(error, "_max_token_efficiency_recorded", True)
+                error._max_token_efficiency_recorded = True
             self.emit_ui_event(
                 {
                     "type": "error",
@@ -1092,7 +1093,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             self.process_metrics(event_loop_metrics, agent=agent)
 
         if agent and hasattr(agent, "event_loop_metrics"):
-            setattr(self, "_last_agent", agent)
+            self._last_agent = agent
             usage = agent.event_loop_metrics.accumulated_usage
             if usage:
                 self._capture_agent_usage(agent, usage)
@@ -1147,7 +1148,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         with self._metrics_lock:
             self._sdk_cache_write_tokens = value
 
-    def _current_usage_totals(self) -> Dict[str, Any]:
+    def _current_usage_totals(self) -> dict[str, Any]:
         with self._metrics_lock:
             input_tokens = self._aggregate_input_tokens + self._sdk_input_tokens
             output_tokens = self._aggregate_output_tokens + self._sdk_output_tokens
@@ -1232,10 +1233,38 @@ class AgentEventHandler(PrintingCallbackHandler):
         classification: str,
         exhaustion_ordinal: int,
         agent: Any = None,
+        failure_snapshot: Any = None,
+        failure_type: str = "MaxTokensReachedException",
     ) -> None:
         """Account for and expose one observed max-token exhaustion."""
 
         self.record_efficiency_event("max_token_exhaustion", agent=agent)
+        snapshot = failure_snapshot or {}
+        usage = getattr(snapshot, "usage", {}) or {}
+        span = otel_trace.get_current_span()
+        span_context = span.get_span_context()
+        generation_id = format(span_context.span_id, "016x") if span_context.is_valid else ""
+        failure_record = {
+            "generation_id": generation_id,
+            "agent_run_id": str(self.agent_run_id or ""),
+            "stop_reason": "max_tokens",
+            "failure_type": str(failure_type or "MaxTokensReachedException"),
+            "max_token_classification": str(classification or "unknown"),
+            "usage": dict(usage),
+            "recorded_reasoning": str(getattr(snapshot, "recorded_reasoning", "") or ""),
+            "partial_output": str(getattr(snapshot, "partial_output", "") or ""),
+        }
+        with otel_trace.get_tracer(__name__).start_as_current_span(
+            "generation_failure",
+            attributes={
+                "langfuse.observation.type": "event",
+                "workflow.event.name": "generation_failure",
+                "workflow.failure.record": json.dumps(failure_record, sort_keys=True),
+                "workflow.failure.agent_run_id": failure_record["agent_run_id"],
+                "workflow.failure.generation_id": generation_id,
+            },
+        ):
+            pass
         self.emit_ui_event(
             {
                 "type": "model_max_token_exhaustion",
@@ -1246,7 +1275,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             }
         )
 
-    def _record_model_call_if_new(self, usage: Dict[str, Any], agent: Any = None) -> None:
+    def _record_model_call_if_new(self, usage: dict[str, Any], agent: Any = None) -> None:
         """Count one inference when cumulative usage advances for an agent."""
         coordinator = self.coordinator
         if coordinator is None:
@@ -1277,7 +1306,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         coordinator.record_model_call(provider_id, model_id)
 
     @staticmethod
-    def _context_window_limit(agent: Any) -> Optional[int]:
+    def _context_window_limit(agent: Any) -> int | None:
         """Return the effective context-window limit configured on an agent model."""
         model = getattr(agent, "model", None)
         value = getattr(model, "context_window_limit", None)
@@ -1285,7 +1314,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             return int(value)
         return None
 
-    def _operation_usage_totals(self) -> Dict[str, Any]:
+    def _operation_usage_totals(self) -> dict[str, Any]:
         self._publish_usage_to_coordinator()
         coordinator = self.coordinator
         if coordinator is None:
@@ -1300,7 +1329,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             "inference_time_ms": float(usage.inference_time_ms),
         }
 
-    def _record_evaluation_usage(self, usage: Dict[str, Any]) -> None:
+    def _record_evaluation_usage(self, usage: dict[str, Any]) -> None:
         """Publish cumulative evaluation usage into the operation metrics total."""
         if self.coordinator is None:
             return
@@ -1349,7 +1378,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             pricing_override=self._pricing_override_configured,
         )
 
-    def _report_budget_estimate_payload(self) -> Dict[str, Any]:
+    def _report_budget_estimate_payload(self) -> dict[str, Any]:
         estimate = self._report_budget_estimate()
         return {
             "inputTokens": estimate.input_tokens,
@@ -1361,7 +1390,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             "remainingSteps": estimate.remaining_steps,
         }
 
-    def _budgeted_usage_totals(self) -> Dict[str, Any]:
+    def _budgeted_usage_totals(self) -> dict[str, Any]:
         totals = self._operation_usage_totals()
         estimate = self._report_budget_estimate()
         input_tokens = int(totals["input_tokens"]) + int(estimate.input_tokens)
@@ -1375,7 +1404,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             "report_estimate": estimate,
         }
 
-    def set_report_items(self, items: List[Dict[str, Any]], refinement_cycles: int = 2) -> None:
+    def set_report_items(self, items: list[dict[str, Any]], refinement_cycles: int = 2) -> None:
         if self.coordinator is not None:
             self.coordinator.set_report_items(
                 items,
@@ -1383,13 +1412,13 @@ class AgentEventHandler(PrintingCallbackHandler):
                 refinement_cycles=refinement_cycles,
             )
 
-    def model_usage(self) -> List[Dict[str, Any]]:
+    def model_usage(self) -> list[dict[str, Any]]:
         """Return provider/model usage rows for final report rendering."""
         if self.coordinator is None:
             return []
         return self.coordinator.model_usage()
 
-    def emit_model_usage_snapshot(self) -> Dict[str, Any]:
+    def emit_model_usage_snapshot(self) -> dict[str, Any]:
         """Persist and freeze assessment-only model usage at operation termination."""
         existing_snapshot = getattr(self, "_model_usage_snapshot", None)
         if existing_snapshot is not None:
@@ -1400,7 +1429,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         cache_read_tokens = int(totals["cache_read_tokens"])
         cache_write_tokens = int(totals["cache_write_tokens"])
         model_usage = self.model_usage()
-        captured_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        captured_at = datetime.now(UTC).isoformat(timespec="microseconds")
         persisted = False
         persistence_error = None
         for attempt in range(3):
@@ -1441,8 +1470,8 @@ class AgentEventHandler(PrintingCallbackHandler):
 
     def emit_operation_terminated(
         self,
-        completion_status: Dict[str, Any],
-        workflow_coverage_summary: List[Dict[str, Any]],
+        completion_status: dict[str, Any],
+        workflow_coverage_summary: list[dict[str, Any]],
     ) -> None:
         """Emit the authoritative post-execution lifecycle event exactly once."""
         if getattr(self, "_operation_terminated_emitted", False):
@@ -1525,7 +1554,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             )
             self._aggregate_cost += float(entry.cost)
 
-    def _capture_agent_usage(self, agent: Any, usage: Dict[str, Any]) -> None:
+    def _capture_agent_usage(self, agent: Any, usage: dict[str, Any]) -> None:
         if not agent or not usage:
             return
         with self._metrics_lock:
@@ -1559,7 +1588,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 _evicted_uuid, evicted = self._agent_usage_cache.popitem(last=False)
                 self._aggregate_usage_entry(evicted)
 
-    def _capture_report_usage(self, usage: Dict[str, Any]) -> None:
+    def _capture_report_usage(self, usage: dict[str, Any]) -> None:
         """Accumulate no-agent report metrics as per-step deltas.
 
         Report generation creates short-lived agents. Some callbacks only expose
@@ -1671,17 +1700,17 @@ class AgentEventHandler(PrintingCallbackHandler):
         if data and not data.startswith("[") and not data.startswith("{"):
             self._accumulate_reasoning_text(data)
 
-    def _tool_use_id(self, tool_use: Dict[str, Any]) -> str:
+    def _tool_use_id(self, tool_use: dict[str, Any]) -> str:
         return tool_use.get("_toolUseId") or tool_use.get("id") or tool_use.get("toolUseId")
 
-    def _handle_tool_announcement(self, tool_use: Dict[str, Any]) -> None:
+    def _handle_tool_announcement(self, tool_use: dict[str, Any]) -> None:
         self._process_tool_announcement(tool_use)
 
     def _handle_tool_result(self, tool_result: Any) -> None:
         self._process_tool_result_from_message(tool_result)
 
     def _handle_alternate_results(
-        self, kwargs: Dict[str, Any], tool_result_already: bool
+        self, kwargs: dict[str, Any], tool_result_already: bool
     ) -> None:
         for alt_key in [
             "result",
@@ -1703,9 +1732,9 @@ class AgentEventHandler(PrintingCallbackHandler):
 
     def _process_message(
             self,
-            message: Dict[str, Any],
+            message: dict[str, Any],
             skip_reasoning_extraction: bool = False,
-            recent_reasoning_seen: Optional[_ReasoningSeenHolder] = None,
+            recent_reasoning_seen: _ReasoningSeenHolder | None = None,
     ) -> None:
         """Process message objects to track actions and extract content.
 
@@ -1804,7 +1833,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         except Exception:
             return False
 
-    def _process_tool_announcement(self, tool_use: Dict[str, Any]) -> None:
+    def _process_tool_announcement(self, tool_use: dict[str, Any]) -> None:
         """Process tool usage announcements.
 
         Emits generic tool lifecycle events from SDK callbacks. Consumers dedupe
@@ -2179,14 +2208,13 @@ class AgentEventHandler(PrintingCallbackHandler):
             "tool_id": tool_use_id,
             **completion_metadata,
         }
+        if status == "error":
+            _deferred_tool_end["error_summary"] = failure_summary(tool_result_dict)
         if duration is not None:
             _deferred_tool_end["duration"] = f"{duration:.2f}s"
         # Handle errors with tool-specific processing
         if status == "error":
-            error_text = ""
-            for item in content_items:
-                if isinstance(item, dict) and "text" in item:
-                    error_text += item["text"] + "\n"
+            error_text = tool_result_text(tool_result_dict)
 
             if error_text.strip():
                 # Combine buffered output with error text for single emission
@@ -2290,6 +2318,29 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
 
                 # Mark that we've emitted output for this tool invocation
+                if tool_use_id:
+                    self.tool_use_output_emitted[tool_use_id] = True
+            else:
+                combined_output = "\n".join(
+                    part
+                    for part in (str(buffered_output or "").strip(), _deferred_tool_end["error_summary"])
+                    if part
+                )
+                self.emit_ui_event(
+                    {
+                        "type": "output",
+                        "content": combined_output,
+                        "metadata": {"fromToolBuffer": True, "tool": tool_name},
+                    }
+                )
+                self.emit_ui_event(
+                    {
+                        "type": "tool_invocation_end",
+                        "tool_name": tool_name,
+                        **completion_metadata,
+                    }
+                )
+                self.emit_ui_event({"type": "tool_end", **_deferred_tool_end})
                 if tool_use_id:
                     self.tool_use_output_emitted[tool_use_id] = True
             return
@@ -2487,13 +2538,9 @@ class AgentEventHandler(PrintingCallbackHandler):
                 if error_msg:
                     actual_output.append(f"Error: {error_msg}")
                 continue
-            elif line.startswith("Execution Summary:") or line.startswith(
-                "Total commands:"
-            ):
+            elif line.startswith(("Execution Summary:", "Total commands:")):
                 continue  # Skip wrapper headers
-            elif in_output_section:
-                actual_output.append(line)
-            elif capture_error and line.strip():
+            elif in_output_section or (capture_error and line.strip()):
                 actual_output.append(line)
 
         # If we have extracted content, return it
@@ -2544,9 +2591,9 @@ class AgentEventHandler(PrintingCallbackHandler):
     def _process_shell_output(
         self,
         output_text: str,
-        _content_items: List,
+        _content_items: list,
         _status: str,
-        tool_use_id: str = None,
+        tool_use_id: str | None = None,
     ) -> None:
         """Process shell command output with intelligent parsing and clean display."""
         # Skip if output was already emitted
@@ -2600,9 +2647,9 @@ class AgentEventHandler(PrintingCallbackHandler):
     def _process_http_output(
         self,
         output_text: str,
-        _content_items: List,
+        _content_items: list,
         _status: str,
-        tool_use_id: str = None,
+        tool_use_id: str | None = None,
     ) -> None:
         """Process HTTP request output with intelligent parsing and clean display."""
         # Skip if output was already emitted
@@ -2667,7 +2714,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             if not s:
                 return s
             # Grab segments ending with . ! ? : (plus following whitespace) or the tail
-            parts = re.findall(r".*?(?:[\.!\?:](?=\s)|$)\s*", s, flags=re.S)
+            parts = re.findall(r".*?(?:[\.!\?:](?=\s)|$)\s*", s, flags=re.DOTALL)
             out = []
             prev_norm = None
             for p in parts:
@@ -2880,14 +2927,10 @@ class AgentEventHandler(PrintingCallbackHandler):
         start_times = []
         coordinator = self.coordinator
         if coordinator is not None:
-            try:
+            with contextlib.suppress(Exception):
                 start_times.append(float(coordinator.start_time))
-            except Exception:
-                pass
-        try:
+        with contextlib.suppress(Exception):
             start_times.append(float(self.start_time))
-        except Exception:
-            pass
         if not start_times:
             return 0.0
         try:
@@ -2902,14 +2945,14 @@ class AgentEventHandler(PrintingCallbackHandler):
                 return coordinator.budget_max_duration
         return self.budget_max_duration
 
-    def _budget_max_tokens(self) -> Optional[int]:
+    def _budget_max_tokens(self) -> int | None:
         coordinator = self.coordinator
         if coordinator is not None and isinstance(coordinator.budget_max_tokens, int):
             if coordinator.budget_max_tokens > 0:
                 return coordinator.budget_max_tokens
         return self.budget_max_tokens
 
-    def _budget_max_cost(self) -> Optional[float]:
+    def _budget_max_cost(self) -> float | None:
         coordinator = self.coordinator
         if coordinator is not None and isinstance(coordinator.budget_max_cost, (int, float)):
             if coordinator.budget_max_cost > 0:
@@ -2987,8 +3030,8 @@ class AgentEventHandler(PrintingCallbackHandler):
             cache_read_tokens: int,
             cache_write_tokens: int,
             agent: Any = None,
-            provider_override: Optional[str] = None,
-            model_id_override: Optional[str] = None,
+            provider_override: str | None = None,
+            model_id_override: str | None = None,
     ) -> float:
         cost = self.pricing_input * (input_tokens / 1_000_000) \
                + self.pricing_output * (output_tokens / 1_000_000) \
@@ -3031,13 +3074,13 @@ class AgentEventHandler(PrintingCallbackHandler):
             except Exception as e:
                 # only report this once
                 if hasattr(self, "_pricing_failures"):
-                    pricing_failures = getattr(self, "_pricing_failures")
+                    pricing_failures = self._pricing_failures
                 else:
                     pricing_failures = set()
-                    setattr(self, "_pricing_failures", pricing_failures)
+                    self._pricing_failures = pricing_failures
                 if model_id not in pricing_failures:
                     pricing_failures.add(model_id)
-                    logger.debug("Error getting pricing: {}".format(e), exc_info=True)
+                    logger.debug(f"Error getting pricing: {e}", exc_info=True)
 
         return cost
 
@@ -3149,7 +3192,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             )
             self.emit_ui_event({"type": "metrics_update", "metrics": current_metrics})
 
-    def process_metrics(self, event_loop_metrics: Dict[str, Any], agent: Any = None) -> None:
+    def process_metrics(self, event_loop_metrics: dict[str, Any], agent: Any = None) -> None:
         """Process SDK metrics - only updates internal counters."""
 
         usage = dict(event_loop_metrics.accumulated_usage or {})
@@ -3195,7 +3238,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         # Allow empty dicts as valid - tools may have no required parameters
         return isinstance(tool_input, (dict, str))
 
-    def _parse_tool_input_from_stream(self, tool_input: Any) -> Dict[str, Any]:
+    def _parse_tool_input_from_stream(self, tool_input: Any) -> dict[str, Any]:
         """Parse tool input from SDK streaming format into usable dictionary.
 
         The Strands SDK sends tool inputs through multiple streaming updates:
@@ -3266,7 +3309,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         # Fallback for unexpected types
         return {"value": str(tool_input)} if tool_input else {}
 
-    def _extract_output_text(self, content_items: List[Any]) -> str:
+    def _extract_output_text(self, content_items: list[Any]) -> str:
         """Extract text from content items, handling all possible formats."""
         output_text = ""
         for item in content_items:
@@ -3301,8 +3344,8 @@ class AgentEventHandler(PrintingCallbackHandler):
         agent,
         target: str,
         objective: str,
-        module: str = None,
-        completion_status: Optional[Dict[str, Any]] = None,
+        module: str | None = None,
+        completion_status: dict[str, Any] | None = None,
     ) -> None:
         """Ensure report is generated only once."""
         if not self._report_generated:
@@ -3313,8 +3356,8 @@ class AgentEventHandler(PrintingCallbackHandler):
         agent,
         target: str,
         objective: str,
-        module: str = None,
-        completion_status: Optional[Dict[str, Any]] = None,
+        module: str | None = None,
+        completion_status: dict[str, Any] | None = None,
     ) -> None:
         """Generate final security assessment report.
 
@@ -3431,7 +3474,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             report_content = ""
             if os.path.exists(report_path):
                 try:
-                    with open(report_path, "r", encoding="utf-8") as f:
+                    with open(report_path, encoding="utf-8") as f:
                         report_content = f.read(15000)  # 15KB threshold for IPC safety, 200 lines for event output
                     report_content = "\n".join(report_content.split("\n")[:200])  # 200 lines for event output
                 except Exception as read_error:
@@ -3490,15 +3533,13 @@ class AgentEventHandler(PrintingCallbackHandler):
                     logger.info(
                         "Report generation skipped - no evidence collected during operation"
                     )
-                    try:
+                    with contextlib.suppress(Exception):
                         self.emit_ui_event(
                             {
                                 "type": "output",
                                 "content": "No memories or evidence were collected during this operation. Skipping report generation.",
                             }
                         )
-                    except Exception:
-                        pass
 
         except Exception as e:
             logger.error("Error generating final report: %s", e)
@@ -3515,7 +3556,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 logger.error("Unable to generate deterministic fallback report: %s", fallback_error)
                 self._report_status = "failed"
             self.emit_ui_event(
-                {"type": "error", "content": f"Error generating report: {str(e)}"}
+                {"type": "error", "content": f"Error generating report: {e!s}"}
             )
 
     def _emit_deterministic_fallback_report(
@@ -3523,13 +3564,15 @@ class AgentEventHandler(PrintingCallbackHandler):
         *,
         target: str,
         objective: str,
-        completion_status: Optional[Dict[str, Any]],
-        config_params: Dict[str, Any],
-        report_path: Optional[str],
+        completion_status: dict[str, Any] | None,
+        config_params: dict[str, Any],
+        report_path: str | None,
         error: Exception,
     ) -> None:
         """Generate fallback artifacts and publish their paths without rendering report content here."""
-        from modules.handlers.report_generator import generate_deterministic_fallback_report
+        from modules.handlers.report_generator import (
+            generate_deterministic_fallback_report,
+        )
 
         fallback_config = dict(config_params)
         snapshot = self.coordinator.operation_state_snapshot()
@@ -3632,7 +3675,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             results = loop.run_until_complete(eval_manager.evaluate_all_traces())
 
             if results:
-                scores: Dict[str, float] = {}
+                scores: dict[str, float] = {}
                 if isinstance(results, dict):
                     for result_scores in results.values():
                         if not isinstance(result_scores, dict):
@@ -3774,11 +3817,11 @@ class AgentEventHandler(PrintingCallbackHandler):
         return self._termination_emitted
 
     @property
-    def termination_reason(self) -> Optional[str]:
+    def termination_reason(self) -> str | None:
         return self._termination_reason
 
     @property
-    def termination_message(self) -> Optional[str]:
+    def termination_message(self) -> str | None:
         return self._termination_message
 
     @property
@@ -3786,7 +3829,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         """Check if report was generated."""
         return self._report_generated
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Get operation summary for reporting."""
         with self._state_lock:
             totals = self._operation_usage_totals()

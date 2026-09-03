@@ -4,10 +4,10 @@ import shlex
 import subprocess
 from functools import lru_cache
 from pathlib import Path
-from typing import List, Any, Dict, Optional
+from typing import Any
 
 import yaml
-from strands import tool, Agent
+from strands import Agent, tool
 
 from modules.config.system import environment, get_logger
 
@@ -17,8 +17,8 @@ _SEPARATOR = "=" * 80
 _EXECUTION_CAPABILITIES = frozenset({"analyze", "compare", "crawl", "enumerate", "execute", "request"})
 
 
-@lru_cache()
-def _get_cyber_tools() -> Dict[str, Any]:
+@lru_cache
+def _get_cyber_tools() -> dict[str, Any]:
     env_path = Path(environment.__file__).with_name("environment.yaml")
     with env_path.open("r", encoding="utf-8") as f:
         env_config = yaml.safe_load(f) or {}
@@ -26,7 +26,7 @@ def _get_cyber_tools() -> Dict[str, Any]:
     return env_config.get("cyber_tools", {})
 
 
-def get_cyber_tools_by_caps(available: List[str]) -> Dict[str, List[str]]:
+def get_cyber_tools_by_caps(available: list[str]) -> dict[str, list[str]]:
     """
     Returns command line tools:
         capability -> tools (list[str])
@@ -47,7 +47,7 @@ def get_cyber_tools_by_caps(available: List[str]) -> Dict[str, List[str]]:
     return result
 
 
-def get_shell_command_specs(available: List[str]) -> List[Dict[str, Any]]:
+def get_shell_command_specs(available: list[str]) -> list[dict[str, Any]]:
     """Return compact metadata for installed command-line programs."""
 
     cyber_tools = _get_cyber_tools()
@@ -98,7 +98,7 @@ def get_shell_command_execution_capabilities(executable: str) -> frozenset[str]:
     return frozenset()
 
 
-def remove_shell_command(available: List[str], executable: str) -> List[str]:
+def remove_shell_command(available: list[str], executable: str) -> list[str]:
     """Remove configured tool names that resolve to an unavailable executable."""
 
     executable = str(executable or "").strip()
@@ -112,7 +112,7 @@ def remove_shell_command(available: List[str], executable: str) -> List[str]:
     return removed
 
 
-def get_shell_command_alternatives(executable: str, available: List[str]) -> List[str]:
+def get_shell_command_alternatives(executable: str, available: list[str]) -> list[str]:
     """Return available commands sharing at least one declared capability."""
 
     executable = str(executable or "").strip()
@@ -168,7 +168,7 @@ def _get_shell_command_help(command: str, help_commands_json: str) -> str:
     return ""
 
 
-def _shell_command_config(shell_command: str) -> tuple[str, Dict[str, Any], List[str]]:
+def _shell_command_config(shell_command: str) -> tuple[str, dict[str, Any], list[str]]:
     cyber_tools = _get_cyber_tools()
     tool_cfg = cyber_tools.get(shell_command) or {}
     real_command = str(tool_cfg.get("command") or shell_command).strip()
@@ -202,7 +202,7 @@ capabilities: {", ".join(str(capability) for capability in caps)}
 """
 
 
-def get_shell_command_help_context(command: str, available: List[str]) -> str:
+def get_shell_command_help_context(command: str, available: list[str]) -> str:
     """Return full tool-catalog command help for one available shell executable."""
 
     command = str(command or "").strip()
@@ -216,7 +216,7 @@ def get_shell_command_help_context(command: str, available: List[str]) -> str:
     return ""
 
 
-def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
+def tool_catalog_wrapper(agent: Agent, shell_commands: list[str]):
     """
     Create a full catalog of all available tools.
     :param agent: agent from which tools will be gathered
@@ -225,7 +225,7 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
     """
 
     @tool(name="tool_catalog")
-    def tool_catalog(keywords: Optional[str] = None) -> str:
+    def tool_catalog(keywords: str | list[str] | None = None) -> str:
         """
         List available tools to pick the best next tool.
 
@@ -244,7 +244,12 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
                 - 2–6 terms: capability + task (e.g., `idor validate`, `jwt decode`, `web_crawling`, `xss_testing`).
                 - 1 term: tool/command name.
         """
-        parts = re.split(r"[\s,;]+", (keywords or ""))
+        if isinstance(keywords, list):
+            parts = keywords
+        elif isinstance(keywords, str):
+            parts = re.split(r"[\s,;]+", (keywords or ""))
+        else:
+            parts = []
         keywords = [w.strip().lower() for w in parts if w.strip()]
         found_tools = []
         catalog = ""
@@ -257,7 +262,7 @@ def tool_catalog_wrapper(agent: Agent, shell_commands: List[str]):
             if specific_tool and tool_name != keywords[0]:
                 continue
             if keywords:
-                if not any([w in tool_name.lower() or w in tool_spec.get("description", "").lower() for w in keywords]):
+                if not any(w in tool_name.lower() or w in tool_spec.get("description", "").lower() for w in keywords):
                     continue
             found_tools.append(tool_name)
 
@@ -292,13 +297,11 @@ These are command-line programs invoked through the **shell** tool.
                     desc_l = description.lower()
                     caps_l = [str(cap).lower() for cap in caps]
                     if not any(
-                        [
-                            w in shell_command.lower()
+                        w in shell_command.lower()
                             or w in real_command.lower()
                             or w in desc_l
                             or w in caps_l
                             for w in keywords
-                        ]
                     ):
                         continue
                 found_cyber_tools.append(real_command)

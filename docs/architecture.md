@@ -73,12 +73,14 @@ graph TB
     C --> E[Runtime Resources]
     C --> F[Short-Lived Role Agents]
     F --> G[Restricted Tool Registry]
+    F --> S[Typed Structured Output]
     F --> H[Memory System]
     F --> I[AI Models]
     
     G --> J[shell]
     G --> K[Typed memory tools / memory_retrieve]
-    G --> L[create_tasks when allowed]
+    G --> L[create_tasks for executor follow-up]
+    S --> PERSIST[Controller task persistence]
     G --> M[Selected Module Tools]
     G --> N[Selected MCP Tools]
     G --> O[swarm when selected]
@@ -103,9 +105,18 @@ Agents operate through role-specific restricted tool lists.
 - **http_request**: Make HTTP requests for web testing
 - **memory_list / memory_retrieve**: List or semantically retrieve findings and knowledge
 - **load_tool**: Dynamically load created tools
-- **create_tasks**: Create durable tasks when a role permits task creation
+- **create_tasks**: Create durable follow-up tasks from task executors when permitted
 
-Plan/task state transitions are owned by Python workflow code. Agents can only add follow-up work with `create_tasks` when their role permits it. Active task context is injected into the role prompt by the workflow; agents do not fetch it with a tool.
+Plan/task state transitions are owned by Python workflow code. Task creators return schema-validated `TaskProposal`
+payloads, which Python validates and persists without an agent tool call. Task executors may still add contracted
+follow-up work with `create_tasks` when permitted. Active task context is injected into the role prompt by the workflow;
+agents do not fetch it with a tool.
+
+Planning, prompt-building, evaluation, taxonomy, reporting, and evaluation-policy roles use provider-backed structured
+output schemas. Strands lets LiteLLM and Bedrock select native response schemas or their internal tool fallback. When
+any provider/model cannot complete that protocol, the controller records an operation-local capability downgrade and
+uses bounded, schema-validated JSON repair for later structured roles in the same operation. Schema validation and
+ordinary provider failures retain their normal bounded-retry behavior rather than triggering this compatibility path.
 
 There is no agent-callable stop tool. When Python workflow evaluation determines the assessment is complete, the controller emits a `termination_reason` event with reason `complete`.
 
@@ -114,11 +125,11 @@ and task/phase evaluators prevent successful completion when evidence shows a co
 
 Initial plan generation uses a bounded actor/critic cycle before persistence. Critic approval immediately accepts the
 current draft; rejection sends feedback to `plan_creator` for revision. The
-`CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS` environment variable limits reviews and defaults to three. A rejection on
+`CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS` environment variable limits reviews and defaults to seven. A rejection on
 the final configured review fails the workflow so an unapproved plan is never persisted or executed.
 
 Task prompt generation uses the same bounded pattern. `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` defaults to
-two critic reviews and accepts `0` to disable critique. After JSON retries, malformed or unavailable builder/critic
+three critic reviews and accepts `0` to disable critique. After JSON retries, malformed or unavailable builder/critic
 output and non-scope prompt defects that survive one bounded repair use a deterministic controller task template.
 The template has no model-selected optional tools or shell commands, and selects only canonical memory references.
 The controller emits `task_prompt_fallback` for that recovery. Only a valid critic response explicitly identifying a
@@ -142,10 +153,9 @@ submission. Repairs retain the executor conversation and stop early when an equi
 Once that ledger exists, the evaluator's semantic verdict is terminal because the ledger cannot
 be revised. Python persists `done`, `partial_failure`, or `blocked` without replaying completed acceptance.
 
-Task creators stop within the Strands event loop after the first successful `create_tasks` mutation. Task executors
-stop the same way after a complete `record_task_acceptance` result. Rejected calls do not set the success marker and
-remain correctable; role completion therefore depends on durable success rather than raw tool-call counts or a later
-text-only turn.
+Task creators return one typed proposal batch, after which Python applies the existing preflight, deduplication, and
+durable persistence checks. Rejected batches remain correctable within the configured bound. Task executors stop after
+a complete `record_task_acceptance` result; rejected calls remain correctable.
 
 Every role invocation also has deterministic safety bounds. Three consecutive responses without a new tool action stop
 a required-tool role as stalled, regardless of tool calls or reasoning emitted during an earlier actor cycle. An
@@ -178,16 +188,15 @@ Shell-tool discovery first resolves each configured command on `PATH`. A tool ma
 Commands without a safe standalone canary remain available but unverified. The Docker tools-image verifier implements
 the same configuration contract independently and is not imported by application runtime code.
 
-Task creation similarly has a deterministic tool-loop boundary. After an initial rejected `create_tasks` call, the
-controller may continue the same conversation for `CYBER_TASK_CREATOR_MAX_CORRECTIONS` correction turns (six by
-default). Each turn ends after its first tool result; the initial prompt contains stable phase context and corrections
-contain only the prior validation error. Generic reasoning-loop repair is disabled for this role. Agents submit a flat
+Task creation similarly has a deterministic structured-output boundary. After an initial rejected proposal, the
+controller may request up to `CYBER_TASK_CREATOR_MAX_CORRECTIONS` corrected payloads (six by default). The initial
+prompt contains stable phase context and corrections contain only the prior validation error. Agents submit a flat
 `TaskProposal` whose `limits` object is always required. Python discards it and `output_kind` for snapshot work,
 infers the basis, supplies procedure invariants, derives source references and target scope, and compiles the proposal
 before storage. Inventory-wide moving collections are rejected as procedures and must use frozen snapshot references.
 Exact frozen-contract duplicates are skipped deterministically within the active phase; completed coverage from one
 phase does not suppress work against the same snapshot in a later phase. Unfinished coverage retries remain eligible,
-and duplicate-only calls retain the creator tool for a bounded corrected submission.
+and duplicate-only payloads remain eligible for a bounded corrected submission.
 
 Successful task acceptance populates task evidence with the validated immutable ledger references. Phase
 evaluators receive that canonical per-criterion ledger and may read only its resolved artifact paths, preventing stale
@@ -226,7 +235,7 @@ capabilities allowed for its task, and command output is captured as operation e
 
 ### MCP Tool Access
 
-MCP tools can be accessed as direct tools, but they are optional tools. They are selected per worker role and task objective, not included in every worker's core tool list.
+MCP tools can be accessed as direct tools, but they are optional tools. They are selected per worker role and task objective, not included in every worker's core tool list. The controller can also add built-in optional tools from structured task-contract output and evidence requirements. For an inventory-manifest task, this includes the converter and the available direct recon/auth producers. This deterministic selection supplements the prompt-builder's choices and never derives tool access from task prose.
 
 ## Execution Flow
 

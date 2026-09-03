@@ -2,7 +2,10 @@
 
 import pytest
 
-from modules.agents.multi_agent_workflow import MultiAgentWorkflowController, extract_json_object
+from modules.agents.multi_agent_workflow import (
+    MultiAgentWorkflowController,
+    extract_json_object,
+)
 
 
 @pytest.mark.ollama

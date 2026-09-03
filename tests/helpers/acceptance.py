@@ -1,6 +1,11 @@
 """Strict task acceptance fixtures shared by unit tests."""
 
-from modules.tools.memory import AcceptanceBasis, AcceptanceContract, AcceptanceCriterion, EvidenceRequirement
+from modules.tools.memory import (
+    AcceptanceBasis,
+    AcceptanceContract,
+    AcceptanceCriterion,
+    EvidenceRequirement,
+)
 
 
 def make_acceptance(criterion_id: str = "test-outcome") -> AcceptanceContract:

@@ -1,7 +1,9 @@
 from strands.types.exceptions import ContextWindowOverflowException
+
 from modules.handlers.conversation_budget import (
     MappingConversationManager,
 )
+
 
 def test_reduce_context_summarizing_restores_first_and_protected_messages(monkeypatch):
     class DummyAgent:

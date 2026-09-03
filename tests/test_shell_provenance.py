@@ -32,3 +32,49 @@ def test_provenance_rejects_malformed_or_dynamic_output_paths(tmp_path):
     assert malformed == type(malformed)((), (), False)
     assert dynamic.parsed is True
     assert dynamic.output_paths == ()
+
+
+def test_provenance_expands_static_loop_url_collection():
+    provenance = shell_execution_provenance(
+        'for path in /api /login /admin; do curl -sS "http://target.test${path}"; done'
+    )
+
+    assert provenance.urls == ()
+    assert provenance.collection_urls == (
+        "http://target.test/api",
+        "http://target.test/login",
+        "http://target.test/admin",
+    )
+
+
+def test_provenance_handles_empty_and_wrapper_only_commands():
+    assert shell_execution_provenance("").parsed is False
+    provenance = shell_execution_provenance("timeout --foreground 30")
+    assert provenance.parsed is True
+    assert provenance.executables == ("timeout",)
+
+
+def test_provenance_extracts_literal_urls_but_rejects_dynamic_values():
+    provenance = shell_execution_provenance(
+        "curl https://target.test/api, ftp://files.test/archive; curl https://target.test/$PATH"
+    )
+
+    assert provenance.urls == ("https://target.test/api", "ftp://files.test/archive")
+
+
+def test_provenance_rejects_dynamic_loop_collections_and_unrelated_templates():
+    dynamic = shell_execution_provenance('for path in $PATHS; do curl "http://target.test/${path}"; done')
+    unrelated = shell_execution_provenance('for path in /api; do curl "http://target.test/static"; done')
+
+    assert dynamic.collection_urls == ()
+    assert unrelated.collection_urls == ()
+
+
+def test_provenance_handles_wrapper_options_and_absolute_output_path(tmp_path):
+    output = tmp_path / "result.json"
+    provenance = shell_execution_provenance(
+        f"sudo -u root env MODE=test command curl https://target.test -o {output}"
+    )
+
+    assert provenance.executables == ("sudo", "env", "command", "curl")
+    assert provenance.output_paths == (str(output),)

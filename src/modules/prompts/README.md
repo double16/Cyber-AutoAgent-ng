@@ -33,7 +33,7 @@ This is the heart of the module. It contains the primary logic for prompt constr
 
 - **`get_system_prompt(...)`**: Assembles the main system prompt for the agent by combining the base persona, workflow, tool guides, and any module-specific execution guidance.
 - **`get_report_generation_prompt(...)`**: Constructs the detailed prompt used by a specialized AI agent to write the final security report.
-- **`ModulePromptLoader` (Class)**: The engine for our plugin architecture. This class discovers modules, resolves prompt inheritance, and discovers allowlisted custom tools.
+- **`ModulePromptLoader` (Class)**: The engine for our plugin architecture. It discovers modules, resolves prompt inheritance, and discovers allowlisted custom tools.
 
 ### `templates/` Directory
 This directory stores the Markdown and text templates that form the building blocks of all prompts. Externalizing these templates allows for easy modification of the agent's behavior and report structure without touching Python code.
@@ -58,6 +58,6 @@ The agent's capabilities are extended through **Operation Modules**, which are s
     - **`execution_prompt.md`**: Provides specific instructions, rules, and context for the agent. This content is injected directly into the main system prompt, guiding the agent's behavior for the specific task.
     - **`termination_policy.md`**: Provides specific instructions and rules for determining when the operation is complete.
     - **`report_prompt.md`**: Supplies module-specific guidance to report generation.
-    - **`/tools` sub-directory**: Python files are discovered as custom tools; the manifest `tools` key controls the allowlist and is not inherited.
+    - **`/tools` sub-directory**: Python files are discovered as custom tools. The manifest `tools` key controls the allowlist and is not inherited.
 
 This architecture allows the agent to dynamically adapt its core instructions and toolset based on the specific operation it is tasked with.

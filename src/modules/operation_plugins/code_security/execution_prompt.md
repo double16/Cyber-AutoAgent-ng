@@ -28,7 +28,8 @@ Style issues and unsupported theoretical risks are not security findings.
   exploit scenario, contextual false-positive check, impact, remediation, and an artifact containing supporting output.
 - Submit vulnerability candidates with `store_finding`, including severity and CWE when
   applicable. Store unverified tool matches, coverage notes, and architectural context with `store_observation`.
-- Never store a secret value in memory; reference the redacted artifact and location instead.
+- Internal task memory may retain exact secret values when needed for evidence correlation and validation. Redact
+  secret values only in reports, logs, and trace exports.
 </evidence_policy>
 
 <prohibited_actions>

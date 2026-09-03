@@ -9,7 +9,12 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider, HookRegistry
+from strands.hooks import (
+    AfterToolCallEvent,
+    BeforeToolCallEvent,
+    HookProvider,
+    HookRegistry,
+)
 from strands.types._events import ToolResultEvent
 from strands.types.tools import AgentTool, ToolGenerator, ToolResult, ToolSpec, ToolUse
 

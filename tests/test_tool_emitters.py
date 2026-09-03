@@ -102,3 +102,33 @@ def test_unknown_and_complete_swarm_tools_emit_nothing():
     emitter.emit_tool_specific_events("complete_swarm_task", {"result": "done"})
 
     assert events == []
+
+
+def test_tool_emitters_ignore_invalid_or_empty_specialized_payloads():
+    events = []
+    emitter = ToolEventEmitter(events.append)
+
+    emitter.emit_tool_specific_events("http_request", {})
+    emitter.emit_tool_specific_events("http_request", "not-a-mapping")
+    emitter.emit_tool_specific_events("python_repl", {"code": ""})
+    emitter.emit_tool_specific_events("python_repl", "not-a-mapping")
+    emitter.emit_tool_specific_events("generate_security_report", "not-a-mapping")
+    emitter.emit_tool_specific_events("think", {})
+    emitter.emit_tool_specific_events("think", 42)
+
+    assert events == []
+
+
+def test_think_emitter_uses_each_supported_mapping_field_in_priority_order():
+    events = []
+    emitter = ToolEventEmitter(events.append)
+
+    emitter.emit_tool_specific_events("think", {"thought": "first", "content": "ignored"})
+    emitter.emit_tool_specific_events("think", {"thinking": "second"})
+    emitter.emit_tool_specific_events("think", {"text": "last"})
+
+    assert events == [
+        {"type": "metadata", "content": {"thinking": "first"}},
+        {"type": "metadata", "content": {"thinking": "second"}},
+        {"type": "metadata", "content": {"thinking": "last"}},
+    ]

@@ -63,7 +63,7 @@ def test_output_interception_react_only(
     }
     mock_get_cfg.return_value = mock_cfg
 
-    from modules.agents.cyber_autoagent import create_agent, AgentConfig
+    from modules.agents.cyber_autoagent import AgentConfig, create_agent
 
     # CLI mode: should NOT setup interception
     monkeypatch.setenv("CYBER_UI_MODE", "cli")

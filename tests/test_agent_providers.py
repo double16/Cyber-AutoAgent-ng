@@ -66,7 +66,7 @@ def test_agent_creation_litellm(
     mock_model = _stateless_model_mock()
     mock_create_litellm.return_value = mock_model
 
-    from modules.agents.cyber_autoagent import create_agent, AgentConfig
+    from modules.agents.cyber_autoagent import AgentConfig, create_agent
 
     config = AgentConfig(target="t", objective="o", provider="litellm", op_id="OP_TEST")
     agent = create_agent(target="t", objective="o", config=config)
@@ -101,7 +101,7 @@ def test_agent_creation_unsupported_provider_raises(
     mock_get_cfg.return_value = mock_cfg
     mock_hooks.side_effect = FakeReactHooks
 
-    from modules.agents.cyber_autoagent import create_agent, AgentConfig
+    from modules.agents.cyber_autoagent import AgentConfig, create_agent
 
     with pytest.raises(ValueError):
         config = AgentConfig(

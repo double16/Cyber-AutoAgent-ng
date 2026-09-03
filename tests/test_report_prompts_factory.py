@@ -13,7 +13,6 @@ from modules.prompts.factory import (
     get_report_observation_system_prompt,
 )
 
-
 PROMPT_TEMPLATE_DIR = Path(__file__).parents[1] / "src" / "modules" / "prompts" / "templates"
 OPERATION_PLUGIN_DIR = Path(__file__).parents[1] / "src" / "modules" / "operation_plugins"
 

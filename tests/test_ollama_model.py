@@ -1,5 +1,8 @@
+import re
+
 import pytest
 from pydantic import BaseModel
+from strands.types.exceptions import ContextWindowOverflowException
 
 from modules.config.models import ollama as mod
 
@@ -71,6 +74,34 @@ def test_format_request_flattens_messages_tools_and_options():
     assert request["extra"] == "value"
 
 
+def test_format_request_uses_tool_name_when_it_differs_from_tool_use_id():
+    model = _model()
+
+    request = model.format_request(
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "toolUse": {
+                            "name": "scan",
+                            "toolUseId": "tooluse_0123456789abcdef01234567",
+                            "input": {"target": "x"},
+                        }
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert request["messages"] == [
+        {
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": "scan", "arguments": {"target": "x"}}}],
+        }
+    ]
+
+
 def test_format_request_uses_configured_non_streaming_mode():
     model = _non_streaming_model()
 
@@ -111,9 +142,10 @@ def test_format_chunk_translates_all_supported_chunk_types():
     assert model.format_chunk({"chunk_type": "content_start", "data_type": "text"}) == {
         "contentBlockStart": {"start": {}}
     }
-    assert model.format_chunk({"chunk_type": "content_start", "data_type": "tool", "data": tool_call}) == {
-        "contentBlockStart": {"start": {"toolUse": {"name": "scan", "toolUseId": "scan"}}}
-    }
+    tool_start = model.format_chunk({"chunk_type": "content_start", "data_type": "tool", "data": tool_call})
+    tool_use = tool_start["contentBlockStart"]["start"]["toolUse"]
+    assert tool_use["name"] == "scan"
+    assert re.fullmatch(r"tooluse_[0-9a-f]{24}", tool_use["toolUseId"])
     assert model.format_chunk({"chunk_type": "content_delta", "data_type": "tool", "data": tool_call}) == {
         "contentBlockDelta": {"delta": {"toolUse": {"input": '{"x": 1}'}}}
     }
@@ -213,6 +245,34 @@ async def test_stream_handles_non_streaming_chat_response(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_stream_preserves_tool_name_with_generated_tool_use_id(monkeypatch):
+    tool_call = mod.ollama.Message.ToolCall(
+        function=mod.ollama.Message.ToolCall.Function(name="scan", arguments={"target": "x"})
+    )
+    response = mod.ChatResponse(
+        message=mod.ollama.Message(role="assistant", content="", tool_calls=[tool_call]),
+        done_reason="stop",
+        prompt_eval_count=2,
+        eval_count=3,
+        total_duration=4_000_000,
+    )
+
+    class FakeClient:
+        async def chat(self, **request):
+            return response
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda host, **kwargs: FakeClient())
+
+    chunks = [chunk async for chunk in _non_streaming_model().stream([{"role": "user", "content": [{"text": "go"}]}])]
+
+    tool_use = chunks[2]["contentBlockStart"]["start"]["toolUse"]
+    assert tool_use["name"] == "scan"
+    assert re.fullmatch(r"tooluse_[0-9a-f]{24}", tool_use["toolUseId"])
+    assert chunks[3] == {"contentBlockDelta": {"delta": {"toolUse": {"input": '{"target": "x"}'}}}}
+    assert chunks[-2] == {"messageStop": {"stopReason": "tool_use"}}
+
+
+@pytest.mark.asyncio
 async def test_stream_raises_value_error_for_invalid_response_type(monkeypatch):
     class FakeClient:
         async def chat(self, **request):
@@ -239,4 +299,36 @@ async def test_structured_output_raises_value_error_for_invalid_json(monkeypatch
 
     with pytest.raises(ValueError, match="Failed to parse"):
         async for _chunk in model.structured_output(Output, [{"role": "user", "content": [{"text": "go"}]}]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_structured_output_translates_context_overflow_response_error(monkeypatch):
+    class Output(BaseModel):
+        answer: int
+
+    class FakeClient:
+        async def chat(self, **request):
+            raise mod.ollama.ResponseError("The prompt is longer than the context length", status_code=400)
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda host, **kwargs: FakeClient())
+
+    with pytest.raises(ContextWindowOverflowException, match="context length"):
+        async for _chunk in _model().structured_output(Output, [{"role": "user", "content": [{"text": "go"}]}]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_structured_output_preserves_non_overflow_response_error(monkeypatch):
+    class Output(BaseModel):
+        answer: int
+
+    class FakeClient:
+        async def chat(self, **request):
+            raise mod.ollama.ResponseError("model is unavailable", status_code=503)
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda host, **kwargs: FakeClient())
+
+    with pytest.raises(mod.ollama.ResponseError, match="model is unavailable"):
+        async for _chunk in _model().structured_output(Output, [{"role": "user", "content": [{"text": "go"}]}]):
             pass

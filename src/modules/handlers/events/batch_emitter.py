@@ -2,7 +2,7 @@
 
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .emitters import EventEmitter
 
@@ -18,7 +18,7 @@ class BatchingEmitter:
         self,
         base_emitter: EventEmitter,
         batch_ms: int = 50,
-        operation_id: Optional[str] = None,
+        operation_id: str | None = None,
     ):
         """Initialize batching emitter.
 
@@ -28,13 +28,13 @@ class BatchingEmitter:
             operation_id: Operation ID for tracking
         """
         self.base = base_emitter
-        self.batch: List[Dict[str, Any]] = []
+        self.batch: list[dict[str, Any]] = []
         self.batch_ms = batch_ms / 1000.0  # Convert to seconds
-        self.timer: Optional[threading.Timer] = None
+        self.timer: threading.Timer | None = None
         self.lock = threading.RLock()
         self.operation_id = operation_id or "batch"
 
-    def emit(self, event: Dict[str, Any]) -> None:
+    def emit(self, event: dict[str, Any]) -> None:
         """Add event to batch and schedule flush.
 
         Args:
@@ -54,7 +54,7 @@ class BatchingEmitter:
                 self.timer = threading.Timer(self.batch_ms, self._flush)
                 self.timer.start()
 
-    def _is_critical(self, event: Dict[str, Any]) -> bool:
+    def _is_critical(self, event: dict[str, Any]) -> bool:
         """Check if event should bypass batching.
 
         Critical events like errors or user handoffs should be immediate.

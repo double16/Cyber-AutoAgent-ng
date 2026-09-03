@@ -3,10 +3,10 @@
 import hashlib
 import re
 import sqlite3
+from contextlib import closing
 from datetime import datetime
 from importlib import resources
 from pathlib import Path
-
 
 _MIGRATION_NAME = re.compile(r"^(?P<version>\d{4})_(?P<name>[a-z0-9_]+)\.sql$")
 
@@ -19,7 +19,7 @@ class SQLiteMigrationRunner:
 
     def migrate(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path, isolation_level=None) as conn:
+        with closing(sqlite3.connect(self.db_path, isolation_level=None)) as conn, conn:
             conn.execute("PRAGMA busy_timeout = 5000")
             try:
                 conn.execute("PRAGMA journal_mode = WAL")

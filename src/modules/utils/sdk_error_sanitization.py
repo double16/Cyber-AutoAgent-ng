@@ -3,7 +3,6 @@
 import re
 from typing import Any
 
-
 _SDK_EXCEPTION_MODULE_PREFIXES = ("strands",)
 _SDK_EXCEPTION_NAMES = frozenset({"MaxTokensReachedException"})
 _URL_PATTERN = re.compile(r"(?i)\b(?:https?|ftp)://[^\s<>{}\[\]\"']+")

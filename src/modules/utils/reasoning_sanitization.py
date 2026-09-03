@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-
 _CHANNEL_LABELS = "thought|analysis|commentary|final"
 _CHANNEL_MARKER_PREFIXES = (
     "<|channel>",

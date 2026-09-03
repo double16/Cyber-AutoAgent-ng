@@ -8,7 +8,6 @@ import sys
 
 import yaml
 
-
 STARTUP_FAILURE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
@@ -34,7 +33,7 @@ def probe_command(tool_path, canary, timeout_seconds = 30):
     accepted_exit_codes = canary.get("accepted_exit_codes", [0])
     if not isinstance(args, list) or not all(isinstance(arg, str) and arg for arg in args):
         return False
-    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not 1 <= timeout_seconds:
+    if not isinstance(timeout_seconds, int) or isinstance(timeout_seconds, bool) or not timeout_seconds >= 1:
         return False
     if not isinstance(accepted_exit_codes, list) or not accepted_exit_codes or not all(
         isinstance(code, int) and not isinstance(code, bool) for code in accepted_exit_codes
@@ -88,7 +87,7 @@ def main():
         sys.exit(1)
 
     try:
-        with open(actual_env_file, "r", encoding="utf-8") as f:
+        with open(actual_env_file, encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except Exception as e:
         print(f"Error parsing {actual_env_file}: {e}", file=sys.stderr)

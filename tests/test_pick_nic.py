@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import socket
-import pytest
 from types import SimpleNamespace
 from unittest.mock import Mock
+
+import pytest
 
 import modules.utils.pick_nic as mod
 
@@ -194,3 +195,15 @@ def test_pick_nic_main_outputs_interface_states(monkeypatch, capsys):
     assert "Address family  : IPv6" in output
     assert "Interface       : en0, utun0" in output
 
+
+def test_pick_nic_main_explains_missing_interface_mapping(monkeypatch, capsys):
+    monkeypatch.setattr(mod, "pick_local_addr", Mock(return_value=("192.0.2.10", mod.socket.AF_INET)))
+    monkeypatch.setattr(mod, "map_ip_to_interfaces", Mock(return_value=[]))
+    monkeypatch.setattr(mod, "psutil", None)
+    monkeypatch.setattr(mod.argparse._sys, "argv", ["pick-nic", "example.com"])
+
+    mod.main()
+
+    output = capsys.readouterr().out
+    assert "Address family  : IPv4" in output
+    assert "unknown; install psutil" in output

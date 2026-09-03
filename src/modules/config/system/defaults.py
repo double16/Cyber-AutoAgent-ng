@@ -6,21 +6,21 @@ This module provides default configurations for LLM models, embeddings,
 and provider-specific settings across Bedrock, Ollama, and LiteLLM.
 """
 
-from typing import Any, Dict, Literal
+from typing import Any
 
+from modules.config.models.agent_profiles import LLMRoleType
 from modules.config.types import (
+    DEFAULT_TEMPERATURE_EXECUTION,
+    DEFAULT_TEMPERATURE_SWARM,
     EmbeddingConfig,
     LLMConfig,
     MemoryLLMConfig,
     ModelProvider,
-    DEFAULT_TEMPERATURE_EXECUTION,
-    DEFAULT_TEMPERATURE_SWARM,
 )
 
-LLMRoleType = Literal["primary", "swarm", "report", "evaluation", "unknown"]
+__all__ = ["LLMRoleType", "build_default_configs"]
 
-
-def build_default_configs() -> Dict[str, Dict[str, Any]]:
+def build_default_configs() -> dict[str, dict[str, Any]]:
     """Initialize default configurations for all provider types.
 
     Returns:
@@ -42,7 +42,7 @@ def build_default_configs() -> Dict[str, Dict[str, Any]]:
     }
 
 
-def build_ollama_defaults() -> Dict[str, Any]:
+def build_ollama_defaults() -> dict[str, Any]:
     """Build default configuration for Ollama provider.
 
     Returns:
@@ -53,7 +53,7 @@ def build_ollama_defaults() -> Dict[str, Any]:
             provider=ModelProvider.OLLAMA,
             model_id="qwen3.6:27b",
             temperature=DEFAULT_TEMPERATURE_EXECUTION,
-            max_tokens=6144,
+            max_tokens=12_000,
         ),
         "embedding": EmbeddingConfig(
             provider=ModelProvider.OLLAMA,
@@ -77,14 +77,14 @@ def build_ollama_defaults() -> Dict[str, Any]:
             provider=ModelProvider.OLLAMA,
             model_id="qwen3.6:27b",
             temperature=DEFAULT_TEMPERATURE_SWARM,
-            max_tokens=6144,
+            max_tokens=12_000,
         ),
         "host": None,  # Will be resolved dynamically
         "region": "ollama",
     }
 
 
-def build_bedrock_defaults() -> Dict[str, Any]:
+def build_bedrock_defaults() -> dict[str, Any]:
     """Build default configuration for AWS Bedrock provider.
 
     Returns:
@@ -127,7 +127,7 @@ def build_bedrock_defaults() -> Dict[str, Any]:
     }
 
 
-def build_litellm_defaults() -> Dict[str, Any]:
+def build_litellm_defaults() -> dict[str, Any]:
     """Build default configuration for LiteLLM provider.
 
     LiteLLM acts as a universal gateway supporting 100+ providers.
@@ -173,7 +173,7 @@ def build_litellm_defaults() -> Dict[str, Any]:
     }
 
 
-def build_gemini_defaults() -> Dict[str, Any]:
+def build_gemini_defaults() -> dict[str, Any]:
     """Build default configuration for Google Gemini provider.
 
     Uses native Gemini SDK (google.genai) to avoid LiteLLM turn ordering issues.

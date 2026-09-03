@@ -10,20 +10,21 @@ import copy
 import logging
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 from strands.agent.conversation_manager import SummarizingConversationManager
 from strands.types.exceptions import ContextWindowOverflowException
 
 from modules.handlers.conversation_budget import (
-    LargeToolResultMapper,
-    MappingConversationManager,
     PROACTIVE_COMPRESSION_THRESHOLD,
     TOOL_COMPRESS_THRESHOLD,
     TOOL_COMPRESS_TRUNCATE,
-    _estimate_prompt_tokens_for_agent,
+    LargeToolResultMapper,
+    MappingConversationManager,
+    _compact_failed_tool_outputs,
     _compact_stale_tool_outputs,
+    _estimate_prompt_tokens_for_agent,
     safe_estimate_tokens,
 )
 
@@ -37,7 +38,7 @@ class ModelConfig:
     char_to_token_ratio: float
     window_size: int
     preserve_first: int = 1
-    preserve_last: Optional[int] = None
+    preserve_last: int | None = None
     context_limit_tokens: int = 200000
 
 
@@ -97,7 +98,7 @@ class MockDataGenerator:
         self,
         tool_name: str,
         tool_input: dict[str, Any],
-        tool_use_id: Optional[str] = None,
+        tool_use_id: str | None = None,
     ) -> dict[str, Any]:
         """Create an assistant message with tool use."""
         return {
@@ -235,7 +236,7 @@ class MockAgent:
     def __init__(
         self,
         messages: list[dict[str, Any]],
-        config: Optional[ModelConfig] = None,
+        config: ModelConfig | None = None,
     ) -> None:
         self.messages = messages
         self.system_prompt = "You are a security assessment agent."
@@ -547,6 +548,26 @@ class TestToolResultCompression:
         assert "memory:m-1" in summary["references"]
         assert any('"task_uid":"task-1"' in value for value in summary["workflow_state"])
 
+    def test_failed_tool_outputs_are_compacted_before_normal_compression(self):
+        generator = MockDataGenerator(CLAUDE_SONNET_CONFIG)
+        failed = generator.create_tool_result_message(
+            "shell",
+            "artifact:artifacts/failed.txt " + ("traceback " * 500),
+        )
+        failed["content"][0]["toolResult"]["status"] = "error"
+        successful = generator.create_tool_result_message("shell", "result " * 1000)
+        agent = MockAgent(
+            [failed, successful, generator.create_assistant_message("recent")],
+            CLAUDE_SONNET_CONFIG,
+        )
+
+        assert _compact_failed_tool_outputs(agent, preserve_recent=1) == 1
+        failed_summary = failed["content"][0]["toolResult"]["content"][0]["json"]
+        assert failed_summary["compacted_failure"] is True
+        assert failed_summary["status"] == "error"
+        assert "artifact:artifacts/failed.txt" in failed_summary["references"]
+        assert successful["content"][0]["toolResult"]["content"][0]["text"].startswith("result")
+
     def test_compression_produces_valid_structure(self):
         """Verify compressed results maintain valid message structure."""
         mapper = LargeToolResultMapper(
@@ -848,7 +869,7 @@ class TestStatelessBehavior:
         texts1 = [b.get("text", "") for b in compressed1]
         texts2 = [b.get("text", "") for b in compressed2]
 
-        for t1, t2 in zip(texts1, texts2):
+        for t1, t2 in zip(texts1, texts2, strict=False):
             if "X" in t1 or "truncated" in t1:
                 assert t1 == t2
 

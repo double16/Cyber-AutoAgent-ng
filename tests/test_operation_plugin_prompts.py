@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-
 PLUGIN_ROOT = Path(__file__).parents[1] / "src" / "modules" / "operation_plugins"
 MODULES = ("code_security", "context_navigator", "ctf", "threat_emulation", "web", "web_recon")
 PROMPT_SECTIONS = (

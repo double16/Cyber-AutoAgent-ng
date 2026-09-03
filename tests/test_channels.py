@@ -1,7 +1,10 @@
 import asyncio
 import base64
+import contextlib
 import sys
 import time
+from types import SimpleNamespace
+
 import pytest
 
 from modules.handlers.utils import get_tool_spec
@@ -147,10 +150,8 @@ async def test_reverse_connect_duplex_send_both_ways_and_close():
     closed = await mod.channel_close(channel_id=cid)
     assert closed.success is True
     writer.close()
-    try:
+    with contextlib.suppress(Exception):
         await writer.wait_closed()
-    except Exception:
-        pass
 
 
 @pytest.mark.asyncio
@@ -290,3 +291,66 @@ def test_channel_send_runtime_schema_accepts_aliases_and_advertises_canonical_va
     assert validated["mode"] == "b64"
     schema = get_tool_spec(mod.channel_send)["inputSchema"]["json"]
     assert schema["properties"]["mode"]["enum"] == ["text", "base64"]
+
+
+@pytest.mark.asyncio
+async def test_channel_orchestration_handles_reverse_listener_and_broken_forward_pipe(monkeypatch):
+    """Exercise listener selection, duplicate clients, and transport failures without binding sockets."""
+    class Server:
+        sockets = [SimpleNamespace(getsockname=lambda: ("10.0.0.5", 4545))]
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    captured = {}
+
+    async def start_server(callback, host, port):
+        captured.update(callback=callback, host=host, port=port)
+        return Server()
+
+    monkeypatch.setattr(mod, "_CHANNEL_MANAGER", mod.ChannelManager())
+    monkeypatch.setattr(mod, "pick_local_addr", lambda _target: ("10.0.0.5", "en0"))
+    monkeypatch.setattr(mod.asyncio, "start_server", start_server)
+    reverse = await mod.channel_create_reverse(target="target.test")
+    assert reverse.listen_address == "10.0.0.5"
+    assert reverse.listen_port == 4545
+
+    class DuplicateWriter:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            return None
+
+    channel = mod._mgr().get(reverse.channel_id)
+    channel._client_writer = object()
+    duplicate = DuplicateWriter()
+    await captured["callback"](SimpleNamespace(), duplicate)
+    assert duplicate.closed is True
+
+    class ClosedStdin:
+        def write(self, _payload):
+            raise BrokenPipeError()
+
+        async def drain(self):
+            return None
+
+        def is_closing(self):
+            return True
+
+    forward = mod._mgr().add(
+        mod.Channel(
+            id="broken-forward",
+            kind="forward",
+            proc=SimpleNamespace(stdin=ClosedStdin(), returncode=None, pid=1),
+        )
+    )
+    sent = await mod.channel_send(forward.id, "payload")
+    assert sent.bytes_sent == 0
+    events = await mod.channel_poll(forward.id, timeout=0, max_events=10)
+    assert events.events[-1].note == "stdin_closed"

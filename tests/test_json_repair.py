@@ -3,11 +3,28 @@ import json
 import pytest
 
 from modules.utils.json_repair import (
+    normalize_json_key_case,
     parse_json_response,
     parse_json_response_with_metadata,
     repair_json_text,
     strip_js_comments,
 )
+
+
+def test_normalize_json_key_case_normalizes_nested_dictionary_keys_without_changing_values():
+    result = normalize_json_key_case(
+        {"Tasks": [{"Title": "Keep VALUE", "Metadata": {"Target_ID": "target-1"}}]}
+    )
+
+    assert result.normalized is True
+    assert result.value == {"tasks": [{"title": "Keep VALUE", "metadata": {"target_id": "target-1"}}]}
+
+
+def test_normalize_json_key_case_accepts_identical_case_collisions_and_rejects_conflicts():
+    assert normalize_json_key_case({"tasks": ["same"], "Tasks": ["same"]}).value == {"tasks": ["same"]}
+
+    with pytest.raises(ValueError, match=r"conflicting JSON keys after lowercasing at \$: 'tasks' and 'Tasks'"):
+        normalize_json_key_case({"tasks": ["first"], "Tasks": ["second"]})
 
 
 def test_parse_json_response_repairs_logged_embedded_quotes_and_invalid_apostrophe_escape():
@@ -51,6 +68,11 @@ def test_strip_js_comments_preserves_strings():
 def test_parse_json_response_rejects_non_object_when_requested():
     with pytest.raises(ValueError, match="JSON object"):
         parse_json_response("[1, 2]", require_object=True)
+
+
+def test_parse_json_response_rejects_non_text_input():
+    with pytest.raises(TypeError, match="response must be text"):
+        parse_json_response({"approved": True})  # type: ignore[arg-type]
 
 
 def test_repair_json_text_serialization_can_escape_emoji():
@@ -104,6 +126,34 @@ def test_parse_json_response_repairs_an_extracted_object():
 def test_parse_json_response_rejects_ambiguous_multiple_objects():
     with pytest.raises(ValueError, match="multiple JSON values"):
         parse_json_response('{"approved": true} then {"approved": false}', require_object=True)
+
+
+def test_parse_json_response_accepts_equal_duplicate_objects_separated_by_think_tag():
+    parsed = parse_json_response_with_metadata(
+        '{"approved": true, "feedback": []}</think>{"approved": true, "feedback": []}',
+        require_object=True,
+    )
+
+    assert parsed.value == {"approved": True, "feedback": []}
+    assert parsed.metadata.extracted is True
+    assert parsed.metadata.repaired is False
+
+
+def test_parse_json_response_accepts_equal_objects_with_different_key_order():
+    parsed = parse_json_response('{"approved": true, "feedback": []} {"feedback": [], "approved": true}')
+
+    assert parsed == {"approved": True, "feedback": []}
+
+
+def test_parse_json_response_discards_invalid_candidate_when_valid_candidates_agree():
+    parsed = parse_json_response('{"approved": true} {not valid} {"approved": true}', require_object=True)
+
+    assert parsed == {"approved": True}
+
+
+def test_parse_json_response_rejects_when_all_candidates_are_invalid():
+    with pytest.raises(json.JSONDecodeError):
+        parse_json_response('{not valid} {still broken}')
 
 
 def test_parse_json_response_rejects_truncated_repair_candidate():

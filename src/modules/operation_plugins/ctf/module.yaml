@@ -48,6 +48,7 @@ planning:
         - flag_path
       synthesis_workstream: challenge_surface_synthesis
       synthesis_output_kind: artifact
+      synthesis_execution: controller
       allow_direct_single_step: true
       direct_single_step_workstreams:
         - flag_path

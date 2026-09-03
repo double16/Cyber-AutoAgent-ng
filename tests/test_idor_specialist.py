@@ -2,8 +2,8 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-import modules.operation_plugins.web.tools.idor_specialist as ids
 
+import modules.tools.idor_specialist as ids
 
 # -------------------------
 # Mocking helpers
@@ -21,6 +21,17 @@ class FakeCompleted:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
+
+
+def test_idor_specialist_normalizes_invalid_type_and_rejects_bad_credentials(monkeypatch):
+    monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ids, "_analyze_idor_intelligence", lambda _results, has_alt: {})
+    monkeypatch.setattr(ids, "_generate_idor_recommendations", lambda _type, _results: [])
+    result = json.loads(ids.idor_specialist("example.test", test_type="unknown"))
+    assert result["target"] == "https://example.test"
+    assert result["test_type"] == "comprehensive"
+    error = json.loads(ids.idor_specialist("https://t", multi_credentials="not-json"))
+    assert "multi_credentials expected" in error["errors"][0]
 
 
 # -------------------------
@@ -96,6 +107,144 @@ def test_compare_responses_json():
     assert res["text_similarity"] < 1.0
     assert res["structure_similarity"] == 1.0
     assert res["content_similarity"] == 0.5
+
+
+def test_compare_responses_covers_invalid_empty_and_list_payloads():
+    assert ids._compare_responses("", "")["text_similarity"] == 0.0
+    assert ids._compare_responses("not-json", "also-not-json")["structure_similarity"] == 0.0
+
+    result = ids._compare_responses("[1, 2]", "[3]")
+    assert result["structure_similarity"] == 0.5
+    assert result["content_similarity"] == result["text_similarity"]
+
+
+def test_send_request_selects_query_json_graphql_and_evasion_options(monkeypatch):
+    calls = []
+
+    def fake_request(**kwargs):
+        calls.append(kwargs)
+        return FakeResponse("ok", 200)
+
+    monkeypatch.setattr(ids.requests, "request", fake_request)
+    monkeypatch.setattr(ids.time, "sleep", lambda _duration: None)
+    monkeypatch.setattr(ids.random, "choice", lambda choices: choices[0])
+
+    query_config = ids.RequestConfig(
+        target_url="http://example.com",
+        headers={"X-Primary": "one"},
+        alt_headers={"X-Alt": "two"},
+        cookies={"primary": "one"},
+        alt_cookies={"alternate": "two"},
+    )
+    assert ids._send_request(query_config, "http://example.com/a", "GET", {"id": "1"}, {"x": "y"}, True, True)
+    assert calls[-1]["params"] == {"id": "1"}
+    assert calls[-1]["data"] == {"x": "y"}
+    assert calls[-1]["headers"]["X-Alt"] == "two"
+    assert calls[-1]["headers"]["User-Agent"]
+    assert calls[-1]["cookies"] == {"alternate": "two"}
+
+    json_config = ids.RequestConfig(target_url="http://example.com", request_type="json")
+    ids._send_request(json_config, "http://example.com/json", "POST", None, {"id": "2"}, False)
+    assert calls[-1]["json"] == {"id": "2"}
+
+    graphql_config = ids.RequestConfig(target_url="http://example.com", request_type="graphql")
+    ids._send_request(graphql_config, "http://example.com/graphql", "GET", {"id": "3"}, None, False)
+    assert calls[-1]["method"] == "POST"
+    assert 'resource(id: "3")' in calls[-1]["json"]["query"]
+
+
+def test_evaluate_mutation_covers_identical_candidate_and_vulnerability_signals():
+    baseline = '{"id": 1, "name": "alice"}'
+    baseline_hash = ids._hash_text(baseline)
+    identical = ids._evaluate_mutation(
+        "http://example.com", "GET", "query", "id", "1", "1", 200, len(baseline), baseline_hash, baseline,
+        FakeResponse(baseline, 200),
+    )
+    assert identical is None
+
+    bypass = ids._evaluate_mutation(
+        "http://example.com", "GET", "query", "id", "1", "2", 403, 9, ids._hash_text("forbidden"), "forbidden",
+        FakeResponse("allowed", 200),
+    )
+    assert bypass["finding_type"] == "authz_bypass_candidate"
+    assert bypass["vulnerable"] is True
+
+    likely = ids._evaluate_mutation(
+        "http://example.com", "GET", "query", "id", "1", "2", 200, len(baseline), baseline_hash, baseline,
+        FakeResponse('{"id": 2, "name": "bob"}', 200),
+    )
+    assert likely["finding_type"] == "idor_likely"
+
+    candidate = ids._evaluate_mutation(
+        "http://example.com", "GET", "query", "id", "1", "2", 200, 100, ids._hash_text("a" * 100), "a" * 100,
+        FakeResponse("b" * 100, 200),
+    )
+    assert candidate["finding_type"] == "idor_candidate"
+    assert candidate["vulnerable"] is False
+
+
+def test_evaluate_authz_replay_handles_missing_errors_matches_and_role_inversion():
+    assert ids._evaluate_authz_replay("url", "GET", "id", "query", None, FakeResponse("ok", 200)) is None
+    assert ids._evaluate_authz_replay(
+        "url", "GET", "id", "query", FakeResponse("denied", 403), FakeResponse("denied", 401)
+    ) is None
+
+    match = ids._evaluate_authz_replay(
+        "url", "GET", "id", "query", FakeResponse("sensitive", 200), FakeResponse("sensitive", 200)
+    )
+    assert match["finding_type"] == "authz_replay_match"
+    assert match["vulnerable"] is True
+
+    inversion = ids._evaluate_authz_replay(
+        "url", "GET", "id", "query", FakeResponse("denied", 403), FakeResponse("allowed", 201)
+    )
+    assert inversion["finding_type"] == "role_inversion_signal"
+
+
+def test_signal_mutation_and_intelligence_helpers_cover_edge_cases():
+    assert ids._signals_are_close({"similarity": 0.5, "mutated_len": 0}, {"similarity": 0.55, "mutated_len": 0})
+    assert not ids._signals_are_close({"similarity": 0.5}, {"similarity": 0.7})
+    assert not ids._signals_are_close({"mutated_len": 0}, {"mutated_len": 5})
+    assert not ids._signals_are_close({"mutated_len": 10}, {"mutated_len": 20})
+
+    assert 110 in ids._default_test_values_from_url("http://example.com/api/user/100")
+    mutations = ids._build_id_mutations({"id": ["2001"]}, num_range="bad-range")
+    assert 1501 in mutations
+    assert all(value >= 0 for value in mutations)
+
+    results = {
+        "parameters_discovered": ["id"],
+        "findings": [
+            {"vulnerable": True, "finding_type": "authz_replay_match"},
+            {"vulnerable": True, "finding_type": "idor_likely"},
+        ],
+    }
+    intelligence = ids._analyze_idor_intelligence(results, has_alt=True)
+    assert intelligence["attack_vectors"] == ["authz_bypass", "idor"]
+    assert intelligence["exploitation_chains"] == ["authz_bypass=>data_access", "idor=>horizontal_data_access"]
+    assert "confirm_with_role_matrix_requests" in ids._generate_idor_recommendations("idor", {
+        "findings": results["findings"], "intelligence": intelligence,
+    })
+    assert ids._generate_idor_recommendations("param_discovery", {"parameters_discovered": ["id"]}) == []
+    assert "provide_low_priv_context_for_replay" in ids._generate_idor_recommendations("idor", {"findings": []})
+
+
+def test_perform_login_supports_oauth_failed_status_and_invalid_json(monkeypatch):
+    successful = MagicMock(status_code=200)
+    successful.cookies.get_dict.return_value = {"session": "oauth"}
+    successful.json.return_value = {"access_token": "access"}
+    failed = MagicMock(status_code=401)
+    invalid_json = MagicMock(status_code=200)
+    invalid_json.cookies.get_dict.return_value = {}
+    invalid_json.json.side_effect = ValueError("not json")
+    responses = iter([successful, failed, invalid_json])
+    monkeypatch.setattr(ids.requests, "request", lambda **_kwargs: next(responses))
+
+    cookies, headers = ids._perform_login("http://example.com/login", {"name": "user"}, auth_type="oauth")
+    assert cookies == {"session": "oauth"}
+    assert headers["Authorization"] == "Bearer access"
+    assert ids._perform_login("http://example.com/login", {}) == (None, None)
+    assert ids._perform_login("http://example.com/login", {}) == ({}, {})
 
 
 
@@ -243,14 +392,14 @@ def test_idor_specialist_comprehensive_flow(monkeypatch):
     assert "findings" in result
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_perform_login_basic(mock_request):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.cookies.get_dict.return_value = {"session": "123"}
     mock_request.return_value = mock_resp
 
-    cookies, headers = ids._perform_login(
+    cookies, _headers = ids._perform_login(
         "http://example.com/login",
         {"user": "admin", "pass": "pass"},
         auth_type="basic"
@@ -260,14 +409,14 @@ def test_perform_login_basic(mock_request):
     assert "user" in mock_request.call_args.kwargs["data"]
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_perform_login_jwt(mock_request):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.json.return_value = {"token": "jwt_token"}
     mock_request.return_value = mock_resp
 
-    cookies, headers = ids._perform_login(
+    _cookies, headers = ids._perform_login(
         "http://example.com/login",
         {"user": "admin"},
         auth_type="jwt"
@@ -277,7 +426,7 @@ def test_perform_login_jwt(mock_request):
     assert mock_request.call_args.kwargs["json"] == {"user": "admin"}
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_json_mode(mock_request):
     # Mock baseline
     baseline_resp = MagicMock()
@@ -307,7 +456,7 @@ def test_idor_specialist_json_mode(mock_request):
     assert json_calls[0].kwargs["json"] == {"id": "1"}
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_evaluate_authz_replay_inversion(mock_request):
     auth_resp = MagicMock()
     auth_resp.status_code = 403
@@ -325,8 +474,8 @@ def test_evaluate_authz_replay_inversion(mock_request):
     assert finding["vulnerable"] is False
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery")
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.advanced_parameter_discovery")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_multi_creds_full(mock_request, mock_discovery):
     mock_discovery.return_value = ["id"]
 
@@ -360,7 +509,7 @@ def test_idor_specialist_multi_creds_full(mock_request, mock_discovery):
     assert "2" in sessions
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_graphql_mode(mock_request):
     # Mock baseline
     baseline_resp = MagicMock()
@@ -385,7 +534,7 @@ def test_idor_specialist_graphql_mode(mock_request):
     assert any(f["finding_type"] == "idor_likely" for f in result["findings"])
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_path_id_replay(mock_request, monkeypatch):
     # Mock baseline
     b = MagicMock()
@@ -416,7 +565,7 @@ def test_idor_specialist_path_id_replay(mock_request, monkeypatch):
     assert any(f["finding_type"] == "authz_replay_match" for f in result["findings"])
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.idor_specialist")
+@patch("modules.tools.idor_specialist.idor_specialist")
 def test_main_cli(mock_tool, monkeypatch):
     mock_tool.return_value = "{}"
     monkeypatch.setattr("sys.argv", [
@@ -449,7 +598,7 @@ def test_perform_login_error_handling(monkeypatch):
     assert headers is None
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_send_request_exception(mock_request):
     mock_request.side_effect = Exception("error")
 
@@ -458,7 +607,7 @@ def test_send_request_exception(mock_request):
     assert resp is None
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.requests.request")
+@patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_baseline_failed(mock_request, monkeypatch):
     mock_request.return_value = None
     monkeypatch.setattr(ids, "advanced_parameter_discovery", lambda *args, **kwargs: [])
@@ -481,7 +630,7 @@ def test_idor_specialist_malformed_json_inputs(monkeypatch):
     assert "findings" in json.loads(res2)
 
 
-@patch("modules.operation_plugins.web.tools.idor_specialist.idor_specialist")
+@patch("modules.tools.idor_specialist.idor_specialist")
 def test_main_cli_malformed_inputs(mock_tool, monkeypatch):
     mock_tool.return_value = "{}"
     monkeypatch.setattr("sys.argv", [
@@ -502,7 +651,7 @@ def test_idor_parameter_discovery_comprehensive():
     rc = ids.RequestConfig(target_url="http://example.com/api/data?id=123")
 
     # In comprehensive mode, it should run advanced discovery
-    with patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
+    with patch("modules.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
         mock_adv.return_value = ["adv_param"]
         params = ids._idor_parameter_discovery(rc, None, test_type="comprehensive")
 
@@ -514,7 +663,7 @@ def test_idor_parameter_discovery_idor_with_url_params():
     # In idor mode (not comprehensive/param_discovery), it should only return URL params if present
     rc = ids.RequestConfig(target_url="http://example.com/api/data?id=123&user=abc")
 
-    with patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
+    with patch("modules.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
         params = ids._idor_parameter_discovery(rc, None, test_type="idor")
 
         assert "id" in params
@@ -526,7 +675,7 @@ def test_idor_parameter_discovery_idor_no_url_params():
     # In idor mode, if no URL params, it should fall back to advanced discovery
     rc = ids.RequestConfig(target_url="http://example.com/api/data")
 
-    with patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
+    with patch("modules.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
         mock_adv.return_value = ["adv_param"]
         params = ids._idor_parameter_discovery(rc, None, test_type="idor")
 
@@ -538,7 +687,7 @@ def test_idor_parameter_discovery_path_id():
     # Path IDs should be considered URL params
     rc = ids.RequestConfig(target_url="http://example.com/api/user/123")
 
-    with patch("modules.operation_plugins.web.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
+    with patch("modules.tools.idor_specialist.advanced_parameter_discovery") as mock_adv:
         params = ids._idor_parameter_discovery(rc, None, test_type="idor")
 
         assert "(path_id_at_3)" in params

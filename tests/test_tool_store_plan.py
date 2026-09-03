@@ -1,11 +1,13 @@
 import json
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from strands import ToolContext
+
 from modules.tools import memory
 from modules.tools.memory import OperationPlan, Task
-from tests.helpers.memory_tasks import store_plan
 from tests.helpers.acceptance import make_acceptance
+from tests.helpers.memory_tasks import store_plan
 
 
 def test_store_plan_with_operation_plan_object():
@@ -34,7 +36,7 @@ def test_store_plan_with_dict():
         mock_client.get_active_plan.return_value = None
         mock_client.store_plan.return_value = {"status": "success", "plan": OperationPlan.from_obj(plan_dict).to_toon()}
         result = store_plan(memory, plan_dict)
-        args, kwargs = mock_client.store_plan.call_args
+        _args, kwargs = mock_client.store_plan.call_args
         assert isinstance(kwargs["plan"], OperationPlan)
         assert "plan_overview[1]" in result
 
@@ -206,5 +208,5 @@ def test_store_plan_assessment_complete_reminder():
 
         assert "plan_overview[1]" in result
         assert "All phases complete" in result
-        args, kwargs = mock_client.store_plan.call_args
+        _args, kwargs = mock_client.store_plan.call_args
         assert kwargs["plan"].assessment_complete is True

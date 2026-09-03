@@ -20,48 +20,54 @@ import os
 from copy import deepcopy
 from functools import lru_cache
 from math import ceil
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import litellm
 import ollama
 
-from modules.config.models.factory import _resolve_prompt_token_limit
-from modules.handlers.utils import get_output_path, sanitize_target_name
-from modules.config.system.logger import get_logger
 from modules.config.models.dev_client import get_models_client
-from modules.config.types import (
-    ModelConfig,
-    LLMConfig,
-    EmbeddingConfig,
-    MemoryLLMConfig,
-    MemoryEmbeddingConfig,
-    MemoryVectorStoreConfig,
-    MemoryConfig,
-    EvaluationConfig,
-    SwarmConfig,
-    SDKConfig,
-    OutputConfig,
-    ServerConfig,
-    MCPConnection,
-    MCPConfig,
-    get_default_base_dir,
-    RateLimitConfig,
-)
-from modules.config.system.env_reader import EnvironmentReader
-from modules.config.system.defaults import build_default_configs
-from modules.config.system.validation import validate_provider
+from modules.config.models.factory import _resolve_prompt_token_limit
 from modules.config.providers.bedrock_config import get_default_region
-from modules.config.providers.ollama_config import (
-    get_ollama_host as _get_ollama_host_from_env,
-    get_ollama_timeout as _get_ollama_timeout_from_env,
-    get_ollama_options as _get_ollama_options_from_env,
-    get_ollama_keep_alive as _get_ollama_keep_alive_from_env,
-)
 from modules.config.providers.litellm_config import (
     align_litellm_defaults,
     get_context_window_fallbacks,
     split_litellm_model_id,
 )
+from modules.config.providers.ollama_config import (
+    get_ollama_host as _get_ollama_host_from_env,
+)
+from modules.config.providers.ollama_config import (
+    get_ollama_keep_alive as _get_ollama_keep_alive_from_env,
+)
+from modules.config.providers.ollama_config import (
+    get_ollama_options as _get_ollama_options_from_env,
+)
+from modules.config.providers.ollama_config import (
+    get_ollama_timeout as _get_ollama_timeout_from_env,
+)
+from modules.config.system.defaults import build_default_configs
+from modules.config.system.env_reader import EnvironmentReader
+from modules.config.system.logger import get_logger
+from modules.config.system.validation import validate_provider
+from modules.config.types import (
+    EmbeddingConfig,
+    EvaluationConfig,
+    LLMConfig,
+    MCPConfig,
+    MCPConnection,
+    MemoryConfig,
+    MemoryEmbeddingConfig,
+    MemoryLLMConfig,
+    MemoryVectorStoreConfig,
+    ModelConfig,
+    OutputConfig,
+    RateLimitConfig,
+    SDKConfig,
+    ServerConfig,
+    SwarmConfig,
+    get_default_base_dir,
+)
+from modules.handlers.utils import get_output_path, sanitize_target_name
 
 litellm.drop_params = True
 litellm.modify_params = True
@@ -71,12 +77,10 @@ litellm.respect_retry_after_header = True
 logger = get_logger("Config.Manager")
 
 # Clamp model max tokens (a.k.a. output limit) to give more space to input and drive action (less reasoning).
-# MAX_TOKENS_LIMIT = 12_000
-MAX_TOKENS_LIMIT = 6144
+MAX_TOKENS_LIMIT = 12_000
 
 # Clamp thinking model max tokens (a.k.a. output limit) to give more space to input and drive action (less reasoning).
-# MAX_TOKENS_REASONING_LIMIT = 32_000
-MAX_TOKENS_REASONING_LIMIT = 10_000
+MAX_TOKENS_REASONING_LIMIT = 32_000
 
 
 class ConfigManager:
@@ -149,7 +153,7 @@ class ConfigManager:
             provider: str,
             model_id: str,
             *,
-            input_tokens: Optional[int] = None,
+            input_tokens: int | None = None,
             supports_reasoning: bool = False
     ) -> int:
         from modules.config import get_capabilities
@@ -162,13 +166,13 @@ class ConfigManager:
         if input_tokens is None and provider:
             input_tokens = _resolve_prompt_token_limit(provider, model_id)
         if input_tokens:
-            max_tokens_limit = min(max_tokens_limit, ceil(input_tokens / 8))
+            max_tokens_limit = min(max_tokens_limit, ceil(input_tokens / 4))
 
         return max_tokens_limit
 
     def get_thinking_model_config(
         self, model_id: str, region_name: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get configuration for thinking-enabled models."""
         # Base beta flags for thinking models
         beta_flags = ["interleaved-thinking-2025-05-14"]
@@ -208,7 +212,7 @@ class ConfigManager:
 
     def get_standard_model_config(
         self, model_id: str, region_name: str, provider: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get configuration for standard (non-thinking) models."""
         provider_config = self.get_server_config(provider)
         llm_config = provider_config.llm
@@ -219,6 +223,10 @@ class ConfigManager:
             "region_name": region_name,
             "temperature": llm_config.temperature,
             "max_tokens": max_tokens,
+            # A provider default is operational configuration, not an output
+            # ceiling for every role profile.  Factories use this value only
+            # when MAX_TOKENS explicitly requests a global ceiling.
+            "max_tokens_ceiling": self.getenv_int("MAX_TOKENS", 0) or None,
         }
 
         if "max_tokens" in llm_config.parameters:
@@ -261,7 +269,7 @@ class ConfigManager:
 
         return config
 
-    def get_local_model_config(self, model_id: str, provider: str) -> Dict[str, Any]:
+    def get_local_model_config(self, model_id: str, provider: str) -> dict[str, Any]:
         """Get configuration for local Ollama models."""
         provider_config = self.get_server_config(provider)
         llm_config = provider_config.llm
@@ -274,6 +282,9 @@ class ConfigManager:
             "keep_alive": self.get_ollama_keep_alive(),
             "temperature": llm_config.temperature,
             "max_tokens": max_tokens,
+            # See get_standard_model_config: profiles own their normal output
+            # budgets, while an explicit MAX_TOKENS value remains a hard cap.
+            "max_tokens_ceiling": self.getenv_int("MAX_TOKENS", 0) or None,
             "options": self.get_ollama_options(),
         }
 
@@ -498,7 +509,7 @@ class ConfigManager:
     # ---------------------------------------------------------------------
     # Swarm helpers (used by specialist sub-agents)
     # ---------------------------------------------------------------------
-    def get_swarm_model_id(self, server: Optional[str] = None, **overrides) -> str:
+    def get_swarm_model_id(self, server: str | None = None, **overrides) -> str:
         """Return the configured swarm model_id for the given provider.
 
         Args:
@@ -566,7 +577,7 @@ class ConfigManager:
         operation_id: str,
         module: str = "web",
         **overrides,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """Ensure operation output directories exist and return absolute paths.
 
         Creates operation-specific directories using configured base_dir:
@@ -616,7 +627,7 @@ class ConfigManager:
 
         return os.path.join(output_config.base_dir, sanitized_target, "memory")
 
-    def get_qdrant_memory_config(self, server: str, **overrides) -> Dict[str, Any]:
+    def get_qdrant_memory_config(self, server: str, **overrides) -> dict[str, Any]:
         """Return the embedding and Qdrant settings used by semantic memory."""
         server_config = self.get_server_config(server, **overrides)
         embedding = server_config.embedding
@@ -640,7 +651,7 @@ class ConfigManager:
 
     def get_context_window_fallbacks(
         self, provider: str
-    ) -> Optional[List[Dict[str, List[str]]]]:
+    ) -> list[dict[str, list[str]]] | None:
         """Optional model fallback mappings for context window resolution."""
         return get_context_window_fallbacks(provider)
 
@@ -656,7 +667,7 @@ class ConfigManager:
         """Get Ollama keep alive."""
         return _get_ollama_keep_alive_from_env(self.env)
 
-    def get_ollama_options(self) -> Dict[str, Any]:
+    def get_ollama_options(self) -> dict[str, Any]:
         """Get Ollama options, such as num_ctx."""
         return _get_ollama_options_from_env(self.env)
 
@@ -666,8 +677,8 @@ class ConfigManager:
         os.environ["CYBER_AGENT_EMBEDDING_MODEL"] = server_config.embedding.model_id
 
     def _apply_environment_overrides(
-        self, _server: str, defaults: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, _server: str, defaults: dict[str, Any]
+    ) -> dict[str, Any]:
         """Apply environment variable overrides to default configuration."""
         llm_cfg = (
             defaults.get("llm") if isinstance(defaults.get("llm"), LLMConfig) else None
@@ -753,16 +764,16 @@ class ConfigManager:
 
         return defaults
 
-    def _split_litellm_model_id(self, model_id: str) -> Tuple[str, str, str]:
+    def _split_litellm_model_id(self, model_id: str) -> tuple[str, str, str]:
         """Split LiteLLM model id into provider prefix and base id."""
         return split_litellm_model_id(model_id)
 
-    def _align_litellm_defaults(self, defaults: Dict[str, Any]) -> None:
+    def _align_litellm_defaults(self, defaults: dict[str, Any]) -> None:
         """Ensure LiteLLM configuration components stay aligned with the selected model."""
         align_litellm_defaults(defaults, self.env)
 
     def _get_memory_embedder_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> MemoryEmbeddingConfig:
         """Get memory embedder configuration."""
         embedding_config = defaults["embedding"]
@@ -774,19 +785,19 @@ class ConfigManager:
         )
 
     def _get_memory_llm_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> MemoryLLMConfig:
         """Get memory LLM configuration."""
         return defaults["memory_llm"]
 
     def _get_evaluation_llm_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> ModelConfig:
         """Get evaluation LLM configuration."""
         return defaults["evaluation_llm"]
 
     def _get_evaluation_embedding_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> ModelConfig:
         """Get evaluation embedding configuration."""
         return defaults["embedding"]
@@ -842,7 +853,7 @@ class ConfigManager:
         return 4096
 
     def _get_swarm_llm_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> LLMConfig:
         """Get swarm LLM configuration with model-aware token limits."""
         swarm_cfg = defaults["swarm_llm"]
@@ -869,7 +880,7 @@ class ConfigManager:
 
         return swarm_cfg
 
-    def _get_mcp_config(self, _server: str, defaults: Dict[str, Any], overrides: Dict[str, Any]) -> MCPConfig:
+    def _get_mcp_config(self, _server: str, defaults: dict[str, Any], overrides: dict[str, Any]) -> MCPConfig:
         """Get MCP configuration with validation."""
         enabled = overrides.get("mcp_enabled") or os.getenv("CYBER_MCP_ENABLED", "false").lower() == "true"
 
@@ -888,7 +899,7 @@ class ConfigManager:
                     mcp_id = conn.get("id")
                     if mcp_id is None or len(mcp_id) == 0:
                         raise ValueError("CYBER_MCP_CONNECTIONS requires an id property")
-                    if mcp_id in map(lambda x: x.id, connections):
+                    if mcp_id in (x.id for x in connections):
                         raise ValueError("CYBER_MCP_CONNECTIONS id property must be unique")
 
                     mcp_transport = conn.get("transport")
@@ -952,7 +963,7 @@ class ConfigManager:
         return MCPConfig(enabled=enabled, connections=connections)
 
     def _get_output_config(
-        self, _server: str, _defaults: Dict[str, Any], overrides: Dict[str, Any]
+        self, _server: str, _defaults: dict[str, Any], overrides: dict[str, Any]
     ) -> OutputConfig:
         """Get output configuration with environment variable and override support."""
         # Get base output directory
@@ -975,7 +986,7 @@ class ConfigManager:
         )
 
     @lru_cache
-    def get_rate_limit_config(self, provider: Optional[str] = None) -> Optional[RateLimitConfig]:
+    def get_rate_limit_config(self, provider: str | None = None) -> RateLimitConfig | None:
         request_per_minute = self.getenv_float("CYBER_RATE_LIMIT_REQ_PER_MIN")
         tokens_per_minute = self.getenv_float("CYBER_RATE_LIMIT_TOKENS_PER_MIN")
         max_concurrent = self.getenv_int("CYBER_RATE_LIMIT_MAX_CONCURRENT")
@@ -1010,7 +1021,7 @@ def get_config_manager() -> ConfigManager:
     return CONFIG_MANAGER_INSTANCE
 
 
-def get_report_refinement_cycles(config_manager: Optional[ConfigManager] = None) -> int:
+def get_report_refinement_cycles(config_manager: ConfigManager | None = None) -> int:
     """Return the configured non-negative bound for report actor/critic refinement."""
     manager = config_manager or get_config_manager()
     try:
@@ -1036,7 +1047,7 @@ def get_model_config(server: str, **overrides) -> ServerConfig:
 
 
 # Backward compatibility functions
-def get_default_model_configs(server: str) -> Dict[str, Any]:
+def get_default_model_configs(server: str) -> dict[str, Any]:
     """Get default model configurations (backward compatibility)."""
     config = get_model_config(server)
     return {

@@ -6,10 +6,9 @@ import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 from modules.utils.text_reducer import collapse_first_repeated_sequence
-
 
 _WORD_RE = re.compile(r"\w+")
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -19,32 +18,65 @@ MIN_REPEATED_UNITS = 3
 LOOP_REPETITION_THRESHOLD = 0.40
 
 
+def _bounded_text(value: Any, limit: int = 4_000) -> str:
+    """Return an internal diagnostic excerpt with a deterministic upper bound."""
+
+    text = str(value or "")
+    return text if len(text) <= limit else f"{text[:limit]}…[truncated]"
+
+
 @dataclass(frozen=True)
 class MaxTokenClassification:
     """Controller-safe diagnostics for an incomplete model response."""
 
     kind: str
     repetition_ratio: float
-    pattern_hash: Optional[str]
+    pattern_hash: str | None
     discarded_tokens: int
+    is_reasoning_induced: bool = False
 
 
-def _message_text(message: Any) -> str:
+@dataclass(frozen=True)
+class MaxTokenFailureSnapshot:
+    """Bounded internal excerpts and controller-safe counters for one interrupted generation."""
+
+    recorded_reasoning: str
+    partial_output: str
+    usage: dict[str, int]
+
+
+def _message_parts(message: Any) -> tuple[str, str, bool]:
+    """Extract output text, reasoning text, and has_reasoning flag from assistant message."""
     if not isinstance(message, dict):
-        return ""
-    parts: list[str] = []
+        return "", "", False
+    out_parts: list[str] = []
+    reason_parts: list[str] = []
+    has_reasoning = False
     for block in message.get("content", []) or []:
         if not isinstance(block, dict):
             continue
         text = block.get("text")
         if isinstance(text, str):
-            parts.append(text)
+            out_parts.append(text)
         reasoning = block.get("reasoningContent")
         if isinstance(reasoning, dict):
+            has_reasoning = True
             reasoning_text = reasoning.get("reasoningText")
             if isinstance(reasoning_text, dict) and isinstance(reasoning_text.get("text"), str):
-                parts.append(reasoning_text["text"])
-    return "".join(parts).strip()
+                reason_parts.append(reasoning_text["text"])
+            elif isinstance(reasoning.get("text"), str):
+                reason_parts.append(reasoning["text"])
+    out_text = "".join(out_parts).strip()
+    reason_text = "".join(reason_parts).strip()
+    if "<think>" in out_text or "<|channel>thought" in out_text or bool(reason_text):
+        has_reasoning = True
+    combined = f"{out_text} {reason_text}".strip()
+    return combined, reason_text, has_reasoning
+
+
+def _message_text(message: Any) -> str:
+    combined, _, _ = _message_parts(message)
+    return combined
 
 
 def _normalized_pattern(text: str) -> str:
@@ -58,14 +90,25 @@ def _logical_units(text: str) -> list[str]:
     return [_normalized_pattern(line) for line in lines]
 
 
-def classify_max_token_output(text: str) -> MaxTokenClassification:
+def classify_max_token_output(
+    text: str,
+    has_reasoning: bool = False,
+    active_reasoning_level: str | None = None,
+) -> MaxTokenClassification:
     """Classify an incomplete response without retaining any of its claims."""
 
     text = str(text or "").strip()
     words = _WORD_RE.findall(text)
     discarded_tokens = max(0, (len(text) + 3) // 4)
+    reasoning_active = has_reasoning or (
+        active_reasoning_level is not None and str(active_reasoning_level).lower() not in ("none", "")
+    )
+
     if len(words) < MIN_LOOP_WORDS:
-        return MaxTokenClassification("output_truncation", 0.0, None, discarded_tokens)
+        kind = "reasoning_exhaustion" if reasoning_active else "output_truncation"
+        return MaxTokenClassification(
+            kind, 0.0, None, discarded_tokens, is_reasoning_induced=reasoning_active
+        )
 
     collapsed = collapse_first_repeated_sequence(text)
     collapsed_words = _WORD_RE.findall(collapsed)
@@ -82,34 +125,68 @@ def classify_max_token_output(text: str) -> MaxTokenClassification:
     )
     repetition_ratio = max(exact_ratio, fuzzy_ratio)
     if repetition_ratio < LOOP_REPETITION_THRESHOLD:
-        return MaxTokenClassification("output_truncation", repetition_ratio, None, discarded_tokens)
+        kind = "reasoning_exhaustion" if reasoning_active else "output_truncation"
+        return MaxTokenClassification(
+            kind, repetition_ratio, None, discarded_tokens, is_reasoning_induced=reasoning_active
+        )
 
     repeated_patterns = [unit for unit, count in counts.most_common() if count >= 2]
     representative = collapsed if exact_ratio >= fuzzy_ratio else "\n".join(repeated_patterns)
     normalized = _normalized_pattern(representative)
     pattern_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16] if normalized else None
-    return MaxTokenClassification("reasoning_loop", repetition_ratio, pattern_hash, discarded_tokens)
+    return MaxTokenClassification(
+        "reasoning_loop", repetition_ratio, pattern_hash, discarded_tokens, is_reasoning_induced=True
+    )
 
 
-def discard_incomplete_assistant_message(agent: Any) -> tuple[str, bool]:
-    """Remove only the incomplete assistant tail added by the SDK."""
+def discard_incomplete_assistant_message(agent: Any) -> tuple[str, bool, bool]:
+    """Remove only the incomplete assistant tail added by the SDK and check for reasoning content."""
 
     messages = getattr(agent, "messages", None)
     if not isinstance(messages, list) or not messages:
-        return "", False
+        return "", False, False
     message = messages[-1]
     if not isinstance(message, dict) or message.get("role") != "assistant":
-        return "", False
-    text = _message_text(message)
+        return "", False, False
+    text, _, has_reasoning = _message_parts(message)
     messages.pop()
-    return text, True
+    return text, True, has_reasoning
 
 
-def classify_and_discard_max_token_output(agent: Any) -> tuple[MaxTokenClassification, bool]:
+def classify_and_discard_max_token_output(
+    agent: Any, active_reasoning_level: str | None = None
+) -> tuple[MaxTokenClassification, bool]:
     """Discard the incomplete tail and return content-free classification metadata."""
 
-    text, removed = discard_incomplete_assistant_message(agent)
-    return classify_max_token_output(text), removed
+    text, removed, has_reasoning = discard_incomplete_assistant_message(agent)
+    return classify_max_token_output(
+        text, has_reasoning=has_reasoning, active_reasoning_level=active_reasoning_level
+    ), removed
+
+
+def capture_and_discard_max_token_output(
+    agent: Any, active_reasoning_level: str | None = None
+) -> tuple[MaxTokenClassification, bool, MaxTokenFailureSnapshot]:
+    """Capture bounded internal diagnostics before removing an incomplete assistant tail."""
+
+    messages = getattr(agent, "messages", None)
+    message = messages[-1] if isinstance(messages, list) and messages else None
+    combined, reasoning, _has_reasoning = _message_parts(message)
+    output = combined
+    if reasoning and output.endswith(reasoning):
+        output = output[: -len(reasoning)].rstrip()
+    usage = getattr(getattr(agent, "event_loop_metrics", None), "accumulated_usage", {}) or {}
+    counters = {
+        key: int(usage.get(key, 0) or 0)
+        for key in ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens")
+        if isinstance(usage, dict)
+    }
+    classification, removed = classify_and_discard_max_token_output(agent, active_reasoning_level)
+    return classification, removed, MaxTokenFailureSnapshot(
+        recorded_reasoning=_bounded_text(reasoning),
+        partial_output=_bounded_text(output),
+        usage=counters,
+    )
 
 
 def reset_agent_conversation_for_recovery(agent: Any) -> bool:
@@ -133,7 +210,7 @@ def is_repeated_max_token_pattern(agent: Any, classification: MaxTokenClassifica
     seen = getattr(agent, "_max_token_pattern_hashes", None)
     if not isinstance(seen, set):
         seen = set()
-        setattr(agent, "_max_token_pattern_hashes", seen)
+        agent._max_token_pattern_hashes = seen
     repeated = classification.pattern_hash in seen
     seen.add(classification.pattern_hash)
     return repeated
@@ -153,7 +230,7 @@ def build_task_executor_max_token_prompt(
 
     if task_objective and classification.kind == "reasoning_loop":
         action = next_required_action or (
-            f"Call {sorted(required_tools)[0]} with the required evidence." if required_tools else "Call one next registered tool."
+            f"Call {min(required_tools)} with the required evidence." if required_tools else "Call one next registered tool."
         )
         outcome = latest_tool_outcome or "No completed tool outcome is available."
         cause = (

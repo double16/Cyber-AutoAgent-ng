@@ -800,8 +800,10 @@ uv run pytest tests/test_agent.py
 # Run tests with verbose output
 uv run pytest -v
 
-# Run tests with coverage
-uv run pytest --cov=src
+# Run branch-aware coverage for Python files changed from main
+uv run pytest --cov=src --cov-branch --cov-fail-under=80 --cov-report=json:coverage.json
+uv run python .github/scripts/check-python-coverage-floor.py coverage.json \
+  --min 80 --branch-min 80 --changed-from origin/main
 
 # Run opt-in Ollama taxonomy compatibility tests (requires an installed local model)
 uv run pytest -m ollama tests/test_taxonomy_ollama.py -v

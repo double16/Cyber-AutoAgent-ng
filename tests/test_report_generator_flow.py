@@ -3,65 +3,189 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from strands.types.exceptions import MaxTokensReachedException
 
 from modules.handlers import report_generator as report_generator_module
 from modules.handlers.report_generator import (
     _append_artifact_evidence,
     _append_inline_review_feedback,
     _apply_next_steps_budget_scope,
+    _artifact_references,
+    _canonical_report_data,
+    _canonical_report_json,
     _cleanup_report_agent,
+    _compact_finding_context,
+    _compact_next_steps_source,
     _configured_nonnegative_int,
-    _extract_text_from_result,
+    _current_operation_report_memories,
     _emit_report_progress,
+    _extract_text_from_result,
     _format_artifact_excerpt,
     _format_execution_history,
     _format_executive_deterministic_sections,
     _format_finding_with_narrative,
-    _format_summary_table,
+    _format_model_usage_table,
+    _format_next_steps_appendix,
+    _format_observation,
     _format_operation_plan,
     _format_operation_tasks,
-    _format_observation,
-    _markdown_table_cell,
-    _format_model_usage_table,
-    _remove_generated_execution_metrics,
-    _format_next_steps_appendix,
-    _format_taxonomy_mappings,
-    _format_taxonomy_coverage_tables,
+    _format_report_consistency_warnings,
+    _format_summary_table,
     _format_target_coverage,
+    _format_taxonomy_coverage_tables,
+    _format_taxonomy_mappings,
+    _format_verified_findings_summary,
     _ground_report_item,
     _has_artifact_reference,
-    _artifact_references,
-    _omit_cross_operation_artifact_references,
-    _normalize_report_category,
-    _normalize_budget_config,
-    _normalize_artifact_reference,
-    _next_steps_fallback,
-    _parse_latest_operation_log,
     _https_repository_url,
-    _software_provenance,
-    _run_next_steps_refinement,
-    _run_report_refinement,
-    _select_artifact_excerpt,
-    _validate_report_critique,
-    _validate_next_steps,
-    _validate_report_consistency,
-    _canonical_report_data,
-    _canonical_report_json,
     _informational_observation_context,
     _inventory_endpoint_values,
+    _invoke_report_agent,
     _is_reportable_informational_observation,
+    _markdown_table_cell,
+    _next_steps_fallback,
+    _normalize_artifact_reference,
+    _normalize_budget_config,
+    _normalize_report_category,
+    _omit_cross_operation_artifact_references,
+    _parse_latest_operation_log,
+    _remove_generated_execution_metrics,
+    _ReportModelCircuitBreaker,
     _resolve_inventory_ids_for_display,
-    _format_verified_findings_summary,
-    _compact_finding_context,
-    _compact_next_steps_source,
-    _current_operation_report_memories,
+    _resolved_finding_report_category,
+    _run_next_steps_refinement,
+    _run_report_critic,
+    _run_report_refinement,
+    _select_artifact_excerpt,
+    _software_provenance,
     _validate_narrative_consistency,
-    _format_report_consistency_warnings,
+    _validate_next_steps,
+    _validate_report_consistency,
+    _validate_report_critique,
     build_report_sections,
     generate_deterministic_fallback_report,
     generate_security_report,
 )
-from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, Task, clear_memory_client
+
+
+def test_report_helpers_cover_incomplete_status_and_nested_artifact_sanitization():
+    status = report_generator_module._normalize_completion_status(
+        {
+            "assessment_complete": False,
+            "workflow_complete": False,
+            "termination_reason": "budget",
+            "termination_message": "limit reached",
+            "unresolved_task_count": 2,
+            "incomplete_phase_ids": [1, "2"],
+        }
+    )
+
+    notice = report_generator_module._completion_status_notice(status)
+    assert "Unresolved actionable tasks: 2" in notice
+    assert "limit reached" in notice
+    assert "partial assessment" in report_generator_module._completion_status_guidance(status)
+    assert report_generator_module._completion_status_notice({"assessment_complete": True}) == ""
+
+    sanitized, omitted = _omit_cross_operation_artifact_references(
+        {"items": ["artifact:artifacts/old.txt", ("outputs/old.json",)]}
+    )
+    assert omitted == 2
+    assert "prior-operation artifact omitted" in str(sanitized)
+    assert _has_artifact_reference({"artifact": "artifacts/evidence.txt"}) is True
+
+
+def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch, tmp_path):
+    manifest = tmp_path / "inventory.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "items": [
+                    "invalid",
+                    {"id": "endpoint-1", "value": "https://one.test"},
+                    {"id": "endpoint-2", "value": "https://first.test"},
+                    {"id": "endpoint-2", "value": "https://second.test"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    task = type(
+        "Task",
+        (),
+        {
+            "acceptance": type(
+                "Acceptance",
+                (),
+                {"basis": type("Basis", (), {"source_refs": ("artifact:artifacts/manifest.json",)})()},
+            )(),
+            "evidence": (),
+        },
+    )()
+    monkeypatch.setattr(report_generator_module, "_artifact_path_from_ref", lambda _reference: str(manifest))
+
+    endpoint_values = _inventory_endpoint_values([task])
+    assert endpoint_values == {"endpoint-1": "https://one.test"}
+    assert report_generator_module._resolve_inventory_ids_for_display(
+        {"description": ["endpoint-1", ("endpoint-1",)]}, endpoint_values
+    ) == {"description": ["https://one.test", ("https://one.test",)]}
+    assert report_generator_module._resolve_inventory_ids_for_display(
+        "endpoint-1", endpoint_values, "source_refs"
+    ) == "endpoint-1"
+    assert report_generator_module._resolve_inventory_ids_for_display("endpoint-1", {}) == "endpoint-1"
+
+    invalid_manifest = tmp_path / "invalid-inventory.json"
+    invalid_manifest.write_text(json.dumps({"items": {}}), encoding="utf-8")
+    invalid_task = type(
+        "Task",
+        (),
+        {
+            "acceptance": type(
+                "Acceptance",
+                (),
+                {"basis": type("Basis", (), {"source_refs": ("artifact:artifacts/invalid.json",)})()},
+            )(),
+            "evidence": (),
+        },
+    )()
+    monkeypatch.setattr(
+        report_generator_module,
+        "_artifact_path_from_ref",
+        lambda reference: str(invalid_manifest) if "invalid" in reference else str(manifest),
+    )
+    assert _inventory_endpoint_values([invalid_task]) == {}
+
+
+def test_artifact_reference_and_excerpt_helpers_cover_fallback_paths(tmp_path):
+    assert report_generator_module._normalize_completion_status(
+        {"assessment_complete": True, "incomplete_reason": "stale value"}
+    )["incomplete_reason"] is None
+    assert report_generator_module._normalize_artifact_reference("artifact_id:abc") == "artifact:artifacts/abc"
+    assert report_generator_module._normalize_artifact_reference("outputs/result.txt") == "artifact:outputs/result.txt"
+    assert report_generator_module._normalize_artifact_reference("plain reference") == "plain reference"
+    assert _artifact_references(["artifact:artifacts/a.txt", {"nested": "outputs/b.txt"}]) == {
+        "artifact:artifacts/a.txt",
+        "artifact:outputs/b.txt",
+    }
+
+    empty = tmp_path / "empty.txt"
+    empty.write_text("\n\n", encoding="utf-8")
+    assert _select_artifact_excerpt(str(empty), {"proof"}) == []
+
+    artifact = tmp_path / "artifact.txt"
+    artifact.write_text("\n".join(f"line {number}" for number in range(20)), encoding="utf-8")
+    assert len(_select_artifact_excerpt(str(artifact), set(), max_lines=3)) == 3
+
+    sanitized_tuple, tuple_omitted = _omit_cross_operation_artifact_references(("artifact:artifacts/a.txt",))
+    sanitized_set, set_omitted = _omit_cross_operation_artifact_references({"artifact:artifacts/a.txt"})
+    assert tuple_omitted == set_omitted == 1
+    assert "prior-operation artifact omitted" in str((sanitized_tuple, sanitized_set))
+from modules.tools.memory import (
+    OperationPlan,
+    OperationTarget,
+    PlanPhase,
+    Task,
+    clear_memory_client,
+)
 from tests.helpers.acceptance import make_acceptance
 
 
@@ -165,6 +289,7 @@ def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
     assert "### Key Findings" in executive
     assert "### Claim Status" in executive
     assert "#### Evidence" in detail
+    assert "#### Impact Grounding" in detail
     assert "#### Attack Path Analysis\n\nNot established from supplied evidence" in detail
     assert "| 2 | Task | done | https://example.test | 1/1 |" in tasks
     assert "Unverified \\[claim\\]" in executive
@@ -173,6 +298,81 @@ def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
         {"phases": [{"id": 1, "title": "Mapping", "status": "done", "criteria": "Inventory routes"}]}
     )
     assert "| 1 | done | **Mapping:** Inventory routes |" in plan
+
+
+def test_finding_narrative_omits_unbacked_secret_shaped_examples():
+    finding = {
+        "title": "Configuration exposure",
+        "severity": "HIGH",
+        "content": "The endpoint returned a database connection string.",
+        "metadata": {"observed_result": "A database connection string was returned."},
+    }
+    narrative = (
+        "#### Impact\n\nPotential exposure.\n\n#### Remediation\n\nRemove the secret.\n\n"
+        "#### TECHNICAL APPENDIX\n\n```json\n{\"connection\":\"postgresql://admin:invented@db/prod\"}\n```"
+    )
+
+    detail = _format_finding_with_narrative(finding, 0, narrative)
+
+    assert "postgresql://admin:invented@db/prod" not in detail
+    assert "[omitted: not backed by supplied evidence]" in detail
+
+
+def test_finding_narrative_uses_recorded_validation_steps_and_impact_evidence():
+    finding = {
+        "title": "Configuration exposure",
+        "severity": "HIGH",
+        "content": "The endpoint returned configuration data.",
+        "metadata": {
+            "reproduction_steps": ["Request /api/config", "Observe the response"],
+            "impact_evidence_artifacts": ["artifact:artifacts/impact.txt"],
+        },
+    }
+
+    detail = _format_finding_with_narrative(finding, 0, "#### Impact\n\nDemonstrated impact.")
+
+    assert "1. Request /api/config" in detail
+    assert "2. Observe the response" in detail
+    assert "#### Impact Grounding" not in detail
+
+
+def test_finding_narrative_removes_unsupported_impact_and_aws_rotation_claims():
+    finding = {
+        "title": "Configuration exposure",
+        "severity": "HIGH",
+        "content": "The endpoint returned an AWS S3 bucket URL.",
+        "metadata": {},
+    }
+    narrative = (
+        "#### Impact\n\nThis enables direct compromise and lateral movement.\n\n"
+        "#### Remediation\n\nRotate all exposed AWS credentials immediately."
+    )
+
+    detail = _format_finding_with_narrative(finding, 0, narrative)
+
+    assert "direct compromise" not in detail
+    assert "lateral movement" not in detail
+    assert "Rotate all exposed AWS credentials" not in detail
+    assert "Impact grounding correction" in detail
+    assert "supplied evidence establishes only the exposed value" in detail
+
+
+def test_finding_narrative_keeps_impact_claims_with_impact_artifacts():
+    finding = {
+        "title": "Unauthorized data access",
+        "severity": "HIGH",
+        "content": "The validation artifact demonstrates unauthorized data access.",
+        "metadata": {"impact_evidence_artifacts": ["artifact:artifacts/impact.txt"]},
+    }
+
+    detail = _format_finding_with_narrative(
+        finding,
+        0,
+        "#### Impact\n\nUnauthorized access enabled data exfiltration.\n\n#### Remediation\n\nFix access control.",
+    )
+
+    assert "Unauthorized access enabled data exfiltration." in detail
+    assert "Impact grounding correction" not in detail
 
 
 def test_report_progress_counts_only_llm_authored_sections():
@@ -890,6 +1090,42 @@ def _agent_result(text):
     return result
 
 
+def test_report_critic_prefers_schema_validated_output():
+    calls = []
+
+    class StructuredCritic:
+        def __call__(self, prompt, **kwargs):
+            calls.append(kwargs)
+            model = kwargs["structured_output_model"]
+            return MagicMock(
+                stop_reason="end_turn",
+                structured_output=model(approved=True, feedback=[]),
+            )
+
+    result = _run_report_critic(StructuredCritic(), "Review", json_retries=1)
+
+    assert result == {"approved": True, "feedback": []}
+    assert calls[0]["structured_output_model"].__name__ == "ReportCritiqueOutput"
+
+
+def test_report_critic_falls_back_after_structured_output_tool_failure():
+    strands_error = type("StructuredOutputException", (RuntimeError,), {})
+
+    class Critic:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, _prompt, **kwargs):
+            self.calls += 1
+            if "structured_output_model" in kwargs:
+                raise strands_error("forced structured output tool was not invoked")
+            return _agent_result('{"approved": true, "feedback": []}')
+
+    critic = Critic()
+    assert _run_report_critic(critic, "Review", json_retries=1) == {"approved": True, "feedback": []}
+    assert critic.calls == 2
+
+
 def test_report_refinement_feeds_each_critic_rejection_back_to_actor():
     actor = MagicMock(
         side_effect=[
@@ -962,6 +1198,38 @@ def test_validate_report_critique_rejects_invalid_schema(critique, error):
         _validate_report_critique(critique)
 
 
+def test_validate_report_critique_rejects_excessive_feedback():
+    with pytest.raises(ValueError, match="at most five"):
+        _validate_report_critique({"approved": False, "feedback": ["fix"] * 6})
+
+    with pytest.raises(ValueError, match="at most 300 characters"):
+        _validate_report_critique({"approved": False, "feedback": ["x" * 301]})
+
+
+def test_report_critic_retries_once_after_max_tokens_even_without_json_retries():
+    critic_agent = MagicMock(side_effect=[
+        MaxTokensReachedException("max_tokens"),
+        _agent_result('{"approved": true, "feedback": []}'),
+    ])
+
+    result = _run_report_critic(critic_agent, "Review the executive summary.", json_retries=0)
+
+    assert result == {"approved": True, "feedback": []}
+    assert critic_agent.call_count == 2
+    retry_prompt = critic_agent.call_args_list[1].args[0]
+    assert "exhausted its token limit" in retry_prompt
+    assert "Review the executive summary." in retry_prompt
+
+
+def test_report_critic_propagates_repeated_max_token_failure():
+    critic_agent = MagicMock(side_effect=MaxTokensReachedException("max_tokens"))
+
+    with pytest.raises(MaxTokensReachedException):
+        _run_report_critic(critic_agent, "Review the executive summary.", json_retries=2)
+
+    assert critic_agent.call_count == 2
+
+
 def test_report_refinement_stops_on_critic_approval():
     actor = MagicMock(return_value=_agent_result("## Approved draft"))
     critic = MagicMock(return_value=_agent_result('{"approved": true, "feedback": []}'))
@@ -998,6 +1266,31 @@ def test_report_refinement_zero_cycles_runs_only_initial_actor():
     assert content == "## Unreviewed draft"
     assert final_critique is None
     actor.assert_called_once()
+
+
+@pytest.mark.parametrize("failure_point", ["actor", "critic", "revision"])
+def test_report_refinement_uses_deterministic_section_fallback_after_model_failure(failure_point):
+    actor = MagicMock(return_value=_agent_result("Draft"))
+    critic = MagicMock(return_value=_agent_result('{"approved": false, "feedback": ["Revise"]}'))
+    if failure_point == "actor":
+        actor.side_effect = RecursionError("maximum recursion depth exceeded")
+    elif failure_point == "critic":
+        critic.side_effect = RecursionError("maximum recursion depth exceeded")
+    else:
+        actor.side_effect = [_agent_result("Draft"), RecursionError("maximum recursion depth exceeded")]
+
+    content, final_critique = _run_report_refinement(
+        actor,
+        critic,
+        "Canonical source data",
+        "Executive summary",
+        "Executive section requirements",
+        refinement_cycles=1,
+        json_retries=1,
+    )
+
+    assert content == ""
+    assert final_critique is None
 
 
 def test_report_refinement_retries_invalid_critic_json_without_failing_report():
@@ -1557,6 +1850,86 @@ def test_next_steps_refinement_uses_deterministic_fallback_without_critic():
     critic.assert_not_called()
 
 
+def test_report_model_circuit_breaker_skips_later_actor_calls_after_provider_failure():
+    breaker = _ReportModelCircuitBreaker()
+    failed_actor = MagicMock(side_effect=RuntimeError("event loop unavailable"))
+    skipped_actor = MagicMock()
+
+    first, _ = _run_report_refinement(
+        failed_actor,
+        MagicMock(),
+        "Source data",
+        "Executive summary",
+        "Requirements",
+        refinement_cycles=0,
+        json_retries=0,
+        circuit_breaker=breaker,
+    )
+    second, _ = _run_report_refinement(
+        skipped_actor,
+        MagicMock(),
+        "Source data",
+        "Methodology",
+        "Requirements",
+        refinement_cycles=0,
+        json_retries=0,
+        circuit_breaker=breaker,
+    )
+
+    assert first == ""
+    assert second == ""
+    assert breaker.tripped is True
+    failed_actor.assert_called_once()
+    skipped_actor.assert_not_called()
+
+
+def test_report_agent_invocation_uses_five_turns_and_identifies_its_section():
+    agent = MagicMock(return_value=MagicMock(stop_reason="end_turn"))
+
+    result = _invoke_report_agent(agent, "Narrative prompt", "Executive summary", None)
+
+    assert result.stop_reason == "end_turn"
+    agent.assert_called_once_with(
+        "Narrative prompt",
+        invocation_state={"report_section": "Executive summary"},
+        limits={"turns": 5},
+    )
+
+
+def test_report_agent_turn_limit_trips_circuit_breaker_without_reusing_tool_result():
+    breaker = _ReportModelCircuitBreaker()
+    agent = MagicMock(return_value=MagicMock(stop_reason="limit_turns"))
+
+    with pytest.raises(RuntimeError, match="turn limit"):
+        _invoke_report_agent(agent, "Narrative prompt", "Executive summary", breaker)
+
+    assert breaker.tripped is True
+    assert "Executive summary" in breaker.reason
+
+
+def test_next_steps_critic_failure_uses_deterministic_fallback_and_trips_circuit():
+    breaker = _ReportModelCircuitBreaker()
+    source = {
+        "completion_status": {"assessment_complete": False},
+        "phase_coverage": [{"phase_id": 2, "title": "Validation", "status": "blocked"}],
+    }
+    data, critique = _run_next_steps_refinement(
+        MagicMock(return_value=_agent_result(json.dumps(_next_steps_data({"duration": 60})))),
+        MagicMock(side_effect=RuntimeError("maximum recursion depth exceeded")),
+        "Source data",
+        "Requirements",
+        {"duration": 60},
+        source,
+        refinement_cycles=1,
+        json_retries=0,
+        circuit_breaker=breaker,
+    )
+
+    assert data["coverage_gaps"]
+    assert critique is None
+    assert breaker.tripped is True
+
+
 def test_report_category_helpers_cover_structured_and_free_form_artifacts():
     assert _has_artifact_reference({"artifacts": ["/tmp/control.txt"]}) is True
     assert _has_artifact_reference({"evidence": ["saved at artifacts/control.txt"]}) is True
@@ -1590,6 +1963,16 @@ def test_summary_table_preserves_full_finding_location():
         "Control case without an artifact",
         {"evidence": "/tmp/proof.txt"},
     ) == "validation_failure"
+
+
+def test_verified_finding_record_cannot_be_rendered_as_validation_required():
+    metadata = {
+        "finding_uid": "finding-1",
+        "finding_record_resolution": "verified",
+        "validation_status": "verified",
+    }
+
+    assert _resolved_finding_report_category("validation_failure", metadata, "", {}) == "finding"
 
 
 @pytest.mark.parametrize(
@@ -1779,8 +2162,8 @@ def test_report_consistency_reports_omitted_shared_memory_artifacts_as_one_warni
     errors = _validate_report_consistency(sections, completion)
 
     assert errors == [
-        "Excluded 2 artifact reference(s) from shared-memory evidence originating in prior operation(s): "
-        "OP_20260813_161308."
+        ("Excluded 2 artifact reference(s) from shared-memory evidence originating in prior operation(s): "
+        "OP_20260813_161308.")
     ]
 
 
@@ -1859,11 +2242,11 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
             "id": "1",
             "memory": "[VULNERABILITY] Verified with Proof [WHERE] /a [EVIDENCE] proof exists",
             "metadata": {
-                "category": "finding",
+                "category": "validation_failure",
                 "operation_id": op_id,
                 "finding_uid": "finding-1",
                 "severity": "CRITICAL",
-                "validation_status": "verified",
+                "validation_status": "pending",
                 "proof_pack": {"artifacts": [str(tmp_path / "proof.txt")]},
                 "negative_control_artifacts": [str(tmp_path / "negative-control.txt")],
             },
@@ -1981,6 +2364,7 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     mock_client.list_finding_records.return_value = [
         {
             "finding_uid": "finding-1",
+            "resolution": "verified",
             "candidate_data": {
                 "source_task_uids": ["task-verified"],
                 "taxonomy": {
@@ -2026,6 +2410,8 @@ def test_report_builder_downgrade_logic(mock_get_client, tmp_path, monkeypatch):
     # Check item 1: Should remain a finding
     item1 = next(e for e in evidence if e["id"] == "1")
     assert item1["category"] == "finding", "Item 1 should remain a finding"
+    assert item1["validation_status"] == "verified"
+    assert item1["metadata"]["validation_status"] == "verified"
     assert item1["metadata"]["taxonomy"]["mitre_attack"] == [{"id": "T1059.004"}]
     assert item1["metadata"]["final_attack_enrichment"]["status"] == "completed"
 
@@ -2184,6 +2570,10 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     assert (output_dir / "report_methodology.md").exists()
     assert (output_dir / "report_recommended_next_steps.md").exists()
     assert "## APPENDIX A: ASSESSMENT METHODOLOGY" in content
+    assert "### Model & Agent Parameter Adjustments" in content
+    assert content.index("### Methodology Limitations") < content.index("### Model & Agent Parameter Adjustments")
+    assert "## APPENDIX C: MODEL & AGENT PARAMETER ADJUSTMENTS" not in content
+    assert "appendix-c-model-agent-parameter-adjustments" not in content
     assert "## APPENDIX B: RECOMMENDED NEXT STEPS" in content
     assert "### Coverage Gaps" in content
     assert "### Completion Criteria" in content
@@ -2231,8 +2621,11 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
                     "title": "Stored XSS",
                     "category": "finding",
                     "severity": "HIGH",
-                    "content": "Verified script execution.",
-                    "metadata": {"artifacts": ["artifact:artifacts/proof.txt"]},
+                    "content": "Verified script execution. Authorization: Bearer report-secret",
+                    "metadata": {
+                        "api_key": "report-json-secret",
+                        "artifacts": ["artifact:artifacts/proof.txt"],
+                    },
                 },
                 {
                     "id": "candidate-1",
@@ -2276,6 +2669,8 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
     payload = json.loads((tmp_path / "security_assessment_report.json").read_text())
     assert result["status"] == "fallback"
     assert "Deterministic fallback report" in markdown
+    assert "report-secret" not in markdown
+    assert "[REDACTED]" in markdown
     assert "Stored XSS" in markdown
     assert "Possible SQL injection" in markdown
     assert "Server banner" in markdown
@@ -2284,12 +2679,37 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
     assert "## APPENDIX A: ASSESSMENT METHODOLOGY" in markdown
     assert "## APPENDIX B: RECOMMENDED NEXT STEPS" in markdown
     assert "### Execution Metrics" in markdown
+    assert "### Model & Agent Parameter Adjustments" in markdown
+    assert markdown.index("### Execution Metrics") < markdown.index("### Model & Agent Parameter Adjustments")
+    assert "## APPENDIX C: MODEL & AGENT PARAMETER ADJUSTMENTS" not in markdown
     assert "model-authored methodology prose" in markdown
     assert "AI-Generated Content Disclaimer" not in markdown
     assert "report agent unavailable" in markdown
     assert payload["report_status"] == "fallback"
+    assert "report-json-secret" not in json.dumps(payload)
     assert payload["narrative"] == {}
     assert payload["canonical"]["verified_findings_total"] == 1
+
+
+def test_report_artifact_writers_redact_text_and_secret_bearing_json_fields(tmp_path):
+    markdown_path = tmp_path / "report.md"
+    json_path = tmp_path / "report.json"
+
+    report_generator_module._write_redacted_report_text(
+        str(markdown_path),
+        "Authorization: Bearer report-markdown-secret",
+    )
+    report_generator_module._write_redacted_report_json(
+        str(json_path),
+        {"api_key": "report-json-secret", "message": "Authorization: Bearer report-message-secret"},
+    )
+
+    markdown = markdown_path.read_text()
+    payload = json.loads(json_path.read_text())
+    assert "report-markdown-secret" not in markdown
+    assert "[REDACTED]" in markdown
+    assert payload["api_key"] == "[REDACTED]"
+    assert "report-message-secret" not in payload["message"]
 
 
 def test_fallback_report_uses_controller_snapshot_when_store_sections_fail(tmp_path, monkeypatch):
@@ -2445,6 +2865,7 @@ def test_generate_security_report_emits_indexed_report_progress(
     ]
     assert all(event["operation_stage"] == "final_report" for event in progress_events)
     assert progress_events[1]["report_step_label"] == "Finding: High Finding"
+    assert progress_events[-1]["report_step_label"] == "Appendix B: Recommended next steps"
     callback_handler.set_report_items.assert_called_once_with(
         mock_build_sections.return_value["raw_evidence"],
         refinement_cycles=0,
@@ -2605,6 +3026,78 @@ def test_generate_security_report_validation_failures(
     assert "## OBJECTIVE VALIDATION" in objective_content
     assert "Rejected or unresolved" in objective_content
     assert "flag{wrong}" in objective_content
+
+
+def test_report_prompt_helpers_handle_malformed_optional_data():
+    context = report_generator_module._compact_finding_context(
+        {
+            "metadata": {"artifacts": "artifact:artifacts/proof.txt", "severity": "LOW"},
+            "parsed": "not a mapping",
+        },
+        "https://example.test",
+    )
+    next_steps = report_generator_module._compact_next_steps_source(
+        target="https://example.test",
+        objective="Assess",
+        completion_status={},
+        sections={"phase_coverage": ["invalid", {"phase_id": 1, "title": "Recon"}]},
+        latest_run={"metrics": "invalid", "tool_failures": "invalid"},
+        configured_budget={"duration": 10},
+        validation_candidates=[],
+    )
+
+    assert context["artifact_references"] == ["artifact:artifacts/proof.txt"]
+    assert context["severity"] == "LOW"
+    assert next_steps["phase_coverage"] == [{"phase_id": 1, "title": "Recon"}]
+    assert next_steps["execution_metrics"] == {
+        "duration": None,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "cost": None,
+    }
+    assert next_steps["tool_failure_counts"] == {}
+
+
+def test_report_table_and_budget_helpers_cover_fallbacks():
+    assert report_generator_module._format_operation_plan(None) == "No operation plan was recorded."
+    assert report_generator_module._format_operation_plan({"phases": ["invalid"]}) == (
+        "No operation plan phases were recorded."
+    )
+    assert report_generator_module._format_operation_tasks(None) == "No operation tasks were recorded."
+    assert report_generator_module._format_operation_tasks({"items": []}) == "No operation tasks were recorded."
+    assert report_generator_module._latest_log_run_text("old log") == "old log"
+    assert report_generator_module._positive_number("unset") is None
+    assert report_generator_module._positive_number("invalid") is None
+    assert report_generator_module._positive_number(0) is None
+    assert report_generator_module._normalize_budget_config("invalid", default_duration=15) == {"duration": 15}
+    assert report_generator_module._format_inference_time("invalid") == "N/A"
+    assert report_generator_module._format_inference_time(0) == "N/A"
+
+
+def test_model_usage_rendering_and_metrics_removal_cover_empty_paths():
+    table = report_generator_module._format_model_usage_table([], "provider", "model")
+
+    assert "| provider | model | N/A |" in table
+    assert report_generator_module._remove_generated_execution_metrics("Narrative") == "Narrative"
+    assert report_generator_module._has_meaningful_model_usage("invalid") is False
+    assert report_generator_module._has_meaningful_model_usage(["invalid", {"total_tokens": "bad"}]) is False
+
+
+def test_report_metrics_callback_and_circuit_breaker_cover_noop_paths():
+    report_generator_module._ReportMetricsCallback(None)(result=MagicMock())
+    handler = MagicMock()
+    report_generator_module._ReportMetricsCallback(handler)(event_loop_metrics={"tokens": 1})
+    handler.record_report_metrics.assert_called_once_with({"tokens": 1}, agent=None)
+
+    breaker = report_generator_module._ReportModelCircuitBreaker()
+    breaker.trip("executive", RuntimeError("provider unavailable"))
+    breaker.trip("finding", RuntimeError("later error"))
+
+    assert breaker.tripped is True
+    assert breaker.reason == "executive: provider unavailable"
+    with pytest.raises(RuntimeError, match="circuit breaker is open"):
+        report_generator_module._invoke_report_agent(MagicMock(), "prompt", "finding", breaker)
 
 if __name__ == "__main__":
     pytest.main([__file__])

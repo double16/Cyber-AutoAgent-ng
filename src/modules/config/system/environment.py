@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import atexit
+import contextlib
+import copy
 import json
 import logging
 import os
@@ -12,23 +14,24 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any
 
 import yaml
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 
-from modules.config.types import get_default_base_dir
-from modules.handlers.utils import print_status
 from modules.config.system.logger import (
     configure_provider_diagnostic_logging,
     get_logger,
     initialize_logger_factory,
     unsafe_diagnostic_logging_enabled,
 )
+from modules.config.types import get_default_base_dir
+from modules.handlers.utils import print_status
+from modules.utils.redaction import redact, redact_text
 
 
-def clean_operation_memory(operation_id: str, target_values: Optional[List[str]] = None):
+def clean_operation_memory(operation_id: str, target_values: list[str] | None = None):
     """Delete semantic-memory points for one operation without removing the database."""
     logger = get_logger("Config.Environment")
     raw_targets = [target_values] if isinstance(target_values, str) else (target_values or [])
@@ -114,7 +117,7 @@ def _is_seclists_root(path: Path) -> bool:
         return False
 
 
-def resolve_seclists_root() -> Optional[str]:
+def resolve_seclists_root() -> str | None:
     """Resolve the local SecLists root without performing a filesystem-wide search."""
 
     configured_root = os.getenv(_SECLISTS_ENV_VAR, "").strip()
@@ -135,7 +138,7 @@ class ToolHealth:
     """Result of deterministic executable discovery and optional startup verification."""
 
     state: str
-    path: Optional[str]
+    path: str | None
     reason: str = ""
 
     @property
@@ -197,14 +200,14 @@ def check_shell_command(command: str, canary: Any = None) -> ToolHealth:
     return ToolHealth("available_verified", tool_path)
 
 
-def _get_shell_command_path(command: str, canary: Any = None) -> Optional[str]:
+def _get_shell_command_path(command: str, canary: Any = None) -> str | None:
     """Return the path for an available command, preserving the historical helper contract."""
 
     health = check_shell_command(command, canary)
     return health.path if health.available else None
 
 
-def auto_setup() -> List[str]:
+def auto_setup() -> list[str]:
     """Setup directories and discover available cyber tools"""
     # Disable RAGAS evaluator tracking
     os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
@@ -368,7 +371,7 @@ class TeeOutput:
                     # Write all complete lines
                     for line in lines[:-1]:
                         # Don't strip leading spaces - preserve formatting
-                        self.log.write(line + "\n")
+                        self.log.write(redact_text(line) + "\n")
                     # Keep the incomplete line in buffer
                     self.line_buffer = lines[-1]
                     self.log.flush()
@@ -380,10 +383,8 @@ class TeeOutput:
     def flush(self):
         with self.lock:
             self.terminal.flush()
-            try:
+            with contextlib.suppress(ValueError, OSError):
                 self.log.flush()
-            except (ValueError, OSError):
-                pass
 
     def close(self):
         with self.lock:
@@ -393,7 +394,7 @@ class TeeOutput:
             try:
                 # Flush any remaining buffered content
                 if self.line_buffer:
-                    self.log.write(self.line_buffer)
+                    self.log.write(redact_text(self.line_buffer))
                     self.line_buffer = ""
                     self.log.flush()
                 self.log.close()
@@ -442,7 +443,19 @@ def setup_logging(log_file: str = "cyber_operations.log", verbose: bool = False)
     initialize_logger_factory(log_file=log_file, verbose=verbose)
 
     # Traditional logger setup for structured logging
-    formatter = logging.Formatter(
+    class RedactingFormatter(logging.Formatter):
+        """Render log records without secret values while preserving diagnostic context."""
+
+        def format(self, record: logging.LogRecord) -> str:
+            safe_record = copy.copy(record)
+            if isinstance(safe_record.args, tuple):
+                safe_record.args = tuple(redact(value) for value in safe_record.args)
+            elif safe_record.args:
+                safe_record.args = redact(safe_record.args)
+            safe_record.msg = redact(safe_record.msg)
+            return redact_text(super().format(safe_record))
+
+    formatter = RedactingFormatter(
         fmt="%(asctime)s - [%(name)s] - %(levelname)s - [%(threadName)s] - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )

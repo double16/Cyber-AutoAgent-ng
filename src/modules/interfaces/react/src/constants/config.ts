@@ -39,6 +39,7 @@ export const EVENT_TYPES = {
   // Core events
   PROGRESS_UPDATE: 'progress_update',
   WORKFLOW_ACTIVITY: 'workflow_activity',
+  PLAN_VALIDATION: 'plan_validation',
   REASONING: 'reasoning',
   THINKING: 'thinking',
   THINKING_END: 'thinking_end',
