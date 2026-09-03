@@ -1,6 +1,8 @@
 import hashlib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,7 +20,7 @@ def test_packaged_migrations_create_schema_once(tmp_path):
     runner.migrate()
     runner.migrate()
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         applied = conn.execute(
             "SELECT version, filename FROM schema_migrations ORDER BY version"
         ).fetchall()
@@ -49,7 +51,7 @@ def test_task_replacement_lineage_migrates_existing_database(tmp_path, monkeypat
     monkeypatch.setattr(SQLiteMigrationRunner, "_load_migrations", staticmethod(lambda: packaged_migrations))
     SQLiteMigrationRunner(db_path).migrate()
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
     assert {"replacement_of", "supersedes_criteria", "recovery_context"}.issubset(task_columns)
 
@@ -61,7 +63,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
         results = list(executor.map(lambda _: SQLiteMigrationRunner(db_path).migrate(), range(2)))
 
     assert results == [None, None]
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 6
 
 
@@ -75,7 +77,7 @@ def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):
 
     SQLiteMigrationRunner(db_path).migrate()
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         versions = [row[0] for row in conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
         columns = [row[1] for row in conn.execute("PRAGMA table_info(example)")]
     assert versions == [1, 2]
@@ -94,7 +96,7 @@ def test_failed_migration_rolls_back_schema_and_ledger(tmp_path, monkeypatch):
     with pytest.raises(sqlite3.DatabaseError):
         SQLiteMigrationRunner(db_path).migrate()
 
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         assert conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'should_rollback'"
         ).fetchone() is None
@@ -117,7 +119,7 @@ def test_changed_applied_migration_is_rejected(tmp_path, monkeypatch):
 def test_unknown_applied_migration_is_rejected(tmp_path):
     db_path = str(tmp_path / "unknown.db")
     SQLiteMigrationRunner(db_path).migrate()
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         conn.execute(
             "INSERT INTO schema_migrations(version, filename, checksum, applied_at) VALUES (?, ?, ?, ?)",
             (9999, "9999_unknown.sql", "checksum", "now"),
@@ -135,7 +137,81 @@ def test_transaction_control_in_migration_is_rejected(tmp_path, monkeypatch):
         SQLiteMigrationRunner(str(tmp_path / "transaction.db")).migrate()
 
 
-def test_statement_splitter_handles_quoted_semicolons_and_rejects_incomplete_sql():
+def test_invalid_migration_filename_is_rejected(monkeypatch):
+    root = SimpleNamespace(iterdir=lambda: [SimpleNamespace(name="invalid.sql")])
+    monkeypatch.setattr("modules.storage.sqlite.resources.files", lambda _package: root)
+
+    with pytest.raises(RuntimeError, match="Invalid migration filename"):
+        SQLiteMigrationRunner._load_migrations()
+
+
+def test_migration_runner_tolerates_wal_lock_and_reconciles_concurrent_migrations(tmp_path, monkeypatch):
+    migration = _migration(1, "0001_example.sql", "CREATE TABLE example (id INTEGER);")
+    monkeypatch.setattr(SQLiteMigrationRunner, "_load_migrations", staticmethod(lambda: [migration]))
+    original_connect = sqlite3.connect
+
+    class ConnectionProxy:
+        def __init__(self, connection, *, concurrent_row=None, lock_wal=False):
+            self.connection = connection
+            self.concurrent_row = concurrent_row
+            self.lock_wal = lock_wal
+
+        def __enter__(self):
+            self.connection.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.connection.__exit__(*args)
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, statement, parameters=()):
+            if self.lock_wal and statement == "PRAGMA journal_mode = WAL":
+                raise sqlite3.OperationalError("database is locked")
+            if self.concurrent_row is not None and statement.startswith("SELECT filename, checksum"):
+                return SimpleNamespace(fetchone=lambda: self.concurrent_row)
+            return self.connection.execute(statement, parameters)
+
+    wal_path = str(tmp_path / "wal-lock.db")
+    monkeypatch.setattr(
+        "modules.storage.sqlite.sqlite3.connect",
+        lambda *args, **kwargs: ConnectionProxy(original_connect(*args, **kwargs), lock_wal=True),
+    )
+    SQLiteMigrationRunner(wal_path).migrate()
+
+    concurrent_path = str(tmp_path / "concurrent-row.db")
+    matching_row = (migration[1], migration[3])
+    monkeypatch.setattr(
+        "modules.storage.sqlite.sqlite3.connect",
+        lambda *args, **kwargs: ConnectionProxy(original_connect(*args, **kwargs), concurrent_row=matching_row),
+    )
+    SQLiteMigrationRunner(concurrent_path).migrate()
+
+    changed_row = (migration[1], "changed")
+    monkeypatch.setattr(
+        "modules.storage.sqlite.sqlite3.connect",
+        lambda *args, **kwargs: ConnectionProxy(original_connect(*args, **kwargs), concurrent_row=changed_row),
+    )
+    with pytest.raises(RuntimeError, match="Applied migration 0001 has changed"):
+        SQLiteMigrationRunner(str(tmp_path / "concurrent-changed.db")).migrate()
+
+
+def test_migration_loader_rejects_duplicate_versions_and_ignores_non_sql_files(monkeypatch):
+    root = SimpleNamespace(
+        iterdir=lambda: [
+            SimpleNamespace(name="README.txt"),
+            SimpleNamespace(name="0001_first.sql", read_text=lambda **_kwargs: "SELECT 1;"),
+            SimpleNamespace(name="0001_second.sql", read_text=lambda **_kwargs: "SELECT 2;"),
+        ]
+    )
+    monkeypatch.setattr("modules.storage.sqlite.resources.files", lambda _package: root)
+
+    with pytest.raises(RuntimeError, match="Duplicate migration version: 0001"):
+        SQLiteMigrationRunner._load_migrations()
+
+
+def test_statement_splitter_handles_quoted_semicolons_and_rejects_incomplete_sql(monkeypatch):
     statements = SQLiteMigrationRunner._split_statements(
         "CREATE TABLE example (value TEXT); INSERT INTO example VALUES ('a;b');"
     )
@@ -143,3 +219,6 @@ def test_statement_splitter_handles_quoted_semicolons_and_rejects_incomplete_sql
     assert len(statements) == 2
     with pytest.raises(RuntimeError, match="incomplete SQL statement"):
         SQLiteMigrationRunner._split_statements("CREATE TABLE incomplete (id INTEGER)")
+
+    monkeypatch.setattr("modules.storage.sqlite.sqlite3.complete_statement", lambda _sql: True)
+    assert SQLiteMigrationRunner._split_statements("SELECT 1") == ["SELECT 1"]

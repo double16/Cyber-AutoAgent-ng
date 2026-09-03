@@ -1,8 +1,8 @@
 """Agent run-loop completion policy."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import FrozenSet, Iterable, Literal
-
+from typing import Literal
 
 ActionlessMode = Literal["auto", "required_tool", "task_progress"]
 
@@ -18,7 +18,7 @@ class AgentRunPolicy:
     """
 
     min_tool_calls: int = 0
-    required_tool_names: FrozenSet[str] = field(default_factory=frozenset)
+    required_tool_names: frozenset[str] = field(default_factory=frozenset)
     terminal_after_required_tools: bool = False
     require_successful_required_tools: bool = False
     allow_text_final_after_tools: bool = True
@@ -28,12 +28,12 @@ class AgentRunPolicy:
     max_model_turns: int = 64
     max_tool_calls: int = 0
     actionless_mode: ActionlessMode = "auto"
-    ignored_terminal_tool_names: FrozenSet[str] = field(default_factory=frozenset)
+    ignored_terminal_tool_names: frozenset[str] = field(default_factory=frozenset)
     terminal_reason: str = "agent_completed_required_tools"
     terminal_message: str = "Agent completed required tool calls"
     recovery_objective: str = ""
     recovery_next_action: str = ""
-    recovery_allowed_tool_names: FrozenSet[str] = field(default_factory=frozenset)
+    recovery_allowed_tool_names: frozenset[str] = field(default_factory=frozenset)
 
     def __init__(
         self,

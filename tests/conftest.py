@@ -4,18 +4,18 @@ import os
 import shutil
 import sys
 import tempfile
-import requests
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
+import requests
 
 from modules.config.models.capabilities import (
     get_model_input_limit,
     get_model_output_limit,
     get_model_pricing,
 )
-from modules.operation_plugins.web.tools import result_cache
+from modules.tools import result_cache
 
 # Disable dotenv loading in tests
 os.environ["PYTHON_DOTENV_DISABLED"] = "true"
@@ -86,6 +86,25 @@ def restore_provider_override_environment():
             os.environ.pop(key, None)
         else:
             os.environ[key] = value
+
+
+@pytest.fixture(autouse=True)
+def close_memory_client_after_test():
+    """Close local Qdrant persistence created by a test before it is garbage-collected."""
+    yield
+    from modules.tools import memory
+
+    memory.clear_memory_client()
+
+
+@pytest.fixture(autouse=True)
+def restore_rate_limit_provider_patches():
+    """Prevent class-level rate-limit wrappers from leaking between tests."""
+    yield
+    from modules.config.models.ollama import OllamaModel
+    from modules.rate_limit.rate_limit import unpatch_model_provider_class
+
+    unpatch_model_provider_class(OllamaModel)
 
 
 @pytest.fixture

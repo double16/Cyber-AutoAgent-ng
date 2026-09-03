@@ -10,7 +10,11 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from modules.config.types import BudgetConfig
-from modules.prompts import get_role_system_prompt, get_system_prompt, load_prompt_template
+from modules.prompts import (
+    get_role_system_prompt,
+    get_system_prompt,
+    load_prompt_template,
+)
 
 real_load_prompt_template = load_prompt_template
 

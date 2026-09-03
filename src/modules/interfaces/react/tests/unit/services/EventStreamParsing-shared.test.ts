@@ -101,6 +101,57 @@ describe('shared cyber event stream parsing behavior', () => {
     ]));
   });
 
+  it.each([
+    ['DirectDockerService', () => new DirectDockerService(), 'parseEvents'],
+    ['PythonExecutionService', () => new PythonExecutionService(), 'processOutputStream'],
+  ])('%s renders a lifecycle-only failure summary without duplicating backend output', (_name, createService, method) => {
+    const service: any = createService();
+    const emitted = captureEvents(service);
+
+    service[method](wrapEvent({ type: 'tool_start', tool_name: 'record_task_acceptance', timestamp: 1 }));
+    service[method](wrapEvent({
+      type: 'tool_end',
+      tool_name: 'record_task_acceptance',
+      success: false,
+      executed: true,
+      error_summary: 'Missing execution evidence',
+      timestamp: 2,
+    }));
+
+    expect(emitted).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'output',
+        content: '❌ record_task_acceptance (failed)\nMissing execution evidence',
+      }),
+    ]));
+
+    emitted.length = 0;
+    service[method](wrapEvent({ type: 'tool_start', tool_name: 'record_task_acceptance', timestamp: 3 }));
+    service[method](wrapEvent({
+      type: 'output',
+      content: 'Missing execution evidence',
+      metadata: { fromToolBuffer: true },
+      timestamp: 4,
+    }));
+    service[method](wrapEvent({
+      type: 'tool_invocation_end',
+      tool_name: 'record_task_acceptance',
+      success: false,
+      timestamp: 5,
+    }));
+    service[method](wrapEvent({
+      type: 'tool_end',
+      tool_name: 'record_task_acceptance',
+      success: false,
+      executed: true,
+      error_summary: 'Missing execution evidence',
+      timestamp: 6,
+    }));
+
+    const failureOutput = emitted.find(event => event.type === 'output' && event.content.startsWith('❌'));
+    expect(failureOutput.content).toBe('❌ record_task_acceptance (failed)');
+  });
+
   it('emits a user-visible parse error for malformed Docker events', () => {
     const service: any = new DirectDockerService();
     const emitted = captureEvents(service);

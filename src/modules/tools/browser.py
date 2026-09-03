@@ -1,8 +1,8 @@
 import asyncio
 import base64
 import contextlib
-import csv
 import contextvars
+import csv
 import datetime
 import functools
 import json
@@ -13,28 +13,29 @@ import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from http.cookies import SimpleCookie
-from typing import Optional, Any, Union, get_origin, get_args
-from urllib.parse import urlparse, parse_qs
-from modules import __version__
-from modules.utils.json_repair import repair_json_text, strip_js_comments
+from typing import Any, get_args, get_origin
+from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import (
-    Page,
     BrowserContext,
-    Response,
-    TimeoutError,
-    Request,
+    ConsoleMessage,
     Dialog,
     Download,
-    ConsoleMessage,
+    Page,
+    Request,
+    Response,
+    TimeoutError,
 )
 from pymitter import EventEmitter
 from six import StringIO
-from stagehand import StagehandConfig, Stagehand, StagehandPage
+from stagehand import Stagehand, StagehandConfig, StagehandPage
 from stagehand.context import StagehandContext
 from stagehand.llm.client import LLMClient
 from strands import tool
 from tldextract import tldextract
+
+from modules import __version__
+from modules.utils.json_repair import repair_json_text, strip_js_comments
 
 logger = logging.getLogger(__name__)
 _BROWSER_OP_DEPTH = contextvars.ContextVar("browser_op_depth", default=0)
@@ -167,7 +168,7 @@ class LLMClientJSONResponsePatch(LLMClient):
         # Unwrap Optional/Union wrappers (e.g., Optional[MyModel])
         origin = get_origin(response_format)
         if origin is not None:
-            args = [a for a in get_args(response_format) if a is not type(None)]  # noqa: E721
+            args = [a for a in get_args(response_format) if a is not type(None)]
             if len(args) == 1:
                 response_format = args[0]
 
@@ -191,8 +192,8 @@ class LLMClientJSONResponsePatch(LLMClient):
             self,
             *,
             messages: list[dict[str, str]],
-            model: Optional[str] = None,
-            function_name: Optional[str] = None,
+            model: str | None = None,
+            function_name: str | None = None,
             **kwargs: Any,
     ) -> dict[str, Any]:
         if "response_format" in kwargs:
@@ -256,8 +257,8 @@ class BrowserService(EventEmitter):
             self,
             provider: str,
             model: str,
-            artifacts_dir: Optional[str] = None,
-            extra_http_headers: Optional[dict[str, str]] = None,
+            artifacts_dir: str | None = None,
+            extra_http_headers: dict[str, str] | None = None,
     ):
         super().__init__()
         api_key = None
@@ -313,10 +314,10 @@ class BrowserService(EventEmitter):
         )
 
         # Dedicated event loop running in its own thread via ThreadPoolExecutor
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_ready = threading.Event()
         # Serialize Playwright/Stagehand operations; created/used only on the browser loop
-        self._op_lock: Optional[asyncio.Lock] = None
+        self._op_lock: asyncio.Lock | None = None
         # Debug counters for verifying single-flight execution on the browser loop
         self._active_ops: int = 0
         self._active_ops_peak: int = 0
@@ -378,8 +379,7 @@ class BrowserService(EventEmitter):
                 )
                 # Count *executing* operations (not queued/waiting). Should never exceed 1.
                 self._active_ops += 1
-                if self._active_ops > self._active_ops_peak:
-                    self._active_ops_peak = self._active_ops
+                self._active_ops_peak = max(self._active_ops_peak, self._active_ops)
                 if self._active_ops > 1:
                     self._active_ops_violations += 1
                     logger.warning(
@@ -434,7 +434,7 @@ class BrowserService(EventEmitter):
         return extract_domain(self.page.url)
 
     @property
-    def page(self) -> Union[Page, StagehandPage]:
+    def page(self) -> Page | StagehandPage:
         """
         A property that retrieves the current page instance.
 
@@ -447,7 +447,7 @@ class BrowserService(EventEmitter):
         return self.stagehand.page
 
     @property
-    def context(self) -> Union[BrowserContext, StagehandContext]:
+    def context(self) -> BrowserContext | StagehandContext:
         """
         This property retrieves the context associated with the current stagehand instance.
 
@@ -563,10 +563,7 @@ class BrowserService(EventEmitter):
 
         if len(logs) > 0:
             logs_summary = "\n".join(
-                map(
-                    lambda log: f"[{log['type']}] {' '.join(map(lambda arg: json.dumps(arg), log['args']))}".strip(),
-                    logs,
-                )
+                f"[{log['type']}] {' '.join(json.dumps(arg) for arg in log['args'])}".strip() for log in logs
             )
             log_file = os.path.join(self.artifacts_dir, f"logs_{time.time_ns()}.log")
             with open(log_file, "w", encoding="utf-8") as f:
@@ -702,7 +699,7 @@ class BrowserService(EventEmitter):
                     [time_value for time_value in timings.values() if time_value > 0], 0
                 )
                 started_date_time = datetime.datetime.fromtimestamp(
-                    request.timing["startTime"] / 1000.0, tz=datetime.timezone.utc
+                    request.timing["startTime"] / 1000.0, tz=datetime.UTC
                 )
                 har_entry: dict[str, Any] = {
                     "timings": timings,
@@ -873,7 +870,7 @@ class BrowserService(EventEmitter):
 
     @asynccontextmanager
     async def interaction_context_capture(
-            self, only_domains: Optional[list[str]] = None
+            self, only_domains: list[str] | None = None
     ):
         """
         An asynchronous context manager for capturing various web interactions including network requests, downloads,
@@ -917,7 +914,7 @@ class BrowserService(EventEmitter):
             if request.method == "OPTIONS" or request in collector.requests:
                 return
 
-            request_url_hostname: Optional[str] = urlparse(request.url).hostname
+            request_url_hostname: str | None = urlparse(request.url).hostname
             if only_domains:
                 for filter_domain in only_domains:
                     if (
@@ -985,7 +982,7 @@ class BrowserService(EventEmitter):
             self.off("dialog", capture_dialog)
 
 
-_BROWSER: Optional[BrowserService] = None
+_BROWSER: BrowserService | None = None
 # Use threading.Lock instead of asyncio.Lock to avoid "bound to different event loop" errors
 # when Strands executes tools concurrently across different thread pool executors.
 # See: https://github.com/strands-agents/sdk-python - ConcurrentToolExecutor
@@ -995,8 +992,8 @@ _BROWSER_LOCK = threading.Lock()
 def initialize_browser(
         provider: str,
         model: str,
-        artifacts_dir: Optional[str] = None,
-        extra_http_headers: Optional[dict[str, str]] = None,
+        artifacts_dir: str | None = None,
+        extra_http_headers: dict[str, str] | None = None,
 ):
     """Initialize the shared browser instance.
 
@@ -1158,7 +1155,7 @@ def form_har_body(content_type: str, data: bytes):
 
 
 @tool
-async def browser_set_headers(headers: Optional[dict[str, str]] = None):
+async def browser_set_headers(headers: dict[str, str] | None = None):
     """
     Set extra headers for subsequent requests made by the shared browser session.
 
@@ -1222,7 +1219,7 @@ async def browser_goto_url(url: str):
     """
     logger.info("[BROWSER] entered goto url %s", url)
     async with get_browser() as browser:
-        reset_notice: Optional[str] = None
+        reset_notice: str | None = None
 
         async def _http_fallback(reason: str) -> str:
             async def _impl() -> str:
@@ -1338,7 +1335,7 @@ async def browser_goto_url(url: str):
                 waf_note = " Detected Cloudflare/WAF indicators." if waf_detected else ""
                 banner = f"[HTTP fallback executed] Reason: {reason}. Fetched {len(rows)} resource(s).{waf_note}"
                 logger.info("[BROWSER] _http_fallback: %s", banner)
-                return "\n".join([banner, toon])
+                return f"{banner}\n{toon}"
 
             return await browser.run_in_browser_loop(_impl)
 
@@ -1352,14 +1349,11 @@ async def browser_goto_url(url: str):
 
                     async with browser.timeout():
                         observations = "\n".join(
-                            map(
-                                lambda obs: obs.description,
-                                await browser.page.observe(
+                            obs.description for obs in await browser.page.observe(
                                     f"{url} was just opened. "
                                     "give all important elements on the page that might be relevant to the next action. "
                                     "observe the overall state of the page to understand the purpose of the page."
-                                ),
-                            )
+                                )
                         )
                     summary = await interaction_context.summarize()
                     return f"<observations>\n{observations}\n</observations>\n{summary}"
@@ -1585,14 +1579,11 @@ async def browser_perform_action(action: str):
                 # Eagerly returning relevant observations to reduce agent tool calls
                 async with browser.timeout():
                     observations = "\n".join(
-                        map(
-                            lambda obs: obs.description,
-                            await browser.page.observe(
+                        obs.description for obs in await browser.page.observe(
                                 f"`{action}` action was just performed. "
                                 "give all important elements on the page that might be relevant to the next action."
                                 "observe the overall state of the page to understand the purpose of the page."
-                            ),
-                        )
+                            )
                     )
                 summary = await interaction_context.summarize()
                 return observations, summary
@@ -1603,7 +1594,7 @@ async def browser_perform_action(action: str):
 
 
 @tool
-async def browser_observe_page(instruction: Optional[str] = None) -> list[str]:
+async def browser_observe_page(instruction: str | None = None) -> list[str]:
     """
     Observe the current rendered page and describe relevant elements.
 

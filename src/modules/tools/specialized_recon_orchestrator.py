@@ -8,15 +8,15 @@ import os
 import re
 import subprocess
 import tempfile
-from typing import Any, Dict, List, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
 import requests
 import urllib3
-
 from strands import tool
 
-from modules.operation_plugins.web.tools.result_cache import (
+from modules.tools.result_cache import (
     build_result_cache_key,
     cache_result,
     get_cached_result,
@@ -136,10 +136,7 @@ def _is_public_hostname(target: str) -> bool:
         return False
 
     tld = labels[-1]
-    if tld in NON_PUBLIC_TLDS:
-        return False
-
-    return True
+    return tld not in NON_PUBLIC_TLDS
 
 
 # Helper: should subdomain enumeration run for this target?
@@ -173,8 +170,8 @@ def _coerce_str(arg: bytes | str | None) -> str:
 def specialized_recon_orchestrator(
         target: str,
         recon_type: str = "comprehensive",
-        output_file: Optional[str] = None,
-        inventory_manifest: Optional[str] = None,
+        output_file: str | None = None,
+        inventory_manifest: str | None = None,
 ) -> str:
     """
     Orchestrates automated web recon for a target. It scans for subdomains, live hosts/tech stack, crawled endpoints, JS files, URL/form parameters, and hidden/high-value services.
@@ -284,7 +281,7 @@ def specialized_recon_orchestrator(
             s = str(s)
             return s[-n:] if len(s) > n else s
 
-        entry: Dict[str, Any] = {"phase": phase, "error": str(error)}
+        entry: dict[str, Any] = {"phase": phase, "error": str(error)}
         if tool:
             entry["tool"] = tool
         if returncode is not None:
@@ -392,7 +389,7 @@ def specialized_recon_orchestrator(
     return result_str
 
 
-def _write_result_file(output_file: Optional[str], result: str) -> None:
+def _write_result_file(output_file: str | None, result: str) -> None:
     """Write a tool result when the caller requested an output artifact."""
     if not output_file:
         return
@@ -403,7 +400,7 @@ def _write_result_file(output_file: Optional[str], result: str) -> None:
         file.write(result)
 
 
-def _write_recon_inventory_manifest(results: Dict[str, Any], inventory_manifest: str, manifest_target: str) -> None:
+def _write_recon_inventory_manifest(results: dict[str, Any], inventory_manifest: str, manifest_target: str) -> None:
     """Materialize an inventory manifest without changing the cacheable recon result."""
     try:
         from modules.tools.recon_inventory_manifest import (
@@ -458,11 +455,11 @@ def _write_recon_inventory_manifest(results: Dict[str, Any], inventory_manifest:
         }
 
 
-def _generate_recon_tasks(results: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _generate_recon_tasks(results: dict[str, Any]) -> list[dict[str, Any]]:
     """Generate a structured task plan optimized for an LLM agent to infer next steps."""
 
-    def _task(task_id: str, title: str, priority: int, goal: str, evidence: List[Any], capabilities: List[str],
-              inputs: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def _task(task_id: str, title: str, priority: int, goal: str, evidence: list[Any], capabilities: list[str],
+              inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
             "id": task_id,
             "title": title,
@@ -473,7 +470,7 @@ def _generate_recon_tasks(results: Dict[str, Any]) -> List[Dict[str, Any]]:
             "inputs": inputs or {},
         }
 
-    tasks: List[Dict[str, Any]] = []
+    tasks: list[dict[str, Any]] = []
 
     subdomains = results.get("subdomains", [])
     live_hosts = results.get("live_hosts", [])
@@ -511,7 +508,7 @@ def _generate_recon_tasks(results: Dict[str, Any]) -> List[Dict[str, Any]]:
     # 2) High-value targets first
     hv = intel.get("high_value_targets", []) or []
     if hv:
-        hv_evidence: List[Dict[str, Any]] = []
+        hv_evidence: list[dict[str, Any]] = []
         for item in hv[:HIGH_VALUE_TARGET_LIMIT]:
             try:
                 t = item.get("type")
@@ -550,7 +547,7 @@ def _generate_recon_tasks(results: Dict[str, Any]) -> List[Dict[str, Any]]:
     # 3) Verify non-standard ports / hidden services
     hidden = intel.get("hidden_services", []) or []
     if hidden:
-        hidden_evidence: List[Dict[str, Any]] = []
+        hidden_evidence: list[dict[str, Any]] = []
         for item in hidden[:HIDDEN_SERVICES_LIMIT]:
             try:
                 t = item.get("type")
@@ -682,7 +679,7 @@ def _generate_recon_tasks(results: Dict[str, Any]) -> List[Dict[str, Any]]:
     return tasks
 
 
-def _append_tool_error(errors: List[Dict[str, Any]] | None, phase: str, tool: str, message: str,
+def _append_tool_error(errors: list[dict[str, Any]] | None, phase: str, tool: str, message: str,
                        returncode: int | None = None, stdout: str | None = None, stderr: str | None = None,
                        timed_out: bool | None = None) -> None:
     if errors is None:
@@ -694,7 +691,7 @@ def _append_tool_error(errors: List[Dict[str, Any]] | None, phase: str, tool: st
         s = str(s)
         return s[-n:] if len(s) > n else s
 
-    entry: Dict[str, Any] = {"phase": phase, "tool": tool, "error": str(message)}
+    entry: dict[str, Any] = {"phase": phase, "tool": tool, "error": str(message)}
     if returncode is not None:
         entry["returncode"] = int(returncode)
     if timed_out is not None:
@@ -706,7 +703,7 @@ def _append_tool_error(errors: List[Dict[str, Any]] | None, phase: str, tool: st
     errors.append(entry)
 
 
-def _setup_specialized_tools(errors: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+def _setup_specialized_tools(errors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Install specialized reconnaissance tools using modern Go module paths"""
     tools_status = {"success": True, "tools": [], "failed": []}
 
@@ -755,7 +752,7 @@ def _setup_specialized_tools(errors: List[Dict[str, Any]] | None = None) -> Dict
     return tools_status
 
 
-def _advanced_subdomain_enum(target: str, errors: List[Dict[str, Any]] | None = None) -> List[str]:
+def _advanced_subdomain_enum(target: str, errors: list[dict[str, Any]] | None = None) -> list[str]:
     """Advanced subdomain enumeration using multiple specialized tools"""
     target = _normalize_target_host(target)
     if not _should_run_subdomain_enum(target):
@@ -853,10 +850,10 @@ def _advanced_subdomain_enum(target: str, errors: List[Dict[str, Any]] | None = 
     except Exception as e:
         _append_tool_error(errors, "subdomain_enum", "crtsh", "request failed", stdout=None, stderr=str(e))
 
-    return sorted(list(all_subdomains))
+    return sorted(all_subdomains)
 
 
-def _analyze_live_hosts(hosts: List[str], errors: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+def _analyze_live_hosts(hosts: list[str], errors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Analyze live hosts and identify technologies"""
     live_analysis = {"hosts": [], "technologies": []}
 
@@ -938,7 +935,7 @@ def _analyze_live_hosts(hosts: List[str], errors: List[Dict[str, Any]] | None = 
     return live_analysis
 
 
-def _dedup_list_by_key(input_list: List, key: Optional[Callable[[Any], Any]] = None) -> List:
+def _dedup_list_by_key(input_list: list, key: Callable[[Any], Any] | None = None) -> list:
     if not input_list:
         return []
     seen = set()
@@ -976,14 +973,14 @@ def _canonicalize_url(u: str) -> str:
         return u
 
 
-def _dedup_canonicalized_urls(input_list: List[str]) -> List[str]:
+def _dedup_canonicalized_urls(input_list: list[str]) -> list[str]:
     if not input_list:
         return []
     input_list = [_canonicalize_url(e) for e in filter(bool, map(str.strip, input_list)) if e is not None]
     return _dedup_list_by_key(input_list)
 
 
-def _deep_web_intelligence(live_hosts: List[str], errors: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+def _deep_web_intelligence(live_hosts: list[str], errors: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Deep web crawling and parameter discovery"""
     web_intel = {"endpoints": [], "js_files": [], "parameters": []}
 
@@ -1074,7 +1071,7 @@ def _deep_web_intelligence(live_hosts: List[str], errors: List[Dict[str, Any]] |
                     link_pattern = r'href=["\']([^"\']*)["\']'
                     links = re.findall(link_pattern, html)
                     for link in links:
-                        if not link or link.startswith("javascript:") or link.startswith("mailto:"):
+                        if not link or link.startswith(("javascript:", "mailto:")):
                             continue
                         endpoint = urljoin(host, link)
                         web_intel["endpoints"].append(endpoint)
@@ -1096,7 +1093,7 @@ def _deep_web_intelligence(live_hosts: List[str], errors: List[Dict[str, Any]] |
     return web_intel
 
 
-def _analyze_attack_surface(results: Dict[str, Any]) -> Dict[str, Any]:
+def _analyze_attack_surface(results: dict[str, Any]) -> dict[str, Any]:
     """Analyze and prioritize the attack surface"""
     intelligence = {
         "attack_surface_size": (
@@ -1202,8 +1199,8 @@ def _analyze_attack_surface(results: Dict[str, Any]) -> Dict[str, Any]:
     ]
 
     def _summarize_hv() -> None:
-        counts_by_type: Dict[str, int] = {}
-        counts_by_keyword: Dict[str, int] = {}
+        counts_by_type: dict[str, int] = {}
+        counts_by_keyword: dict[str, int] = {}
         for item in intelligence.get("high_value_targets", []) or []:
             t = item.get("type")
             if t:
@@ -1362,14 +1359,14 @@ def _analyze_attack_surface(results: Dict[str, Any]) -> Dict[str, Any]:
     return intelligence
 
 
-def _generate_recon_recommendations(results: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _generate_recon_recommendations(results: dict[str, Any]) -> list[dict[str, Any]]:
     """Generate agent-optimized next-step directives.
 
     Returns a list of machine-readable directives an agent can translate into tool invocations.
     """
 
-    intel: Dict[str, Any] = results.get("intelligence", {}) or {}
-    meta: Dict[str, Any] = results.get("meta", {}) or {}
+    intel: dict[str, Any] = results.get("intelligence", {}) or {}
+    meta: dict[str, Any] = results.get("meta", {}) or {}
 
     subdomains_n = int(
         meta.get("coverage", {}).get("subdomains_discovered", len(results.get("subdomains", []) or [])) or 0)
@@ -1380,17 +1377,17 @@ def _generate_recon_recommendations(results: Dict[str, Any]) -> List[Dict[str, A
     js_n = int(meta.get("coverage", {}).get("js_files_discovered", len(results.get("js_files", []) or [])) or 0)
     params_n = int(meta.get("coverage", {}).get("parameters_discovered", len(results.get("parameters", []) or [])) or 0)
 
-    hv_summary: Dict[str, Any] = intel.get("high_value_summary", {}) or {}
-    hv_counts_by_kw: Dict[str, int] = hv_summary.get("counts_by_keyword", {}) or {}
+    hv_summary: dict[str, Any] = intel.get("high_value_summary", {}) or {}
+    hv_counts_by_kw: dict[str, int] = hv_summary.get("counts_by_keyword", {}) or {}
 
-    ranked_targets: List[Dict[str, Any]] = (intel.get("ranked_targets", []) or [])
-    ranked_hidden: List[Dict[str, Any]] = (intel.get("ranked_hidden_services", []) or [])
+    ranked_targets: list[dict[str, Any]] = (intel.get("ranked_targets", []) or [])
+    ranked_hidden: list[dict[str, Any]] = (intel.get("ranked_hidden_services", []) or [])
 
-    directives: List[Dict[str, Any]] = []
+    directives: list[dict[str, Any]] = []
 
-    def _d(did: str, priority: int, goal: str, capabilities: List[str], selectors: List[Dict[str, Any]] | None = None,
-           constraints: Dict[str, Any] | None = None, success_criteria: List[str] | None = None,
-           evidence: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    def _d(did: str, priority: int, goal: str, capabilities: list[str], selectors: list[dict[str, Any]] | None = None,
+           constraints: dict[str, Any] | None = None, success_criteria: list[str] | None = None,
+           evidence: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
             "id": did,
             "priority": int(priority),
@@ -1403,7 +1400,7 @@ def _generate_recon_recommendations(results: Dict[str, Any]) -> List[Dict[str, A
         }
 
     # 1) Coverage expansion when constrained by limits
-    limits: Dict[str, Any] = meta.get("limits", {}) or {}
+    limits: dict[str, Any] = meta.get("limits", {}) or {}
     if live_hosts_n > 0 and endpoints_n < 50:
         directives.append(
             _d(

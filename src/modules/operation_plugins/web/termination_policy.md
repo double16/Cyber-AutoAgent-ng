@@ -20,13 +20,14 @@ inventory manifest.
    input, trust-boundary, and workflow observations. Do not treat a hypothesis as a finding.
 3. **Vulnerability Discovery and Exploitability Testing** — Test prioritized hypotheses and record expected and actual
    behavior, negative controls, reproducibility, and evidence-backed vulnerability candidates.
-4. **Exploit Chain Analysis** — Determine whether multiple weaknesses combine into a higher-impact attack path. Record
+4. **Finding Validation** — Confirm or reject each vulnerability candidate using reproducible evidence,
+expected-versus-actual behavior, negative controls, scope, confidence, and artifact paths. This phase must complete
+before any phase that consumes verified findings.
+5. **Exploit Chain Analysis** — Determine whether multiple verified weaknesses combine into a higher-impact attack path. Record
    prerequisites, transitions, failed links, alternative branches, and evidence for each link. Mark this phase
-   `not_applicable` when no evidenced candidates can compose into a meaningful relationship. Analyze existing candidates
+   `not_applicable` when no verified candidates can compose into a meaningful relationship. Analyze existing candidates
    rather than repeating vulnerability discovery or introducing unrelated pivots. Create follow-on execution work only
    for a concrete, evidence-backed chain link that still requires validation.
-5. **Finding Validation** — Confirm or reject each vulnerability candidate or attack path using reproducible evidence,
-   expected-versus-actual behavior, negative controls, scope, confidence, and artifact paths.
 6. **Impact Demonstration** — Safely demonstrate the minimum necessary security consequence required by the objective,
    without destructive action or unnecessary data access.
 

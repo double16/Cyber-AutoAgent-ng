@@ -2,6 +2,11 @@
 
 Cyber-AutoAgent provides built-in observability via Langfuse tracing and automated evaluation using Ragas metrics to monitor and improve penetration testing operations.
 
+Max-token failures are recorded as failure-aware generation diagnostics. They include the stop reason, failure type,
+classification, available token counters, and bounded redacted reasoning/output excerpts. Prompt-review exports attach
+these records by generation ID when available; otherwise they use the same agent run and trace timestamp and mark the
+association as inferred. The exporter uses the shared secret-redaction utility, so raw credentials are not exported.
+
 ## Architecture Overview
 
 ### Observability Stack

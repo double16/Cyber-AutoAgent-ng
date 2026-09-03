@@ -6,8 +6,8 @@ from strands.types.exceptions import MaxTokensReachedException
 
 # this import helps the hooks import avoid a circular dependency
 importlib.import_module("cyberautoagent")
-from modules.handlers.agent_repair_hook import AgentRepairHook  # noqa: E402
-from modules.handlers.react.hooks import ReactHooks  # noqa: E402
+from modules.handlers.agent_repair_hook import AgentRepairHook
+from modules.handlers.react.hooks import ReactHooks, classify_tool_outcome
 
 
 class RecordingEmitter:
@@ -16,6 +16,16 @@ class RecordingEmitter:
 
     def emit(self, event):
         self.events.append(event)
+
+
+def test_classify_tool_outcome_distinguishes_blocked_validation_and_execution_errors():
+    assert classify_tool_outcome({"status": "success"}) == ("success", True)
+    assert classify_tool_outcome({}, "controller cancelled") == ("blocked", False)
+    assert classify_tool_outcome({"status": "error", "content": [{"text": "Validation failed for input parameters: x"}]}) == (
+        "validation_error",
+        False,
+    )
+    assert classify_tool_outcome({"status": "error", "content": [{"text": "execution failed"}]}) == ("error", True)
 
 
 
@@ -82,6 +92,23 @@ def test_react_hooks_can_disable_tool_lifecycle_when_callback_handler_owns_it():
     assert "tool_end" not in event_types
 
 
+def test_react_hooks_normalizes_empty_failure_for_model_and_lifecycle_event():
+    emitter = RecordingEmitter()
+    hooks = ReactHooks(emitter=emitter, operation_id="OP")
+    after = SimpleNamespace(
+        tool_use={"name": "record_task_acceptance", "toolUseId": "acceptance-1"},
+        result={"status": "error", "content": []},
+        exception=RuntimeError("missing execution evidence"),
+    )
+
+    hooks._on_after_tool(after)
+
+    assert after.result["content"] == [{"text": "missing execution evidence"}]
+    tool_end = next(event for event in emitter.events if event["type"] == "tool_end")
+    assert tool_end["success"] is False
+    assert tool_end["error_summary"] == "missing execution evidence"
+
+
 def test_react_hooks_swarm_rewrite():
     hooks = ReactHooks(emitter=RecordingEmitter())
     event = SimpleNamespace(
@@ -106,6 +133,28 @@ def test_react_hooks_swarm_rewrite():
     assert "model_provider" not in agent
     assert agent["model_settings"] == {"params": {"temperature": 0.1}}
     assert event.tool_use["input"]["agents"][1] == "plain-agent"
+
+
+def test_react_hooks_handles_unparseable_inputs_and_nonstandard_results():
+    hooks = ReactHooks(emitter=RecordingEmitter())
+
+    assert hooks._parse_tool_input("{not json") == {"raw": "{not json"}
+    assert hooks._parse_tool_input(42) == {"raw": "42"}
+    assert hooks._process_tool_result({"status": "success", "content": [{"text": "one"}, "ignored"]}) == (
+        True,
+        "one",
+    )
+
+    event = SimpleNamespace(
+        tool_use={"name": "handoff_to_agent", "id": "handoff-1", "input": {}},
+        result={"status": "success", "content": []},
+        exception=None,
+    )
+    hooks._on_before_tool(event)
+    hooks._on_after_tool(event)
+
+    assert hooks._calculate_duration("handoff-1") == 0.0
+    assert [item["type"] for item in hooks.emitter.events].count("tool_end") == 1
 
 
 def test_agent_repair_hook_json_patch_and_state_paths(monkeypatch):
@@ -210,6 +259,25 @@ def test_agent_repair_hook_ignores_direct_tool_calls_and_rejects_invalid_wrapper
     )
     hook.before_tool_call_repair(invalid)
     assert invalid.cancel_tool
+
+
+def test_agent_repair_hook_repairs_atem_envelope_before_direct_tool_dispatch():
+    hook = AgentRepairHook()
+    event = SimpleNamespace(
+        tool_use={
+            "name": "store_observation",
+            "input": {
+                "content": "Observation",
+                "artifacts": '["artifact:artifacts/api_config_headers_fresh.txt"]</atem:invoke>',
+            },
+        },
+        cancel_tool=False,
+    )
+
+    hook.before_tool_call_repair(event)
+
+    assert event.cancel_tool is False
+    assert event.tool_use["input"]["artifacts"] == ["artifact:artifacts/api_config_headers_fresh.txt"]
 
 
 def test_agent_repair_hook_leaves_max_tokens_for_controller_recovery():

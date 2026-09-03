@@ -82,3 +82,21 @@ def test_task_creator_hook_stops_each_failed_attempt_for_controller_retry():
         "tool_name": "create_tasks",
         "error": "Error",
     }
+
+
+def test_terminal_tool_hook_registers_and_ignores_unusable_request_state():
+    callbacks = []
+    registry = SimpleNamespace(add_callback=lambda event, callback: callbacks.append((event, callback)))
+    hook = TerminalToolHook("task_executor")
+
+    hook.register_hooks(registry)
+    assert callbacks == [(callbacks[0][0], hook._after_tool)]
+
+    event = _event("record_task_acceptance", '{"complete": true}')
+    event.invocation_state["request_state"] = "not-a-mapping"
+    hook._after_tool(event)
+    assert event.invocation_state["request_state"] == "not-a-mapping"
+
+    rejected = _event("ignored", "failure", status="error")
+    TerminalToolHook("other")._record_terminal_failure(rejected, "ignored")
+    assert rejected.invocation_state == {}

@@ -13,13 +13,15 @@ This module provides:
 
 import asyncio
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
-from .evaluation import CyberAgentEvaluator
 from modules.config.system.logger import get_logger
+
 from ..handlers.events import EventEmitter, get_emitter
+from .evaluation import CyberAgentEvaluator
 
 logger = get_logger("Evaluation.Manager")
 
@@ -40,9 +42,9 @@ class TraceInfo:
     trace_type: TraceType
     session_id: str
     name: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     evaluated: bool = False
-    evaluation_scores: Optional[Dict[str, float]] = None
+    evaluation_scores: dict[str, float] | None = None
 
 
 class EvaluationManager:
@@ -53,10 +55,10 @@ class EvaluationManager:
     def __init__(
         self,
         operation_id: str,
-        emitter: Optional[EventEmitter] = None,
-        report_path: Optional[str] = None,
-        usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-        progress_callback: Optional[Callable[[], None]] = None,
+        emitter: EventEmitter | None = None,
+        report_path: str | None = None,
+        usage_callback: Callable[[dict[str, Any]], None] | None = None,
+        progress_callback: Callable[[], None] | None = None,
     ):
         """
         Initialize the evaluation manager.
@@ -66,10 +68,10 @@ class EvaluationManager:
         """
         self.operation_id = operation_id
         self.report_path = report_path
-        self.traces: Dict[str, TraceInfo] = {}
-        self.evaluator: Optional[CyberAgentEvaluator] = None
+        self.traces: dict[str, TraceInfo] = {}
+        self.evaluator: CyberAgentEvaluator | None = None
         self._lock = threading.Lock()
-        self._evaluation_thread: Optional[threading.Thread] = None
+        self._evaluation_thread: threading.Thread | None = None
         self._evaluation_complete = threading.Event()
         self._emitter = emitter or get_emitter(operation_id=operation_id)
         self._usage_callback = usage_callback
@@ -81,7 +83,7 @@ class EvaluationManager:
         trace_type: TraceType,
         session_id: str,
         name: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """
         Register a trace for evaluation.
@@ -108,7 +110,7 @@ class EvaluationManager:
                 name,
             )
 
-    def get_trace_ids_by_type(self, trace_type: TraceType) -> List[str]:
+    def get_trace_ids_by_type(self, trace_type: TraceType) -> list[str]:
         """
         Get all trace IDs of a specific type.
 
@@ -125,7 +127,7 @@ class EvaluationManager:
                 if info.trace_type == trace_type
             ]
 
-    def get_unevaluated_traces(self) -> List[TraceInfo]:
+    def get_unevaluated_traces(self) -> list[TraceInfo]:
         """
         Get all traces that haven't been evaluated yet.
 
@@ -135,7 +137,7 @@ class EvaluationManager:
         with self._lock:
             return [info for info in self.traces.values() if not info.evaluated]
 
-    async def evaluate_all_traces(self) -> Dict[str, Dict[str, float]]:
+    async def evaluate_all_traces(self) -> dict[str, dict[str, float]]:
         """
         Evaluate all registered traces.
 
@@ -243,7 +245,7 @@ class EvaluationManager:
         self._evaluation_thread.daemon = True
         self._evaluation_thread.start()
 
-    def wait_for_completion(self, timeout: Optional[float] = None) -> bool:
+    def wait_for_completion(self, timeout: float | None = None) -> bool:
         """
         Wait for evaluation to complete.
 
@@ -258,7 +260,7 @@ class EvaluationManager:
 
         return self._evaluation_complete.wait(timeout=timeout)
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """
         Get a summary of the evaluation status.
 

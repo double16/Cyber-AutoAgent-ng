@@ -52,6 +52,7 @@ export class PythonExecutionService extends EventEmitter {
 
   // Track whether backend emitted consolidated tool output to avoid duplication
   private sawBackendToolOutput = false;
+  private lastToolHadBackendOutput = false;
   // Track whether a user-initiated stop() was requested to treat exits as intentional
   private userStopRequested = false;
   
@@ -1102,6 +1103,10 @@ export class PythonExecutionService extends EventEmitter {
       set toolOutputBuffer(value: string) { service.toolOutputBuffer = value; },
       get sawBackendToolOutput() { return service.sawBackendToolOutput; },
       set sawBackendToolOutput(value: boolean) { service.sawBackendToolOutput = value; },
+      get lastToolHadBackendOutput() { return service.lastToolHadBackendOutput; },
+      set lastToolHadBackendOutput(value: boolean | undefined) {
+        service.lastToolHadBackendOutput = value === true;
+      },
       get currentToolName() { return service.currentToolName; },
       set currentToolName(value: string | undefined) { service.currentToolName = value; }
     };

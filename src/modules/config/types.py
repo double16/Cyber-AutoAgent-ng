@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import Any, Literal
 
 # 0.2–0.5
 DEFAULT_TEMPERATURE_EXECUTION = 0.5
@@ -25,8 +25,8 @@ class BudgetConfig:
     """Execution budget configuration."""
 
     max_duration_minutes: int
-    max_tokens: Optional[int] = None
-    max_cost: Optional[float] = None
+    max_tokens: int | None = None
+    max_cost: float | None = None
 
     def __post_init__(self) -> None:
         if self.max_duration_minutes <= 0:
@@ -36,14 +36,14 @@ class BudgetConfig:
         if self.max_cost is not None and self.max_cost <= 0:
             raise ValueError("max_cost must be greater than 0 when provided")
 
-    def to_ui_dict(self) -> Dict[str, Any]:
+    def to_ui_dict(self) -> dict[str, Any]:
         return {
             "maxDurationMinutes": self.max_duration_minutes,
             "maxTokens": self.max_tokens,
             "maxCost": self.max_cost,
         }
 
-LITELLM_EMBEDDING_DEFAULTS: Dict[str, Tuple[str, int]] = {
+LITELLM_EMBEDDING_DEFAULTS: dict[str, tuple[str, int]] = {
     "openai": ("openai/text-embedding-3-small", 1536),
     "azure": ("azure/text-embedding-3-small", 1536),
     "gemini": ("models/text-embedding-004", 768),
@@ -53,9 +53,9 @@ LITELLM_EMBEDDING_DEFAULTS: Dict[str, Tuple[str, int]] = {
     "xai": ("multi-qa-MiniLM-L6-cos-v1", 384),
     "ollama": ("mxbai-embed-large:latest", 1024),
 }
-DEFAULT_LITELLM_EMBEDDING: Tuple[str, int] = ("multi-qa-MiniLM-L6-cos-v1", 384)
+DEFAULT_LITELLM_EMBEDDING: tuple[str, int] = ("multi-qa-MiniLM-L6-cos-v1", 384)
 
-EMBEDDING_DIMENSIONS: Dict[str, int] = {
+EMBEDDING_DIMENSIONS: dict[str, int] = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
@@ -91,7 +91,7 @@ class ModelConfig:
 
     provider: ModelProvider
     model_id: str
-    parameters: Dict[str, Any] = field(default_factory=dict)
+    parameters: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate model configuration."""
@@ -109,7 +109,7 @@ class LLMConfig(ModelConfig):
 
     temperature: float = DEFAULT_TEMPERATURE_EXECUTION
     max_tokens: int = 4096
-    top_p: Optional[float] = None
+    top_p: float | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -141,7 +141,7 @@ class VectorStoreConfig:
     """Configuration for vector storage."""
 
     provider: str = "qdrant"
-    config: Dict[str, Any] = field(default_factory=dict)
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -182,11 +182,11 @@ class MemoryVectorStoreConfig:
     """Configuration for the semantic-memory Qdrant collection."""
 
     provider: str = "qdrant"
-    qdrant_config: Dict[str, Any] = field(
+    qdrant_config: dict[str, Any] = field(
         default_factory=lambda: {"collection_name": "cyber_autoagent_memories", "embedding_model_dims": 1024}
     )
 
-    def get_config_for_provider(self, provider: str, **overrides) -> Dict[str, Any]:
+    def get_config_for_provider(self, provider: str, **overrides) -> dict[str, Any]:
         """Get configuration for specific provider."""
         if provider == "qdrant":
             config = self.qdrant_config.copy()
@@ -223,8 +223,8 @@ class EvaluationConfig:
     judge_temperature: float = 0.2
     judge_max_tokens: int = 800
     rubric_profile: str = "default"
-    judge_system_prompt: Optional[str] = None
-    judge_user_template: Optional[str] = None
+    judge_system_prompt: str | None = None
+    judge_user_template: str | None = None
     skip_if_insufficient_evidence: bool = True
     rationale_persist_mode: str = "metadata"
 
@@ -242,12 +242,12 @@ class MCPConnection:
 
     id: str
     transport: Literal["stdio", "sse", "streamable-http"]
-    command: Optional[List[str]] = None
-    server_url: Optional[str] = None
-    headers: Optional[Dict[str, str]] = None
-    plugins: List[str] = field(default_factory=list)
-    timeoutSeconds: Optional[int] = None
-    allowed_tools: List[str] = field(default_factory=list)
+    command: list[str] | None = None
+    server_url: str | None = None
+    headers: dict[str, str] | None = None
+    plugins: list[str] = field(default_factory=list)
+    timeoutSeconds: int | None = None
+    allowed_tools: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -255,7 +255,7 @@ class MCPConfig:
     """Configuration for Model Context Protocol servers."""
 
     enabled: bool = field(default_factory=lambda: False)
-    connections: List[MCPConnection] = field(default_factory=list)
+    connections: list[MCPConnection] = field(default_factory=list)
 
 
 @dataclass
@@ -265,16 +265,16 @@ class AgentConfig:
     target: str
     objective: str
     budget: BudgetConfig = field(default_factory=lambda: BudgetConfig(max_duration_minutes=DEFAULT_MAX_DURATION))
-    available_tools: Optional[List[str]] = None
-    op_id: Optional[str] = None
-    model_id: Optional[str] = None
-    region_name: Optional[str] = None
+    available_tools: list[str] | None = None
+    op_id: str | None = None
+    model_id: str | None = None
+    region_name: str | None = None
     provider: str = "bedrock"
     memory_mode: Literal["shared", "operation"] = "operation"
     operation_mode: str = "execution"
     module: str = "web"
-    bug_bounty_headers: Dict[str, str] = field(default_factory=dict)
-    mcp_connections: List[MCPConnection] = field(default_factory=list)
+    bug_bounty_headers: dict[str, str] = field(default_factory=dict)
+    mcp_connections: list[MCPConnection] = field(default_factory=list)
 
 
 def get_default_base_dir() -> str:
@@ -334,8 +334,8 @@ class OutputConfig:
     """Configuration for output directory management."""
 
     base_dir: str = field(default_factory=get_default_base_dir)
-    target_name: Optional[str] = None
-    operation_id: Optional[str] = None  # Current operation ID for path generation
+    target_name: str | None = None
+    operation_id: str | None = None  # Current operation ID for path generation
 
 
 @dataclass
@@ -351,26 +351,26 @@ class ServerConfig:
     mcp: MCPConfig = field(default_factory=MCPConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     sdk: SDKConfig = field(default_factory=SDKConfig)
-    host: Optional[str] = None
+    host: str | None = None
     region: str = "us-east-1"  # Default, can be overridden via environment
 
 
 @dataclass(frozen=True)
 class RateLimitConfig:
     # Requests per minute (set None to disable)
-    rpm: Optional[float] = None
+    rpm: float | None = None
 
     # Tokens per minute (set None to disable)
-    tpm: Optional[float] = None
+    tpm: float | None = None
 
     # Max in-flight model calls (set None to disable)
-    max_concurrent: Optional[int] = None
+    max_concurrent: int | None = None
 
     # Token estimation knobs
     assume_output_tokens: int = 0  # add a constant to estimated input tokens
 
     # Retry and cooldown settings
-    retry_codes: List[int] = field(default_factory=lambda: [429, 503])
+    retry_codes: list[int] = field(default_factory=lambda: [429, 503])
     max_retries: int = 10
     retry_base_delay: float = 4.0  # seconds
     retry_max_delay: float = 120.0  # seconds

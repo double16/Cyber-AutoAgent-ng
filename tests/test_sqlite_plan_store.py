@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -21,7 +22,7 @@ def test_sqlite_plan_store_init(tmp_path):
     assert os.path.exists(db_path)
 
     # Check if tables were created
-    with sqlite3.connect(db_path) as conn:
+    with closing(sqlite3.connect(db_path)) as conn, conn:
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='plans'")
         assert cursor.fetchone() is not None
         cursor = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'")
@@ -97,6 +98,98 @@ def test_sqlite_plan_store_tracks_acceptance_memory_publication(tmp_path):
     store.mark_acceptance_memory_published("op-1", "task-1", "publication-2")
 
     assert store.has_acceptance_memory_publication("op-1", "task-1", "publication-2") is True
+
+
+def test_sqlite_task_patch_preserves_execution_receipts_while_adding_artifacts(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
+    task = Task(
+        task_uid="task-1",
+        title="Crawl target",
+        objective="Collect routes",
+        acceptance=make_acceptance("task-1"),
+        phase=1,
+        status="active",
+        recovery_context={
+            "execution_evidence_receipts": {"req-1": ["artifact:artifacts/recon.json"]},
+            "pending_controller_acceptance": {"status": "satisfied"},
+        },
+    )
+    store.store_task("op-1", task)
+
+    patched = store.patch_task(
+        "op-1",
+        task.task_uid,
+        evidence_additions=["artifact:artifacts/recon.json", "artifact:artifacts/root.txt"],
+        recovery_context_removals=["pending_controller_acceptance"],
+        status="done",
+        status_reason="acceptance reconciled",
+    )
+
+    assert patched.status == "done"
+    assert patched.evidence == ["artifact:artifacts/recon.json", "artifact:artifacts/root.txt"]
+    assert patched.recovery_context == {
+        "execution_evidence_receipts": {"req-1": ["artifact:artifacts/recon.json"]}
+    }
+    reloaded = store.get_tasks("op-1")[0]
+    assert reloaded.evidence == patched.evidence
+    assert reloaded.recovery_context == patched.recovery_context
+
+
+def test_sqlite_task_patch_rejects_unknown_task(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
+
+    with pytest.raises(ValueError, match="Unknown task_uid"):
+        store.patch_task("op-1", "missing", status="done")
+
+
+def test_sqlite_task_evidence_replacement_preserves_execution_receipts(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
+    task = Task(
+        task_uid="task-1",
+        title="Accept crawl",
+        objective="Persist accepted evidence",
+        acceptance=make_acceptance("task-1"),
+        phase=1,
+        status="active",
+        evidence=["artifact:artifacts/provisional.txt"],
+        recovery_context={"execution_evidence_receipts": {"crawl": ["artifact:artifacts/recon.json"]}},
+    )
+    store.store_task("op-1", task)
+
+    patched = store.patch_task(
+        "op-1",
+        task.task_uid,
+        evidence_replacement=["artifact:artifacts/accepted.txt"],
+    )
+
+    assert patched.evidence == ["artifact:artifacts/accepted.txt"]
+    assert patched.recovery_context == task.recovery_context
+
+
+def test_sqlite_plan_patch_changes_only_requested_phase_progress(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
+    plan = OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Recon", status="active"),
+            PlanPhase(id=2, title="Validate", status="pending"),
+        ],
+        constraints=["No destructive actions"],
+    )
+    store.store_plan("op-1", plan)
+
+    patched = store.patch_plan(
+        "op-1",
+        phase_status_updates={1: "done", 2: "active"},
+        current_phase=2,
+        assessment_complete=False,
+    )
+
+    assert patched.constraints == ["No destructive actions"]
+    assert patched.current_phase == 2
+    assert [phase.status for phase in patched.phases] == ["done", "active"]
 
 
 def test_sqlite_plan_store_plan_operations(tmp_path):
@@ -285,6 +378,18 @@ def test_sqlite_finding_ledger_operations(tmp_path):
     assert resolved["resolution"] == "verified"
     assert store.list_findings("op") == [resolved]
     assert store.list_findings("other-operation") == []
+
+
+def test_sqlite_finding_verification_task_rebinding_is_compare_and_set(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "test.db"), "target")
+    store.store_finding_candidate("op", "finding-1", "fingerprint", {"claim": "claim"}, "task-1")
+
+    assert store.rebind_finding_verification_task("op", "finding-1", "task-1", "task-2") is True
+    assert store.get_finding("op", "finding-1")["verification_task_uid"] == "task-2"
+    assert store.rebind_finding_verification_task("op", "finding-1", "task-1", "task-3") is False
+
+    store.store_finding_validation("op", "finding-1", {"outcome": "confirmed"})
+    assert store.rebind_finding_verification_task("op", "finding-1", "task-2", "task-3") is False
 
 
 def test_sqlite_finding_evidence_receipts_are_operation_and_task_scoped(tmp_path):

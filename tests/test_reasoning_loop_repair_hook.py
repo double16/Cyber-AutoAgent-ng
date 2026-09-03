@@ -61,7 +61,7 @@ def test_discards_only_final_incomplete_assistant_message():
         {"role": "assistant", "content": [{"text": "untrusted partial success claim"}]},
     ])
 
-    text, removed = discard_incomplete_assistant_message(agent)
+    text, removed, _has_reasoning = discard_incomplete_assistant_message(agent)
 
     assert removed is True
     assert text == "untrusted partial success claim"
@@ -72,7 +72,7 @@ def test_discards_only_final_incomplete_assistant_message():
 def test_does_not_remove_non_assistant_tail():
     agent = SimpleNamespace(messages=[{"role": "user", "content": [{"text": "continue"}]}])
 
-    text, removed = discard_incomplete_assistant_message(agent)
+    text, removed, _has_reasoning = discard_incomplete_assistant_message(agent)
 
     assert (text, removed) == ("", False)
     assert len(agent.messages) == 1
@@ -188,3 +188,52 @@ def test_agent_repair_hook_does_not_retry_max_tokens_stop():
 
     assert event.retry is False
     assert event.state == {}
+
+
+def test_agent_repair_hook_records_parse_error_repair_once():
+    recorded = []
+    callback_handler = SimpleNamespace(
+        action_count=4,
+        record_efficiency_event=lambda *args, **kwargs: recorded.append((args, kwargs)),
+    )
+    event = SimpleNamespace(
+        agent=SimpleNamespace(callback_handler=callback_handler),
+        exception=SimpleNamespace(status_code=500, __str__=lambda self: "unexpected server error"),
+        stop_response=None,
+        retry=False,
+        metadata={},
+    )
+
+    hook = AgentRepairHook()
+    hook.after_model_call_check(event)
+    hook.after_model_call_check(event)
+
+    assert event.retry is True
+    assert event.metadata["force_openai_toolcalls_retry"] is True
+    assert recorded == [(("model_repair",), {"agent": event.agent})]
+
+
+def test_agent_repair_hook_handles_empty_blocks_and_failed_json_patch(monkeypatch):
+    monkeypatch.setattr("modules.handlers.agent_repair_hook._JSON_TOOL_CALL_PATCH_ATTEMPT", False)
+    monkeypatch.setattr("modules.handlers.agent_repair_hook.patch_ollama_model_json_toolcalls", lambda: False)
+    event = SimpleNamespace(
+        agent=SimpleNamespace(callback_handler=None),
+        exception=None,
+        stop_response=SimpleNamespace(
+            message={"content": [{"image": "ignored"}, {"text": ""}, {"text": '{"name":"shell","parameters":{}}'}]},
+        ),
+        retry=False,
+        state={},
+    )
+
+    AgentRepairHook().after_model_call_check(event)
+
+    assert event.retry is False
+
+
+def test_agent_repair_hook_before_model_call_ignores_invalid_messages_and_exceptions():
+    hook = AgentRepairHook()
+    hook.before_model_call_inject(SimpleNamespace(agent=SimpleNamespace(messages="not-a-list"), state={}))
+    hook.before_model_call_inject(SimpleNamespace(agent=SimpleNamespace(messages=[]), state=None))
+
+    assert hook._state_bag(SimpleNamespace(metadata={})) == {}

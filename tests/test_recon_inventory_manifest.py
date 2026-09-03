@@ -4,10 +4,9 @@ from types import SimpleNamespace
 import pytest
 
 from modules.handlers.utils import get_tool_spec
-from modules.operation_plugins.web.tools import recon_inventory_manifest as manifest_tool
 from modules.prompts.factory import ModulePromptLoader
-from modules.tools import artifact
-from modules.tools import memory
+from modules.tools import artifact, memory
+from modules.tools import recon_inventory_manifest as manifest_tool
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 
 
@@ -16,8 +15,8 @@ from modules.tools.recon_inventory_manifest import recon_output_to_inventory_man
     [
         (
             "katana",
-            '{"request":{"endpoint":"https://target.test/a","method":"POST"},'
-            '"response":{"status_code":201}}',
+            ('{"request":{"endpoint":"https://target.test/a","method":"POST"},'
+            '"response":{"status_code":201}}'),
             "https://target.test/a",
             201,
         ),
@@ -54,6 +53,34 @@ def test_ffuf_parser_accepts_csv_and_rejects_relative_fuzz_input():
     assert csv_records[0]["url"] == "https://target.test/csv"
     assert csv_records[0]["status"] == 204
     assert relative_records == []
+
+
+def test_ffuf_wildcard_responses_become_auditable_gaps_not_endpoints():
+    payload = {
+        "results": [
+            {
+                "url": f"https://target.test/missing-{index}",
+                "status": 200,
+                "length": 3031,
+                "words": 353,
+                "lines": 66,
+            }
+            for index in range(8)
+        ]
+        + [{"url": "https://target.test/api/config", "status": 200, "length": 794, "words": 1, "lines": 48}],
+    }
+
+    records = manifest_tool._parse_ffuf(json.dumps(payload))
+    manifest_tool._mark_ffuf_wildcard_records(records)
+    manifest = manifest_tool.records_to_inventory_manifest(
+        records,
+        target_id="target-1",
+        target="https://target.test",
+    )
+
+    endpoints = {item["value"] for item in manifest["items"] if item["kind"] == "endpoint"}
+    assert endpoints == {"https://target.test/api/config"}
+    assert len([gap for gap in manifest["unassessed_gaps"] if gap["reason"] == "wildcard_response"]) == 8
 
 
 def test_gobuster_parser_extracts_default_relative_path_output():
@@ -241,7 +268,11 @@ def test_converter_reads_artifact_normalizes_alias_and_writes_valid_manifest(tmp
         encoding="utf-8",
     )
     output = artifact_dir / "inventory.json"
-    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    plan = SimpleNamespace(
+        targets=[
+            SimpleNamespace(target_id="target-1", value="https://target.test")
+        ]
+    )
     monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
@@ -260,6 +291,164 @@ def test_converter_reads_artifact_normalizes_alias_and_writes_valid_manifest(tmp
     assert result["artifact_ref"] == "artifact:artifacts/inventory.json"
     assert {item["kind"] for item in written["items"]} == {"service", "endpoint", "parameter"}
     assert memory._load_inventory_manifest(result["artifact_ref"])[0]["schema_version"] == 1
+
+
+def test_consolidation_merges_detected_sources_preserves_provenance_and_skips_unknown_artifacts(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    ffuf = artifact_dir / "ffuf.json"
+    ffuf.write_text(
+        json.dumps({"ffufhash": "fixture", "results": [{"url": "https://target.test/admin", "status": 200}]}),
+        encoding="utf-8",
+    )
+    manifest = artifact_dir / "source-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "items": [
+                    {
+                        "id": "endpoint-admin",
+                        "target_id": "target-1",
+                        "kind": "endpoint",
+                        "value": "https://target.test/admin",
+                        "attributes": {"source": "existing"},
+                    },
+                    {
+                        "id": "endpoint-api",
+                        "target_id": "target-1",
+                        "kind": "endpoint",
+                        "value": "https://target.test/api",
+                        "attributes": {},
+                    },
+                ],
+                "unassessed_gaps": ["requires authenticated crawl"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    unknown = artifact_dir / "notes.txt"
+    unknown.write_text("not a supported recon artifact", encoding="utf-8")
+    output = artifact_dir / "consolidated.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = manifest_tool.consolidate_recon_artifacts(
+        ["artifact:artifacts/ffuf.json", "artifact:artifacts/source-manifest.json", "artifact:artifacts/notes.txt"],
+        str(output),
+        target_id="target-1",
+        target="https://target.test",
+    )
+
+    written = json.loads(output.read_text(encoding="utf-8"))
+    endpoints = [item for item in written["items"] if item["kind"] == "endpoint"]
+    admin = next(item for item in endpoints if item["value"] == "https://target.test/admin")
+    assert {item["value"] for item in endpoints} == {"https://target.test/admin", "https://target.test/api"}
+    assert set(admin["attributes"]["source_artifact_refs"]) == {
+        "artifact:artifacts/ffuf.json",
+        "artifact:artifacts/source-manifest.json",
+    }
+    assert written["unassessed_gaps"] == ["requires authenticated crawl"]
+    assert result["validation_status"] == "valid"
+    assert result["skipped_artifacts"][0]["source_artifact"] == "artifact:artifacts/notes.txt"
+
+
+def test_consolidation_rejects_when_every_source_is_unsupported(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    source = artifact_dir / "notes.txt"
+    source.write_text("not a supported recon artifact", encoding="utf-8")
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+
+    with pytest.raises(ValueError, match="No valid in-scope inventory items"):
+        manifest_tool.consolidate_recon_artifacts(
+            ["artifact:artifacts/notes.txt"],
+            "artifacts/consolidated.json",
+        )
+
+
+@pytest.mark.parametrize(
+    "source_format",
+    ["auto", "client_bundle_inventory", "client-bundle-inventory"],
+)
+def test_converter_recognizes_client_bundle_inventory_extraction(
+    tmp_path, monkeypatch, source_format
+):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    source = artifact_dir / "bundle-inventory.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": "client_bundle_inventory_v2",
+                "target": "https://target.test",
+                "target_id": "target-1",
+                "api_paths": ["/api/products"],
+                "spa_routes": ["/profile"],
+                "auth_indicators": [],
+                "auth_storage_keys": [],
+                "external_origins": [],
+                "source_map_references": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = artifact_dir / f"inventory-{source_format}.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = json.loads(
+        manifest_tool.recon_output_to_inventory_manifest(
+            "artifact:artifacts/bundle-inventory.json",
+            str(output),
+            source_format=source_format,
+        )
+    )
+
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    assert result["source_format"] == "client_bundle_inventory"
+    assert {
+        item["value"]
+        for item in manifest["items"]
+        if item["kind"] == "endpoint"
+    } == {
+        "https://target.test/",
+        "https://target.test/api/products",
+        "https://target.test/profile",
+    }
+
+
+def test_converter_rejects_malformed_client_bundle_inventory_extraction(
+    tmp_path, monkeypatch
+):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    source = artifact_dir / "bundle-inventory.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema_version": "client_bundle_inventory_v2",
+                "target": "https://target.test",
+                "api_paths": "/api/products",
+                "spa_routes": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+
+    with pytest.raises(ValueError, match="No inventory candidates"):
+        manifest_tool.recon_output_to_inventory_manifest(
+            "artifact:artifacts/bundle-inventory.json",
+            "artifacts/inventory.json",
+            source_format="client_bundle_inventory",
+        )
 
 
 @pytest.mark.parametrize("source_format", ["auto", "inventory_manifest", "inventory", "manifest"])
@@ -403,10 +592,10 @@ def test_converter_resolves_relative_gobuster_paths_against_registered_target(tm
 
 
 @pytest.mark.parametrize("module_name", ["web", "web_recon"])
-def test_web_modules_do_not_register_the_globally_available_inventory_converter(module_name):
+def test_web_modules_do_not_expose_plugin_local_tools(module_name):
     tools, missing = ModulePromptLoader().discover_module_tools(module_name)
 
-    assert not any(path.endswith("/recon_inventory_manifest.py") for path in tools)
+    assert tools == []
     assert missing is not None
 
 

@@ -4,21 +4,26 @@ Unit tests for the centralized model configuration system.
 """
 
 import os
-from unittest.mock import MagicMock, patch, Mock
 from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 # Import the modules we're testing
 from modules.config.manager import (
+    MAX_TOKENS_REASONING_LIMIT,
     ConfigManager,
     get_config_manager,
-    get_report_refinement_cycles,
     get_default_model_configs,
     get_model_config,
-    get_ollama_host, MAX_TOKENS_REASONING_LIMIT,
+    get_ollama_host,
+    get_report_refinement_cycles,
 )
+from modules.config.system import validation
 from modules.config.types import (
+    DEFAULT_TEMPERATURE_EXECUTION,
+    DEFAULT_TEMPERATURE_SWARM,
+    BudgetConfig,
     EmbeddingConfig,
     EvaluationConfig,
     LLMConfig,
@@ -33,9 +38,7 @@ from modules.config.types import (
     ServerConfig,
     SwarmConfig,
     get_default_base_dir,
-    DEFAULT_TEMPERATURE_EXECUTION, DEFAULT_TEMPERATURE_SWARM,
 )
-from modules.config.system import validation
 from modules.tools.mcp import resolve_env_vars_in_dict, resolve_env_vars_in_list
 
 
@@ -193,6 +196,24 @@ class TestMemoryVectorStoreConfig:
         assert qdrant_config["collection_name"] == "custom"
         assert qdrant_config["embedding_model_dims"] == 1024
 
+    def test_non_qdrant_provider_returns_only_overrides(self):
+        assert MemoryVectorStoreConfig().get_config_for_provider("other", endpoint="memory.test") == {
+            "endpoint": "memory.test"
+        }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_duration_minutes": 0}, "max_duration_minutes"),
+        ({"max_duration_minutes": 1, "max_tokens": 0}, "max_tokens"),
+        ({"max_duration_minutes": 1, "max_cost": 0}, "max_cost"),
+    ],
+)
+def test_budget_config_rejects_non_positive_limits(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        BudgetConfig(**kwargs)
+
 
 class TestConfigManager:
     """Test ConfigManager class."""
@@ -334,7 +355,7 @@ class TestConfigManager:
         assert remote_config.llm.provider == ModelProvider.AWS_BEDROCK
         assert "claude" in remote_config.llm.model_id
         assert remote_config.llm.temperature == DEFAULT_TEMPERATURE_SWARM
-        assert remote_config.llm.max_tokens == 5000
+        assert remote_config.llm.max_tokens == 16_000
 
     def test_get_qdrant_memory_config(self):
         """Test Qdrant embedding configuration for local and remote providers."""
@@ -1063,7 +1084,7 @@ class TestEnvironmentIntegration:
             "us.anthropic.claude-opus-4-20250514-v1:0", "us-east-1"
         )
         assert thinking_config["temperature"] == 1.0
-        assert thinking_config["max_tokens"] == 10_000
+        assert thinking_config["max_tokens"] == 32_000
         assert "additional_request_fields" in thinking_config
         assert "anthropic_beta" in thinking_config["additional_request_fields"]
         assert "thinking" in thinking_config["additional_request_fields"]
@@ -1079,7 +1100,7 @@ class TestEnvironmentIntegration:
         # Test local model configuration
         local_config = config_manager.get_local_model_config("llama3.2:3b", "ollama")
         assert local_config["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
-        assert local_config["max_tokens"] == 4000
+        assert local_config["max_tokens"] == 8000
         assert "host" in local_config
         assert local_config["host"].startswith("http://")
 
@@ -1125,6 +1146,21 @@ class TestOutputConfig:
         base_dir = get_default_base_dir()
         project_root = os.path.dirname(base_dir)
         assert os.path.exists(os.path.join(project_root, "pyproject.toml"))
+
+    def test_get_default_base_dir_prefers_environment_override(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CYBER_AGENT_OUTPUT_DIR", str(tmp_path / "configured-output"))
+
+        assert get_default_base_dir() == str(tmp_path / "configured-output")
+
+    def test_get_default_base_dir_walks_to_parent_project_root(self, monkeypatch, tmp_path):
+        project_root = tmp_path / "project"
+        child = project_root / "nested" / "working"
+        child.mkdir(parents=True)
+        (project_root / "pyproject.toml").touch()
+        monkeypatch.delenv("CYBER_AGENT_OUTPUT_DIR", raising=False)
+        monkeypatch.chdir(child)
+
+        assert get_default_base_dir() == str(project_root / "outputs")
 
 
 class TestOutputConfigIntegration:
@@ -1241,3 +1277,133 @@ def test_validation_aws_and_ollama_requirements(monkeypatch):
     monkeypatch.setattr(validation.requests, "get", Mock(side_effect=RuntimeError("down")))
     with pytest.raises(ConnectionError):
         validation.validate_ollama_requirements(env, "http://localhost:11434")
+
+
+def test_config_manager_models_and_swarm_fallback_paths(monkeypatch):
+    manager = ConfigManager()
+    assert manager.is_thinking_model("", "sonnet") is False
+
+    monkeypatch.setenv("BEDROCK_EFFORT", "high")
+    standard = manager.get_standard_model_config(
+        "claude-sonnet-4-5-20250929", "us-east-1", "bedrock"
+    )
+    assert standard["additional_request_fields"]["anthropic_beta"] == [
+        "context-1m-2025-08-07", "effort-2025-11-24"
+    ]
+    assert standard["additional_request_fields"]["output_config"]["effort"] == "high"
+
+    thinking = manager.get_thinking_model_config("claude-sonnet-4-5-20250929", "us-east-1")
+    assert thinking["max_tokens"] == 16000
+    assert thinking["additional_request_fields"]["thinking"]["budget_tokens"] == 7000
+
+    manager.get_provider = lambda: "bedrock"
+    manager.get_server_config = lambda *_args, **_kwargs: SimpleNamespace(
+        swarm=None, llm=SimpleNamespace(model_id="primary")
+    )
+    assert manager.get_swarm_model_id() == "primary"
+    manager.get_server_config = Mock(side_effect=RuntimeError("unavailable"))
+    assert manager.get_swarm_model_id() == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ('{"id": "not-a-list"}', "not an array"),
+        ("not-json", "not valid JSON"),
+        ('[{"id": "", "transport": "sse", "server_url": "url"}]', "requires an id"),
+        ('[{"id": "a", "transport": "stdio", "command": 1}]', "expected to be a list"),
+        ('[{"id": "a", "transport": "sse", "server_url": "url", "headers": []}]', "headers property"),
+        ('[{"id": "a", "transport": "sse", "server_url": "url", "plugins": "all"}]', "plugins property"),
+        ('[{"id": "a", "transport": "sse", "server_url": "url", "timeoutSeconds": -1}]', "positive integer"),
+        ('[{"id": "a", "transport": "sse", "server_url": "url", "allowed_tools": "all"}]', "allowed_tools property"),
+    ],
+)
+def test_mcp_config_rejects_remaining_invalid_connection_shapes(payload, message):
+    manager = ConfigManager()
+    with pytest.raises(ValueError, match=message):
+        manager._get_mcp_config("bedrock", {}, {"mcp_enabled": True, "mcp_conns": payload})
+
+
+def test_report_refinement_cycles_and_compatibility_helpers_cover_invalid_inputs(monkeypatch):
+    assert get_report_refinement_cycles(SimpleNamespace(getenv_int=lambda *_args: True)) == 2
+    assert get_report_refinement_cycles(SimpleNamespace(getenv_int=lambda *_args: -3)) == 0
+    assert get_report_refinement_cycles(SimpleNamespace(getenv_int=Mock(side_effect=RuntimeError))) == 2
+
+    import modules.config.manager as manager_module
+
+    sentinel = SimpleNamespace(get_ollama_host=lambda: "host")
+    monkeypatch.setattr(manager_module, "get_config_manager", lambda: sentinel)
+    assert get_ollama_host() == "host"
+    assert get_ollama_host(SimpleNamespace(get=lambda *_args: "direct")) == "direct"
+
+
+def test_environment_overrides_update_all_configured_models(monkeypatch):
+    manager = ConfigManager()
+    monkeypatch.setenv("CYBER_AGENT_LLM_MODEL", "replacement")
+    monkeypatch.setenv("CYBER_AGENT_TEMPERATURE", "0.25")
+    monkeypatch.setenv("CYBER_AGENT_TOP_P", "0.75")
+    monkeypatch.setenv("MAX_TOKENS", "123")
+    monkeypatch.setenv("CYBER_AGENT_EMBEDDING_MODEL", "embedding-replacement")
+    monkeypatch.setenv("CYBER_AGENT_EVALUATION_MODEL", "evaluation-replacement")
+    monkeypatch.setenv("CYBER_AGENT_SWARM_MODEL", "swarm-replacement")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+
+    defaults = manager._default_configs["bedrock"]
+    updated = manager._apply_environment_overrides("bedrock", defaults)
+    assert updated["llm"].model_id == "replacement"
+    assert updated["llm"].temperature == 0.25
+    assert updated["llm"].top_p == 0.75
+    assert updated["llm"].max_tokens == 123
+    assert updated["embedding"].model_id == "embedding-replacement"
+    assert updated["evaluation_llm"].model_id == "evaluation-replacement"
+    assert updated["swarm_llm"].model_id == "swarm-replacement"
+    assert updated["region"] == "eu-west-1"
+    assert updated["memory_llm"].aws_region == "eu-west-1"
+
+
+def test_server_model_override_handles_ollama_embedding_fallbacks(monkeypatch):
+    import modules.config.manager as manager_module
+
+    manager = ConfigManager()
+    monkeypatch.setattr(manager.env, "has_changed", lambda: False)
+    monkeypatch.setattr(manager, "get_ollama_host", lambda: "http://ollama")
+    monkeypatch.setattr(manager_module.ollama, "Client", lambda **_kwargs: SimpleNamespace(
+        list=lambda: {"models": [{"model": "llama"}]}
+    ))
+    config = manager.get_server_config("ollama", model_id="chosen")
+    assert config.llm.model_id == "chosen"
+    assert config.embedding.model_id == "chosen"
+
+    manager._config_cache.clear()
+    monkeypatch.setattr(manager_module.ollama, "Client", Mock(side_effect=RuntimeError("down")))
+    config = manager.get_server_config("ollama", model_id="chosen-again")
+    assert config.embedding.model_id == "chosen-again"
+
+
+def test_safe_token_swarm_and_rate_limit_helpers_cover_default_paths(monkeypatch):
+    manager = ConfigManager()
+    manager.models_client = None
+    manager.get_safe_max_tokens.cache_clear()
+    assert manager.get_safe_max_tokens("unavailable", buffer=2) == 4096
+
+    manager.models_client = SimpleNamespace(get_model_info=lambda _model: SimpleNamespace(
+        limits=SimpleNamespace(output=8000, context=12000),
+        capabilities=SimpleNamespace(reasoning=True),
+    ))
+    manager.get_max_tokens = lambda *_args, **_kwargs: 6000
+    manager.get_safe_max_tokens.cache_clear()
+    assert manager.get_safe_max_tokens("available", buffer=0.5) == 3000
+
+    defaults = manager._default_configs["bedrock"]
+    manager.get_safe_max_tokens = lambda _model: 4321
+    monkeypatch.setattr(manager, "getenv_int", lambda key, default=0: 99 if key == "CYBER_AGENT_SWARM_MAX_TOKENS" else default)
+    assert manager._get_swarm_llm_config("bedrock", defaults).max_tokens == 99
+
+    manager.get_rate_limit_config.cache_clear()
+    manager.get_provider = lambda: "ollama"
+    monkeypatch.setattr(manager, "getenv_float", lambda _key, default=0.0: 1.0)
+    monkeypatch.setattr(manager, "getenv_int", lambda _key, default=0: 0)
+    assert manager.get_rate_limit_config().max_concurrent == 1
+
+    manager.get_rate_limit_config.cache_clear()
+    assert manager.get_rate_limit_config("bedrock").max_concurrent == 0

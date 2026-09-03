@@ -1,25 +1,25 @@
 import asyncio
+import contextlib
+import functools
+import ipaddress
+import json
+import logging
+import os
 import socket
 import sys
+import tempfile
 import threading
+import time
+import uuid
+from collections import deque
+from datetime import UTC
+from http import HTTPStatus
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-import functools
-import ipaddress
-import logging
-import os
-import tempfile
-import time
-import uuid
-from typing import Optional, Dict, List, Any, Set, Deque, Union
-from collections import deque
-
 import validators
 from pydantic import BaseModel, Field, ValidationError
-import json
-from http import HTTPStatus
-
 from strands import tool
 
 from modules.handlers import b64
@@ -39,38 +39,38 @@ def _get_config_manager():
 
 class Endpoints(BaseModel):
     # Optional fields to support heterogeneous providers
-    dns: Optional[str] = None
-    http: Optional[str] = None
-    https: Optional[str] = None
-    smtp: Optional[str] = None
-    smtp_domain: Optional[str] = None
-    ldap: Optional[str] = None
+    dns: str | None = None
+    http: str | None = None
+    https: str | None = None
+    smtp: str | None = None
+    smtp_domain: str | None = None
+    ldap: str | None = None
     # provider-specific extras
-    extras: Dict[str, str] = Field(default_factory=dict)
+    extras: dict[str, str] = Field(default_factory=dict)
 
 
 class PollOutput(BaseModel):
-    interactions: List[Dict[str, Any]] = Field(default_factory=list)
+    interactions: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class HealthOutput(BaseModel):
     status: str = Field(description='"ok" if provider is reachable, "error" otherwise')
-    detail: Optional[str] = Field(None, description="Optional error message")
+    detail: str | None = Field(None, description="Optional error message")
 
 
 class HttpRequestMatch(BaseModel):
     """Match criteria for an inbound HTTP request."""
 
-    scheme: Optional[str] = Field(None, description='Optional scheme filter: "http" or "https"')
-    method: Optional[str] = Field(None, description='Optional HTTP method filter, e.g. "GET"')
-    target: Optional[str] = Field(
+    scheme: str | None = Field(None, description='Optional scheme filter: "http" or "https"')
+    method: str | None = Field(None, description='Optional HTTP method filter, e.g. "GET"')
+    target: str | None = Field(
         None,
         description=(
             "Optional exact match for the request target/path, e.g. '/cb' or '/cb?x=1'. "
             "For webhook.site this is matched as a substring of the full request URL."
         ),
     )
-    target_prefix: Optional[str] = Field(
+    target_prefix: str | None = Field(
         None,
         description=(
             "Optional prefix match for the request target/path, e.g. '/api/'. "
@@ -85,33 +85,31 @@ class HttpRequestMatch(BaseModel):
             return False
         if self.target is not None and self.target != target:
             return False
-        if self.target_prefix is not None and not (target or "").startswith(self.target_prefix):
-            return False
-        return True
+        return not (self.target_prefix is not None and not (target or "").startswith(self.target_prefix))
 
 
 class HttpResponseSpec(BaseModel):
     """HTTP response to return when a match is found."""
 
     status: int = Field(200, description="HTTP status code")
-    headers: Dict[str, str] = Field(default_factory=dict, description="Response headers")
-    body: Optional[str] = Field(None, description="Response body as UTF-8 text")
+    headers: dict[str, str] = Field(default_factory=dict, description="Response headers")
+    body: str | None = Field(None, description="Response body as UTF-8 text")
 
 
 class RegisterHttpResponseInput(BaseModel):
-    scheme: Optional[str] = Field(None, description='Optional scheme filter: "http" or "https"')
+    scheme: str | None = Field(None, description='Optional scheme filter: "http" or "https"')
     match: HttpRequestMatch
     response: HttpResponseSpec
 
 
 class ClearHttpResponsesInput(BaseModel):
-    scheme: Optional[str] = Field(None, description='Optional scheme filter: "http" or "https"')
+    scheme: str | None = Field(None, description='Optional scheme filter: "http" or "https"')
 
 
 class OASTProvider:
     def __init__(self):
         self.inited = False
-        self.seen_ids: Set[str] = set()
+        self.seen_ids: set[str] = set()
 
     def _check_inited(self):
         if not self.inited:
@@ -128,10 +126,10 @@ class OASTProvider:
     async def deregister(self) -> None: ...
 
     async def register_http_response(self, match: HttpRequestMatch, response: HttpResponseSpec,
-                                     scheme: Optional[str] = None) -> None:
+                                     scheme: str | None = None) -> None:
         raise NotImplementedError(f"{self.name} does not support registering HTTP responses")
 
-    async def clear_http_responses(self, scheme: Optional[str] = None) -> None:
+    async def clear_http_responses(self, scheme: str | None = None) -> None:
         # default no-op for providers that don't support it
         return
 
@@ -140,8 +138,8 @@ class WebhookSiteProvider(OASTProvider):
     def __init__(self):
         super().__init__()
         self.webhook_token_id = None
-        self._response_rules: List[RegisterHttpResponseInput] = []
-        self._response_action_id: Optional[str] = None
+        self._response_rules: list[RegisterHttpResponseInput] = []
+        self._response_action_id: str | None = None
 
         config_manager = _get_config_manager()
         self._headers = {"Accept": "application/json", "Content-Type": "application/json"}
@@ -152,7 +150,7 @@ class WebhookSiteProvider(OASTProvider):
     def _ws_rule_to_script_if(self, tid: str, rule: RegisterHttpResponseInput) -> str:
         """Generate a WebhookScript if-block for a single rule."""
         # request.method and request.url are available runtime variables.
-        parts: List[str] = []
+        parts: list[str] = []
 
         # scheme check based on request.url prefix
         if rule.scheme:
@@ -237,7 +235,7 @@ class WebhookSiteProvider(OASTProvider):
                 r.raise_for_status()
 
     async def register_http_response(self, match: HttpRequestMatch, response: HttpResponseSpec,
-                                     scheme: Optional[str] = None) -> None:
+                                     scheme: str | None = None) -> None:
         # Ensure token exists, then install/update WebhookScript action.
         if not self.inited:
             await self.init()
@@ -246,7 +244,7 @@ class WebhookSiteProvider(OASTProvider):
         self._response_rules.append(rule)
         await self._sync_custom_response_action()
 
-    async def clear_http_responses(self, scheme: Optional[str] = None) -> None:
+    async def clear_http_responses(self, scheme: str | None = None) -> None:
         # Clear locally and remove the Custom Action from the token if present.
         if scheme:
             self._response_rules = [r for r in self._response_rules if (r.scheme or "").lower() != scheme.lower()]
@@ -258,14 +256,12 @@ class WebhookSiteProvider(OASTProvider):
         tid = self.webhook_token_id
         if tid and self._response_action_id:
             async with httpx.AsyncClient() as client:
-                try:
+                with contextlib.suppress(Exception):
                     await client.delete(
                         f"https://webhook.site/token/{tid}/actions/{self._response_action_id}",
                         headers=self._headers,
                         timeout=20,
                     )
-                except Exception:
-                    pass
         self._response_action_id = None
 
     async def health(self) -> HealthOutput:
@@ -314,7 +310,7 @@ class WebhookSiteProvider(OASTProvider):
         r.raise_for_status()
         data = r.json() or {}
         items = data.get("data") or []
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         seen: set[str] = self.seen_ids
         for it in items:
             uid = it.get("uuid")
@@ -357,20 +353,20 @@ class LocalListenerOASTProvider(OASTProvider):
         self._ip = ipaddress.ip_address(bind_addr)
 
         self._bind_addr = bind_addr
-        self._endpoints: Optional[Endpoints] = None
+        self._endpoints: Endpoints | None = None
 
-        self._http_server: Optional[asyncio.AbstractServer] = None
-        self._https_server: Optional[asyncio.AbstractServer] = None
+        self._http_server: asyncio.AbstractServer | None = None
+        self._https_server: asyncio.AbstractServer | None = None
 
         self._lock = asyncio.Lock()
-        self._events: Deque[Dict[str, Any]] = deque()
-        self._response_rules: List[RegisterHttpResponseInput] = []
+        self._events: deque[dict[str, Any]] = deque()
+        self._response_rules: list[RegisterHttpResponseInput] = []
 
-        self._tmpdir: Optional[str] = None
-        self._cert_path: Optional[str] = None
-        self._key_path: Optional[str] = None
+        self._tmpdir: str | None = None
+        self._cert_path: str | None = None
+        self._key_path: str | None = None
 
-    def _select_registered_response(self, scheme: str, req: Dict[str, Any]) -> Optional[HttpResponseSpec]:
+    def _select_registered_response(self, scheme: str, req: dict[str, Any]) -> HttpResponseSpec | None:
         method = (req.get("method") or "").upper()
         target = req.get("target") or ""
         for rule in self._response_rules:
@@ -380,12 +376,12 @@ class LocalListenerOASTProvider(OASTProvider):
                 return rule.response
         return None
 
-    def _format_http_response(self, spec: Optional[HttpResponseSpec]) -> bytes:
+    def _format_http_response(self, spec: HttpResponseSpec | None) -> bytes:
         # default response
         if spec is None:
             body = b"ok\n"
             status = 200
-            hdrs: Dict[str, str] = {"Content-Type": "text/plain; charset=utf-8"}
+            hdrs: dict[str, str] = {"Content-Type": "text/plain; charset=utf-8"}
         else:
             status = int(spec.status or 200)
             body = (spec.body or "").encode("utf-8")
@@ -405,7 +401,7 @@ class LocalListenerOASTProvider(OASTProvider):
 
         head = f"HTTP/1.1 {status} {reason}\r\n".encode("ascii")
         for k, v in headers_out.items():
-            head += f"{k}: {v}\r\n".encode("utf-8")
+            head += f"{k}: {v}\r\n".encode()
         head += b"\r\n"
         return head + body
 
@@ -427,10 +423,10 @@ class LocalListenerOASTProvider(OASTProvider):
             self._endpoints = self._build_endpoints()
             self.inited = True
             return self._endpoints
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to init %s", self.name)
             await self.deregister()
-            raise e
+            raise
 
     async def endpoints(self) -> Endpoints:
         self._check_inited()
@@ -441,7 +437,7 @@ class LocalListenerOASTProvider(OASTProvider):
         self._check_inited()
 
         async with self._lock:
-            out: List[Dict[str, Any]] = []
+            out: list[dict[str, Any]] = []
             for ev in list(self._events):
                 ev_id = ev.get("id")
                 if not ev_id:
@@ -551,19 +547,17 @@ class LocalListenerOASTProvider(OASTProvider):
         except Exception as e:
             logger.debug("Client handler error (%s): %s", scheme, e)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 writer.close()
-            except Exception:
-                pass
 
     async def register_http_response(self, match: HttpRequestMatch, response: HttpResponseSpec,
-                                     scheme: Optional[str] = None) -> None:
+                                     scheme: str | None = None) -> None:
         # Can be called before or after init.
         rule = RegisterHttpResponseInput(scheme=scheme, match=match, response=response)
         async with self._lock:
             self._response_rules.append(rule)
 
-    async def clear_http_responses(self, scheme: Optional[str] = None) -> None:
+    async def clear_http_responses(self, scheme: str | None = None) -> None:
         async with self._lock:
             if scheme:
                 self._response_rules = [r for r in self._response_rules if (r.scheme or "").lower() != scheme.lower()]
@@ -574,7 +568,7 @@ class LocalListenerOASTProvider(OASTProvider):
     # Tool functions
     # ---------------------------
 
-    async def _read_http_request(self, reader: asyncio.StreamReader) -> Dict[str, Any]:
+    async def _read_http_request(self, reader: asyncio.StreamReader) -> dict[str, Any]:
         # Read headers
         head = await reader.readuntil(b"\r\n\r\n")
         head_text = head.decode("iso-8859-1", errors="replace")
@@ -588,7 +582,7 @@ class LocalListenerOASTProvider(OASTProvider):
         method, target, version = parts[0], parts[1], parts[2]
 
         # Headers
-        headers: Dict[str, str] = {}
+        headers: dict[str, str] = {}
         for line in lines[1:]:
             if not line:
                 continue
@@ -642,7 +636,7 @@ class LocalListenerOASTProvider(OASTProvider):
 
     def _try_generate_with_cryptography(self, cert_path: str, key_path: str) -> bool:
         try:
-            from datetime import datetime, timedelta, timezone
+            from datetime import datetime, timedelta
 
             from cryptography import x509
             from cryptography.hazmat.primitives import hashes, serialization
@@ -665,7 +659,7 @@ class LocalListenerOASTProvider(OASTProvider):
             san_ips = {ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1"), self._ip}
             san = x509.SubjectAlternativeName([x509.IPAddress(ip) for ip in sorted(san_ips, key=str)])
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             cert = (
                 x509.CertificateBuilder()
                 .subject_name(subject)
@@ -727,11 +721,11 @@ class LocalListenerOASTProvider(OASTProvider):
 
 
 _OAST_LOCK = threading.Lock()
-_OAST_PROVIDERS: Dict[str, OASTProvider] = {}
+_OAST_PROVIDERS: dict[str, OASTProvider] = {}
 
 _TARGET_VALIDATION_ERROR = "target IP address or FQDN is required"
 
-def get_oast_provider(target: Optional[str] = None) -> OASTProvider:
+def get_oast_provider(target: str | None = None) -> OASTProvider:
     if not target:
         raise ValueError(_TARGET_VALIDATION_ERROR)
 
@@ -749,10 +743,7 @@ def get_oast_provider(target: Optional[str] = None) -> OASTProvider:
             # URL given
             validators.url(target, skip_ipv4_addr=False, skip_ipv6_addr=False, simple_host=True, strict_query=False,
                            consider_tld=False)
-            if "://" in target:
-                url_parsed = urlparse(target)
-            else:
-                url_parsed = urlparse("http://" + target)
+            url_parsed = urlparse(target) if "://" in target else urlparse("http://" + target)
             if url_parsed.hostname:
                 target = url_parsed.hostname
         except ValidationError:
@@ -794,10 +785,7 @@ def get_oast_provider(target: Optional[str] = None) -> OASTProvider:
     with _OAST_LOCK:
         if bind_target in _OAST_PROVIDERS:
             return _OAST_PROVIDERS.get(bind_target)
-        if bind_target == "global":
-            provider = WebhookSiteProvider()
-        else:
-            provider = LocalListenerOASTProvider(bind_target)
+        provider = WebhookSiteProvider() if bind_target == "global" else LocalListenerOASTProvider(bind_target)
         _OAST_PROVIDERS[bind_target] = provider
         return provider
 
@@ -861,10 +849,7 @@ async def oast_poll(
         sleep_time = min(time_step, time_end - time.time())
         if sleep_time <= 0:
             break
-        if sleep_time < time_step:
-            last_check = True
-        else:
-            last_check = False
+        last_check = sleep_time < time_step
         await asyncio.sleep(sleep_time)
     logger.info("oast_poll returned 0 interactions")
     return PollOutput()
@@ -873,7 +858,7 @@ async def oast_poll(
 @tool
 async def oast_register_http_response(
         target: str,
-        inp: Union[str, RegisterHttpResponseInput]
+        inp: str | RegisterHttpResponseInput
 ) -> None:
     """
     Register a dynamic HTTP/HTTPS response for the OAST endpoint.
@@ -895,7 +880,7 @@ async def oast_register_http_response(
 @tool
 async def oast_clear_http_responses(
         target: str,
-        inp: Optional[Union[str, ClearHttpResponsesInput]] = ClearHttpResponsesInput()
+        inp: str | ClearHttpResponsesInput | None = ClearHttpResponsesInput()
 ) -> None:
     """
     Clear any registered dynamic OAST HTTP/HTTPS responses for this target.

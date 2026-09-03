@@ -7,14 +7,15 @@ the operation.
 from __future__ import annotations
 
 import asyncio
-import httpx
-import logging
-from datetime import datetime
-import time
-import threading
 import json
+import logging
+import threading
+import time
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any, TypeVar
 
-from typing import Any, Optional, Type, TypeVar, Callable, Dict, List
+import httpx
 
 from modules.config.models.factory import get_model_id_from_model
 from modules.config.types import RateLimitConfig
@@ -236,7 +237,7 @@ class ThreadSafeRateLimiter:
 
 def _batch_messages_to_strands_messages(
         batch_messages: Any,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     LangChain ChatModel.generate/agenerate signature typically uses:
       generate(messages: list[list[BaseMessage]], ...)
@@ -278,7 +279,7 @@ _ORIG_STREAM_ATTR = "_rl_orig_stream"
 _ORIG_STRUCT_ATTR = "_rl_orig_structured_output"
 
 
-def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimiter) -> None:
+def patch_model_provider_class(model_cls: type[Any], limiter: ThreadSafeRateLimiter) -> None:
     """
     Monkey-patches model_cls.stream and model_cls.structured_output (if present),
     preserving originals on the class.
@@ -299,7 +300,7 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
             self,
             messages,
             tool_specs=None,
-            system_prompt: Optional[str] = None,
+            system_prompt: str | None = None,
             *,
             tool_choice=None,
             system_prompt_content=None,
@@ -351,9 +352,9 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
 
         async def structured_output(
                 self,
-                output_model: Type[T],
+                output_model: type[T],
                 prompt,
-                system_prompt: Optional[str] = None,
+                system_prompt: str | None = None,
                 **kwargs: Any,
         ):
             token_cost = estimate_prompt_tokens(
@@ -381,7 +382,7 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
         model_cls.structured_output = structured_output  # type: ignore[assignment]
 
 
-def unpatch_model_provider_class(model_cls: Type[Any]) -> None:
+def unpatch_model_provider_class(model_cls: type[Any]) -> None:
     if hasattr(model_cls, _ORIG_STREAM_ATTR):
         model_cls.stream = getattr(model_cls, _ORIG_STREAM_ATTR)  # type: ignore[assignment]
         delattr(model_cls, _ORIG_STREAM_ATTR)
@@ -399,14 +400,14 @@ _ORIG_GENERATE_ATTR = "_rl_orig_generate"
 _ORIG_AGENERATE_ATTR = "_rl_orig_agenerate"
 
 
-def patch_langchain_chat_class_generate(model_cls: Type[Any], limiter: ThreadSafeRateLimiter) -> None:
+def patch_langchain_chat_class_generate(model_cls: type[Any], limiter: ThreadSafeRateLimiter) -> None:
     """
     Monkey-patch LangChain chat model classes (ChatLiteLLM, ChatOllama, ChatBedrock, etc.)
     at the CLASS level, rate-limiting generate/agenerate.
     """
 
     # ---- generate (sync) ----
-    if hasattr(model_cls, "generate") and callable(getattr(model_cls, "generate")):
+    if hasattr(model_cls, "generate") and callable(model_cls.generate):
         if not hasattr(model_cls, _ORIG_GENERATE_ATTR):
             logger.info(
                 "Rate limit: Applying LangChain generate rate limit to %s: %s",
@@ -438,7 +439,7 @@ def patch_langchain_chat_class_generate(model_cls: Type[Any], limiter: ThreadSaf
         logger.warning("Rate limit: %s has no generate() to patch", model_cls)
 
     # ---- agenerate (async) ----
-    if hasattr(model_cls, "agenerate") and callable(getattr(model_cls, "agenerate")):
+    if hasattr(model_cls, "agenerate") and callable(model_cls.agenerate):
         if not hasattr(model_cls, _ORIG_AGENERATE_ATTR):
             logger.info(
                 "Rate limit: Applying LangChain agenerate rate limit to %s: %s",
@@ -473,7 +474,7 @@ def patch_langchain_chat_class_generate(model_cls: Type[Any], limiter: ThreadSaf
         logger.warning("Rate limit: %s has no agenerate() to patch", model_cls)
 
 
-def unpatch_langchain_chat_class_generate(model_cls: Type[Any]) -> None:
+def unpatch_langchain_chat_class_generate(model_cls: type[Any]) -> None:
     if hasattr(model_cls, _ORIG_GENERATE_ATTR):
         model_cls.generate = getattr(model_cls, _ORIG_GENERATE_ATTR)  # type: ignore[assignment]
         delattr(model_cls, _ORIG_GENERATE_ATTR)

@@ -157,6 +157,8 @@ Event types handled by interface:
 - `reasoning`: Agent decision-making context
 - `progress_update`: Progress boundary; `step` is internal sequence metadata, `progressPercent` is budget usage, and
   optional `health` supplies a compact colored workflow-health score and band in the stream and persistent footer
+- `plan_validation`: Plan draft and critic-validation telemetry with cycle/stage/outcome and bounded feedback
+  summaries; prompts, drafts, and raw model responses are excluded
 - `metrics_update`: Token usage, costs and budget usage
 
 Typed memory tools are rendered according to their purpose. `store_finding` is shown as a candidate awaiting

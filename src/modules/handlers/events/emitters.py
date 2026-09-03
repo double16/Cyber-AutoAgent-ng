@@ -5,7 +5,7 @@ import json
 import os
 from collections import deque
 from datetime import datetime
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Protocol
 
 DEDUP_EVENT_TYPES = (
     "tool_start",
@@ -19,7 +19,7 @@ DEDUP_EVENT_TYPES = (
 class EventEmitter(Protocol):
     """Protocol for event emitters - minimal interface."""
 
-    def emit(self, event: Dict[str, Any]) -> None:
+    def emit(self, event: dict[str, Any]) -> None:
         """Emit an event to the configured transport."""
         ...
 
@@ -31,7 +31,7 @@ class StdoutEventEmitter:
     adding intelligent deduplication to prevent duplicate events.
     """
 
-    def __init__(self, operation_id: Optional[str] = None):
+    def __init__(self, operation_id: str | None = None):
         """Initialize emitter with deduplication tracking.
 
         Args:
@@ -45,7 +45,7 @@ class StdoutEventEmitter:
         self._last_output_content = None
         self._last_output_time = None
 
-    def emit(self, event: Dict[str, Any]) -> None:
+    def emit(self, event: dict[str, Any]) -> None:
         """Emit event with deduplication and ID tracking.
 
         Args:
@@ -146,7 +146,7 @@ class StdoutEventEmitter:
         if event_type not in DEDUP_EVENT_TYPES:
             self._recent_signatures.append(self._create_signature(event))
 
-    def _clean_event_for_json(self, event: Dict[str, Any]) -> Dict[str, Any]:
+    def _clean_event_for_json(self, event: dict[str, Any]) -> dict[str, Any]:
         """Clean event data to ensure JSON serialization succeeds.
 
         Recursively processes the event dictionary to handle problematic
@@ -167,9 +167,7 @@ class StdoutEventEmitter:
                 return value
             elif isinstance(value, dict):
                 return {k: clean_value(v) for k, v in value.items()}
-            elif isinstance(value, list):
-                return [clean_value(item) for item in value]
-            elif isinstance(value, tuple):
+            elif isinstance(value, (list, tuple)):
                 return [clean_value(item) for item in value]
             elif hasattr(value, "__dict__"):
                 # Try to convert objects to dict
@@ -181,7 +179,7 @@ class StdoutEventEmitter:
         # Create a deep copy to avoid modifying the original
         return clean_value(event)
 
-    def _create_signature(self, event: Dict[str, Any]) -> str:
+    def _create_signature(self, event: dict[str, Any]) -> str:
         """Create a signature for event deduplication.
 
         Excludes timestamp, id, and other volatile fields.
@@ -232,7 +230,7 @@ class StdoutEventEmitter:
 
 
 def get_emitter(
-    transport: str = None, operation_id: Optional[str] = None
+    transport: str | None = None, operation_id: str | None = None
 ) -> EventEmitter:
     """Factory function to get the appropriate emitter.
 

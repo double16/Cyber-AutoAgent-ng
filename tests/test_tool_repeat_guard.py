@@ -8,6 +8,7 @@ from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent
 from strands.types._events import ToolResultEvent
 from strands.types.tools import AgentTool
 
+from modules.handlers.tool_recovery import TaskFailureRecoveryHook, ToolOutcomeJournal
 from modules.handlers.tool_repeat_guard import (
     DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
     DEFAULT_TOOL_REPEAT_THRESHOLD,
@@ -16,7 +17,6 @@ from modules.handlers.tool_repeat_guard import (
     normalize_tool_repeat_max_cycle_length,
     normalize_tool_repeat_threshold,
 )
-from modules.handlers.tool_recovery import TaskFailureRecoveryHook, ToolOutcomeJournal
 
 
 class FakeTool(AgentTool):

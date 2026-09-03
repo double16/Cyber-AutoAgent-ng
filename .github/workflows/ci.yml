@@ -12,10 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.12', '3.13']
+        python-version: ['3.12', '3.13', '3.14']
     
     steps:
     - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
     
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v7
@@ -44,12 +46,16 @@ jobs:
         PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run pylint src/ --score=y | grep "Your code has been rated"
     
     - name: Run Tests
+      env:
+        COVERAGE_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
       run: |
         export PATH="$HOME/.local/bin:$PATH"
         export PYTHONPATH="${PWD}/src:${PYTHONPATH}"
         set +e
         PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run pytest tests/ -v \
           --cov=src \
+          --cov-branch \
+          --cov-fail-under=80 \
           --cov-report=term-missing \
           --cov-report=xml \
           --cov-report=html \
@@ -58,7 +64,8 @@ jobs:
         set -e
         coverage_status=0
         if [ -f coverage.json ]; then
-          PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run python .github/scripts/check-python-coverage-floor.py coverage.json --min 65 || coverage_status=$?
+          PYTHONPATH="${PWD}/src:${PYTHONPATH}" uv run python .github/scripts/check-python-coverage-floor.py \
+            coverage.json --min 80 --branch-min 80 --changed-from "$COVERAGE_BASE_SHA" || coverage_status=$?
         else
           echo "coverage.json was not generated."
           coverage_status=1

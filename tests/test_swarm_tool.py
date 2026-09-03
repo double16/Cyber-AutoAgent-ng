@@ -1,11 +1,11 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch, Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
-import modules.tools.swarm as swarm_mod
 import modules.agents.factory as agent_factory_mod
+import modules.tools.swarm as swarm_mod
 
 
 class FakeSwarm:
@@ -31,7 +31,8 @@ class _FakeAgent:
         _FakeAgent.instances.append(self)
 
 
-_AGENT_FACTORY = lambda **kwargs: _FakeAgent(**kwargs)
+def _AGENT_FACTORY(**kwargs):
+    return _FakeAgent(**kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -249,7 +250,40 @@ def test_swarm_creates_custom_agents_and_error_paths(monkeypatch):
     assert created[0]["name"] == "Recon"
 
     monkeypatch.setattr(swarm_mod, "_create_custom_agents", Mock(side_effect=RuntimeError("boom")))
-    setattr(swarm_mod.swarm, "agent_factory", FakeAgent)
+    swarm_mod.swarm.agent_factory = FakeAgent
     result = swarm_mod.swarm(task="do it", agents=[{"name": "a"}])
     assert result["status"] == "error"
     assert "boom" in result["content"][0]["text"]
+
+
+def test_create_custom_agents_validates_specs_deduplicates_names_and_filters_parent_tools():
+    created = []
+
+    def factory(**kwargs):
+        created.append(kwargs)
+        return SimpleNamespace(cleanup=lambda: None)
+
+    parent = SimpleNamespace(
+        system_prompt="Parent instructions",
+        tool_registry=SimpleNamespace(registry={"shell": "shell-tool", "known": "known-tool"}),
+    )
+    specs = [
+        {"name": "worker", "tools": ["known", "missing"]},
+        {"name": "worker", "system_prompt": "Own instructions", "inherit_parent_prompt": True, "tools": []},
+    ]
+
+    agents = swarm_mod._create_custom_agents(factory, specs, parent)
+
+    assert len(agents) == 2
+    assert [item["name"] for item in created] == ["worker", "worker_1"]
+    assert created[0]["tools"] == ["known-tool", "shell-tool"]
+    assert "Parent instructions" in created[0]["system_prompt"]
+    assert created[1]["tools"] == ["shell-tool"]
+    assert created[1]["system_prompt"].startswith("Own instructions")
+    assert "Parent instructions" in created[1]["system_prompt"]
+
+
+@pytest.mark.parametrize("specs", [[], ["not-a-mapping"]])
+def test_create_custom_agents_rejects_empty_and_invalid_specs(specs):
+    with pytest.raises(ValueError):
+        swarm_mod._create_custom_agents(lambda **kwargs: kwargs, specs)

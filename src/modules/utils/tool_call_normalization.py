@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import re
+from collections.abc import Collection
 from dataclasses import dataclass
-from typing import Any, Collection
+from typing import Any
 
 from modules.utils.json_repair import parse_json_response
 
@@ -14,6 +17,45 @@ class NormalizedToolCall:
 
     name: str
     arguments: dict[str, Any]
+
+
+_ATEM_TRAILING_ENVELOPE_RE = re.compile(
+    r"^</atem:invoke>(?:\s*<atem:parameter\b[^>]*>.*)?$", re.DOTALL
+)
+
+
+def repair_model_response_tool_input(payload: Any) -> tuple[Any, tuple[str, ...]]:
+    """Repair JSON values contaminated by a known trailing model tool envelope.
+
+    Some model responses serialize a tool argument as JSON and then append an
+    ``atem`` envelope to that same value. Only a complete leading JSON object or
+    array followed exclusively by that known envelope is accepted. Other malformed
+    values remain unchanged for normal tool-schema validation.
+    """
+
+    if not isinstance(payload, dict):
+        return payload, ()
+
+    repaired = dict(payload)
+    repaired_fields: list[str] = []
+    decoder = json.JSONDecoder()
+    for field_name, value in payload.items():
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if not text.startswith(("{", "[")):
+            continue
+        try:
+            parsed, end = decoder.raw_decode(text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, (dict, list)):
+            continue
+        if not _ATEM_TRAILING_ENVELOPE_RE.fullmatch(text[end:].strip()):
+            continue
+        repaired[field_name] = parsed
+        repaired_fields.append(field_name)
+    return repaired, tuple(repaired_fields)
 
 
 def normalize_tool_call_payload(

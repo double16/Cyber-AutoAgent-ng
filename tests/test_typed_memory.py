@@ -6,23 +6,176 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.modules.tools import memory as mod
 from src.modules.handlers.utils import get_tool_spec
+from src.modules.tools import memory as mod
 from src.modules.tools.memory import (
     AcceptanceBasis,
     AcceptanceContract,
     AcceptanceCriterion,
     EvidenceRequirement,
     Task,
+    TaskProposalRepairGuard,
     finalize_finding_validation,
     finalize_objective_validation,
     record_finding_validation,
     record_objective_validation,
     store_finding,
     store_knowledge,
-    store_observation,
     store_objective_candidate,
+    store_observation,
 )
+
+
+def test_plan_phase_normalizes_legacy_finding_dependency_to_creation_mode():
+    phase = mod.PlanPhase.from_obj({
+        "id": 1,
+        "title": "Candidate follow-up",
+        "status": "pending",
+        "requires_finding_candidates": True,
+    })
+
+    assert phase.task_creation_mode == "finding_dependent"
+    assert phase.to_dict()["task_creation_mode"] == "finding_dependent"
+
+
+def test_plan_phase_rejects_unknown_task_creation_mode():
+    with pytest.raises(ValueError, match="task_creation_mode must be one of"):
+        mod.PlanPhase(id=1, title="Invalid", status="pending", task_creation_mode="invented")
+
+
+@pytest.mark.parametrize(
+    ("current_phase", "phase_modes", "expected_phase"),
+    [
+        (1, ["standard", "finding_validation", "finding_dependent"], 2),
+        (1, ["standard", "finding_dependent", "finding_validation"], 1),
+        (2, ["standard", "finding_validation", "finding_dependent"], 2),
+        (3, ["standard", "finding_validation", "finding_dependent"], 3),
+        (2, ["standard", "finding_validation", "standard", "finding_dependent"], 2),
+        (2, ["finding_validation", "standard", "finding_validation"], 2),
+        (1, ["standard", "finding_dependent"], 1),
+    ],
+)
+def test_finding_validation_task_phase_uses_planned_validation_owner(
+    current_phase, phase_modes, expected_phase
+):
+    phases = [
+        mod.PlanPhase(id=index, title=f"Phase {index}", status="pending", task_creation_mode=mode)
+        for index, mode in enumerate(phase_modes, start=1)
+    ]
+    plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=current_phase,
+        total_phases=len(phases),
+        phases=phases,
+    )
+
+    assert mod._finding_validation_task_phase(plan, current_phase) == expected_phase
+
+
+def test_finding_validation_task_phase_keeps_current_phase_without_matching_plan_context():
+    assert mod._finding_validation_task_phase(None, 3) == 3
+
+    plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Finding validation", status="active")],
+    )
+
+    assert mod._finding_validation_task_phase(plan, 99) == 99
+
+
+def test_task_proposal_repair_guard_restores_individually_valid_proposals():
+    guard = TaskProposalRepairGuard()
+    guard.capture([
+        {
+            "title": "Valid mapping",
+            "objective": "Map one bounded target",
+            "methods": ["crawl"],
+            "limits": {"max_requests": 5},
+            "criteria": [{"description": "Store a finite inventory"}],
+        },
+        {"title": "Broken"},
+    ])
+    rewritten = mod.TaskProposal.model_validate({
+        "title": "Rewritten mapping",
+        "objective": "Changed objective",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 9},
+        "criteria": [{"description": "Changed criterion"}],
+    })
+    repaired = mod.TaskProposal.model_validate({
+        "title": "Fixed proposal",
+        "objective": "Perform bounded work",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 5},
+        "criteria": [{"description": "Store finite evidence"}],
+    })
+
+    restored = guard.restore([rewritten, repaired])
+
+    assert restored[0].title == "Valid mapping"
+    assert restored[1].title == "Fixed proposal"
+
+
+def test_task_proposal_repair_guard_keeps_prior_valid_slots_across_captures():
+    guard = TaskProposalRepairGuard()
+    original = {
+        "title": "Original valid proposal",
+        "objective": "Map one bounded target",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 5},
+        "criteria": [{"description": "Store a finite inventory"}],
+    }
+    repaired = {
+        "title": "Repaired proposal",
+        "objective": "Perform bounded work",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 5},
+        "criteria": [{"description": "Store finite evidence"}],
+    }
+    guard.capture([original, "invalid proposal"])
+    guard.capture([{**original, "title": "Unwanted rewrite"}, repaired])
+
+    restored = guard.restore([
+        mod.TaskProposal.model_validate({**original, "title": "Another rewrite"}),
+        mod.TaskProposal.model_validate({**repaired, "title": "Later rewrite"}),
+    ])
+
+    assert [proposal.title for proposal in restored] == ["Original valid proposal", "Repaired proposal"]
+
+
+def test_task_proposal_repair_guard_rejects_count_changes():
+    guard = TaskProposalRepairGuard()
+    guard.capture([
+        {
+            "title": "Valid proposal",
+            "objective": "Map one bounded target",
+            "methods": ["crawl"],
+            "limits": {"max_requests": 5},
+            "criteria": [{"description": "Store a finite inventory"}],
+        },
+        "invalid proposal",
+    ])
+
+    with pytest.raises(ValueError, match="preserve the original proposal count and order"):
+        guard.restore([guard.baseline[0]])
+
+
+def test_task_proposal_repair_guard_ignores_malformed_capture_without_valid_slots():
+    guard = TaskProposalRepairGuard()
+    proposal = mod.TaskProposal.model_validate({
+        "title": "Valid proposal",
+        "objective": "Map one bounded target",
+        "methods": ["crawl"],
+        "limits": {"max_requests": 5},
+        "criteria": [{"description": "Store a finite inventory"}],
+    })
+
+    guard.capture({"tasks": []})
+    guard.capture(["invalid proposal"])
+
+    assert guard.restore([proposal]) == [proposal]
 from tests.helpers.acceptance import make_acceptance
 
 
@@ -216,7 +369,7 @@ def test_store_observation_reports_current_root_for_outside_artifact(memory_clie
     memory_client.store_memory.assert_not_called()
 
 
-def test_store_finding_creates_one_linked_same_phase_task(memory_client, operation_ids, tmp_path: Path):
+def test_store_finding_routes_task_to_future_validation_phase(memory_client, operation_ids, tmp_path: Path):
     artifact = tmp_path / "admin-response.txt"
     artifact.write_text("HTTP 200 admin data", encoding="utf-8")
     plan_store = MagicMock()
@@ -230,8 +383,26 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
         status="active",
     )
     plan_store.get_tasks.return_value = [source_task]
+    plan = mod.OperationPlan(
+        objective="Assess",
+        current_phase=3,
+        total_phases=4,
+        phases=[
+            mod.PlanPhase(id=1, title="Discovery", status="done"),
+            mod.PlanPhase(id=2, title="Testing", status="done"),
+            mod.PlanPhase(id=3, title="Candidate discovery", status="active"),
+            mod.PlanPhase(
+                id=4,
+                title="Finding validation",
+                status="pending",
+                task_creation_mode="finding_validation",
+            ),
+        ],
+        targets=[mod.OperationTarget(target_id="target-1", value="https://target", type="network")],
+    )
     with (
         patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_active_plan", return_value=plan),
         patch("src.modules.tools.memory._get_plan_current_phase", return_value=3),
         patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
         patch("src.modules.tools.memory._store_memory_entry") as store_entry,
@@ -254,13 +425,14 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     assert result["status"] == "pending_validation"
     store_entry.assert_called_once()
     task = memory_client.store_task.call_args.kwargs["task"]
-    assert task.phase == 3
+    assert task.phase == 4
     assert task.kind == "finding_validation"
     assert task.reference_id == result["finding_uid"]
     assert result["finding_ref"] == f"finding:{result['finding_uid']}"
     assert result["verification_task_ref"] == f"task:{result['verification_task_uid']}"
     assert task.status == "pending"
-    assert task.target_scope == "all"
+    assert task.target_scope == "subset"
+    assert task.target_ids == ["target-1"]
     candidate = plan_store.store_finding_candidate.call_args.args[3]
     assert "admin data" not in task.objective
     assert candidate["verification_packet"]["observed_result"] == "Admin data was returned"
@@ -276,14 +448,17 @@ def test_store_finding_creates_one_linked_same_phase_task(memory_client, operati
     }]
     assert candidate["verification_packet"] == {
         "version": 1,
+        "finding_uid": result["finding_uid"],
+        "confirmation_guard_catalog_version": 1,
+        "confirmation_requirements": [],
         "source_task": {
             "task_uid": "source-task",
             "title": "Assess admin",
             "objective": "Assess admin authorization",
         },
         "target": "https://target/admin",
-        "target_scope": "all",
-        "target_ids": [],
+        "target_scope": "subset",
+        "target_ids": ["target-1"],
         "claim": "An unauthenticated user can access admin data",
         "technique": "auth_bypass",
         "expected_result": "Unauthenticated request is denied",
@@ -336,6 +511,47 @@ def test_store_finding_persists_internal_task_bound_evidence_receipts(memory_cli
     assert candidate["evidence_receipts"][0].startswith("finding_evidence:")
     stored = plan_store.store_finding_evidence_receipt.call_args.args
     assert stored[2:5] == (task.task_uid, "artifact:response.txt", "admin data")
+
+
+def test_finding_fingerprint_ignores_model_authored_title_variants():
+    first = mod._finding_fingerprint(
+        "Exposed connection string",
+        "A connection string is exposed by /api/config",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+    second = mod._finding_fingerprint(
+        "PostgreSQL Connection String Exposure",
+        "A connection string is exposed by /api/config",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+    distinct = mod._finding_fingerprint(
+        "Google Maps key exposure",
+        "An API key is exposed by /api/config",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+
+    assert first == second
+    assert first != distinct
+
+
+def test_finding_fingerprint_merges_equivalent_multi_secret_exposure_claims():
+    first = mod._finding_fingerprint(
+        "Sensitive credentials exposed",
+        "The endpoint exposes a PostgreSQL connection string and a Google Maps API key.",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+    second = mod._finding_fingerprint(
+        "Configuration disclosure",
+        "A Google Maps API key and PostgreSQL connection string are disclosed by the endpoint.",
+        "https://target.test/api/config",
+        "credential_exposure",
+    )
+
+    assert first == second
 
 
 def test_typed_evidence_assertions_validate_binary_and_json_artifacts(tmp_path: Path):
@@ -646,11 +862,15 @@ def test_store_finding_schema_requires_artifacts():
     schema = get_tool_spec(store_finding)["inputSchema"]["json"]
 
     assert "artifacts" in schema["required"]
+    assert schema["properties"]["artifacts"] == {"type": "array", "items": {"type": "string"}, "minItems": 1}
+    assert str(store_finding._tool_func.__annotations__["artifacts"]) == "typing.Annotated[list[str], Len(min_length=1, max_length=None)]"
+    assert str(store_observation._tool_func.__annotations__["artifacts"]) == "typing.Optional[typing.List[str]]"
     assertion_schema = schema["properties"]["evidence_assertions"]["items"]
     assert assertion_schema["properties"]["type"]["enum"] == [
         "literal_text",
         "byte_sequence",
         "json_value",
+        "secret_exposure",
     ]
     assert assertion_schema["properties"]["encoding"]["enum"] == ["hex", "base64"]
     assert assertion_schema["properties"]["operator"]["enum"] == ["exists", "equals", "contains"]
@@ -815,6 +1035,83 @@ def test_record_finding_validation_requires_linked_active_task(tmp_path: Path, o
     assert acceptance_results[0].disposition == "existing_finding"
 
 
+def test_record_finding_validation_canonicalizes_bare_artifact_references(tmp_path: Path, operation_ids, memory_client):
+    artifact = tmp_path / "artifacts" / "response.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("HTTP 200", encoding="utf-8")
+    validation_acceptance = AcceptanceContract(
+        mode="outcome",
+        basis=AcceptanceBasis(kind="snapshot", description="Finding", source_refs=["finding:finding-1"]),
+        criteria=[AcceptanceCriterion(
+            id="verify-finding:finding-1",
+            description="Verify finding",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    task = Task(
+        "task-1", "Verify", "Verify claim", validation_acceptance, 1, "active",
+        kind="finding_validation", reference_id="finding-1"
+    )
+    plan_store = MagicMock()
+    plan_store.get_finding.return_value = {
+        "verification_task_uid": "task-1",
+        "candidate_data": {
+            "evidence_assertions": [{"artifact": "artifact:artifacts/response.txt", "marker": "HTTP 200"}],
+        },
+    }
+    plan_store.get_tasks.return_value = [task]
+    acceptance_results = []
+    plan_store.get_acceptance_results.side_effect = lambda *_args: list(acceptance_results)
+    plan_store.store_acceptance_results.side_effect = (
+        lambda _op_id, _task_uid, results: acceptance_results.extend(results)
+    )
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._store_memory_entry"),
+    ):
+        record_finding_validation(
+            "finding-1", "confirmed", "Confirmed", ["Request target"], "direct", ["response.txt"]
+        )
+
+    validation = plan_store.store_finding_validation.call_args.args[2]
+    assert validation["evidence_artifacts"] == ["artifact:artifacts/response.txt"]
+
+
+@pytest.mark.parametrize(
+    ("reproduction_steps", "evidence_artifacts", "expected_error"),
+    [
+        ("Replay request", [], "reproduction_steps must be an array of strings"),
+        (["Replay request"], {}, "evidence_artifacts must be an artifact reference string or array of strings"),
+        (
+            ["Replay request"],
+            ["artifact:response.txt", {}],
+            "evidence_artifacts must be an artifact reference string or array of strings",
+        ),
+    ],
+)
+def test_record_finding_validation_rejects_malformed_payload_before_lookup(
+    reproduction_steps,
+    evidence_artifacts,
+    expected_error,
+    operation_ids,
+):
+    plan_store = MagicMock()
+    with patch("src.modules.tools.memory._get_database_store", return_value=plan_store), pytest.raises(
+        ValueError, match=expected_error
+    ):
+        record_finding_validation(
+            "finding-1",
+            "confirmed",
+            "Confirmed",
+            reproduction_steps,
+            "direct",
+            evidence_artifacts,
+        )
+
+    plan_store.get_finding.assert_not_called()
+
+
 def test_differential_confirmation_requires_control(tmp_path: Path, operation_ids):
     artifact = tmp_path / "response.txt"
     artifact.write_text("changed", encoding="utf-8")
@@ -838,7 +1135,6 @@ def test_confirmed_enumeration_and_rate_limit_require_resolved_manifest(tmp_path
     nonexistent.write_text("HTTP/1.1 200 OK\n\npositive-marker unknown user", encoding="utf-8")
     manifest = tmp_path / "validation.json"
     manifest.write_text(json.dumps({
-        "version": 1,
         "checks": {
             "user_enumeration": {
                 "known_existing_artifact": str(existing),
@@ -892,6 +1188,214 @@ def test_confirmed_enumeration_and_rate_limit_require_resolved_manifest(tmp_path
     assert payload["outcome"] == "confirmed"
     validation = plan_store.store_finding_validation.call_args.args[2]
     assert validation["validation_manifest_attestation"]["derived"]["lack_of_rate_limiting"]["attempt_count"] == 10
+
+
+def test_secret_exposure_manifest_error_repeats_required_schema(tmp_path: Path, operation_ids):
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps({"checks": {"secret_exposure": {}}}), encoding="utf-8")
+    candidate = {
+        "title": "Exposed API key",
+        "claim": "The target has a secret exposure.",
+        "technique": "secret exposure",
+        "evidence_assertions": [{"type": "secret_exposure", "kind": "api_key", "digest": "digest"}],
+    }
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError) as error,
+    ):
+        mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    message = str(error.value)
+    assert "reexposure_artifact" in message
+    assert "Expected validation_manifest JSON shape" in message
+    assert '"version"' not in message
+
+
+@pytest.mark.parametrize(
+    ("candidate", "manifest_payload", "missing_field"),
+    [
+        (
+            {"title": "User Enumeration", "claim": "User enumeration", "technique": "authentication"},
+            {"checks": {"user_enumeration": {}}},
+            "known_existing_artifact",
+        ),
+        (
+            {"title": "Lack of rate limiting", "claim": "No rate limiting", "technique": "HTTP"},
+            {"checks": {"lack_of_rate_limiting": {"attempts": []}}},
+            "at least 10 recorded attempts",
+        ),
+    ],
+)
+def test_confirmation_manifest_schema_errors_repeat_the_required_shape(
+    tmp_path: Path,
+    operation_ids,
+    candidate,
+    manifest_payload,
+    missing_field,
+):
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError) as error,
+    ):
+        mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    message = str(error.value)
+    assert missing_field in message
+    assert "Expected validation_manifest JSON shape" in message
+    assert '"checks"' in message
+
+
+@pytest.mark.parametrize(
+    ("candidate", "manifest_payload", "manifest_name", "expected_reason"),
+    [
+        (
+            {"title": "User Enumeration", "claim": "User enumeration", "technique": "authentication"},
+            None,
+            "missing-validation.json",
+            "Artifact does not exist",
+        ),
+        (
+            {"title": "User Enumeration", "claim": "User enumeration", "technique": "authentication"},
+            {
+                "checks": {
+                    "user_enumeration": {
+                        "known_existing_artifact": "missing-response.txt",
+                        "known_nonexistent_artifact": "missing-control.txt",
+                    }
+                }
+            },
+            "validation.json",
+            "Artifact does not exist: missing-response.txt",
+        ),
+        (
+            {"title": "Lack of rate limiting", "claim": "No rate limiting", "technique": "HTTP"},
+            {
+                "checks": {
+                    "lack_of_rate_limiting": {
+                        "attempts": [
+                            {"sequence": index, "response_artifact": "missing-attempt.txt"}
+                            for index in range(1, 11)
+                        ]
+                    }
+                }
+            },
+            "validation.json",
+            "Artifact does not exist: missing-attempt.txt",
+        ),
+        (
+            {
+                "title": "Exposed API key",
+                "claim": "The target has a secret exposure.",
+                "technique": "secret exposure",
+                "evidence_assertions": [{"type": "secret_exposure", "kind": "api_key", "digest": "digest"}],
+            },
+            {"checks": {"secret_exposure": {"reexposure_artifact": "missing-fresh-response.txt"}}},
+            "validation.json",
+            "Artifact does not exist: missing-fresh-response.txt",
+        ),
+    ],
+    ids=("missing_manifest", "invalid_response_comparison", "invalid_rate_limit_attempt", "invalid_reexposure"),
+)
+def test_confirmation_manifest_invalid_references_repeat_reason_and_required_shape(
+    tmp_path: Path,
+    operation_ids,
+    candidate,
+    manifest_payload,
+    manifest_name,
+    expected_reason,
+):
+    manifest = tmp_path / manifest_name
+    if manifest_payload is not None:
+        manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError) as error,
+    ):
+        mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    message = str(error.value)
+    assert expected_reason in message
+    assert "Expected validation_manifest JSON shape" in message
+    assert '"checks"' in message
+
+
+def test_confirmation_manifest_unreadable_json_repeats_reason_and_required_shape(
+    tmp_path: Path, operation_ids
+):
+    manifest = tmp_path / "validation.json"
+    manifest.write_text("not valid JSON", encoding="utf-8")
+    candidate = {"title": "User Enumeration", "claim": "User enumeration", "technique": "authentication"}
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError) as error,
+    ):
+        mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    message = str(error.value)
+    assert "Expecting value" in message
+    assert "Expected validation_manifest JSON shape" in message
+    assert '"checks"' in message
+
+
+def test_finding_validation_manifest_schema_documents_every_supported_check_shape():
+    schema = mod.finding_validation_manifest_schema([
+        {"id": "user_enumeration", "kind": "response_comparison"},
+        {"id": "lack_of_rate_limiting", "kind": "rate_limit_probe"},
+        {"id": "secret_exposure", "kind": "secret_exposure_revalidation"},
+    ])
+
+    assert schema == {
+        "checks": {
+            "user_enumeration": {
+                "known_existing_artifact": "artifact:<operation-local response artifact>",
+                "known_nonexistent_artifact": "artifact:<operation-local response artifact>",
+            },
+            "lack_of_rate_limiting": {
+                "attempts": [
+                    {
+                        "sequence": 1,
+                        "response_artifact": "artifact:<operation-local response artifact>",
+                    }
+                ],
+            },
+            "secret_exposure": {
+                "reexposure_artifact": "artifact:<fresh operation-local exposure artifact>",
+            },
+        }
+    }
+
+
+def test_secret_exposure_manifest_accepts_versionless_fresh_reexposure_artifact(
+    tmp_path: Path, operation_ids
+):
+    fresh_artifact = tmp_path / "fresh-response.json"
+    fresh_artifact.write_text('{"api_key":"fresh-secret"}', encoding="utf-8")
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(json.dumps({
+        "checks": {"secret_exposure": {"reexposure_artifact": str(fresh_artifact)}},
+    }), encoding="utf-8")
+    candidate = {
+        "title": "Exposed API key",
+        "claim": "The target has a secret exposure.",
+        "technique": "secret exposure",
+        "evidence_assertions": [{"type": "secret_exposure", "kind": "api_key", "digest": "digest"}],
+    }
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        patch("src.modules.tools.memory._assertion_matches_artifact", return_value=True),
+    ):
+        attestation = mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    assert attestation["derived"]["secret_exposure"] == {
+        "reexposure_artifact": "artifact:fresh-response.json"
+    }
 
 
 def test_confirmed_enumeration_rejects_identical_response_signatures(tmp_path: Path, operation_ids):
@@ -1126,7 +1630,7 @@ def test_finding_validation_schema_advertises_only_canonical_enum_values():
     assert "evidence_assertions" not in schema["required"]
 
 
-def test_bound_finding_validation_tool_hides_the_controller_owned_finding_identifier():
+def test_bound_finding_validation_tool_hides_the_controller_owned_finding_identifier(monkeypatch):
     task = Task(
         task_uid="verify-task",
         title="Verify finding",
@@ -1138,11 +1642,193 @@ def test_bound_finding_validation_tool_hides_the_controller_owned_finding_identi
         reference_id="finding-1",
     )
 
+    store = MagicMock()
+    store.get_finding.return_value = {
+        "verification_task_uid": "verify-task",
+        "candidate_data": {"finding_uid": "finding-1", "title": "Open redirect"},
+    }
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
     schema = get_tool_spec(mod.build_record_finding_validation_tool(task))["inputSchema"]["json"]
 
     assert "finding_uid" not in schema["properties"]
     assert schema["properties"]["validation_manifest"]["type"] == "string"
     assert schema["required"] == ["outcome", "summary", "reproduction_steps"]
+
+
+def test_bound_finding_validation_tool_requires_manifest_for_confirmed_secret_exposure(monkeypatch):
+    task = Task(
+        task_uid="verify-task",
+        title="Verify exposed connection string",
+        objective="Verify finding",
+        acceptance=make_acceptance("verify").to_dict(),
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-1",
+    )
+    store = MagicMock()
+    store.get_finding.return_value = {
+        "verification_task_uid": "verify-task",
+        "candidate_data": {
+            "finding_uid": "finding-1",
+            "title": "Exposed connection string",
+            "claim": "A connection string is exposed.",
+            "technique": "Direct response inspection",
+        }
+    }
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    schema = get_tool_spec(mod.build_record_finding_validation_tool(task))["inputSchema"]["json"]
+
+    assert schema["allOf"] == [{
+        "if": {"properties": {"outcome": {"const": "confirmed"}}, "required": ["outcome"]},
+        "then": {"required": ["validation_manifest"]},
+    }]
+    assert "artifact reference, never inline JSON" in schema["properties"]["validation_manifest"]["description"]
+    assert "reexposure_artifact" in schema["properties"]["validation_manifest"]["description"]
+    assert '"version"' not in schema["properties"]["validation_manifest"]["description"]
+
+
+def test_bound_finding_validation_uses_frozen_requirements_per_candidate(monkeypatch):
+    store = MagicMock()
+    records = {
+        "open-redirect": {
+            "verification_task_uid": "verify-open",
+            "candidate_data": {
+                "finding_uid": "open-redirect",
+                "title": "Open redirect",
+                "claim": "Redirects to the supplied URL.",
+                "technique": "open redirect",
+                "verification_packet": {"confirmation_requirements": []},
+            },
+        },
+        "secret": {
+            "verification_task_uid": "verify-secret",
+            "candidate_data": {
+                "finding_uid": "secret",
+                "title": "Exposed API key",
+                "claim": "A secret exposure was reported.",
+                "technique": "secret exposure",
+                "verification_packet": {
+                    "confirmation_requirements": [
+                        {"id": "secret_exposure", "kind": "secret_exposure_revalidation"}
+                    ]
+                },
+            },
+        },
+    }
+    store.get_finding.side_effect = lambda _operation_id, finding_uid: records[finding_uid]
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    open_task = Task("verify-open", "Verify redirect", "Verify", make_acceptance("open").to_dict(), 1, "active",
+                     kind="finding_validation", reference_id="open-redirect")
+    secret_task = Task("verify-secret", "Verify secret", "Verify", make_acceptance("secret").to_dict(), 1, "active",
+                       kind="finding_validation", reference_id="secret")
+
+    open_schema = get_tool_spec(mod.build_record_finding_validation_tool(open_task))["inputSchema"]["json"]
+    secret_schema = get_tool_spec(mod.build_record_finding_validation_tool(secret_task))["inputSchema"]["json"]
+
+    assert "allOf" not in open_schema
+    assert secret_schema["allOf"][0]["then"] == {"required": ["validation_manifest"]}
+
+
+def test_bound_finding_validation_rejects_mismatched_verification_task(monkeypatch):
+    task = Task("verify-open", "Verify redirect", "Verify", make_acceptance("open").to_dict(), 1, "active",
+                kind="finding_validation", reference_id="open-redirect")
+    store = MagicMock()
+    store.get_finding.return_value = {
+        "verification_task_uid": "verify-secret",
+        "candidate_data": {"finding_uid": "open-redirect", "title": "Open redirect"},
+    }
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    with pytest.raises(ValueError, match="Finding validation binding mismatch"):
+        mod.build_record_finding_validation_tool(task)
+
+
+def test_bound_finding_validation_rejects_unknown_candidate(monkeypatch):
+    task = Task("verify-open", "Verify redirect", "Verify", make_acceptance("open").to_dict(), 1, "active",
+                kind="finding_validation", reference_id="open-redirect")
+    store = MagicMock()
+    store.get_finding.return_value = None
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    with pytest.raises(ValueError, match="Unknown finding_uid"):
+        mod._load_finding_validation_binding(store, "test_op", "open-redirect", task.task_uid)
+
+
+def test_bound_finding_validation_rejects_mismatched_candidate_packet(monkeypatch):
+    task = Task("verify-open", "Verify redirect", "Verify", make_acceptance("open").to_dict(), 1, "active",
+                kind="finding_validation", reference_id="open-redirect")
+    store = MagicMock()
+    store.get_finding.return_value = {
+        "verification_task_uid": "verify-open",
+        "candidate_data": {
+            "finding_uid": "secret",
+            "verification_packet": {"finding_uid": "secret"},
+        },
+    }
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    with pytest.raises(ValueError, match="stored_finding_uid=secret"):
+        mod.build_record_finding_validation_tool(task)
+
+
+def test_bound_objective_validation_tool_hides_controller_owned_candidate_identifier(monkeypatch):
+    task = Task("verify-objective", "Validate flag", "Validate", make_acceptance("objective").to_dict(), 1, "active",
+                kind="objective_validation", reference_id="candidate-1")
+    store = MagicMock()
+    store.get_objective_candidate.return_value = {"verification_task_uid": "verify-objective"}
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    schema = get_tool_spec(mod.build_record_objective_validation_tool(task))["inputSchema"]["json"]
+
+    assert "candidate_uid" not in schema["properties"]
+    assert schema["required"] == ["outcome", "confidence", "summary", "evidence_artifacts", "validator"]
+
+
+def test_bound_objective_validation_tool_rejects_invalid_or_mismatched_task(monkeypatch):
+    invalid_task = Task("verify-objective", "Validate", "Validate", make_acceptance("objective").to_dict(), 1,
+                        "active", kind="recon", reference_id="candidate-1")
+    with pytest.raises(ValueError, match="bound objective-validation task"):
+        mod.build_record_objective_validation_tool(invalid_task)
+
+    task = Task("verify-objective", "Validate", "Validate", make_acceptance("objective").to_dict(), 1, "active",
+                kind="objective_validation", reference_id="candidate-1")
+    store = MagicMock()
+    store.get_objective_candidate.return_value = {"verification_task_uid": "different-task"}
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+
+    with pytest.raises(ValueError, match="Objective validation binding mismatch"):
+        mod.build_record_objective_validation_tool(task)
+
+
+def test_bound_objective_validation_tool_forwards_only_its_owned_candidate(monkeypatch):
+    task = Task("verify-objective", "Validate", "Validate", make_acceptance("objective").to_dict(), 1, "active",
+                kind="objective_validation", reference_id="candidate-1")
+    store = MagicMock()
+    store.get_objective_candidate.return_value = {"verification_task_uid": "verify-objective"}
+    recorded = MagicMock(return_value='{"status":"recorded"}')
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_id", lambda: "test_op")
+    monkeypatch.setattr(mod, "record_objective_validation", recorded)
+
+    bound_tool = mod.build_record_objective_validation_tool(task)
+    bound_tool("confirmed", 90, "Validated", ["artifact:proof.json"], "evaluator")
+
+    assert recorded.call_args.args[0] == "candidate-1"
+    assert recorded.call_args.args[1:] == (
+        "confirmed", 90, "Validated", ["artifact:proof.json"], "evaluator"
+    )
 
 
 def test_finding_validation_runtime_schema_accepts_aliases():

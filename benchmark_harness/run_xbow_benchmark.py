@@ -17,6 +17,7 @@ Possible git repos:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import hashlib
 import http.client
@@ -27,9 +28,10 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Literal, Set, Union
+from typing import Any, Literal
 
 DEFAULT_MAX_DURATION = 180
 
@@ -37,8 +39,8 @@ DEFAULT_MAX_DURATION = 180
 def _run(
     argv: Sequence[str],
     *,
-    cwd: Optional[Path] = None,
-    env: Optional[Dict[str, str]] = None,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
     check: bool = False,
     capture: bool = True,
     text: bool = True,
@@ -87,7 +89,7 @@ def _docker_exec_env(container: str, varname: str) -> str:
 
 
 @lru_cache
-def _read_benchmark_json(xbow_root: Path, bench_id: str) -> Dict[str, Any]:
+def _read_benchmark_json(xbow_root: Path, bench_id: str) -> dict[str, Any]:
     bench_json = xbow_root / "benchmarks" / bench_id / "benchmark.json"
     if not bench_json.is_file():
         _print_err(f"[!] benchmark.json not found for {bench_id} at {bench_json}")
@@ -105,14 +107,14 @@ def get_description(xbow_root: Path, bench_id: str) -> str:
     return desc if isinstance(desc, str) else ""
 
 
-def get_tags_list(xbow_root: Path, bench_id: str) -> List[str]:
+def get_tags_list(xbow_root: Path, bench_id: str) -> list[str]:
     try:
         data = _read_benchmark_json(xbow_root, bench_id)
     except FileNotFoundError:
         return []
     tags = data.get("tags")
     if isinstance(tags, list):
-        out: Set[str] = set()
+        out: set[str] = set()
         for t in tags:
             if isinstance(t, str) and t.strip():
                 out.add(t.strip())
@@ -134,14 +136,14 @@ def bench_has_tag(xbow_root: Path, bench_id: str, tag: str) -> bool:
 def get_flag(bench_id: str) -> str:
     if "FLAG" in os.environ:
         return os.environ["FLAG"]
-    h = hashlib.sha256(f"caa_{bench_id}".encode("utf-8")).hexdigest()
+    h = hashlib.sha256(f"caa_{bench_id}".encode()).hexdigest()
     return h
 
 
 # --- Dockerfile flag file reference scan helper ---
 _FLAGFILE_RE = re.compile(r"[^\s\"\'`]*?(?:FLAG\.txt|flag\.txt)")
 
-def _find_flagfile_refs_in_dockerfiles(bench_dir: Path) -> List[str]:
+def _find_flagfile_refs_in_dockerfiles(bench_dir: Path) -> list[str]:
     """Return unique, sorted file paths referenced in Dockerfile* that end with FLAG.txt/flag.txt."""
 
     def _clean(token: str) -> str:
@@ -184,10 +186,7 @@ def list_benchmarks(xbow_root: Path) -> None:
             data = {}
         desc = data.get("description") if isinstance(data.get("description"), str) else ""
         tags = data.get("tags")
-        if isinstance(tags, list):
-            tags_csv = ", ".join([t for t in tags if isinstance(t, str)])
-        else:
-            tags_csv = ""
+        tags_csv = ", ".join([t for t in tags if isinstance(t, str)]) if isinstance(tags, list) else ""
         print(f"{bench_id}\t{desc}, tags: {tags_csv}")
 
 
@@ -233,7 +232,7 @@ def build_benchmark(xbow_root: Path, bench_id: str, flag: str) -> bool:
     return True
 
 
-def _compose_ps_json(bench_dir: Path) -> Optional[Any]:
+def _compose_ps_json(bench_dir: Path) -> Any | None:
     cp = _run(["docker", "compose", "ps", "--format", "json"], cwd=bench_dir, capture=True)
     if cp.returncode != 0:
         return None
@@ -243,8 +242,8 @@ def _compose_ps_json(bench_dir: Path) -> Optional[Any]:
     # JSONL
     try:
         lines = s.splitlines()
-        if all(map(lambda e: e.startswith("{") and e.endswith("}"), lines)):
-            return list(map(lambda e: json.loads(e), lines))
+        if all(e.startswith("{") and e.endswith("}") for e in lines):
+            return [json.loads(e) for e in lines]
     except Exception:
         pass
     # Proper JSON
@@ -254,8 +253,8 @@ def _compose_ps_json(bench_dir: Path) -> Optional[Any]:
         return None
 
 
-def _extract_published_ports_from_compose_ps(obj: Any) -> List[int]:
-    ports: List[int] = []
+def _extract_published_ports_from_compose_ps(obj: Any) -> list[int]:
+    ports: list[int] = []
 
     def _handle_service(svc: Any) -> None:
         if not isinstance(svc, dict):
@@ -286,28 +285,26 @@ def _extract_published_ports_from_compose_ps(obj: Any) -> List[int]:
                 if isinstance(v, (list, dict)):
                     _handle_service(v)
 
-    ports = sorted(set([p for p in ports if p]))
+    ports = sorted({p for p in ports if p})
     return ports
 
 
 _PORT_RE = re.compile(r"(?:(?:0\.0\.0\.0|\*|\[::\]|::):)?(\d+)->")
 
 
-def _fallback_extract_ports_from_compose_ps_text(bench_dir: Path) -> List[int]:
+def _fallback_extract_ports_from_compose_ps_text(bench_dir: Path) -> list[int]:
     cp = _run(["docker", "compose", "ps"], cwd=bench_dir, capture=True)
     if cp.returncode != 0:
         return []
     text = (cp.stdout or "") + "\n" + (cp.stderr or "")
-    ports: List[int] = []
+    ports: list[int] = []
     for m in _PORT_RE.finditer(text):
-        try:
+        with contextlib.suppress(Exception):
             ports.append(int(m.group(1)))
-        except Exception:
-            pass
-    return sorted(set([p for p in ports if p]))
+    return sorted({p for p in ports if p})
 
 
-def start_benchmark(xbow_root: Path, bench_id: str, target_host: str) -> List[str]:
+def start_benchmark(xbow_root: Path, bench_id: str, target_host: str) -> list[str]:
     print(f"[*] Starting benchmark {bench_id}...", file=sys.stderr)
 
     env = os.environ.copy()
@@ -324,7 +321,7 @@ def start_benchmark(xbow_root: Path, bench_id: str, target_host: str) -> List[st
     print("[*] Discovering published ports via docker compose ps...", file=sys.stderr)
 
     obj = _compose_ps_json(bench_dir)
-    ports: List[int] = []
+    ports: list[int] = []
     if obj is not None:
         ports = _extract_published_ports_from_compose_ps(obj)
 
@@ -367,7 +364,7 @@ def _run_agent_process(
     xbow_root: Path,
     bench_id: str,
     keep_running: bool,
-    cwd: Optional[Path] = None,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the agent process and tear down the benchmark if the user interrupts it."""
     try:
@@ -384,7 +381,7 @@ def _run_agent_process(
         raise
 
 
-def _find_latest_op_dir(outputs_root: Path) -> Optional[Path]:
+def _find_latest_op_dir(outputs_root: Path) -> Path | None:
     if not outputs_root.is_dir():
         return None
     candidates = [p for p in outputs_root.iterdir() if p.is_dir() and p.name.startswith("OP_")]
@@ -394,7 +391,7 @@ def _find_latest_op_dir(outputs_root: Path) -> Optional[Path]:
     return candidates[0]
 
 
-def _file_contains(path: Path, needle: Union[str, re.Pattern]) -> bool:
+def _file_contains(path: Path, needle: str | re.Pattern) -> bool:
     try:
         if not path.is_file():
             return False
@@ -427,7 +424,7 @@ def _append_results_csv(
     module: str,
     result: str,
 ) -> None:
-    ts = _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+    ts = _dt.datetime.now(_dt.UTC).astimezone().isoformat(timespec="seconds")
     line = f"{ts},{duration_s},{version},{bench_id},{tags},{provider},{model},{module},{result}\n"
     with open(results_csv, "a", encoding="utf-8", errors="ignore") as f:
         f.write(line)
@@ -457,8 +454,8 @@ def run_benchmark(
     hints: bool = True,
     continue_session: bool = False,
     max_duration: int = DEFAULT_MAX_DURATION,
-    max_tokens: Optional[int] = None,
-    max_cost: Optional[float] = None,
+    max_tokens: int | None = None,
+    max_cost: float | None = None,
 ) -> int:
     ensure_benchmarks_dir(xbow_root)
 
@@ -570,7 +567,7 @@ def run_benchmark(
         )
         agent_exit = cp.returncode
     else:
-        docker_env_args: List[str] = []
+        docker_env_args: list[str] = []
         docker_env_args += ["-e", f"CYBER_AGENT_PROVIDER={provider_under_test}"]
         docker_env_args += ["-e", f"CYBER_AGENT_LLM_MODEL={model_under_test}"]
         docker_env_args += ["-e", f"CYBER_AGENT_SWARM_MODEL={model_under_test}"]
@@ -715,7 +712,7 @@ def _results_csv_has_success(
     return False
 
 
-def _http_probe_ok(endpoint: str, *, timeout_s: float = 5.0, retries: int = 2) -> Tuple[bool, bool, str]:
+def _http_probe_ok(endpoint: str, *, timeout_s: float = 5.0, retries: int = 2) -> tuple[bool, bool, str]:
     """Probe an endpoint with a simple HTTP GET using native Python.
 
     Returns: (ok, is_http, detail)
@@ -732,7 +729,7 @@ def _http_probe_ok(endpoint: str, *, timeout_s: float = 5.0, retries: int = 2) -
     last_err = ""
 
     for attempt in range(max(1, retries + 1)):
-        conn: Optional[http.client.HTTPConnection] = None
+        conn: http.client.HTTPConnection | None = None
         try:
             conn = http.client.HTTPConnection(host, port, timeout=timeout_s)
             conn.request("GET", "/", headers={"User-Agent": "run_xbow_benchmark.py"})
@@ -740,10 +737,8 @@ def _http_probe_ok(endpoint: str, *, timeout_s: float = 5.0, retries: int = 2) -
             status = int(getattr(resp, "status", 0) or 0)
 
             # Drain a small amount of body; ignore content.
-            try:
+            with contextlib.suppress(Exception):
                 resp.read(512)
-            except Exception:
-                pass
 
             # Success: 2xx/3xx and also 401/403.
             if (200 <= status < 400) or status in (401, 403):
@@ -763,7 +758,7 @@ def _http_probe_ok(endpoint: str, *, timeout_s: float = 5.0, retries: int = 2) -
         except (http.client.RemoteDisconnected, http.client.ResponseNotReady, http.client.CannotSendRequest) as e:
             # Often indicates protocol mismatch / non-HTTP service.
             return False, False, f"non-HTTP (protocol mismatch): {e!s}".strip()
-        except (socket.timeout, TimeoutError) as e:
+        except TimeoutError as e:
             last_err = (f"timeout: {e!s}".strip() or "timeout")
         except ConnectionRefusedError as e:
             last_err = (f"connection refused: {e!s}".strip() or "connection refused")
@@ -801,7 +796,7 @@ def check_all_benchmarks(
     *,
     xbow_root: Path,
     target_host: str,
-    tag: Optional[str],
+    tag: str | None,
 ) -> int:
     ensure_benchmarks_dir(xbow_root)
 
@@ -812,15 +807,14 @@ def check_all_benchmarks(
         return 1
 
     failures = 0
-    failed_ids: List[str] = []
+    failed_ids: list[str] = []
 
     for d in dirs:
         bench_id = d.name
 
-        if tag:
-            if not bench_has_tag(xbow_root, bench_id, tag):
-                print(f"[*] {bench_id} does not match tag '{tag}', skipping")
-                continue
+        if tag and not bench_has_tag(xbow_root, bench_id, tag):
+            print(f"[*] {bench_id} does not match tag '{tag}', skipping")
+            continue
 
         flag = get_flag(bench_id)
 
@@ -883,14 +877,14 @@ def run_all_benchmarks(
     model_under_test: str,
     module: str,
     remaining: bool,
-    tag: Optional[str],
+    tag: str | None,
     keep_running: bool,
     react_ui: bool = False,
     hints: bool = True,
     continue_session: bool = False,
     max_duration: int = DEFAULT_MAX_DURATION,
-    max_tokens: Optional[int] = None,
-    max_cost: Optional[float] = None,
+    max_tokens: int | None = None,
+    max_cost: float | None = None,
 ) -> int:
     ensure_benchmarks_dir(xbow_root)
 
@@ -906,10 +900,9 @@ def run_all_benchmarks(
     for d in dirs:
         bench_id = d.name
 
-        if tag:
-            if not bench_has_tag(xbow_root, bench_id, tag):
-                print(f"[*] {bench_id} does not match tag '{tag}', skipping")
-                continue
+        if tag and not bench_has_tag(xbow_root, bench_id, tag):
+            print(f"[*] {bench_id} does not match tag '{tag}', skipping")
+            continue
 
         if remaining and _results_csv_has_success(
             results_csv,

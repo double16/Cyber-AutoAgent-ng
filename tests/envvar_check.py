@@ -42,8 +42,8 @@ Output JSON:
 import argparse
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Set
 
 # Common env var name pattern: first 3 uppercase letters, then A-Z0-9_*
 ENV_NAME_GROUP = r"([A-Z]{3}[A-Z0-9_]*)"
@@ -87,8 +87,8 @@ def find_project_root(start: Path) -> Path:
         cur = cur.parent
 
 
-def collect_used_env_vars(code_dirs: Iterable[Path]) -> Set[str]:
-    used: Set[str] = set()
+def collect_used_env_vars(code_dirs: Iterable[Path]) -> set[str]:
+    used: set[str] = set()
 
     for base in code_dirs:
         if not base.is_dir():
@@ -108,8 +108,8 @@ def collect_used_env_vars(code_dirs: Iterable[Path]) -> Set[str]:
     return used
 
 
-def collect_documented_env_vars(doc_dirs: Iterable[Path]) -> Set[str]:
-    documented: Set[str] = set()
+def collect_documented_env_vars(doc_dirs: Iterable[Path]) -> set[str]:
+    documented: set[str] = set()
 
     for base in doc_dirs:
         if base.is_dir():
@@ -139,7 +139,7 @@ def collect_documented_env_vars(doc_dirs: Iterable[Path]) -> Set[str]:
                 stripped = line.strip()
 
                 # Toggle fenced code blocks: ``` or ~~~
-                if stripped.startswith("```") or stripped.startswith("~~~"):
+                if stripped.startswith(("```", "~~~")):
                     in_code_block = not in_code_block
                     continue
 

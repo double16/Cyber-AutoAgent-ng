@@ -72,29 +72,14 @@ def test_all_env_example_vars_are_used_somewhere_in_compose(tmp_path: Path) -> N
     compose = tmp_path / "docker-compose.yml"
 
     env_example.write_text(
-        "\n".join(
-            [
-                "# LANGFUSE_HOST=http://your-custom-langfuse:3000",
-                "LANGFUSE_PUBLIC_KEY=cyber-public",
-                "LANGFUSE_ENCRYPTION_KEY=secret",
-            ]
-        )
-        + "\n",
+        "# LANGFUSE_HOST=http://your-custom-langfuse:3000\nLANGFUSE_PUBLIC_KEY=cyber-public\nLANGFUSE_ENCRYPTION_KEY=secret"
+         "\n",
         encoding="utf-8",
     )
 
     compose.write_text(
-        "\n".join(
-            [
-                "services:",
-                "  app:",
-                "    environment:",
-                "      - PUBLIC=${LANGFUSE_PUBLIC_KEY}",
-                "      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-web:3000}",
-                "      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}",
-            ]
-        )
-        + "\n",
+        "services:\n  app:\n    environment:\n      - PUBLIC=${LANGFUSE_PUBLIC_KEY}\n      - LANGFUSE_HOST=${LANGFUSE_HOST:-http://langfuse-web:3000}\n      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}"
+         "\n",
         encoding="utf-8",
     )
 
@@ -106,27 +91,14 @@ def test_missing_var_is_reported(tmp_path: Path) -> None:
     compose = tmp_path / "docker-compose.yml"
 
     env_example.write_text(
-        "\n".join(
-            [
-                "LANGFUSE_HOST=http://x",
-                "LANGFUSE_PUBLIC_KEY=cyber-public",
-            ]
-        )
-        + "\n",
+        "LANGFUSE_HOST=http://x\nLANGFUSE_PUBLIC_KEY=cyber-public"
+         "\n",
         encoding="utf-8",
     )
 
     compose.write_text(
-        "\n".join(
-            [
-                "services:",
-                "  app:",
-                "    environment:",
-                "      - SOME_KEY=${LANGFUSE_PUBLIC_KEY}",
-                "      # LANGFUSE_HOST not referenced",
-            ]
-        )
-        + "\n",
+        "services:\n  app:\n    environment:\n      - SOME_KEY=${LANGFUSE_PUBLIC_KEY}\n      # LANGFUSE_HOST not referenced"
+         "\n",
         encoding="utf-8",
     )
 
@@ -139,15 +111,8 @@ def test_dict_form_is_accepted(tmp_path: Path) -> None:
 
     env_example.write_text("LANGFUSE_ENCRYPTION_KEY=secret\n", encoding="utf-8")
     compose.write_text(
-        "\n".join(
-            [
-                "services:",
-                "  app:",
-                "    environment:",
-                "      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}",
-            ]
-        )
-        + "\n",
+        "services:\n  app:\n    environment:\n      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-}"
+         "\n",
         encoding="utf-8",
     )
 

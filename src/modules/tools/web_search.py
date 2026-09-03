@@ -1,11 +1,11 @@
 import asyncio
 import random
+from collections.abc import Callable
 
-from strands import tool
+from ddgs import DDGS
 from ddgs.exceptions import RatelimitException, TimeoutException
 from pydantic import BaseModel, Field
-from ddgs import DDGS
-from typing import List, Callable, Dict
+from strands import tool
 
 
 class WebSearchHit(BaseModel):
@@ -15,14 +15,14 @@ class WebSearchHit(BaseModel):
 
 
 # 9.10.0 has backend: brave, duckduckgo, google, grokipedia, mojeek, wikipedia, yahoo, yandex
-def search_duckduckgo(query: str, num: int) -> List[WebSearchHit]:
+def search_duckduckgo(query: str, num: int) -> list[WebSearchHit]:
     with DDGS() as ddg:
         results = ddg.text(query, backend="brave,duckduckgo", max_results=num)
         return [WebSearchHit(title=r["title"], url=r["href"], snippet=r["body"])
                 for r in results]
 
 
-def with_backoff(fn: Callable[..., List[WebSearchHit]],
+def with_backoff(fn: Callable[..., list[WebSearchHit]],
                  retries: int = 4,
                  base: float = 1.5,
                  jitter: float = 0.3):
@@ -41,17 +41,15 @@ def with_backoff(fn: Callable[..., List[WebSearchHit]],
             except Exception as exc:
                 last_exc = exc
                 if attempt >= retries:
-                    raise exc
+                    raise
                 # Only retry obvious transient problems
-                if isinstance(exc, RatelimitException):
-                    pass
-                elif isinstance(exc, TimeoutException):
+                if isinstance(exc, (RatelimitException, TimeoutException)):
                     pass
                 else:
                     msg = str(exc).lower()
                     if "429" not in msg and "rate" not in msg and "timeout" not in msg \
                             and "temporarily unavailable" not in msg:
-                        raise exc
+                        raise
                 sleep_for = delay * (1 + random.uniform(-jitter, jitter))
                 await asyncio.sleep(max(0.1, sleep_for))
                 delay *= base
@@ -64,7 +62,7 @@ def with_backoff(fn: Callable[..., List[WebSearchHit]],
 async def web_search(
         query: str,
         limit: int = 20,
-) -> List[Dict[str, str]]:
+) -> list[dict[str, str]]:
     """
     Searches the web with the provided query.
 

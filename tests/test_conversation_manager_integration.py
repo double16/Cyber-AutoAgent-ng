@@ -12,24 +12,33 @@ Validates expected behavior with mock data to ensure:
 - Clean logs without spurious warnings
 """
 
-import math
 import logging
+import math
+import types
 from typing import Any
 from unittest.mock import Mock, patch
-import types
 
 import pytest
-
 from strands.types.tools import ToolSpec
+
 from modules.config.manager import ConfigManager
-from modules.config.models.dev_client import ModelsDevClient, ModelLimits, ModelCapabilities
+from modules.config.models.dev_client import (
+    ModelCapabilities,
+    ModelLimits,
+    ModelsDevClient,
+)
 from modules.handlers.conversation_budget import (
-    _get_char_to_token_ratio_dynamic,
-    _estimate_prompt_tokens_for_agent,
-    _ensure_prompt_within_budget,
+    _MODEL_RATIO_HISTORY,
+    _RATIO_BASELINE_BLEND,
+    _RATIO_LOCK,
+    _RATIO_WINDOW_WEIGHTS,
+    _RATIO_WINDOWS,
     MappingConversationManager,
-    token_calc, _RATIO_LOCK, _MODEL_RATIO_HISTORY, _RATIO_WINDOW_WEIGHTS,
-    _update_ratio_from_telemetry, _RATIO_BASELINE_BLEND, _RATIO_WINDOWS,
+    _ensure_prompt_within_budget,
+    _estimate_prompt_tokens_for_agent,
+    _get_char_to_token_ratio_dynamic,
+    _update_ratio_from_telemetry,
+    token_calc,
 )
 
 
@@ -326,18 +335,18 @@ class TestSafeMaxTokens:
         """Test Azure GPT-5 safe max_tokens is 50% of 128,000 = 64,000."""
         monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("azure/gpt-5")
-        assert safe_max == 17000
+        assert safe_max == 34000
 
     def test_azure_gpt_5_safe_tokens_clamped(self, config_manager_with_mock_client):
         """Test Azure GPT-5 safe max_tokens is 50% of 128,000 = 64,000."""
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("azure/gpt-5")
-        assert safe_max == 5000
+        assert safe_max == 16000
 
     def test_azure_gpt_4o_safe_tokens(self, config_manager_with_mock_client, monkeypatch):
         """Test Azure GPT-4o safe max_tokens is 50% of 16,384 = 8,192."""
         monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("azure/gpt-4o")
-        assert safe_max == 8000
+        assert safe_max == 8192
 
     def test_bedrock_claude_35_safe_tokens(self, config_manager_with_mock_client):
         """Test Bedrock Claude 3.5 safe max_tokens is 50% of 8,192 = 4,096."""
@@ -350,7 +359,7 @@ class TestSafeMaxTokens:
         """Test Moonshot Kimi safe max_tokens is 50% of 262,144 = 131,072."""
         monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("moonshot/kimi-k2-thinking")
-        assert safe_max == 16384
+        assert safe_max == 32768
 
     def test_anthropic_claude_sonnet_45_safe_tokens(self, config_manager_with_mock_client, monkeypatch):
         """Test Anthropic Claude Sonnet 4.5 safe max_tokens is 50% of 64,000 = 32,000."""
@@ -358,14 +367,14 @@ class TestSafeMaxTokens:
         safe_max = config_manager_with_mock_client.get_safe_max_tokens(
             "anthropic/claude-sonnet-4-5-20250929"
         )
-        assert safe_max == 12500
+        assert safe_max == 25000
 
     def test_custom_buffer_percentage(self, config_manager_with_mock_client, monkeypatch):
         """Test custom buffer percentage (e.g., 75% instead of 50%)."""
         # 75% of 128,000 = 96,000
         monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         safe_max = config_manager_with_mock_client.get_safe_max_tokens("azure/gpt-5", buffer=0.75)
-        assert safe_max == 25500
+        assert safe_max == 51000
 
     def test_unknown_model_returns_safe_default(self, config_manager_with_mock_client):
         """Test unknown model returns safe default of 4,096."""
@@ -388,7 +397,7 @@ class TestSwarmModelConfig:
             {"swarm_llm": Mock(model_id="azure/gpt-4o", max_tokens=None)}
         )
 
-        assert swarm_cfg.max_tokens == 8000
+        assert swarm_cfg.max_tokens == 8192
 
     def test_explicit_override_takes_precedence(self, config_manager_with_mock_client, monkeypatch):
         """Test CYBER_AGENT_SWARM_MAX_TOKENS overrides auto-calculation."""
@@ -639,11 +648,11 @@ class TestExpectedBehaviorValidation:
         """Validate all user's production models get safe max_tokens."""
         monkeypatch.setenv("MAX_TOKENS_REASONING_LIMIT", "1000000")
         expected = {
-            "azure/gpt-5": 17000,
-            "azure/gpt-4o": 8000,
-            "moonshot/kimi-k2-thinking": 16384,
+            "azure/gpt-5": 34000,
+            "azure/gpt-4o": 8192,
+            "moonshot/kimi-k2-thinking": 32768,
             "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0": 4096,
-            "anthropic/claude-sonnet-4-5-20250929": 12500,
+            "anthropic/claude-sonnet-4-5-20250929": 25000,
         }
 
         for model_id, expected_safe in expected.items():
@@ -654,11 +663,11 @@ class TestExpectedBehaviorValidation:
     def test_all_user_models_have_safe_limits_clamped(self, config_manager_with_mock_client):
         """Validate all user's production models get safe max_tokens."""
         expected = {
-            "azure/gpt-5": 5000,
-            "azure/gpt-4o": 5000,
-            "moonshot/kimi-k2-thinking": 5000,
+            "azure/gpt-5": 16000,
+            "azure/gpt-4o": 8192,
+            "moonshot/kimi-k2-thinking": 16000,
             "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0": 4096,
-            "anthropic/claude-sonnet-4-5-20250929": 5000,
+            "anthropic/claude-sonnet-4-5-20250929": 16000,
         }
 
         for model_id, expected_safe in expected.items():
@@ -732,8 +741,8 @@ class TestThresholdAlignment:
         - Compression truncates to 8K (TOOL_COMPRESS_TRUNCATE)
         """
         from modules.handlers.conversation_budget import (
-            TOOL_COMPRESS_THRESHOLD,
             _TOOL_ARTIFACT_THRESHOLD,
+            TOOL_COMPRESS_THRESHOLD,
         )
 
         # Compression threshold must MATCH artifact threshold (not 1.5x)
@@ -749,9 +758,9 @@ class TestThresholdAlignment:
     def test_mapper_acts_as_safety_net(self):
         """Test that mapper compresses results that bypass externalization."""
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
             TOOL_COMPRESS_THRESHOLD,
             TOOL_COMPRESS_TRUNCATE,
+            LargeToolResultMapper,
         )
 
         mapper = LargeToolResultMapper(
@@ -794,8 +803,8 @@ class TestThresholdAlignment:
         3. Mapper correctly reports 'no compression needed'
         """
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
             TOOL_COMPRESS_THRESHOLD,
+            LargeToolResultMapper,
         )
 
         mapper = LargeToolResultMapper(max_tool_chars=TOOL_COMPRESS_THRESHOLD)
@@ -890,8 +899,8 @@ class TestFullPipelineSimulation:
     def test_pipeline_with_mixed_output_sizes(self):
         """Simulate realistic operation with mixed tool output sizes."""
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
             TOOL_COMPRESS_THRESHOLD,
+            LargeToolResultMapper,
         )
 
         mapper = LargeToolResultMapper(max_tool_chars=TOOL_COMPRESS_THRESHOLD)
@@ -928,7 +937,7 @@ class TestFullPipelineSimulation:
             }
 
             # Apply mapper (simulates LargeToolResultMapper in pipeline)
-            mapped = mapper(message, i, messages + [message])
+            mapped = mapper(message, i, [*messages, message])
             if mapped != message:
                 compression_count += 1
             messages.append(mapped)
@@ -1113,9 +1122,9 @@ class TestThresholdGapFailureMode:
         This test validates the fix works correctly.
         """
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
-            TOOL_COMPRESS_THRESHOLD,
             _TOOL_ARTIFACT_THRESHOLD,
+            TOOL_COMPRESS_THRESHOLD,
+            LargeToolResultMapper,
         )
 
         # Verify the fix is applied: thresholds should now match
@@ -1178,13 +1187,13 @@ class TestThresholdGapFailureMode:
         This test validates the fix works for realistic workloads.
         """
         from modules.handlers.conversation_budget import (
+            TOOL_COMPRESS_THRESHOLD,
             LargeToolResultMapper,
             MappingConversationManager,
-            TOOL_COMPRESS_THRESHOLD,
         )
 
         mapper = LargeToolResultMapper(max_tool_chars=TOOL_COMPRESS_THRESHOLD)
-        manager = MappingConversationManager(
+        MappingConversationManager(
             window_size=100,  # Large window to allow accumulation
             preserve_first_messages=1,
             preserve_recent_messages=5,
@@ -1218,7 +1227,7 @@ class TestThresholdGapFailureMode:
             }
 
             # Check if mapper compresses this message
-            mapped = mapper(message, i, messages + [message])
+            mapped = mapper(message, i, [*messages, message])
             original_size = len(preview)
             mapped_text = mapped["content"][0]["toolResult"]["content"][0]["text"]
             mapped_size = len(mapped_text)
@@ -1275,9 +1284,9 @@ class TestThresholdGapFailureMode:
         increases total size rather than decreasing it.
         """
         from modules.handlers.conversation_budget import (
-            LargeToolResultMapper,
             TOOL_COMPRESS_THRESHOLD,
             TOOL_COMPRESS_TRUNCATE,
+            LargeToolResultMapper,
         )
 
         mapper = LargeToolResultMapper(
@@ -1427,7 +1436,7 @@ class TestTelemetryCalibratedRatios:
 
             # replicate window math used by implementation:
             n = len(history)
-            ks = [max(1, int(round(n * pct))) for pct in _RATIO_WINDOWS]
+            ks = [max(1, round(n * pct)) for pct in _RATIO_WINDOWS]
             k10, k30, k50 = ks[0], ks[1], ks[2]
 
             avg10 = sum(history[-k10:]) / k10  # last 1 -> 6.0

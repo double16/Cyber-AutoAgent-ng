@@ -171,3 +171,23 @@ def test_get_emitter_uses_environment_and_unknown_transport_falls_back(monkeypat
 
     assert isinstance(emitter, StdoutEventEmitter)
     assert emitter.operation_id == "ENV_OP"
+
+
+def test_event_emitter_signatures_handle_empty_output_and_explicit_stdout_transport():
+    emitter = StdoutEventEmitter(operation_id="OP")
+
+    assert emitter._create_signature({"type": "output", "content": "   "}) == '{"content": "", "type": "output"}'
+
+    explicit = get_emitter(transport="stdout", operation_id="EXPLICIT")
+    assert isinstance(explicit, StdoutEventEmitter)
+    assert explicit.operation_id == "EXPLICIT"
+
+
+def test_event_emitter_cleans_nested_unserializable_values():
+    emitter = StdoutEventEmitter(operation_id="OP")
+    payload = SimpleNamespace(value={"nested": (object(), None, True)})
+
+    cleaned = emitter._clean_event_for_json({"payload": payload})
+
+    assert cleaned["payload"]["value"]["nested"][1:] == [None, True]
+    assert isinstance(cleaned["payload"]["value"]["nested"][0], str)

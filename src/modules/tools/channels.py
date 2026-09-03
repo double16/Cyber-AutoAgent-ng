@@ -1,18 +1,18 @@
-import uuid
 import asyncio
 import base64
+import contextlib
 import logging
 import time
-from typing import Dict, Optional, List, Literal
+import uuid
 from dataclasses import dataclass, field
+from typing import Literal
 
 from pydantic import BaseModel, Field
+from strands import tool
 
-from modules.utils.pick_nic import pick_local_addr
 from modules.handlers.utils import b64
 from modules.tools.semantic_enum import normalize_semantic_enum
-
-from strands import tool
+from modules.utils.pick_nic import pick_local_addr
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +37,10 @@ class PollEvent(BaseModel):
     stream: Literal["output", "status"] = Field(
         ..., description="'output' has bytes (data_b64). 'status' has a human-readable note."
     )
-    data_b64: Optional[str] = Field(
+    data_b64: str | None = Field(
         None, description="Base64 bytes for 'output' events."
     )
-    note: Optional[str] = Field(
+    note: str | None = Field(
         None,
         description=(
             "Status message (e.g., 'process_started_pid_<pid>', 'listening', 'client_connected', "
@@ -59,23 +59,21 @@ class Channel:
     events: "asyncio.Queue[PollEvent]" = field(default_factory=asyncio.Queue)
 
     # forward
-    proc: Optional[asyncio.subprocess.Process] = None
-    _output_task: Optional[asyncio.Task] = None
+    proc: asyncio.subprocess.Process | None = None
+    _output_task: asyncio.Task | None = None
 
     # reverse (single duplex connection)
-    host: Optional[str] = None
-    server: Optional[asyncio.AbstractServer] = None
-    _client_reader: Optional[asyncio.StreamReader] = None
-    _client_writer: Optional[asyncio.StreamWriter] = None
-    _client_read_task: Optional[asyncio.Task] = None
+    host: str | None = None
+    server: asyncio.AbstractServer | None = None
+    _client_reader: asyncio.StreamReader | None = None
+    _client_writer: asyncio.StreamWriter | None = None
+    _client_read_task: asyncio.Task | None = None
 
     async def put_event(self, ev: PollEvent):
         # simple cap to avoid unbounded growth
         if self.events.qsize() > 50_000:
-            try:
+            with contextlib.suppress(asyncio.QueueEmpty):
                 _ = self.events.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
         await self.events.put(ev)
 
     async def mark_status(self, note: str):
@@ -94,10 +92,8 @@ class Channel:
         # close server and client
         if self.server:
             self.server.close()
-            try:
+            with contextlib.suppress(Exception):
                 await self.server.wait_closed()
-            except Exception:
-                pass
         if self._client_writer:
             try:
                 self._client_writer.close()
@@ -111,7 +107,7 @@ class Channel:
                 self.proc.terminate()
                 try:
                     await asyncio.wait_for(self.proc.wait(), timeout=2)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     self.proc.kill()
             except ProcessLookupError:
                 pass
@@ -121,7 +117,7 @@ class Channel:
 
 class ChannelManager:
     def __init__(self):
-        self._channels: Dict[str, Channel] = {}
+        self._channels: dict[str, Channel] = {}
 
     def new_id(self) -> str:
         return str(uuid.uuid4())
@@ -167,7 +163,7 @@ class CreateReverseResult(BaseModel):
 class PollResult(BaseModel):
     channel_id: str = Field(description="Echo channel id.")
     closed: bool = Field(description="True if channel has been closed.")
-    events: List[PollEvent] = Field(description="Events since last poll (consumed on delivery).")
+    events: list[PollEvent] = Field(description="Events since last poll (consumed on delivery).")
 
 
 class SendResult(BaseModel):
@@ -195,7 +191,7 @@ class StatusResult(BaseModel):
             "Forward: stdin pipe open; Reverse: client connected."
         )
     )
-    details: Dict[str, str] = Field(
+    details: dict[str, str] = Field(
         description=(
             "Additional state hints. Forward includes {'pid': '<pid>', 'proc_alive': 'true/false'}. "
             "Reverse includes {'listening': 'true/false', 'client_connected': 'true/false', 'port': '<port>'} when known."
@@ -229,7 +225,7 @@ def _mgr() -> ChannelManager:
 @tool
 async def channel_create_forward(
         command: str,
-        env: Dict[str, str] = None,
+        env: dict[str, str] | None = None,
 ) -> CreateForwardResult:
     """
     Create a forward channel backed by a local subprocess that connects to the target (e.g., nc/ssh).
@@ -278,7 +274,7 @@ async def channel_create_forward(
 async def channel_create_reverse(
         listener_host: str = "0.0.0.0",
         listener_port: int = 0,
-        target: Optional[str] = None,
+        target: str | None = None,
 ) -> CreateReverseResult:
     """
     Create a reverse channel listener for a single inbound client connection.
@@ -358,7 +354,7 @@ async def channel_poll(
 
     ch = _mgr().get(channel_id)
 
-    events: List[PollEvent] = []
+    events: list[PollEvent] = []
     deadline = time.time() + timeout
 
     def drain_now():
@@ -379,7 +375,7 @@ async def channel_poll(
             ev = await asyncio.wait_for(ch.events.get(), timeout=min(0.25, remaining))
             events.append(ev)
             drain_now()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     return PollResult(channel_id=ch.id, closed=ch.closed, events=events)
@@ -509,7 +505,7 @@ async def channel_close(
     return CloseResult(channel_id=channel_id, success=ok)
 
 
-async def channel_close_all() -> Dict[str, int]:
+async def channel_close_all() -> dict[str, int]:
     """
 Close all channels.
 Usage: channel_close_all()

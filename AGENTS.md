@@ -43,14 +43,16 @@
 
 - Prefix subsequent `uv` commands with the same cache setting. Use the repository's `.venv` through `uv run`; do not
   activate a different virtual environment or invoke tools from a system Python.
+- When running coverage or tests that import NumPy on macOS, also set `KMP_DUPLICATE_LIB_OK=TRUE` to avoid the
+  duplicate OpenMP-library import error.
 - Examples:
 
   ```bash
   UV_CACHE_DIR="$PWD/.uv-cache" uv run python3 --version
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q --tb=short
+  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q --tb=short
   UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest -q
-  UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage report
+  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest -q
+  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage report
   ```
 
 - If `.uv-cache` is not present, create it before running commands. Keep it project-local and persistent between agent
@@ -101,6 +103,9 @@
 - When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.
 - When an LLM is to return structured data, prefer JSON.
 - Primary use-case LLM have ~26b parameters and 48,000 tokens context window.
+- Secret redaction boundary: redact secret values in report Markdown/JSON, logs, and trace exports. Agent prompts,
+  internal memory, SQLite records, and non-report evidence artifacts are sensitive internal data and may retain exact
+  secret values when required for evidence correlation and validation.
 - CWE mappings describe software weaknesses and may use deterministic candidate seeds derived from vulnerability
   terminology. MITRE ATT&CK mappings describe observed adversary behavior and should be inferred only from evidence
   such as execution traces, commands, access paths, or post-exploitation activity; a vulnerability alone does not
@@ -110,6 +115,3 @@
 
 ## User Interface
 - When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.
-
-## Cyber Operations Log and Trace Review
-- Only when the user asks to review an operation, see forensics.md for guidance.

@@ -1,12 +1,18 @@
 import json
 
 import pytest
-
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
 
 from src.modules.handlers.tool_recovery import (
-    TaskFailureRecoveryHook,
+    ARTIFACT_PAGE_LIMIT_REACHED_MARKER,
+    ARTIFACT_READ_OVERLAP_GUARD_MARKER,
+    ARTIFACT_READ_REPEAT_GUARD_MARKER,
+    ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER,
+    EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY,
+    STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY,
     TOOL_RECOVERY_EXHAUSTED_STATE_KEY,
+    EvaluatorArtifactReadLimitHook,
+    TaskFailureRecoveryHook,
     ToolOutcomeJournal,
     _input_fingerprint,
     _result_success,
@@ -113,6 +119,60 @@ def test_outcome_journal_retains_externalized_artifact_references():
     assert outcome.artifact_refs == ("artifact:artifacts/specialized_recon_orchestrator_result.log",)
 
 
+def test_outcome_journal_normalizes_comma_terminated_artifact_references():
+    outcome = ToolOutcomeJournal().append(
+        tool_use_id="evidence",
+        tool_name="store_observation",
+        success=True,
+        correctable=False,
+        tool_input={},
+        output="Stored artifact:task_evidence/abc/root_status.txt,",
+    )
+
+    assert outcome.artifact_refs == ("artifact:task_evidence/abc/root_status.txt",)
+
+
+def test_outcome_journal_records_static_shell_request_collection():
+    outcome = ToolOutcomeJournal().append(
+        tool_use_id="routes",
+        tool_name="shell",
+        success=True,
+        correctable=False,
+        tool_input={
+            "command": 'for path in /api /login; do curl -sS "http://target.test${path}"; done'
+        },
+        output="/api -> 200\n/login -> 200",
+    )
+
+    assert outcome.execution_receipts[0].subjects == (
+        "http://target.test/api",
+        "http://target.test/login",
+    )
+    assert outcome.execution_receipts[0].request_count == 2
+    assert outcome.execution_receipts[0].collection is True
+
+
+def test_outcome_journal_records_python_runtime_receipts_only_from_marker():
+    journal = ToolOutcomeJournal()
+    output = (
+        "done\n__CYBER_EXECUTION_RECEIPT__"
+        '{"collection": true, "request_count": 2, '
+        '"subjects": ["http://target.test/api", "http://target.test/login"]}'
+    )
+
+    outcome = journal.append(
+        tool_use_id="python-routes",
+        tool_name="python_repl",
+        success=True,
+        correctable=False,
+        tool_input={"code": "..."},
+        output=output,
+    )
+
+    assert outcome.execution_receipts[0].source == "python_runtime"
+    assert outcome.execution_receipts[0].request_count == 2
+
+
 def test_outcome_journal_extracts_structured_mcp_artifact_id_from_result_only():
     journal = ToolOutcomeJournal()
 
@@ -126,6 +186,144 @@ def test_outcome_journal_extracts_structured_mcp_artifact_id_from_result_only():
     )
 
     assert outcome.artifact_refs == ("artifact_id:mcp-inventory.json",)
+
+
+def test_evaluator_artifact_read_limit_hook_guides_once_then_stops():
+    hook = EvaluatorArtifactReadLimitHook()
+    first = _after(
+        "first",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Artifact read limit reached (8)",
+    )
+
+    hook._after_tool(first)
+
+    assert hook.blocked_attempts == 1
+    assert hook.exhausted is False
+    assert "evaluator-wide artifact-read budget is exhausted" in first.result["content"][0]["text"]
+    assert first.invocation_state == {}
+
+    second = _after(
+        "second",
+        "read_artifact",
+        {"path": "artifact:artifacts/second.txt"},
+        status="error",
+        text=f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Artifact read limit reached (8)",
+    )
+    hook._after_tool(second)
+
+    assert hook.blocked_attempts == 2
+    assert hook.exhausted is True
+    assert "Evaluation is stopping" in second.result["content"][0]["text"]
+    assert second.invocation_state["request_state"] == {
+        "stop_event_loop": True,
+        EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY: {
+            "reason": "max_reads_exceeded",
+            "blocked_attempts": 2,
+        },
+    }
+
+
+def test_evaluator_artifact_read_limit_hook_preserves_repeat_guard_reason():
+    hook = EvaluatorArtifactReadLimitHook()
+    event = _after(
+        "repeat",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_READ_REPEAT_GUARD_MARKER}: Repeated artifact read guidance for duplicate_page",
+    )
+
+    hook._after_tool(event)
+
+    assert "ARTIFACT_READ_REPEAT_GUARD" in event.result["content"][0]["text"]
+    assert "page is unavailable" not in event.result["content"][0]["text"]
+
+
+def test_evaluator_artifact_read_limit_hook_guides_overlap_then_stops_repeat():
+    hook = EvaluatorArtifactReadLimitHook()
+    first = _after(
+        "first",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: page overlaps returned content",
+    )
+    hook._after_tool(first)
+
+    assert hook.exhausted is False
+    assert ARTIFACT_READ_OVERLAP_GUARD_MARKER in first.result["content"][0]["text"]
+
+    other = _after(
+        "other",
+        "read_artifact",
+        {"path": "artifact:artifacts/second.txt"},
+        status="error",
+        text=f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: page overlaps returned content",
+    )
+    hook._after_tool(other)
+
+    assert hook.exhausted is False
+
+    second = _after(
+        "second",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: artifact is blocked",
+    )
+    hook._after_tool(second)
+
+    assert hook.exhausted is True
+    assert second.invocation_state["request_state"]["stop_event_loop"] is True
+
+
+def test_evaluator_artifact_page_limit_allows_another_artifact_then_stops_repeat():
+    hook = EvaluatorArtifactReadLimitHook()
+    first = _after(
+        "first",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact page limit reached (4)",
+    )
+
+    hook._after_tool(first)
+
+    assert hook.blocked_attempts == 0
+    assert hook.exhausted is False
+    assert "different controller-authorized artifact" in first.result["content"][0]["text"]
+
+    other = _after(
+        "other",
+        "read_artifact",
+        {"path": "artifact:artifacts/second.txt"},
+        status="error",
+        text=f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact page limit reached (4)",
+    )
+    hook._after_tool(other)
+
+    assert hook.exhausted is False
+
+    repeated = _after(
+        "repeated",
+        "read_artifact",
+        {"path": "artifact:artifacts/first.txt"},
+        status="error",
+        text=f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact page limit reached (4)",
+    )
+    hook._after_tool(repeated)
+
+    assert hook.exhausted is True
+    assert repeated.invocation_state["request_state"] == {
+        "stop_event_loop": True,
+        EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY: {
+            "reason": "repeated_page_limit",
+            "blocked_attempts": 1,
+        },
+    }
 
 
 def test_failed_corrections_exhaust_configured_allowance_without_blocking_independent_work():
@@ -409,6 +607,18 @@ def test_validation_error_status_is_not_treated_as_a_successful_tool_result():
             "RECORD_TASK_ACCEPTANCE_REPAIR_FINDING_PREREQUISITE",
         ),
         ("acceptance result evidence_refs required", "RECORD_TASK_ACCEPTANCE_REPAIR_EVIDENCE_REFS"),
+        (
+            "TASK_EVIDENCE_SNAPSHOT_VERIFICATION_FAILED: copied snapshot digest mismatch",
+            "RECORD_TASK_ACCEPTANCE_SNAPSHOT_VERIFICATION_FAILED",
+        ),
+        (
+            "TASK_EVIDENCE_SNAPSHOT_SOURCE_UNAVAILABLE: source artifact is unavailable",
+            "RECORD_TASK_ACCEPTANCE_SOURCE_ARTIFACT_REPAIR",
+        ),
+        (
+            "TASK_EVIDENCE_SNAPSHOT_DESTINATION_UNVERIFIABLE: copied snapshot digest mismatch",
+            "RECORD_TASK_ACCEPTANCE_SNAPSHOT_DESTINATION_FAILED",
+        ),
     ],
 )
 def test_acceptance_errors_return_specific_repair_instructions(raw, expected):
@@ -441,8 +651,131 @@ def test_non_shell_failed_correction_exhausts_recovery():
     retry = _before("retry", "create_tasks", retry_input)
     hook._before_tool(retry)
     assert retry.cancel_tool is False
-    hook._after_tool(_after("retry", "create_tasks", retry_input, status="error", text="validation error"))
+    retry_failure = _after("retry", "create_tasks", retry_input, status="error", text="validation error")
+    hook._after_tool(retry_failure)
     assert hook.exhausted is True
+    assert STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY not in retry_failure.invocation_state["request_state"]
+
+
+def test_exhausted_store_finding_correction_requests_stop_for_current_invocation():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10, max_corrections=1)
+    failed_input = {"title": "Candidate", "artifacts": ["artifacts/evidence.txt"]}
+    hook._after_tool(
+        _after(
+            "failed",
+            "store_finding",
+            failed_input,
+            status="error",
+            text="At least one evidence assertion is required",
+        )
+    )
+
+    correction = _before(
+        "correction",
+        "store_finding",
+        {**failed_input, "evidence_assertions": [{"artifact": "artifacts/evidence.txt", "marker": "proof"}]},
+    )
+    hook._before_tool(correction)
+    correction_failure = _after(
+        "correction",
+        "store_finding",
+        correction.tool_use["input"],
+        status="error",
+        text="evidence assertion marker was not found in artifact:artifacts/evidence.txt",
+    )
+    hook._after_tool(correction_failure)
+
+    request_state = correction_failure.invocation_state["request_state"]
+    assert hook.exhausted is True
+    assert request_state["stop_event_loop"] is True
+    assert request_state[STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY] == {
+        "reason": "correction_failed",
+        "policy_violations": 0,
+        "max_policy_violations": 10,
+        "failed_tool": "store_finding",
+    }
+    assert request_state[TOOL_RECOVERY_EXHAUSTED_STATE_KEY] == request_state[
+        STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY
+    ]
+
+
+def test_blocked_store_finding_recovery_requests_stop_for_current_invocation():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=1)
+    failed_input = {"title": "Candidate", "artifacts": []}
+    hook._after_tool(
+        _after(
+            "failed",
+            "store_finding",
+            failed_input,
+            status="error",
+            text="At least one existing artifact is required",
+        )
+    )
+
+    blocked = _before("blocked", "store_finding", failed_input)
+    hook._before_tool(blocked)
+
+    request_state = blocked.invocation_state["request_state"]
+    assert hook.exhausted is True
+    assert request_state["stop_event_loop"] is True
+    assert request_state[STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY]["reason"] == "policy_violation_limit"
+    assert request_state[STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY]["failed_tool"] == "store_finding"
+
+
+def test_finding_validation_corrections_survive_shell_inspection_and_stop_on_final_failure():
+    journal = ToolOutcomeJournal()
+    hook = TaskFailureRecoveryHook(journal, max_policy_violations=10, max_corrections=2)
+    validation_error = (
+        "secret exposure revalidation requires the same exposure in a fresh artifact; "
+        "API_KEY=exact-validator-secret"
+    )
+    first_input = {"outcome": "confirmed", "evidence_artifacts": ["artifact:artifacts/first.json"]}
+
+    first_failure = _after(
+        "validation-1",
+        "record_finding_validation",
+        first_input,
+        status="error",
+        text=validation_error,
+    )
+    hook._after_tool(first_failure)
+    assert "FINDING_VALIDATION_REPAIR" in _result_text(first_failure.result)
+    assert "same exposure in a fresh artifact" in _result_text(first_failure.result)
+    assert "exact-validator-secret" in _result_text(first_failure.result)
+
+    shell_one = _before("shell-1", "shell", {"command": "curl -sS http://target/first"})
+    hook._before_tool(shell_one)
+    hook._after_tool(_after("shell-1", "shell", shell_one.tool_use["input"], status="success", text="first.json"))
+    assert hook.unresolved is True
+
+    second_input = {"outcome": "confirmed", "evidence_artifacts": ["artifact:artifacts/second.json"]}
+    second = _before("validation-2", "record_finding_validation", second_input)
+    hook._before_tool(second)
+    assert second.cancel_tool is False
+    hook._after_tool(_after("validation-2", "record_finding_validation", second_input, status="error", text=validation_error))
+
+    shell_two = _before("shell-2", "shell", {"command": "curl -sS http://target/second"})
+    hook._before_tool(shell_two)
+    hook._after_tool(_after("shell-2", "shell", shell_two.tool_use["input"], status="success", text="second.json"))
+    assert hook.unresolved is True
+
+    final_input = {"outcome": "confirmed", "evidence_artifacts": ["artifact:artifacts/final.json"]}
+    final = _before("validation-3", "record_finding_validation", final_input)
+    hook._before_tool(final)
+    assert final.cancel_tool is False
+    final_failure = _after("validation-3", "record_finding_validation", final_input, status="error", text=validation_error)
+    hook._after_tool(final_failure)
+
+    assert hook.exhausted is True
+    assert final_failure.invocation_state["request_state"]["stop_event_loop"] is True
+    assert final_failure.invocation_state["request_state"][TOOL_RECOVERY_EXHAUSTED_STATE_KEY]["reason"] == "correction_failed"
+    assert [outcome.recovery_role for outcome in journal.entries()] == [
+        "normal",
+        "alternative",
+        "correction",
+        "alternative",
+        "correction",
+    ]
 
 
 def test_shell_correction_allows_different_executable_and_requires_changed_input():
@@ -515,7 +848,7 @@ def test_shell_validation_failure_without_executable_accepts_valid_changed_corre
     assert [outcome.recovery_role for outcome in journal.entries()] == ["normal", "correction"]
 
 
-def test_outcome_journal_is_bounded_and_redacts_sensitive_input():
+def test_outcome_journal_is_bounded_and_retains_sensitive_internal_input():
     journal = ToolOutcomeJournal(max_entries=2)
     for index in range(3):
         journal.append(
@@ -529,8 +862,8 @@ def test_outcome_journal_is_bounded_and_redacts_sensitive_input():
 
     entries = journal.entries()
     assert [entry.sequence for entry in entries] == [2, 3]
-    assert "Bearer secret" not in entries[-1].input_summary
-    assert "[REDACTED]" in entries[-1].input_summary
+    assert "Bearer secret" in entries[-1].input_summary
+    assert "[REDACTED]" not in entries[-1].input_summary
     assert len(entries[-1].output_summary) == 500
 
 

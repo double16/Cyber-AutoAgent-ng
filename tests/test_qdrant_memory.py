@@ -374,7 +374,12 @@ def test_get_missing_and_cross_operation_same_target(monkeypatch, tmp_path):
 
 
 def test_local_qdrant_round_trip_uses_target_and_operation_scope(monkeypatch, tmp_path):
+    from qdrant_client.local.persistence import CollectionPersistence
+
     monkeypatch.delenv("QDRANT_URL", raising=False)
+    # qdrant-client's thread-safety probe uses `with sqlite3.connect(...)`,
+    # which commits but does not close its temporary connection.
+    monkeypatch.setattr(CollectionPersistence, "CHECK_SAME_THREAD", False)
     monkeypatch.setattr(
         memory,
         "_MEMORY_CONFIG",

@@ -111,7 +111,7 @@ def test_critical_types_configuration():
         expected = event["expected_critical"]
         status = "✓" if is_critical == expected else "✗"
 
-        print(f"{event['type']:20} {str(is_critical):10} {str(expected):10} {status}")
+        print(f"{event['type']:20} {is_critical!s:10} {expected!s:10} {status}")
 
         if event["type"] == "progress_update" and not is_critical:
             issues.append("progress_update should be critical for FINAL REPORT visibility")

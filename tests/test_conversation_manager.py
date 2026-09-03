@@ -3,8 +3,8 @@ from typing import Any
 from strands.types.exceptions import ContextWindowOverflowException
 
 from modules.handlers.conversation_budget import (
-    MappingConversationManager,
     LargeToolResultMapper,
+    MappingConversationManager,
 )
 
 
@@ -192,7 +192,9 @@ def test_reduce_context_records_event(monkeypatch):
     agent = _AgentStub(
         [_make_message("one"), _make_message("two"), _make_message("three"), _make_message("four")]
     )
-    setattr(agent, "_pending_reduction_reason", "telemetry tokens 900")
+    reduction_state = {"epoch": 0}
+    agent._cyber_context_reduction_states = [reduction_state]
+    agent._pending_reduction_reason = "telemetry tokens 900"
 
     manager.reduce_context(agent)
 
@@ -201,6 +203,7 @@ def test_reduce_context_records_event(monkeypatch):
     event = history[-1]
     assert event["reason"] == "telemetry tokens 900"
     assert event["removed_messages"] > 0
+    assert reduction_state["epoch"] == 1
 
 
 def test_pruning_conversation_manager_removes_reasoning():
@@ -218,7 +221,7 @@ def test_pruning_conversation_manager_removes_reasoning():
     manager.reduce_context(agent)
 
     assert len(agent.messages) == 4
-    assert not any(["reasoningContent" in message["content"][0] for message in agent.messages[:-1]])
+    assert not any("reasoningContent" in message["content"][0] for message in agent.messages[:-1])
 
 
 def test_pruning_conversation_manager_removes_redacted_reasoning():
@@ -236,7 +239,7 @@ def test_pruning_conversation_manager_removes_redacted_reasoning():
     manager.reduce_context(agent)
 
     assert len(agent.messages) == 4
-    assert not any(["reasoningContent" in message["content"][0] for message in agent.messages[:-1]])
+    assert not any("reasoningContent" in message["content"][0] for message in agent.messages[:-1])
 
 
 def test_pruning_conversation_manager_reduces_reasoning_loop():

@@ -3,12 +3,12 @@
 import ipaddress
 import os
 import socket
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Literal, Optional, Sequence
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from modules.tools.memory import OperationTarget
-
 
 PreflightStatus = Literal["pass", "fail", "skip"]
 
@@ -61,7 +61,7 @@ class TargetValidationResult:
 @dataclass(frozen=True)
 class _NetworkEndpoint:
     host: str
-    port: Optional[int]
+    port: int | None
 
 
 class TargetValidator:
@@ -213,7 +213,7 @@ class TargetValidator:
         return _NetworkEndpoint(host=host, port=port)
 
     @staticmethod
-    def _numeric_address(host: str) -> Optional[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    def _numeric_address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
         try:
             return ipaddress.ip_address(host)
         except ValueError:
@@ -235,10 +235,7 @@ class TargetValidator:
         try:
             probe.settimeout(self.timeout_seconds)
             sockaddr: tuple[Any, ...]
-            if family == socket.AF_INET6:
-                sockaddr = (str(destination), 9, 0, 0)
-            else:
-                sockaddr = (str(destination), 9)
+            sockaddr = (str(destination), 9, 0, 0) if family == socket.AF_INET6 else (str(destination), 9)
             probe.connect(sockaddr)
         finally:
             probe.close()
@@ -262,7 +259,7 @@ class TargetValidator:
 def validate_operation_targets(
     targets: Iterable[OperationTarget],
     *,
-    validator: Optional[TargetValidator] = None,
+    validator: TargetValidator | None = None,
 ) -> list[TargetValidationResult]:
     """Validate every resolved target without stopping at the first failure."""
 

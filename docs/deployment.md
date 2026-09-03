@@ -339,6 +339,10 @@ The resolved value is written to the Strands model's `context_window_limit` and 
 conversation compression. Ollama also receives the same value as `num_ctx`. Values such as 48,000 are configuration or
 detection results, not application defaults. Startup fails when no positive context window can be resolved.
 
+Artifact pages use the same resolved input context window. Each page is limited to 5% of the window at four UTF-8
+bytes per token, clamped from 8 KiB through 64 KiB. For example, a 48,000-token context permits 9,600 bytes. Oversized
+pages are rejected before their content is materialized.
+
 **Example fallback configuration:**
 ```bash
 export CYBER_CONTEXT_WINDOW_FALLBACKS='[
@@ -363,10 +367,11 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `CYBER_CONTEXT_LIMIT`                              | Limit detected prompt tokens                               | No (auto-detected)                                              |
 | `CYBER_PROMPT_LIMIT_FORCE`                         | Force prompt token limit                                   | No (auto-detected)                                              |
 | `CYBER_SDK_CONTEXT_MANAGER`                        | Strands context facade (`auto`, `agentic`, `false`)        | No (default: `false`)                                           |
-| `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique | No (default: `3`)                                               |
-| `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique  | No (default: `2`)                                               |
+| `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique | No (default: `7`)                                               |
+| `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique  | No (default: `3`)                                               |
 | `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum normal executor passes per task                    | No (default: `3`, minimum `1`)                                  |
 | `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS`             | Extra executor passes for actionable evaluator feedback    | No (default: `1`, minimum `0`)                                  |
+| `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE`     | Successful pages per authorized evaluator evidence artifact | No (default: `4`, minimum `1`; 200 lines per page)              |
 | `CYBER_SECLISTS_DIR`                               | Absolute SecLists root for wordlist-consuming tools        | No (common locations; container default: `/usr/share/seclists`) |
 | `CYBER_REPORT_REFINEMENT_CYCLES`                   | Critic-guided revision cycles per generated report section | No (default: `2`; `0` disables)                                 |
 | `CYBER_TAXONOMY_CACHE_DIR`                         | Local cache directory for CWE and ATT&CK catalogs          | No (default: user cache directory)                              |

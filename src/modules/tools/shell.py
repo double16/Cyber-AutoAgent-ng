@@ -6,19 +6,21 @@
 import json
 import logging
 import os
+import re
 import shlex
 import subprocess
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Any, Literal
 
 from strands import tool
 
 logger = logging.getLogger(__name__)
 
-ShellCommandValidator = Callable[[List[Union[str, Dict]]], Optional[str]]
-_shell_command_validator: ContextVar[Optional[ShellCommandValidator]] = ContextVar(
+ShellCommandValidator = Callable[[list[str | dict]], str | None]
+_shell_command_validator: ContextVar[ShellCommandValidator | None] = ContextVar(
     "shell_command_validator",
     default=None,
 )
@@ -47,7 +49,7 @@ def _safe_text(value: Any) -> str:
     return str(value)
 
 
-def validate_command(command: Union[str, Dict]) -> Tuple[str, Dict]:
+def validate_command(command: str | dict) -> tuple[str, dict]:
     """Validate and normalize command input."""
     if isinstance(command, str):
         return command, {}
@@ -60,13 +62,37 @@ def validate_command(command: Union[str, Dict]) -> Tuple[str, Dict]:
         raise ValueError("Command must be string or dict")
 
 
+_SHELL_CONTROL_OPERATOR_PATTERN = re.compile(r"(?:&&|\|\||[;<>]|`|\$\()")
+
+
+def _is_empty_read_only_search(command: str, exit_code: int, error: str) -> bool:
+    """Return whether grep/rg exit status one unambiguously means no matches."""
+
+    if (
+        exit_code != 1
+        or error.strip()
+        or _SHELL_CONTROL_OPERATOR_PATTERN.search(command)
+    ):
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    executable = os.path.basename(tokens[0]).lower()
+    if executable not in {"grep", "rg"}:
+        return False
+    return "--pre" not in tokens and "--pre-glob" not in tokens
+
+
 class CommandExecutor:
     """Handles execution of shell commands with timeout."""
 
-    def __init__(self, timeout: int = None) -> None:
+    def __init__(self, timeout: int | None = None) -> None:
         self.timeout = int(os.environ.get("SHELL_DEFAULT_TIMEOUT", "900")) if timeout is None else timeout
 
-    def execute(self, command: str, cwd: str) -> Tuple[int, str, str]:
+    def execute(self, command: str, cwd: str) -> tuple[int, str, str]:
         """Execute command with timeout support."""
         try:
             completed = subprocess.run(
@@ -88,8 +114,8 @@ class CommandExecutor:
 
 
 def execute_single_command(
-        command: Union[str, Dict], work_dir: str, timeout: int
-) -> Dict[str, Any]:
+        command: str | dict, work_dir: str, timeout: int
+) -> dict[str, Any]:
     """Execute a single command and return its results."""
     cmd_str = str(command)
 
@@ -105,6 +131,9 @@ def execute_single_command(
             "error": error,
             "status": "success" if exit_code == 0 else "error",
         }
+        if _is_empty_read_only_search(cmd_str, exit_code, error):
+            result["status"] = "success"
+            result["no_matches"] = True
 
         if cmd_opts:
             result["options"] = cmd_opts
@@ -127,7 +156,7 @@ class CommandContext:
     def __init__(self, base_dir: str) -> None:
         self.base_dir = os.path.abspath(base_dir)
         self.current_dir = self.base_dir
-        self._dir_stack: List[str] = []
+        self._dir_stack: list[str] = []
 
     def push_dir(self) -> None:
         """Save current directory to stack."""
@@ -151,12 +180,12 @@ class CommandContext:
 
 
 def execute_commands(
-        commands: List[Union[str, Dict]],
+        commands: list[str | dict],
         parallel: bool,
         ignore_errors: bool,
         work_dir: str,
         timeout: int,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Execute multiple commands either sequentially or in parallel."""
     results = []
     context = CommandContext(work_dir)
@@ -168,7 +197,7 @@ def execute_commands(
                 executor.submit(execute_single_command, cmd, work_dir, timeout): index
                 for index, cmd in enumerate(commands)
             }
-            ordered_results: List[Optional[Dict[str, Any]]] = [None] * len(future_to_index)
+            ordered_results: list[dict[str, Any] | None] = [None] * len(future_to_index)
 
             for future in as_completed(future_to_index):
                 index = future_to_index[future]
@@ -195,8 +224,8 @@ def execute_commands(
 
 
 def normalize_commands(
-        command: Union[str, List[Union[str, Dict[Any, Any]]], Dict[Any, Any]],
-) -> List[Union[str, Dict]]:
+        command: str | list[str | dict[Any, Any]] | dict[Any, Any],
+) -> list[str | dict]:
     """Convert command input into a normalized list of commands."""
     if isinstance(command, list):
         return command
@@ -205,11 +234,11 @@ def normalize_commands(
 
 @tool
 def shell(
-        command: Union[str, List[Union[str, Dict[str, Any]]]],
+        command: str | list[str | dict[str, Any]],
         parallel: bool = False,
-        timeout: Optional[int] = None,
-        work_dir: Optional[str] = None,
-) -> Dict[str, Any]:
+        timeout: int | None = None,
+        work_dir: str | None = None,
+) -> dict[str, Any]:
     """Non-interactive shell for command execution. Features:
 
     1. Selection Rules:
@@ -346,13 +375,14 @@ def shell(
 
         content = []
         for result in results:
+            no_matches = "\nNo Matches: true" if result.get("no_matches") else ""
             content.append(
                 {
                     "text": f"Command: {result['command']}\n"
                             f"Status: {result['status']}\n"
                             f"Exit Code: {result['exit_code']}\n"
                             f"Output: {result['output']}\n"
-                            f"Error: {result['error']}"
+                            f"Error: {result['error']}{no_matches}"
                 }
             )
 
@@ -373,5 +403,5 @@ def shell(
     except Exception as e:
         return {
             "status": "error",
-            "content": [{"text": f"Shell error: {str(e)}"}],
+            "content": [{"text": f"Shell error: {e!s}"}],
         }

@@ -81,3 +81,23 @@ def test_monitor_uses_cgroup_limit_and_takes_dump_when_threshold_exceeded(monkey
 
     assert dumps == ["dumped"]
     assert sleeps == [30, 0.25]
+
+
+def test_monitor_handles_missing_psutil_and_uses_resource_fallback(monkeypatch, capsys):
+    mod = _import_heap_monitor(monkeypatch)
+    monkeypatch.setattr(mod, "psutil", None)
+
+    mod.monitor(max_iterations=1)
+
+    assert "psutil unavailable" in capsys.readouterr().out
+
+    class FakeProcess:
+        def memory_info(self):
+            return SimpleNamespace(rss=10)
+
+    monkeypatch.setattr(mod, "psutil", SimpleNamespace(Process=lambda: FakeProcess()))
+    monkeypatch.setattr(builtins, "open", lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setattr("resource.getrlimit", lambda _limit: (100, 100))
+    monkeypatch.setattr(mod.time, "sleep", lambda _value: None)
+
+    mod.monitor(interval=0, threshold_ratio=0.8, max_iterations=1)

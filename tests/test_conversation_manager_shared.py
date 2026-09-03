@@ -9,8 +9,8 @@ import types
 
 from modules.handlers.conversation_budget import (
     _ensure_prompt_within_budget,
-    register_conversation_manager,
     clear_shared_conversation_manager,
+    register_conversation_manager,
 )
 
 
@@ -35,7 +35,7 @@ def test_shared_conversation_manager_is_used_when_agent_has_none():
     calls = []
 
     class CMStub:
-        def reduce_context(self, agent, *args, **kwargs):  # noqa: D401
+        def reduce_context(self, agent, *args, **kwargs):
             calls.append(len(getattr(agent, "messages", [])))
 
     register_conversation_manager(CMStub())
