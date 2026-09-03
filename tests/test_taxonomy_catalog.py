@@ -7,6 +7,7 @@ from io import BytesIO
 import httpx
 import pytest
 
+from modules.config import taxonomy_catalog as mod
 from modules.config.taxonomy_catalog import TaxonomyCatalog, validate_taxonomy_mappings
 from modules.handlers.report_generator import _format_taxonomy_mappings
 
@@ -194,6 +195,132 @@ def test_refresh_logs_the_cwe_source_when_cwe_request_fails(monkeypatch, tmp_pat
         assert TaxonomyCatalog(cache_dir=tmp_path)._refresh() is None
 
     assert "https://cwe.mitre.org/data/xml/cwec_latest.xml.zip" in caplog.text
+
+
+def test_catalog_refreshes_configured_normalized_endpoint_and_writes_cache(monkeypatch, tmp_path):
+    payload = _catalog_payload()
+    response = httpx.Response(200, json=payload, request=httpx.Request("GET", "https://catalog.test/data.json"))
+    monkeypatch.setenv("CYBER_TAXONOMY_CATALOG_URL", "https://catalog.test/data.json")
+    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: response)
+
+    catalog = TaxonomyCatalog(cache_dir=tmp_path)
+
+    assert catalog._refresh() == payload
+    assert json.loads(catalog.cache_file.read_text(encoding="utf-8"))["version"] == "test-v1"
+
+
+def test_catalog_refresh_rejects_malformed_configured_payload(monkeypatch, tmp_path):
+    response = httpx.Response(200, json={"cwe": []}, request=httpx.Request("GET", "https://catalog.test/data.json"))
+    monkeypatch.setenv("CYBER_TAXONOMY_CATALOG_URL", "https://catalog.test/data.json")
+    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: response)
+
+    assert TaxonomyCatalog(cache_dir=tmp_path)._refresh() is None
+
+
+def test_catalog_normalizes_attack_records_and_refreshes_snapshot(monkeypatch, tmp_path):
+    records = TaxonomyCatalog._normalize_attack(
+        {
+            "objects": [
+                {"type": "not-an-attack-pattern"},
+                {
+                    "type": "attack-pattern",
+                    "name": "Valid Technique",
+                    "description": "Observed behavior",
+                    "external_references": [{"source_name": "mitre-attack", "external_id": "T1059.004"}],
+                },
+                {
+                    "type": "attack-pattern",
+                    "external_references": [{"source_name": "mitre-attack", "external_id": "invalid"}],
+                },
+            ]
+        }
+    )
+    assert records[0]["id"] == "T1059.004"
+    assert records[0]["url"].endswith("T1059/004/")
+
+    catalog = TaxonomyCatalog(cache_dir=tmp_path)
+    catalog.snapshot_file = tmp_path / "snapshot" / "taxonomy_catalog.json"
+    monkeypatch.setattr(catalog, "_refresh", lambda: _catalog_payload())
+
+    assert catalog.refresh_snapshot()["version"] == "test-v1"
+    assert json.loads(catalog.snapshot_file.read_text(encoding="utf-8"))["attack"][0]["id"] == "T1190"
+
+
+def test_catalog_helpers_cover_unavailable_data_and_singleton(monkeypatch, tmp_path):
+    catalog = TaxonomyCatalog(cache_dir=tmp_path)
+    catalog.snapshot_file = tmp_path / "missing-snapshot.json"
+    monkeypatch.setenv("CYBER_TAXONOMY_OFFLINE", "true")
+
+    assert catalog.get_data()["version"] == "unavailable"
+    assert catalog.get("unexpected", "CWE-79") is None
+    assert catalog.candidates({"title": "anything"}, "unexpected") == []
+
+    monkeypatch.setattr(mod, "_catalog", None)
+    first = mod.get_taxonomy_catalog()
+    assert mod.get_taxonomy_catalog() is first
+
+
+def test_catalog_uses_refresh_and_stale_cache_fallback(monkeypatch, tmp_path):
+    cache_file = tmp_path / "taxonomy_catalog.json"
+    cache_file.write_text(json.dumps(_catalog_payload()), encoding="utf-8")
+    old = time.time() - 90 * 24 * 3600
+    os.utime(cache_file, (old, old))
+
+    refreshed = TaxonomyCatalog(cache_dir=tmp_path)
+    monkeypatch.setenv("CYBER_TAXONOMY_OFFLINE", "false")
+    monkeypatch.setattr(refreshed, "_refresh", lambda: {**_catalog_payload(), "version": "refreshed"})
+    assert refreshed.get_data()["version"] == "refreshed"
+    assert refreshed.provenance()["source"] == "refresh"
+
+    stale = TaxonomyCatalog(cache_dir=tmp_path)
+    stale.snapshot_file = tmp_path / "missing-snapshot.json"
+    monkeypatch.setenv("CYBER_TAXONOMY_OFFLINE", "true")
+    assert stale.get_data()["version"] == "test-v1"
+    assert stale.provenance()["source"] == "stale_cache"
+
+
+def test_catalog_validation_rejects_invalid_mapping_shapes(monkeypatch):
+    class Catalog:
+        def provenance(self):
+            return {}
+
+        def get(self, kind, identifier):
+            return _catalog_payload()["cwe" if kind == "cwe" else "attack"][0]
+
+    monkeypatch.setattr(mod, "get_taxonomy_catalog", lambda: Catalog())
+
+    assert validate_taxonomy_mappings(None, None, []) == {"cwe": [], "mitre_attack": [], "provenance": {}}
+    with pytest.raises(ValueError, match="must be a list"):
+        validate_taxonomy_mappings({}, None, [])
+    with pytest.raises(ValueError, match="must be an object"):
+        validate_taxonomy_mappings(["bad"], None, [])
+    with pytest.raises(ValueError, match="requires an id"):
+        validate_taxonomy_mappings([{}], None, [])
+    with pytest.raises(ValueError, match="not eligible"):
+        validate_taxonomy_mappings(
+            None,
+            [{"id": "T1190"}],
+            [],
+            disallowed_attack_ids={"T1190"},
+        )
+    with pytest.raises(ValueError, match="number from"):
+        validate_taxonomy_mappings(
+            [{"id": "CWE-79", "confidence": True, "rationale": "evidence", "evidence": ["artifact:proof"]}],
+            None,
+            ["artifact:proof"],
+        )
+    with pytest.raises(ValueError, match="rationale is required"):
+        validate_taxonomy_mappings(
+            [{"id": "CWE-79", "confidence": 0.8, "evidence": ["artifact:proof"]}],
+            None,
+            ["artifact:proof"],
+        )
+    with pytest.raises(ValueError, match="requires at least one"):
+        validate_taxonomy_mappings(
+            [{"id": "CWE-79", "confidence": 0.8, "rationale": "evidence", "evidence": []}],
+            None,
+            ["artifact:proof"],
+        )
 
 
 def test_taxonomy_validation_rejects_unknown_low_and_ungrounded_inferred_candidates(monkeypatch):

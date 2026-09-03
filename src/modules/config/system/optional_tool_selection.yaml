@@ -1,0 +1,20 @@
+# Controller-owned rules for making built-in optional tools available from
+# persisted task-contract metadata. Rules do not inspect task prose.
+version: 1
+rules:
+  - id: inventory_manifest_output
+    output_kinds:
+      - inventory_manifest
+    evidence_requirement_kinds: []
+    tools:
+      - recon_output_to_inventory_manifest
+      - specialized_recon_orchestrator
+      - auth_chain_analyzer
+  - id: inventory_manifest_evidence
+    output_kinds: []
+    evidence_requirement_kinds:
+      - inventory_manifest
+    tools:
+      - recon_output_to_inventory_manifest
+      - specialized_recon_orchestrator
+      - auth_chain_analyzer

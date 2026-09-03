@@ -7,7 +7,8 @@ or when multiple capability classes should be tested in parallel. Keep teams sma
 
 import logging
 import traceback
-from typing import Any, Dict, List, Optional, Callable
+from collections.abc import Callable
+from typing import Any
 
 from strands import Agent, ToolContext, tool
 from strands.multiagent import Swarm
@@ -20,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 def _create_custom_agents(
         agent_factory: Callable[..., Agent],
-        agent_specs: List[Dict[str, Any]],
-        parent_agent: Optional[Agent] = None,
-) -> List[Agent]:
+        agent_specs: list[dict[str, Any]],
+        parent_agent: Agent | None = None,
+) -> list[Agent]:
     """
     Create custom agents based on user specifications.
 
@@ -113,7 +114,7 @@ def _create_custom_agents(
 @tool(context=True)
 def swarm(
         task: str,
-        agents: List[Dict[str, Any]],
+        agents: list[dict[str, Any]],
         max_handoffs: int = 20,
         max_iterations: int = 30,
         execution_timeout: float = 900.0,
@@ -121,7 +122,7 @@ def swarm(
         repetitive_handoff_detection_window: int = 8,
         repetitive_handoff_min_unique_agents: int = 3,
         tool_context: ToolContext = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run a coordinated multi-agent swarm for parallel exploration.
 
     Call when:
@@ -156,7 +157,7 @@ def swarm(
     """
     agent_factory = getattr(swarm, "agent_factory", None)
     assert agent_factory is not None
-    swarm_agents: Optional[list[Agent]] = None
+    swarm_agents: list[Agent] | None = None
     agent = tool_context.agent if tool_context else None
 
     try:
@@ -271,11 +272,11 @@ def swarm(
 
     except Exception as e:
         error_trace = traceback.format_exc()
-        logger.error(f"Custom swarm execution failed: {str(e)}\n{error_trace}")
+        logger.error(f"Custom swarm execution failed: {e!s}\n{error_trace}")
 
         return {
             "status": "error",
-            "content": [{"text": f"⚠️ Custom swarm execution failed: {str(e)}"}],
+            "content": [{"text": f"⚠️ Custom swarm execution failed: {e!s}"}],
         }
 
     finally:

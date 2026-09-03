@@ -1,11 +1,11 @@
-import subprocess
 import json
-from typing import Any, Dict, List
+import subprocess
+from typing import Any
 
 import pytest
 
-import modules.operation_plugins.web.tools.specialized_recon_orchestrator as sro
 import modules.tools.recon_inventory_manifest as manifest_tool
+import modules.tools.specialized_recon_orchestrator as sro
 
 
 class _CP:
@@ -31,7 +31,7 @@ class _Resp:
         return self._json_obj
 
 
-def _as_json(result_str: str) -> Dict[str, Any]:
+def _as_json(result_str: str) -> dict[str, Any]:
     assert isinstance(result_str, str)
     return json.loads(result_str)
 
@@ -159,7 +159,7 @@ def test_target_normalization_domain_and_url_inputs(fake_subprocess, fake_reques
 
 
 def test_orchestrator_uses_controller_bound_target_before_recon(monkeypatch):
-    import modules.tools.memory as memory
+    from modules.tools import memory
 
     captured = {}
     monkeypatch.setattr(
@@ -304,6 +304,24 @@ def test_public_hostname_detection_rejects_non_public_hosts():
     assert sro._normalize_target_endpoint("10.0.0.1:8080") == "10.0.0.1:8080"
     assert sro._normalize_target_endpoint("https://portal.internal:8443/login") == "portal.internal:8443"
     assert sro._normalize_target_endpoint("[fd00::1]:8443") == "[fd00::1]:8443"
+
+
+def test_target_helpers_cover_empty_invalid_and_non_string_inputs():
+    assert sro._normalize_target_host("") == ""
+    assert sro._normalize_target_endpoint("") == ""
+    assert sro._format_host_with_port("", 443) == ""
+    assert sro._format_host_with_port("example.com", None) == "example.com"
+    assert sro._format_host_with_port("2001:db8::1", 443) == "[2001:db8::1]:443"
+    assert sro._safe_url_port(sro.urlparse("https://example.test:invalid")) is None
+    assert sro._is_public_hostname("") is False
+    assert sro._is_public_hostname("bad host.example") is False
+    assert sro._is_public_hostname("-bad.example") is False
+    assert sro._is_public_hostname("bad-.example") is False
+    assert sro._is_public_hostname("bad..example") is False
+    assert sro._should_run_subdomain_enum("") is False
+    assert sro._coerce_str(None) == ""
+    assert sro._coerce_str(b"value") == "value"
+    assert sro._coerce_str(42) == "42"
 
 
 def test_orchestrator_skips_public_osint_for_non_public_hostname(monkeypatch):
@@ -667,7 +685,7 @@ def test_dedup_canonicalized_urls_strips_fragments_and_preserves_first_seen():
 
 
 def test_append_tool_error_includes_tails_only():
-    errors: List[Dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     big = "x" * 6000
     sro._append_tool_error(
         errors,
@@ -705,7 +723,7 @@ def test_setup_specialized_tools_records_errors_on_nonzero(fake_subprocess):
 
     fake_subprocess["handlers"] = [(pred_which, resp_which), (pred_go_install, resp_go_install)]
 
-    errors: List[Dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     status = sro._setup_specialized_tools(errors=errors)
 
     assert status["failed"], "Should mark tools as failed when go install returns non-zero"
@@ -729,7 +747,7 @@ def test_setup_specialized_tools_timeout_records_error(fake_subprocess):
 
     fake_subprocess["handlers"] = [(pred_which, resp_which), (pred_go_install, resp_go_install)]
 
-    errors: List[Dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     status = sro._setup_specialized_tools(errors=errors)
 
     assert status["failed"], "Timeout should mark tools as failed"
@@ -767,7 +785,7 @@ def test_advanced_subdomain_enum_records_tool_errors(fake_subprocess, fake_reque
     # crtsh returns empty list
     fake_requests["get_handler"] = lambda url, kwargs: _Resp(ok=True, text="[]", json_obj=[])
 
-    errors: List[Dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     subs = sro._advanced_subdomain_enum("example.com", errors=errors)
 
     assert "a.example.com" in subs
@@ -818,7 +836,7 @@ def test_advanced_subdomain_enum_skips_public_site_tools_for_non_public_hosts(fa
 
     fake_subprocess["handlers"] = [(fail_if_public_tool_runs, fail_response)]
 
-    errors: List[Dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     subs = sro._advanced_subdomain_enum("portal.internal", errors=errors)
 
     assert subs == []
@@ -840,7 +858,7 @@ def test_advanced_subdomain_enum_crtsh_json_parse_error_recorded(fake_subprocess
 
     fake_requests["get_handler"] = lambda url, kwargs: _BadResp(ok=True, text="not-json", status_code=200)
 
-    errors: List[Dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     subs = sro._advanced_subdomain_enum("example.com", errors=errors)
 
     assert isinstance(subs, list)
@@ -856,7 +874,7 @@ def test_analyze_live_hosts_httpx_nonzero_records_error(fake_subprocess):
 
     fake_subprocess["handlers"] = [(pred_httpx, resp_httpx)]
 
-    errors: List[Dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     out = sro._analyze_live_hosts(["a.example.com"], errors=errors)
 
     assert "hosts" in out and "technologies" in out
@@ -913,7 +931,7 @@ def test_deep_web_intelligence_katana_nonzero_fallback_parses_html(fake_subproce
 
     fake_requests["get_handler"] = lambda url, kwargs: _Resp(ok=True, text=html, status_code=200)
 
-    errors: List[Dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
     out = sro._deep_web_intelligence(["https://a.example.com"], errors=errors)
 
     assert "https://a.example.com/static/app.js" in out["js_files"]

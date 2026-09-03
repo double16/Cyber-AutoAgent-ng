@@ -95,6 +95,8 @@ export enum EventType {
   PROGRESS_UPDATE = 'progress_update',
   /** Controller-owned planning, prompt-building, and evaluation activity */
   WORKFLOW_ACTIVITY = 'workflow_activity',
+  /** Plan draft and critic-validation outcome, excluding prompt and draft content */
+  PLAN_VALIDATION = 'plan_validation',
   /** Pre-operation validation result for one resolved target */
   PREFLIGHT_CHECK = 'preflight_check',
   
@@ -461,6 +463,20 @@ export interface PythonSystemEvent extends BaseEvent {
   operation_id?: string;
 }
 
+/** Safe lifecycle telemetry for plan creation and critic review. */
+export interface PlanValidationEvent extends BaseEvent {
+  type: EventType.PLAN_VALIDATION;
+  cycle: number;
+  cycle_total: number;
+  stage: 'draft' | 'critic';
+  outcome: 'created' | 'approved' | 'revision_requested' | 'failed';
+  feedback_count: number;
+  feedback_summaries: string[];
+  approved?: boolean;
+  repairable?: boolean;
+  error_type?: string;
+}
+
 // =============================================================================
 // UNION TYPES AND UTILITY INTERFACES - Event system foundations
 // =============================================================================
@@ -536,6 +552,7 @@ export type StreamEvent =
   | ConnectionEvent
   | AgentEvent
   | PythonSystemEvent
+  | PlanValidationEvent
   | ReportContentEvent
   | TerminationReasonEvent
   | { type: 'error'; error?: string; message?: string; [key: string]: any }

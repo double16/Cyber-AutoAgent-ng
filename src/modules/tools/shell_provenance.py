@@ -1,11 +1,13 @@
 """Deterministic provenance extraction for Bash-compatible shell commands."""
 
+import re
+import shlex
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import Iterable
 
-from tree_sitter import Language, Parser
 import tree_sitter_bash
+from tree_sitter import Language, Parser
 
 
 @dataclass(frozen=True)
@@ -15,6 +17,8 @@ class ShellExecutionProvenance:
     executables: tuple[str, ...]
     output_paths: tuple[str, ...]
     parsed: bool
+    urls: tuple[str, ...] = ()
+    collection_urls: tuple[str, ...] = ()
 
 
 _PARSER = Parser(Language(tree_sitter_bash.language()))
@@ -80,6 +84,8 @@ def shell_execution_provenance(command: str, initial_directory: str = "") -> She
         tuple(dict.fromkeys(executables)),
         tuple(dict.fromkeys(output_paths)),
         True,
+        tuple(dict.fromkeys(_literal_urls(source))),
+        tuple(dict.fromkeys(_loop_collection_urls(source))),
     )
 
 
@@ -145,6 +151,55 @@ def _command_output_paths(source: str, children: list) -> list[str]:
             if candidate:
                 values.append(candidate)
     return values
+
+
+_URL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+")
+_FOR_LOOP_PATTERN = re.compile(
+    r"\bfor\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+([^;\n]+)\s*;?\s*do\b",
+    re.IGNORECASE,
+)
+
+
+def _literal_urls(source: str) -> list[str]:
+    """Return literal URLs while rejecting shell-expanded values."""
+
+    return [
+        candidate.rstrip(".,;:!?)]}")
+        for candidate in _URL_PATTERN.findall(source)
+        if "$" not in candidate and "`" not in candidate
+    ]
+
+
+def _loop_collection_urls(source: str) -> list[str]:
+    """Expand literal ``for`` collections used in URL templates.
+
+    This intentionally supports only static shell word lists. Dynamic expansions
+    are not receipt evidence because their eventual request subjects are unknown.
+    """
+
+    urls = []
+    for match in _FOR_LOOP_PATTERN.finditer(source):
+        variable, raw_values = match.groups()
+        try:
+            values = shlex.split(raw_values)
+        except ValueError:
+            continue
+        if not values or any("$" in value or "`" in value for value in values):
+            continue
+        body_end = source.find("done", match.end())
+        body = source[match.end() : body_end if body_end >= 0 else len(source)]
+        templates = _URL_PATTERN.findall(body)
+        variable_patterns = (f"${{{variable}}}", f"${variable}")
+        for template in templates:
+            if not any(token in template for token in variable_patterns):
+                continue
+            for value in values:
+                expanded = template
+                for token in variable_patterns:
+                    expanded = expanded.replace(token, value)
+                if "$" not in expanded:
+                    urls.append(expanded.rstrip(".,;:!?)]}"))
+    return urls
 
 
 def _literal_path(value: str) -> str:

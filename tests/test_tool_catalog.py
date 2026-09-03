@@ -320,13 +320,14 @@ def test_tool_catalog_wrapper_filters_by_keywords_for_agent_tool(monkeypatch, tm
     agent = _FakeAgent(tools_config)
     tool_catalog = tc.tool_catalog_wrapper(agent, shell_commands=[])
 
-    text = tool_catalog("t2")
-    assert "name: t2" in text
-    assert "name: t1" not in text
-    assert "**Tools found**:" not in text
-    assert "**Command line tools found**:" not in text
+    for single_keyword in ["t2", ["t2"]]:
+        text = tool_catalog(single_keyword)
+        assert "name: t2" in text
+        assert "name: t1" not in text
+        assert "**Tools found**:" not in text
+        assert "**Command line tools found**:" not in text
 
-    for multiple_keywords in ["t1 t2", "t1,t2", "t1, t2"]:
+    for multiple_keywords in ["t1 t2", "t1,t2", "t1, t2", ["t1", "t2"]]:
         text = tool_catalog(multiple_keywords)
         assert "name: t2" in text
         assert "name: t1" in text

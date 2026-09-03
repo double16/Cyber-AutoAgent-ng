@@ -138,6 +138,7 @@ export class DirectDockerService extends EventEmitter {
   private inToolExecution = false;
   private toolOutputBuffer = '';
   private sawBackendToolOutput = false;
+  private lastToolHadBackendOutput = false;
   private _currentToolName: string | undefined = undefined;
   private pendingTimers = new Set<NodeJS.Timeout>();
   private eventParser?: Transform;
@@ -935,6 +936,10 @@ export class DirectDockerService extends EventEmitter {
       set toolOutputBuffer(value: string) { service.toolOutputBuffer = value; },
       get sawBackendToolOutput() { return service.sawBackendToolOutput; },
       set sawBackendToolOutput(value: boolean) { service.sawBackendToolOutput = value; },
+      get lastToolHadBackendOutput() { return service.lastToolHadBackendOutput; },
+      set lastToolHadBackendOutput(value: boolean | undefined) {
+        service.lastToolHadBackendOutput = value === true;
+      },
       get currentToolName() { return service._currentToolName; },
       set currentToolName(value: string | undefined) { service._currentToolName = value; }
     };

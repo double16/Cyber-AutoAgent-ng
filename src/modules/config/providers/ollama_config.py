@@ -7,7 +7,7 @@ including host detection and connectivity checks.
 """
 
 import os
-from typing import Dict, Any
+from typing import Any
 
 import requests
 
@@ -95,8 +95,8 @@ def get_ollama_keep_alive(env_reader: EnvironmentReader) -> str:
     return env_reader.get("OLLAMA_KEEP_ALIVE") or "30m"
 
 
-def get_ollama_options(env_reader: EnvironmentReader) -> Dict[str, Any]:
-    options = dict()
+def get_ollama_options(env_reader: EnvironmentReader) -> dict[str, Any]:
+    options = {}
     env_context_length = env_reader.get("OLLAMA_CONTEXT_LENGTH")
     if env_context_length and env_context_length.strip():
         try:

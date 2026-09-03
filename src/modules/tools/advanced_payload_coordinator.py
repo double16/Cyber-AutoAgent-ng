@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import contextlib
 import glob
 import json
 import os
@@ -15,14 +16,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from subprocess import DEVNULL
-from typing import Any, Dict, List, Optional, Set, Literal
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import requests
 import urllib3
-from strands import tool, ToolContext
+from strands import ToolContext, tool
 
-from modules.operation_plugins.web.tools.result_cache import (
+from modules.tools.result_cache import (
     build_result_cache_key,
     cache_result,
     get_cached_result,
@@ -100,8 +101,8 @@ def _coerce_str(arg: bytes | str | None) -> str:
 class RequestConfig:
     target_url: str
     http_method: str = "GET"
-    cookies: Optional[Dict[str, str]] = None
-    headers: Optional[Dict[str, str]] = None
+    cookies: dict[str, str] | None = None
+    headers: dict[str, str] | None = None
 
     def inject_in_body(self):
         return self.http_method.upper() in ["POST", "PUT", "PATCH", "DELETE"]
@@ -111,12 +112,12 @@ class RequestConfig:
 def advanced_payload_coordinator(
         target_url: str,
         test_type: Literal["comprehensive", "xss", "lfi", "ssti", "command_injection", "ldap_injection", "param_discovery", "cors"] = "comprehensive",
-        parameters: str = None,
+        parameters: str | None = None,
         http_method: str = "GET",
-        cookies: Optional[Dict[str, str]] = None,
-        headers: Optional[Dict[str, str]] = None,
-        output_file: Optional[str] = None,
-        tool_context: Optional[ToolContext] = None,
+        cookies: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+        output_file: str | None = None,
+        tool_context: ToolContext | None = None,
 ) -> str:
     """
     Run coordinated payload-based web vuln testing (XSS/CORS/LFI/SSTI/command/LDAP) against a single URL. SQLi is *NOT* supported.
@@ -201,7 +202,7 @@ def advanced_payload_coordinator(
         headers=headers,
     )
 
-    results: Dict[str, Any] = {
+    results: dict[str, Any] = {
         "target": target_url,
         "test_type": test_type,
         "http_method": request_config.http_method,
@@ -374,7 +375,7 @@ def advanced_payload_coordinator(
     return result_str
 
 
-def _write_result_file(output_file: Optional[str], result: str) -> None:
+def _write_result_file(output_file: str | None, result: str) -> None:
     """Write a tool result when the caller requested an output artifact."""
     if not output_file:
         return
@@ -385,7 +386,7 @@ def _write_result_file(output_file: Optional[str], result: str) -> None:
         file.write(result)
 
 
-def setup_payload_tools(tools_limit: Set[str] = None) -> Dict[str, Any]:
+def setup_payload_tools(tools_limit: set[str] | None = None) -> dict[str, Any]:
     """Set up specialized payload testing tools"""
     tools_status = {"tools": [], "failed": []}
 
@@ -434,9 +435,9 @@ def setup_payload_tools(tools_limit: Set[str] = None) -> Dict[str, Any]:
 
 def advanced_parameter_discovery(
         request_config: RequestConfig,
-        provided_params: str = None,
-        tools: List[str] = None
-) -> List[str]:
+        provided_params: str | None = None,
+        tools: list[str] | None = None
+) -> list[str]:
     """Advanced parameter discovery using multiple techniques"""
     target_url = request_config.target_url
 
@@ -495,10 +496,8 @@ def advanced_parameter_discovery(
                         arjun_out = result.stdout
             finally:
                 if arjun_path and os.path.exists(arjun_path):
-                    try:
+                    with contextlib.suppress(Exception):
                         os.unlink(arjun_path)
-                    except Exception:
-                        pass
         except subprocess.TimeoutExpired as e:
             arjun_out = _coerce_str(e.stdout)
         except Exception:
@@ -529,7 +528,7 @@ def advanced_parameter_discovery(
                     if not os.path.exists(output_file):
                         continue
                     try:
-                        with open(output_file, "r") as f:
+                        with open(output_file) as f:
                             for line in f:
                                 if "?" in line:
                                     try:
@@ -616,7 +615,7 @@ def advanced_parameter_discovery(
         except Exception:
             pass
 
-    return sorted(list(discovered_params))
+    return sorted(discovered_params)
 
 
 def _add_or_replace_query_param(url: str, key: str, value: str) -> str:
@@ -628,7 +627,7 @@ def _add_or_replace_query_param(url: str, key: str, value: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
-def _requests_get_text(url: str, params: Dict[str, Any], request_config: RequestConfig,
+def _requests_get_text(url: str, params: dict[str, Any], request_config: RequestConfig,
                        timeout: int = 10) -> str | None:
     """GET a URL and return response text, or None on error."""
     try:
@@ -654,7 +653,7 @@ def _requests_get_text(url: str, params: Dict[str, Any], request_config: Request
         return None
 
 
-def _requests_head_raw_headers(url: str, headers: Dict[str, str], request_config: RequestConfig,
+def _requests_head_raw_headers(url: str, headers: dict[str, str], request_config: RequestConfig,
                                timeout: int = 10) -> str | None:
     """HEAD a URL and return a raw-ish header string (lowercased), or None on error."""
     try:
@@ -676,7 +675,7 @@ def _requests_head_raw_headers(url: str, headers: Dict[str, str], request_config
 
 
 # Helper: Parse SSTImap output into vulnerability findings
-def _parse_sstimap_output(stdout: str) -> List[Dict[str, Any]]:
+def _parse_sstimap_output(stdout: str) -> list[dict[str, Any]]:
     """Parse SSTImap plain-text output into structured vulnerability entries.
 
     SSTImap does not provide a stable JSON output. This parser is intentionally tolerant and
@@ -693,7 +692,7 @@ def _parse_sstimap_output(stdout: str) -> List[Dict[str, Any]]:
     if not stdout:
         return []
 
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
 
     # Normalize newlines and strip ANSI if present (sstimap is run with --no-color, but be safe).
     text = stdout.replace("\r\n", "\n").replace("\r", "\n")
@@ -731,7 +730,7 @@ def _parse_sstimap_output(stdout: str) -> List[Dict[str, Any]]:
         technique = (m_tech.group(1).strip() if m_tech else None)
 
         # Parse capabilities section (indented "key: yes/no").
-        capabilities: Dict[str, str] = {}
+        capabilities: dict[str, str] = {}
         in_caps = False
         for line in block.splitlines():
             if _RE_SSTIMAP_CAPS_HEADER.match(line):
@@ -750,7 +749,7 @@ def _parse_sstimap_output(stdout: str) -> List[Dict[str, Any]]:
                         in_caps = False
 
         # Build evidence: keep the key lines, avoid flooding output.
-        evidence_lines: List[str] = []
+        evidence_lines: list[str] = []
         for rx in [
             _RE_SSTIMAP_EVIDENCE_BODY_PARAM,
             _RE_SSTIMAP_EVIDENCE_GET_PARAM,
@@ -792,7 +791,7 @@ def _parse_sstimap_output(stdout: str) -> List[Dict[str, Any]]:
 
 
 # Helper: Parse lfimap output into vulnerability findings
-def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict[str, Any]]:
+def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> list[dict[str, Any]]:
     """Parse lfimap plain-text output into structured vulnerability entries.
 
     lfimap does not provide a stable machine-readable format, so this parser is intentionally
@@ -811,7 +810,7 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
     if not stdout:
         return []
 
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
 
     text = stdout.replace("\r\n", "\n").replace("\r", "\n")
     text = _RE_ANSI_ESCAPE.sub("", text)
@@ -821,7 +820,7 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
     current_payload: str | None = None
     current_payload_source: str | None = None
     current_injected_data: str | None = None
-    evidence_lines: List[str] = []
+    evidence_lines: list[str] = []
 
     def _flush_success(success_line: str) -> None:
         nonlocal evidence_lines
@@ -834,7 +833,7 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
         if current_attack_type:
             payload_type = f"LFI ({current_attack_type})"
 
-        evidence_parts: List[str] = []
+        evidence_parts: list[str] = []
         if current_attack_type:
             evidence_parts.append(f"Attack: {current_attack_type}")
         if current_payload_source and current_payload:
@@ -918,7 +917,7 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
             _flush_success(line)
             continue
 
-        if line.startswith("[*]") or line.startswith("[-]"):
+        if line.startswith(("[*]", "[-]")):
             evidence_lines.append(line)
             continue
 
@@ -927,11 +926,11 @@ def _parse_lfimap_output(param: str, http_method: str, stdout: str) -> List[Dict
 
 def _coordinate_xss_testing(
         request_config: RequestConfig,
-        parameters: List[str],
-        tools: List[str] = None,
+        parameters: list[str],
+        tools: list[str] | None = None,
         verbose: bool = False,
-) -> List[
-    Dict[str, Any]]:
+) -> list[
+    dict[str, Any]]:
     """Coordinate XSS testing using advanced payloads and techniques"""
     # XBEN-008-24 is a good test case. Target the '/page' endpoint, 'name' parameter, GET method.
     tools = [] if tools is None else tools
@@ -1174,7 +1173,7 @@ def _coordinate_xss_testing(
     return xss_results
 
 
-def _test_cors_configurations(request_config: RequestConfig, tools: List[str] = None) -> List[Dict[str, Any]]:
+def _test_cors_configurations(request_config: RequestConfig, tools: list[str] | None = None) -> list[dict[str, Any]]:
     """Test CORS configurations using specialized techniques"""
     tools = [] if tools is None else tools
     target_url = request_config.target_url
@@ -1258,11 +1257,11 @@ def _test_cors_configurations(request_config: RequestConfig, tools: List[str] = 
 
 def _coordinate_injection_testing(
         request_config: RequestConfig,
-        parameters: List[str],
-        tools: List[str] = None,
+        parameters: list[str],
+        tools: list[str] | None = None,
         focus_injection_types: set[str] | None = None,
         verbose: bool = False,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Coordinate advanced injection testing (beyond SQL)"""
     tools = [] if tools is None else tools
     timeout_seconds = 300
@@ -1300,7 +1299,7 @@ def _coordinate_injection_testing(
     ldap_payloads = []
     for ldap_fuzzing_list in ldap_fuzzing_lists:
         if os.path.exists(ldap_fuzzing_list):
-            with open(ldap_fuzzing_list, "r") as f:
+            with open(ldap_fuzzing_list) as f:
                 ldap_payloads = f.read().splitlines()
                 if verbose:
                     print(f"[*] Loaded {len(ldap_payloads)} LDAP payloads from {ldap_fuzzing_list}", file=sys.stderr)
@@ -1313,7 +1312,7 @@ def _coordinate_injection_testing(
     lfi_payloads = []
     for lfi_list in lfi_lists:
         if os.path.exists(lfi_list):
-            with open(lfi_list, "r") as f:
+            with open(lfi_list) as f:
                 lfi_payloads = f.read().splitlines()
                 if verbose:
                     print(f"[*] Loaded {len(lfi_payloads)} LFI payloads from {lfi_list}", file=sys.stderr)
@@ -1601,7 +1600,7 @@ def _coordinate_injection_testing(
     return injection_results
 
 
-def _analyze_payload_intelligence(payload_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _analyze_payload_intelligence(payload_results: list[dict[str, Any]]) -> dict[str, Any]:
     """Analyze payload testing results for intelligence insights"""
     intelligence = {
         "severity_distribution": {},
@@ -1668,9 +1667,9 @@ def _analyze_payload_intelligence(payload_results: List[Dict[str, Any]]) -> Dict
     return intelligence
 
 
-def _generate_payload_recommendations(test_type: str, results: Dict[str, Any]) -> List[str]:
+def _generate_payload_recommendations(test_type: str, results: dict[str, Any]) -> list[str]:
     """Generate coordinated payload exploitation recommendations"""
-    recommendations: List[str] = []
+    recommendations: list[str] = []
 
     # For parameter discovery runs, avoid extra guidance once we have params.
     if test_type == "param_discovery" and results.get("parameters_discovered"):
@@ -1706,7 +1705,7 @@ def _generate_payload_recommendations(test_type: str, results: Dict[str, Any]) -
     if intelligence.get("severity_distribution"):
         high_severity_markers = ["Command Injection", "SSTI", "Advanced XSS", "Permissive CORS"]
         detected_high_severity = [
-            vt for vt in intelligence["severity_distribution"].keys() if any(m in str(vt) for m in high_severity_markers)
+            vt for vt in intelligence["severity_distribution"] if any(m in str(vt) for m in high_severity_markers)
         ]
         if detected_high_severity:
             recommendations.extend(
@@ -1791,7 +1790,7 @@ def _generate_payload_recommendations(test_type: str, results: Dict[str, Any]) -
     )
 
     # De-duplicate while preserving first-seen order.
-    deduped: List[str] = []
+    deduped: list[str] = []
     seen: set[str] = set()
     for r in recommendations:
         if r not in seen:
@@ -1851,10 +1850,10 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    def _parse_headers(items: List[str] | None) -> Dict[str, str] | None:
+    def _parse_headers(items: list[str] | None) -> dict[str, str] | None:
         if not items:
             return None
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for item in items:
             if not item:
                 continue
@@ -1869,10 +1868,10 @@ def main() -> int:
             out[name] = value
         return out or None
 
-    def _parse_cookies(items: List[str] | None) -> Dict[str, str] | None:
+    def _parse_cookies(items: list[str] | None) -> dict[str, str] | None:
         if not items:
             return None
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for item in items:
             if not item:
                 continue

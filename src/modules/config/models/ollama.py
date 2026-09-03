@@ -5,19 +5,24 @@
 
 import json
 import logging
+import uuid
 from collections.abc import AsyncGenerator
-from typing import Any, TypeVar, cast, List
+from typing import Any, TypeVar, Unpack, cast, override
 
 import ollama
 from ollama import ChatResponse
 from pydantic import BaseModel
-from typing_extensions import TypedDict, Unpack, override
-
+from strands.models._validation import (
+    _has_location_source,
+    validate_config_keys,
+    warn_on_tool_choice_not_supported,
+)
+from strands.models.model import Model
 from strands.types.content import ContentBlock, Messages
+from strands.types.exceptions import ContextWindowOverflowException
 from strands.types.streaming import StopReason, StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
-from strands.models._validation import _has_location_source, validate_config_keys, warn_on_tool_choice_not_supported
-from strands.models.model import Model
+from typing_extensions import TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,13 @@ class OllamaModel(Model):
     - Streaming responses
     - Tool/function calling
     """
+
+    OVERFLOW_MESSAGES = {
+        "the prompt is longer than the context length",
+        "the input length exceeds the context length",
+        "exceeds the available context",
+        "exceeded max context length",
+    }
 
     class OllamaConfig(TypedDict, total=False):
         """Configuration parameters for Ollama models.
@@ -58,6 +70,7 @@ class OllamaModel(Model):
         stop_sequences: list[str] | None
         temperature: float | None
         top_p: float | None
+        top_k: int | None
         stream: bool | None
 
     def __init__(
@@ -79,7 +92,7 @@ class OllamaModel(Model):
         validate_config_keys(model_config, self.OllamaConfig)
         self.config = OllamaModel.OllamaConfig(**model_config)
 
-        logger.debug("config=<%s> | initializing", self.config)
+        logger.info("config=<%s> | initializing", self.config)
 
     @override
     def update_config(self, **model_config: Unpack[OllamaConfig]) -> None:  # type: ignore
@@ -125,14 +138,16 @@ class OllamaModel(Model):
             return [{"role": role, "images": [content["image"]["source"]["bytes"]]}]
 
         if "toolUse" in content:
+            tool_use = content["toolUse"]
+            tool_name = tool_use.get("name") or tool_use["toolUseId"]
             return [
                 {
                     "role": role,
                     "tool_calls": [
                         {
                             "function": {
-                                "name": content["toolUse"]["toolUseId"],
-                                "arguments": content["toolUse"]["input"],
+                                "name": tool_name,
+                                "arguments": tool_use["input"],
                             }
                         }
                     ],
@@ -146,7 +161,7 @@ class OllamaModel(Model):
                 for formatted_tool_result_content in self._format_request_message_contents(
                     "tool",
                     (
-                        {"text": json.dumps(tool_result_content["json"])}
+                        {"text": json.dumps(tool_result_content["json"], ensure_ascii=False)}
                         if "json" in tool_result_content
                         else cast(ContentBlock, tool_result_content)
                     ),
@@ -206,6 +221,7 @@ class OllamaModel(Model):
                         ("num_predict", self.config.get("max_tokens")),
                         ("temperature", self.config.get("temperature")),
                         ("top_p", self.config.get("top_p")),
+                        ("top_k", self.config.get("top_k")),
                         ("stop", self.config.get("stop_sequences")),
                     ]
                     if value is not None
@@ -253,7 +269,8 @@ class OllamaModel(Model):
                     return {"contentBlockStart": {"start": {}}}
 
                 tool_name = event["data"].function.name
-                return {"contentBlockStart": {"start": {"toolUse": {"name": tool_name, "toolUseId": tool_name}}}}
+                tool_use_id = f"tooluse_{uuid.uuid4().hex[:24]}"
+                return {"contentBlockStart": {"start": {"toolUse": {"name": tool_name, "toolUseId": tool_use_id}}}}
 
             case "content_delta":
                 match event["data_type"]:
@@ -306,6 +323,101 @@ class OllamaModel(Model):
             case _:
                 raise RuntimeError(f"chunk_type=<{event['chunk_type']} | unknown type")
 
+    @staticmethod
+    def _fallback_think_param(
+            current_request: dict[str, Any], model_id: str, exc: Exception, registry: Any
+    ) -> tuple[bool, Any | None]:
+        """Progressively retry a rejected ``think`` value without omitting it."""
+        if "think" not in current_request or current_request["think"] is False:
+            return False, None
+
+        previous_value = current_request["think"]
+        if isinstance(previous_value, str):
+            from modules.config.models.agent_profiles import ReasoningLevel
+
+            fallback_value = ReasoningLevel.from_value(previous_value).to_bool()
+        else:
+            fallback_value = False
+
+        current_request["think"] = fallback_value
+        logger.warning(
+            "Ollama rejected think=%r for %s (%s). Retrying with think=%r",
+            previous_value,
+            model_id,
+            exc,
+            fallback_value,
+        )
+        return True, fallback_value
+
+    async def _chat_with_fallback(self, client: ollama.AsyncClient, request: dict[str, Any]) -> Any:
+        """Execute chat request with progressive parameter stripping upon provider errors."""
+        from modules.config.models.agent_profiles import get_agent_settings_registry
+        registry = get_agent_settings_registry()
+        model_id = str(request.get("model", self.config.get("model_id", "")))
+
+        current_request = dict(request)
+        current_options = dict(current_request.get("options") or {})
+        pending_think_fallback: Any | None = None
+
+        while True:
+            try:
+                response = await client.chat(**current_request)
+                if pending_think_fallback is not None:
+                    registry.record_parameter_fallback(
+                        "ollama",
+                        model_id,
+                        "think",
+                        pending_think_fallback,
+                        "Ollama think compatibility fallback accepted",
+                    )
+                return response
+            except Exception as exc:
+                if isinstance(exc, RecursionError):
+                    logger.error(
+                        "Ollama request failed for %s with RecursionError; no parameter fallback will be attempted",
+                        model_id,
+                    )
+                    raise
+                err_msg = str(exc).lower()
+
+                if "think" in err_msg or "reasoning" in err_msg:
+                    think_fallback_applied, fallback_value = self._fallback_think_param(
+                        current_request, model_id, exc, registry
+                    )
+                    if think_fallback_applied:
+                        pending_think_fallback = fallback_value
+                        continue
+
+                # Fallback for options: top_k -> temperature -> top_p.
+                if "top_k" in current_options and (
+                    "top_k" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
+                ):
+                    current_options.pop("top_k", None)
+                    current_request["options"] = current_options
+                    logger.warning("Ollama rejected top_k for %s (%s). Omitting top_k", model_id, exc)
+                    registry.record_parameter_fallback("ollama", model_id, "top_k", None, "Ollama top_k rejected")
+                    continue
+
+                if "temperature" in current_options and (
+                    "temperature" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
+                ):
+                    current_options.pop("temperature", None)
+                    current_request["options"] = current_options
+                    logger.warning("Ollama rejected temperature for %s (%s). Omitting temperature", model_id, exc)
+                    registry.record_parameter_fallback("ollama", model_id, "temperature", None, "Ollama temperature rejected")
+                    continue
+
+                if "top_p" in current_options and (
+                    "top_p" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
+                ):
+                    current_options.pop("top_p", None)
+                    current_request["options"] = current_options
+                    logger.warning("Ollama rejected top_p for %s (%s). Omitting top_p", model_id, exc)
+                    registry.record_parameter_fallback("ollama", model_id, "top_p", None, "Ollama top_p rejected")
+                    continue
+
+                raise
+
     @override
     async def stream(
             self,
@@ -339,13 +451,13 @@ class OllamaModel(Model):
         tool_requested = [False]  # holder pattern
 
         client = ollama.AsyncClient(self.host, **self.client_args)
-        response = await client.chat(**request)
+        response = await self._chat_with_fallback(client, request)
 
         logger.debug("got response from model")
         yield self.format_chunk({"chunk_type": "message_start"})
         yield self.format_chunk({"chunk_type": "content_start", "data_type": "text"})
 
-        def produce_chunks(event: ChatResponse) -> List[StreamEvent]:
+        def produce_chunks(event: ChatResponse) -> list[StreamEvent]:
             chunks = []
 
             for tool_call in event.message.tool_calls or []:
@@ -409,7 +521,12 @@ class OllamaModel(Model):
         formatted_request["stream"] = False
 
         client = ollama.AsyncClient(self.host, **self.client_args)
-        response = await client.chat(**formatted_request)
+        try:
+            response = await self._chat_with_fallback(client, formatted_request)
+        except ollama.ResponseError as error:
+            if any(message in str(error).lower() for message in self.OVERFLOW_MESSAGES):
+                raise ContextWindowOverflowException(str(error)) from error
+            raise
 
         try:
             content = response.message.content.strip()

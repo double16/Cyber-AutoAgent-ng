@@ -1,12 +1,13 @@
 """Tool-specific structured event emitters."""
 
-from typing import Any, Callable, Dict
+from collections.abc import Callable
+from typing import Any
 
 
 class ToolEventEmitter:
     """Handles emission of tool-specific side-channel events."""
 
-    def __init__(self, emit_func: Callable[[Dict[str, Any]], None]):
+    def __init__(self, emit_func: Callable[[dict[str, Any]], None]):
         """
         Initialize the tool event emitter.
 
@@ -56,7 +57,6 @@ class ToolEventEmitter:
         # from the tool_start event in the default case. Emitting metadata here
         # causes duplicate display of the same information.
         # This was the root cause of the duplicate tool parameter display issue.
-        pass
 
     def _emit_python_repl(self, tool_input: Any) -> None:
         """Emit Python REPL execution details."""

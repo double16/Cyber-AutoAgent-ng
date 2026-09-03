@@ -12,26 +12,27 @@ Returns:
 """
 
 import argparse
-import json
-import os
-import sys
-import time
-import random
-import traceback
-from dataclasses import dataclass
-from difflib import SequenceMatcher
-from typing import Any, Dict, List, Optional, Tuple, Literal
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
-
-import requests
-import urllib3
-from strands import tool, ToolContext
+import contextlib
 
 #
 # import from advanced_payload_coordinator
 #
 import importlib.util
+import json
+import os
+import random
+import sys
+import time
+import traceback
+from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+import requests
+import urllib3
+from strands import ToolContext, tool
 
 module_path = Path(__file__).resolve().parent / "advanced_payload_coordinator.py"
 
@@ -41,9 +42,6 @@ exporter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(exporter)
 advanced_parameter_discovery = exporter.advanced_parameter_discovery
 apc_request_config = exporter.RequestConfig
-#
-#
-#
 
 # Test cases:
 # XBEN-001-24
@@ -104,11 +102,11 @@ _COMMON_ID_KEYS = {
 class RequestConfig:
     target_url: str
     http_method: str = "GET"
-    cookies: Optional[Dict[str, str]] = None
-    headers: Optional[Dict[str, str]] = None
+    cookies: dict[str, str] | None = None
+    headers: dict[str, str] | None = None
     # Optional “low privilege / unauth” replay context
-    alt_cookies: Optional[Dict[str, str]] = None
-    alt_headers: Optional[Dict[str, str]] = None
+    alt_cookies: dict[str, str] | None = None
+    alt_headers: dict[str, str] | None = None
     timeout: int = 15
     request_type: str = "query"
     auth_type: str = "basic"
@@ -122,23 +120,23 @@ class RequestConfig:
 def idor_specialist(
         target_url: str,
         test_type: Literal["comprehensive", "idor", "authz_replay", "param_discovery"] = "comprehensive",
-        parameters: Optional[str] = None,
+        parameters: str | None = None,
         http_method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"] = "GET",
-        cookies: Optional[Dict[str, str]] = None,
-        headers: Optional[Dict[str, str]] = None,
-        alt_cookies: Optional[Dict[str, str]] = None,
-        alt_headers: Optional[Dict[str, str]] = None,
-        test_values: Optional[str] = None,
-        login_url: Optional[str] = None,
-        credentials: Optional[str] = None,
-        login_method: Optional[Literal["GET", "POST"]] = None,
-        num_range: Optional[str] = None,
-        multi_credentials: Optional[str] = None,
+        cookies: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
+        alt_cookies: dict[str, str] | None = None,
+        alt_headers: dict[str, str] | None = None,
+        test_values: str | None = None,
+        login_url: str | None = None,
+        credentials: str | None = None,
+        login_method: Literal["GET", "POST"] | None = None,
+        num_range: str | None = None,
+        multi_credentials: str | None = None,
         evasion: bool = False,
-        request_type: Optional[Literal["query", "json", "graphql"]] = None,
-        auth_type: Optional[Literal["basic", "oauth", "jwt"]] = None,
-        output_file: Optional[str] = None,
-        tool_context: Optional[ToolContext] = None,
+        request_type: Literal["query", "json", "graphql"] | None = None,
+        auth_type: Literal["basic", "oauth", "jwt"] | None = None,
+        output_file: str | None = None,
+        tool_context: ToolContext | None = None,
 ) -> str:
     """
     Coordinated IDOR (Insecure Direct Object Reference) / authorization testing against a single URL.
@@ -187,7 +185,7 @@ def idor_specialist(
     if test_type not in ["idor", "authz_replay", "param_discovery", "comprehensive"]:
         test_type = "comprehensive"
 
-    results: Dict[str, Any] = {
+    results: dict[str, Any] = {
         "target": target_url,
         "test_type": test_type,
         "http_method": http_method,
@@ -286,7 +284,7 @@ def idor_specialist(
         # Param discovery (cheap: URL query + common ID keys)
         if not parameters or test_type == "param_discovery":
             if verbose:
-                print(f"[*] Parameter discovery", file=sys.stderr)
+                print("[*] Parameter discovery", file=sys.stderr)
             discovered = _idor_parameter_discovery(rc, parameters, test_type=test_type)
         else:
             discovered = [p.strip() for p in parameters.split(",") if p.strip()]
@@ -300,10 +298,8 @@ def idor_specialist(
 
         parsed_test_values = None
         if test_values:
-            try:
+            with contextlib.suppress(BaseException):
                 parsed_test_values = json.loads(test_values)
-            except:
-                pass
 
         if verbose:
             print(f"[*] Running IDOR scan for {discovered}", file=sys.stderr)
@@ -354,13 +350,13 @@ def idor_specialist(
 
 def _perform_login(
         login_url: str,
-        credentials: Dict[str, Any],
+        credentials: dict[str, Any],
         method: str = "POST",
         auth_type: str = "basic",
-        base_headers: Optional[Dict[str, str]] = None,
+        base_headers: dict[str, str] | None = None,
         timeout: int = 15,
         verbose: bool = False
-) -> Tuple[Optional[Dict[str, str]], Optional[Dict[str, str]]]:
+) -> tuple[dict[str, str] | None, dict[str, str] | None]:
     """
     Perform a login request to get session cookies or tokens.
     Returns (cookies, headers).
@@ -414,9 +410,9 @@ def _perform_login(
 
 def _idor_parameter_discovery(
         request_config: RequestConfig,
-        provided_params: Optional[str],
+        provided_params: str | None,
         test_type: str = "comprehensive",
-) -> List[str]:
+) -> list[str]:
     # Extract query params from URL
     parsed = urlparse(request_config.target_url)
     qs = parse_qs(parsed.query, keep_blank_values=True)
@@ -428,11 +424,10 @@ def _idor_parameter_discovery(
 
     all_url_params = set(url_params + url_path_params)
 
-    if test_type not in ["param_discovery", "comprehensive"]:
-        if all_url_params:
-            # Prefer likely ID keys first (stable ordering)
-            ordered = sorted(all_url_params, key=lambda x: (0 if x.lower() in _COMMON_ID_KEYS else 1, x.lower()))
-            return ordered
+    if test_type not in ["param_discovery", "comprehensive"] and all_url_params:
+        # Prefer likely ID keys first (stable ordering)
+        ordered = sorted(all_url_params, key=lambda x: (0 if x.lower() in _COMMON_ID_KEYS else 1, x.lower()))
+        return ordered
 
     # Advanced discovery
     discovered = set(advanced_parameter_discovery(
@@ -459,7 +454,7 @@ def _idor_parameter_discovery(
     return ordered
 
 
-def _signals_are_close(s1: Dict[str, Any], s2: Dict[str, Any]) -> bool:
+def _signals_are_close(s1: dict[str, Any], s2: dict[str, Any]) -> bool:
     """
     Check if two signals are 'close' enough to be combined.
     """
@@ -468,9 +463,8 @@ def _signals_are_close(s1: Dict[str, Any], s2: Dict[str, Any]) -> bool:
     for k in ["similarity", "struct_similarity", "content_similarity"]:
         v1 = s1.get(k)
         v2 = s2.get(k)
-        if v1 is not None and v2 is not None:
-            if abs(v1 - v2) > 0.1:
-                return False
+        if v1 is not None and v2 is not None and abs(v1 - v2) > 0.1:
+            return False
 
     # Length signal
     # If mutated_len differs significantly, they might be different objects
@@ -489,13 +483,13 @@ def _signals_are_close(s1: Dict[str, Any], s2: Dict[str, Any]) -> bool:
 
 def _python_idor_engine(
         request_config: RequestConfig,
-        focus_params: List[str],
-        num_range: Optional[str],
+        focus_params: list[str],
+        num_range: str | None,
         do_authz_replay: bool,
-        test_values: Optional[List[Any]] = None,
+        test_values: list[Any] | None = None,
         evasion: bool = False,
         verbose: bool = False
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Internal IDOR Engine:
     - Create an "authorized baseline" request (current cookies/headers) for the endpoint.
@@ -505,7 +499,7 @@ def _python_idor_engine(
         - JSON structure/content similarity
     - Optional authz replay: replay baseline + mutated as alt (low-priv/unauth) and see if alt matches authorized.
     """
-    findings: List[Dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
 
     method = request_config.http_method.upper()
     target = request_config.target_url
@@ -710,8 +704,8 @@ def _python_idor_engine(
                     findings.append(replay_f)
 
     # Combine similar findings where original values are equal
-    combined: List[Dict[str, Any]] = []
-    groups: Dict[Tuple, List[Dict[str, Any]]] = {}
+    combined: list[dict[str, Any]] = []
+    groups: dict[tuple, list[dict[str, Any]]] = {}
 
     for f in findings:
         sig = f.get("signals", {})
@@ -752,7 +746,7 @@ def _python_idor_engine(
                     remaining.append(other)
 
             # Combine them
-            base["mutated_value"] = sorted(list(set(str(v) for v in base_mutated_values if v is not None)))
+            base["mutated_value"] = sorted({str(v) for v in base_mutated_values if v is not None})
 
             # If we combined multiple, we might want to adjust the evidence/URL
             if len(base["mutated_value"]) > 1:
@@ -765,7 +759,7 @@ def _python_idor_engine(
     return combined
 
 
-def _compare_responses(baseline_text: str, test_text: str) -> Dict[str, float]:
+def _compare_responses(baseline_text: str, test_text: str) -> dict[str, float]:
     """
     Compare baseline and test responses for structure, content, and similarity.
     """
@@ -816,11 +810,11 @@ def _send_request(
         request_config: RequestConfig,
         url: str,
         method: str,
-        params: Optional[Dict[str, Any]],
-        data: Optional[Dict[str, Any]],
+        params: dict[str, Any] | None,
+        data: dict[str, Any] | None,
         use_alt: bool,
         evasion: bool = False
-) -> Optional[requests.Response]:
+) -> requests.Response | None:
     try:
         headers = dict((request_config.alt_headers if use_alt else request_config.headers) or {})
         cookies = (request_config.alt_cookies if use_alt else request_config.cookies) or {}
@@ -875,7 +869,7 @@ def _evaluate_mutation(
         baseline_text: str,
         resp: requests.Response,
         verbose: bool = False,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """
     Heuristic signals:
     - status is 200 when baseline is 200, but content differs materially (potential other object)
@@ -962,9 +956,9 @@ def _evaluate_authz_replay(
         method: str,
         key: str,
         location: str,
-        resp_auth: Optional[requests.Response],
-        resp_alt: Optional[requests.Response],
-) -> Optional[Dict[str, Any]]:
+        resp_auth: requests.Response | None,
+        resp_alt: requests.Response | None,
+) -> dict[str, Any] | None:
     """
     Authorization replay signal:
     - alt user gets same (or near-same) response as auth user for a request expected to be restricted
@@ -1023,7 +1017,7 @@ def _evaluate_authz_replay(
 # Intelligence / Recommendations
 # ----------------------------
 
-def _analyze_idor_intelligence(results: Dict[str, Any], has_alt: bool) -> Dict[str, Any]:
+def _analyze_idor_intelligence(results: dict[str, Any], has_alt: bool) -> dict[str, Any]:
     vulns = [r for r in results.get("findings", []) if r.get("vulnerable", False)]
     signals = {
         "has_alt_auth_context": has_alt,
@@ -1032,7 +1026,7 @@ def _analyze_idor_intelligence(results: Dict[str, Any], has_alt: bool) -> Dict[s
     }
     vectors: set[str] = set()
     bypass: set[str] = set()
-    chains: List[str] = []
+    chains: list[str] = []
 
     for v in vulns:
         t = str(v.get("finding_type", "unknown"))
@@ -1053,15 +1047,15 @@ def _analyze_idor_intelligence(results: Dict[str, Any], has_alt: bool) -> Dict[s
         chains.append("idor=>horizontal_data_access")
 
     return {
-        "attack_vectors": sorted(list(vectors)),
-        "bypass_techniques": sorted(list(bypass)),
+        "attack_vectors": sorted(vectors),
+        "bypass_techniques": sorted(bypass),
         "exploitation_chains": chains,
         "signals": signals,
     }
 
 
-def _generate_idor_recommendations(test_type: str, results: Dict[str, Any]) -> List[str]:
-    recs: List[str] = []
+def _generate_idor_recommendations(test_type: str, results: dict[str, Any]) -> list[str]:
+    recs: list[str] = []
     vulns = [r for r in results.get("findings", []) if r.get("vulnerable", False)]
     has_alt = bool(results.get("intelligence", {}).get("signals", {}).get("has_alt_auth_context"))
 
@@ -1102,7 +1096,7 @@ def _generate_idor_recommendations(test_type: str, results: Dict[str, Any]) -> L
     )
 
     # De-dupe preserving order
-    out: List[str] = []
+    out: list[str] = []
     seen: set[str] = set()
     for r in recs:
         if r not in seen:
@@ -1128,7 +1122,7 @@ def _add_or_replace_query_param(url: str, key: str, value: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
 
 
-def _extract_path_ids(path: str) -> List[Tuple[int, int]]:
+def _extract_path_ids(path: str) -> list[tuple[int, int]]:
     """
     Extract all numeric segments from the path and their indices.
     Returns list of (index, value).
@@ -1151,7 +1145,7 @@ def _replace_path_id(path: str, index: int, new_value: str) -> str:
     return "/".join(parts)
 
 
-def _pick_candidate_params(qs: Dict[str, List[str]], focus_params: List[str]) -> List[str]:
+def _pick_candidate_params(qs: dict[str, list[str]], focus_params: list[str]) -> list[str]:
     # if focus provided, use those first (filtered for query)
     if focus_params is not None:
         return [p for p in focus_params if p and not p.startswith("(path_id_at_")]
@@ -1159,13 +1153,13 @@ def _pick_candidate_params(qs: Dict[str, List[str]], focus_params: List[str]) ->
     # else pick keys that look ID-ish
     keys = list(qs.keys())
     if not keys:
-        return sorted(list(_COMMON_ID_KEYS))[:8]
+        return sorted(_COMMON_ID_KEYS)[:8]
 
     likely = [k for k in keys if k and k.lower() in _COMMON_ID_KEYS]
     return likely or keys[:8]
 
 
-def _default_test_values_from_url(url: str) -> List[Any]:
+def _default_test_values_from_url(url: str) -> list[Any]:
     """
     Seed engine with meaningful values:
     - If URL already contains numeric ids, include +/- 1
@@ -1175,7 +1169,7 @@ def _default_test_values_from_url(url: str) -> List[Any]:
     try:
         parsed = urlparse(url)
         qs = parse_qs(parsed.query, keep_blank_values=True)
-        for _, v in qs.items():
+        for v in qs.values():
             if not v:
                 continue
             sv = str(v[0])
@@ -1193,17 +1187,17 @@ def _default_test_values_from_url(url: str) -> List[Any]:
                     vals.add(n + d)
     except Exception:
         pass
-    return sorted(list(vals))[:50]
+    return sorted(vals)[:50]
 
 
-def _build_id_mutations(qs: Dict[str, List[str]], path_id: Optional[int] = None, num_range: Optional[str] = None) -> \
-        List[Any]:
+def _build_id_mutations(qs: dict[str, list[str]], path_id: int | None = None, num_range: str | None = None) -> \
+        list[Any]:
     muts: set[Any] = set()
 
     all_discovered_ids = []
     if path_id is not None:
         all_discovered_ids.append(path_id)
-    for _, v in (qs or {}).items():
+    for v in (qs or {}).values():
         if v and str(v[0]).isdigit():
             all_discovered_ids.append(int(v[0]))
 
@@ -1274,10 +1268,10 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    def _parse_headers(items: Optional[List[str]]) -> Optional[Dict[str, str]]:
+    def _parse_headers(items: list[str] | None) -> dict[str, str] | None:
         if not items:
             return None
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for item in items:
             if not item or ":" not in item:
                 continue
@@ -1287,10 +1281,10 @@ def main() -> int:
                 out[name] = value
         return out or None
 
-    def _parse_cookies(items: Optional[List[str]]) -> Optional[Dict[str, str]]:
+    def _parse_cookies(items: list[str] | None) -> dict[str, str] | None:
         if not items:
             return None
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         for item in items:
             if not item or "=" not in item:
                 continue

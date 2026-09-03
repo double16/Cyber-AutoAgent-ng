@@ -9,25 +9,25 @@ import json
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
 from strands.types.exceptions import ContextWindowOverflowException
 
 from modules.handlers.conversation_budget import (
-    LargeToolResultMapper,
-    MappingConversationManager,
     PROACTIVE_COMPRESSION_THRESHOLD,
-    PromptBudgetHook,
     TOOL_COMPRESS_THRESHOLD,
     TOOL_COMPRESS_TRUNCATE,
+    LargeToolResultMapper,
+    MappingConversationManager,
+    PromptBudgetHook,
+    _dedupe_state_markers,
     _ensure_prompt_within_budget,
     _record_context_reduction_event,
     clear_shared_conversation_manager,
-    register_conversation_manager, _dedupe_state_markers,
+    register_conversation_manager,
 )
-
 
 # =============================================================================
 # Test Fixtures and Mock Data Generators
@@ -57,7 +57,7 @@ class MockAgent:
     name: str = "test_agent"
     _prompt_token_limit: int = 200000
     _context_reduction_events: list[dict[str, Any]] = field(default_factory=list)
-    _pending_reduction_reason: Optional[str] = None
+    _pending_reduction_reason: str | None = None
     _prompt_budget_escalations: int = 0
     conversation_manager: Any = None
     model: Any = None
@@ -82,7 +82,7 @@ def create_assistant_message(content: str) -> dict[str, Any]:
 def create_tool_use_message(
     tool_name: str,
     tool_input: dict[str, Any],
-    tool_use_id: Optional[str] = None,
+    tool_use_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a tool use message."""
     return {
@@ -166,10 +166,7 @@ def generate_security_operation_messages(
         messages.append(create_tool_use_message(tool_name, tool_input, tool_id))
 
         # Determine result size (periodically large)
-        if step % include_large_results_every == 0 and step > 0:
-            result_size = large_result_size
-        else:
-            result_size = tool_result_size
+        result_size = large_result_size if step % include_large_results_every == 0 and step > 0 else tool_result_size
 
         # Generate realistic-looking output
         result_header = f"[Step {step}] {tool_name} output:\n"
@@ -259,7 +256,7 @@ class TestStatePersistence:
 
         total_removed = 0
 
-        for cycle in range(5):
+        for _cycle in range(5):
             agent = MockAgent(
                 messages=generate_security_operation_messages(15, tool_result_size=2000)
             )
@@ -896,7 +893,7 @@ class TestConcurrentAccessSafety:
 
         def worker(worker_id):
             try:
-                for i in range(10):
+                for _i in range(10):
                     # Create agent with messages
                     agent = MockAgent(
                         messages=[create_assistant_message(f"w{worker_id}_msg_{j}") for j in range(25)]

@@ -1,16 +1,22 @@
 """Test unified precedence order for model capabilities."""
 
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+from modules.config.models import capabilities as capabilities_module
 from modules.config.models.capabilities import (
     Capabilities,
+    ModelCapabilitiesResolver,
+    allows_reasoning_content_replay,
+    apply_parameter_fallback_to_model,
+    classify_parameter_error,
     get_capabilities,
     get_model_input_limit,
     get_model_output_limit,
     get_model_pricing,
-    ModelCapabilitiesResolver,
-    allows_reasoning_content_replay,
+    wrap_model_with_fallback,
 )
 
 
@@ -68,6 +74,24 @@ class TestCapabilitiesPrecedence:
 
         assert allows_reasoning_content_replay("litellm", "openai/gpt-5", caps) is False
         assert allows_reasoning_content_replay("bedrock", "claude-sonnet-4", caps) is True
+
+    def test_ollama_thinking_sets_internal_string_reasoning_flag(self):
+        show_response = MagicMock(capabilities=["thinking"])
+        ollama_client = MagicMock()
+        ollama_client.show.return_value = show_response
+
+        with (
+            patch("modules.config.models.capabilities.get_models_client", None),
+            patch("modules.config.models.capabilities.ProviderConfigManager", None),
+            patch("modules.config.models.capabilities.LlmProviders", None),
+            patch("modules.config.models.capabilities.ModelInfoBase", None),
+            patch("modules.config.models.capabilities.ollama.Client", return_value=ollama_client),
+        ):
+            ModelCapabilitiesResolver.capabilities.cache_clear()
+            caps = get_capabilities("ollama", "any-thinking-model")
+
+        assert caps.supports_reasoning is True
+        assert caps.pass_reasoning_effort is True
 
 
 class TestTokenLimitPrecedence:
@@ -241,3 +265,155 @@ class TestTemperature:
             assert caps.supports_temperature is False, "Should be False when models.dev says so"
             assert caps.supports_reasoning is True
             assert caps.supports_tools is True
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        (None, ("", "")),
+        ("OpenAI/GPT-5", ("openai", "GPT-5")),
+        ("plain", ("", "plain")),
+    ],
+)
+def test_capability_helpers_handle_prefixes_and_static_reasoning_models(model_id, expected):
+    assert capabilities_module._split_prefix(model_id) == expected
+    assert capabilities_module._static_supports_reasoning_model("moonshot/kimi-thinking") is True
+    assert capabilities_module._static_supports_reasoning_model("gemini-3-pro-preview") is True
+    assert capabilities_module._static_supports_reasoning_model("ordinary-model") is False
+    assert capabilities_module.get_provider_default_limit("unknown") is None
+
+
+def test_capability_limits_ignore_invalid_environment_overrides(monkeypatch):
+    monkeypatch.setenv("MAX_COMPLETION_TOKENS", "not-a-number")
+    monkeypatch.setenv("MAX_TOKENS", "also-bad")
+    capabilities_module.get_model_output_limit.cache_clear()
+    with patch.object(capabilities_module, "get_models_client", None):
+        assert capabilities_module.get_model_output_limit("unknown") is None
+
+    capabilities_module.get_model_output_limit.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("temperature is unsupported", "temperature"),
+        ("top_k unexpected parameter", "top_k"),
+        ("top_p is not allowed with this model", "top_p"),
+        ("reasoning_effort invalid", "reasoning_effort"),
+        ("thinking budget unsupported", "thinking"),
+        ("effort does not support this request", "effort"),
+        ("connection refused", None),
+    ],
+)
+def test_classify_parameter_error_handles_supported_parameter_failures(message, expected):
+    assert classify_parameter_error(RuntimeError(message)) == expected
+
+
+def test_apply_parameter_fallback_handles_ollama_litellm_and_bedrock_models():
+    ollama_model = type(
+        "OllamaModel",
+        (),
+        {"config": {"additional_args": {"think": "medium"}, "temperature": 0.3, "options": {"top_p": 0.9}}},
+    )()
+    assert apply_parameter_fallback_to_model(ollama_model, "ollama", "model", "think") is True
+    assert ollama_model.config["additional_args"]["think"] is True
+    assert apply_parameter_fallback_to_model(ollama_model, "ollama", "model", "temperature") is True
+    assert ollama_model.config["temperature"] is None
+    assert apply_parameter_fallback_to_model(ollama_model, "ollama", "model", "top_p") is True
+    assert "top_p" not in ollama_model.config["options"]
+
+    litellm_model = type(
+        "LiteLLMModel",
+        (),
+        {"params": {"top_k": 5}, "client_args": {"reasoning_effort": "high", "thinking": {}, "thinking_config": {}}},
+    )()
+    assert apply_parameter_fallback_to_model(litellm_model, "litellm", "model", "top_k") is True
+    assert litellm_model.params == {}
+    assert apply_parameter_fallback_to_model(litellm_model, "litellm", "model", "thinking") is True
+    assert litellm_model.client_args == {}
+
+    bedrock_model = type(
+        "BedrockModel",
+        (),
+        {"temperature": 0.2, "additional_request_fields": {"output_config": {}, "thinking": {}}},
+    )()
+    assert apply_parameter_fallback_to_model(bedrock_model, "bedrock", "model", "temperature") is True
+    assert bedrock_model.temperature is None
+    assert apply_parameter_fallback_to_model(bedrock_model, "bedrock", "model", "effort") is True
+    assert bedrock_model.additional_request_fields == {}
+
+
+@pytest.mark.asyncio
+async def test_model_fallback_wrapper_retries_stream_and_structured_output():
+    class Model:
+        def __init__(self):
+            self.config = {"temperature": 0.2}
+            self.stream_attempts = 0
+            self.structured_attempts = 0
+
+        async def stream(self):
+            self.stream_attempts += 1
+            if self.stream_attempts == 1:
+                raise RuntimeError("temperature unsupported")
+            yield {"kind": "stream"}
+
+        async def structured_output(self):
+            self.structured_attempts += 1
+            if self.structured_attempts == 1:
+                raise RuntimeError("temperature unsupported")
+            yield {"kind": "structured"}
+
+    model = wrap_model_with_fallback(Model(), "ollama", "test-model")
+
+    assert [event async for event in model.stream()] == [{"kind": "stream"}]
+    model.config["temperature"] = 0.2
+    assert [event async for event in model.structured_output()] == [{"kind": "structured"}]
+    assert (model.stream_attempts, model.structured_attempts) == (2, 2)
+    assert model.config["temperature"] is None
+
+
+def test_capability_resolver_uses_provider_parameter_metadata_without_network(monkeypatch):
+    class ProviderConfig:
+        def get_supported_openai_params(self, **_kwargs):
+            return ["reasoning_effort", "tools", "tool_choice"]
+
+        def get_model_info(self, **_kwargs):
+            return {"supports_function_calling": True}
+
+    class ProviderManager:
+        @staticmethod
+        def get_provider_chat_config(**_kwargs):
+            return ProviderConfig()
+
+    monkeypatch.setattr(capabilities_module, "get_models_client", None)
+    monkeypatch.setattr(capabilities_module, "llm_supports_reasoning", lambda **_kwargs: False)
+    monkeypatch.setattr(capabilities_module, "ProviderConfigManager", ProviderManager)
+    monkeypatch.setattr(capabilities_module, "LlmProviders", lambda provider: provider)
+    monkeypatch.setattr(capabilities_module, "ModelInfoBase", dict)
+    ModelCapabilitiesResolver.capabilities.cache_clear()
+
+    capabilities = get_capabilities("litellm", "openai/custom-model:variant")
+
+    assert capabilities == Capabilities(
+        supports_reasoning=True,
+        pass_reasoning_effort=True,
+        supports_tools=True,
+        supports_tool_choice=True,
+        supports_temperature=False,
+    )
+
+
+def test_capability_limit_and_pricing_helpers_cover_empty_static_and_unavailable_paths(monkeypatch):
+    monkeypatch.setattr(capabilities_module, "get_models_client", None)
+    capabilities_module.get_model_input_limit.cache_clear()
+    capabilities_module.get_model_output_limit.cache_clear()
+    capabilities_module.get_model_pricing.cache_clear()
+
+    assert capabilities_module.get_model_input_limit("") is None
+    assert capabilities_module.get_model_input_limit("gpt-4-test") == 128000
+    assert capabilities_module.get_model_input_limit("unrecognized-model") is None
+    assert capabilities_module.get_model_output_limit("") is None
+    assert capabilities_module.get_model_output_limit("unrecognized-model") is None
+    assert capabilities_module.get_model_pricing("") is None
+    assert capabilities_module.get_model_pricing("unrecognized-model") is None
+    assert capabilities_module.get_provider_default_limit("bedrock") == 200000

@@ -218,7 +218,7 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path, monkey
         assert all("criterion" not in item.lower() for item in operation_tasks["items"])
 
         evidence_text = out.get("evidence_text")
-        assert all([f" /{chr(c)}\n" in evidence_text for c in range(ord('a'), ord('p'))])
+        assert all(f" /{chr(c)}\n" in evidence_text for c in range(ord('a'), ord('p')))
         assert "#### 11. INFO Observation"
 
         findings_table = out.get("findings_table")
@@ -241,8 +241,8 @@ def test_report_builder_full_range_of_evidence(mock_client_cls, tmp_path, monkey
 
         raw_evidence = out.get("raw_evidence", [])
         assert len(raw_evidence) == 15
-        assert all(["id" in e for e in raw_evidence])
-        assert all(["severity" in e for e in raw_evidence])
+        assert all("id" in e for e in raw_evidence)
+        assert all("severity" in e for e in raw_evidence)
         assert len(list(filter(lambda e: e["severity"] == "CRITICAL", raw_evidence))) == 1
         verified = [item for item in raw_evidence if item["category"] == "finding"]
         assert len(list(filter(lambda e: e["severity"] == "HIGH", verified))) == 1

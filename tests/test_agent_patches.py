@@ -2,10 +2,17 @@
 from __future__ import annotations
 
 import pytest
-
 from strands.hooks.events import AfterToolCallEvent
-from modules.agents.patches import ToolUseIdHook, patch_model_class_tool_use_id, unpatch_model_class_tool_use_id
-from modules.utils.reasoning_sanitization import ReasoningSanitizationState, sanitize_reasoning_control_text
+
+from modules.agents.patches import (
+    ToolUseIdHook,
+    patch_model_class_tool_use_id,
+    unpatch_model_class_tool_use_id,
+)
+from modules.utils.reasoning_sanitization import (
+    ReasoningSanitizationState,
+    sanitize_reasoning_control_text,
+)
 
 
 def _list_id_factory(ids: list[str]):

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from typing import Any, Dict, Mapping, Optional, Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from modules.tools.memory import OperationPlan, PlanPhase, Task
 
@@ -93,9 +94,9 @@ def _phase_weight(phase: PlanPhase, current_phase: int) -> float:
 
 
 def _normalize_prediction(
-    prediction: Optional[Mapping[str, Any]],
+    prediction: Mapping[str, Any] | None,
     actual_tasks: int,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     if not isinstance(prediction, Mapping):
         return None
     try:
@@ -123,8 +124,8 @@ def _phase_health(
     tasks: Sequence[Task],
     *,
     current_phase: int,
-    prediction: Optional[Mapping[str, Any]],
-) -> Dict[str, Any]:
+    prediction: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     future_phase = phase.status == "pending" and phase.id != current_phase
     inconsistent = phase.status == "done" and (
         not tasks or any(task.status not in {"done", "superseded"} for task in tasks)
@@ -160,10 +161,10 @@ def _coverage_feasibility(
     plan: OperationPlan,
     tasks: Sequence[Task],
     *,
-    prediction: Optional[Mapping[str, Any]],
+    prediction: Mapping[str, Any] | None,
     progress_percent: Any,
     assessment_active: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Estimate whether remaining assessment coverage fits the remaining budget."""
 
     unavailable = {
@@ -241,13 +242,13 @@ def _coverage_feasibility(
 
 
 def compute_operation_health(
-    plan: Optional[OperationPlan],
+    plan: OperationPlan | None,
     tasks: Sequence[Task],
     *,
-    predictions: Optional[Mapping[int, Mapping[str, Any]]] = None,
-    budget: Optional[Mapping[str, Any]] = None,
+    predictions: Mapping[int, Mapping[str, Any]] | None = None,
+    budget: Mapping[str, Any] | None = None,
     incomplete_health_cap: Any = DEFAULT_INCOMPLETE_HEALTH_CAP,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Compute a point-in-time operation health snapshot against an optimal score of one."""
 
     if plan is None:
@@ -259,7 +260,7 @@ def compute_operation_health(
 
     predictions = predictions or {}
     health_cap = _normalize_health_cap(incomplete_health_cap)
-    tasks_by_phase: Dict[int, list[Task]] = {}
+    tasks_by_phase: dict[int, list[Task]] = {}
     for task in tasks:
         tasks_by_phase.setdefault(task.phase, []).append(task)
 

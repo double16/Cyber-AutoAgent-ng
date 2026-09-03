@@ -25,7 +25,7 @@ Before a material action or a changed approach, make one concise decision record
 `Evidence: <artifact or constraint>; Action: <next minimal step>; Exit: <what changes task status or approach>.`
 Do not restate this record for routine reads, retries, or terminal acceptance calls when it has not changed.
 
-Use the least-cost step that can produce or rule out task-relevant evidence. After a repeated failure, record the
+Use the most efficient step that can produce or rule out task-relevant evidence. After a repeated failure, record the
 constraint and change method or end the task with its supported disposition.
 </cognitive_framework>
 

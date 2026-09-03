@@ -20,9 +20,8 @@ Usage:
 
 import logging
 import os
-from typing import Dict
 
-_logger_registry: Dict[str, logging.Logger] = {}
+_logger_registry: dict[str, logging.Logger] = {}
 _RAW_DIAGNOSTIC_LOGGERS = (
     "openai",
     "httpx",
@@ -96,9 +95,7 @@ def configure_sdk_logging(enable_debug: bool = False) -> None:
     class ToolRegistryWarningFilter(logging.Filter):
         def filter(self, record: logging.LogRecord) -> bool:
             # Suppress only the specific "unrecognized tool specification" warning
-            if "unrecognized tool specification" in record.getMessage():
-                return False
-            return True
+            return "unrecognized tool specification" not in record.getMessage()
 
     # Only enable verbose logging when explicitly requested
     log_level = logging.DEBUG if enable_debug else logging.INFO

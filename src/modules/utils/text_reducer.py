@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Iterable, List, Tuple
 
 _TAG_RE = re.compile(r"^\s*\[(?P<tag>[A-Z_]+)\]\s*")
 _WS_RE = re.compile(r"\s+")
@@ -20,8 +19,8 @@ def collapse_first_repeated_sequence(s: str) -> str:
         This is a duplicate.
     """
     # Tokenize words and keep spans into original string
-    words: List[str] = []
-    spans: List[Tuple[int, int]] = []
+    words: list[str] = []
+    spans: list[tuple[int, int]] = []
     for m in _WORD_RE.finditer(s):
         words.append(m.group(0))
         spans.append((m.start(), m.end()))
@@ -56,7 +55,7 @@ def collapse_first_repeated_sequence(s: str) -> str:
 
 
 # Helper: split into logical "lines" or units (prefer lines, fallback to punctuation for long blobs)
-def _split_into_units(text: str, *, long_line_threshold: int = 600, few_lines_threshold: int = 3) -> List[str]:
+def _split_into_units(text: str, *, long_line_threshold: int = 600, few_lines_threshold: int = 3) -> list[str]:
     """Split input into logical 'lines'.
 
     Prefer existing line breaks. If the input is only a few very long lines,
@@ -94,13 +93,13 @@ def _normalize(s: str) -> str:
     return s
 
 
-def _tokens(s: str) -> List[str]:
+def _tokens(s: str) -> list[str]:
     s = _normalize(s)
     # Keep words and a few meaningful symbols
     return re.findall(r"[a-z0-9_<>]+", s)
 
 
-def _jaccard(a: List[str], b: List[str]) -> float:
+def _jaccard(a: list[str], b: list[str]) -> float:
     sa, sb = set(a), set(b)
     if not sa and not sb:
         return 1.0
@@ -139,7 +138,7 @@ def _priority(line: str) -> int:
 
 @dataclass
 class ReduceResult:
-    kept_lines: List[str]
+    kept_lines: list[str]
     removed_count: int
 
     def to_text(self) -> str:
@@ -176,7 +175,7 @@ def reduce_lines_lossy(
     if keep_last_if_tagged and _tag(raw_lines[-1]):
         protected_last = raw_lines.pop()
 
-    kept: List[str] = []
+    kept: list[str] = []
     removed = 0
 
     def add_or_replace(line: str) -> None:
@@ -205,7 +204,7 @@ def reduce_lines_lossy(
     if max_lines is not None and len(kept) > max_lines:
         # Sort by priority first so important items are seeded
         candidates = sorted(kept, key=lambda s: (-_priority(s), -len(s)))
-        selected: List[str] = []
+        selected: list[str] = []
         for c in candidates:
             if len(selected) >= max_lines:
                 break

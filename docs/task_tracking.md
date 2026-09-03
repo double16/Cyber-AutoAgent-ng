@@ -22,7 +22,7 @@ The workflow controller creates focused agents as needed:
 |------|---------|-----------------------------|
 | `plan_creator` | Create or revise an initial high-level plan | No; returns structured plan data for Python to store |
 | `plan_critic` | Approve a proposed plan or return actionable revision feedback | No |
-| `task_creator` | Create concrete tasks for the current phase | May call `create_tasks` only |
+| `task_creator` | Return typed task proposals for the current phase | No; Python validates and persists the payload |
 | `task_prompt_builder` | Build a task-specific execution prompt and select applicable memory/tools | No |
 | `task_prompt_critic` | Approve a proposed task prompt or return actionable revision feedback | No |
 | `task_executor` | Execute one active task objective | Records acceptance results and may create contracted follow-up work |
@@ -33,18 +33,22 @@ Task and phase evaluators are review-only roles. They receive only `editor` for 
 `memory_retrieve` for reviewing existing memories. They do not receive shell or execution tools and must not perform the
 task, phase, or operation objective while classifying existing evidence.
 
-Agents may create follow-up work with `create_tasks` when their role permits it. Plan reads/writes, task activation, active-task lookup, task closure, and uncompleted-task listing are applied directly by Python rather than agent-callable tools.
+Task executors may create contracted follow-up work with `create_tasks` when their role permits it. Task creators return
+schema-validated proposals for controller persistence. Plan reads/writes, task activation, active-task lookup, task
+closure, and uncompleted-task listing are applied directly by Python rather than agent-callable tools.
 
 The task creator receives a deterministic controller-owned prompt and a flat `TaskProposal` contract. A proposal
 contains its title, objective, required limits object, one concise criterion, and optional procedure, snapshot, and
 target fields. For snapshot proposals, Python silently discards `limits` and `output_kind`; procedure methods remain
 invalid. Python compiles the full
 immutable acceptance contract, assigns pending status and the active phase, and infers target scope from `target_ids`.
-The controller permits a configurable number of corrected calls after an initial rejection (four by default) in the
-same retained conversation and stops the role when that allowance is exhausted. It never retries after tasks are
-successfully stored.
+The controller permits a configurable number of corrected structured payloads after an initial rejection and stops the
+role when that allowance is exhausted. It never retries after tasks are successfully stored.
 
-Agents also do not have a stop tool. Operation completion is a Python workflow decision; the controller emits a `termination_reason` event with reason `complete`.
+Agents do not receive a model-callable stop tool. When a task executor exhausts recovery for `store_finding`, its
+controller hook requests the Strands SDK to stop only that active agent invocation after the current tool batch.
+The workflow controller then decides the task outcome; operation completion remains a Python workflow decision, and
+the controller emits a `termination_reason` event with reason `complete` only when the operation is complete.
 
 The task executor's workflow boundary is controller-owned and shared by every module. Module prompts add distinct access,
 safety, domain-execution, and evidence policies without redefining task lifecycle behavior. Module termination policies
@@ -198,10 +202,17 @@ requires `inventory_manifest`; ordinary JSON outputs must use the generic `artif
 Web discovery tasks should prefer deterministic manifest production. Pass `--inventory-manifest` (or the additive
 `inventory_manifest` tool argument) to `specialized_recon_orchestrator` or `auth_chain_analyzer` while retaining their
 normal output. The generally available `recon_output_to_inventory_manifest` tool converts katana, feroxbuster, ffuf,
-gobuster, dirsearch, httpx, gospider, and plain URL-list artifacts; the source artifact remains unchanged. URL-list
-auto-detection samples at most the first five non-empty lines before the converter processes the complete artifact.
-It also accepts an existing inventory manifest as `source_artifact` and writes a distinct, validated manifest copy;
-manifest input bypasses recon parsing and preserves its target IDs and inventory structure for controller validation.
+gobuster, dirsearch, httpx, gospider, client-bundle extraction, and plain URL-list artifacts; the source artifact
+remains unchanged. It recognizes the `client_bundle_inventory_v2` extraction artifact and converts its target-scoped
+API paths and SPA routes. URL-list auto-detection samples at most the first five non-empty lines before the converter
+processes the complete artifact. It also accepts an existing inventory manifest as `source_artifact` and writes a
+distinct, validated manifest copy; manifest input bypasses recon parsing and preserves its target IDs and inventory
+structure for controller validation.
+
+For a web phase-1 task with the declared `inventory_synthesis` controller contract, Python collects the artifact
+evidence from its completed mapping workstreams and consolidates supported recon outputs and existing manifests into
+one validated inventory manifest. This deterministic task does not invoke an executor agent; unsupported source
+artifacts are reported in controller diagnostics and do not discard valid contributions.
 
 Before an inventory is frozen, Python extracts same-scope navigation and form destinations from current-operation HTML
 artifacts and merges unambiguous missing routes. Fan-out then dispatches by kind: endpoints and their parameters share
@@ -244,7 +255,7 @@ Final report generation receives the workflow completion status before it runs. 
 that findings, observations, validation counts, and target coverage are partial. The progress value itself is reported
 unchanged from budget utilization.
 
-Task prompt refinement is controlled by `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS`, which defaults to two
+Task prompt refinement is controlled by `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS`, which defaults to three
 critic reviews. Setting it to `0` uses the initial builder output without critique. After the configured JSON retries,
 an unavailable or malformed builder/critic response, or a non-scope prompt defect that survives one bounded repair,
 uses a controller-owned deterministic task template. That template selects no model-proposed optional tools or shell
@@ -300,11 +311,38 @@ exact boundary and never receives fuzzy authorization.
 
 Every `store_finding` call requires at least one durable artifact reference and returns canonical `finding_ref` and
 `verification_task_ref` values. Python links the finding to the currently active source task and creates one narrow,
-same-phase `finding_validation` task. The linked task must call
+controller-owned `finding_validation` task. Before the first planned finding-validation phase, the task is assigned to
+that future phase; during or after a finding-validation phase, it remains in the current phase. The linked task must
+call
 `record_finding_validation`; only an evaluator-approved confirmation is promoted to a verified finding. Failed or
 unfinished validations remain visible in the final report under **Findings Requiring Validation**. Evaluators and
-report agents can inspect operation artifacts with the read-only `read_artifact` tool, limited by
-`CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation).
+report agents can inspect operation artifacts with the read-only `read_artifact` tool. Report and other read-only
+agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation). A task evaluator may read
+only controller-authorized task evidence and frozen acceptance artifacts. It receives up to
+`CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE` pages per artifact (default four), with its total derived from the
+number of distinct authorized artifacts; each evaluator page is limited to 200 lines and 5% of the resolved input
+context window at four UTF-8 bytes per token, clamped from 8 KiB through 64 KiB. Oversized pages are rejected without
+materializing their content. Reaching a page limit directs the evaluator to another authorized artifact; only total
+exhaustion or a repeated denied read stops evaluation.
+
+Finding-dependent task creation consumes only verified findings. The controller advertises and validates canonical
+`finding:<uid>` references, and normalizes an eligible bare finding UID to that canonical form before persistence.
+Unresolved and failed-validation candidates remain unavailable to downstream task creation; controller-owned
+finding-validation tasks handle their lifecycle.
+Before artifact reads, the controller provides a deterministic digest with each artifact's byte size. Artifacts larger
+than the evaluator's page budget are omitted from its reader but retained in the digest for provenance; evaluators use
+the acceptance summary, controller-observed outcomes, and compact artifacts rather than paging through raw bundles.
+When a review agent emits several tool calls in one model response, the controller executes them in order and stops
+the batch after the first failed call. Remaining calls receive a skipped result and do not consume evaluator evidence
+read allowance.
+The general reader accepts one file per call. When it receives an in-scope directory, it returns up to 25 immediate
+file references so the agent can retry with a specific artifact; evaluator readers do not disclose directory listings.
+
+Target-owned artifacts are also checked for broad secret-exposure patterns. The detector retains only a secret type
+and SHA-256 fingerprint in workflow state; raw values remain solely in the evidence artifact. A match from a
+successful, target-scoped tool outcome creates a validation-required finding candidate. Local context, user input,
+and unproven artifacts do not qualify. Independent validation must re-establish exposure without using the secret to
+access another system.
 
 Operation-objective candidates use a separate lifecycle. `store_objective_candidate` creates an
 `objective_validation` task, and `record_objective_validation` records confirmed, rejected, or inconclusive objective
@@ -369,6 +407,13 @@ Optional tools are selected as needed:
 - MCP tools
 - any other discovered non-core tools
 
+The controller may also make built-in optional tools available from persisted task-contract metadata. These
+controller-owned rules inspect only declared procedure output kinds and acceptance evidence requirements; they do not
+infer needs from task titles or objectives. For example, a task that produces or requires an `inventory_manifest`
+receives the converter plus the available direct producers `specialized_recon_orchestrator` and
+`auth_chain_analyzer`. This supplements, rather than replaces, the
+prompt-builder's optional-tool selection. Shell-command selection remains separate.
+
 Selection happens in two passes:
 
 1. Python narrows candidates based on objective, phase/task context, available tools, MCP metadata, and memories.
@@ -389,11 +434,14 @@ recognized names into their correct runtime categories.
 
 Prompt-builder agents also receive compact task history. Successful tasks become useful context for prioritizing similar paths, while `partial_failure` and `blocked` tasks provide dead-end context so workers can pivot without rewriting module prompts on disk.
 
-`create_tasks` is exposed only to task creation roles and task executors that may create follow-up work. Other plan/task mutation tools are withheld from worker agents.
+`create_tasks` is exposed only to task executors that may create follow-up work. Task creators and other workflow roles
+receive no plan/task mutation tool.
 
 ## Task Creation
 
-Task creation still uses the `create_tasks` tool so agents can turn discoveries into durable work. There is no separate
+Task creators return typed `TaskProposal` batches and Python submits them through the same controller-owned validation
+and persistence service used by the `create_tasks` tool. Task executors retain that tool for contracted discoveries.
+There is no separate
 active-task fetch tool; active task context is selected by Python and included in the task executor prompt. Agents
 submit flat `TaskProposal` objects, and Python compiles each into a controller-frozen acceptance contract containing a
 basis, source references, unique criteria, and evidence requirements. The rules are:
@@ -403,6 +451,9 @@ basis, source references, unique criteria, and evidence requirements. The rules 
 - provide exactly one criterion description; Python generates its ID and evidence requirement in the frozen contract
 - provide procedure methods and positive limits, or provide existing snapshot references; snapshot-only limits and
   output kinds are ignored
+- use only controller-advertised canonical procedure capabilities in `methods` (for example `request`, `crawl`, or
+  `analyze`), never raw tool names such as `shell`; when no such capability or eligible snapshot exists, Python
+  blocks task creation before model retries
 - omit `target_ids` for all targets or provide exact IDs for a subset
 - do not create duplicates; Python also skips proposals with an exact frozen contract match
 - do not reduce task coverage based only on likelihood or convenience

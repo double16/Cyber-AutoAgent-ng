@@ -49,3 +49,20 @@ def test_critical_event_flushes_pending_batch_without_deadlock():
     assert base.events == [pending, critical]
     assert emitter.batch == []
     assert emitter.timer is None
+
+
+def test_batch_emitter_handles_empty_flushes_and_all_critical_event_types():
+    base = RecordingEmitter()
+    emitter = BatchingEmitter(base, batch_ms=10_000)
+
+    emitter._flush()
+    emitter.flush_immediate()
+    for event_type in ("user_handoff", "assessment_complete", "progress_update", "report_content"):
+        emitter.emit({"type": event_type})
+
+    assert base.events == [
+        {"type": "user_handoff"},
+        {"type": "assessment_complete"},
+        {"type": "progress_update"},
+        {"type": "report_content"},
+    ]
