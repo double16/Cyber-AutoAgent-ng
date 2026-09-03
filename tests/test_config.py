@@ -347,7 +347,7 @@ class TestConfigManager:
         assert local_config.llm.provider == ModelProvider.OLLAMA
         assert local_config.llm.model_id == "qwen3.6:27b"
         assert local_config.llm.temperature == DEFAULT_TEMPERATURE_SWARM
-        assert local_config.llm.max_tokens == 4096
+        assert local_config.llm.max_tokens == 16000
 
         # Test remote swarm config
         remote_config = self.config_manager.get_swarm_config("bedrock")
@@ -1100,7 +1100,7 @@ class TestEnvironmentIntegration:
         # Test local model configuration
         local_config = config_manager.get_local_model_config("llama3.2:3b", "ollama")
         assert local_config["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
-        assert local_config["max_tokens"] == 8000
+        assert local_config["max_tokens"] == 8192
         assert "host" in local_config
         assert local_config["host"].startswith("http://")
 
