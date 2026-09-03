@@ -32,7 +32,7 @@ dependencies = [
     "strands-agents-tools~=0.8.3",
     "qdrant-client==1.19.0",
     "google-genai~=1.71.0",
-    "litellm>=1.92,<1.98",
+    "litellm>=1.92,<1.99",
     "fastapi>=0.136.3,<0.142.0",
     "azure-identity~=1.25.0",
     "boto3~=1.43.1",
@@ -56,7 +56,7 @@ dependencies = [
     "standard-distutils~=3.11.9",
     "guppy3~=3.1.5",
     "validators~=0.35.0",
-    "ddgs>=9.14.1,<9.16.0",
+    "ddgs>=9.14.1,<9.17.0",
     "rapidfuzz~=3.14.3",
     "psutil~=7.2.2",
     "pyyaml~=6.0",
@@ -78,7 +78,7 @@ dev = [
 [tool.uv]
 # Stagehand 0.5.x is retained for its local-browser behavior but caps LiteLLM at 1.80.
 # Override that transitive cap for the explicitly requested LiteLLM 1.92 compatibility assessment.
-override-dependencies = ["litellm>=1.92,<1.98"]
+override-dependencies = ["litellm>=1.92,<1.99"]
 
 [project.urls]
 Homepage = "https://github.com/double16/Cyber-AutoAgent-ng"
