@@ -165,6 +165,7 @@ describe('DirectDockerService broad environment construction', () => {
             target: 'https://example.com/a b',
             objective: 'find issues',
             continueOperation: 'op-123',
+            resetFailed: true,
             reportOnly: true,
         } as any, {...baseConfig, outputDir})).rejects.toThrow('abort-after-create');
 
@@ -175,6 +176,7 @@ describe('DirectDockerService broad environment construction', () => {
             '--module', 'web_scan',
             '--target', 'https://example.com/a b',
             '--continue', 'op-123',
+            '--reset-failed',
             '--report',
             '--model', 'gpt-test',
             '--region', 'us-east-2',

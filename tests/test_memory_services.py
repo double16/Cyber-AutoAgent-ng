@@ -52,6 +52,91 @@ def test_shared_semantic_enum_normalization_keeps_unknown_values_invalid(adapter
         TypeAdapter(adapter_type).validate_python("invented-state")
 
 
+def test_sqlite_store_resets_failed_work_without_discarding_task_context(tmp_path):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical-target")
+    operation_id = "OP_RESET"
+    plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            mod.PlanPhase(id=1, title="Recon", status="done"),
+            mod.PlanPhase(id=2, title="Validate", status="partial_failure"),
+            mod.PlanPhase(id=3, title="Close", status="blocked"),
+        ],
+        assessment_complete=True,
+    )
+    store.store_plan(operation_id, plan)
+    failed_task = mod.Task(
+        task_uid="failed",
+        title="Retry validation",
+        objective="Validate the assigned target",
+        acceptance=make_acceptance("retry"),
+        phase=2,
+        status="partial_failure",
+        status_reason="Response timed out",
+        evidence=["artifact:retry.json"],
+        recovery_context={"guidance": "Use the retained artifact."},
+    )
+    blocked_task = mod.Task(
+        task_uid="blocked",
+        title="Blocked validation",
+        objective="Await credentials",
+        acceptance=make_acceptance("blocked"),
+        phase=3,
+        status="blocked",
+        status_reason="Credentials unavailable",
+    )
+    reasonless_failed_task = mod.Task(
+        task_uid="reasonless-failed",
+        title="Retry mapping",
+        objective="Retry the assigned mapping task",
+        acceptance=make_acceptance("reasonless-retry"),
+        phase=3,
+        status="partial_failure",
+    )
+    store.store_task(operation_id, failed_task)
+    store.store_task(operation_id, blocked_task)
+    store.store_task(operation_id, reasonless_failed_task)
+
+    reset_plan, task_count, phase_count = store.reset_failed_work(operation_id)
+
+    assert (task_count, phase_count) == (3, 2)
+    assert reset_plan.current_phase == 2
+    assert reset_plan.assessment_complete is False
+    assert [phase.status for phase in reset_plan.phases] == ["done", "active", "pending"]
+    tasks = {task.task_uid: task for task in store.get_tasks(operation_id)}
+    assert tasks["failed"].status == "pending"
+    assert "Prior reason: Response timed out" in tasks["failed"].status_reason
+    assert tasks["failed"].evidence == ["artifact:retry.json"]
+    assert tasks["failed"].recovery_context == {"guidance": "Use the retained artifact."}
+    assert tasks["reasonless-failed"].status == "pending"
+    assert tasks["reasonless-failed"].status_reason == "Reset for continuation from partial_failure."
+    assert tasks["blocked"].status == "pending"
+    assert "Reset for continuation from blocked." in tasks["blocked"].status_reason
+    assert "Prior reason: Credentials unavailable" in tasks["blocked"].status_reason
+
+
+def test_sqlite_store_failed_work_reset_is_a_noop_without_failures(tmp_path):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical-target")
+    operation_id = "OP_NO_RESET"
+    plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="done")],
+        assessment_complete=True,
+    )
+    store.store_plan(operation_id, plan)
+
+    reset_plan, task_count, phase_count = store.reset_failed_work(operation_id)
+
+    assert reset_plan.current_phase == plan.current_phase
+    assert reset_plan.assessment_complete == plan.assessment_complete
+    assert [phase.status for phase in reset_plan.phases] == ["done"]
+    assert (task_count, phase_count) == (0, 0)
+
+
 def test_task_service_scope_violations_enforces_assigned_scheme_host_and_port_only():
     plan = mod.OperationPlan(
         objective="assess",

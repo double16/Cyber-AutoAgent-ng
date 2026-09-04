@@ -60,6 +60,7 @@ export class AssessmentFlow {
   };
 
   private continueOperation?: string | boolean;
+  private resetFailed = false;
   private reportOnly?: string | boolean;
 
   /**
@@ -153,6 +154,9 @@ export class AssessmentFlow {
     if (this.continueOperation !== undefined) {
       params.continueOperation = this.continueOperation;
     }
+    if (this.resetFailed) {
+      params.resetFailed = true;
+    }
     if (this.reportOnly !== undefined) {
       params.reportOnly = this.reportOnly;
     }
@@ -204,6 +208,7 @@ export class AssessmentFlow {
 
   private clearExecutionMode(): void {
     this.continueOperation = undefined;
+    this.resetFailed = false;
     this.reportOnly = undefined;
   }
 
@@ -217,12 +222,23 @@ export class AssessmentFlow {
     const rawOperationId = (match[2] || '').trim();
     const operationIdParts = rawOperationId ? rawOperationId.split(/\s+/) : [];
 
-    if (operationIdParts.length > 1) {
+    const resetFailedCount = operationIdParts.filter((part) => part.toLowerCase() === 'reset-failed').length;
+    const operationIds = operationIdParts.filter((part) => part.toLowerCase() !== 'reset-failed');
+    const resetFailed = mode === 'continue' && resetFailedCount === 1;
+    if (
+      operationIds.length > 1
+      || resetFailedCount > 1
+      || (mode === 'report' && resetFailedCount > 0)
+    ) {
       return {
         success: false,
         message: `Invalid ${mode} command`,
-        error: `Usage: ${mode} [operation_id]`,
-        nextPrompt: `Provide at most one operation ID, e.g. ${mode} OP_20260320_101501`
+        error: mode === 'continue'
+          ? 'Usage: continue [operation_id] [reset-failed]'
+          : 'Usage: report [operation_id]',
+        nextPrompt: mode === 'continue'
+          ? 'Use an optional operation ID and optional reset-failed argument.'
+          : 'Provide at most one operation ID, e.g. report OP_20260320_101501'
       };
     }
 
@@ -240,13 +256,15 @@ export class AssessmentFlow {
     }
     this.assessmentState.stage = 'ready';
 
-    const operationValue: string | boolean = operationIdParts[0] || true;
+    const operationValue: string | boolean = operationIds[0] || true;
     if (mode === 'continue') {
       this.continueOperation = operationValue;
+      this.resetFailed = resetFailed;
       this.reportOnly = undefined;
     } else {
       this.reportOnly = operationValue;
       this.continueOperation = undefined;
+      this.resetFailed = false;
     }
 
     const operationLabel = typeof operationValue === 'string' ? ` ${operationValue}` : '';
@@ -254,7 +272,7 @@ export class AssessmentFlow {
 
     return {
       success: true,
-      message: `${action} requested${operationLabel}`,
+      message: `${action} requested${operationLabel}${resetFailed ? ' with failed work reset' : ''}`,
       nextPrompt: 'Ready to execute - Press Enter to start operation',
       readyToExecute: true
     };

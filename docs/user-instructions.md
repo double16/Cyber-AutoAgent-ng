@@ -44,6 +44,7 @@ options include:
 | `--memory-mode` | `operation` (current operation only) or `shared` (same target across operations) |
 | `--provider` / `--model` / `--region` | Model configuration |
 | `--continue` / `--report` | Continue or regenerate the latest operation, optionally by ID |
+| `--reset-failed` | With `--continue`, retry all partial-failure and blocked tasks and phases |
 | `--deployment-mode` | `local-cli`, `single-container`, or `full-stack` |
 | `--mcp-enabled` / `--mcp-conns` | Enable and configure MCP servers |
 | `--headless` / `--recording` / `--debug, -d` | Output and diagnostic modes |
@@ -80,12 +81,31 @@ default is `web`; its provider choices are `bedrock`, `ollama`, `litellm`, and `
 | `--memory-path` / `--memory-mode` / `--keep-memory` | Memory configuration |
 | `--output-dir` | Output directory override |
 | `--continue` / `--report` | Continue or regenerate an operation |
+| `--reset-failed` | With `--continue`, reset partial-failure and blocked work before retrying the operation |
 | `--eval-rubric` | Enable evaluation with the selected rubric |
 | `--mcp-enabled` / `--mcp-conns` | Enable and configure MCP servers |
 | `--bug-bounty-header NAME=VALUE` | Add an authorized request header; repeatable |
 | `--verbose` / `--heap-monitor` | Diagnostics |
 
 The Python parser does not provide the React short aliases for these options.
+
+### Retrying failed work
+
+Normal continuation resumes only pending or active work. To retry the tasks and phases that ended in
+`partial_failure` or `blocked`, add `--reset-failed`; durable artifacts, acceptance records, and recovery context
+remain intact:
+
+```bash
+# Retry failed work in the latest operation for this target
+uv run python src/cyberautoagent.py --target example.com --objective "via environment" --continue --reset-failed
+
+# Retry failed work in one specific operation
+uv run python src/cyberautoagent.py --target example.com --objective "via environment" \
+  --continue OP_20260904_120000 --reset-failed
+```
+
+In the interactive React terminal, use `continue [operation_id] reset-failed`; the operation ID and
+`reset-failed` argument may be supplied in either order.
 
 ## Deployment modes
 

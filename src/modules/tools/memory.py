@@ -1449,6 +1449,8 @@ class ApplicationStore(Protocol):
 
     def get_tasks(self, operation_id: str) -> list[Task]: ...
 
+    def reset_failed_work(self, operation_id: str) -> tuple[OperationPlan, int, int]: ...
+
     def append_operation_model_metrics(
         self, operation_id: str, captured_at: str, rows: list[dict[str, Any]]
     ) -> None: ...
@@ -1496,6 +1498,7 @@ class SQLiteApplicationStore:
         "store_task",
         "patch_task",
         "get_tasks",
+        "reset_failed_work",
         "store_acceptance_results",
         "get_acceptance_results",
         "has_acceptance_memory_publication",
@@ -2100,6 +2103,76 @@ class SQLiteApplicationStore:
                     )
                 )
         return tasks
+
+    def reset_failed_work(self, operation_id: str) -> tuple[OperationPlan, int, int]:
+        """Make failed work runnable again while retaining its durable evidence.
+
+        Returns the updated plan followed by the number of reset tasks and phases.  The
+        transition is atomic so a continuation never observes a reset plan with stale
+        terminal tasks, or the reverse.
+        """
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown operation plan: {operation_id}")
+            plan = OperationPlan.from_obj(json.loads(row[0]))
+            failed_tasks = conn.execute(
+                "SELECT task_uid, phase, status, status_reason FROM tasks "
+                "WHERE logical_target = ? AND operation_id = ? AND status IN ('partial_failure', 'blocked')",
+                (self.logical_target, operation_id),
+            ).fetchall()
+            failed_phase_ids = {
+                int(phase.id) for phase in plan.phases if phase.status in {"partial_failure", "blocked"}
+            }
+            affected_phase_ids = failed_phase_ids | {int(task[1]) for task in failed_tasks}
+            if not affected_phase_ids:
+                return plan, 0, 0
+
+            now = datetime.now().isoformat()
+            for task_uid, _phase, prior_status, prior_reason in failed_tasks:
+                reset_reason = f"Reset for continuation from {prior_status}."
+                if prior_reason:
+                    reset_reason = f"{reset_reason} Prior reason: {prior_reason}"
+                conn.execute(
+                    "UPDATE tasks SET status = ?, status_reason = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    ("pending", reset_reason, now, self.logical_target, operation_id, task_uid),
+                )
+
+            current_phase = min(affected_phase_ids)
+            phases = []
+            for phase in plan.phases:
+                status = phase.status
+                if phase.id == current_phase:
+                    status = "active"
+                elif phase.id in affected_phase_ids or status == "active":
+                    status = "pending"
+                phases.append(replace(phase, status=status))
+            updated_plan = replace(
+                plan,
+                current_phase=current_phase,
+                phases=phases,
+                assessment_complete=False,
+                updated_at=now,
+            )
+            conn.execute(
+                "UPDATE plans SET current_phase = ?, assessment_complete = ?, plan_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ?",
+                (
+                    updated_plan.current_phase,
+                    updated_plan.assessment_complete,
+                    json.dumps(updated_plan.to_dict()),
+                    now,
+                    self.logical_target,
+                    operation_id,
+                ),
+            )
+        return updated_plan, len(failed_tasks), len(affected_phase_ids)
 
     def store_acceptance_results(
         self,

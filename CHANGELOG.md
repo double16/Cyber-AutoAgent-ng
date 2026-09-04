@@ -2,9 +2,8 @@
 
 ### Features
 
-- Add opt-in module task fan-out contracts so web, web reconnaissance, and CTF mapping phases create distinct,
-  controller-validated workstreams instead of one broad task.
-
+- Add `--reset-failed` continuation mode and interactive `continue ... reset-failed` support to retry partial-failure
+  and blocked workflow tasks and phases while retaining their durable evidence.
 - Add webcrack and shuji JavaScript reverse-engineering tools.
 - Consolidate authoritative workflow state into `outputs/cyber_autoagent.db`.
 - Replace semantic-memory backends with Qdrant 1.18, using `outputs/qdrant` by default or a configured service.

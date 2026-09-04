@@ -355,6 +355,54 @@ def test_consolidation_merges_detected_sources_preserves_provenance_and_skips_un
     assert result["skipped_artifacts"][0]["source_artifact"] == "artifact:artifacts/notes.txt"
 
 
+def test_consolidation_merges_case_variant_technologies_with_one_stable_id(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    technology_id = manifest_tool._stable_id("technology", "target-1", "jquery")
+    for filename, value in (("recon-manifest.json", "jquery"), ("httpx-manifest.json", "jQuery")):
+        (artifact_dir / filename).write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "items": [
+                        {
+                            "id": technology_id,
+                            "target_id": "target-1",
+                            "kind": "technology",
+                            "value": value,
+                            "attributes": {},
+                        }
+                    ],
+                    "unassessed_gaps": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+    output = artifact_dir / "consolidated.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = manifest_tool.consolidate_recon_artifacts(
+        ["artifact:artifacts/recon-manifest.json", "artifact:artifacts/httpx-manifest.json"],
+        str(output),
+        target_id="target-1",
+        target="https://target.test",
+    )
+
+    written = json.loads(output.read_text(encoding="utf-8"))
+    technologies = [item for item in written["items"] if item["kind"] == "technology"]
+    assert result["validation_status"] == "valid"
+    assert len(technologies) == 1
+    assert technologies[0]["id"] == technology_id
+    assert technologies[0]["value"] == "jquery"
+    assert set(technologies[0]["attributes"]["source_artifact_refs"]) == {
+        "artifact:artifacts/recon-manifest.json",
+        "artifact:artifacts/httpx-manifest.json",
+    }
+
+
 def test_consolidation_rejects_when_every_source_is_unsupported(tmp_path, monkeypatch):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()

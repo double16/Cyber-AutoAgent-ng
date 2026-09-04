@@ -97,6 +97,7 @@ const cli = meow(`
     --debug, -d         Enable debug mode
     --headless          Run in headless mode for scripting
     --continue          Continue a previous operation, optionally by operation ID, defaults to last operation
+    --reset-failed      With --continue, reset partial-failure and blocked work before resuming
     --report            Re-generate a report, optionally by operation ID, defaults to last operation
     --deployment-mode   Deployment mode: local-cli, single-container, full-stack
     --mcp-enabled       Enable MCP servers
@@ -169,6 +170,9 @@ const cli = meow(`
       type: 'string',
       isMultiple: false,
       isRequired: false,
+    },
+    resetFailed: {
+      type: 'boolean',
     },
     report: {
       type: 'string',
@@ -412,6 +416,7 @@ const runAutoAssessment = async () => {
         target: cli.flags.target,
         objective: cli.flags.objective || `Comprehensive ${cli.flags.module} security assessment`,
         continueOperation: cli.flags.continue,
+        resetFailed: cli.flags.resetFailed,
         reportOnly: cli.flags.report,
       };
 

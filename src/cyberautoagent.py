@@ -313,6 +313,33 @@ def restore_continuation_state(
     return objective, restored_targets
 
 
+def reset_continuation_failed_work(
+    *,
+    output_dir: str,
+    logical_target: str,
+    operation_id: str,
+    logger: Any,
+) -> tuple[int, int]:
+    """Reset persisted failures so the selected operation can retry them."""
+
+    store = create_application_store(
+        get_application_database_path({"output_dir": output_dir}),
+        logical_target=logical_target,
+    )
+    plan, task_count, phase_count = store.reset_failed_work(operation_id)
+    if not task_count and not phase_count:
+        logger.info("No failed work to reset for continuation %s", operation_id)
+        return 0, 0
+    logger.info(
+        "Reset failed work for continuation %s: tasks=%s phases=%s current_phase=%s",
+        operation_id,
+        task_count,
+        phase_count,
+        plan.current_phase,
+    )
+    return task_count, phase_count
+
+
 def setup_telemetry(logger):
     """
     Setup telemetry system with separated concerns:
@@ -1436,6 +1463,11 @@ def main():
         help="Continue last operation or the passed operation",
     )
     parser.add_argument(
+        "--reset-failed",
+        action="store_true",
+        help="With --continue, reset partial-failure and blocked tasks and phases before resuming",
+    )
+    parser.add_argument(
         "--report",
         nargs="?",
         type=str,
@@ -1476,6 +1508,10 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.reset_failed and not bool(args.cont):
+        parser.error("--reset-failed requires --continue")
+    if args.reset_failed and bool(args.report):
+        parser.error("--reset-failed cannot be used with --report")
     if args.memory_mode not in {"shared", "operation"}:
         parser.error("CYBER_MEMORY_MODE must be one of: shared, operation")
 
@@ -1732,6 +1768,22 @@ def main():
             restore_memory_environment()
             raise SystemExit(2)
 
+    if args.reset_failed:
+        task_count, phase_count = reset_continuation_failed_work(
+            output_dir=server_config.output.base_dir,
+            logical_target=args.target,
+            operation_id=operation_id,
+            logger=logger,
+        )
+        print_status(
+            (
+                f"Reset {task_count} failed task(s) across {phase_count} phase(s) for continuation"
+                if task_count or phase_count
+                else "No failed work required reset for continuation"
+            ),
+            "SUCCESS",
+        )
+
     latest_pointer = update_latest_output_pointer(
         target_sanitized,
         operation_id,
@@ -1912,7 +1964,15 @@ def main():
             region_name=args.region,
             provider=args.provider,
             memory_mode=args.memory_mode,
-            operation_mode=("report_only" if args.report else "continuation" if args.cont else "execution"),
+            operation_mode=(
+                "report_only"
+                if args.report
+                else "continuation_reset_failed"
+                if args.reset_failed
+                else "continuation"
+                if args.cont
+                else "execution"
+            ),
             module=args.module,
             bug_bounty_headers=bug_bounty_headers,
             mcp_connections=mcp_connections,

@@ -282,6 +282,9 @@ export class DirectDockerService extends EventEmitter {
       } else if (params.continueOperation) {
         args.push('--continue', params.continueOperation);
       }
+      if (params.resetFailed) {
+        args.push('--reset-failed');
+      }
 
       if (params.reportOnly === true || params.reportOnly === "") {
         args.push('--report');

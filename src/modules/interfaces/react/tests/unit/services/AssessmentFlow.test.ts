@@ -141,6 +141,44 @@ describe('AssessmentFlow', () => {
         }));
     });
 
+    it('accepts reset-failed with interactive continue in either argument order', () => {
+        const flow = new AssessmentFlow();
+
+        flow.processUserInput('target example.com');
+        flow.processUserInput('initial objective');
+        expect(flow.processUserInput('continue OP_RESET reset-failed')).toEqual(expect.objectContaining({
+            success: true,
+            message: 'Continue operation requested OP_RESET with failed work reset',
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual(expect.objectContaining({
+            continueOperation: 'OP_RESET',
+            resetFailed: true,
+        }));
+
+        expect(flow.processUserInput('continue reset-failed OP_LATEST')).toEqual(expect.objectContaining({
+            success: true,
+            message: 'Continue operation requested OP_LATEST with failed work reset',
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual(expect.objectContaining({
+            continueOperation: 'OP_LATEST',
+            resetFailed: true,
+        }));
+    });
+
+    it('rejects malformed reset-failed interactive commands', () => {
+        const flow = new AssessmentFlow();
+
+        flow.processUserInput('target example.com');
+        expect(flow.processUserInput('continue reset-failed reset-failed')).toEqual(expect.objectContaining({
+            success: false,
+            error: 'Usage: continue [operation_id] [reset-failed]',
+        }));
+        expect(flow.processUserInput('report reset-failed')).toEqual(expect.objectContaining({
+            success: false,
+            error: 'Usage: report [operation_id]',
+        }));
+    });
+
     it('uses default objective for continue and report from objective stage', () => {
         const flow = new AssessmentFlow();
 
@@ -207,7 +245,7 @@ describe('AssessmentFlow', () => {
         flow.processUserInput('target example.com');
         expect(flow.processUserInput('continue OP_ONE OP_TWO')).toEqual(expect.objectContaining({
             success: false,
-            error: 'Usage: continue [operation_id]',
+            error: 'Usage: continue [operation_id] [reset-failed]',
         }));
         expect(flow.processUserInput('report OP_ONE OP_TWO')).toEqual(expect.objectContaining({
             success: false,
