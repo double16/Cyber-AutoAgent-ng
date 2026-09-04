@@ -4672,13 +4672,15 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
             status="pending",
         )
 
-    phase = mod.PlanPhase.from_obj({"id": 1, "title": "Recon", "status": "active", "criteria": None})
+    phase = mod.PlanPhase.from_obj({
+        "id": 1, "title": "Recon", "status": "active", "criteria": None, "produces_hypotheses": False
+    })
     plan = mod.OperationPlan.from_obj(
         {
             "objective": "Assess target",
             "constraints": ["Read-only checks", "Keep evidence in artifacts"],
             "current_phase": 1,
-            "phases": [phase.to_dict(), {"id": 2, "title": "Exploit", "status": "pending"}],
+            "phases": [phase.to_dict(), {"id": 2, "title": "Exploit", "status": "pending", "produces_hypotheses": False}],
         }
     )
     assert "plan_overview[1]" in plan.to_toon()
@@ -4690,15 +4692,15 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
     assert plan.to_dict()["constraints"] == ["Read-only checks", "Keep evidence in artifacts"]
     assert plan.total_phases == 2
     assert mod.OperationPlan.from_obj(plan) is plan
-    legacy_plan = mod.OperationPlan.from_obj(
+    explicit_plan = mod.OperationPlan.from_obj(
         {
             "objective": "Legacy",
             "current_phase": 1,
-            "phases": [{"id": 1, "title": "Recon", "status": "active"}],
+            "phases": [{"id": 1, "title": "Recon", "status": "active", "produces_hypotheses": False}],
         }
     )
-    assert legacy_plan.constraints == []
-    assert "plan_constraints[0]{constraint}:" in legacy_plan.to_toon()
+    assert explicit_plan.constraints == []
+    assert "plan_constraints[0]{constraint}:" in explicit_plan.to_toon()
     with pytest.raises(ValueError):
         mod.PlanPhase(id=-1, title="bad", status="pending")
     with pytest.raises(ValueError):
@@ -4708,7 +4710,7 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
             "objective": "Scalar",
             "constraints": "  read-only  ",
             "current_phase": 1,
-            "phases": [{"id": 1, "title": "Recon", "status": "active"}],
+            "phases": [{"id": 1, "title": "Recon", "status": "active", "produces_hypotheses": False}],
         }
     )
     assert scalar_plan.constraints == ["read-only"]

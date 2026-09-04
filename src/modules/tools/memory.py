@@ -1084,6 +1084,7 @@ class PlanPhase:
     title: str
     status: PlanStatus
     criteria: str = ""
+    produces_hypotheses: bool = False
     requires_finding_candidates: bool = False
     task_creation_mode: Literal[
         "standard",
@@ -1107,6 +1108,8 @@ class PlanPhase:
             object.__setattr__(self, "criteria", "")  # type: ignore[misc]
         if not isinstance(self.criteria, str):
             raise ValueError("phase.criteria must be a string")
+        if not isinstance(self.produces_hypotheses, bool):
+            raise ValueError("phase.produces_hypotheses must be a boolean")
         if not isinstance(self.requires_finding_candidates, bool):
             raise ValueError("phase.requires_finding_candidates must be a boolean")
         valid_modes = {"standard", "snapshot_dependent", "finding_dependent", "finding_validation"}
@@ -1117,11 +1120,14 @@ class PlanPhase:
     def from_obj(obj: Any) -> "PlanPhase":
         if not isinstance(obj, dict):
             raise ValueError("phase must be an object/dict")
+        if "produces_hypotheses" not in obj:
+            raise ValueError("phase.produces_hypotheses is required")
         return PlanPhase(
             id=int(obj.get("id")),
             title=str(obj.get("title", "")),
             status=str(obj.get("status", "pending")),  # validated in __post_init__
             criteria=str(obj.get("criteria", "")) if obj.get("criteria") is not None else "",
+            produces_hypotheses=obj["produces_hypotheses"],
             requires_finding_candidates=obj.get("requires_finding_candidates", False),
             task_creation_mode=str(
                 obj.get("task_creation_mode")
@@ -1135,7 +1141,7 @@ class PlanPhase:
 
     @staticmethod
     def csv_format() -> str:
-        return "id,title,status,criteria,requires_finding_candidates,task_creation_mode"
+        return "id,title,status,criteria,produces_hypotheses,requires_finding_candidates,task_creation_mode"
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
@@ -1145,7 +1151,8 @@ class PlanPhase:
         if include_format:
             lines.append(f"{self.toon_format()}:")
         lines.append(
-            f"  {self.id},{title},{status},{criteria},{str(self.requires_finding_candidates).lower()},"
+            f"  {self.id},{title},{status},{criteria},{str(self.produces_hypotheses).lower()},"
+            f"{str(self.requires_finding_candidates).lower()},"
             f"{self.task_creation_mode}"
         )
         return "\n".join(lines).strip()
@@ -1156,6 +1163,7 @@ class PlanPhase:
             "title": self.title,
             "status": self.status,
             "criteria": self.criteria,
+            "produces_hypotheses": self.produces_hypotheses,
             "requires_finding_candidates": self.requires_finding_candidates,
             "task_creation_mode": self.task_creation_mode,
         })
@@ -4396,8 +4404,19 @@ def _validate_confirmation_manifest(candidate: dict[str, Any], reference: str) -
                 _assertion_matches_artifact(assertion, canonical_reexposure_ref)
                 for assertion in secret_assertions
             ):
+                required_predicates = sorted(
+                    _canonical_assertion_predicate(assertion) for assertion in secret_assertions
+                )
+                available_predicates = [
+                    {"type": "secret_exposure", "kind": exposure.kind, "digest": exposure.digest}
+                    for exposure in detect_secret_exposures(canonical_reexposure_ref)
+                ]
                 raise _confirmation_manifest_error(
-                    "secret exposure revalidation requires the same exposure in a fresh artifact", requirements
+                    "secret exposure revalidation requires the same exposure in a fresh artifact; "
+                    f"canonical reexposure_artifact={canonical_reexposure_ref}; "
+                    f"required predicates={json.dumps(required_predicates)}; "
+                    f"available predicates={json.dumps(available_predicates, sort_keys=True)}",
+                    requirements,
                 )
             derived[rule_id] = {"reexposure_artifact": canonical_reexposure_ref}
     return {
@@ -4579,6 +4598,8 @@ def record_finding_validation(
             "complete": True,
             "finding_uid": finding_uid,
             "outcome": normalized_outcome,
+            "evidence_artifacts": evidence,
+            "validation_manifest": manifest_attestation.get("manifest"),
             "acceptance": acceptance_response,
         },
         sort_keys=True,
@@ -4616,6 +4637,8 @@ def build_record_finding_validation_tool(task: Task) -> Any:
         manifest_shape = json.dumps(finding_validation_manifest_schema(requirements), sort_keys=True)
         manifest_description = (
             "Required for confirmed outcomes. Provide a previously written artifact reference, never inline JSON. "
+            "An existing absolute path inside the current operation is accepted and canonicalized to artifact:, "
+            "but artifact: is preferred. "
             f"It must contain these required checks: {', '.join(requirement_ids)}. "
             f"Manifest JSON shape: {manifest_shape}"
         )
@@ -4648,6 +4671,8 @@ def build_record_finding_validation_tool(task: Task) -> Any:
 The controller binds this tool to the only finding and verification task assigned to this task. Supply fresh evidence
 artifacts and an outcome; Python re-proves the candidate's immutable markers and records frozen task acceptance.
 For confirmed outcomes, provide any required validation manifest as an existing artifact reference, never inline JSON.
+An existing absolute path inside the current operation is accepted and canonicalized to an `artifact:` reference, but
+use `artifact:` in new calls.
 """
     input_schema: dict[str, Any] = {
         "type": "object",

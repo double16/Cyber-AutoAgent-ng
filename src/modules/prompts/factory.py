@@ -703,6 +703,7 @@ class ModulePromptLoader:
         self.plugin_dirs = plugin_dirs
         # Track sources for observability
         self.last_loaded_execution_prompt_source: str | None = None
+        self.last_loaded_hypothesis_prompt_source: str | None = None
         self.last_loaded_termination_policy_source: str | None = None
         self.last_loaded_report_prompt_source: str | None = None
 
@@ -919,6 +920,14 @@ class ModulePromptLoader:
 
     def load_module_termination_policy(self, module_name: str) -> str:
         content, self.last_loaded_termination_policy_source = self.load_module_prompt(module_name, "termination_policy", "termination_policy.md")
+        return content
+
+    def load_module_hypothesis_prompt(self, module_name: str) -> str:
+        """Load module-specific hypothesis guidance when the active phase requests it."""
+
+        content, self.last_loaded_hypothesis_prompt_source = self.load_module_prompt(
+            module_name, "hypothesis", "hypothesis_prompt.md"
+        )
         return content
 
     def load_module_report_prompt(self, module_name: str) -> str:

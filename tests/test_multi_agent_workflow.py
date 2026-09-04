@@ -348,7 +348,7 @@ def test_workflow_falls_back_after_strands_structured_output_failure_and_caches_
     def text_runner(role, *_args):
         calls.append(f"text:{role}")
         if role == "plan_creator":
-            return json.dumps({"objective": "assess", "phases": [{"id": 1, "title": "Recon"}]})
+            return json.dumps({"objective": "assess", "phases": [{"id": 1, "title": "Recon", "produces_hypotheses": False}]})
         return json.dumps({"approved": True, "feedback": []})
 
     controller = MultiAgentWorkflowController(
@@ -5277,10 +5277,59 @@ def test_endpoint_evidence_guard_rejects_inventory_manifest(monkeypatch):
 
     reason = controller._endpoint_evidence_guard(task, [result], [])
 
-    assert "inventory/manifest evidence" in reason
+    assert "inventory/manifest context alone" in reason
 
 
-def test_endpoint_evidence_inventory_rejection_is_recoverable():
+def test_endpoint_evidence_guard_accepts_route_evidence_with_inventory_context(monkeypatch):
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = TaskModel(
+        task_uid="endpoint",
+        title="Assess endpoint http://target.test/login [target-1]",
+        objective="Assess login",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="route",
+                source_refs=["artifact:artifacts/discovery.json"],
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="criterion",
+                description="Assess route",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    result = AcceptanceResult(
+        criterion_id="criterion",
+        status="satisfied",
+        disposition="observation",
+        summary="assessed",
+        evidence_refs=(
+            "artifact:artifacts/inventory_manifest.json",
+            "artifact:artifacts/login_response.txt",
+        ),
+    )
+
+    def load_manifest(reference):
+        if reference.endswith(("discovery.json", "inventory_manifest.json")):
+            return {"items": [{"id": "endpoint-1", "kind": "endpoint"}]}, "digest"
+        raise ValueError("not an inventory manifest")
+
+    monkeypatch.setattr(workflow_mod, "_load_inventory_manifest", load_manifest)
+
+    assert controller._endpoint_evidence_guard(task, [result], []) == ""
+
+
+def test_endpoint_evidence_inventory_rejection_is_recoverable(monkeypatch):
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -5288,9 +5337,16 @@ def test_endpoint_evidence_inventory_rejection_is_recoverable():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    reason = "Endpoint task used inventory/manifest evidence instead of route-specific evidence: artifact:inventory_manifest.json"
+    reason = "Endpoint task has no route-specific evidence; inventory/manifest context alone cannot prove a single endpoint assessment: artifact:inventory_manifest.json"
 
     assert controller._endpoint_evidence_failure_recoverable(reason) is True
+    def load_manifest(reference):
+        if reference.endswith("inventory_manifest.json"):
+            return {"items": [{"id": "endpoint-1", "kind": "endpoint"}]}, "digest"
+        raise ValueError("not an inventory manifest")
+
+    monkeypatch.setattr(workflow_mod, "_load_inventory_manifest", load_manifest)
+
     instruction = controller._endpoint_evidence_recovery_instruction(
         TaskModel(
             task_uid="endpoint",
@@ -5314,12 +5370,15 @@ def test_endpoint_evidence_inventory_rejection_is_recoverable():
             status="active",
         ),
         reason,
-        ["artifact:artifacts/login_response.txt"],
+        ["artifact:artifacts/inventory_manifest.json", "artifact:artifacts/login_response.txt"],
         1,
         1,
     )
     assert "do not repeat the rejected record_task_acceptance call" in instruction
     assert "artifact:artifacts/login_response.txt" in instruction
+    assert "Acceptance-eligible route-specific artifact references" in instruction
+    assert "Inventory context artifacts (do not submit for acceptance)" in instruction
+    assert "artifact:artifacts/inventory_manifest.json" in instruction
     assert "endpoint-1" in instruction
 
 
@@ -6766,12 +6825,11 @@ def test_task_executor_appends_selected_memories_from_prompt_spec():
         _plan(),
         tasks=[Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")],
     )
-    requested_memory_ids = []
     state.client = SimpleNamespace(
-        get_memory_by_id=lambda memory_id: requested_memory_ids.append(memory_id) or {
-            "id": memory_id,
-            "memory": f"memory for {memory_id}",
-        }
+        list_memories=lambda **kwargs: [
+            {"id": "m2", "memory": "memory for m2"},
+            {"id": "m1", "memory": "memory for m1"},
+        ]
     )
     captured = {}
 
@@ -6795,12 +6853,52 @@ def test_task_executor_appends_selected_memories_from_prompt_spec():
 
     controller._run_task(_plan(), _plan().phases[0], state.tasks[0])
 
-    assert requested_memory_ids == ["m2", "m1"]
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
     assert "## Selected Memory Context\n" in captured["prompt"]
     assert "memories[2]{id,category,source,origin_operation,evidence_status,memory}:" in captured["prompt"]
     assert "m2,general,,unknown,prior_operation_advisory,memory for m2" in captured["prompt"]
     assert "m1,general,,unknown,prior_operation_advisory,memory for m1" in captured["prompt"]
+
+
+def test_task_executor_omits_memory_sections_without_selected_memory_ids():
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+    captured = {}
+
+    def work_runner(role, prompt, tools, system_prompt, run_policy):
+        captured["prompt"] = prompt
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+        text_runner=lambda role, *_args: '{"prompt":"execute active","tools":[],"shell_commands":[]}',
+        work_runner=work_runner,
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert "## Selected Memory Context" not in captured["prompt"]
+    assert "## Eligible Semantic Memories" not in captured["prompt"]
+
+
+def test_selected_memory_context_truncates_each_selected_id_deterministically():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    records = [
+        {"id": "first", "memory": "a" * 500},
+        {"id": "second", "memory": "b" * 500},
+    ]
+
+    rendered = controller._selected_memory_context(
+        ["first", "second"], records, prompt_char_budget=500
+    )
+
+    assert "first,general" in rendered
+    assert "second,general" in rendered
+    assert rendered.count("[truncated original_chars=500") == 2
 
 
 def test_task_executor_continues_when_selected_memory_lookup_fails():
@@ -6835,7 +6933,7 @@ def test_task_executor_continues_when_selected_memory_lookup_fails():
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
 
 
-def test_task_prompt_normalization_drops_stale_memory_references_and_prefers_indices():
+def test_task_prompt_normalization_uses_only_canonical_memory_ids():
     state = FakeState(_plan())
     state.client = SimpleNamespace(
         list_memories=lambda **kwargs: [
@@ -6853,7 +6951,6 @@ def test_task_prompt_normalization_drops_stale_memory_references_and_prefers_ind
     normalized = controller._normalize_task_prompt_spec(
         {
             "prompt": "execute active",
-            "memory_indices": [1, 1, 99],
             "memory_ids": ["memory-1", "memory-2-corrupted"],
             "tools": [],
             "shell_commands": [],
@@ -6861,8 +6958,23 @@ def test_task_prompt_normalization_drops_stale_memory_references_and_prefers_ind
         Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
     )
 
-    assert normalized["memory_ids"] == ["memory-2"]
-    assert normalized["memory_indices"] == [1]
+    assert normalized["memory_ids"] == ["memory-1"]
+    assert "memory_indices" not in normalized
+
+
+def test_task_prompt_normalization_rejects_memory_indices():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
+
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="memory_indices is unsupported"):
+        controller._normalize_task_prompt_spec(
+            {"prompt": "execute active", "memory_indices": [0], "tools": [], "shell_commands": []}, task
+        )
 
 
 def test_malformed_memory_id_is_dropped_during_prompt_prevalidation():
@@ -6890,7 +7002,7 @@ def test_malformed_memory_id_is_dropped_during_prompt_prevalidation():
         task,
     )
 
-    assert normalized["memory_ids"] == []
+    assert "memory_ids" not in normalized
 
 
 def test_malformed_memory_id_reaches_prompt_critic_with_valid_prompt():
@@ -6926,7 +7038,7 @@ def test_malformed_memory_id_reaches_prompt_critic_with_valid_prompt():
         Task(task_uid="active", title="Active", objective="run active", phase=1, status="active"),
     )
 
-    assert prompt_spec["memory_ids"] == []
+    assert "memory_ids" not in prompt_spec
     assert [role for role, _prompt in calls] == ["task_prompt_builder", "task_prompt_critic"]
 
 
@@ -9407,6 +9519,81 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert "must follow a finding_validation phase" in prompt
 
 
+def test_hypothesis_prompts_require_future_attack_paths_and_refinement():
+    plan = _plan()
+    phase = replace(
+        plan.phases[0],
+        title="Generate hypotheses",
+        criteria="Generate testable hypotheses from the frozen inventory.",
+        produces_hypotheses=True,
+    )
+    plan.phases[0] = phase
+    task = Task(
+        task_uid="hypothesis-task",
+        title="Plan attack paths",
+        objective="Generate hypotheses for the assigned inventory unit",
+        phase=phase.id,
+        status="active",
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    plan_prompt = controller._plan_creator_prompt()
+    creator_prompt = controller._task_creator_prompt(plan, phase)
+    builder_prompt = controller._task_prompt_builder_prompt(plan, phase, task)
+    critic_prompt = controller._plan_critic_prompt(plan.to_dict())
+
+    assert "detailed, target-specific future test plans" in plan_prompt
+    assert "Existing hypotheses are context to refine" in plan_prompt
+    assert "Hypothesis-Generation Guidance" in creator_prompt
+    assert "Hypothesis-Generation Guidance" in builder_prompt
+    assert "published proof of concepts must not be executed" in builder_prompt
+    assert "prior hypothesis alone is not completion" in critic_prompt
+
+
+def test_non_hypothesis_prompts_omit_hypothesis_guidance():
+    plan = _plan()
+    phase = replace(plan.phases[0], produces_hypotheses=False)
+    plan.phases[0] = phase
+    task = Task(task_uid="task", title="Map target", objective="Map target", phase=phase.id, status="active")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    assert "Hypothesis-Generation Guidance" not in controller._task_creator_prompt(plan, phase)
+    assert "Hypothesis-Generation Guidance" not in controller._task_prompt_builder_prompt(plan, phase, task)
+    assert "Hypothesis-Generation Guidance" not in controller._deterministic_task_prompt_spec(
+        plan, phase, task, RuntimeError("fallback")
+    )["prompt"]
+
+
+def test_hypothesis_phase_loads_module_specific_guidance():
+    plan = _plan()
+    phase = replace(plan.phases[0], produces_hypotheses=True)
+    plan.phases[0] = phase
+    task = Task(task_uid="task", title="Plan paths", objective="Plan paths", phase=phase.id, status="active")
+    runtime = _runtime()
+    runtime.config.module = "web"
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    prompt = controller._task_prompt_builder_prompt(plan, phase, task)
+
+    assert "Module Hypothesis Guidance" in prompt
+    assert "mapped technologies, versions, components, routes" in prompt
+
+
 def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -9420,7 +9607,7 @@ def test_plan_critic_rejects_post_processing_phases_regardless_of_title():
             "constraints": [],
             "current_phase": 1,
             "phases": [
-                {"id": 1, "title": "Wrap up evidence", "status": "pending", "criteria": "Summarize findings"}
+                {"id": 1, "title": "Wrap up evidence", "status": "pending", "criteria": "Summarize findings", "produces_hypotheses": False}
             ],
         }
     )
@@ -9470,7 +9657,7 @@ def test_module_termination_policy_directs_plan_creation_and_review():
         "objective": "assess",
         "constraints": [],
         "current_phase": 1,
-        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence"}],
+        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence", "produces_hypotheses": False}],
     }
 
     prompts = [
@@ -9496,7 +9683,7 @@ def test_planning_prompts_omit_empty_module_termination_policy_section():
         "objective": "assess",
         "constraints": [],
         "current_phase": 1,
-        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence"}],
+        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence", "produces_hypotheses": False}],
     }
 
     assert "Module Completion Policy" not in controller._plan_creator_prompt()
@@ -9515,7 +9702,7 @@ def test_plan_revision_prompt_describes_advisory_phase_contract():
         "objective": "assess",
         "constraints": [],
         "current_phase": 1,
-        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence"}],
+        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence", "produces_hypotheses": False}],
     }
 
     prompt = controller._plan_revision_prompt(plan_data, ["Preserve testing coverage"])
@@ -9540,7 +9727,7 @@ def test_plan_revision_prompt_keeps_complete_creator_instructions_ahead_of_feedb
         "objective": "assess",
         "constraints": [],
         "current_phase": 1,
-        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence"}],
+        "phases": [{"id": 1, "title": "Assess", "status": "pending", "criteria": "evidence", "produces_hypotheses": False}],
     }
 
     prompt = controller._plan_revision_prompt(plan_data, ["Add a report phase"])
@@ -9596,7 +9783,7 @@ def test_zero_plan_refinement_iterations_runs_only_initial_actor():
 
     def text_runner(role, prompt, tools, system_prompt):
         calls.append(role)
-        return '{"objective":"single pass","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending"}]}'
+        return '{"objective":"single pass","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending","produces_hypotheses":false}]}'
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(env_ints={"CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS": 0}),
@@ -9616,7 +9803,7 @@ def test_plan_critic_approval_skips_revision_and_persists_draft_once():
     def text_runner(role, prompt, tools, system_prompt):
         calls.append((role, prompt, tools, system_prompt))
         if role == "plan_creator":
-            return '{"objective":"draft","constraints":["Stay in scope"],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending","criteria":"Map scope"}]}'
+            return '{"objective":"draft","constraints":["Stay in scope"],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending","criteria":"Map scope","produces_hypotheses":false}]}'
         if role == "plan_critic":
             return '{"approved":true,"feedback":[]}'
         raise AssertionError(role)
@@ -9658,8 +9845,8 @@ def test_plan_critic_rejection_runs_revision_and_persists_only_revision():
     state = FakeState(None)
     actor_responses = iter(
         [
-            '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending","criteria":"Map"}]}',
-            '{"objective":"revised","constraints":["Store evidence"],"current_phase":1,"phases":[{"id":1,"title":"Evidence-backed recon","status":"pending","criteria":"Artifact exists"}]}',
+            '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending","criteria":"Map","produces_hypotheses":false}]}',
+            '{"objective":"revised","constraints":["Store evidence"],"current_phase":1,"phases":[{"id":1,"title":"Evidence-backed recon","status":"pending","criteria":"Artifact exists","produces_hypotheses":false}]}',
         ]
     )
     critic_responses = iter(
@@ -9766,8 +9953,8 @@ def test_plan_refinement_stops_after_later_approval():
     calls = []
     actor_responses = iter(
         [
-            '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending"}]}',
-            '{"objective":"revised","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Revised","status":"pending"}]}',
+            '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending","produces_hypotheses":false}]}',
+            '{"objective":"revised","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Revised","status":"pending","produces_hypotheses":false}]}',
         ]
     )
     critic_responses = iter(
@@ -9799,8 +9986,8 @@ def test_plan_refinement_fails_when_final_critic_rejects():
     calls = []
     actor_responses = iter(
         [
-            '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending"}]}',
-            '{"objective":"revision one","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Revision one","status":"pending"}]}',
+            '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending","produces_hypotheses":false}]}',
+            '{"objective":"revision one","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Revision one","status":"pending","produces_hypotheses":false}]}',
         ]
     )
     state = FakeState(None)
@@ -9844,7 +10031,7 @@ def test_invalid_plan_critic_contract_retries_without_persisting(critique):
     def text_runner(role, prompt, tools, system_prompt):
         calls.append(role)
         if role == "plan_creator":
-            return '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending"}]}'
+            return '{"objective":"draft","constraints":[],"current_phase":1,"phases":[{"id":1,"title":"Draft","status":"pending","produces_hypotheses":false}]}'
         return critique
 
     controller = MultiAgentWorkflowController(
@@ -9881,7 +10068,7 @@ def test_controller_creates_plan_when_missing():
     def text_runner(role, prompt, tools, system_prompt):
         calls.append(role)
         if role == "plan_creator":
-            return '{"objective":"assess","constraints":["Stay in scope"],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending"}]}'
+            return '{"objective":"assess","constraints":["Stay in scope"],"current_phase":1,"phases":[{"id":1,"title":"Recon","status":"pending","produces_hypotheses":false}]}'
         if role == "plan_critic":
             return '{"approved":true,"feedback":[]}'
         if role == "task_prompt_builder":
@@ -12628,6 +12815,35 @@ def test_task_prompt_critic_checks_pseudo_calls_and_tool_selection_limits():
     assert "Do not reject a draft for omitting" in prompt
 
 
+def test_task_prompt_critic_has_tool_agnostic_mapping_validation_boundary():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Map authentication",
+        objective="Map the assigned authentication flows",
+        phase=1,
+        status="active",
+    )
+
+    prompt = controller._task_prompt_critic_prompt(
+        _plan(),
+        _plan().phases[0],
+        task,
+        {"prompt": "Map observed auth flows.", "memory_ids": [], "tools": [], "shell_commands": []},
+    )
+
+    assert "observable candidate security surfaces" in prompt
+    assert "must not treat those observations as findings" in prompt
+    assert "changed HTTP methods" in prompt
+    assert "injected headers" in prompt
+    assert "auth_chain_analyzer" not in prompt.split("## Proposed task prompt draft", maxsplit=1)[0]
+
+
 def test_task_prompt_builder_can_omit_controller_owned_acceptance_requirements():
     task = Task(
         task_uid="active",
@@ -13782,7 +13998,7 @@ def test_task_prompt_builder_lists_compact_shell_command_catalog(monkeypatch):
     assert row.endswith(",scan;validate")
     description = row.split(",", maxsplit=2)[1]
     assert len(description) == 250
-    assert "keys prompt, memory_indices, memory_ids, tools,\nshell_commands." in prompt
+    assert "keys prompt, tools,\nshell_commands." in prompt
 
 
 def test_shell_command_catalog_is_empty_without_shell_tool(monkeypatch):
@@ -14553,8 +14769,8 @@ def test_task_prompt_repairable_rejection_uses_deterministic_template():
         controller._build_task_prompt(_plan(), _plan().phases[0], task)
     fallback = controller._deterministic_task_prompt_spec(_plan(), _plan().phases[0], task, error.value)
 
-    assert fallback["memory_ids"] == []
-    assert fallback["memory_indices"] == []
+    assert "memory_ids" not in fallback
+    assert "memory_indices" not in fallback
     assert fallback["tools"] == []
     assert fallback["shell_commands"] == []
     assert "Assigned task" in fallback["prompt"]
@@ -14882,7 +15098,7 @@ def test_state_store_mutates_plan_and_tasks_with_fake_client(monkeypatch):
             "objective": "generated",
             "constraints": "  Keep generated work in scope  ",
             "current_phase": 1,
-            "phases": [{"id": 1, "title": "Generated", "status": "pending", "criteria": "Evidence exists"}],
+            "phases": [{"id": 1, "title": "Generated", "status": "pending", "criteria": "Evidence exists", "produces_hypotheses": False}],
         }
     )
     assert generated_plan.constraints == ["Keep generated work in scope"]
@@ -15061,7 +15277,8 @@ def test_memory_summary_returns_compact_memories_and_handles_errors():
     first_line = memories.splitlines()[1]
     first_parts = first_line.strip().split(",", maxsplit=5)
     assert first_parts[0] == "m1"
-    assert len(first_parts[5]) == 1000
+    assert first_parts[5].startswith("x" * 1000)
+    assert "[truncated original_chars=1200 included_chars=1000]" in first_parts[5]
 
     state.client = SimpleNamespace(list_memories=lambda **kwargs: (_ for _ in ()).throw(RuntimeError("fail")))
     assert controller._memory_summary() == (
@@ -16354,7 +16571,7 @@ def test_workflow_state_store_creates_plan_and_activates_first_phase_when_needed
 
     plan = store.create_plan_from_dict({
         "objective": "Assess",
-        "phases": [{"id": 1, "title": "Discovery", "status": "pending"}],
+        "phases": [{"id": 1, "title": "Discovery", "status": "pending", "produces_hypotheses": False}],
     })
 
     assert plan.phases[0].status == "active"

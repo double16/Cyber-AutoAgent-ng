@@ -12,7 +12,7 @@ from tests.helpers.memory_tasks import store_plan
 
 def test_store_plan_with_operation_plan_object():
     plan_data = {"objective": "Test", "current_phase": 1, "total_phases": 1,
-                 "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "c1"}]}
+                 "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "c1", "produces_hypotheses": False}]}
     plan_obj = OperationPlan.from_obj(plan_data)
     with patch("modules.tools.memory._ensure_memory_client") as mc, patch("modules.tools.memory._user_id") as mui, patch("modules.tools.memory._operation_id") as mopid:
         mock_client = MagicMock()
@@ -28,7 +28,7 @@ def test_store_plan_with_operation_plan_object():
 
 def test_store_plan_with_dict():
     plan_dict = {"objective": "Test", "current_phase": 1, "total_phases": 1,
-                 "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "c1"}]}
+                 "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "c1", "produces_hypotheses": False}]}
     with patch("modules.tools.memory._ensure_memory_client") as mc, patch("modules.tools.memory._user_id") as mui:
         mock_client = MagicMock()
         mc.return_value = mock_client
@@ -43,7 +43,7 @@ def test_store_plan_with_dict():
 
 def test_store_plan_with_json_string():
     plan_dict = {"objective": "Test", "current_phase": 1, "total_phases": 1,
-                 "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "c1"}]}
+                 "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "c1", "produces_hypotheses": False}]}
     plan_json = json.dumps(plan_dict)
     with patch("modules.tools.memory._ensure_memory_client") as mc, patch("modules.tools.memory._user_id") as mui:
         mock_client = MagicMock()
@@ -85,8 +85,8 @@ def test_store_plan_phase_change_validation_refusal():
         "current_phase": 1,
         "total_phases": 2,
         "phases": [
-            {"id": 1, "title": "P1", "status": "active", "criteria": "c1"},
-            {"id": 2, "title": "P2", "status": "pending", "criteria": "c2"}
+            {"id": 1, "title": "P1", "status": "active", "criteria": "c1", "produces_hypotheses": False},
+            {"id": 2, "title": "P2", "status": "pending", "criteria": "c2", "produces_hypotheses": False}
         ]
     }
     prev_plan = OperationPlan.from_obj(prev_plan_data)
@@ -118,8 +118,8 @@ def test_store_plan_phase_change_allowed_no_tasks():
         "current_phase": 1,
         "total_phases": 2,
         "phases": [
-            {"id": 1, "title": "P1", "status": "active", "criteria": "c1"},
-            {"id": 2, "title": "P2", "status": "pending", "criteria": "c2"}
+            {"id": 1, "title": "P1", "status": "active", "criteria": "c1", "produces_hypotheses": False},
+            {"id": 2, "title": "P2", "status": "pending", "criteria": "c2", "produces_hypotheses": False}
         ]
     }
     prev_plan = OperationPlan.from_obj(prev_plan_data)
@@ -147,8 +147,8 @@ def test_store_plan_phase_change_refused_with_active_task_at_high_budget_progres
         "current_phase": 1,
         "total_phases": 2,
         "phases": [
-            {"id": 1, "title": "P1", "status": "active", "criteria": "c1"},
-            {"id": 2, "title": "P2", "status": "pending", "criteria": "c2"}
+            {"id": 1, "title": "P1", "status": "active", "criteria": "c1", "produces_hypotheses": False},
+            {"id": 2, "title": "P2", "status": "pending", "criteria": "c2", "produces_hypotheses": False}
         ]
     }
     prev_plan = OperationPlan.from_obj(prev_plan_data)
@@ -180,7 +180,7 @@ def test_store_plan_assessment_complete_reminder():
         "objective": "Test",
         "current_phase": 1,
         "total_phases": 1,
-        "phases": [{"id": 1, "title": "P1", "status": "done", "criteria": "c1"}],
+        "phases": [{"id": 1, "title": "P1", "status": "done", "criteria": "c1", "produces_hypotheses": False}],
         "assessment_complete": False
     }
     plan_obj = OperationPlan.from_obj(plan_data)

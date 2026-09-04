@@ -46,7 +46,7 @@ def test_multi_agent_adaptation_e2e_scenario():
             return '{"evaluation": "pass", "reasoning": "done"}'
         return (
             '{"objective":"Assess target","constraints":[],"current_phase":1,'
-            '"phases":[{"id":1,"title":"Recon","status":"pending","criteria":"Map target"}]}'
+            '"phases":[{"id":1,"title":"Recon","status":"pending","criteria":"Map target","produces_hypotheses":false}]}'
         )
 
     workflow.text_runner = text_runner

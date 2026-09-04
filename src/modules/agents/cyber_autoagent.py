@@ -575,8 +575,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     web_search_instructions = """
 **Purpose**
-  - external intel, OSINT, NVD/CVE, Exploit‑DB, vendor advisories, Shodan/Censys, VirusTotal; save request/response artifacts and cite them in Proof Packs.
-  - NOT for: Do not run published proof-of-concepts, use for learning how to write own exploit
+  - external intel, OSINT, NVD/CVE, Exploit‑DB, vendor advisories, Shodan/Censys, VirusTotal; save query and result artifacts and cite them as research context for hypothesis and test design or as evidence when applicable.
+  - NOT for: Do not run published proof-of-concepts; use them only to understand conditions and design an authorized test.
 """
     if os.getenv("TAVILY_API_KEY"):
         # rename to web_search so instructions can be consistent

@@ -26,16 +26,22 @@ from src.modules.tools.memory import (
 )
 
 
-def test_plan_phase_normalizes_legacy_finding_dependency_to_creation_mode():
+def test_plan_phase_normalizes_finding_dependency_to_creation_mode():
     phase = mod.PlanPhase.from_obj({
         "id": 1,
         "title": "Candidate follow-up",
         "status": "pending",
+        "produces_hypotheses": False,
         "requires_finding_candidates": True,
     })
 
     assert phase.task_creation_mode == "finding_dependent"
     assert phase.to_dict()["task_creation_mode"] == "finding_dependent"
+
+
+def test_plan_phase_rejects_missing_hypothesis_metadata():
+    with pytest.raises(ValueError, match="produces_hypotheses is required"):
+        mod.PlanPhase.from_obj({"id": 1, "title": "Discovery", "status": "pending"})
 
 
 def test_plan_phase_rejects_unknown_task_creation_mode():
@@ -1186,6 +1192,7 @@ def test_confirmed_enumeration_and_rate_limit_require_resolved_manifest(tmp_path
         ))
 
     assert payload["outcome"] == "confirmed"
+    assert payload["validation_manifest"] == "artifact:validation.json"
     validation = plan_store.store_finding_validation.call_args.args[2]
     assert validation["validation_manifest_attestation"]["derived"]["lack_of_rate_limiting"]["attempt_count"] == 10
 
@@ -1210,6 +1217,37 @@ def test_secret_exposure_manifest_error_repeats_required_schema(tmp_path: Path, 
     assert "reexposure_artifact" in message
     assert "Expected validation_manifest JSON shape" in message
     assert '"version"' not in message
+
+
+def test_secret_exposure_manifest_error_reports_canonical_artifact_and_safe_predicates(tmp_path, operation_ids):
+    fresh = tmp_path / "fresh-response.json"
+    fresh.write_text('{"api_key":"different-secret"}', encoding="utf-8")
+    manifest = tmp_path / "validation.json"
+    manifest.write_text(
+        json.dumps({"checks": {"secret_exposure": {"reexposure_artifact": str(fresh)}}}),
+        encoding="utf-8",
+    )
+    candidate = {
+        "title": "Exposed API key",
+        "claim": "The target has a secret exposure.",
+        "technique": "secret exposure",
+        "evidence_assertions": [{
+            "type": "secret_exposure",
+            "kind": "provider_api_key",
+            "digest": "missing-digest",
+        }],
+    }
+
+    with (
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError) as error,
+    ):
+        mod._validate_confirmation_manifest(candidate, str(manifest))
+
+    message = str(error.value)
+    assert "canonical reexposure_artifact=artifact:fresh-response.json" in message
+    assert "required predicates=" in message
+    assert "available predicates=" in message
 
 
 @pytest.mark.parametrize(

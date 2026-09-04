@@ -58,6 +58,7 @@ class StrictStructuredOutput(BaseModel):
 class PlanPhaseOutput(StrictStructuredOutput):
     id: int
     title: str
+    produces_hypotheses: bool
     status: str = "pending"
     criteria: str = ""
     requires_finding_candidates: bool = False
@@ -84,8 +85,7 @@ class CritiqueOutput(StrictStructuredOutput):
 
 class TaskPromptOutput(StrictStructuredOutput):
     prompt: str
-    memory_indices: list[int] = Field(default_factory=list)
-    memory_ids: list[str] = Field(default_factory=list)
+    memory_ids: list[str] | None = None
     tools: list[str] = Field(default_factory=list)
     shell_commands: list[str] = Field(default_factory=list)
 
