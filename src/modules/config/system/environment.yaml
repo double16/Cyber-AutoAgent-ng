@@ -360,10 +360,11 @@ cyber_tools:
     command: "ROPgadget"
     caps: [reverse_engineering, exploitation_framework]
     canary: {args: ["--help"]}
-  ropper:
-    description: "ROP gadget finder and binary information"
-    caps: [reverse_engineering, exploitation_framework]
-    canary: {args: ["-h"]}
+# ropper install fails 2026-09-02
+#  ropper:
+#    description: "ROP gadget finder and binary information"
+#    caps: [reverse_engineering, exploitation_framework]
+#    canary: {args: ["-h"]}
   webcrack:
     description: "JavaScript deobfuscation, unminification, and bundle unpacking"
     caps: [reverse_engineering]

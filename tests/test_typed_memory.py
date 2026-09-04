@@ -864,7 +864,7 @@ def test_store_finding_schema_requires_artifacts():
     assert "artifacts" in schema["required"]
     assert schema["properties"]["artifacts"] == {"type": "array", "items": {"type": "string"}, "minItems": 1}
     assert str(store_finding._tool_func.__annotations__["artifacts"]) == "typing.Annotated[list[str], Len(min_length=1, max_length=None)]"
-    assert str(store_observation._tool_func.__annotations__["artifacts"]) == "typing.Optional[typing.List[str]]"
+    assert str(store_observation._tool_func.__annotations__["artifacts"]) == "typing.List[str] | None"
     assertion_schema = schema["properties"]["evidence_assertions"]["items"]
     assert assertion_schema["properties"]["type"]["enum"] == [
         "literal_text",
