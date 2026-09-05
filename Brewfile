@@ -1,6 +1,6 @@
-brew "python@3.13"
+brew "python@3.14"
 brew "virtualenv"
-brew "node@22"
+brew "node@24"
 
 brew "docker"
 brew "docker-buildx"
@@ -33,7 +33,7 @@ brew "ike-scan"
 brew "socat"
 brew "sslscan"
 cask "metasploit"
-brew "john"
+brew "john-jumbo"
 brew "hydra"
 brew "ncrack"
 brew "iproute2" if OS.linux?

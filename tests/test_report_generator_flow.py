@@ -2537,7 +2537,7 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     assert '"approved"' not in content
     assert "```json" not in content
     assert f"Operation ID: {operation_id}" in content
-    assert "- Software: cyber-autoagent v0.10.0" in content
+    assert "- Software: cyber-autoagent v0.11.0" in content
     metrics_heading = "### Execution Metrics"
     assert content.count(metrics_heading) == 1
     assert content.index("## APPENDIX A: ASSESSMENT METHODOLOGY") < content.index(metrics_heading)

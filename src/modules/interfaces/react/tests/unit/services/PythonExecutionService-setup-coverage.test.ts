@@ -71,11 +71,12 @@ describe('PythonExecutionService setup coverage', () => {
         commandResults = [
             {match: /^python3\.12 --version/, stdout: 'Python 3.12.2\n'},
             {match: /^python3\.13 --version/, stdout: 'Python 3.13.5\n'},
+            {match: /^python3\.14 --version/, stdout: 'Python 3.14.1\n'},
         ];
         const service = new PythonExecutionService();
 
-        await expect(service.checkPythonVersion()).resolves.toEqual({installed: true, version: 'Python 3.13.5'});
-        expect(service.getCurrentPythonCommand()).toBe('python3.13');
+        await expect(service.checkPythonVersion()).resolves.toEqual({installed: true, version: 'Python 3.14.1'});
+        expect(service.getCurrentPythonCommand()).toBe('python3.14');
         expect(service.getActiveProcessPid()).toBeUndefined();
         expect(service.getSessionId()).toMatch(/^py-/);
         expect(service.isActive()).toBe(false);
