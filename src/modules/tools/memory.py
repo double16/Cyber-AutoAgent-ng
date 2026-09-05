@@ -8156,7 +8156,7 @@ def _validate_acceptance_result_evidence(
 
 
 def _acceptance_evidence_relevance_error(task: Task, result: AcceptanceResult) -> str:
-    """Reject a manifest used as proof for one frozen inventory endpoint.
+    """Reject inventory-manifest-only proof for one frozen inventory endpoint.
 
     This is intentionally based on the inventory item kind and frozen item IDs rather
     than HTTP URL syntax, so inventories from other modules retain the same guard.
@@ -8180,14 +8180,18 @@ def _acceptance_evidence_relevance_error(task: Task, result: AcceptanceResult) -
         )
     if not source_endpoint_ids.intersection(expected_ids):
         return ""
+    references = list(result.evidence_refs)
+    for coverage_item in result.coverage:
+        references.extend(coverage_item.evidence_refs)
+    references = list(dict.fromkeys(references))
     inventory_refs = []
-    for reference in result.evidence_refs:
+    for reference in references:
         try:
             _load_inventory_manifest(reference)
         except ValueError:
             continue
         inventory_refs.append(reference)
-    if not inventory_refs:
+    if not inventory_refs or len(inventory_refs) != len(references):
         return ""
     return (
         "Acceptance evidence is not relevant to the frozen inventory subject. "

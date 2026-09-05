@@ -83,7 +83,6 @@ from modules.handlers.utils import (
     print_status,
     sanitize_target_name,
     tool_append_description,
-    tool_rename,
 )
 from modules.tools import python_repl
 from modules.tools.advanced_payload_coordinator import advanced_payload_coordinator
@@ -145,11 +144,17 @@ from modules.tools.tool_catalog import (
     remove_shell_command,
     tool_catalog_wrapper,
 )
-from modules.tools.web_search import web_search
+from modules.tools.web_search import create_web_search_tool, web_search
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 logger = get_logger("Agents.CyberAutoAgent")
+
+
+async def _tavily_web_search_provider(query: str, limit: int) -> dict[str, Any]:
+    """Adapt Tavily's provider-specific schema behind the agent-facing web-search wrapper."""
+
+    return await tavily_search(query=query, max_results=min(limit, 20))
 
 _SECLISTS_CONSUMER_TOOLS = {"dirb", "feroxbuster", "ffuf", "gobuster", "hydra", "ncrack", "wfuzz", "wpscan"}
 _FAIL_FAST_TOOL_ROLES = {"task_evaluator", "plan_critic", "task_prompt_critic"}
@@ -578,14 +583,13 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
   - external intel, OSINT, NVD/CVE, Exploit‑DB, vendor advisories, Shodan/Censys, VirusTotal; save query and result artifacts and cite them as research context for hypothesis and test design or as evidence when applicable.
   - NOT for: Do not run published proof-of-concepts; use them only to understand conditions and design an authorized test.
 """
-    if os.getenv("TAVILY_API_KEY"):
-        # rename to web_search so instructions can be consistent
-        tool_rename(tavily_search, "web_search")
-        tool_append_description(tavily_search, web_search_instructions)
-        builtin_tools_list.append(tavily_search)
-    else:
-        tool_append_description(web_search, web_search_instructions)
-        builtin_tools_list.append(web_search)
+    selected_web_search = (
+        create_web_search_tool(_tavily_web_search_provider)
+        if os.getenv("TAVILY_API_KEY")
+        else web_search
+    )
+    tool_append_description(selected_web_search, web_search_instructions)
+    builtin_tools_list.append(selected_web_search)
 
 
     logger.info(f"Built-in tools available for allow listing by module: {[get_tool_name(tool) for tool in builtin_tools_list]}")

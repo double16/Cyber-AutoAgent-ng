@@ -115,3 +115,47 @@ async def test_web_search_clamps_low_limits_and_retries_transient_message_errors
 
     monkeypatch.setattr(mod, "with_backoff", lambda _fn: fake_search)
     assert await mod.web_search("x", limit=0) == [{"title": "T", "url": "U", "snippet": "S"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Authorization: Bearer secret-token-value CVE guidance",
+        "api_key=secret-value vendor advisory",
+        "-----BEGIN PRIVATE KEY-----",
+        "contact alice@example.test exploit mitigation",
+        "SSN 123-45-6789 incident response",
+        "card 4111 1111 1111 1111 breach response",
+    ],
+)
+async def test_web_search_blocks_sensitive_queries_before_calling_provider(query):
+    calls = []
+
+    async def provider(received_query, limit):
+        calls.append((received_query, limit))
+        return []
+
+    tool = mod.create_web_search_tool(provider)
+
+    with pytest.raises(mod.SensitiveWebSearchQueryError) as error:
+        await tool(query, limit=500)
+
+    assert str(error.value) == mod.SENSITIVE_QUERY_BLOCKED_MESSAGE
+    assert "secret-token-value" not in str(error.value)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_web_search_wrapper_has_stable_schema_and_delegates_safe_query():
+    calls = []
+
+    async def provider(query, limit):
+        calls.append((query, limit))
+        return {"provider": "test"}
+
+    tool = mod.create_web_search_tool(provider)
+
+    assert tool.tool_name == "web_search"
+    assert await tool("CVE-2026-1234 remediation", limit=500) == {"provider": "test"}
+    assert calls == [("CVE-2026-1234 remediation", 50)]

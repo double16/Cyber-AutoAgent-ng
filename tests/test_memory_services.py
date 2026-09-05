@@ -3588,6 +3588,61 @@ def test_endpoint_coverage_acceptance_rejects_manifest_as_subject_evidence(fake_
     assert store.get_acceptance_results("op1", task.task_uid) == []
 
 
+@pytest.mark.parametrize(
+    ("evidence_requirement", "additional_reference"),
+    [
+        (mod.EvidenceRequirement(kind="artifact", min_count=1), "artifact:artifacts/endpoint-assessment.txt"),
+        (mod.EvidenceRequirement(kind="durable_evidence", min_count=1), "memory:m1"),
+    ],
+)
+def test_endpoint_coverage_acceptance_allows_subject_evidence_alongside_manifest(
+    fake_memory_client,
+    evidence_requirement,
+    additional_reference,
+):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    _loaded_manifest, snapshot_hash = mod._load_inventory_manifest(f"artifact:{manifest}")
+    if additional_reference.startswith("artifact:"):
+        artifact = Path(mod._operation_output_root()) / "artifacts" / "endpoint-assessment.txt"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("Endpoint-specific assessment result", encoding="utf-8")
+    task = mod.Task(
+        task_uid=f"endpoint-mixed-evidence-{evidence_requirement.kind}",
+        title="Assess inventory endpoint",
+        objective="Assess the frozen endpoint",
+        acceptance=mod.AcceptanceContract(
+            mode="coverage",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="one endpoint",
+                source_refs=[f"artifact:{manifest}"],
+                snapshot_hash=snapshot_hash,
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Assess the selected endpoint",
+                evidence_requirements=[evidence_requirement],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    result = json.loads(
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Endpoint assessment complete",
+            evidence_refs=[f"artifact:{manifest}", additional_reference],
+        )
+    )
+
+    assert result["complete"] is True
+
+
 def test_controller_execution_evidence_is_required_before_acceptance(fake_memory_client):
     _client, store = fake_memory_client
     artifact = _write_inventory_manifest()

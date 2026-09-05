@@ -1,11 +1,54 @@
 import asyncio
 import random
-from collections.abc import Callable
+import re
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from ddgs import DDGS
 from ddgs.exceptions import RatelimitException, TimeoutException
 from pydantic import BaseModel, Field
 from strands import tool
+
+SENSITIVE_QUERY_BLOCKED_MESSAGE = "Web search query blocked by sensitive-data policy."
+_SENSITIVE_QUERY_PATTERNS = (
+    re.compile(r"(?i)-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"),
+    re.compile(r"(?i)\b(?:authorization\s*[:=]\s*(?:bearer|basic)\s+|bearer\s+)[A-Za-z0-9._~+/-]+=*"),
+    re.compile(r"(?i)\b(?:api[_-]?key|secret|password|token|access[_-]?key)\s*[:=]\s*[^\s,;]+"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"(?i)https?://[^\s/@:]+:[^\s/@]+@"),
+    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+    re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+)
+_CARD_CANDIDATE_PATTERN = re.compile(r"(?<!\d)(?:\d[ -]?){13,19}(?!\d)")
+
+
+class SensitiveWebSearchQueryError(ValueError):
+    """Raised when a web-search query would disclose sensitive data to a provider."""
+
+
+def _passes_luhn(value: str) -> bool:
+    """Return whether a digit-only payment-card candidate passes the Luhn checksum."""
+
+    total = 0
+    for index, digit in enumerate(reversed(value)):
+        number = int(digit)
+        if index % 2:
+            number *= 2
+            if number > 9:
+                number -= 9
+        total += number
+    return total % 10 == 0
+
+
+def contains_sensitive_web_search_data(query: str) -> bool:
+    """Detect high-confidence secret, payment, and PII values in an outbound search query."""
+
+    if any(pattern.search(query) for pattern in _SENSITIVE_QUERY_PATTERNS):
+        return True
+    return any(
+        _passes_luhn(re.sub(r"[ -]", "", candidate.group()))
+        for candidate in _CARD_CANDIDATE_PATTERN.finditer(query)
+    )
 
 
 class WebSearchHit(BaseModel):
@@ -58,22 +101,36 @@ def with_backoff(fn: Callable[..., list[WebSearchHit]],
     return wrapper
 
 
-@tool
-async def web_search(
-        query: str,
-        limit: int = 20,
-) -> list[dict[str, str]]:
-    """
-    Searches the web with the provided query.
+async def search_duckduckgo_with_backoff(query: str, limit: int) -> list[dict[str, str]]:
+    """Search DDGS and normalize the provider response for the wrapper."""
 
-    Invoke this tool when the user needs to find general information on vulnerabilities, CVEs, published exploits,
-    and instructions for using tools.
+    search_fn = with_backoff(search_duckduckgo)
+    hits = await search_fn(query, limit)
+    return [dict(hit) for hit in hits]
 
-    Never include sensitive information such as personally identifiable information (PII), payment card data, health care
-    information, etc.
 
-    Args:
-        query:
+WebSearchProvider = Callable[[str, int], Awaitable[Any]]
+
+
+def create_web_search_tool(search_provider: WebSearchProvider = search_duckduckgo_with_backoff):
+    """Create the single agent-facing web-search wrapper around a selected provider."""
+
+    @tool
+    async def web_search(
+            query: str,
+            limit: int = 20,
+    ) -> Any:
+        """
+        Searches the web with the provided query.
+
+        Invoke this tool when the user needs to find general information on vulnerabilities, CVEs, published exploits,
+        and instructions for using tools.
+
+        Sensitive credentials, payment-card data, and personally identifiable information are blocked before a search
+        provider is called.
+
+        Args:
+            query:
             | Example | Result |
             | ------- | ------ |
             | cats dogs | Results about cats or dogs |
@@ -87,13 +144,16 @@ async def web_search(
             | intitle:dogs | Page title includes the word "dogs" |
             | inurl:cats | Page URL includes the word "cats" |
 
-        limit: The maximum number of results to return, defaults to 20
-    Return:
-        List of search results, each a Dict with title, url and snippet
-    """
-    limit = max(1, min(50, limit))
+            limit: The maximum number of results to return, defaults to 20
+        Return:
+            Provider search results.
+        """
+        if contains_sensitive_web_search_data(query):
+            raise SensitiveWebSearchQueryError(SENSITIVE_QUERY_BLOCKED_MESSAGE)
 
-    search_fn = with_backoff(search_duckduckgo)
-    hits = await search_fn(query, limit)
+        return await search_provider(query, max(1, min(50, limit)))
 
-    return [dict(hit) for hit in hits]
+    return web_search
+
+
+web_search = create_web_search_tool()

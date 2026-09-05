@@ -52,6 +52,8 @@
 
 ### Fixes
 
+- Block credential, payment-card, and high-confidence PII values before either web-search provider receives a query;
+  expose both runtime providers through one stable `web_search` wrapper.
 - Keep auto-generated finding-validation tasks focused on their assigned endpoint while retaining leaked credentials
   and external service URLs as response-data markers for deterministic evidence verification.
 - Retain redacted structured shell inputs in controller tool outcomes so successful artifact-producing commands such
