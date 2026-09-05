@@ -2,6 +2,8 @@
 
 ### Features
 
+- Add a seven-day Qdrant semantic cache for successful web-search responses, shared across operations that use the
+  same embedding model and conservatively reused only for high-confidence matches.
 - Add `--reset-failed` continuation mode and interactive `continue ... reset-failed` support to retry partial-failure
   and blocked workflow tasks and phases while retaining their durable evidence.
 - Add webcrack and shuji JavaScript reverse-engineering tools.
