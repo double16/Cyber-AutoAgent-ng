@@ -168,7 +168,7 @@ _QDRANT_WRITE_LOCK = threading.Lock()
 
 
 PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "not_applicable"]
-TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "superseded"]
+TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"]
 TargetType = Literal["network", "network_range", "filesystem"]
 TargetScope = Literal["all", "subset"]
 AcceptanceMode = Literal["outcome", "coverage"]
@@ -967,7 +967,7 @@ class Task:
         if not isinstance(self.objective, str) or not self.objective.strip():
             raise ValueError("objective must be a non-empty string")
         normalized_status = _normalize_task_status(self.status)
-        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked", "superseded"}:
+        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"}:
             raise ValueError("task status is invalid")
         object.__setattr__(self, "status", normalized_status)
         object.__setattr__(self, "acceptance", AcceptanceContract.from_obj(self.acceptance))
@@ -976,8 +976,8 @@ class Task:
         object.__setattr__(self, "recovery_context", dict(self.recovery_context))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
-        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded"):
-            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked|superseded")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"):
+            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked|superseded|replanned")
         if self.target_scope not in ("all", "subset"):
             raise ValueError("target_scope must be all or subset")
         if not isinstance(self.target_ids, list):
@@ -1451,6 +1451,12 @@ class ApplicationStore(Protocol):
 
     def reset_failed_work(self, operation_id: str) -> tuple[OperationPlan, int, int]: ...
 
+    def reset_phases_for_replan(
+        self,
+        operation_id: str,
+        phase_ids: Iterable[int],
+    ) -> tuple[OperationPlan, int, tuple[int, ...]]: ...
+
     def append_operation_model_metrics(
         self, operation_id: str, captured_at: str, rows: list[dict[str, Any]]
     ) -> None: ...
@@ -1499,6 +1505,7 @@ class SQLiteApplicationStore:
         "patch_task",
         "get_tasks",
         "reset_failed_work",
+        "reset_phases_for_replan",
         "store_acceptance_results",
         "get_acceptance_results",
         "has_acceptance_memory_publication",
@@ -2173,6 +2180,91 @@ class SQLiteApplicationStore:
                 ),
             )
         return updated_plan, len(failed_tasks), len(affected_phase_ids)
+
+    def reset_phases_for_replan(
+        self,
+        operation_id: str,
+        phase_ids: Iterable[int],
+    ) -> tuple[OperationPlan, int, tuple[int, ...]]:
+        """Replan selected phase tasks and reopen their phases for fresh task creation.
+
+        Archived tasks retain their evidence and immutable acceptance history. They are
+        deliberately marked ``replanned`` rather than deleted so reports and operation
+        forensics retain the reason that replacement work was requested. Existing
+        finding-validation tasks instead return to ``pending`` so their bound, independent
+        verification work resumes before fresh proposals are created.
+        """
+
+        requested_phase_ids = tuple(sorted({int(phase_id) for phase_id in phase_ids}))
+        if not requested_phase_ids:
+            raise ValueError("At least one phase ID is required for replanning")
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown operation plan: {operation_id}")
+            plan = OperationPlan.from_obj(json.loads(row[0]))
+            known_phase_ids = {int(phase.id) for phase in plan.phases}
+            unknown_phase_ids = sorted(set(requested_phase_ids) - known_phase_ids)
+            if unknown_phase_ids:
+                raise ValueError(f"Unknown plan phase IDs: {unknown_phase_ids}")
+
+            now = datetime.now().isoformat()
+            placeholders = ", ".join("?" for _ in requested_phase_ids)
+            task_rows = conn.execute(
+                "SELECT task_uid, kind, status, status_reason FROM tasks "
+                f"WHERE logical_target = ? AND operation_id = ? AND phase IN ({placeholders})",
+                (self.logical_target, operation_id, *requested_phase_ids),
+            ).fetchall()
+            for task_uid, kind, prior_status, prior_reason in task_rows:
+                is_finding_validation = kind == "finding_validation"
+                next_status = "pending" if is_finding_validation else "replanned"
+                reset_reason = (
+                    f"Reset finding validation for explicit phase replan from {prior_status}."
+                    if is_finding_validation
+                    else f"Archived for explicit phase replan from {prior_status}."
+                )
+                if prior_reason:
+                    reset_reason = f"{reset_reason} Prior reason: {prior_reason}"
+                conn.execute(
+                    "UPDATE tasks SET status = ?, status_reason = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    (next_status, reset_reason, now, self.logical_target, operation_id, task_uid),
+                )
+
+            active_phase_id = requested_phase_ids[0]
+            phases = []
+            for phase in plan.phases:
+                status = phase.status
+                if phase.id == active_phase_id:
+                    status = "active"
+                elif phase.id in requested_phase_ids or status == "active":
+                    status = "pending"
+                phases.append(replace(phase, status=status))
+            updated_plan = replace(
+                plan,
+                current_phase=active_phase_id,
+                phases=phases,
+                assessment_complete=False,
+                updated_at=now,
+            )
+            conn.execute(
+                "UPDATE plans SET current_phase = ?, assessment_complete = ?, plan_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ?",
+                (
+                    updated_plan.current_phase,
+                    updated_plan.assessment_complete,
+                    json.dumps(updated_plan.to_dict()),
+                    now,
+                    self.logical_target,
+                    operation_id,
+                ),
+            )
+        return updated_plan, len(task_rows), requested_phase_ids
 
     def store_acceptance_results(
         self,
@@ -9368,7 +9460,7 @@ class QdrantMemoryClient:
         # retained for reporting, but must not be converted into a completed operation.
         tasks = _get_database_store().get_tasks(op_id)
         all_done = all(p.status in {"done", "not_applicable"} for p in plan.phases)
-        all_tasks_done = all(task.status in {"done", "superseded"} for task in tasks)
+        all_tasks_done = all(task.status in {"done", "superseded", "replanned"} for task in tasks)
         actionable_tasks = [task for task in tasks if task.status in {"active", "pending"}]
         add_completion_reminder = False
         if all_done and all_tasks_done and not plan.assessment_complete:

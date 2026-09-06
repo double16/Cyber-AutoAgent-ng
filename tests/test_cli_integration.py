@@ -160,11 +160,70 @@ def test_reset_continuation_failed_work_resets_persisted_operation(tmp_path):
     assert reset.phases[0].status == "active"
 
 
+def test_parse_continuation_phase_selector_supports_ids_and_ranges():
+    assert cyberautoagent.parse_continuation_phase_selector("1,3-4,6-", [1, 2, 3, 4, 5, 6, 7]) == (
+        1,
+        3,
+        4,
+        6,
+        7,
+    )
+
+
+@pytest.mark.parametrize("selector", ["", "0", "3-1", "1,,2", "unknown", "8-"])
+def test_parse_continuation_phase_selector_rejects_invalid_selection(selector):
+    with pytest.raises(ValueError):
+        cyberautoagent.parse_continuation_phase_selector(selector, [1, 2, 3])
+
+
+def test_reset_continuation_phases_archives_selected_phase_tasks(tmp_path):
+    from modules.tools.memory import OperationPlan, PlanPhase, SQLiteApplicationStore, Task
+    from tests.helpers.acceptance import make_acceptance
+
+    operation_id = "OP_REPLAN"
+    store = SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical")
+    store.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="Assess service",
+            current_phase=2,
+            total_phases=2,
+            phases=[PlanPhase(1, "Recon", "done"), PlanPhase(2, "Validate", "done")],
+            assessment_complete=True,
+        ),
+    )
+    store.store_task(
+        operation_id,
+        Task(
+            task_uid="phase-two",
+            title="Validate service",
+            objective="Validate service",
+            acceptance=make_acceptance("phase-two"),
+            phase=2,
+            status="done",
+        ),
+    )
+
+    task_count, phase_ids = cyberautoagent.reset_continuation_phases(
+        output_dir=str(tmp_path),
+        logical_target="logical",
+        operation_id=operation_id,
+        phase_selector="2-",
+        logger=Mock(),
+    )
+
+    assert (task_count, phase_ids) == (1, (2,))
+    assert store.get_tasks(operation_id)[0].status == "replanned"
+
+
 @pytest.mark.parametrize(
     ("argv", "message"),
     [
         (["--reset-failed"], "--reset-failed requires --continue"),
         (["--continue", "--report", "--reset-failed"], "--reset-failed cannot be used with --report"),
+        (["--reset-phases", "2"], "--reset-phases requires --continue"),
+        (["--continue", "--report", "--reset-phases", "2"], "--reset-phases cannot be used with --report"),
+        (["--continue", "--reset-failed", "--reset-phases", "2"], "--reset-phases cannot be used with --reset-failed"),
     ],
 )
 def test_main_rejects_invalid_reset_failed_combinations(monkeypatch, capsys, argv, message):

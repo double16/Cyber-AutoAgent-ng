@@ -366,10 +366,13 @@ export function useOperationManager({
       const operationSuffix = (value: string | boolean | undefined) =>
         typeof value === 'string' && value ? ` ${value}` : '';
       const resetFailedSuffix = assessmentParams.resetFailed ? ' after resetting failed work' : '';
+      const resetPhasesSuffix = assessmentParams.resetPhases
+        ? ` after resetting phases ${assessmentParams.resetPhases}`
+        : '';
       const operationStartMessage = assessmentParams.reportOnly
         ? `Regenerating report${operationSuffix(assessmentParams.reportOnly)} for ${assessmentParams.target}`
         : assessmentParams.continueOperation
-          ? `Continuing operation${operationSuffix(assessmentParams.continueOperation)} for ${assessmentParams.target}${resetFailedSuffix}`
+          ? `Continuing operation${operationSuffix(assessmentParams.continueOperation)} for ${assessmentParams.target}${resetFailedSuffix}${resetPhasesSuffix}`
           : `Starting ${assessmentParams.module} assessment on ${assessmentParams.target}`;
 
       addOperationHistoryEntry('info', operationStartMessage);

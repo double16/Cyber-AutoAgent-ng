@@ -26,6 +26,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -338,6 +339,67 @@ def reset_continuation_failed_work(
         plan.current_phase,
     )
     return task_count, phase_count
+
+
+def parse_continuation_phase_selector(selector: str, available_phase_ids: list[int]) -> tuple[int, ...]:
+    """Parse comma-separated phase IDs and inclusive/open-ended numeric ranges."""
+
+    text = str(selector or "").strip()
+    if not text:
+        raise ValueError("Phase selector is required")
+    available = {int(phase_id) for phase_id in available_phase_ids}
+    if not available:
+        raise ValueError("Operation plan has no phases")
+
+    selected: set[int] = set()
+    for part in text.split(","):
+        token = part.strip()
+        match = re.fullmatch(r"([1-9]\d*)(?:-([1-9]\d*)?)?", token)
+        if not match:
+            raise ValueError(f"Invalid phase selector segment: {token or '<empty>'}")
+        start = int(match.group(1))
+        end_text = match.group(2)
+        if "-" not in token:
+            selected.add(start)
+            continue
+        end = int(end_text) if end_text else max(available)
+        if end < start:
+            raise ValueError(f"Invalid descending phase range: {token}")
+        selected.update(range(start, end + 1))
+
+    unknown = sorted(selected - available)
+    if unknown:
+        raise ValueError(f"Unknown plan phase IDs: {unknown}")
+    return tuple(sorted(selected))
+
+
+def reset_continuation_phases(
+    *,
+    output_dir: str,
+    logical_target: str,
+    operation_id: str,
+    phase_selector: str,
+    logger: Any,
+) -> tuple[int, tuple[int, ...]]:
+    """Archive selected phase work and reopen it for fresh task proposals."""
+
+    store = create_application_store(
+        get_application_database_path({"output_dir": output_dir}),
+        logical_target=logical_target,
+    )
+    plan = store.get_plan(operation_id)
+    if plan is None:
+        raise ValueError(f"Unknown operation plan: {operation_id}")
+    phase_ids = parse_continuation_phase_selector(phase_selector, [phase.id for phase in plan.phases])
+    reset_plan, task_count, selected_phase_ids = store.reset_phases_for_replan(operation_id, phase_ids)
+    logger.info(
+        "Reset phases for continuation %s: phases=%s tasks=%s current_phase=%s",
+        operation_id,
+        list(selected_phase_ids),
+        task_count,
+        reset_plan.current_phase,
+    )
+    return task_count, selected_phase_ids
 
 
 def setup_telemetry(logger):
@@ -1468,6 +1530,11 @@ def main():
         help="With --continue, reset partial-failure and blocked tasks and phases before resuming",
     )
     parser.add_argument(
+        "--reset-phases",
+        type=str,
+        help="With --continue, archive selected phase tasks and propose fresh work (for example: 3,5- or 2-4)",
+    )
+    parser.add_argument(
         "--report",
         nargs="?",
         type=str,
@@ -1512,6 +1579,12 @@ def main():
         parser.error("--reset-failed requires --continue")
     if args.reset_failed and bool(args.report):
         parser.error("--reset-failed cannot be used with --report")
+    if args.reset_phases and not bool(args.cont):
+        parser.error("--reset-phases requires --continue")
+    if args.reset_phases and bool(args.report):
+        parser.error("--reset-phases cannot be used with --report")
+    if args.reset_phases and args.reset_failed:
+        parser.error("--reset-phases cannot be used with --reset-failed")
     if args.memory_mode not in {"shared", "operation"}:
         parser.error("CYBER_MEMORY_MODE must be one of: shared, operation")
 
@@ -1783,6 +1856,19 @@ def main():
             ),
             "SUCCESS",
         )
+    elif args.reset_phases:
+        task_count, selected_phase_ids = reset_continuation_phases(
+            output_dir=server_config.output.base_dir,
+            logical_target=args.target,
+            operation_id=operation_id,
+            phase_selector=args.reset_phases,
+            logger=logger,
+        )
+        print_status(
+            f"Reset phase(s) {', '.join(str(phase_id) for phase_id in selected_phase_ids)} "
+            f"and archived {task_count} task(s) for fresh proposals",
+            "SUCCESS",
+        )
 
     latest_pointer = update_latest_output_pointer(
         target_sanitized,
@@ -1969,6 +2055,8 @@ def main():
                 if args.report
                 else "continuation_reset_failed"
                 if args.reset_failed
+                else "continuation_reset_phases"
+                if args.reset_phases
                 else "continuation"
                 if args.cont
                 else "execution"

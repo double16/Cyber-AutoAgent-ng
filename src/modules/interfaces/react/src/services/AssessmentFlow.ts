@@ -61,6 +61,7 @@ export class AssessmentFlow {
 
   private continueOperation?: string | boolean;
   private resetFailed = false;
+  private resetPhases?: string;
   private reportOnly?: string | boolean;
 
   /**
@@ -157,6 +158,9 @@ export class AssessmentFlow {
     if (this.resetFailed) {
       params.resetFailed = true;
     }
+    if (this.resetPhases) {
+      params.resetPhases = this.resetPhases;
+    }
     if (this.reportOnly !== undefined) {
       params.reportOnly = this.reportOnly;
     }
@@ -209,6 +213,7 @@ export class AssessmentFlow {
   private clearExecutionMode(): void {
     this.continueOperation = undefined;
     this.resetFailed = false;
+    this.resetPhases = undefined;
     this.reportOnly = undefined;
   }
 
@@ -223,21 +228,35 @@ export class AssessmentFlow {
     const operationIdParts = rawOperationId ? rawOperationId.split(/\s+/) : [];
 
     const resetFailedCount = operationIdParts.filter((part) => part.toLowerCase() === 'reset-failed').length;
-    const operationIds = operationIdParts.filter((part) => part.toLowerCase() !== 'reset-failed');
+    const resetPhasesIndexes = operationIdParts
+      .map((part, index) => part.toLowerCase() === 'reset-phases' ? index : -1)
+      .filter((index) => index >= 0);
+    const resetPhasesIndex = resetPhasesIndexes[0];
+    const resetPhaseSelectorIndex = resetPhasesIndex === undefined ? -1 : resetPhasesIndex + 1;
+    const resetPhases = resetPhaseSelectorIndex < 0 ? undefined : operationIdParts[resetPhaseSelectorIndex];
+    const operationIds = operationIdParts.filter((part, index) =>
+      part.toLowerCase() !== 'reset-failed'
+      && part.toLowerCase() !== 'reset-phases'
+      && index !== resetPhaseSelectorIndex
+    );
     const resetFailed = mode === 'continue' && resetFailedCount === 1;
     if (
       operationIds.length > 1
       || resetFailedCount > 1
+      || resetPhasesIndexes.length > 1
+      || (resetPhasesIndex !== undefined && (!resetPhases || resetPhasesIndex + 1 !== operationIdParts.length - 1))
+      || (resetFailed && resetPhasesIndex !== undefined)
       || (mode === 'report' && resetFailedCount > 0)
+      || (mode === 'report' && resetPhasesIndex !== undefined)
     ) {
       return {
         success: false,
         message: `Invalid ${mode} command`,
         error: mode === 'continue'
-          ? 'Usage: continue [operation_id] [reset-failed]'
+          ? 'Usage: continue [operation_id] [reset-failed | reset-phases <phase_selector>]'
           : 'Usage: report [operation_id]',
         nextPrompt: mode === 'continue'
-          ? 'Use an optional operation ID and optional reset-failed argument.'
+          ? 'Use an optional operation ID and one optional reset argument.'
           : 'Provide at most one operation ID, e.g. report OP_20260320_101501'
       };
     }
@@ -260,11 +279,13 @@ export class AssessmentFlow {
     if (mode === 'continue') {
       this.continueOperation = operationValue;
       this.resetFailed = resetFailed;
+      this.resetPhases = resetPhases;
       this.reportOnly = undefined;
     } else {
       this.reportOnly = operationValue;
       this.continueOperation = undefined;
       this.resetFailed = false;
+      this.resetPhases = undefined;
     }
 
     const operationLabel = typeof operationValue === 'string' ? ` ${operationValue}` : '';
@@ -272,7 +293,7 @@ export class AssessmentFlow {
 
     return {
       success: true,
-      message: `${action} requested${operationLabel}${resetFailed ? ' with failed work reset' : ''}`,
+      message: `${action} requested${operationLabel}${resetFailed ? ' with failed work reset' : ''}${resetPhases ? ` with phase reset ${resetPhases}` : ''}`,
       nextPrompt: 'Ready to execute - Press Enter to start operation',
       readyToExecute: true
     };

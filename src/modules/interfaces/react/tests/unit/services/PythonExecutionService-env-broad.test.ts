@@ -54,6 +54,7 @@ describe('PythonExecutionService broad environment construction', () => {
             objective: 'audit api',
             continueOperation: true,
             resetFailed: true,
+            resetPhases: '3,5-',
             reportOnly: 'report-1',
         } as any, {
             budgetMaxDuration: 60,
@@ -141,6 +142,7 @@ describe('PythonExecutionService broad environment construction', () => {
             '--target', 'example.com',
             '--continue',
             '--reset-failed',
+            '--reset-phases', '3,5-',
             '--report', 'report-1',
             '--model', 'gpt-test',
             '--region', 'us-west-1',

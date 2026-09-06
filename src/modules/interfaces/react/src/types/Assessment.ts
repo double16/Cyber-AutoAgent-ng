@@ -9,6 +9,7 @@ export interface AssessmentParams {
   availableTools?: string[];
   continueOperation?: string | boolean;
   resetFailed?: boolean;
+  resetPhases?: string;
   reportOnly?: string | boolean;
 }
 

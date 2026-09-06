@@ -137,6 +137,106 @@ def test_sqlite_store_failed_work_reset_is_a_noop_without_failures(tmp_path):
     assert (task_count, phase_count) == (0, 0)
 
 
+def test_sqlite_store_replans_selected_phases_without_discarding_task_context(tmp_path):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical-target")
+    operation_id = "OP_REPLAN"
+    plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            mod.PlanPhase(id=1, title="Recon", status="done"),
+            mod.PlanPhase(id=2, title="Map", status="done"),
+            mod.PlanPhase(id=3, title="Validate", status="active"),
+        ],
+        assessment_complete=True,
+    )
+    store.store_plan(operation_id, plan)
+    archived_task = mod.Task(
+        task_uid="archived",
+        title="Completed mapping",
+        objective="Map the assigned target",
+        acceptance=make_acceptance("archived"),
+        phase=2,
+        status="done",
+        evidence=["artifact:mapping.json"],
+        recovery_context={"source": "retained"},
+    )
+    active_task = mod.Task(
+        task_uid="active",
+        title="Active validation",
+        objective="Validate the assigned target",
+        acceptance=make_acceptance("active"),
+        phase=3,
+        status="active",
+    )
+    validation_task = mod.Task(
+        task_uid="finding-validation",
+        title="Validate mapping finding",
+        objective="Independently validate the assigned mapping finding",
+        acceptance=make_acceptance("finding-validation"),
+        phase=2,
+        status="done",
+        status_reason="Original validation completed",
+        evidence=["artifact:validation.json"],
+        kind="finding_validation",
+        reference_id="finding-1",
+        recovery_context={"binding": "retained"},
+    )
+    store.store_task(operation_id, archived_task)
+    store.store_task(operation_id, active_task)
+    store.store_task(operation_id, validation_task)
+
+    reset_plan, task_count, selected_phase_ids = store.reset_phases_for_replan(operation_id, [2, 3])
+
+    assert task_count == 3
+    assert selected_phase_ids == (2, 3)
+    assert reset_plan.current_phase == 2
+    assert reset_plan.assessment_complete is False
+    assert [phase.status for phase in reset_plan.phases] == ["done", "active", "pending"]
+    tasks = {task.task_uid: task for task in store.get_tasks(operation_id)}
+    assert tasks["archived"].status == "replanned"
+    assert "Archived for explicit phase replan from done." in tasks["archived"].status_reason
+    assert tasks["archived"].evidence == ["artifact:mapping.json"]
+    assert tasks["archived"].recovery_context == {"source": "retained"}
+    assert tasks["active"].status == "replanned"
+    assert "Archived for explicit phase replan from active." in tasks["active"].status_reason
+    assert tasks["finding-validation"].status == "pending"
+    assert "Reset finding validation for explicit phase replan from done." in tasks["finding-validation"].status_reason
+    assert "Prior reason: Original validation completed" in tasks["finding-validation"].status_reason
+    assert tasks["finding-validation"].reference_id == "finding-1"
+    assert tasks["finding-validation"].evidence == ["artifact:validation.json"]
+    assert tasks["finding-validation"].recovery_context == {"binding": "retained"}
+
+
+def test_sqlite_store_replan_rejects_unknown_phase_without_mutating_state(tmp_path):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical-target")
+    operation_id = "OP_REPLAN_INVALID"
+    plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="done")],
+        assessment_complete=True,
+    )
+    store.store_plan(operation_id, plan)
+    task = mod.Task(
+        task_uid="completed",
+        title="Completed reconnaissance",
+        objective="Map the assigned target",
+        acceptance=make_acceptance("completed"),
+        phase=1,
+        status="done",
+    )
+    store.store_task(operation_id, task)
+
+    with pytest.raises(ValueError, match="Unknown plan phase IDs"):
+        store.reset_phases_for_replan(operation_id, [2])
+
+    assert store.get_plan(operation_id).assessment_complete is True
+    assert store.get_tasks(operation_id)[0].status == "done"
+
+
 def test_task_service_scope_violations_enforces_assigned_scheme_host_and_port_only():
     plan = mod.OperationPlan(
         objective="assess",

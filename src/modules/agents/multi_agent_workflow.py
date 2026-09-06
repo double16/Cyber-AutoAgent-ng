@@ -843,7 +843,7 @@ class WorkflowStateStore:
         """Return whether every phase and task reached a successful terminal state."""
 
         phases_complete = all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
-        tasks_complete = all(task.status in {"done", "superseded"} for task in self.list_tasks())
+        tasks_complete = all(task.status in {"done", "superseded", "replanned"} for task in self.list_tasks())
         objective_records = self.list_objective_validation_records()
         objective_complete = not objective_records or any(
             record.get("resolution") == "objective_verified" for record in objective_records
@@ -2176,7 +2176,7 @@ class MultiAgentWorkflowController:
 
         return (
             all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
-            and all(task.status in {"done", "superseded"} for task in self.state.list_tasks())
+            and all(task.status in {"done", "superseded", "replanned"} for task in self.state.list_tasks())
         )
 
     def _mark_phase(self, plan: OperationPlan, phase_id: int, status: str) -> OperationPlan:
@@ -2193,7 +2193,7 @@ class MultiAgentWorkflowController:
                 phase_tasks
                 and not remaining_failures
                 and any(task.status == "superseded" for task in phase_tasks)
-                and all(task.status in {"done", "superseded"} for task in phase_tasks)
+                and all(task.status in {"done", "superseded", "replanned"} for task in phase_tasks)
             ):
                 self._log_workflow(
                     "promoting phase with only successful terminal tasks phase=%s status=done reconciled=%s",
@@ -2717,7 +2717,7 @@ class MultiAgentWorkflowController:
         phase_tasks = self.state.list_tasks(phase=phase_id)
         if phase is None or phase.status not in {"partial_failure", "blocked"}:
             return
-        if not phase_tasks or any(task.status not in {"done", "superseded"} for task in phase_tasks):
+        if not phase_tasks or any(task.status not in {"done", "superseded", "replanned"} for task in phase_tasks):
             return
         updated_plan = replace(
             plan,
@@ -8473,7 +8473,7 @@ applicability or a finding, and published proof of concepts must not be executed
         elif status_counts.get("active", 0) or status_counts.get("pending", 0):
             status = "continue"
             classification_reason = "actionable phase tasks remain"
-        elif tasks and all(task.status in {"done", "superseded"} for task in tasks):
+        elif tasks and all(task.status in {"done", "superseded", "replanned"} for task in tasks):
             status = "done"
             classification_reason = "all phase tasks reached successful terminal states"
         elif not tasks and _phase_semantically_requires_finding_candidates(phase):
@@ -9830,12 +9830,19 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
         pending = self.state.list_tasks(phase=phase.id, status=["pending", "active"])
         if not pending:
+            phase_tasks = self.state.list_tasks(phase=phase.id)
+            if phase_tasks and all(task.status == "replanned" for task in phase_tasks):
+                self._log_workflow(
+                    "phase task creation trigger phase=%s reason=explicit_replan",
+                    self._phase_label(phase),
+                )
+                return False
             self._log_workflow(
                 "phase evaluation trigger phase=%s reason=no_pending_or_active has_tasks=%s",
                 self._phase_label(phase),
-                len(self.state.list_tasks(phase=phase.id)) > 0,
+                bool(phase_tasks),
             )
-            return len(self.state.list_tasks(phase=phase.id)) > 0
+            return bool(phase_tasks)
         checkpoint = self._consume_crossed_checkpoint()
         if checkpoint:
             if any(task.kind in VALIDATION_TASK_KINDS for task in pending):

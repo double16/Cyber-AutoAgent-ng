@@ -171,11 +171,30 @@ describe('AssessmentFlow', () => {
         flow.processUserInput('target example.com');
         expect(flow.processUserInput('continue reset-failed reset-failed')).toEqual(expect.objectContaining({
             success: false,
-            error: 'Usage: continue [operation_id] [reset-failed]',
+            error: 'Usage: continue [operation_id] [reset-failed | reset-phases <phase_selector>]',
         }));
         expect(flow.processUserInput('report reset-failed')).toEqual(expect.objectContaining({
             success: false,
             error: 'Usage: report [operation_id]',
+        }));
+    });
+
+    it('accepts selective phase reset continuation and rejects conflicting reset modes', () => {
+        const flow = new AssessmentFlow();
+
+        flow.processUserInput('target example.com');
+        flow.processUserInput('initial objective');
+        expect(flow.processUserInput('continue OP_RESET reset-phases 3,5-')).toEqual(expect.objectContaining({
+            success: true,
+            message: 'Continue operation requested OP_RESET with phase reset 3,5-',
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual(expect.objectContaining({
+            continueOperation: 'OP_RESET',
+            resetPhases: '3,5-',
+        }));
+        expect(flow.processUserInput('continue OP_RESET reset-failed reset-phases 3')).toEqual(expect.objectContaining({
+            success: false,
+            error: 'Usage: continue [operation_id] [reset-failed | reset-phases <phase_selector>]',
         }));
     });
 
@@ -245,7 +264,7 @@ describe('AssessmentFlow', () => {
         flow.processUserInput('target example.com');
         expect(flow.processUserInput('continue OP_ONE OP_TWO')).toEqual(expect.objectContaining({
             success: false,
-            error: 'Usage: continue [operation_id] [reset-failed]',
+            error: 'Usage: continue [operation_id] [reset-failed | reset-phases <phase_selector>]',
         }));
         expect(flow.processUserInput('report OP_ONE OP_TWO')).toEqual(expect.objectContaining({
             success: false,

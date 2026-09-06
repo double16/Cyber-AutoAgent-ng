@@ -86,6 +86,7 @@ npm start
 target https://testphp.vulnweb.com
 execute focus on OWASP Top 10
 continue OP_20260320_101501
+continue OP_20260320_101501 reset-phases 3,5-
 report OP_20260320_101501
 ```
 

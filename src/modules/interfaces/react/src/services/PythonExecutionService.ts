@@ -688,6 +688,9 @@ export class PythonExecutionService extends EventEmitter {
       if (params.resetFailed) {
         args.push('--reset-failed');
       }
+      if (params.resetPhases) {
+        args.push('--reset-phases', params.resetPhases);
+      }
 
       if (params.reportOnly === true || params.reportOnly === "") {
         args.push('--report');

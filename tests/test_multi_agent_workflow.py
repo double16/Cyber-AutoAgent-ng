@@ -71,6 +71,18 @@ def _acceptance(criterion_id="task-outcome"):
     )
 
 
+def test_replanned_phase_bypasses_phase_evaluation_for_fresh_task_creation():
+    replanned_task = SimpleNamespace(status="replanned")
+    controller = object.__new__(MultiAgentWorkflowController)
+    controller.state = SimpleNamespace(
+        list_tasks=lambda *, phase=None, status=None: [] if status else [replanned_task],
+    )
+    controller._log_workflow = Mock()
+
+    assert controller._should_evaluate_phase(PlanPhase(id=3, title="Validate", status="active")) is False
+    controller._log_workflow.assert_called_once()
+
+
 def _artifact_acceptance(criterion_id="artifact-output"):
     return AcceptanceContract(
         mode="outcome",
