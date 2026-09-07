@@ -49,6 +49,17 @@ def test_plan_phase_rejects_unknown_task_creation_mode():
         mod.PlanPhase(id=1, title="Invalid", status="pending", task_creation_mode="invented")
 
 
+def test_plan_phase_accepts_hypothesis_dependent_task_creation_mode():
+    phase = mod.PlanPhase(
+        id=1,
+        title="Comprehensive testing",
+        status="pending",
+        task_creation_mode="hypothesis_dependent",
+    )
+
+    assert phase.task_creation_mode == "hypothesis_dependent"
+
+
 @pytest.mark.parametrize(
     ("current_phase", "phase_modes", "expected_phase"),
     [

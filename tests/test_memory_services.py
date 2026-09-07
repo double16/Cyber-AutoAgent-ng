@@ -4212,6 +4212,83 @@ def test_acceptance_basis_reference_resolution_rejects_invalid_sources(fake_memo
         )
 
 
+def test_artifact_acceptance_allows_done_producer_with_replanned_duplicate(fake_memory_client):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    artifact_ref = f"artifact:{manifest}"
+    acceptance = mod.AcceptanceContract(
+        mode="outcome",
+        basis=mod.AcceptanceBasis(
+            kind="snapshot",
+            description="Existing inventory",
+            source_refs=[artifact_ref],
+        ),
+        criteria=[
+            mod.AcceptanceCriterion(
+                id="result",
+                description="Use the inventory",
+                evidence_requirements=[mod.EvidenceRequirement(kind="memory")],
+            )
+        ],
+    )
+    done = mod.Task(
+        task_uid="done-producer",
+        title="Done producer",
+        objective="Produce inventory",
+        acceptance=make_acceptance("produce-done"),
+        evidence=[str(manifest)],
+        phase=1,
+        status="done",
+    )
+    replanned = mod.Task(
+        task_uid="replanned-consumer",
+        title="Replanned consumer",
+        objective="Consume inventory",
+        acceptance=make_acceptance("consume-replanned"),
+        evidence=[str(manifest)],
+        phase=2,
+        status="replanned",
+    )
+
+    frozen = mod._freeze_and_validate_acceptance(acceptance, [done, replanned])
+
+    assert frozen.basis.source_refs == (artifact_ref,)
+    assert store.tasks == []
+
+
+def test_artifact_acceptance_rejects_when_no_matching_producer_is_done(fake_memory_client):
+    _client, _store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    artifact_ref = f"artifact:{manifest}"
+    acceptance = mod.AcceptanceContract(
+        mode="outcome",
+        basis=mod.AcceptanceBasis(
+            kind="snapshot",
+            description="Existing inventory",
+            source_refs=[artifact_ref],
+        ),
+        criteria=[
+            mod.AcceptanceCriterion(
+                id="result",
+                description="Use the inventory",
+                evidence_requirements=[mod.EvidenceRequirement(kind="memory")],
+            )
+        ],
+    )
+    producer = mod.Task(
+        task_uid="partial-producer",
+        title="Partial producer",
+        objective="Produce inventory",
+        acceptance=make_acceptance("produce-partial"),
+        evidence=[str(manifest)],
+        phase=1,
+        status="partial_failure",
+    )
+
+    with pytest.raises(ValueError, match="Acceptance basis producer task is not done"):
+        mod._freeze_and_validate_acceptance(acceptance, [producer])
+
+
 def test_bound_acceptance_validates_coverage_ledger_and_manifest_hash(fake_memory_client):
     _client, store = fake_memory_client
     manifest = _write_inventory_manifest()

@@ -135,6 +135,15 @@ flowchart LR
     D --> E[Resume validation, then create fresh task proposals]
 ```
 
+### Comprehensive hypothesis testing
+
+When a plan places a hypothesis-producing phase before vulnerability discovery, the controller uses
+`hypothesis_dependent` task creation for the testing phase. It creates one route-scoped testing task for every completed
+hypothesis coverage group and records the source hypothesis task IDs and artifact references with each test task.
+Executors must assess every documented hypothesis in those source artifacts for the assigned group. If a hypothesis
+producer is failed, blocked, missing, or does not cover an assigned group, task creation stops with an explicit coverage
+error; the operation does not silently treat that group as tested.
+
 ## Deployment modes
 
 The first-run setup wizard asks which environment you want to use. You can select a different environment later with

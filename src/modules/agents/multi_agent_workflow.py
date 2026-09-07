@@ -415,10 +415,20 @@ class TaskCreationBatch:
     snapshot_ref: str | None
     groups: tuple[tuple[str, str, str, tuple[str, ...]], ...]
     estimated_input_tokens: int
+    hypothesis_source_task_uids_by_item_id: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    hypothesis_source_artifact_refs_by_item_id: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
     @property
     def item_ids(self) -> set[str]:
         return {item_id for _target_id, _kind, _label, item_ids in self.groups for item_id in item_ids}
+
+    @property
+    def hypothesis_source_task_uids(self) -> dict[str, tuple[str, ...]]:
+        return dict(self.hypothesis_source_task_uids_by_item_id)
+
+    @property
+    def hypothesis_source_artifact_refs(self) -> dict[str, tuple[str, ...]]:
+        return dict(self.hypothesis_source_artifact_refs_by_item_id)
 
 
 def extract_json_object(text: str) -> dict[str, Any]:
@@ -1008,6 +1018,14 @@ class WorkflowStateStore:
                 task_creation_mode=phase.task_creation_mode,
             )
             for phase in phases
+        ]
+        phases = [
+            replace(phase, task_creation_mode="hypothesis_dependent")
+            if index > 0
+            and phase.task_creation_mode == "standard"
+            and phases[index - 1].produces_hypotheses
+            else phase
+            for index, phase in enumerate(phases)
         ]
         if not phases:
             raise WorkflowInvariantError("plan creator returned no phases")
@@ -9060,10 +9078,56 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
         if not prior_phase_ids:
             return [self._default_task_creation_batch(plan, phase, system_prompt)]
         source_phase = max(prior_phase_ids)
+        hypothesis_sources: dict[str, tuple[str, ...]] = {}
+        hypothesis_artifact_refs: dict[str, tuple[str, ...]] = {}
+        if phase.task_creation_mode == "hypothesis_dependent":
+            hypothesis_phases = [
+                item for item in plan.phases if item.id < phase.id and item.produces_hypotheses
+            ]
+            if not hypothesis_phases:
+                raise ValueError("hypothesis-dependent phase has no preceding hypothesis producer phase")
+            source_phase = max(item.id for item in hypothesis_phases)
+
         snapshot_refs = []
         for task in self.state.list_tasks(phase=source_phase):
+            if task.status != "done":
+                continue
+            if phase.task_creation_mode == "hypothesis_dependent":
+                basis = task.acceptance.basis
+                if basis.kind != "snapshot" or not basis.snapshot_hash or not basis.item_ids:
+                    continue
+                for candidate in basis.source_refs:
+                    try:
+                        reference = canonical_artifact_reference(candidate)
+                        _manifest, snapshot_hash = self._load_controller_inventory_manifest(plan, reference)
+                    except ValueError:
+                        continue
+                    if snapshot_hash != basis.snapshot_hash:
+                        continue
+                    if reference not in snapshot_refs:
+                        snapshot_refs.append(reference)
+                    for item_id in basis.item_ids:
+                        prior = hypothesis_sources.get(item_id, ())
+                        hypothesis_sources[item_id] = tuple(sorted({*prior, task.task_uid}))
+                        evidence_refs = list(task.evidence)
+                        for result in self.state.list_task_acceptance_results(task.task_uid):
+                            evidence_refs.extend(result.evidence_refs)
+                        artifact_refs = []
+                        for evidence_ref in evidence_refs:
+                            try:
+                                artifact_ref = canonical_artifact_reference(evidence_ref)
+                            except ValueError:
+                                continue
+                            if artifact_ref.startswith("artifact:"):
+                                artifact_refs.append(artifact_ref)
+                        previous_artifacts = hypothesis_artifact_refs.get(item_id, ())
+                        hypothesis_artifact_refs[item_id] = tuple(
+                            sorted({*previous_artifacts, *artifact_refs})
+                        )
+                continue
+
             procedure = task.acceptance.basis.procedure
-            if task.status != "done" or procedure is None or procedure.output_kind != "inventory_manifest":
+            if procedure is None or procedure.output_kind != "inventory_manifest":
                 continue
             candidates = list(task.evidence)
             for result in self.state.list_task_acceptance_results(task.task_uid):
@@ -9102,6 +9166,26 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
                 )
                 if not set(item_ids).issubset(assigned_ids)
             ]
+            if phase.task_creation_mode == "hypothesis_dependent":
+                missing_groups = [
+                    label
+                    for _target_id, _kind, label, item_ids in groups
+                    if not set(item_ids).issubset(hypothesis_sources)
+                ]
+                self._emit_workflow_event({
+                    "type": "hypothesis_coverage",
+                    "source_phase": source_phase,
+                    "target_phase": phase.id,
+                    "total_group_count": len(groups),
+                    "covered_group_count": len(groups) - len(missing_groups),
+                    "missing_group_count": len(missing_groups),
+                    "missing_groups": sorted(missing_groups),
+                })
+                if missing_groups:
+                    raise ValueError(
+                        "hypothesis-dependent phase requires completed hypothesis coverage for every assigned "
+                        "inventory group; missing=" + ", ".join(sorted(missing_groups))
+                    )
             if not groups:
                 continue
             empty_batch = TaskCreationBatch(1, 1, snapshot_ref, (), 0)
@@ -9126,7 +9210,25 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
             return [self._default_task_creation_batch(plan, phase, system_prompt)]
         total = len(raw_batches)
         return [
-            TaskCreationBatch(index, total, snapshot_ref, groups, estimated)
+            TaskCreationBatch(
+                index,
+                total,
+                snapshot_ref,
+                groups,
+                estimated,
+                tuple(
+                    (item_id, hypothesis_sources[item_id])
+                    for _target_id, _kind, _label, item_ids in groups
+                    for item_id in item_ids
+                    if item_id in hypothesis_sources
+                ),
+                tuple(
+                    (item_id, hypothesis_artifact_refs[item_id])
+                    for _target_id, _kind, _label, item_ids in groups
+                    for item_id in item_ids
+                    if item_id in hypothesis_artifact_refs
+                ),
+            )
             for index, (snapshot_ref, groups, estimated) in enumerate(raw_batches, start=1)
         ]
 
@@ -9743,6 +9845,8 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
         return build_create_tasks_submitter(
             prompt_token_limit=getattr(self.runtime, "prompt_token_limit", 48_000),
             coverage_item_ids=batch.item_ids if batch.snapshot_ref else None,
+            hypothesis_source_task_uids_by_item_id=batch.hypothesis_source_task_uids,
+            hypothesis_source_artifact_refs_by_item_id=batch.hypothesis_source_artifact_refs,
             expected_snapshot_ref=batch.snapshot_ref,
             phase_title=phase.title,
             phase_objective=phase.criteria,
@@ -11205,8 +11309,9 @@ metadata; do not infer it from a phase number or title.
 Set `produces_hypotheses` to true only for a phase whose dominant outcome is detailed hypotheses for future testing;
 set it false for every other phase. This is semantic metadata; do not infer it from a phase number or title.
 Set `task_creation_mode` explicitly: standard for ordinary work, snapshot_dependent for frozen-inventory work,
-finding_dependent for work that creates tasks from persisted candidates, and finding_validation when Python owns the
-candidate verification tasks. A finding_validation phase must not use generic task creation.
+hypothesis_dependent for comprehensive testing of every completed hypothesis from an earlier hypothesis-producing
+phase, finding_dependent for work that creates tasks from persisted candidates, and finding_validation when Python
+owns the candidate verification tasks. A finding_validation phase must not use generic task creation.
 Every finding-dependent phase must follow a finding_validation phase that can verify its candidate inputs. Do not place
 exploit-chain, correlation, impact-composition, or other finding-dependent work before its required validation phase.
 
@@ -11228,7 +11333,7 @@ Return JSON exactly:
   \"id\": int, \"title\": string, \"status\": \"pending\", \"criteria\": string,
   \"produces_hypotheses\": boolean,
   \"requires_finding_candidates\": boolean,
-  \"task_creation_mode\": \"standard|snapshot_dependent|finding_dependent|finding_validation\"
+  \"task_creation_mode\": \"standard|snapshot_dependent|hypothesis_dependent|finding_dependent|finding_validation\"
 }}]}}.
 
 Now, create the plan and output only the plan:
@@ -11352,7 +11457,7 @@ Return JSON exactly:
   "id": int, "title": string, "status": "pending", "criteria": string,
   "produces_hypotheses": boolean,
   "requires_finding_candidates": boolean,
-  "task_creation_mode": "standard|snapshot_dependent|finding_dependent|finding_validation"
+  "task_creation_mode": "standard|snapshot_dependent|hypothesis_dependent|finding_dependent|finding_validation"
 }}]}}.
 
 Output only the revised plan:
@@ -11396,6 +11501,14 @@ while planning.
             if task.kind == "finding_validation"
             else ""
         )
+        hypothesis_source_refs = task.recovery_context.get("hypothesis_source_artifact_refs", [])
+        hypothesis_source_guidance = (
+            "- Read the controller-bound hypothesis source artifacts before testing. Test every documented hypothesis "
+            "for this assigned route group; record a supported negative or non-actionable disposition for any "
+            "hypothesis that cannot produce a safe executable test.\n"
+            if hypothesis_source_refs
+            else ""
+        )
         hypothesis_guidance = self._hypothesis_phase_guidance(phase)
         memory_catalog = self._memory_selection_catalog(memory_records)
         memory_selection_guidance = (
@@ -11420,6 +11533,7 @@ The generated prompt must instruct the task-executor agent:
 - Do not continue into later phase objectives, adjacent tasks, or newly discovered follow-up work.
 - If new follow-up work is discovered, preserve it as task-local durable context when an applicable persistence tool is
   available; do not investigate or execute that follow-up work in this run.
+{hypothesis_source_guidance}
 {hypothesis_guidance}
 - When the acceptance basis references inventory items, inspect their attributes.interaction metadata before acting.
   Preserve recorded operations and input locations. Do not replace POST with GET, read with execute, or another
@@ -11666,13 +11780,19 @@ Output only the revised task prompt:
         task_creator_plan = self._task_creator_plan_projection(plan, task_creator_phase)
         if batch and batch.snapshot_ref:
             existing_task_context = self._task_creator_batch_existing_task_context(phase, batch)
+            hypothesis_batch_rule = (
+                "Every listed group has completed hypothesis coverage. Prioritization may order execution but must "
+                "not omit a group.\n"
+                if phase.task_creation_mode == "hypothesis_dependent"
+                else ""
+            )
             batch_context = f"""## Controller-Owned Creation Batch
 Batch {batch.index} of {batch.total}. The structured proposal is restricted to this exact snapshot and item set.
 Snapshot: {batch.snapshot_ref}
 Estimated input tokens: {batch.estimated_input_tokens}
 Resolved context window: {int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)}
 Create the active phase's work for every listed atomic route group and no work outside this batch.
-Submit exactly one snapshot proposal. Do not divide this batch into endpoint-category or vulnerability-class proposals;
+{hypothesis_batch_rule}Submit exactly one snapshot proposal. Do not divide this batch into endpoint-category or vulnerability-class proposals;
 Python expands the single proposal into one route-scoped task for every listed group.
 The proposal objective and criterion must describe the active phase's distinct work. Do not use generic "assess
 endpoint" or "assess frozen inventory" wording.

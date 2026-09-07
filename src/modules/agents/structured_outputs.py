@@ -65,6 +65,7 @@ class PlanPhaseOutput(StrictStructuredOutput):
     task_creation_mode: Literal[
         "standard",
         "snapshot_dependent",
+        "hypothesis_dependent",
         "finding_dependent",
         "finding_validation",
     ] = "standard"

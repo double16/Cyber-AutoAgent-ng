@@ -9520,7 +9520,10 @@ def test_plan_creator_prompt_requests_inferred_operation_constraints():
     assert "separates hypothesis generation" in prompt
     assert "models exploit chains" in prompt
     assert "Concise means avoiding" in prompt
-    assert '"task_creation_mode": "standard|snapshot_dependent|finding_dependent|finding_validation"' in prompt
+    assert (
+        '"task_creation_mode": '
+        '"standard|snapshot_dependent|hypothesis_dependent|finding_dependent|finding_validation"'
+    ) in prompt
     assert "not minimizing the number of phases" in prompt
     assert "recommended minimum phase contract" in prompt
     assert "advisory, not a" in prompt
@@ -11539,6 +11542,154 @@ def test_task_creation_batches_use_resolved_context_and_preserve_atomic_groups(m
         "endpoint-1",
         "endpoint-2",
     }
+
+
+def test_hypothesis_dependent_batches_cover_every_completed_hypothesis(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Hypotheses", status="done", produces_hypotheses=True),
+            PlanPhase(id=3, title="Test", status="active", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    source_ref = "artifact:artifacts/inventory.json"
+
+    def hypothesis_task(task_uid, item_id):
+        return Task(
+            task_uid=task_uid,
+            title=f"Hypothesis {item_id}",
+            objective="Record a testable hypothesis",
+            phase=2,
+            status="done",
+            evidence=[f"artifact:artifacts/{task_uid}.json"],
+            acceptance=AcceptanceContract(
+                mode="coverage",
+                basis=AcceptanceBasis(
+                    kind="snapshot",
+                    description="Frozen endpoint",
+                    source_refs=[source_ref],
+                    snapshot_hash="snapshot-hash",
+                    item_ids=[item_id],
+                ),
+                criteria=[AcceptanceCriterion(
+                    id="hypothesis",
+                    description="Record the hypothesis",
+                    evidence_requirements=[EvidenceRequirement(kind="artifact")],
+                )],
+            ),
+        )
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, [hypothesis_task("hypothesis-1", "endpoint-1"), hypothesis_task("hypothesis-2", "endpoint-2")]),
+        text_runner=lambda *_args: "{}",
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda *_args: ({"items": []}, "snapshot-hash"),
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "_coverage_route_groups",
+        lambda *_args, **_kwargs: [
+            ("target-1", "endpoint", "http://target.test/one", ["endpoint-1"]),
+            ("target-1", "endpoint", "http://target.test/two", ["endpoint-2"]),
+        ],
+    )
+
+    batches = controller._task_creation_batches(plan, plan.phases[2], "system")
+
+    assert len(batches) == 1
+    assert batches[0].item_ids == {"endpoint-1", "endpoint-2"}
+    assert batches[0].hypothesis_source_task_uids == {
+        "endpoint-1": ("hypothesis-1",),
+        "endpoint-2": ("hypothesis-2",),
+    }
+    assert batches[0].hypothesis_source_artifact_refs == {
+        "endpoint-1": ("artifact:artifacts/hypothesis-1.json",),
+        "endpoint-2": ("artifact:artifacts/hypothesis-2.json",),
+    }
+
+
+def test_hypothesis_dependent_batches_reject_missing_hypothesis_coverage(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Hypotheses", status="done", produces_hypotheses=True),
+            PlanPhase(id=3, title="Test", status="active", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    source = Task(
+        task_uid="hypothesis-1",
+        title="Hypothesis one",
+        objective="Record a testable hypothesis",
+        phase=2,
+        status="done",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Frozen endpoint",
+                source_refs=["artifact:artifacts/inventory.json"],
+                snapshot_hash="snapshot-hash",
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="hypothesis",
+                description="Record the hypothesis",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, [source]),
+        text_runner=lambda *_args: "{}",
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda *_args: ({"items": []}, "snapshot-hash"),
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "_coverage_route_groups",
+        lambda *_args, **_kwargs: [
+            ("target-1", "endpoint", "http://target.test/one", ["endpoint-1"]),
+            ("target-1", "endpoint", "http://target.test/two", ["endpoint-2"]),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="missing=http://target.test/two"):
+        controller._task_creation_batches(plan, plan.phases[2], "system")
+
+
+def test_plan_creation_normalizes_following_standard_phase_to_hypothesis_dependent():
+    store = object.__new__(WorkflowStateStore)
+    store.operation_targets = []
+    store.store_plan = lambda plan: plan
+
+    plan = store.create_plan_from_dict({
+        "objective": "assess",
+        "phases": [
+            {"id": 1, "title": "Map", "status": "pending", "produces_hypotheses": False},
+            {"id": 2, "title": "Hypothesize", "status": "pending", "produces_hypotheses": True},
+            {"id": 3, "title": "Test", "status": "pending", "produces_hypotheses": False},
+        ],
+    })
+
+    assert plan.phases[2].task_creation_mode == "hypothesis_dependent"
 
 
 def test_controller_inventory_filter_retains_unusual_in_scope_routes_and_removes_boundary_mismatch(

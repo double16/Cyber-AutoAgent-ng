@@ -1089,6 +1089,7 @@ class PlanPhase:
     task_creation_mode: Literal[
         "standard",
         "snapshot_dependent",
+        "hypothesis_dependent",
         "finding_dependent",
         "finding_validation",
     ] = "standard"
@@ -1112,7 +1113,13 @@ class PlanPhase:
             raise ValueError("phase.produces_hypotheses must be a boolean")
         if not isinstance(self.requires_finding_candidates, bool):
             raise ValueError("phase.requires_finding_candidates must be a boolean")
-        valid_modes = {"standard", "snapshot_dependent", "finding_dependent", "finding_validation"}
+        valid_modes = {
+            "standard",
+            "snapshot_dependent",
+            "hypothesis_dependent",
+            "finding_dependent",
+            "finding_validation",
+        }
         if self.task_creation_mode not in valid_modes:
             raise ValueError(f"phase.task_creation_mode must be one of: {', '.join(sorted(valid_modes))}")
 
@@ -6941,7 +6948,9 @@ def _freeze_and_validate_acceptance(contract: AcceptanceContract, existing_tasks
         if prefix == "artifact":
             artifact_path = _artifact_path_from_ref(reference)
             producers = [task for task in existing_tasks if artifact_path in _task_evidence_artifact_paths(task)]
-            if producers and any(task.status != "done" for task in producers):
+            # Replanned/replaced tasks may retain inherited evidence references. An artifact is
+            # usable once at least one task that produced or persisted it is complete.
+            if producers and not any(task.status == "done" for task in producers):
                 raise ValueError(f"Acceptance basis producer task is not done: {reference}")
         elif prefix == "task":
             task = next((item for item in existing_tasks if item.task_uid == value), None)
@@ -7618,6 +7627,8 @@ def _create_tasks_from_proposals(
     *,
     prompt_token_limit: int,
     coverage_item_ids: set[str] | None = None,
+    hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -7915,6 +7926,23 @@ def _create_tasks_from_proposals(
 
         proposal_expanded_count = len(acceptance_groups)
         for group_title, group_objective, group_acceptance, group_target_scope, group_target_ids in acceptance_groups:
+            group_planning_context = dict(planning_context)
+            if hypothesis_source_task_uids_by_item_id and group_acceptance.mode == "coverage":
+                source_task_uids = sorted({
+                    task_uid
+                    for item_id in group_acceptance.basis.item_ids
+                    for task_uid in hypothesis_source_task_uids_by_item_id.get(item_id, ())
+                })
+                if source_task_uids:
+                    group_planning_context["hypothesis_source_task_uids"] = source_task_uids
+            if hypothesis_source_artifact_refs_by_item_id and group_acceptance.mode == "coverage":
+                source_artifact_refs = sorted({
+                    artifact_ref
+                    for item_id in group_acceptance.basis.item_ids
+                    for artifact_ref in hypothesis_source_artifact_refs_by_item_id.get(item_id, ())
+                })
+                if source_artifact_refs:
+                    group_planning_context["hypothesis_source_artifact_refs"] = source_artifact_refs
             group_identity = _frozen_task_identity(
                 group_title,
                 group_objective,
@@ -7973,7 +8001,7 @@ def _create_tasks_from_proposals(
                 target_ids=group_target_ids,
                 replacement_of=replacement_of,
                 supersedes_criteria=supersedes_criteria,
-                recovery_context=planning_context,
+                recovery_context=group_planning_context,
             ))
             proposal_created_count += 1
         logger.info(
@@ -8035,6 +8063,8 @@ def build_create_tasks_submitter(
     prompt_token_limit: int = 48_000,
     *,
     coverage_item_ids: set[str] | None = None,
+    hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -8063,6 +8093,8 @@ def build_create_tasks_submitter(
                 tasks,
                 prompt_token_limit=prompt_token_limit,
                 coverage_item_ids=coverage_item_ids,
+                hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
+                hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
                 expected_snapshot_ref=expected_snapshot_ref,
                 phase_title=phase_title,
                 phase_objective=phase_objective,
@@ -8089,6 +8121,8 @@ def build_create_tasks_tool(
     prompt_token_limit: int = 48_000,
     *,
     coverage_item_ids: set[str] | None = None,
+    hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -8105,6 +8139,8 @@ def build_create_tasks_tool(
     submit_tasks = build_create_tasks_submitter(
         prompt_token_limit=prompt_token_limit,
         coverage_item_ids=coverage_item_ids,
+        hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
+        hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
         expected_snapshot_ref=expected_snapshot_ref,
         phase_title=phase_title,
         phase_objective=phase_objective,
