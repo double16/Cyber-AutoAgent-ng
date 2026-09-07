@@ -52,6 +52,191 @@ def test_shared_semantic_enum_normalization_keeps_unknown_values_invalid(adapter
         TypeAdapter(adapter_type).validate_python("invented-state")
 
 
+def test_sqlite_store_resets_failed_work_without_discarding_task_context(tmp_path):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical-target")
+    operation_id = "OP_RESET"
+    plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            mod.PlanPhase(id=1, title="Recon", status="done"),
+            mod.PlanPhase(id=2, title="Validate", status="partial_failure"),
+            mod.PlanPhase(id=3, title="Close", status="blocked"),
+        ],
+        assessment_complete=True,
+    )
+    store.store_plan(operation_id, plan)
+    failed_task = mod.Task(
+        task_uid="failed",
+        title="Retry validation",
+        objective="Validate the assigned target",
+        acceptance=make_acceptance("retry"),
+        phase=2,
+        status="partial_failure",
+        status_reason="Response timed out",
+        evidence=["artifact:retry.json"],
+        recovery_context={"guidance": "Use the retained artifact."},
+    )
+    blocked_task = mod.Task(
+        task_uid="blocked",
+        title="Blocked validation",
+        objective="Await credentials",
+        acceptance=make_acceptance("blocked"),
+        phase=3,
+        status="blocked",
+        status_reason="Credentials unavailable",
+    )
+    reasonless_failed_task = mod.Task(
+        task_uid="reasonless-failed",
+        title="Retry mapping",
+        objective="Retry the assigned mapping task",
+        acceptance=make_acceptance("reasonless-retry"),
+        phase=3,
+        status="partial_failure",
+    )
+    store.store_task(operation_id, failed_task)
+    store.store_task(operation_id, blocked_task)
+    store.store_task(operation_id, reasonless_failed_task)
+
+    reset_plan, task_count, phase_count = store.reset_failed_work(operation_id)
+
+    assert (task_count, phase_count) == (3, 2)
+    assert reset_plan.current_phase == 2
+    assert reset_plan.assessment_complete is False
+    assert [phase.status for phase in reset_plan.phases] == ["done", "active", "pending"]
+    tasks = {task.task_uid: task for task in store.get_tasks(operation_id)}
+    assert tasks["failed"].status == "pending"
+    assert "Prior reason: Response timed out" in tasks["failed"].status_reason
+    assert tasks["failed"].evidence == ["artifact:retry.json"]
+    assert tasks["failed"].recovery_context == {"guidance": "Use the retained artifact."}
+    assert tasks["reasonless-failed"].status == "pending"
+    assert tasks["reasonless-failed"].status_reason == "Reset for continuation from partial_failure."
+    assert tasks["blocked"].status == "pending"
+    assert "Reset for continuation from blocked." in tasks["blocked"].status_reason
+    assert "Prior reason: Credentials unavailable" in tasks["blocked"].status_reason
+
+
+def test_sqlite_store_failed_work_reset_is_a_noop_without_failures(tmp_path):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical-target")
+    operation_id = "OP_NO_RESET"
+    plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="done")],
+        assessment_complete=True,
+    )
+    store.store_plan(operation_id, plan)
+
+    reset_plan, task_count, phase_count = store.reset_failed_work(operation_id)
+
+    assert reset_plan.current_phase == plan.current_phase
+    assert reset_plan.assessment_complete == plan.assessment_complete
+    assert [phase.status for phase in reset_plan.phases] == ["done"]
+    assert (task_count, phase_count) == (0, 0)
+
+
+def test_sqlite_store_replans_selected_phases_without_discarding_task_context(tmp_path):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical-target")
+    operation_id = "OP_REPLAN"
+    plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            mod.PlanPhase(id=1, title="Recon", status="done"),
+            mod.PlanPhase(id=2, title="Map", status="done"),
+            mod.PlanPhase(id=3, title="Validate", status="active"),
+        ],
+        assessment_complete=True,
+    )
+    store.store_plan(operation_id, plan)
+    archived_task = mod.Task(
+        task_uid="archived",
+        title="Completed mapping",
+        objective="Map the assigned target",
+        acceptance=make_acceptance("archived"),
+        phase=2,
+        status="done",
+        evidence=["artifact:mapping.json"],
+        recovery_context={"source": "retained"},
+    )
+    active_task = mod.Task(
+        task_uid="active",
+        title="Active validation",
+        objective="Validate the assigned target",
+        acceptance=make_acceptance("active"),
+        phase=3,
+        status="active",
+    )
+    validation_task = mod.Task(
+        task_uid="finding-validation",
+        title="Validate mapping finding",
+        objective="Independently validate the assigned mapping finding",
+        acceptance=make_acceptance("finding-validation"),
+        phase=2,
+        status="done",
+        status_reason="Original validation completed",
+        evidence=["artifact:validation.json"],
+        kind="finding_validation",
+        reference_id="finding-1",
+        recovery_context={"binding": "retained"},
+    )
+    store.store_task(operation_id, archived_task)
+    store.store_task(operation_id, active_task)
+    store.store_task(operation_id, validation_task)
+
+    reset_plan, task_count, selected_phase_ids = store.reset_phases_for_replan(operation_id, [2, 3])
+
+    assert task_count == 3
+    assert selected_phase_ids == (2, 3)
+    assert reset_plan.current_phase == 2
+    assert reset_plan.assessment_complete is False
+    assert [phase.status for phase in reset_plan.phases] == ["done", "active", "pending"]
+    tasks = {task.task_uid: task for task in store.get_tasks(operation_id)}
+    assert tasks["archived"].status == "replanned"
+    assert "Archived for explicit phase replan from done." in tasks["archived"].status_reason
+    assert tasks["archived"].evidence == ["artifact:mapping.json"]
+    assert tasks["archived"].recovery_context == {"source": "retained"}
+    assert tasks["active"].status == "replanned"
+    assert "Archived for explicit phase replan from active." in tasks["active"].status_reason
+    assert tasks["finding-validation"].status == "pending"
+    assert "Reset finding validation for explicit phase replan from done." in tasks["finding-validation"].status_reason
+    assert "Prior reason: Original validation completed" in tasks["finding-validation"].status_reason
+    assert tasks["finding-validation"].reference_id == "finding-1"
+    assert tasks["finding-validation"].evidence == ["artifact:validation.json"]
+    assert tasks["finding-validation"].recovery_context == {"binding": "retained"}
+
+
+def test_sqlite_store_replan_rejects_unknown_phase_without_mutating_state(tmp_path):
+    store = mod.SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical-target")
+    operation_id = "OP_REPLAN_INVALID"
+    plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Recon", status="done")],
+        assessment_complete=True,
+    )
+    store.store_plan(operation_id, plan)
+    task = mod.Task(
+        task_uid="completed",
+        title="Completed reconnaissance",
+        objective="Map the assigned target",
+        acceptance=make_acceptance("completed"),
+        phase=1,
+        status="done",
+    )
+    store.store_task(operation_id, task)
+
+    with pytest.raises(ValueError, match="Unknown plan phase IDs"):
+        store.reset_phases_for_replan(operation_id, [2])
+
+    assert store.get_plan(operation_id).assessment_complete is True
+    assert store.get_tasks(operation_id)[0].status == "done"
+
+
 def test_task_service_scope_violations_enforces_assigned_scheme_host_and_port_only():
     plan = mod.OperationPlan(
         objective="assess",
@@ -3503,6 +3688,61 @@ def test_endpoint_coverage_acceptance_rejects_manifest_as_subject_evidence(fake_
     assert store.get_acceptance_results("op1", task.task_uid) == []
 
 
+@pytest.mark.parametrize(
+    ("evidence_requirement", "additional_reference"),
+    [
+        (mod.EvidenceRequirement(kind="artifact", min_count=1), "artifact:artifacts/endpoint-assessment.txt"),
+        (mod.EvidenceRequirement(kind="durable_evidence", min_count=1), "memory:m1"),
+    ],
+)
+def test_endpoint_coverage_acceptance_allows_subject_evidence_alongside_manifest(
+    fake_memory_client,
+    evidence_requirement,
+    additional_reference,
+):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    _loaded_manifest, snapshot_hash = mod._load_inventory_manifest(f"artifact:{manifest}")
+    if additional_reference.startswith("artifact:"):
+        artifact = Path(mod._operation_output_root()) / "artifacts" / "endpoint-assessment.txt"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text("Endpoint-specific assessment result", encoding="utf-8")
+    task = mod.Task(
+        task_uid=f"endpoint-mixed-evidence-{evidence_requirement.kind}",
+        title="Assess inventory endpoint",
+        objective="Assess the frozen endpoint",
+        acceptance=mod.AcceptanceContract(
+            mode="coverage",
+            basis=mod.AcceptanceBasis(
+                kind="snapshot",
+                description="one endpoint",
+                source_refs=[f"artifact:{manifest}"],
+                snapshot_hash=snapshot_hash,
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[mod.AcceptanceCriterion(
+                id="criterion-1",
+                description="Assess the selected endpoint",
+                evidence_requirements=[evidence_requirement],
+            )],
+        ),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+
+    result = json.loads(
+        mod.build_record_task_acceptance_tool(task.task_uid)(
+            status="satisfied",
+            disposition="observation",
+            summary="Endpoint assessment complete",
+            evidence_refs=[f"artifact:{manifest}", additional_reference],
+        )
+    )
+
+    assert result["complete"] is True
+
+
 def test_controller_execution_evidence_is_required_before_acceptance(fake_memory_client):
     _client, store = fake_memory_client
     artifact = _write_inventory_manifest()
@@ -3970,6 +4210,83 @@ def test_acceptance_basis_reference_resolution_rejects_invalid_sources(fake_memo
                 }
             ]
         )
+
+
+def test_artifact_acceptance_allows_done_producer_with_replanned_duplicate(fake_memory_client):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    artifact_ref = f"artifact:{manifest}"
+    acceptance = mod.AcceptanceContract(
+        mode="outcome",
+        basis=mod.AcceptanceBasis(
+            kind="snapshot",
+            description="Existing inventory",
+            source_refs=[artifact_ref],
+        ),
+        criteria=[
+            mod.AcceptanceCriterion(
+                id="result",
+                description="Use the inventory",
+                evidence_requirements=[mod.EvidenceRequirement(kind="memory")],
+            )
+        ],
+    )
+    done = mod.Task(
+        task_uid="done-producer",
+        title="Done producer",
+        objective="Produce inventory",
+        acceptance=make_acceptance("produce-done"),
+        evidence=[str(manifest)],
+        phase=1,
+        status="done",
+    )
+    replanned = mod.Task(
+        task_uid="replanned-consumer",
+        title="Replanned consumer",
+        objective="Consume inventory",
+        acceptance=make_acceptance("consume-replanned"),
+        evidence=[str(manifest)],
+        phase=2,
+        status="replanned",
+    )
+
+    frozen = mod._freeze_and_validate_acceptance(acceptance, [done, replanned])
+
+    assert frozen.basis.source_refs == (artifact_ref,)
+    assert store.tasks == []
+
+
+def test_artifact_acceptance_rejects_when_no_matching_producer_is_done(fake_memory_client):
+    _client, _store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    artifact_ref = f"artifact:{manifest}"
+    acceptance = mod.AcceptanceContract(
+        mode="outcome",
+        basis=mod.AcceptanceBasis(
+            kind="snapshot",
+            description="Existing inventory",
+            source_refs=[artifact_ref],
+        ),
+        criteria=[
+            mod.AcceptanceCriterion(
+                id="result",
+                description="Use the inventory",
+                evidence_requirements=[mod.EvidenceRequirement(kind="memory")],
+            )
+        ],
+    )
+    producer = mod.Task(
+        task_uid="partial-producer",
+        title="Partial producer",
+        objective="Produce inventory",
+        acceptance=make_acceptance("produce-partial"),
+        evidence=[str(manifest)],
+        phase=1,
+        status="partial_failure",
+    )
+
+    with pytest.raises(ValueError, match="Acceptance basis producer task is not done"):
+        mod._freeze_and_validate_acceptance(acceptance, [producer])
 
 
 def test_bound_acceptance_validates_coverage_ledger_and_manifest_hash(fake_memory_client):
@@ -4672,13 +4989,15 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
             status="pending",
         )
 
-    phase = mod.PlanPhase.from_obj({"id": 1, "title": "Recon", "status": "active", "criteria": None})
+    phase = mod.PlanPhase.from_obj({
+        "id": 1, "title": "Recon", "status": "active", "criteria": None, "produces_hypotheses": False
+    })
     plan = mod.OperationPlan.from_obj(
         {
             "objective": "Assess target",
             "constraints": ["Read-only checks", "Keep evidence in artifacts"],
             "current_phase": 1,
-            "phases": [phase.to_dict(), {"id": 2, "title": "Exploit", "status": "pending"}],
+            "phases": [phase.to_dict(), {"id": 2, "title": "Exploit", "status": "pending", "produces_hypotheses": False}],
         }
     )
     assert "plan_overview[1]" in plan.to_toon()
@@ -4690,15 +5009,15 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
     assert plan.to_dict()["constraints"] == ["Read-only checks", "Keep evidence in artifacts"]
     assert plan.total_phases == 2
     assert mod.OperationPlan.from_obj(plan) is plan
-    legacy_plan = mod.OperationPlan.from_obj(
+    explicit_plan = mod.OperationPlan.from_obj(
         {
             "objective": "Legacy",
             "current_phase": 1,
-            "phases": [{"id": 1, "title": "Recon", "status": "active"}],
+            "phases": [{"id": 1, "title": "Recon", "status": "active", "produces_hypotheses": False}],
         }
     )
-    assert legacy_plan.constraints == []
-    assert "plan_constraints[0]{constraint}:" in legacy_plan.to_toon()
+    assert explicit_plan.constraints == []
+    assert "plan_constraints[0]{constraint}:" in explicit_plan.to_toon()
     with pytest.raises(ValueError):
         mod.PlanPhase(id=-1, title="bad", status="pending")
     with pytest.raises(ValueError):
@@ -4708,7 +5027,7 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
             "objective": "Scalar",
             "constraints": "  read-only  ",
             "current_phase": 1,
-            "phases": [{"id": 1, "title": "Recon", "status": "active"}],
+            "phases": [{"id": 1, "title": "Recon", "status": "active", "produces_hypotheses": False}],
         }
     )
     assert scalar_plan.constraints == ["read-only"]

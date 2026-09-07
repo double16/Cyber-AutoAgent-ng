@@ -168,7 +168,7 @@ _QDRANT_WRITE_LOCK = threading.Lock()
 
 
 PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "not_applicable"]
-TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "superseded"]
+TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"]
 TargetType = Literal["network", "network_range", "filesystem"]
 TargetScope = Literal["all", "subset"]
 AcceptanceMode = Literal["outcome", "coverage"]
@@ -967,7 +967,7 @@ class Task:
         if not isinstance(self.objective, str) or not self.objective.strip():
             raise ValueError("objective must be a non-empty string")
         normalized_status = _normalize_task_status(self.status)
-        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked", "superseded"}:
+        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"}:
             raise ValueError("task status is invalid")
         object.__setattr__(self, "status", normalized_status)
         object.__setattr__(self, "acceptance", AcceptanceContract.from_obj(self.acceptance))
@@ -976,8 +976,8 @@ class Task:
         object.__setattr__(self, "recovery_context", dict(self.recovery_context))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
-        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded"):
-            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked|superseded")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"):
+            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked|superseded|replanned")
         if self.target_scope not in ("all", "subset"):
             raise ValueError("target_scope must be all or subset")
         if not isinstance(self.target_ids, list):
@@ -1084,10 +1084,12 @@ class PlanPhase:
     title: str
     status: PlanStatus
     criteria: str = ""
+    produces_hypotheses: bool = False
     requires_finding_candidates: bool = False
     task_creation_mode: Literal[
         "standard",
         "snapshot_dependent",
+        "hypothesis_dependent",
         "finding_dependent",
         "finding_validation",
     ] = "standard"
@@ -1107,9 +1109,17 @@ class PlanPhase:
             object.__setattr__(self, "criteria", "")  # type: ignore[misc]
         if not isinstance(self.criteria, str):
             raise ValueError("phase.criteria must be a string")
+        if not isinstance(self.produces_hypotheses, bool):
+            raise ValueError("phase.produces_hypotheses must be a boolean")
         if not isinstance(self.requires_finding_candidates, bool):
             raise ValueError("phase.requires_finding_candidates must be a boolean")
-        valid_modes = {"standard", "snapshot_dependent", "finding_dependent", "finding_validation"}
+        valid_modes = {
+            "standard",
+            "snapshot_dependent",
+            "hypothesis_dependent",
+            "finding_dependent",
+            "finding_validation",
+        }
         if self.task_creation_mode not in valid_modes:
             raise ValueError(f"phase.task_creation_mode must be one of: {', '.join(sorted(valid_modes))}")
 
@@ -1117,11 +1127,14 @@ class PlanPhase:
     def from_obj(obj: Any) -> "PlanPhase":
         if not isinstance(obj, dict):
             raise ValueError("phase must be an object/dict")
+        if "produces_hypotheses" not in obj:
+            raise ValueError("phase.produces_hypotheses is required")
         return PlanPhase(
             id=int(obj.get("id")),
             title=str(obj.get("title", "")),
             status=str(obj.get("status", "pending")),  # validated in __post_init__
             criteria=str(obj.get("criteria", "")) if obj.get("criteria") is not None else "",
+            produces_hypotheses=obj["produces_hypotheses"],
             requires_finding_candidates=obj.get("requires_finding_candidates", False),
             task_creation_mode=str(
                 obj.get("task_creation_mode")
@@ -1135,7 +1148,7 @@ class PlanPhase:
 
     @staticmethod
     def csv_format() -> str:
-        return "id,title,status,criteria,requires_finding_candidates,task_creation_mode"
+        return "id,title,status,criteria,produces_hypotheses,requires_finding_candidates,task_creation_mode"
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
@@ -1145,7 +1158,8 @@ class PlanPhase:
         if include_format:
             lines.append(f"{self.toon_format()}:")
         lines.append(
-            f"  {self.id},{title},{status},{criteria},{str(self.requires_finding_candidates).lower()},"
+            f"  {self.id},{title},{status},{criteria},{str(self.produces_hypotheses).lower()},"
+            f"{str(self.requires_finding_candidates).lower()},"
             f"{self.task_creation_mode}"
         )
         return "\n".join(lines).strip()
@@ -1156,6 +1170,7 @@ class PlanPhase:
             "title": self.title,
             "status": self.status,
             "criteria": self.criteria,
+            "produces_hypotheses": self.produces_hypotheses,
             "requires_finding_candidates": self.requires_finding_candidates,
             "task_creation_mode": self.task_creation_mode,
         })
@@ -1441,6 +1456,14 @@ class ApplicationStore(Protocol):
 
     def get_tasks(self, operation_id: str) -> list[Task]: ...
 
+    def reset_failed_work(self, operation_id: str) -> tuple[OperationPlan, int, int]: ...
+
+    def reset_phases_for_replan(
+        self,
+        operation_id: str,
+        phase_ids: Iterable[int],
+    ) -> tuple[OperationPlan, int, tuple[int, ...]]: ...
+
     def append_operation_model_metrics(
         self, operation_id: str, captured_at: str, rows: list[dict[str, Any]]
     ) -> None: ...
@@ -1488,6 +1511,8 @@ class SQLiteApplicationStore:
         "store_task",
         "patch_task",
         "get_tasks",
+        "reset_failed_work",
+        "reset_phases_for_replan",
         "store_acceptance_results",
         "get_acceptance_results",
         "has_acceptance_memory_publication",
@@ -2092,6 +2117,161 @@ class SQLiteApplicationStore:
                     )
                 )
         return tasks
+
+    def reset_failed_work(self, operation_id: str) -> tuple[OperationPlan, int, int]:
+        """Make failed work runnable again while retaining its durable evidence.
+
+        Returns the updated plan followed by the number of reset tasks and phases.  The
+        transition is atomic so a continuation never observes a reset plan with stale
+        terminal tasks, or the reverse.
+        """
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown operation plan: {operation_id}")
+            plan = OperationPlan.from_obj(json.loads(row[0]))
+            failed_tasks = conn.execute(
+                "SELECT task_uid, phase, status, status_reason FROM tasks "
+                "WHERE logical_target = ? AND operation_id = ? AND status IN ('partial_failure', 'blocked')",
+                (self.logical_target, operation_id),
+            ).fetchall()
+            failed_phase_ids = {
+                int(phase.id) for phase in plan.phases if phase.status in {"partial_failure", "blocked"}
+            }
+            affected_phase_ids = failed_phase_ids | {int(task[1]) for task in failed_tasks}
+            if not affected_phase_ids:
+                return plan, 0, 0
+
+            now = datetime.now().isoformat()
+            for task_uid, _phase, prior_status, prior_reason in failed_tasks:
+                reset_reason = f"Reset for continuation from {prior_status}."
+                if prior_reason:
+                    reset_reason = f"{reset_reason} Prior reason: {prior_reason}"
+                conn.execute(
+                    "UPDATE tasks SET status = ?, status_reason = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    ("pending", reset_reason, now, self.logical_target, operation_id, task_uid),
+                )
+
+            current_phase = min(affected_phase_ids)
+            phases = []
+            for phase in plan.phases:
+                status = phase.status
+                if phase.id == current_phase:
+                    status = "active"
+                elif phase.id in affected_phase_ids or status == "active":
+                    status = "pending"
+                phases.append(replace(phase, status=status))
+            updated_plan = replace(
+                plan,
+                current_phase=current_phase,
+                phases=phases,
+                assessment_complete=False,
+                updated_at=now,
+            )
+            conn.execute(
+                "UPDATE plans SET current_phase = ?, assessment_complete = ?, plan_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ?",
+                (
+                    updated_plan.current_phase,
+                    updated_plan.assessment_complete,
+                    json.dumps(updated_plan.to_dict()),
+                    now,
+                    self.logical_target,
+                    operation_id,
+                ),
+            )
+        return updated_plan, len(failed_tasks), len(affected_phase_ids)
+
+    def reset_phases_for_replan(
+        self,
+        operation_id: str,
+        phase_ids: Iterable[int],
+    ) -> tuple[OperationPlan, int, tuple[int, ...]]:
+        """Replan selected phase tasks and reopen their phases for fresh task creation.
+
+        Archived tasks retain their evidence and immutable acceptance history. They are
+        deliberately marked ``replanned`` rather than deleted so reports and operation
+        forensics retain the reason that replacement work was requested. Existing
+        finding-validation tasks instead return to ``pending`` so their bound, independent
+        verification work resumes before fresh proposals are created.
+        """
+
+        requested_phase_ids = tuple(sorted({int(phase_id) for phase_id in phase_ids}))
+        if not requested_phase_ids:
+            raise ValueError("At least one phase ID is required for replanning")
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown operation plan: {operation_id}")
+            plan = OperationPlan.from_obj(json.loads(row[0]))
+            known_phase_ids = {int(phase.id) for phase in plan.phases}
+            unknown_phase_ids = sorted(set(requested_phase_ids) - known_phase_ids)
+            if unknown_phase_ids:
+                raise ValueError(f"Unknown plan phase IDs: {unknown_phase_ids}")
+
+            now = datetime.now().isoformat()
+            placeholders = ", ".join("?" for _ in requested_phase_ids)
+            task_rows = conn.execute(
+                "SELECT task_uid, kind, status, status_reason FROM tasks "
+                f"WHERE logical_target = ? AND operation_id = ? AND phase IN ({placeholders})",
+                (self.logical_target, operation_id, *requested_phase_ids),
+            ).fetchall()
+            for task_uid, kind, prior_status, prior_reason in task_rows:
+                is_finding_validation = kind == "finding_validation"
+                next_status = "pending" if is_finding_validation else "replanned"
+                reset_reason = (
+                    f"Reset finding validation for explicit phase replan from {prior_status}."
+                    if is_finding_validation
+                    else f"Archived for explicit phase replan from {prior_status}."
+                )
+                if prior_reason:
+                    reset_reason = f"{reset_reason} Prior reason: {prior_reason}"
+                conn.execute(
+                    "UPDATE tasks SET status = ?, status_reason = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    (next_status, reset_reason, now, self.logical_target, operation_id, task_uid),
+                )
+
+            active_phase_id = requested_phase_ids[0]
+            phases = []
+            for phase in plan.phases:
+                status = phase.status
+                if phase.id == active_phase_id:
+                    status = "active"
+                elif phase.id in requested_phase_ids or status == "active":
+                    status = "pending"
+                phases.append(replace(phase, status=status))
+            updated_plan = replace(
+                plan,
+                current_phase=active_phase_id,
+                phases=phases,
+                assessment_complete=False,
+                updated_at=now,
+            )
+            conn.execute(
+                "UPDATE plans SET current_phase = ?, assessment_complete = ?, plan_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ?",
+                (
+                    updated_plan.current_phase,
+                    updated_plan.assessment_complete,
+                    json.dumps(updated_plan.to_dict()),
+                    now,
+                    self.logical_target,
+                    operation_id,
+                ),
+            )
+        return updated_plan, len(task_rows), requested_phase_ids
 
     def store_acceptance_results(
         self,
@@ -4396,8 +4576,19 @@ def _validate_confirmation_manifest(candidate: dict[str, Any], reference: str) -
                 _assertion_matches_artifact(assertion, canonical_reexposure_ref)
                 for assertion in secret_assertions
             ):
+                required_predicates = sorted(
+                    _canonical_assertion_predicate(assertion) for assertion in secret_assertions
+                )
+                available_predicates = [
+                    {"type": "secret_exposure", "kind": exposure.kind, "digest": exposure.digest}
+                    for exposure in detect_secret_exposures(canonical_reexposure_ref)
+                ]
                 raise _confirmation_manifest_error(
-                    "secret exposure revalidation requires the same exposure in a fresh artifact", requirements
+                    "secret exposure revalidation requires the same exposure in a fresh artifact; "
+                    f"canonical reexposure_artifact={canonical_reexposure_ref}; "
+                    f"required predicates={json.dumps(required_predicates)}; "
+                    f"available predicates={json.dumps(available_predicates, sort_keys=True)}",
+                    requirements,
                 )
             derived[rule_id] = {"reexposure_artifact": canonical_reexposure_ref}
     return {
@@ -4579,6 +4770,8 @@ def record_finding_validation(
             "complete": True,
             "finding_uid": finding_uid,
             "outcome": normalized_outcome,
+            "evidence_artifacts": evidence,
+            "validation_manifest": manifest_attestation.get("manifest"),
             "acceptance": acceptance_response,
         },
         sort_keys=True,
@@ -4616,6 +4809,8 @@ def build_record_finding_validation_tool(task: Task) -> Any:
         manifest_shape = json.dumps(finding_validation_manifest_schema(requirements), sort_keys=True)
         manifest_description = (
             "Required for confirmed outcomes. Provide a previously written artifact reference, never inline JSON. "
+            "An existing absolute path inside the current operation is accepted and canonicalized to artifact:, "
+            "but artifact: is preferred. "
             f"It must contain these required checks: {', '.join(requirement_ids)}. "
             f"Manifest JSON shape: {manifest_shape}"
         )
@@ -4648,6 +4843,8 @@ def build_record_finding_validation_tool(task: Task) -> Any:
 The controller binds this tool to the only finding and verification task assigned to this task. Supply fresh evidence
 artifacts and an outcome; Python re-proves the candidate's immutable markers and records frozen task acceptance.
 For confirmed outcomes, provide any required validation manifest as an existing artifact reference, never inline JSON.
+An existing absolute path inside the current operation is accepted and canonicalized to an `artifact:` reference, but
+use `artifact:` in new calls.
 """
     input_schema: dict[str, Any] = {
         "type": "object",
@@ -6751,7 +6948,9 @@ def _freeze_and_validate_acceptance(contract: AcceptanceContract, existing_tasks
         if prefix == "artifact":
             artifact_path = _artifact_path_from_ref(reference)
             producers = [task for task in existing_tasks if artifact_path in _task_evidence_artifact_paths(task)]
-            if producers and any(task.status != "done" for task in producers):
+            # Replanned/replaced tasks may retain inherited evidence references. An artifact is
+            # usable once at least one task that produced or persisted it is complete.
+            if producers and not any(task.status == "done" for task in producers):
                 raise ValueError(f"Acceptance basis producer task is not done: {reference}")
         elif prefix == "task":
             task = next((item for item in existing_tasks if item.task_uid == value), None)
@@ -7428,6 +7627,8 @@ def _create_tasks_from_proposals(
     *,
     prompt_token_limit: int,
     coverage_item_ids: set[str] | None = None,
+    hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -7725,6 +7926,23 @@ def _create_tasks_from_proposals(
 
         proposal_expanded_count = len(acceptance_groups)
         for group_title, group_objective, group_acceptance, group_target_scope, group_target_ids in acceptance_groups:
+            group_planning_context = dict(planning_context)
+            if hypothesis_source_task_uids_by_item_id and group_acceptance.mode == "coverage":
+                source_task_uids = sorted({
+                    task_uid
+                    for item_id in group_acceptance.basis.item_ids
+                    for task_uid in hypothesis_source_task_uids_by_item_id.get(item_id, ())
+                })
+                if source_task_uids:
+                    group_planning_context["hypothesis_source_task_uids"] = source_task_uids
+            if hypothesis_source_artifact_refs_by_item_id and group_acceptance.mode == "coverage":
+                source_artifact_refs = sorted({
+                    artifact_ref
+                    for item_id in group_acceptance.basis.item_ids
+                    for artifact_ref in hypothesis_source_artifact_refs_by_item_id.get(item_id, ())
+                })
+                if source_artifact_refs:
+                    group_planning_context["hypothesis_source_artifact_refs"] = source_artifact_refs
             group_identity = _frozen_task_identity(
                 group_title,
                 group_objective,
@@ -7783,7 +8001,7 @@ def _create_tasks_from_proposals(
                 target_ids=group_target_ids,
                 replacement_of=replacement_of,
                 supersedes_criteria=supersedes_criteria,
-                recovery_context=planning_context,
+                recovery_context=group_planning_context,
             ))
             proposal_created_count += 1
         logger.info(
@@ -7845,6 +8063,8 @@ def build_create_tasks_submitter(
     prompt_token_limit: int = 48_000,
     *,
     coverage_item_ids: set[str] | None = None,
+    hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -7873,6 +8093,8 @@ def build_create_tasks_submitter(
                 tasks,
                 prompt_token_limit=prompt_token_limit,
                 coverage_item_ids=coverage_item_ids,
+                hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
+                hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
                 expected_snapshot_ref=expected_snapshot_ref,
                 phase_title=phase_title,
                 phase_objective=phase_objective,
@@ -7899,6 +8121,8 @@ def build_create_tasks_tool(
     prompt_token_limit: int = 48_000,
     *,
     coverage_item_ids: set[str] | None = None,
+    hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -7915,6 +8139,8 @@ def build_create_tasks_tool(
     submit_tasks = build_create_tasks_submitter(
         prompt_token_limit=prompt_token_limit,
         coverage_item_ids=coverage_item_ids,
+        hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
+        hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
         expected_snapshot_ref=expected_snapshot_ref,
         phase_title=phase_title,
         phase_objective=phase_objective,
@@ -8058,7 +8284,7 @@ def _validate_acceptance_result_evidence(
 
 
 def _acceptance_evidence_relevance_error(task: Task, result: AcceptanceResult) -> str:
-    """Reject a manifest used as proof for one frozen inventory endpoint.
+    """Reject inventory-manifest-only proof for one frozen inventory endpoint.
 
     This is intentionally based on the inventory item kind and frozen item IDs rather
     than HTTP URL syntax, so inventories from other modules retain the same guard.
@@ -8082,14 +8308,18 @@ def _acceptance_evidence_relevance_error(task: Task, result: AcceptanceResult) -
         )
     if not source_endpoint_ids.intersection(expected_ids):
         return ""
+    references = list(result.evidence_refs)
+    for coverage_item in result.coverage:
+        references.extend(coverage_item.evidence_refs)
+    references = list(dict.fromkeys(references))
     inventory_refs = []
-    for reference in result.evidence_refs:
+    for reference in references:
         try:
             _load_inventory_manifest(reference)
         except ValueError:
             continue
         inventory_refs.append(reference)
-    if not inventory_refs:
+    if not inventory_refs or len(inventory_refs) != len(references):
         return ""
     return (
         "Acceptance evidence is not relevant to the frozen inventory subject. "
@@ -9266,7 +9496,7 @@ class QdrantMemoryClient:
         # retained for reporting, but must not be converted into a completed operation.
         tasks = _get_database_store().get_tasks(op_id)
         all_done = all(p.status in {"done", "not_applicable"} for p in plan.phases)
-        all_tasks_done = all(task.status in {"done", "superseded"} for task in tasks)
+        all_tasks_done = all(task.status in {"done", "superseded", "replanned"} for task in tasks)
         actionable_tasks = [task for task in tasks if task.status in {"active", "pending"}]
         add_completion_reminder = False
         if all_done and all_tasks_done and not plan.assessment_complete:

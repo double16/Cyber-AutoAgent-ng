@@ -2,9 +2,13 @@
 
 ### Features
 
-- Add opt-in module task fan-out contracts so web, web reconnaissance, and CTF mapping phases create distinct,
-  controller-validated workstreams instead of one broad task.
-
+- Add a seven-day Qdrant semantic cache for successful web-search responses, shared across operations that use the
+  same embedding model and conservatively reused only for high-confidence matches.
+- Add `--reset-phases` continuation mode that selectively resets phases, archives prior tasks, and creates fresh task
+  proposals from comma-separated phase IDs and ranges such as `3,5-`; existing finding-validation tasks are returned
+  to pending so their bound independent verification resumes.
+- Add `--reset-failed` continuation mode and interactive `continue ... reset-failed` support to retry partial-failure
+  and blocked workflow tasks and phases while retaining their durable evidence.
 - Add webcrack and shuji JavaScript reverse-engineering tools.
 - Consolidate authoritative workflow state into `outputs/cyber_autoagent.db`.
 - Replace semantic-memory backends with Qdrant 1.18, using `outputs/qdrant` by default or a configured service.
@@ -53,6 +57,8 @@
 
 ### Fixes
 
+- Block credential, payment-card, and high-confidence PII values before either web-search provider receives a query;
+  expose both runtime providers through one stable `web_search` wrapper.
 - Keep auto-generated finding-validation tasks focused on their assigned endpoint while retaining leaked credentials
   and external service URLs as response-data markers for deterministic evidence verification.
 - Retain redacted structured shell inputs in controller tool outcomes so successful artifact-producing commands such

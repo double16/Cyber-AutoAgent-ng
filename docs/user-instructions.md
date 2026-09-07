@@ -44,6 +44,8 @@ options include:
 | `--memory-mode` | `operation` (current operation only) or `shared` (same target across operations) |
 | `--provider` / `--model` / `--region` | Model configuration |
 | `--continue` / `--report` | Continue or regenerate the latest operation, optionally by ID |
+| `--reset-failed` | With `--continue`, retry all partial-failure and blocked tasks and phases |
+| `--reset-phases` | With `--continue`, archive selected phase tasks and propose fresh work; accepts `3,5-` style selectors |
 | `--deployment-mode` | `local-cli`, `single-container`, or `full-stack` |
 | `--mcp-enabled` / `--mcp-conns` | Enable and configure MCP servers |
 | `--headless` / `--recording` / `--debug, -d` | Output and diagnostic modes |
@@ -80,12 +82,67 @@ default is `web`; its provider choices are `bedrock`, `ollama`, `litellm`, and `
 | `--memory-path` / `--memory-mode` / `--keep-memory` | Memory configuration |
 | `--output-dir` | Output directory override |
 | `--continue` / `--report` | Continue or regenerate an operation |
+| `--reset-failed` | With `--continue`, reset partial-failure and blocked work before retrying the operation |
+| `--reset-phases SELECTOR` | With `--continue`, archive selected phase work and create fresh task proposals |
 | `--eval-rubric` | Enable evaluation with the selected rubric |
 | `--mcp-enabled` / `--mcp-conns` | Enable and configure MCP servers |
 | `--bug-bounty-header NAME=VALUE` | Add an authorized request header; repeatable |
 | `--verbose` / `--heap-monitor` | Diagnostics |
 
 The Python parser does not provide the React short aliases for these options.
+
+### Retrying failed work
+
+Normal continuation resumes only pending or active work. To retry the tasks and phases that ended in
+`partial_failure` or `blocked`, add `--reset-failed`; durable artifacts, acceptance records, and recovery context
+remain intact:
+
+```bash
+# Retry failed work in the latest operation for this target
+uv run python src/cyberautoagent.py --target example.com --objective "via environment" --continue --reset-failed
+
+# Retry failed work in one specific operation
+uv run python src/cyberautoagent.py --target example.com --objective "via environment" \
+  --continue OP_20260904_120000 --reset-failed
+```
+
+In the interactive React terminal, use `continue [operation_id] reset-failed`; the operation ID and
+`reset-failed` argument may be supplied in either order.
+
+### Replanning selected phases
+
+Use `--reset-phases` when an entire phase needs fresh task proposals rather than a retry of its existing tasks. The
+selector accepts comma-separated phase IDs, inclusive ranges, and an open-ended range through the final phase:
+
+```bash
+# Replan phases 3 and 5 through the final phase of one operation
+uv run python src/cyberautoagent.py --target example.com --objective "via environment" \
+  --continue OP_20260904_120000 --reset-phases 3,5-
+```
+
+Prior phase tasks are retained with status `replanned` together with their evidence and acceptance history.
+`finding_validation` tasks are instead returned to `pending`, preserving their finding binding and independent
+verification context so they resume before new work is proposed. The selected phase's normal contracts and target
+constraints still apply to new proposals. In the interactive React terminal, use
+`continue [operation_id] reset-phases <selector>`. `reset-phases` cannot be combined with `reset-failed`.
+
+```mermaid
+flowchart LR
+    A[Continue with reset-phases] --> B[Archive normal selected tasks as replanned]
+    A --> C[Return finding validation tasks to pending]
+    B --> D[Reopen earliest selected phase]
+    C --> D
+    D --> E[Resume validation, then create fresh task proposals]
+```
+
+### Comprehensive hypothesis testing
+
+When a plan places a hypothesis-producing phase before vulnerability discovery, the controller uses
+`hypothesis_dependent` task creation for the testing phase. It creates one route-scoped testing task for every completed
+hypothesis coverage group and records the source hypothesis task IDs and artifact references with each test task.
+Executors must assess every documented hypothesis in those source artifacts for the assigned group. If a hypothesis
+producer is failed, blocked, missing, or does not cover an assigned group, task creation stops with an explicit coverage
+error; the operation does not silently treat that group as tested.
 
 ## Deployment modes
 

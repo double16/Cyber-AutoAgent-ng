@@ -128,7 +128,7 @@ def _phase_health(
 ) -> dict[str, Any]:
     future_phase = phase.status == "pending" and phase.id != current_phase
     inconsistent = phase.status == "done" and (
-        not tasks or any(task.status not in {"done", "superseded"} for task in tasks)
+        not tasks or any(task.status not in {"done", "superseded", "replanned"} for task in tasks)
     )
 
     if future_phase:
@@ -207,7 +207,7 @@ def _coverage_feasibility(
     remaining_work = 0
     for task in tasks:
         weight = _task_weight(task)
-        if str(task.status) in {"done", "superseded"}:
+        if str(task.status) in {"done", "superseded", "replanned"}:
             completed_work += weight
         else:
             remaining_work += weight

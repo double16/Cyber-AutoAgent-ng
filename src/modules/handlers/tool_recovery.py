@@ -242,11 +242,18 @@ def format_tool_repair_error(tool_name: str, output: str) -> str:
 
     normalized = str(output or "").lower()
     if tool_name == "record_finding_validation":
+        canonical_hint = (
+            " Existing absolute paths inside the current operation are accepted and canonicalized to artifact: "
+            "references; do not change a valid path merely to guess at a filename."
+            if "canonical reexposure_artifact=" in normalized
+            else ""
+        )
         return (
             "FINDING_VALIDATION_REPAIR: The validation submission was rejected. Use fresh evidence that "
             "reproduces every immutable candidate assertion; do not substitute a different observation for the "
             "required evidence. Controller validation error: "
             + _bounded_text(output, 900)
+            + canonical_hint
         )
     if tool_name == "shell" and "service target is outside the assigned task boundary" in normalized:
         return (

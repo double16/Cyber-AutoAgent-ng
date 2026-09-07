@@ -734,8 +734,15 @@ def _read_inventory_source(
 def _inventory_item_identity(item: dict[str, Any]) -> str:
     """Return the stable semantic identity used while combining inventories."""
 
+    kind = str(item.get("kind") or "")
+    value = item.get("value")
+    if kind == "technology":
+        # Technology IDs are created from a lower-cased value. Keep consolidation
+        # aligned with that identity so sources that spell a technology differently
+        # do not survive as separate items with the same deterministic ID.
+        value = str(value or "").casefold()
     return json.dumps(
-        {"target_id": item.get("target_id"), "kind": item.get("kind"), "value": item.get("value")},
+        {"target_id": item.get("target_id"), "kind": kind, "value": value},
         sort_keys=True,
         separators=(",", ":"),
     )

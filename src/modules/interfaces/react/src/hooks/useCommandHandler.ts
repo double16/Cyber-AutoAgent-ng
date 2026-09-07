@@ -262,11 +262,12 @@ export function useCommandHandler({
 ▣ Cyber-AutoAgent Command Reference
 
 ASSESSMENT COMMANDS:
-  target <url>          - Set assessment target
-  execute [objective]   - Start assessment with optional focus
-  continue [operation]  - Continue a previous operation
-  report [operation]    - Re-generate a report for a previous operation
-  reset                 - Clear current configuration
+  target <url>        - Set assessment target
+  execute [objective] - Start assessment with optional focus
+  continue [operation] [reset-failed | reset-phases <selector>]
+                      - Continue and optionally reset work
+  report [operation]  - Re-generate a report for a previous operation
+  reset               - Clear current configuration
 
 SLASH COMMANDS:
   /help                 - Show this help message
