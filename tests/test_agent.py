@@ -26,6 +26,20 @@ from modules.config.manager import (
 )
 
 
+@pytest.mark.asyncio
+async def test_tavily_web_search_provider_adapts_wrapper_arguments(monkeypatch):
+    calls = []
+
+    async def fake_tavily_search(**kwargs):
+        calls.append(kwargs)
+        return {"status": "success"}
+
+    monkeypatch.setattr(cyber_agent_module, "tavily_search", fake_tavily_search)
+
+    assert await cyber_agent_module._tavily_web_search_provider("CVE remediation", 50) == {"status": "success"}
+    assert calls == [{"query": "CVE remediation", "max_results": 20}]
+
+
 class TestModelConfigs:
     """Test model configuration functions"""
 

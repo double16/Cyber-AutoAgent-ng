@@ -31,48 +31,113 @@ def _coerce_str(arg: bytes | str | None) -> str:
     if isinstance(arg, str):
         return arg
     if isinstance(arg, bytes):
-        return arg.decode('utf-8', errors='ignore')
+        return arg.decode("utf-8", errors="ignore")
     return str(arg)
 
 
-@tool
+_AUTH_ANALYSIS_MODE_ALIASES = {
+    "mapping_only": "mapping_only",
+    "mapping": "mapping_only",
+    "map": "mapping_only",
+    "recon": "mapping_only",
+    "discovery": "mapping_only",
+    "validation": "validation",
+    "validate": "validation",
+    "bypass_testing": "validation",
+    "bypass_validation": "validation",
+}
+
+
+def _normalize_analysis_mode(analysis_mode: str) -> str:
+    normalized = str(analysis_mode or "").strip().lower().replace("-", "_").replace(" ", "_")
+    canonical = _AUTH_ANALYSIS_MODE_ALIASES.get(normalized)
+    if canonical is None:
+        raise ValueError("analysis_mode must be one of: mapping_only, validation")
+    return canonical
+
+
+@tool(
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "target_url": {
+                    "type": "string",
+                    "description": "Base URL or domain to analyze. Scheme is optional; https is assumed.",
+                },
+                "auth_type": {
+                    "type": "string",
+                    "enum": ["jwt", "oauth", "saml", "session", "auto"],
+                    "default": "auto",
+                    "description": "Authentication type to focus on.",
+                },
+                "analysis_mode": {
+                    "type": "string",
+                    "enum": ["mapping_only", "validation"],
+                    "default": "mapping_only",
+                    "description": (
+                        "mapping_only records observed auth flows and candidate bypass surfaces without active bypass "
+                        "checks. validation may perform active method/header/forced-browsing bypass checks."
+                    ),
+                },
+                "output_file": {
+                    "type": ["string", "null"],
+                    "default": None,
+                    "description": "Optional path to write the JSON result.",
+                },
+                "inventory_manifest": {
+                    "type": ["string", "null"],
+                    "default": None,
+                    "description": "Optional path to write a validated inventory manifest.",
+                },
+            },
+            "required": ["target_url"],
+        }
+    }
+)
 def auth_chain_analyzer(
         target_url: str,
         auth_type: str = "auto",
+        analysis_mode: str = "mapping_only",
         output_file: str | None = None,
         inventory_manifest: str | None = None,
 ) -> str:
     """
-    Map auth flows + identify/validate auth bypass surfaces for a target. Supported: JWT, OAuth, SAML, cookies, sessions.
+    Map auth flows for a target, optionally validating candidate bypass surfaces when authorized.
+    Supported: JWT, OAuth, SAML, cookies, sessions.
 
     CALL WHEN
     - Auth blocks progress (30x→login/SSO, 401/403 on key pages/APIs), or you need auth-flow mapping.
     - You see signals of session/JWT/OAuth/SAML (Set-Cookie, Bearer/JWT strings, /.well-known/*, jwks, oauth/saml paths).
-    - You need structured next steps for bypass verification/exploitation.
+    - Use analysis_mode="validation" only when the assigned task explicitly authorizes bypass validation/testing.
 
     DO NOT CALL
     - If you already have recent auth mapping + bypass validation for this same target, unless new endpoints/flows were found.
+    - Do not use validation mode for mapping/recon-only tasks.
 
     BEHAVIOR NOTES
     - Redirects are NOT auto-followed (30x is evidence).
-    - Performs lightweight validation: forced browsing (admin), HTTP method variations, limited header bypass checks.
+    - mapping_only is the default: it records auth flows and candidate bypass surfaces without active bypass checks.
+    - validation mode performs lightweight validation: forced browsing, HTTP method variations, and limited header checks.
 
     ARGS
     - target_url: base URL/domain (scheme optional; https assumed)
     - auth_type: "jwt"|"oauth"|"saml"|"session"|"auto" (use specific type to reduce noise)
+    - analysis_mode: "mapping_only"|"validation"; semantic aliases are normalized, unknown values are rejected
     - output_file: path to write results to disk
     - inventory_manifest: path for validated inventory manifest.
 
     RETURNS (JSON)
-    - summary: mechanism/token types, confirmed_exploits count
+    - summary: mechanism/token types, confirmed_exploits count; mapping_only never confirms exploits
     - evidence: endpoints/mechanisms/tokens/flow mapping
-    - findings[]: observed/confirmed auth bypass or controls + evidence
-    - next_steps[]: prioritized, capability-tagged next steps
+    - candidate_bypass_surfaces[]: observed surfaces or auth-chain properties that may justify a later validation task
+    - findings[]: observed/confirmed auth bypass or controls + evidence; populated only in validation mode
+    - next_steps[]: prioritized, capability-tagged next steps; populated only in validation mode
     - decision: routing hints (best_attack_surface, next_phase)
 
     HOW TO USE
-    - If summary.confirmed_exploits > 0: exploit findings (technique+endpoint) and prove impact.
-    - Else: execute next_steps in priority order; use evidence to reproduce/justify.
+    - For mapping/recon tasks, use mapping_only and treat candidate_bypass_surfaces as hypotheses, not findings.
+    - For validation tasks, if summary.confirmed_exploits > 0, prove impact using the confirmed finding evidence.
     - Absence of findings is not proof of security
     """
     if not target_url:
@@ -83,8 +148,9 @@ def auth_chain_analyzer(
     if auth_type not in ["jwt", "oauth", "saml", "session", "auto"]:
         auth_type = "auto"
     auth_type = auth_type.lower()
+    analysis_mode = _normalize_analysis_mode(analysis_mode)
 
-    cache_key = build_result_cache_key(target_url=target_url, auth_type=auth_type)
+    cache_key = build_result_cache_key(target_url=target_url, auth_type=auth_type, analysis_mode=analysis_mode)
     cached_result = get_cached_result("auth_chain_analyzer", cache_key)
     if cached_result:
         cached_payload = json.loads(cached_result)
@@ -115,9 +181,11 @@ def auth_chain_analyzer(
         "tool": "auth_chain_analyzer",
         "target": target_url,
         "auth_type": auth_type,
+        "analysis_mode": analysis_mode,
         "timestamp": datetime.now(UTC).isoformat(),
         "summary": {},
         "evidence": {},
+        "candidate_bypass_surfaces": [],
         "findings": [],
         "next_steps": [],
     }
@@ -156,15 +224,17 @@ def auth_chain_analyzer(
         # Phase 4: Authentication flow mapping
         flow_analysis = _map_authentication_flows(target_url, results)
         results["flow_analysis"].update(flow_analysis)
+        candidate_bypass_surfaces = flow_analysis.get("bypass_opportunities", []) or []
+        report["candidate_bypass_surfaces"] = candidate_bypass_surfaces
 
         report["evidence"]["flow_analysis"] = {
             "authentication_steps": {
                 "count": len(flow_analysis.get("authentication_steps", []) or []),
                 "items": flow_analysis.get("authentication_steps", []) or [],
             },
-            "bypass_opportunities": {
-                "count": len(flow_analysis.get("bypass_opportunities", []) or []),
-                "items": flow_analysis.get("bypass_opportunities", []) or [],
+            "candidate_bypass_surfaces": {
+                "count": len(candidate_bypass_surfaces),
+                "items": candidate_bypass_surfaces,
             },
             "privilege_escalation": {
                 "count": len(flow_analysis.get("privilege_escalation", []) or []),
@@ -172,44 +242,47 @@ def auth_chain_analyzer(
             },
         }
 
-        # Phase 5: Advanced bypass testing
-        bypass_results = _test_advanced_auth_bypasses(target_url, results)
+        bypass_results: list[dict[str, Any]] | list[Any] = []
+        if analysis_mode == "validation":
+            # Phase 5: Advanced bypass testing
+            bypass_results = _test_advanced_auth_bypasses(target_url, results)
 
-        # Normalize bypass_results to a list to avoid type/iteration bugs.
-        if bypass_results is None:
-            bypass_results = []
-        elif not isinstance(bypass_results, list):
-            bypass_results = [bypass_results]
+            # Normalize bypass_results to a list to avoid type/iteration bugs.
+            if bypass_results is None:
+                bypass_results = []
+            elif not isinstance(bypass_results, list):
+                bypass_results = [bypass_results]
 
-        # Preserve any previously discovered vulnerabilities; append bypass test results.
-        results["vulnerabilities"].extend(bypass_results)
+            # Preserve any previously discovered vulnerabilities; append bypass test results.
+            results["vulnerabilities"].extend(bypass_results)
 
-        # Convert bypass results into structured findings for the agent.
-        for b in bypass_results:
-            if not isinstance(b, dict):
-                continue
-            report["findings"].append(
-                {
-                    "id": f"FINDING_{(b.get('technique') or 'UNKNOWN').upper().replace(' ', '_')}_{(b.get('endpoint') or '').strip('/').replace('/', '_') or 'TARGET'}",
-                    "status": "confirmed" if b.get("successful") else "observed",
-                    "category": "auth_bypass" if b.get("successful") else "auth_control",
-                    "severity": "critical" if b.get("successful") else "info",
-                    "confidence": 0.9 if b.get("successful") else 0.6,
-                    "technique": b.get("technique"),
-                    "endpoint": b.get("endpoint"),
-                    "method": b.get("method"),
-                    "description": b.get("description"),
-                    "evidence": {
-                        "status_code": b.get("status_code"),
-                        "redirect_to": b.get("redirect_to"),
-                        "baseline": b.get("baseline"),
-                        "header": b.get("header"),
-                    },
-                }
-            )
+            # Convert bypass results into structured findings for the agent.
+            for b in bypass_results:
+                if not isinstance(b, dict):
+                    continue
+                technique_id = (b.get("technique") or "UNKNOWN").upper().replace(" ", "_")
+                endpoint_id = (b.get("endpoint") or "").strip("/").replace("/", "_") or "TARGET"
+                report["findings"].append(
+                    {
+                        "id": f"FINDING_{technique_id}_{endpoint_id}",
+                        "status": "confirmed" if b.get("successful") else "observed",
+                        "category": "auth_bypass" if b.get("successful") else "auth_control",
+                        "severity": "critical" if b.get("successful") else "info",
+                        "confidence": 0.9 if b.get("successful") else 0.6,
+                        "technique": b.get("technique"),
+                        "endpoint": b.get("endpoint"),
+                        "method": b.get("method"),
+                        "description": b.get("description"),
+                        "evidence": {
+                            "status_code": b.get("status_code"),
+                            "redirect_to": b.get("redirect_to"),
+                            "baseline": b.get("baseline"),
+                            "header": b.get("header"),
+                        },
+                    }
+                )
 
-        # Generate agent-oriented next steps (capability-tagged)
-        next_steps = _generate_auth_recommendations(results)
+        next_steps = _generate_auth_recommendations(results) if analysis_mode == "validation" else []
         report["next_steps"] = next_steps
 
         # High-level summary and routing hints
@@ -239,18 +312,23 @@ def auth_chain_analyzer(
         elif "JWT" in report["summary"]["mechanisms"]:
             primary_auth = "jwt"
 
-        best_surface = "discovery"
-        if any(f.get("status") == "confirmed" for f in confirmed):
-            best_surface = "exploitation"
-        elif (results.get("flow_analysis", {}) or {}).get("bypass_opportunities"):
-            best_surface = "bypass_validation"
-        elif (results.get("auth_endpoints") or []):
-            best_surface = "endpoint_mapping"
+        best_surface = "auth_flow_mapping"
+        next_phase = "recon"
+        if analysis_mode == "validation":
+            if any(f.get("status") == "confirmed" for f in confirmed):
+                best_surface = "exploitation"
+            elif (results.get("flow_analysis", {}) or {}).get("bypass_opportunities"):
+                best_surface = "bypass_validation"
+            elif (results.get("auth_endpoints") or []):
+                best_surface = "endpoint_mapping"
+            next_phase = "bypass_testing" if best_surface in {"bypass_validation", "exploitation"} else "recon"
+        elif results.get("auth_endpoints") or report["candidate_bypass_surfaces"]:
+            best_surface = "auth_inventory"
 
         report["decision"] = {
             "primary_auth": primary_auth,
             "best_attack_surface": best_surface,
-            "next_phase": "bypass_testing" if best_surface in {"bypass_validation", "exploitation"} else "recon",
+            "next_phase": next_phase,
         }
 
         cache_result(
@@ -267,6 +345,7 @@ def auth_chain_analyzer(
             "tool": "auth_chain_analyzer",
             "target": target_url,
             "auth_type": auth_type,
+            "analysis_mode": analysis_mode,
             "timestamp": datetime.now(UTC).isoformat(),
             "error": str(e),
         }
@@ -1913,6 +1992,13 @@ def main() -> int:
         choices=["jwt", "oauth", "saml", "session", "auto"],
         help="Authentication type to focus on (default: auto)",
     )
+    parser.add_argument(
+        "--analysis-mode",
+        dest="analysis_mode",
+        default="mapping_only",
+        choices=["mapping_only", "validation"],
+        help="Analysis mode: mapping_only records auth flows; validation performs active bypass checks",
+    )
     parser.add_argument("--output-file", "-o", default=None, help="Path to write results to disk")
     parser.add_argument(
         "--inventory-manifest",
@@ -1926,6 +2012,7 @@ def main() -> int:
         auth_chain_analyzer(
             args.target_url,
             auth_type=args.auth_type,
+            analysis_mode=args.analysis_mode,
             output_file=args.output_file,
             inventory_manifest=args.inventory_manifest,
         )

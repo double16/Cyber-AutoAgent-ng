@@ -103,9 +103,10 @@ fi
 
 Do not install packages or create a replacement database as part of forensic review.
 
-**Step 2: Validate the database**
+**Step 2: Validate and repair the database**
 
-NOTE: the integrity check requires write access, therefore `-readonly` is omitted.
+This step will attempt to validate the integrity of the SQLite database and repair any issues found. The integrity
+check requires write access, this is acceptable during review. Do not add `-readonly` to the integrity check command.
 
 ```bash
 if ! integrity=$(sqlite3 outputs/cyber_autoagent.db "PRAGMA integrity_check;"); then

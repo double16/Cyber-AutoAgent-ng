@@ -16,8 +16,12 @@ Create separate artifact-producing tasks for at least three applicable workstrea
 bounded crawl and route discovery, client-side/API extraction, and authentication/workflow mapping. Create one final
 inventory-synthesis task only after those mapping tasks are queued; it is the sole task that produces the canonical
 inventory manifest.
-2. **Generate Attack Hypotheses from the Mapped Attack Surface** — Derive testable hypotheses from technology,
-   input, trust-boundary, and workflow observations. Do not treat a hypothesis as a finding.
+2. **Generate Attack Hypotheses from the Mapped Attack Surface** — Derive detailed, testable attack paths from
+   technology, input, trust-boundary, and workflow observations. For each path, record preconditions, the suspected
+   mechanism and attacker-controlled flow, safe future test steps, expected positive and negative/control results,
+   and required evidence. Research relevant technologies, versions, components, advisories, CVEs, and published PoC
+   preconditions when they provide a lead; they are not applicability evidence or findings. Do not treat a hypothesis
+   as a finding or consider a prior hypothesis alone complete.
 3. **Vulnerability Discovery and Exploitability Testing** — Test prioritized hypotheses and record expected and actual
    behavior, negative controls, reproducibility, and evidence-backed vulnerability candidates.
 4. **Finding Validation** — Confirm or reject each vulnerability candidate using reproducible evidence,

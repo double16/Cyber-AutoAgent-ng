@@ -130,6 +130,114 @@ def test_restore_continuation_state_warns_when_database_missing(tmp_path):
     logger.warning.assert_called_once()
 
 
+def test_reset_continuation_failed_work_resets_persisted_operation(tmp_path):
+    from modules.tools.memory import OperationPlan, PlanPhase, SQLiteApplicationStore
+
+    operation_id = "OP_RESET"
+    store = SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical")
+    store.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="Assess service",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(1, "Recon", "partial_failure")],
+        ),
+    )
+
+    counts = cyberautoagent.reset_continuation_failed_work(
+        output_dir=str(tmp_path),
+        logical_target="logical",
+        operation_id=operation_id,
+        logger=Mock(),
+    )
+
+    assert counts == (0, 1)
+    reset = store.get_plan(operation_id)
+    assert reset is not None
+    assert reset.current_phase == 1
+    assert reset.assessment_complete is False
+    assert reset.phases[0].status == "active"
+
+
+def test_parse_continuation_phase_selector_supports_ids_and_ranges():
+    assert cyberautoagent.parse_continuation_phase_selector("1,3-4,6-", [1, 2, 3, 4, 5, 6, 7]) == (
+        1,
+        3,
+        4,
+        6,
+        7,
+    )
+
+
+@pytest.mark.parametrize("selector", ["", "0", "3-1", "1,,2", "unknown", "8-"])
+def test_parse_continuation_phase_selector_rejects_invalid_selection(selector):
+    with pytest.raises(ValueError):
+        cyberautoagent.parse_continuation_phase_selector(selector, [1, 2, 3])
+
+
+def test_reset_continuation_phases_archives_selected_phase_tasks(tmp_path):
+    from modules.tools.memory import OperationPlan, PlanPhase, SQLiteApplicationStore, Task
+    from tests.helpers.acceptance import make_acceptance
+
+    operation_id = "OP_REPLAN"
+    store = SQLiteApplicationStore(str(tmp_path / "cyber_autoagent.db"), "logical")
+    store.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="Assess service",
+            current_phase=2,
+            total_phases=2,
+            phases=[PlanPhase(1, "Recon", "done"), PlanPhase(2, "Validate", "done")],
+            assessment_complete=True,
+        ),
+    )
+    store.store_task(
+        operation_id,
+        Task(
+            task_uid="phase-two",
+            title="Validate service",
+            objective="Validate service",
+            acceptance=make_acceptance("phase-two"),
+            phase=2,
+            status="done",
+        ),
+    )
+
+    task_count, phase_ids = cyberautoagent.reset_continuation_phases(
+        output_dir=str(tmp_path),
+        logical_target="logical",
+        operation_id=operation_id,
+        phase_selector="2-",
+        logger=Mock(),
+    )
+
+    assert (task_count, phase_ids) == (1, (2,))
+    assert store.get_tasks(operation_id)[0].status == "replanned"
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["--reset-failed"], "--reset-failed requires --continue"),
+        (["--continue", "--report", "--reset-failed"], "--reset-failed cannot be used with --report"),
+        (["--reset-phases", "2"], "--reset-phases requires --continue"),
+        (["--continue", "--report", "--reset-phases", "2"], "--reset-phases cannot be used with --report"),
+        (["--continue", "--reset-failed", "--reset-phases", "2"], "--reset-phases cannot be used with --reset-failed"),
+    ],
+)
+def test_main_rejects_invalid_reset_failed_combinations(monkeypatch, capsys, argv, message):
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        ["cyberautoagent", "--target", "example.com", "--objective", "test", *argv],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        cyberautoagent.main()
+    assert message in capsys.readouterr().err
+
+
 def test_restore_continuation_state_handles_missing_plan_and_empty_targets(monkeypatch, tmp_path):
     monkeypatch.setattr(cyberautoagent.os.path, "isfile", lambda _path: True)
     monkeypatch.setattr(cyberautoagent, "get_application_database_path", lambda _cfg: str(tmp_path / "db"))

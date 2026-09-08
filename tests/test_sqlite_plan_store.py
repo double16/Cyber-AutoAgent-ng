@@ -41,15 +41,21 @@ def test_plan_phase_finding_candidate_dependency_round_trips():
             "title": "Candidate correlation",
             "status": "pending",
             "criteria": "Analyze persisted candidates",
+            "produces_hypotheses": False,
             "requires_finding_candidates": True,
         }
     )
 
     assert phase.requires_finding_candidates is True
     assert PlanPhase.from_obj(phase.to_dict()).requires_finding_candidates is True
-    assert PlanPhase.from_obj({"id": 1, "title": "Recon", "status": "pending"}).requires_finding_candidates is False
+    assert PlanPhase.from_obj({
+        "id": 1, "title": "Recon", "status": "pending", "produces_hypotheses": False
+    }).requires_finding_candidates is False
     with pytest.raises(ValueError, match="requires_finding_candidates"):
-        PlanPhase.from_obj({"id": 1, "title": "Recon", "status": "pending", "requires_finding_candidates": "yes"})
+        PlanPhase.from_obj({
+            "id": 1, "title": "Recon", "status": "pending", "produces_hypotheses": False,
+            "requires_finding_candidates": "yes",
+        })
 
 
 def test_sqlite_plan_store_persists_immutable_preflight_results(tmp_path):

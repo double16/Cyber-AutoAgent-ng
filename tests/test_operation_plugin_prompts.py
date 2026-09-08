@@ -49,6 +49,19 @@ def test_code_security_access_is_repository_only_and_static():
     assert "Do not access network targets" in prompt
 
 
+@pytest.mark.parametrize("module", ("web", "ctf", "code_security"))
+def test_hypothesis_modules_require_detailed_paths_and_research_context(module):
+    prompt = (PLUGIN_ROOT / module / "execution_prompt.md").read_text(encoding="utf-8")
+    hypothesis_prompt = (PLUGIN_ROOT / module / "hypothesis_prompt.md").read_text(encoding="utf-8")
+    policy = (PLUGIN_ROOT / module / "termination_policy.md").read_text(encoding="utf-8")
+
+    assert "hypothesis work" not in prompt
+    assert "detailed" in hypothesis_prompt
+    assert "CVEs" in hypothesis_prompt
+    assert "required evidence" in policy
+    assert "prior hypothesis" in policy
+
+
 def test_context_navigator_access_is_limited_to_granted_post_access_context():
     prompt = (PLUGIN_ROOT / "context_navigator" / "execution_prompt.md").read_text(encoding="utf-8")
 
