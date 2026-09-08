@@ -8714,7 +8714,7 @@ def _source_task_finding_refs(task_uid: str) -> list[str]:
         candidate_data = record.get("candidate_data", {}) if isinstance(record, dict) else {}
         if task_uid in candidate_data.get("source_task_uids", []):
             references.append(f"finding:{record['finding_uid']}")
-    return list(dict.fromkeys(references))
+    return sorted(set(references))
 
 
 def _bind_acceptance_finding_reference(
@@ -8734,20 +8734,26 @@ def _bind_acceptance_finding_reference(
             "then retry record_task_acceptance."
         )
     supplied_refs = [reference for reference in evidence_refs if str(reference).startswith("finding:")]
-    if len(linked_refs) == 1:
-        selected_ref = linked_refs[0]
-    else:
-        matching_refs = [reference for reference in supplied_refs if reference in linked_refs]
-        if len(set(matching_refs)) != 1:
+    if not supplied_refs:
+        if len(linked_refs) != 1:
             raise ValueError(
-                "Acceptance disposition finding_candidate is ambiguous; use exactly one current-task reference: "
+                "Acceptance disposition finding_candidate is ambiguous; supply one or more current-task references: "
                 + ", ".join(linked_refs)
             )
-        selected_ref = matching_refs[0]
+        selected_refs = [linked_refs[0]]
+    else:
+        linked_ref_set = set(linked_refs)
+        unavailable_refs = sorted(set(supplied_refs) - linked_ref_set)
+        if unavailable_refs:
+            raise ValueError(
+                "Acceptance disposition finding_candidate references findings not created by this task: "
+                + ", ".join(unavailable_refs)
+            )
+        selected_refs = supplied_refs
     normalized = [reference for reference in evidence_refs if not str(reference).startswith("finding:")]
-    normalized.append(selected_ref)
-    if supplied_refs != [selected_ref]:
-        logger.info("Auto-bound task acceptance to %s for task %s", selected_ref, task_uid)
+    normalized.extend(selected_refs)
+    if not supplied_refs:
+        logger.info("Auto-bound task acceptance to %s for task %s", selected_refs[0], task_uid)
     return normalized
 
 
@@ -8837,7 +8843,8 @@ def build_record_task_acceptance_tool(
         )
         manifest, _snapshot_hash = _load_inventory_manifest(artifact_ref)
         coverage_item_ids = tuple(str(item["id"]) for item in manifest["items"])
-    eligible_evidence_refs = []
+    task_finding_refs = _source_task_finding_refs(normalized_uid)
+    eligible_evidence_refs = list(task_finding_refs)
     for reference in task.evidence:
         try:
             canonical = _canonical_evidence_reference(reference)
@@ -8852,7 +8859,9 @@ def build_record_task_acceptance_tool(
             continue
         if canonical not in eligible_evidence_refs:
             eligible_evidence_refs.append(canonical)
-    eligible_evidence_refs = eligible_evidence_refs[:8]
+    non_finding_refs = [reference for reference in eligible_evidence_refs if not reference.startswith("finding:")]
+    eligible_evidence_refs = [*task_finding_refs, *non_finding_refs[:8]]
+    finding_refs_text = ", ".join(task_finding_refs) or "none"
 
     def record_task_acceptance(
         status: str,
@@ -8988,8 +8997,12 @@ def build_record_task_acceptance_tool(
 
     Use finding_candidate or existing_finding whenever the summary claims confirmed security behavior. The controller
     automatically binds finding_candidate to the sole finding created by this task. If the task created multiple
-    candidates, supply exactly one returned finding_ref. existing_finding always requires an explicit finding reference.
+    candidates, supply every returned finding_ref represented by this acceptance. existing_finding always requires
+    an explicit finding reference.
     Use observation for useful non-finding results and no_vulnerability for negative results.
+
+Current task-created finding candidates: {finding_refs_text}. For finding_candidate, include one or more of these
+references that the acceptance represents.
 
     Task identity, its single criterion, and frozen coverage item IDs are supplied by the workflow controller.
     Successfully recorded results are immutable. Their concrete summaries and evidence references are automatically

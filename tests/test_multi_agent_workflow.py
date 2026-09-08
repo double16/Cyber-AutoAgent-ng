@@ -7473,6 +7473,91 @@ def test_task_executor_uses_fresh_sessions_for_compact_continuations():
     assert "Do not perform network discovery" in prompt
 
 
+def test_task_owned_findings_survive_recovery_evidence_cap_and_appear_in_prompt():
+    task = Task(
+        task_uid="task",
+        title="Task",
+        objective="Assess related behaviors",
+        phase=1,
+        status="active",
+        acceptance=_acceptance("criterion-1"),
+        evidence=[f"memory:observation-{index}" for index in range(10)],
+    )
+    finding_records = [
+        {
+            "finding_uid": f"candidate-{index}",
+            "candidate_data": {"source_task_uids": [task.task_uid]},
+        }
+        for index in range(10)
+    ] + [{
+        "finding_uid": "other-task-candidate",
+        "candidate_data": {"source_task_uids": ["other-task"]},
+    }]
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task], finding_records=finding_records),
+    )
+    context = controller._acceptance_recovery_context(task, [], [], None)
+    finding_refs = [item["reference"] for item in context if item["source"] == "task_finding"]
+    prompt = controller._task_executor_critic_guidance(
+        _plan(), task, ["criterion-1"], context, next_cycle=2
+    )
+
+    assert finding_refs == [f"finding:candidate-{index}" for index in range(10)]
+    assert len(context) == 18
+    assert "finding:other-task-candidate" not in prompt
+    assert "finding:candidate-0" in prompt
+    assert "finding:candidate-9" in prompt
+    assert "For finding_candidate acceptance, include one or more listed task-owned finding references" in prompt
+
+
+def test_initial_executor_prompt_includes_current_task_finding_references():
+    task = Task(
+        task_uid="task",
+        title="Task",
+        objective="Assess related behaviors",
+        phase=1,
+        status="active",
+        acceptance=_acceptance("criterion-1"),
+    )
+    prompts = []
+    state = FakeState(
+        _plan(),
+        tasks=[task],
+        finding_records=[
+            {
+                "finding_uid": "candidate-1",
+                "candidate_data": {"source_task_uids": [task.task_uid]},
+            },
+            {
+                "finding_uid": "other-task-candidate",
+                "candidate_data": {"source_task_uids": ["other-task"]},
+            },
+        ],
+    )
+
+    def text_runner(role, *_args):
+        if role == "task_prompt_builder":
+            return '{"prompt":"Assess the assigned behavior","tools":[]}'
+        if role == "task_evaluator":
+            return '{"status":"done","reason":"Task evidence accepted"}'
+        raise AssertionError(role)
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=text_runner,
+        work_runner=lambda _role, prompt, *_args: prompts.append(prompt) or "complete",
+    )
+
+    controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert "finding:candidate-1" in prompts[0]
+    assert "finding:other-task-candidate" not in prompts[0]
+
+
 def test_acceptance_recovery_context_merges_task_ledger_outcomes_and_rejection(monkeypatch):
     task = Task(
         task_uid="task",

@@ -5472,7 +5472,7 @@ def test_acceptance_disposition_requires_finding_for_confirmed_behavior(fake_mem
         status="satisfied",
         disposition="finding_candidate",
         summary="Confirmed an exploitable injection vulnerability",
-        evidence_refs=[f"artifact:{manifest}", "finding:placeholder-from-model"],
+        evidence_refs=[f"artifact:{manifest}"],
     )
     assert json.loads(result)["complete"] is True
     assert store.get_acceptance_results("op1", task.task_uid)[0].evidence_refs[-1] == "finding:candidate-1"
@@ -5558,6 +5558,102 @@ def test_acceptance_finding_auto_binding_rejects_missing_and_ambiguous_candidate
             disposition="finding_candidate",
             summary="Confirmed an exploitable injection vulnerability",
             evidence_refs=[f"artifact:{manifest}"],
+        )
+
+
+def test_acceptance_finding_binding_accepts_multiple_current_task_candidates(fake_memory_client):
+    client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    task = mod.Task(
+        task_uid="multiple-finding-binding",
+        title="Test related behaviors",
+        objective="Test related behaviors and retain all candidates",
+        acceptance=make_acceptance("outcome"),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+    for finding_uid in ("candidate-1", "candidate-2"):
+        store.findings[finding_uid] = {
+            "candidate_data": {"source_task_uids": [task.task_uid]},
+            "resolution": None,
+        }
+
+    acceptance_tool = mod.build_record_task_acceptance_tool(task.task_uid)
+    result = json.loads(acceptance_tool(
+        status="satisfied",
+        disposition="finding_candidate",
+        summary="Confirmed two independently reproducible security issues",
+        evidence_refs=[f"artifact:{manifest}", "finding:candidate-1", "finding:candidate-2"],
+    ))
+
+    assert result["complete"] is True
+    recorded = store.get_acceptance_results("op1", task.task_uid)[0]
+    assert recorded.evidence_refs[-2:] == ("finding:candidate-1", "finding:candidate-2")
+    published = client._fake_backend.add_calls[-1]["messages"][0]["content"]
+    assert "finding:candidate-1, finding:candidate-2" in published
+    description = get_tool_spec(acceptance_tool)["description"]
+    assert "Current task-created finding candidates: finding:candidate-1, finding:candidate-2" in description
+
+
+def test_acceptance_finding_binding_deduplicates_and_rejects_other_task_candidates(fake_memory_client):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    task = mod.Task(
+        task_uid="finding-binding-owner",
+        title="Test behavior",
+        objective="Test one behavior",
+        acceptance=make_acceptance("outcome"),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", task)
+    store.findings["candidate-1"] = {
+        "candidate_data": {"source_task_uids": [task.task_uid]},
+        "resolution": None,
+    }
+    store.findings["other-task-candidate"] = {
+        "candidate_data": {"source_task_uids": ["other-task"]},
+        "resolution": None,
+    }
+    acceptance_tool = mod.build_record_task_acceptance_tool(task.task_uid)
+
+    result = json.loads(acceptance_tool(
+        status="satisfied",
+        disposition="finding_candidate",
+        summary="Confirmed an exploitable injection vulnerability",
+        evidence_refs=[f"artifact:{manifest}", "finding:candidate-1", "finding:candidate-1"],
+    ))
+
+    assert result["complete"] is True
+    recorded = store.get_acceptance_results("op1", task.task_uid)[0]
+    assert recorded.evidence_refs.count("finding:candidate-1") == 1
+
+    other_task = mod.Task(
+        task_uid="finding-binding-other-owner",
+        title="Test another behavior",
+        objective="Test a different behavior",
+        acceptance=make_acceptance("outcome"),
+        phase=1,
+        status="active",
+    )
+    store.store_task("op1", other_task)
+    store.findings["other-task-owned-candidate"] = {
+        "candidate_data": {"source_task_uids": [other_task.task_uid]},
+        "resolution": None,
+    }
+    other_acceptance_tool = mod.build_record_task_acceptance_tool(other_task.task_uid)
+
+    with pytest.raises(ValueError, match="not created by this task.*other-task-candidate"):
+        other_acceptance_tool(
+            status="satisfied",
+            disposition="finding_candidate",
+            summary="Confirmed an exploitable injection vulnerability",
+            evidence_refs=[
+                f"artifact:{manifest}",
+                "finding:other-task-owned-candidate",
+                "finding:other-task-candidate",
+            ],
         )
 
 

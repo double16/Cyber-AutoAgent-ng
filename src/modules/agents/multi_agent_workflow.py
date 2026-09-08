@@ -3239,6 +3239,7 @@ class MultiAgentWorkflowController:
         evidence_refs = list(task.evidence)
         for result in self.state.list_task_acceptance_results(task.task_uid):
             evidence_refs.extend(result.evidence_refs)
+        evidence_refs.extend(self._task_owned_finding_refs(task))
         canonical_refs = sorted({str(reference) for reference in evidence_refs if str(reference).strip()})
         if canonical_refs:
             execution_prompt += (
@@ -5629,6 +5630,11 @@ class MultiAgentWorkflowController:
             or "- None"
         )
         artifact_available = any(item["reference"].startswith(("artifact:", "artifact_id:")) for item in recovery_evidence)
+        task_finding_refs = [
+            item["reference"]
+            for item in recovery_evidence
+            if item["source"] == "task_finding" and item["reference"].startswith("finding:")
+        ]
         frozen_criteria = "; ".join(
             f"{criterion.id}: {criterion.description}" for criterion in task.acceptance.criteria
         )
@@ -5657,6 +5663,12 @@ class MultiAgentWorkflowController:
                 "acceptance ledger unless a registered tool requires an update. Do not broaden scope or add criteria."
             )
         loop_section = f"\n{loop_guidance.strip()}\n" if loop_guidance.strip() else ""
+        finding_instruction = (
+            " For finding_candidate acceptance, include one or more listed task-owned finding references that "
+            "the acceptance represents."
+            if task_finding_refs
+            else ""
+        )
         return f"""## Compact Task Continuation
 Start a fresh actor cycle {next_cycle} for the existing task. Do not replay prior reasoning, task history, or
 completed commands. The controller intentionally did not retain earlier conversation messages.
@@ -5671,7 +5683,7 @@ Durable evidence ledger:
 {evidence_ledger}
 {required_tool_section}{evaluator_section}
 
-{completion_instruction}
+{completion_instruction}{finding_instruction}
 {loop_section}
 """
 
@@ -13919,7 +13931,10 @@ tools and durable evidence before relying on it."""
     ) -> list[dict[str, str]]:
         """Return compact, task-owned durable evidence for an acceptance correction."""
 
-        candidates: list[tuple[str, Any]] = [("task_evidence", reference) for reference in task.evidence]
+        candidates: list[tuple[str, Any]] = [
+            ("task_finding", reference) for reference in self._task_owned_finding_refs(task)
+        ]
+        candidates.extend(("task_evidence", reference) for reference in task.evidence)
         for result in acceptance_results:
             candidates.extend(("prior_acceptance", reference) for reference in result.evidence_refs)
         candidates.extend(
@@ -13985,7 +14000,21 @@ tools and durable evidence before relying on it."""
         for item in selected_artifacts:
             item.pop("rank", None)
             item.pop("order", None)
-        return [*selected_artifacts, *other_candidates][:8]
+        task_finding_candidates = [item for item in other_candidates if item["source"] == "task_finding"]
+        other_candidates = [item for item in other_candidates if item["source"] != "task_finding"]
+        return [*task_finding_candidates, *[*selected_artifacts, *other_candidates][:8]]
+
+    def _task_owned_finding_refs(self, task: Task) -> list[str]:
+        """Return stable current-operation finding references created by one task."""
+
+        references = []
+        for record in self.state.list_finding_records():
+            finding_uid = str(record.get("finding_uid") or "").strip()
+            candidate_data = record.get("candidate_data")
+            source_task_uids = candidate_data.get("source_task_uids", []) if isinstance(candidate_data, dict) else []
+            if finding_uid and isinstance(source_task_uids, list) and task.task_uid in source_task_uids:
+                references.append(f"finding:{finding_uid}")
+        return sorted(set(references))
 
     @staticmethod
     def _artifact_recovery_quality(path: str) -> str:
