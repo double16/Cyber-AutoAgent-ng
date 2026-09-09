@@ -3,6 +3,7 @@
 - Docs: https://ollama.com/
 """
 
+import inspect
 import json
 import logging
 import uuid
@@ -29,12 +30,19 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
-async def _close_async_client(client: Any) -> None:
-    """Close an Ollama async client when the installed client exposes ``aclose``."""
+async def _close_async_resource(resource: Any) -> None:
+    """Close an async or sync Ollama resource when it exposes a close method."""
 
-    close = getattr(client, "aclose", None)
-    if close is not None:
-        await close()
+    if resource is None:
+        return
+
+    close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+    if close is None:
+        return
+
+    result = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 class OllamaModel(Model):
@@ -459,6 +467,7 @@ class OllamaModel(Model):
         tool_requested = [False]  # holder pattern
 
         client = ollama.AsyncClient(self.host, **self.client_args)
+        response = None
         try:
             response = await self._chat_with_fallback(client, request)
 
@@ -510,7 +519,10 @@ class OllamaModel(Model):
 
             logger.debug("finished streaming response from model")
         finally:
-            await _close_async_client(client)
+            try:
+                await _close_async_resource(response)
+            finally:
+                await _close_async_resource(client)
 
     @override
     async def structured_output(
@@ -532,6 +544,7 @@ class OllamaModel(Model):
         formatted_request["stream"] = False
 
         client = ollama.AsyncClient(self.host, **self.client_args)
+        response = None
         try:
             try:
                 response = await self._chat_with_fallback(client, formatted_request)
@@ -546,4 +559,7 @@ class OllamaModel(Model):
             except Exception as e:
                 raise ValueError(f"Failed to parse or load content into model: {e}") from e
         finally:
-            await _close_async_client(client)
+            try:
+                await _close_async_resource(response)
+            finally:
+                await _close_async_resource(client)

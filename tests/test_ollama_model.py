@@ -1,3 +1,4 @@
+import asyncio
 import re
 from unittest.mock import AsyncMock
 
@@ -254,7 +255,7 @@ async def test_stream_closes_async_client_after_success(monkeypatch):
 
     class FakeClient:
         def __init__(self):
-            self.aclose = AsyncMock()
+            self.close = AsyncMock()
 
         async def chat(self, **request):
             return response
@@ -266,7 +267,38 @@ async def test_stream_closes_async_client_after_success(monkeypatch):
         [{"role": "user", "content": [{"text": "go"}]}]
     )]
 
-    client.aclose.assert_awaited_once()
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_closes_response_iterator_and_client_when_consumption_stops(monkeypatch):
+    class FakeResponse:
+        def __init__(self):
+            self.aclose = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(1)
+
+    class FakeClient:
+        def __init__(self):
+            self.close = AsyncMock()
+
+        async def chat(self, **request):
+            return response
+
+    response = FakeResponse()
+    client = FakeClient()
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda host, **kwargs: client)
+
+    stream = _non_streaming_model().stream([{"role": "user", "content": [{"text": "go"}]}])
+    await stream.__anext__()
+    await stream.aclose()
+
+    response.aclose.assert_awaited_once()
+    client.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -276,7 +308,7 @@ async def test_structured_output_closes_async_client_after_failure(monkeypatch):
 
     class FakeClient:
         def __init__(self):
-            self.aclose = AsyncMock()
+            self.close = AsyncMock()
 
         async def chat(self, **request):
             raise RuntimeError("request failed")
@@ -290,7 +322,7 @@ async def test_structured_output_closes_async_client_after_failure(monkeypatch):
         ):
             pass
 
-    client.aclose.assert_awaited_once()
+    client.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio

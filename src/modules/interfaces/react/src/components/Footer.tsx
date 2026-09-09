@@ -26,6 +26,7 @@ interface FooterProps {
     progressPercent?: number;
   };
   operationHealth?: OperationHealthSnapshot | null;
+  showAssessmentStatus?: boolean;
   connectionStatus?: 'connected' | 'connecting' | 'error' | 'offline';
   modelProvider?: string;
   deploymentMode?: string;
@@ -42,6 +43,7 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   debugMode = false,
   operationMetrics,
   operationHealth,
+  showAssessmentStatus = false,
   connectionStatus = 'connected',
   modelProvider,
   deploymentMode,
@@ -82,7 +84,7 @@ export const Footer: React.FC<FooterProps> = React.memo(({
   const hasDuration = !!operationMetrics?.duration && operationMetrics?.duration !== '0s';
   const etaSeconds = estimateEtaSeconds(operationMetrics?.duration, progressPercent);
   const hasMem = (operationMetrics?.memoryOps || 0) > 0;
-  const healthVisual = formatOperationHealth(operationHealth);
+  const healthVisual = formatOperationHealth(operationHealth, showAssessmentStatus);
   // Build a single-line footer string and hard-truncate to terminal width to avoid Ink layout bugs
   // Keep one column clear at the right edge so the animated line cannot wrap
   // when the terminal or renderer accounts for the final cell differently.

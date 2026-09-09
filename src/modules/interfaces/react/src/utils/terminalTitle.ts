@@ -12,8 +12,12 @@ const sanitizeTerminalTitleTarget = (target: unknown): string => String(target ?
   .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
   .trim();
 
-export const formatOperationTerminalTitle = (health: unknown, target?: string | null): string => {
-  const visual = formatOperationHealth(health);
+export const formatOperationTerminalTitle = (
+  health: unknown,
+  target?: string | null,
+  showAssessmentStatus = false,
+): string => {
+  const visual = formatOperationHealth(health, showAssessmentStatus);
   const targetValue = sanitizeTerminalTitleTarget(target);
   const healthTitle = visual ? `CAA ${visual.label}` : 'CAA';
   return targetValue ? `${healthTitle} | ${targetValue}` : healthTitle;
@@ -23,10 +27,11 @@ export const setOperationTerminalTitle = (
   health: OperationHealthSnapshot | null | undefined,
   target?: string | null,
   stream: TerminalTitleStream = process.stdout,
+  showAssessmentStatus = false,
 ): boolean => {
   if (stream.isTTY !== true) return false;
 
-  const title = formatOperationTerminalTitle(health, target);
+  const title = formatOperationTerminalTitle(health, target, showAssessmentStatus);
   if (lastTitleByStream.get(stream as object) === title) return false;
 
   stream.write(`\u001B]0;${title}\u0007`);

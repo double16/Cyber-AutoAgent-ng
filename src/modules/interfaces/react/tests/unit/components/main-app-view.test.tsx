@@ -177,6 +177,7 @@ describe('MainAppView', () => {
             health,
             'https://target.test',
             expect.anything(),
+            false,
         );
 
         await act(async () => {
@@ -189,7 +190,7 @@ describe('MainAppView', () => {
             }) as any}/>);
             await Promise.resolve();
         });
-        expect(setOperationTerminalTitle).toHaveBeenLastCalledWith(null, null, expect.anything());
+        expect(setOperationTerminalTitle).toHaveBeenLastCalledWith(null, null, expect.anything(), false);
     });
 
     it('renders modals and operation streams while forwarding lifecycle metrics', async () => {
