@@ -1312,7 +1312,10 @@ def _format_finding_with_narrative(item: dict[str, Any], index: int, narrative: 
             for step_index, step in enumerate(recorded_steps, 1)
             if str(step).strip()
         )
-    steps = _compact_text(recorded_steps, 1200) or "Not established from supplied evidence"
+        steps = safe_truncate(recorded_steps, 2400)
+    else:
+        steps = _compact_text(recorded_steps, 2400)
+    steps = steps or "Not established from supplied evidence"
     impact_grounding = ""
     if not metadata.get("impact_evidence_artifacts"):
         impact_grounding = (

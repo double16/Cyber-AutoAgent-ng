@@ -513,9 +513,22 @@ def test_finding_narrative_uses_recorded_validation_steps_and_impact_evidence():
 
     detail = _format_finding_with_narrative(finding, 0, "#### Impact\n\nDemonstrated impact.")
 
-    assert "1. Request /api/config" in detail
-    assert "2. Observe the response" in detail
+    assert "1. Request /api/config\n2. Observe the response" in detail
+    assert "1. Request /api/config 2. Observe the response" not in detail
     assert "#### Impact Grounding" not in detail
+
+
+def test_finding_narrative_uses_fallback_when_validation_steps_are_missing():
+    finding = {
+        "title": "Configuration exposure",
+        "severity": "HIGH",
+        "content": "The endpoint returned configuration data.",
+        "metadata": {},
+    }
+
+    detail = _format_finding_with_narrative(finding, 0, "#### Impact\n\nDemonstrated impact.")
+
+    assert "#### Steps to Reproduce\n\nNot established from supplied evidence" in detail
 
 
 def test_finding_narrative_removes_unsupported_impact_and_aws_rotation_claims():
