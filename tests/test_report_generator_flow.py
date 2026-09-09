@@ -465,6 +465,122 @@ def test_report_evidence_grouping_is_disabled_by_default_and_opt_in():
     assert len(enabled) == 1
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("open redirect", "open_redirect"),
+        ("cross-site scripting", "cross_site_scripting"),
+        ("XSS", "cross_site_scripting"),
+        ("local file inclusion", "local_file_inclusion"),
+        ("LFI", "local_file_inclusion"),
+        ("SQL injection", "sql_injection"),
+        ("SQLi", "sql_injection"),
+        ("arbitrary file read", "arbitrary_file_read"),
+        ("path traversal", "arbitrary_file_read"),
+        ("authentication bypass", "authentication_bypass"),
+        ("auth bypass", "authentication_bypass"),
+        ("missing security header", "missing_security_headers"),
+        ("version disclosure", "version_disclosure"),
+        ("secret disclosure", "information_disclosure"),
+        ("unclassified behavior", "unclassified behavior"),
+    ],
+)
+def test_report_canonical_finding_behavior_normalizes_supported_families(text, expected):
+    item = {"title": text}
+
+    assert report_generator_module._canonical_finding_behavior(item) == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("verified", "verified"),
+        ("confirmed", "verified"),
+        ("success", "verified"),
+        ("successful", "verified"),
+        ("failed", "failed"),
+        ("not-confirmed", "failed"),
+        ("rejected", "failed"),
+        ("unverified", "failed"),
+        ("pending", "validation_required"),
+        ("pending-validation", "validation_required"),
+        ("validation required", "validation_required"),
+        ("inaccessible", "validation_required"),
+    ],
+)
+def test_report_canonical_validation_status_normalizes_aliases(status, expected):
+    assert report_generator_module._canonical_validation_status({"validation_status": status}) == expected
+
+
+def test_report_canonical_validation_status_uses_category_fallbacks():
+    assert report_generator_module._canonical_validation_status({"category": "finding"}) == "verified"
+    assert report_generator_module._canonical_validation_status({"category": "validation_failure"}) == "validation_required"
+
+
+def test_report_canonical_endpoint_handles_relative_and_fallback_locations():
+    target = {"network-1": report_generator_module.OperationTarget("network-1", "https://example.test:8443", "network")}
+
+    assert report_generator_module._canonical_report_endpoint(
+        {"metadata": {"target_id": "network-1", "location": "/api/items"}}, target
+    ) == "https://example.test:8443/api/items"
+    assert report_generator_module._canonical_report_endpoint(
+        {"metadata": {"target_id": "network-1", "location": "https://other.test/path"}}, target
+    ) == "https://example.test:8443"
+    assert report_generator_module._canonical_report_endpoint(
+        {"title": "Finding at https://example.test/api/items"}
+    ) == "https://example.test/api/items"
+    assert report_generator_module._canonical_report_endpoint({"title": "/api/items"}) == "/api/items"
+    assert report_generator_module._canonical_report_endpoint({"title": "No location"}) == ""
+
+
+def test_report_canonical_endpoint_handles_network_ranges_and_invalid_urls():
+    network_range = report_generator_module.OperationTarget("range-1", "192.168.0.0/16", "network_range")
+
+    assert report_generator_module._canonical_report_endpoint(
+        {"metadata": {"target_id": "range-1", "endpoint": "http://192.168.1.10/api"}},
+        {"range-1": network_range},
+    ) == "http://192.168.1.10/api"
+    assert report_generator_module._canonical_report_endpoint(
+        {"metadata": {"target_id": "range-1", "endpoint": "http://not-an-ip/api"}},
+        {"range-1": network_range},
+    ) == "192.168.0.0/16"
+
+
+def test_report_secret_predicates_ignore_malformed_and_duplicate_assertions():
+    digest = "c" * 64
+    item = {
+        "metadata": {
+            "candidate_evidence_assertions": [
+                {"type": "literal_text", "value": "secret"},
+                {"type": "secret_exposure", "kind": "connection_string", "digest": digest},
+                {"type": "secret_exposure", "kind": "connection_string", "digest": digest},
+                {"type": "secret_exposure", "kind": "provider_api_key", "digest": "invalid"},
+            ],
+            "evidence_assertions": "not-a-list",
+        }
+    }
+
+    assert report_generator_module._secret_exposure_predicates(item) == [("connection_string", digest)]
+    assert report_generator_module._secret_exposure_label({}) == ""
+    assert report_generator_module._secret_exposure_label({"canonical_exposure": {"kind": "api_key"}}) == "api key"
+
+
+def test_report_safe_evidence_removes_only_secret_exposure_digests():
+    value = {
+        "items": [
+            {"type": "secret_exposure", "kind": "api_key", "digest": "secret-digest"},
+            {"type": "literal_text", "digest": "ordinary-digest"},
+            "plain text",
+        ]
+    }
+
+    safe = report_generator_module._report_safe_evidence(value)
+
+    assert "digest" not in safe["items"][0]
+    assert safe["items"][1]["digest"] == "ordinary-digest"
+    assert safe["items"][2] == "plain text"
+
+
 def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch, tmp_path):
     manifest = tmp_path / "inventory.json"
     manifest.write_text(
