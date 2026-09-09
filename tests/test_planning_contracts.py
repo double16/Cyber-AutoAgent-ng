@@ -10,6 +10,7 @@ from modules.operation_plugins.planning_contracts import (
 from modules.tools.memory import (
     _TASK_PROPOSAL_INPUT_SCHEMA,
     OperationPlan,
+    OperationTarget,
     PlanPhase,
     TaskProposal,
     _proposal_acceptance_contract,
@@ -77,6 +78,7 @@ def test_controller_owned_synthesis_proposal_requires_no_runtime_method():
             total_phases=1,
             phases=[PlanPhase(id=1, title="Mapping", status="active")],
         ),
+        phase_task_contract=load_phase_task_contract("web", 1),
     )
 
     assert proposal.methods == []
@@ -85,17 +87,110 @@ def test_controller_owned_synthesis_proposal_requires_no_runtime_method():
 
 
 def test_controller_owned_synthesis_rejects_invented_runtime_method():
-    with pytest.raises(ValueError, match="controller-owned synthesis"):
-        TaskProposal.model_validate(
-            {
-                "title": "Synthesize canonical inventory",
-                "objective": "Merge the completed mapping outputs into the canonical inventory manifest",
-                "methods": ["synthesis"],
-                "limits": {"max_requests": 1},
-                "criteria": [{"description": "Store the canonical inventory manifest"}],
-                "workstream": "inventory_synthesis",
-                "task_role": "synthesis",
-            }
+    proposal = TaskProposal.model_validate(
+        {
+            "title": "Synthesize canonical inventory",
+            "objective": "Merge the completed mapping outputs into the canonical inventory manifest",
+            "methods": ["analyze"],
+            "limits": {"max_requests": 1},
+            "criteria": [{"description": "Store the canonical inventory manifest"}],
+            "workstream": "inventory_synthesis",
+            "task_role": "synthesis",
+            "output_kind": "inventory_manifest",
+        }
+    )
+
+    with pytest.raises(ValueError, match="controller_synthesis is reserved"):
+        _proposal_acceptance_contract(
+            proposal,
+            OperationPlan(
+                objective="Assess",
+                current_phase=1,
+                total_phases=1,
+                phases=[PlanPhase(id=1, title="Mapping", status="active")],
+            ),
+            phase_task_contract=load_phase_task_contract("web", 1),
+        )
+
+
+def test_non_inventory_synthesis_requires_an_explicit_executor_model():
+    proposal = TaskProposal.model_validate(
+        {
+            "title": "Analyze exploit chain",
+            "objective": "Correlate verified findings into one bounded attack path",
+            "methods": [],
+            "limits": {"max_requests": 1},
+            "criteria": [{"description": "Store one bounded chain analysis artifact"}],
+            "task_role": "synthesis",
+        }
+    )
+
+    with pytest.raises(ValueError, match="controller_synthesis is reserved"):
+        _proposal_acceptance_contract(
+            proposal,
+            OperationPlan(
+                objective="Assess",
+                current_phase=1,
+                total_phases=1,
+                phases=[PlanPhase(id=1, title="Exploit chain analysis", status="active")],
+            ),
+        )
+
+
+def test_executor_owned_synthesis_retains_its_declared_execution_method():
+    proposal = TaskProposal.model_validate(
+        {
+            "title": "Synthesize challenge surface",
+            "objective": "Analyze completed CTF mapping artifacts into one challenge surface record",
+            "methods": ["analyze"],
+            "limits": {"max_requests": 1},
+            "criteria": [{"description": "Store one bounded challenge surface artifact"}],
+            "workstream": "challenge_surface_synthesis",
+            "task_role": "synthesis",
+            "output_kind": "artifact",
+        }
+    )
+
+    acceptance = _proposal_acceptance_contract(
+        proposal,
+        OperationPlan(
+            objective="Assess",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(id=1, title="Challenge surface", status="active")],
+            targets=[OperationTarget(target_id="target-1", type="network", value="ctf.test")],
+        ),
+        phase_task_contract=load_phase_task_contract("ctf", 1),
+    )
+
+    assert acceptance.basis.procedure.methods == ("analyze",)
+    assert acceptance.criteria[0].execution_requirements
+
+
+def test_executor_owned_synthesis_requires_a_runtime_method():
+    proposal = TaskProposal.model_validate(
+        {
+            "title": "Synthesize challenge surface",
+            "objective": "Analyze completed CTF mapping artifacts into one challenge surface record",
+            "methods": [],
+            "limits": {"max_requests": 1},
+            "criteria": [{"description": "Store one bounded challenge surface artifact"}],
+            "workstream": "challenge_surface_synthesis",
+            "task_role": "synthesis",
+            "output_kind": "artifact",
+        }
+    )
+
+    with pytest.raises(ValueError, match="executor-owned synthesis requires"):
+        _proposal_acceptance_contract(
+            proposal,
+            OperationPlan(
+                objective="Assess",
+                current_phase=1,
+                total_phases=1,
+                phases=[PlanPhase(id=1, title="Challenge surface", status="active")],
+            ),
+            phase_task_contract=load_phase_task_contract("ctf", 1),
         )
 
 

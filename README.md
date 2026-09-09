@@ -184,7 +184,8 @@ The compose stack automatically provides:
   with ATT&CK mappings after terminal workflow evidence is available
 - **Meta-Tool Creation**: Dynamically creates custom exploitation tools when needed
 - **Adaptive Execution**: Metacognitive assessment guides strategy based on confidence levels
-- **Assessment Reporting**: Generates comprehensive reports with findings and remediation
+- **Assessment Reporting**: Generates comprehensive reports with findings, remediation, and a discovered
+  attack-surface summary grounded in current-operation records
 - **Swarm Intelligence**: Deploy parallel agents as an execution capability for complex tasks
 - **Real-Time Monitoring**: React interface displays live agent reasoning and tool execution
 - **Observability**: Built-in Langfuse tracing and Ragas evaluation metrics

@@ -33,6 +33,11 @@ Task and phase evaluators are review-only roles. They receive only `editor` for 
 `memory_retrieve` for reviewing existing memories. They do not receive shell or execution tools and must not perform the
 task, phase, or operation objective while classifying existing evidence.
 
+Task-prompt memory selection uses canonical memory IDs. When the controller selects memory, it injects the selected
+records with their IDs, provenance, and evidence status; large selections are deterministically truncated while keeping
+every selected ID visible. When no memory is selected, the task prompt contains no memory-selection or memory-context
+section. Semantic memory remains advisory context and cannot independently satisfy task acceptance.
+
 Task executors may create contracted follow-up work with `create_tasks` when their role permits it. Task creators return
 schema-validated proposals for controller persistence. Plan reads/writes, task activation, active-task lookup, task
 closure, and uncompleted-task listing are applied directly by Python rather than agent-callable tools.
@@ -275,6 +280,16 @@ recorded. Once the atomic ledger passes structural validation, one short-lived s
 `done`, `partial_failure`, or `blocked` verdict; immutable acceptance results are not replayed through another pass.
 Python may later reconcile a failed or blocked task to `superseded` when explicitly linked replacement tasks resolve
 all of its criteria.
+
+For a task scoped to one frozen endpoint, an inventory manifest is supporting scope context only: it cannot close the
+task by itself. The acceptance submission may retain that context alongside one or more route-specific artifacts (for
+example, the captured response or a task-local hypothesis artifact). Endpoint recovery guidance lists the
+route-specific artifacts eligible for submission separately from manifests that remain scope context and do not
+contribute to endpoint acceptance.
+
+Finding-validation manifests should normally use `artifact:` references. For compatibility, an existing absolute path
+inside the current operation output root is accepted and canonicalized to an `artifact:` reference; paths outside the
+operation root and missing files are rejected.
 
 Correctable tool invocation failures receive one bounded recovery turn in the same retained executor conversation.
 The executor may inspect or create prerequisites, continue independent work, select another executable, and make a

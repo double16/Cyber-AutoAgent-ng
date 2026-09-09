@@ -447,7 +447,7 @@ def test_create_tasks_does_not_deduplicate_by_fuzzy_similarity(tmp_path, monkeyp
             "objective": "Test fuzzy",
             "current_phase": 1,
             "total_phases": 1,
-            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1", "produces_hypotheses": False}],
             "assessment_complete": False,
         }
         memory_tasks.store_plan(memory, plan)
@@ -613,7 +613,7 @@ def test_create_tasks_sensitive_urls(tmp_path, monkeypatch):
             "objective": "Test sensitive URLs",
             "current_phase": 1,
             "total_phases": 1,
-            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1", "produces_hypotheses": False}],
             "assessment_complete": False,
         }
         memory_tasks.store_plan(memory, plan)
@@ -659,7 +659,7 @@ def test_create_tasks_parameterized_urls(tmp_path, monkeypatch):
             "objective": "Test parameterized URLs",
             "current_phase": 1,
             "total_phases": 1,
-            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1", "produces_hypotheses": False}],
             "assessment_complete": False,
         }
         memory_tasks.store_plan(memory, plan)
@@ -705,7 +705,7 @@ def test_create_tasks_parameterized_url_paths(tmp_path, monkeypatch):
             "objective": "Test parameterized URL paths",
             "current_phase": 1,
             "total_phases": 1,
-            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1", "produces_hypotheses": False}],
             "assessment_complete": False,
         }
         memory_tasks.store_plan(memory, plan)
@@ -751,7 +751,7 @@ def test_create_tasks_parameterized_urls_batched(tmp_path, monkeypatch):
             "objective": "Test parameterized URLs",
             "current_phase": 1,
             "total_phases": 1,
-            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1", "produces_hypotheses": False}],
             "assessment_complete": False,
         }
         memory_tasks.store_plan(memory, plan)
@@ -794,7 +794,7 @@ def test_create_tasks_sensitive_paths(tmp_path, monkeypatch):
             "objective": "Test sensitive paths",
             "current_phase": 1,
             "total_phases": 1,
-            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1"}],
+            "phases": [{"id": 1, "title": "P1", "status": "active", "criteria": "C1", "produces_hypotheses": False}],
             "assessment_complete": False,
         }
         memory_tasks.store_plan(memory, plan)

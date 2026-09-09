@@ -190,6 +190,18 @@ def test_module_prompt_loader_load_module_termination_policy(tmp_path, monkeypat
     assert "Termination Policy" in content
 
 
+def test_module_prompt_loader_loads_hypothesis_prompt(tmp_path, monkeypatch):
+    module_dir = tmp_path / "operation_plugins" / "web"
+    module_dir.mkdir(parents=True)
+    (module_dir / "module.yaml").write_text("name: web\n")
+    (module_dir / "hypothesis_prompt.md").write_text("Hypothesis guidance\n")
+
+    loader = ModulePromptLoader()
+    monkeypatch.setattr(loader, "plugin_dirs", [tmp_path / "operation_plugins"])
+
+    assert loader.load_module_hypothesis_prompt("web") == "Hypothesis guidance"
+
+
 def test_module_prompt_loader_load_module_report_prompt(tmp_path, monkeypatch):
     # Create a report_prompt.md for module
     module_dir = tmp_path / "operation_plugins" / "web"

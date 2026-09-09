@@ -20,7 +20,10 @@ import { ApplicationState } from '../hooks/useApplicationState.js';
 import { OperationHistoryEntry } from '../hooks/useOperationManager.js';
 import { ModalType } from '../hooks/useModalManager.js';
 import type { ThinkingStatus } from '../types/thinking.js';
-import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
+import {
+  isPostAssessmentStage,
+  type OperationHealthSnapshot,
+} from '../utils/operationHealthFormatting.js';
 import { setOperationTerminalTitle } from '../utils/terminalTitle.js';
 
 interface MainAppViewProps {
@@ -91,6 +94,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
   const [hasStreamBegun, setHasStreamBegun] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState<ThinkingStatus>({ active: false });
   const [currentTaskTitle, setCurrentTaskTitle] = useState<string | null>(null);
+  const [showAssessmentStatus, setShowAssessmentStatus] = useState(false);
 
   const clearDeferStreamMountTimer = useCallback(() => {
     if (deferStreamMountTimerRef.current) {
@@ -135,11 +139,15 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
   // Reset flag when operation changes
   useEffect(() => {
     setHasStreamBegun(false);
+    setShowAssessmentStatus(false);
   }, [appState.activeOperation?.id]);
 
   const hasStreamBegunRef = useRef(false);
   const handleStreamEvent = useCallback((event: any) => {
     const eventType = event?.type;
+    if (isPostAssessmentStage(event?.operation_stage, event?.step, eventType)) {
+      setShowAssessmentStatus(true);
+    }
     if (eventType === 'task_started') {
       const title = typeof event?.title === 'string' ? event.title.trim() : '';
       setCurrentTaskTitle(title ? `${title}${formatTaskScope(event)}` : null);
@@ -163,12 +171,14 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
       operationRunning ? appState.operationHealth : null,
       operationRunning ? appState.activeOperation?.target : null,
       stdout,
+      showAssessmentStatus,
     );
   }, [
     appState.activeOperation?.status,
     appState.activeOperation?.target,
     appState.operationHealth,
     hasAnyOperationEnded,
+    showAssessmentStatus,
     stdout,
   ]);
 
@@ -387,6 +397,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
             model={appState.activeOperation?.model || ""}
             operationMetrics={appState.operationMetrics}
             operationHealth={appState.operationHealth}
+            showAssessmentStatus={showAssessmentStatus}
             connectionStatus={appState.isDockerServiceAvailable ? 'connected' : 'offline'}
             modelProvider={applicationConfig?.modelProvider}
             deploymentMode={applicationConfig?.deploymentMode}

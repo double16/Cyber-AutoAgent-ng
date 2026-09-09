@@ -168,12 +168,24 @@ _QDRANT_WRITE_LOCK = threading.Lock()
 
 
 PlanStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "not_applicable"]
-TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "superseded"]
+TaskStatus = Literal["active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"]
 TargetType = Literal["network", "network_range", "filesystem"]
 TargetScope = Literal["all", "subset"]
 AcceptanceMode = Literal["outcome", "coverage"]
 AcceptanceBasisKind = Literal["procedure", "snapshot"]
 ProcedureOutputKind = Literal["artifact", "inventory_manifest"]
+
+
+def current_workflow_tasks(tasks: Iterable["Task"]) -> list["Task"]:
+    """Return tasks eligible for current workflow decisions and coverage.
+
+    Replanned tasks are retained durably for audit history, but represent archived
+    work. They must not affect current workflow control or coverage claims.
+    """
+
+    return [task for task in tasks if str(task.status) != "replanned"]
+
+
 DISCOVERY_PROCEDURE_LIMIT_KEYS = (
     "max_duration_minutes",
     "max_requests",
@@ -967,7 +979,7 @@ class Task:
         if not isinstance(self.objective, str) or not self.objective.strip():
             raise ValueError("objective must be a non-empty string")
         normalized_status = _normalize_task_status(self.status)
-        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked", "superseded"}:
+        if normalized_status not in {"active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"}:
             raise ValueError("task status is invalid")
         object.__setattr__(self, "status", normalized_status)
         object.__setattr__(self, "acceptance", AcceptanceContract.from_obj(self.acceptance))
@@ -976,8 +988,8 @@ class Task:
         object.__setattr__(self, "recovery_context", dict(self.recovery_context))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
-        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded"):
-            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked|superseded")
+        if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"):
+            raise ValueError("status must be one of: active|pending|done|partial_failure|blocked|superseded|replanned")
         if self.target_scope not in ("all", "subset"):
             raise ValueError("target_scope must be all or subset")
         if not isinstance(self.target_ids, list):
@@ -1084,10 +1096,12 @@ class PlanPhase:
     title: str
     status: PlanStatus
     criteria: str = ""
+    produces_hypotheses: bool = False
     requires_finding_candidates: bool = False
     task_creation_mode: Literal[
         "standard",
         "snapshot_dependent",
+        "hypothesis_dependent",
         "finding_dependent",
         "finding_validation",
     ] = "standard"
@@ -1107,9 +1121,17 @@ class PlanPhase:
             object.__setattr__(self, "criteria", "")  # type: ignore[misc]
         if not isinstance(self.criteria, str):
             raise ValueError("phase.criteria must be a string")
+        if not isinstance(self.produces_hypotheses, bool):
+            raise ValueError("phase.produces_hypotheses must be a boolean")
         if not isinstance(self.requires_finding_candidates, bool):
             raise ValueError("phase.requires_finding_candidates must be a boolean")
-        valid_modes = {"standard", "snapshot_dependent", "finding_dependent", "finding_validation"}
+        valid_modes = {
+            "standard",
+            "snapshot_dependent",
+            "hypothesis_dependent",
+            "finding_dependent",
+            "finding_validation",
+        }
         if self.task_creation_mode not in valid_modes:
             raise ValueError(f"phase.task_creation_mode must be one of: {', '.join(sorted(valid_modes))}")
 
@@ -1117,11 +1139,14 @@ class PlanPhase:
     def from_obj(obj: Any) -> "PlanPhase":
         if not isinstance(obj, dict):
             raise ValueError("phase must be an object/dict")
+        if "produces_hypotheses" not in obj:
+            raise ValueError("phase.produces_hypotheses is required")
         return PlanPhase(
             id=int(obj.get("id")),
             title=str(obj.get("title", "")),
             status=str(obj.get("status", "pending")),  # validated in __post_init__
             criteria=str(obj.get("criteria", "")) if obj.get("criteria") is not None else "",
+            produces_hypotheses=obj["produces_hypotheses"],
             requires_finding_candidates=obj.get("requires_finding_candidates", False),
             task_creation_mode=str(
                 obj.get("task_creation_mode")
@@ -1135,7 +1160,7 @@ class PlanPhase:
 
     @staticmethod
     def csv_format() -> str:
-        return "id,title,status,criteria,requires_finding_candidates,task_creation_mode"
+        return "id,title,status,criteria,produces_hypotheses,requires_finding_candidates,task_creation_mode"
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
@@ -1145,7 +1170,8 @@ class PlanPhase:
         if include_format:
             lines.append(f"{self.toon_format()}:")
         lines.append(
-            f"  {self.id},{title},{status},{criteria},{str(self.requires_finding_candidates).lower()},"
+            f"  {self.id},{title},{status},{criteria},{str(self.produces_hypotheses).lower()},"
+            f"{str(self.requires_finding_candidates).lower()},"
             f"{self.task_creation_mode}"
         )
         return "\n".join(lines).strip()
@@ -1156,6 +1182,7 @@ class PlanPhase:
             "title": self.title,
             "status": self.status,
             "criteria": self.criteria,
+            "produces_hypotheses": self.produces_hypotheses,
             "requires_finding_candidates": self.requires_finding_candidates,
             "task_creation_mode": self.task_creation_mode,
         })
@@ -1441,6 +1468,14 @@ class ApplicationStore(Protocol):
 
     def get_tasks(self, operation_id: str) -> list[Task]: ...
 
+    def reset_failed_work(self, operation_id: str) -> tuple[OperationPlan, int, int]: ...
+
+    def reset_phases_for_replan(
+        self,
+        operation_id: str,
+        phase_ids: Iterable[int],
+    ) -> tuple[OperationPlan, int, tuple[int, ...]]: ...
+
     def append_operation_model_metrics(
         self, operation_id: str, captured_at: str, rows: list[dict[str, Any]]
     ) -> None: ...
@@ -1488,6 +1523,8 @@ class SQLiteApplicationStore:
         "store_task",
         "patch_task",
         "get_tasks",
+        "reset_failed_work",
+        "reset_phases_for_replan",
         "store_acceptance_results",
         "get_acceptance_results",
         "has_acceptance_memory_publication",
@@ -2092,6 +2129,178 @@ class SQLiteApplicationStore:
                     )
                 )
         return tasks
+
+    def reset_failed_work(self, operation_id: str) -> tuple[OperationPlan, int, int]:
+        """Make failed work runnable again while retaining its durable evidence.
+
+        Returns the updated plan followed by the number of reset tasks and phases.  The
+        transition is atomic so a continuation never observes a reset plan with stale
+        terminal tasks, or the reverse.
+        """
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown operation plan: {operation_id}")
+            plan = OperationPlan.from_obj(json.loads(row[0]))
+            failed_tasks = conn.execute(
+                "SELECT task_uid, phase, status, status_reason FROM tasks "
+                "WHERE logical_target = ? AND operation_id = ? AND status IN ('partial_failure', 'blocked')",
+                (self.logical_target, operation_id),
+            ).fetchall()
+            failed_phase_ids = {
+                int(phase.id) for phase in plan.phases if phase.status in {"partial_failure", "blocked"}
+            }
+            affected_phase_ids = failed_phase_ids | {int(task[1]) for task in failed_tasks}
+            if not affected_phase_ids:
+                return plan, 0, 0
+
+            now = datetime.now().isoformat()
+            for task_uid, _phase, prior_status, prior_reason in failed_tasks:
+                reset_reason = f"Reset for continuation from {prior_status}."
+                if prior_reason:
+                    reset_reason = f"{reset_reason} Prior reason: {prior_reason}"
+                conn.execute(
+                    "UPDATE tasks SET status = ?, status_reason = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    ("pending", reset_reason, now, self.logical_target, operation_id, task_uid),
+                )
+
+            current_phase = min(affected_phase_ids)
+            phases = []
+            for phase in plan.phases:
+                status = phase.status
+                if phase.id == current_phase:
+                    status = "active"
+                elif phase.id in affected_phase_ids or status == "active":
+                    status = "pending"
+                phases.append(replace(phase, status=status))
+            updated_plan = replace(
+                plan,
+                current_phase=current_phase,
+                phases=phases,
+                assessment_complete=False,
+                updated_at=now,
+            )
+            conn.execute(
+                "UPDATE plans SET current_phase = ?, assessment_complete = ?, plan_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ?",
+                (
+                    updated_plan.current_phase,
+                    updated_plan.assessment_complete,
+                    json.dumps(updated_plan.to_dict()),
+                    now,
+                    self.logical_target,
+                    operation_id,
+                ),
+            )
+        return updated_plan, len(failed_tasks), len(affected_phase_ids)
+
+    def reset_phases_for_replan(
+        self,
+        operation_id: str,
+        phase_ids: Iterable[int],
+    ) -> tuple[OperationPlan, int, tuple[int, ...]]:
+        """Replan selected phase tasks and reopen their phases for fresh task creation.
+
+        Archived tasks retain their evidence and immutable acceptance history. They are
+        deliberately marked ``replanned`` rather than deleted so reports and operation
+        forensics retain the reason that replacement work was requested. Existing
+        finding-validation tasks instead return to ``pending`` so their bound, independent
+        verification work resumes before fresh proposals are created.
+        """
+
+        requested_phase_ids = tuple(sorted({int(phase_id) for phase_id in phase_ids}))
+        if not requested_phase_ids:
+            raise ValueError("At least one phase ID is required for replanning")
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT plan_data FROM plans WHERE logical_target = ? AND operation_id = ?",
+                (self.logical_target, operation_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Unknown operation plan: {operation_id}")
+            plan = OperationPlan.from_obj(json.loads(row[0]))
+            known_phase_ids = {int(phase.id) for phase in plan.phases}
+            unknown_phase_ids = sorted(set(requested_phase_ids) - known_phase_ids)
+            if unknown_phase_ids:
+                raise ValueError(f"Unknown plan phase IDs: {unknown_phase_ids}")
+
+            now = datetime.now().isoformat()
+            placeholders = ", ".join("?" for _ in requested_phase_ids)
+            task_rows = conn.execute(
+                "SELECT task_uid, kind, status, status_reason, recovery_context FROM tasks "
+                f"WHERE logical_target = ? AND operation_id = ? AND phase IN ({placeholders})",
+                (self.logical_target, operation_id, *requested_phase_ids),
+            ).fetchall()
+            for task_uid, kind, prior_status, prior_reason, raw_context in task_rows:
+                is_finding_validation = kind == "finding_validation"
+                next_status = "pending" if is_finding_validation else "replanned"
+                reset_reason = (
+                    f"Reset finding validation for explicit phase replan from {prior_status}."
+                    if is_finding_validation
+                    else f"Archived for explicit phase replan from {prior_status}."
+                )
+                recovery_context = json.loads(raw_context or "{}")
+                history = recovery_context.get("replan_history", [])
+                if not isinstance(history, list):
+                    history = []
+                history.append({
+                    "at": now,
+                    "transition": "explicit_phase_replan",
+                    "from_status": prior_status,
+                    "prior_reason": prior_reason or "",
+                })
+                recovery_context["replan_history"] = history
+                conn.execute(
+                    "UPDATE tasks SET status = ?, status_reason = ?, recovery_context = ?, updated_at = ? "
+                    "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
+                    (
+                        next_status,
+                        reset_reason,
+                        json.dumps(recovery_context, sort_keys=True),
+                        now,
+                        self.logical_target,
+                        operation_id,
+                        task_uid,
+                    ),
+                )
+
+            active_phase_id = requested_phase_ids[0]
+            phases = []
+            for phase in plan.phases:
+                status = phase.status
+                if phase.id == active_phase_id:
+                    status = "active"
+                elif phase.id in requested_phase_ids or status == "active":
+                    status = "pending"
+                phases.append(replace(phase, status=status))
+            updated_plan = replace(
+                plan,
+                current_phase=active_phase_id,
+                phases=phases,
+                assessment_complete=False,
+                updated_at=now,
+            )
+            conn.execute(
+                "UPDATE plans SET current_phase = ?, assessment_complete = ?, plan_data = ?, updated_at = ? "
+                "WHERE logical_target = ? AND operation_id = ?",
+                (
+                    updated_plan.current_phase,
+                    updated_plan.assessment_complete,
+                    json.dumps(updated_plan.to_dict()),
+                    now,
+                    self.logical_target,
+                    operation_id,
+                ),
+            )
+        return updated_plan, len(task_rows), requested_phase_ids
 
     def store_acceptance_results(
         self,
@@ -4396,8 +4605,19 @@ def _validate_confirmation_manifest(candidate: dict[str, Any], reference: str) -
                 _assertion_matches_artifact(assertion, canonical_reexposure_ref)
                 for assertion in secret_assertions
             ):
+                required_predicates = sorted(
+                    _canonical_assertion_predicate(assertion) for assertion in secret_assertions
+                )
+                available_predicates = [
+                    {"type": "secret_exposure", "kind": exposure.kind, "digest": exposure.digest}
+                    for exposure in detect_secret_exposures(canonical_reexposure_ref)
+                ]
                 raise _confirmation_manifest_error(
-                    "secret exposure revalidation requires the same exposure in a fresh artifact", requirements
+                    "secret exposure revalidation requires the same exposure in a fresh artifact; "
+                    f"canonical reexposure_artifact={canonical_reexposure_ref}; "
+                    f"required predicates={json.dumps(required_predicates)}; "
+                    f"available predicates={json.dumps(available_predicates, sort_keys=True)}",
+                    requirements,
                 )
             derived[rule_id] = {"reexposure_artifact": canonical_reexposure_ref}
     return {
@@ -4579,6 +4799,8 @@ def record_finding_validation(
             "complete": True,
             "finding_uid": finding_uid,
             "outcome": normalized_outcome,
+            "evidence_artifacts": evidence,
+            "validation_manifest": manifest_attestation.get("manifest"),
             "acceptance": acceptance_response,
         },
         sort_keys=True,
@@ -4616,6 +4838,8 @@ def build_record_finding_validation_tool(task: Task) -> Any:
         manifest_shape = json.dumps(finding_validation_manifest_schema(requirements), sort_keys=True)
         manifest_description = (
             "Required for confirmed outcomes. Provide a previously written artifact reference, never inline JSON. "
+            "An existing absolute path inside the current operation is accepted and canonicalized to artifact:, "
+            "but artifact: is preferred. "
             f"It must contain these required checks: {', '.join(requirement_ids)}. "
             f"Manifest JSON shape: {manifest_shape}"
         )
@@ -4648,6 +4872,8 @@ def build_record_finding_validation_tool(task: Task) -> Any:
 The controller binds this tool to the only finding and verification task assigned to this task. Supply fresh evidence
 artifacts and an outcome; Python re-proves the candidate's immutable markers and records frozen task acceptance.
 For confirmed outcomes, provide any required validation manifest as an existing artifact reference, never inline JSON.
+An existing absolute path inside the current operation is accepted and canonicalized to an `artifact:` reference, but
+use `artifact:` in new calls.
 """
     input_schema: dict[str, Any] = {
         "type": "object",
@@ -5401,8 +5627,6 @@ class TaskProposal(_StrictTaskWireModel):
         snapshot_fields = bool(self.snapshot_refs)
         if self.methods and snapshot_fields:
             raise ValueError("proposal must not mix procedure and snapshot fields")
-        if self.task_role == "synthesis" and self.methods:
-            raise ValueError("controller-owned synthesis proposal must leave methods empty")
         if snapshot_fields:
             if self.output_kind != "artifact":
                 raise ValueError("snapshot proposal must not set output_kind")
@@ -6751,7 +6975,9 @@ def _freeze_and_validate_acceptance(contract: AcceptanceContract, existing_tasks
         if prefix == "artifact":
             artifact_path = _artifact_path_from_ref(reference)
             producers = [task for task in existing_tasks if artifact_path in _task_evidence_artifact_paths(task)]
-            if producers and any(task.status != "done" for task in producers):
+            # Replanned/replaced tasks may retain inherited evidence references. An artifact is
+            # usable once at least one task that produced or persisted it is complete.
+            if producers and not any(task.status == "done" for task in producers):
                 raise ValueError(f"Acceptance basis producer task is not done: {reference}")
         elif prefix == "task":
             task = next((item for item in existing_tasks if item.task_uid == value), None)
@@ -6833,10 +7059,55 @@ def _normalize_task_proposal(proposal: TaskProposal) -> _NormalizedTaskProposal:
     return _NormalizedTaskProposal(proposal=proposal, basis_kind=basis_kind, limits=limits)
 
 
-def _proposal_procedure_methods(proposal: TaskProposal) -> list[str]:
-    """Return deterministic internal methods for controller-owned synthesis."""
+def _is_supported_controller_synthesis(
+    proposal: TaskProposal,
+    phase_task_contract: Any | None,
+) -> bool:
+    """Return whether a proposal uses the one implemented controller synthesis path."""
 
-    if proposal.task_role == "synthesis" and not proposal.methods:
+    return bool(
+        proposal.task_role == "synthesis"
+        and phase_task_contract is not None
+        and getattr(phase_task_contract, "mode", "") == "fanout_with_synthesis"
+        and getattr(phase_task_contract, "synthesis_execution", "") == "controller"
+        and getattr(phase_task_contract, "synthesis_output_kind", "") == "inventory_manifest"
+        and proposal.workstream == getattr(phase_task_contract, "synthesis_workstream", None)
+        and proposal.output_kind == "inventory_manifest"
+        and not proposal.methods
+    )
+
+
+def _validate_synthesis_execution_model(
+    proposal: TaskProposal,
+    phase_task_contract: Any | None,
+) -> None:
+    """Reject synthesis proposals that lack a declared, runnable execution model."""
+
+    if proposal.task_role != "synthesis":
+        return
+    if _is_supported_controller_synthesis(proposal, phase_task_contract):
+        return
+    if phase_task_contract is not None and getattr(phase_task_contract, "synthesis_execution", "") == "executor":
+        if proposal.methods:
+            return
+        raise ValueError(
+            "task_preflight:unsupported_synthesis_execution: executor-owned synthesis requires a declared "
+            "runtime procedure method"
+        )
+    raise ValueError(
+        "task_preflight:unsupported_synthesis_execution: controller_synthesis is reserved for declared "
+        "inventory-manifest synthesis; use an explicit executor procedure or snapshot proposal"
+    )
+
+
+def _proposal_procedure_methods(
+    proposal: TaskProposal,
+    phase_task_contract: Any | None,
+) -> list[str]:
+    """Return methods after validating the proposal's declared execution model."""
+
+    _validate_synthesis_execution_model(proposal, phase_task_contract)
+    if _is_supported_controller_synthesis(proposal, phase_task_contract):
         return ["controller_synthesis"]
     return proposal.methods
 
@@ -6902,12 +7173,13 @@ def _proposal_execution_requirements(
     proposal: TaskProposal,
     plan: OperationPlan,
     criterion_id: str,
+    phase_task_contract: Any | None = None,
 ) -> tuple[ExecutionRequirement, ...]:
     """Derive narrow, controller-owned execution obligations for procedure work."""
 
     if proposal.inferred_basis_kind != "procedure":
         return ()
-    if proposal.task_role == "synthesis":
+    if _is_supported_controller_synthesis(proposal, phase_task_contract):
         return ()
     selected_ids = proposal.target_ids or [target.target_id for target in plan.targets]
     selected_targets = [target for target in plan.targets if target.target_id in selected_ids]
@@ -6930,6 +7202,7 @@ def _proposal_acceptance_contract(
     plan: OperationPlan,
     *,
     proposal_index: int | None = None,
+    phase_task_contract: Any | None = None,
 ) -> AcceptanceContract:
     """Compile a small task proposal into the full immutable acceptance contract."""
 
@@ -6951,7 +7224,12 @@ def _proposal_acceptance_contract(
                     ),
                     min_count=1,
                 )],
-                execution_requirements=_proposal_execution_requirements(proposal, plan, criterion_id),
+                execution_requirements=_proposal_execution_requirements(
+                    proposal,
+                    plan,
+                    criterion_id,
+                    phase_task_contract,
+                ),
             ))
         except ValueError as error:
             raise TaskProposalValidationError(
@@ -6972,7 +7250,7 @@ def _proposal_acceptance_contract(
             description=proposal.effective_basis_description,
             source_refs=source_refs,
             procedure=DiscoveryProcedure(
-                methods=_proposal_procedure_methods(proposal),
+                methods=_proposal_procedure_methods(proposal, phase_task_contract),
                 limits=normalized.limits or {},
                 stop_condition="first_limit_reached",
                 gap_policy="record_unassessed",
@@ -7428,6 +7706,8 @@ def _create_tasks_from_proposals(
     *,
     prompt_token_limit: int,
     coverage_item_ids: set[str] | None = None,
+    hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -7555,9 +7835,15 @@ def _create_tasks_from_proposals(
                 "depends_on_workstreams": list(proposal.depends_on_workstreams),
                 "inapplicability_reason": proposal.inapplicability_reason,
             }
+        _validate_synthesis_execution_model(proposal, phase_task_contract)
         _validate_procedure_proposal_route_atomicity(proposal, selected_targets, proposal_index)
         acceptance = _freeze_and_validate_acceptance(
-            _proposal_acceptance_contract(proposal, plan, proposal_index=proposal_index),
+            _proposal_acceptance_contract(
+                proposal,
+                plan,
+                proposal_index=proposal_index,
+                phase_task_contract=phase_task_contract,
+            ),
             [*existing_tasks, *staged_tasks],
         )
         if coverage_item_ids is not None and acceptance.mode != "coverage":
@@ -7725,6 +8011,25 @@ def _create_tasks_from_proposals(
 
         proposal_expanded_count = len(acceptance_groups)
         for group_title, group_objective, group_acceptance, group_target_scope, group_target_ids in acceptance_groups:
+            group_planning_context = dict(planning_context)
+            if required_finding_refs is not None:
+                group_planning_context["upstream_finding_refs"] = list(finding_refs)
+            if hypothesis_source_task_uids_by_item_id and group_acceptance.mode == "coverage":
+                source_task_uids = sorted({
+                    task_uid
+                    for item_id in group_acceptance.basis.item_ids
+                    for task_uid in hypothesis_source_task_uids_by_item_id.get(item_id, ())
+                })
+                if source_task_uids:
+                    group_planning_context["hypothesis_source_task_uids"] = source_task_uids
+            if hypothesis_source_artifact_refs_by_item_id and group_acceptance.mode == "coverage":
+                source_artifact_refs = sorted({
+                    artifact_ref
+                    for item_id in group_acceptance.basis.item_ids
+                    for artifact_ref in hypothesis_source_artifact_refs_by_item_id.get(item_id, ())
+                })
+                if source_artifact_refs:
+                    group_planning_context["hypothesis_source_artifact_refs"] = source_artifact_refs
             group_identity = _frozen_task_identity(
                 group_title,
                 group_objective,
@@ -7783,7 +8088,7 @@ def _create_tasks_from_proposals(
                 target_ids=group_target_ids,
                 replacement_of=replacement_of,
                 supersedes_criteria=supersedes_criteria,
-                recovery_context=planning_context,
+                recovery_context=group_planning_context,
             ))
             proposal_created_count += 1
         logger.info(
@@ -7845,6 +8150,8 @@ def build_create_tasks_submitter(
     prompt_token_limit: int = 48_000,
     *,
     coverage_item_ids: set[str] | None = None,
+    hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -7873,6 +8180,8 @@ def build_create_tasks_submitter(
                 tasks,
                 prompt_token_limit=prompt_token_limit,
                 coverage_item_ids=coverage_item_ids,
+                hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
+                hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
                 expected_snapshot_ref=expected_snapshot_ref,
                 phase_title=phase_title,
                 phase_objective=phase_objective,
@@ -7899,6 +8208,8 @@ def build_create_tasks_tool(
     prompt_token_limit: int = 48_000,
     *,
     coverage_item_ids: set[str] | None = None,
+    hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -7915,6 +8226,8 @@ def build_create_tasks_tool(
     submit_tasks = build_create_tasks_submitter(
         prompt_token_limit=prompt_token_limit,
         coverage_item_ids=coverage_item_ids,
+        hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
+        hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
         expected_snapshot_ref=expected_snapshot_ref,
         phase_title=phase_title,
         phase_objective=phase_objective,
@@ -8058,7 +8371,7 @@ def _validate_acceptance_result_evidence(
 
 
 def _acceptance_evidence_relevance_error(task: Task, result: AcceptanceResult) -> str:
-    """Reject a manifest used as proof for one frozen inventory endpoint.
+    """Reject inventory-manifest-only proof for one frozen inventory endpoint.
 
     This is intentionally based on the inventory item kind and frozen item IDs rather
     than HTTP URL syntax, so inventories from other modules retain the same guard.
@@ -8082,14 +8395,18 @@ def _acceptance_evidence_relevance_error(task: Task, result: AcceptanceResult) -
         )
     if not source_endpoint_ids.intersection(expected_ids):
         return ""
+    references = list(result.evidence_refs)
+    for coverage_item in result.coverage:
+        references.extend(coverage_item.evidence_refs)
+    references = list(dict.fromkeys(references))
     inventory_refs = []
-    for reference in result.evidence_refs:
+    for reference in references:
         try:
             _load_inventory_manifest(reference)
         except ValueError:
             continue
         inventory_refs.append(reference)
-    if not inventory_refs:
+    if not inventory_refs or len(inventory_refs) != len(references):
         return ""
     return (
         "Acceptance evidence is not relevant to the frozen inventory subject. "
@@ -8484,7 +8801,7 @@ def _source_task_finding_refs(task_uid: str) -> list[str]:
         candidate_data = record.get("candidate_data", {}) if isinstance(record, dict) else {}
         if task_uid in candidate_data.get("source_task_uids", []):
             references.append(f"finding:{record['finding_uid']}")
-    return list(dict.fromkeys(references))
+    return sorted(set(references))
 
 
 def _bind_acceptance_finding_reference(
@@ -8504,21 +8821,50 @@ def _bind_acceptance_finding_reference(
             "then retry record_task_acceptance."
         )
     supplied_refs = [reference for reference in evidence_refs if str(reference).startswith("finding:")]
-    if len(linked_refs) == 1:
-        selected_ref = linked_refs[0]
-    else:
-        matching_refs = [reference for reference in supplied_refs if reference in linked_refs]
-        if len(set(matching_refs)) != 1:
+    if not supplied_refs:
+        if len(linked_refs) != 1:
             raise ValueError(
-                "Acceptance disposition finding_candidate is ambiguous; use exactly one current-task reference: "
+                "Acceptance disposition finding_candidate is ambiguous; supply one or more current-task references: "
                 + ", ".join(linked_refs)
             )
-        selected_ref = matching_refs[0]
+        selected_refs = [linked_refs[0]]
+    else:
+        linked_ref_set = set(linked_refs)
+        unavailable_refs = sorted(set(supplied_refs) - linked_ref_set)
+        if unavailable_refs:
+            raise ValueError(
+                "Acceptance disposition finding_candidate references findings not created by this task: "
+                + ", ".join(unavailable_refs)
+            )
+        selected_refs = supplied_refs
     normalized = [reference for reference in evidence_refs if not str(reference).startswith("finding:")]
-    normalized.append(selected_ref)
-    if supplied_refs != [selected_ref]:
-        logger.info("Auto-bound task acceptance to %s for task %s", selected_ref, task_uid)
+    normalized.extend(selected_refs)
+    if not supplied_refs:
+        logger.info("Auto-bound task acceptance to %s for task %s", selected_refs[0], task_uid)
     return normalized
+
+
+def _validate_existing_finding_reference(task: Task, evidence_refs: list[str]) -> None:
+    """Require finding-dependent tasks to cite their declared verified finding input."""
+
+    upstream_refs = task.recovery_context.get("upstream_finding_refs", [])
+    if not isinstance(upstream_refs, list):
+        return
+    declared_refs = {str(reference) for reference in upstream_refs if str(reference).startswith("finding:")}
+    if not declared_refs:
+        return
+    supplied_refs = {str(reference) for reference in evidence_refs if str(reference).startswith("finding:")}
+    if not supplied_refs:
+        raise ValueError(
+            "Acceptance disposition existing_finding requires an explicit declared upstream finding reference: "
+            + ", ".join(sorted(declared_refs))
+        )
+    invalid_refs = sorted(supplied_refs - declared_refs)
+    if invalid_refs:
+        raise ValueError(
+            "Acceptance disposition existing_finding references findings not declared for this task: "
+            + ", ".join(invalid_refs)
+        )
 
 
 def _task_execution_receipts(task: Task, criterion: AcceptanceCriterion) -> dict[str, list[str]]:
@@ -8607,7 +8953,8 @@ def build_record_task_acceptance_tool(
         )
         manifest, _snapshot_hash = _load_inventory_manifest(artifact_ref)
         coverage_item_ids = tuple(str(item["id"]) for item in manifest["items"])
-    eligible_evidence_refs = []
+    task_finding_refs = _source_task_finding_refs(normalized_uid)
+    eligible_evidence_refs = list(task_finding_refs)
     for reference in task.evidence:
         try:
             canonical = _canonical_evidence_reference(reference)
@@ -8622,7 +8969,9 @@ def build_record_task_acceptance_tool(
             continue
         if canonical not in eligible_evidence_refs:
             eligible_evidence_refs.append(canonical)
-    eligible_evidence_refs = eligible_evidence_refs[:8]
+    non_finding_refs = [reference for reference in eligible_evidence_refs if not reference.startswith("finding:")]
+    eligible_evidence_refs = [*task_finding_refs, *non_finding_refs[:8]]
+    finding_refs_text = ", ".join(task_finding_refs) or "none"
 
     def record_task_acceptance(
         status: str,
@@ -8727,6 +9076,8 @@ def build_record_task_acceptance_tool(
         ]
         evidence_refs = list(dict.fromkeys([*evidence_refs, *execution_evidence_refs]))
         evidence_refs = _bind_acceptance_finding_reference(normalized_uid, disposition, evidence_refs)
+        if disposition == "existing_finding":
+            _validate_existing_finding_reference(current_task, evidence_refs)
         coverage = tuple(
             CoverageResult(item_id=item_id, status=status, evidence_refs=tuple(evidence_refs))
             for item_id in coverage_item_ids
@@ -8758,8 +9109,12 @@ def build_record_task_acceptance_tool(
 
     Use finding_candidate or existing_finding whenever the summary claims confirmed security behavior. The controller
     automatically binds finding_candidate to the sole finding created by this task. If the task created multiple
-    candidates, supply exactly one returned finding_ref. existing_finding always requires an explicit finding reference.
+    candidates, supply every returned finding_ref represented by this acceptance. existing_finding always requires
+    an explicit finding reference.
     Use observation for useful non-finding results and no_vulnerability for negative results.
+
+Current task-created finding candidates: {finding_refs_text}. For finding_candidate, include one or more of these
+references that the acceptance represents.
 
     Task identity, its single criterion, and frozen coverage item IDs are supplied by the workflow controller.
     Successfully recorded results are immutable. Their concrete summaries and evidence references are automatically
@@ -9266,7 +9621,7 @@ class QdrantMemoryClient:
         # retained for reporting, but must not be converted into a completed operation.
         tasks = _get_database_store().get_tasks(op_id)
         all_done = all(p.status in {"done", "not_applicable"} for p in plan.phases)
-        all_tasks_done = all(task.status in {"done", "superseded"} for task in tasks)
+        all_tasks_done = all(task.status in {"done", "superseded", "replanned"} for task in tasks)
         actionable_tasks = [task for task in tasks if task.status in {"active", "pending"}]
         add_completion_reminder = False
         if all_done and all_tasks_done and not plan.assessment_complete:

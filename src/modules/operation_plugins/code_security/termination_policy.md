@@ -9,8 +9,12 @@ inapplicable and document the reason.
 
 1. **Repository Attack Surface Characterization** — Identify the authorized repository structure, languages,
    frameworks, dependency sources, entry points, trust boundaries, and high-value security paths.
-2. **Generate Security Hypotheses from the Codebase** — Derive testable hypotheses from dependencies, secrets,
-   security patterns, data flows, and business logic without treating tool matches as findings.
+2. **Generate Security Hypotheses from the Codebase** — Derive detailed, testable exploit paths from dependencies,
+   secrets, security patterns, data flows, and business logic. For each path, record preconditions, the suspected
+   mechanism and attacker-controlled flow, safe future analysis steps, expected positive and negative/control results,
+   and required evidence. Research relevant dependency versions, advisories, CVEs, published PoC preconditions, and
+   reachable code paths when they provide a lead; they are not applicability evidence or findings. Do not treat tool
+   matches or a prior hypothesis as completion.
 3. **Vulnerability Analysis** — Apply applicable static, dependency, secret, data-flow, and business-logic analysis;
    preserve unverified theoretical risks as observations.
 4. **Finding Validation** — Validate candidates in surrounding code and deployment context with exact locations and

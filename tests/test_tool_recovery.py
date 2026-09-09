@@ -595,6 +595,17 @@ def test_schema_error_is_replaced_with_compact_store_finding_repair_contract():
     assert "9 validation errors" not in formatted
 
 
+def test_finding_validation_repair_explains_canonicalized_operation_paths():
+    formatted = format_tool_repair_error(
+        "record_finding_validation",
+        "secret exposure revalidation requires the same exposure in a fresh artifact; "
+        "canonical reexposure_artifact=artifact:artifacts/fresh.json",
+    )
+
+    assert formatted.startswith("FINDING_VALIDATION_REPAIR")
+    assert "Existing absolute paths inside the current operation are accepted and canonicalized" in formatted
+
+
 def test_validation_error_status_is_not_treated_as_a_successful_tool_result():
     assert _result_success({"status": "validation_error"}) is False
 

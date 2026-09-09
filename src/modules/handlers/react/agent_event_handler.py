@@ -3569,7 +3569,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         report_path: str | None,
         error: Exception,
     ) -> None:
-        """Generate fallback artifacts and publish their paths without rendering report content here."""
+        """Generate fallback artifacts and publish their persisted report preview."""
         from modules.handlers.report_generator import (
             generate_deterministic_fallback_report,
         )
@@ -3591,7 +3591,15 @@ class AgentEventHandler(PrintingCallbackHandler):
         self._completed_report_path = fallback["report_path"]
         self._evaluation_report_path = fallback["report_path"]
         self._report_status = fallback["status"]
-        self.emit_ui_event({"type": "report_content", "content": fallback["content"][:15000]})
+        fallback_preview = ""
+        try:
+            with open(fallback["report_path"], encoding="utf-8") as report_file:
+                fallback_preview = report_file.read(15000)
+            fallback_preview = "\n".join(fallback_preview.split("\n")[:200])
+        except OSError as read_error:
+            logger.warning("Could not read deterministic fallback report: %s", read_error)
+        if fallback_preview:
+            self.emit_ui_event({"type": "report_content", "content": fallback_preview})
         self.emit_ui_event(
             {
                 "type": "report_paths",

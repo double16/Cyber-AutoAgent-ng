@@ -17,8 +17,12 @@ Create separate artifact-producing tasks for at least three applicable workstrea
 capability discovery, access-context mapping, and flag-path investigation. Queue one challenge-surface synthesis task
 after the mapping tasks. A one-task direct flag path is allowed only when its structured exception records a concrete
 reason.
-2. **Generate Exploit Hypotheses from the Challenge Surface** — Derive testable hypotheses from challenge hints,
-   exposed capabilities, inputs, and trust boundaries without treating clues as findings.
+2. **Generate Exploit Hypotheses from the Challenge Surface** — Derive detailed, testable exploit paths from challenge
+   hints, exposed capabilities, inputs, and trust boundaries. For each path, record preconditions, the suspected
+   mechanism and attacker-controlled flow, safe future test steps, expected positive and negative/control results,
+   and required evidence. Research relevant challenge technologies, versions, techniques, advisories, CVEs, and
+   published PoC preconditions when they provide a lead; they are not proof of applicability. Do not treat clues or a
+   prior hypothesis as findings or completion.
 3. **Exploit Testing** — Test prioritized hypotheses with expected and actual results, negative controls, and artifacts.
 4. **Exploit Chain Analysis** — Record each prerequisite, transition, required server-side acceptance, failed links,
    and alternative branches. Preserve failed links and alternative branches as evidence-backed observations. Mark this

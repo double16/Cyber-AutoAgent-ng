@@ -94,6 +94,493 @@ def test_report_helpers_cover_incomplete_status_and_nested_artifact_sanitization
     assert _has_artifact_reference({"artifact": "artifacts/evidence.txt"}) is True
 
 
+def test_report_canonicalization_prefers_validated_evidence_over_matching_unvalidated_claims():
+    items = [
+        {
+            "id": "verified-config",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Information disclosure via /api/config without authentication.",
+            "parsed": {
+                "vulnerability": "Information disclosure via /api/config",
+                "where": "http://example.test/api/config",
+            },
+            "metadata": {
+                "finding_uid": "finding-1",
+                "task_uid": "task-1",
+                "validation_status": "verified",
+            },
+        },
+        {
+            "id": "rejected-config",
+            "category": "validation_failure",
+            "severity": "HIGH",
+            "content": "Sensitive configuration disclosure via /api/config requires validation.",
+            "parsed": {
+                "vulnerability": "Sensitive configuration disclosure via /api/config",
+                "where": "http://example.test/",
+            },
+            "metadata": {
+                "finding_uid": "finding-2",
+                "task_uid": "task-2",
+                "validation_status": "failed",
+            },
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
+    assert len(canonical) == 1
+    assert canonical[0]["category"] == "finding"
+    assert canonical[0]["canonical_finding_identity"]["validation_status"] == "verified"
+    assert [source["evidence_id"] for source in canonical[0]["source_provenance"]] == ["verified-config"]
+    assert canonical[0]["suppressed_unvalidated_evidence_ids"] == ["rejected-config"]
+
+
+def test_report_canonicalization_retains_unvalidated_statuses_without_verified_evidence():
+    items = [
+        {
+            "id": "failed-config",
+            "category": "validation_failure",
+            "severity": "HIGH",
+            "parsed": {
+                "vulnerability": "Information disclosure via /api/config",
+                "where": "http://example.test/api/config",
+            },
+            "metadata": {"validation_status": "failed"},
+        },
+        {
+            "id": "pending-config",
+            "category": "validation_failure",
+            "severity": "HIGH",
+            "parsed": {
+                "vulnerability": "Sensitive configuration disclosure via /api/config",
+                "where": "http://example.test/",
+            },
+            "metadata": {"validation_status": "pending"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
+    assert len(canonical) == 2
+    assert {
+        item["canonical_finding_identity"]["validation_status"] for item in canonical
+    } == {"failed", "validation_required"}
+
+
+def test_report_canonicalization_uses_structured_filesystem_subjects(tmp_path):
+    from modules.tools.memory import OperationTarget
+
+    target_root = tmp_path / "assessed-source"
+    subject = target_root / "config" / "secrets.env"
+    items = [
+        {
+            "id": "filesystem-finding-1",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": f"File read evidence copied to {tmp_path / 'artifacts' / 'first.txt'}.",
+            "parsed": {"vulnerability": "Arbitrary file read", "where": str(subject)},
+            "metadata": {"target_id": "filesystem-1", "task_uid": "task-1"},
+        },
+        {
+            "id": "filesystem-finding-2",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": f"Corroborating artifact: {tmp_path / 'artifacts' / 'second.txt'}.",
+            "parsed": {"vulnerability": "Arbitrary file read", "where": "config/secrets.env"},
+            "metadata": {"target_id": "filesystem-1", "task_uid": "task-2"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(
+        items,
+        {"filesystem-1": OperationTarget("filesystem-1", str(target_root), "filesystem")},
+    )
+
+    assert len(canonical) == 1
+    assert canonical[0]["canonical_finding_identity"]["endpoint"] == str(subject)
+    assert [source["evidence_id"] for source in canonical[0]["source_provenance"]] == [
+        "filesystem-finding-1",
+        "filesystem-finding-2",
+    ]
+
+
+def test_report_canonicalization_uses_structured_network_endpoint_not_evidence_urls():
+    from modules.tools.memory import OperationTarget
+
+    items = [
+        {
+            "id": "network-finding-1",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Evidence mentions https://external.example/collector, not the assessed endpoint.",
+            "parsed": {"vulnerability": "Information disclosure", "where": "/api/config"},
+            "metadata": {"target_id": "network-1", "task_uid": "task-1"},
+        },
+        {
+            "id": "network-finding-2",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Corroborating evidence mentions https://external.example/other.",
+            "parsed": {
+                "vulnerability": "Sensitive configuration disclosure",
+                "where": "https://assessed.example:8443/api/config?source=validation",
+            },
+            "metadata": {"target_id": "network-1", "task_uid": "task-2"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(
+        items,
+        {"network-1": OperationTarget("network-1", "https://assessed.example:8443", "network")},
+    )
+
+    assert len(canonical) == 1
+    assert canonical[0]["canonical_finding_identity"]["endpoint"] == "https://assessed.example:8443/api/config"
+    assert [source["evidence_id"] for source in canonical[0]["source_provenance"]] == [
+        "network-finding-1",
+        "network-finding-2",
+    ]
+
+
+def test_report_canonicalization_keeps_same_route_findings_separate_by_input_location():
+    from modules.tools.memory import OperationTarget
+
+    target = {"network-1": OperationTarget("network-1", "https://assessed.example", "network")}
+    items = [
+        {
+            "id": "xss-query",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "/search"},
+            "metadata": {
+                "target_id": "network-1",
+                "parameter_name": "q",
+                "input_location": "query",
+            },
+        },
+        {
+            "id": "xss-query-corroborating",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "/search"},
+            "metadata": {
+                "target_id": "network-1",
+                "input": {"name": "q", "location": "query"},
+            },
+        },
+        {
+            "id": "xss-sort",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "/search"},
+            "metadata": {
+                "target_id": "network-1",
+                "parameter_name": "sort",
+                "input_location": "query",
+            },
+        },
+        {
+            "id": "lfi-file",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "LFI", "where": "/search"},
+            "metadata": {
+                "target_id": "network-1",
+                "parameter_name": "file",
+                "input_location": "query",
+            },
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items, target)
+
+    assert len(canonical) == 3
+    identities = {item["canonical_finding_identity"]["input_location"] for item in canonical}
+    assert identities == {"query:q", "query:sort", "query:file"}
+    xss_query = next(
+        item for item in canonical if item["canonical_finding_identity"]["input_location"] == "query:q"
+    )
+    assert [source["evidence_id"] for source in xss_query["source_provenance"]] == [
+        "xss-query",
+        "xss-query-corroborating",
+    ]
+
+
+def test_report_canonicalization_uses_unambiguous_legacy_input_locations():
+    items = [
+        {
+            "id": "query",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the q query parameter.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+        {
+            "id": "path",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the q path parameter.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+        {
+            "id": "body",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the body parameter named payload.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+        {
+            "id": "header",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the header parameter named X-Search.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+        {
+            "id": "cookie",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the cookie parameter named search_pref.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
+    assert len(canonical) == 5
+    assert {item["canonical_finding_identity"]["input_location"] for item in canonical} == {
+        "query:q",
+        "path:q",
+        "body:payload",
+        "header:x-search",
+        "cookie:search_pref",
+    }
+    assert report_generator_module._canonical_input_location(
+        {"content": "The query parameter and path parameter were both tested."}
+    ) == ""
+
+
+def test_report_canonicalization_uses_highest_severity_for_merged_findings():
+    items = [
+        {
+            "id": "medium",
+            "category": "finding",
+            "severity": "MEDIUM",
+            "parsed": {"vulnerability": "Open redirect", "where": "https://example.test/goto"},
+        },
+        {
+            "id": "critical",
+            "category": "finding",
+            "severity": "CRITICAL",
+            "parsed": {"vulnerability": "Open redirect", "where": "https://example.test/goto"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
+    assert len(canonical) == 1
+    assert canonical[0]["severity"] == "CRITICAL"
+    assert [source["evidence_id"] for source in canonical[0]["source_provenance"]] == ["medium", "critical"]
+
+
+def test_report_canonicalization_splits_exact_secret_exposures_without_emitting_digests():
+    connection_digest = "a" * 64
+    provider_key_digest = "b" * 64
+    items = [
+        {
+            "id": "config-both",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {
+                "vulnerability": "Sensitive configuration disclosure",
+                "where": "https://example.test/api/config",
+            },
+            "metadata": {
+                "candidate_evidence_assertions": [
+                    {"type": "secret_exposure", "kind": "connection_string", "digest": connection_digest},
+                    {"type": "secret_exposure", "kind": "provider_api_key", "digest": provider_key_digest},
+                ]
+            },
+        },
+        {
+            "id": "config-connection-corroborating",
+            "category": "finding",
+            "severity": "MEDIUM",
+            "parsed": {
+                "vulnerability": "Information disclosure",
+                "where": "https://example.test/api/config",
+            },
+            "metadata": {
+                "candidate_evidence_assertions": [
+                    {"type": "secret_exposure", "kind": "connection_string", "digest": connection_digest}
+                ]
+            },
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
+    assert len(canonical) == 2
+    assert {
+        item["canonical_finding_identity"]["exposure_kind"] for item in canonical
+    } == {"connection_string", "provider_api_key"}
+    connection = next(
+        item for item in canonical if item["canonical_finding_identity"]["exposure_kind"] == "connection_string"
+    )
+    assert connection["severity"] == "HIGH"
+    assert [source["evidence_id"] for source in connection["source_provenance"]] == [
+        "config-both",
+        "config-connection-corroborating",
+    ]
+    assert "connection string" in report_generator_module._report_item_title(connection, "Finding")
+
+    emitted = report_generator_module._canonical_report_data({"raw_evidence": canonical})
+    assert connection_digest not in json.dumps(emitted)
+    assert provider_key_digest not in json.dumps(emitted)
+
+
+def test_report_evidence_grouping_is_disabled_by_default_and_opt_in():
+    items = [
+        {
+            "id": "first",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Open redirect", "where": "https://example.test/goto"},
+        },
+        {
+            "id": "second",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Open redirect", "where": "https://example.test/goto"},
+        },
+    ]
+
+    disabled = report_generator_module._prepare_report_evidence(items, {}, grouping_enabled=False)
+    enabled = report_generator_module._prepare_report_evidence(items, {}, grouping_enabled=True)
+
+    assert disabled is items
+    assert len(disabled) == 2
+    assert len(enabled) == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("open redirect", "open_redirect"),
+        ("cross-site scripting", "cross_site_scripting"),
+        ("XSS", "cross_site_scripting"),
+        ("local file inclusion", "local_file_inclusion"),
+        ("LFI", "local_file_inclusion"),
+        ("SQL injection", "sql_injection"),
+        ("SQLi", "sql_injection"),
+        ("arbitrary file read", "arbitrary_file_read"),
+        ("path traversal", "arbitrary_file_read"),
+        ("authentication bypass", "authentication_bypass"),
+        ("auth bypass", "authentication_bypass"),
+        ("missing security header", "missing_security_headers"),
+        ("version disclosure", "version_disclosure"),
+        ("secret disclosure", "information_disclosure"),
+        ("unclassified behavior", "unclassified behavior"),
+    ],
+)
+def test_report_canonical_finding_behavior_normalizes_supported_families(text, expected):
+    item = {"title": text}
+
+    assert report_generator_module._canonical_finding_behavior(item) == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        ("verified", "verified"),
+        ("confirmed", "verified"),
+        ("success", "verified"),
+        ("successful", "verified"),
+        ("failed", "failed"),
+        ("not-confirmed", "failed"),
+        ("rejected", "failed"),
+        ("unverified", "failed"),
+        ("pending", "validation_required"),
+        ("pending-validation", "validation_required"),
+        ("validation required", "validation_required"),
+        ("inaccessible", "validation_required"),
+    ],
+)
+def test_report_canonical_validation_status_normalizes_aliases(status, expected):
+    assert report_generator_module._canonical_validation_status({"validation_status": status}) == expected
+
+
+def test_report_canonical_validation_status_uses_category_fallbacks():
+    assert report_generator_module._canonical_validation_status({"category": "finding"}) == "verified"
+    assert report_generator_module._canonical_validation_status({"category": "validation_failure"}) == "validation_required"
+
+
+def test_report_canonical_endpoint_handles_relative_and_fallback_locations():
+    target = {"network-1": report_generator_module.OperationTarget("network-1", "https://example.test:8443", "network")}
+
+    assert report_generator_module._canonical_report_endpoint(
+        {"metadata": {"target_id": "network-1", "location": "/api/items"}}, target
+    ) == "https://example.test:8443/api/items"
+    assert report_generator_module._canonical_report_endpoint(
+        {"metadata": {"target_id": "network-1", "location": "https://other.test/path"}}, target
+    ) == "https://example.test:8443"
+    assert report_generator_module._canonical_report_endpoint(
+        {"title": "Finding at https://example.test/api/items"}
+    ) == "https://example.test/api/items"
+    assert report_generator_module._canonical_report_endpoint({"title": "/api/items"}) == "/api/items"
+    assert report_generator_module._canonical_report_endpoint({"title": "No location"}) == ""
+
+
+def test_report_canonical_endpoint_handles_network_ranges_and_invalid_urls():
+    network_range = report_generator_module.OperationTarget("range-1", "192.168.0.0/16", "network_range")
+
+    assert report_generator_module._canonical_report_endpoint(
+        {"metadata": {"target_id": "range-1", "endpoint": "http://192.168.1.10/api"}},
+        {"range-1": network_range},
+    ) == "http://192.168.1.10/api"
+    assert report_generator_module._canonical_report_endpoint(
+        {"metadata": {"target_id": "range-1", "endpoint": "http://not-an-ip/api"}},
+        {"range-1": network_range},
+    ) == "192.168.0.0/16"
+
+
+def test_report_secret_predicates_ignore_malformed_and_duplicate_assertions():
+    digest = "c" * 64
+    item = {
+        "metadata": {
+            "candidate_evidence_assertions": [
+                {"type": "literal_text", "value": "secret"},
+                {"type": "secret_exposure", "kind": "connection_string", "digest": digest},
+                {"type": "secret_exposure", "kind": "connection_string", "digest": digest},
+                {"type": "secret_exposure", "kind": "provider_api_key", "digest": "invalid"},
+            ],
+            "evidence_assertions": "not-a-list",
+        }
+    }
+
+    assert report_generator_module._secret_exposure_predicates(item) == [("connection_string", digest)]
+    assert report_generator_module._secret_exposure_label({}) == ""
+    assert report_generator_module._secret_exposure_label({"canonical_exposure": {"kind": "api_key"}}) == "api key"
+
+
+def test_report_safe_evidence_removes_only_secret_exposure_digests():
+    value = {
+        "items": [
+            {"type": "secret_exposure", "kind": "api_key", "digest": "secret-digest"},
+            {"type": "literal_text", "digest": "ordinary-digest"},
+            "plain text",
+        ]
+    }
+
+    safe = report_generator_module._report_safe_evidence(value)
+
+    assert "digest" not in safe["items"][0]
+    assert safe["items"][1]["digest"] == "ordinary-digest"
+    assert safe["items"][2] == "plain text"
+
+
 def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch, tmp_path):
     manifest = tmp_path / "inventory.json"
     manifest.write_text(
@@ -101,9 +588,24 @@ def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch,
             {
                 "items": [
                     "invalid",
-                    {"id": "endpoint-1", "value": "https://one.test"},
-                    {"id": "endpoint-2", "value": "https://first.test"},
-                    {"id": "endpoint-2", "value": "https://second.test"},
+                    {
+                        "id": "endpoint-1",
+                        "kind": "endpoint",
+                        "target_id": "target-1",
+                        "value": "https://one.test",
+                    },
+                    {
+                        "id": "endpoint-2",
+                        "kind": "endpoint",
+                        "target_id": "target-1",
+                        "value": "https://first.test",
+                    },
+                    {
+                        "id": "endpoint-2",
+                        "kind": "endpoint",
+                        "target_id": "target-1",
+                        "value": "https://second.test",
+                    },
                 ]
             }
         ),
@@ -125,6 +627,13 @@ def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch,
 
     endpoint_values = _inventory_endpoint_values([task])
     assert endpoint_values == {"endpoint-1": "https://one.test"}
+    inventory_items, manifest_count = report_generator_module._inventory_manifest_items([task])
+    assert manifest_count == 1
+    assert [item["value"] for item in inventory_items] == [
+        "https://one.test",
+        "https://first.test",
+        "https://second.test",
+    ]
     assert report_generator_module._resolve_inventory_ids_for_display(
         {"description": ["endpoint-1", ("endpoint-1",)]}, endpoint_values
     ) == {"description": ["https://one.test", ("https://one.test",)]}
@@ -153,6 +662,113 @@ def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch,
         lambda reference: str(invalid_manifest) if "invalid" in reference else str(manifest),
     )
     assert _inventory_endpoint_values([invalid_task]) == {}
+
+
+def test_attack_surface_groups_typed_records_and_links_only_structured_locations():
+    inventory_items = [
+        {
+            "kind": "endpoint",
+            "value": f"https://example.test/api/users/{index}",
+            "target_id": "web-1",
+            "attributes": {},
+        }
+        for index in range(7)
+    ] + [
+        {
+            "kind": "endpoint",
+            "value": "https://example.test/graphql",
+            "target_id": "web-1",
+            "attributes": {},
+        },
+        {
+            "kind": "endpoint",
+            "value": "https://example.test/api/config",
+            "target_id": "web-1",
+            "attributes": {},
+        },
+        {"kind": "component", "value": "identity-service", "target_id": "code-1", "attributes": {}},
+    ]
+    targets = {
+        "network-1": report_generator_module.OperationTarget(
+            target_id="network-1",
+            value="10.0.0.10",
+            type="network",
+        ),
+        "filesystem-1": report_generator_module.OperationTarget(
+            target_id="filesystem-1",
+            value="/srv/app",
+            type="filesystem",
+        ),
+    }
+    evidence = [
+        {
+            "id": "config-finding",
+            "title": "Sensitive configuration exposed",
+            "category": "finding",
+            "validation_status": "verified",
+            "metadata": {"location": "https://example.test/api/config"},
+        },
+        {
+            "id": "graphql-candidate",
+            "title": "GraphQL authorization requires validation",
+            "category": "validation_failure",
+            "metadata": {"location": "https://example.test/graphql"},
+        },
+        {
+            "id": "unstructured",
+            "title": "Unstructured mention",
+            "category": "finding",
+            "content": "https://example.test/api/users/1 appeared in prose only",
+            "metadata": {},
+        },
+    ]
+
+    surface = report_generator_module._build_attack_surface(inventory_items, targets, evidence, 1)
+    groups = {group["name"]: group for group in surface["groups"]}
+
+    assert surface["source"] == {"inventory_manifest_count": 1, "registered_target_count": 2}
+    api_group = groups["API: /api/users"]
+    assert api_group["member_count"] == 7
+    assert len(api_group["representative_members"]) == 5
+    assert api_group["omitted_member_count"] == 2
+    assert api_group["notable"] is False
+    assert groups["Configuration and operations"]["linked_findings"] == [
+        {"id": "config-finding", "title": "Sensitive configuration exposed", "status": "verified"}
+    ]
+    assert groups["GraphQL"]["linked_validation_items"] == [
+        {
+            "id": "graphql-candidate",
+            "title": "GraphQL authorization requires validation",
+            "status": "validation_required",
+        }
+    ]
+    assert groups["Declared network targets"]["representative_members"] == ["10.0.0.10"]
+    assert groups["Filesystem targets"]["representative_members"] == ["/srv/app"]
+
+    markdown = report_generator_module._format_attack_surface(surface)
+    assert "## DISCOVERED ATTACK SURFACE" in markdown
+    assert "Notable recorded association" in markdown
+    assert "unstructured" not in markdown
+
+
+def test_attack_surface_enforces_group_limit_and_reports_absent_typed_records():
+    inventory_items = [
+        {
+            "kind": "endpoint",
+            "value": f"https://example.test/api/feature-{index}",
+            "target_id": "web-1",
+            "attributes": {},
+        }
+        for index in range(13)
+    ]
+
+    surface = report_generator_module._build_attack_surface(inventory_items, {}, [], 1)
+
+    assert len(surface["groups"]) == 12
+    assert surface["omitted_group_count"] == 1
+    empty = report_generator_module._build_attack_surface([], {}, [], 0)
+    assert empty["groups"] == []
+    assert "not a complete asset inventory" in report_generator_module._format_attack_surface(empty)
 
 
 def test_artifact_reference_and_excerpt_helpers_cover_fallback_paths(tmp_path):
@@ -331,9 +947,22 @@ def test_finding_narrative_uses_recorded_validation_steps_and_impact_evidence():
 
     detail = _format_finding_with_narrative(finding, 0, "#### Impact\n\nDemonstrated impact.")
 
-    assert "1. Request /api/config" in detail
-    assert "2. Observe the response" in detail
+    assert "1. Request /api/config\n2. Observe the response" in detail
+    assert "1. Request /api/config 2. Observe the response" not in detail
     assert "#### Impact Grounding" not in detail
+
+
+def test_finding_narrative_uses_fallback_when_validation_steps_are_missing():
+    finding = {
+        "title": "Configuration exposure",
+        "severity": "HIGH",
+        "content": "The endpoint returned configuration data.",
+        "metadata": {},
+    }
+
+    detail = _format_finding_with_narrative(finding, 0, "#### Impact\n\nDemonstrated impact.")
+
+    assert "#### Steps to Reproduce\n\nNot established from supplied evidence" in detail
 
 
 def test_finding_narrative_removes_unsupported_impact_and_aws_rotation_claims():
@@ -2674,6 +3303,7 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
     assert "Stored XSS" in markdown
     assert "Possible SQL injection" in markdown
     assert "Server banner" in markdown
+    assert "## DISCOVERED ATTACK SURFACE" in markdown
     assert "## TARGET COVERAGE" in markdown
     assert "## EXECUTION HISTORY" in markdown
     assert "## APPENDIX A: ASSESSMENT METHODOLOGY" in markdown
@@ -2689,6 +3319,7 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
     assert "report-json-secret" not in json.dumps(payload)
     assert payload["narrative"] == {}
     assert payload["canonical"]["verified_findings_total"] == 1
+    assert payload["canonical"]["attack_surface"] == {}
 
 
 def test_report_artifact_writers_redact_text_and_secret_bearing_json_fields(tmp_path):
@@ -2736,6 +3367,20 @@ def test_fallback_report_uses_controller_snapshot_when_store_sections_fail(tmp_p
 
     assert result["status"] == "fallback"
     assert "| 1 | Recon | done |" in result["content"]
+
+
+def test_fallback_report_excludes_replanned_tasks_from_current_counts():
+    sections = report_generator_module._fallback_sections_from_operation_snapshot({
+        "plan": {"phases": [{"id": 1, "title": "Recon", "status": "done"}]},
+        "tasks": [
+            {"phase": 1, "title": "Current", "status": "done"},
+            {"phase": 1, "title": "Archived", "status": "replanned"},
+        ],
+    })
+
+    assert sections["total_task_count"] == 1
+    assert sections["task_status_counts"] == {"done": 1}
+    assert sections["archived_replanned_task_count"] == 1
 
 
 def test_sanitize_mermaid_diagrams_quotes_supported_node_and_edge_labels():

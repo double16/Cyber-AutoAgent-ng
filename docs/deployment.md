@@ -374,6 +374,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE`     | Successful pages per authorized evaluator evidence artifact | No (default: `4`, minimum `1`; 200 lines per page)              |
 | `CYBER_SECLISTS_DIR`                               | Absolute SecLists root for wordlist-consuming tools        | No (common locations; container default: `/usr/share/seclists`) |
 | `CYBER_REPORT_REFINEMENT_CYCLES`                   | Critic-guided revision cycles per generated report section | No (default: `2`; `0` disables)                                 |
+| `CYBER_REPORT_EVIDENCE_GROUPING`                   | Merge corroborating evidence into canonical report findings | No (default: `false`)                                            |
 | `CYBER_TAXONOMY_CACHE_DIR`                         | Local cache directory for CWE and ATT&CK catalogs          | No (default: user cache directory)                              |
 | `CYBER_TAXONOMY_REFRESH_DAYS`                      | Days before cached taxonomy catalogs are refreshed         | No (default: `30`)                                              |
 | `CYBER_TAXONOMY_REFRESH`                           | Fetch current catalogs when the cache is stale             | No (default: `true`)                                            |

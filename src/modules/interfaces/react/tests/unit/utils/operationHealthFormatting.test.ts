@@ -1,6 +1,10 @@
 import { describe, expect, it } from '@jest/globals';
 
-import { appendOperationHealth, formatOperationHealth } from '../../../src/utils/operationHealthFormatting.js';
+import {
+  appendOperationHealth,
+  formatOperationHealth,
+  isPostAssessmentStage,
+} from '../../../src/utils/operationHealthFormatting.js';
 
 describe('operation health formatting', () => {
   it.each([
@@ -37,6 +41,32 @@ describe('operation health formatting', () => {
       '➡️ Budget 42% | Duration 8m 10s',
       { status: 'available', score: 0.82, band: 'good', failure_count: 4 },
     )).toBe('➡️ Budget 42% | Duration 8m 10s | 💚 82% GOOD');
+  });
+
+  it('suppresses assessment status while the assessment is running', () => {
+    expect(formatOperationHealth(
+      {status: 'available', score: 0.82, band: 'good', completion_feasible: false},
+    )?.label).toBe('💚 82% GOOD');
+  });
+
+  it('marks complete and incomplete assessments after assessment execution', () => {
+    expect(formatOperationHealth(
+      {status: 'available', score: 0.82, band: 'good', completion_feasible: false},
+      true,
+    )?.label).toBe('💚 82% GOOD · INCOMPLETE');
+    expect(formatOperationHealth(
+      {status: 'available', score: 0.82, band: 'good', completion_feasible: true},
+      true,
+    )?.label).toBe('💚 82% GOOD · COMPLETE');
+  });
+
+  it.each([
+    ['final_report', undefined, 'progress_update'],
+    ['ragas_evaluation', undefined, 'progress_update'],
+    [undefined, 'FINAL REPORT', 'progress_update'],
+    [undefined, undefined, 'operation_finalized'],
+  ])('recognizes post-assessment stage %#', (stage, step, eventType) => {
+    expect(isPostAssessmentStage(stage, step, eventType)).toBe(true);
   });
 
   it('leaves headless progress text unchanged when health is unavailable', () => {

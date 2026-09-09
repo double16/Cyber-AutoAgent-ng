@@ -16,7 +16,7 @@ import * as path from 'path';
 import stripAnsi from 'strip-ansi';
 import { useConfig } from '../contexts/ConfigContext.js';
 import type { Config } from '../contexts/ConfigContext.js';
-import { formatOperationHealth } from '../utils/operationHealthFormatting.js';
+import { formatOperationHealth, isPostAssessmentStage } from '../utils/operationHealthFormatting.js';
 import type { OperationHealthSnapshot } from '../utils/operationHealthFormatting.js';
 import { formatWorkflowActivityEvent } from '../utils/workflowActivityFormatting.js';
 import { MarkdownRenderer } from '../utils/markdownRows.js';
@@ -777,7 +777,10 @@ export const EventLine: React.FC<EventLineProps> = React.memo(({
     // =======================================================================
     case 'progress_update':
       let stepDisplay = '';
-      const healthVisual = formatOperationHealth((event as any).health);
+      const healthVisual = formatOperationHealth(
+        (event as any).health,
+        isPostAssessmentStage((event as any).operation_stage, event.step, event.type),
+      );
 
       const eventAgent = (event as any)['agent_name'];
       const agentSubStep = (event as any)['agent_sub_step'];

@@ -24,7 +24,7 @@ import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
 import { formatToolDiscoveryEvent } from './utils/toolDiscoveryEventFormatting.js';
 import { formatWorkflowActivityEvent } from './utils/workflowActivityFormatting.js';
 import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
-import { appendOperationHealth } from './utils/operationHealthFormatting.js';
+import { appendOperationHealth, isPostAssessmentStage } from './utils/operationHealthFormatting.js';
 import { setOperationTerminalTitle } from './utils/terminalTitle.js';
 import { applyMemoryModeOverride } from './utils/cliConfigOverrides.js';
 
@@ -97,6 +97,8 @@ const cli = meow(`
     --debug, -d         Enable debug mode
     --headless          Run in headless mode for scripting
     --continue          Continue a previous operation, optionally by operation ID, defaults to last operation
+    --reset-failed      With --continue, reset partial-failure and blocked work before resuming
+    --reset-phases      With --continue, reset phase IDs/ranges and propose fresh work (e.g. 3,5-)
     --report            Re-generate a report, optionally by operation ID, defaults to last operation
     --deployment-mode   Deployment mode: local-cli, single-container, full-stack
     --mcp-enabled       Enable MCP servers
@@ -169,6 +171,12 @@ const cli = meow(`
       type: 'string',
       isMultiple: false,
       isRequired: false,
+    },
+    resetFailed: {
+      type: 'boolean',
+    },
+    resetPhases: {
+      type: 'string',
     },
     report: {
       type: 'string',
@@ -412,6 +420,8 @@ const runAutoAssessment = async () => {
         target: cli.flags.target,
         objective: cli.flags.objective || `Comprehensive ${cli.flags.module} security assessment`,
         continueOperation: cli.flags.continue,
+        resetFailed: cli.flags.resetFailed,
+        resetPhases: cli.flags.resetPhases,
         reportOnly: cli.flags.report,
       };
 
@@ -459,13 +469,22 @@ const runAutoAssessment = async () => {
             }
         }
         else if (event.type === 'progress_update') {
-          setOperationTerminalTitle(event.health, cli.flags.target);
+          const showAssessmentStatus = isPostAssessmentStage(
+            event.operation_stage,
+            event.step,
+            event.type,
+          );
+          setOperationTerminalTitle(event.health, cli.flags.target, process.stdout, showAssessmentStatus);
           if (event.operation_stage === 'ragas_evaluation') {
             const message = formatAutoRunEvaluationEvent(event);
-            if (message) loggingService.info(appendOperationHealth(message, event.health));
+            if (message) loggingService.info(appendOperationHealth(message, event.health, showAssessmentStatus));
           }
           else if (event.operation_stage === 'final_report') {
-            loggingService.info(appendOperationHealth(formatAutoRunReportProgress(event), event.health));
+            loggingService.info(appendOperationHealth(
+              formatAutoRunReportProgress(event),
+              event.health,
+              showAssessmentStatus,
+            ));
           }
           else if (Number.isFinite(event.progressPercent)) {
             const etaSeconds = estimateEtaSeconds(event.duration, event.progressPercent);
@@ -475,7 +494,8 @@ const runAutoAssessment = async () => {
             loggingService.info(
               appendOperationHealth(
                 `➡️ Budget ${event.progressPercent ?? 0}% | Duration ${event.duration ?? ''}${etaText}`,
-                event.health
+                event.health,
+                showAssessmentStatus,
               )
             );
           }

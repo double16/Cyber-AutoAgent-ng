@@ -17,6 +17,7 @@ from modules.config.manager import (
     get_default_model_configs,
     get_model_config,
     get_ollama_host,
+    get_report_evidence_grouping_enabled,
     get_report_refinement_cycles,
 )
 from modules.config.system import validation
@@ -982,6 +983,14 @@ class TestGlobalFunctions:
         assert get_report_refinement_cycles(manager) == 3
         assert get_report_refinement_cycles(manager) == 0
         assert get_report_refinement_cycles(manager) == 2
+
+    def test_get_report_evidence_grouping_enabled_defaults_to_false(self):
+        manager = MagicMock()
+        manager.getenv_bool.side_effect = [False, True, "invalid"]
+
+        assert get_report_evidence_grouping_enabled(manager) is False
+        assert get_report_evidence_grouping_enabled(manager) is True
+        assert get_report_evidence_grouping_enabled(manager) is False
 
     def test_get_model_config(self):
         """Test get_model_config function."""
