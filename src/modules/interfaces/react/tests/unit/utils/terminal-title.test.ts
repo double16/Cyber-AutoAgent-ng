@@ -34,6 +34,14 @@ describe('operation terminal title', () => {
     expect(formatOperationTerminalTitle(null, 'target.test')).toBe('CAA | target.test');
   });
 
+  it('delays assessment status until post-assessment processing', () => {
+    const health = {status: 'available', score: 0.86, band: 'good', completion_feasible: false};
+
+    expect(formatOperationTerminalTitle(health)).toBe('CAA 💚 86% GOOD');
+    expect(formatOperationTerminalTitle(health, undefined, true))
+      .toBe('CAA 💚 86% GOOD · INCOMPLETE');
+  });
+
   it('writes a TTY title once for each distinct health label', () => {
     const stream = ttyStream();
     const health = {status: 'available', score: 0.86, band: 'good'};

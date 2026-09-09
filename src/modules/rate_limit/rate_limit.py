@@ -11,6 +11,7 @@ import json
 import logging
 import threading
 import time
+import warnings
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any, TypeVar
@@ -278,6 +279,63 @@ def _batch_messages_to_strands_messages(
 _ORIG_STREAM_ATTR = "_rl_orig_stream"
 _ORIG_STRUCT_ATTR = "_rl_orig_structured_output"
 
+_UNSUPPORTED_TOOL_CHOICE_WARNING = (
+    "A ToolChoice was provided to this provider but is not supported and will be ignored"
+)
+
+
+def _is_unsupported_tool_choice_warning(warning: warnings.WarningMessage) -> bool:
+    """Return whether a provider warning is the recoverable tool-choice warning."""
+
+    return (
+        warning.category is UserWarning
+        and str(warning.message).strip() == _UNSUPPORTED_TOOL_CHOICE_WARNING
+    )
+
+
+def _handle_provider_warnings(captured: list[warnings.WarningMessage], model: Any) -> None:
+    """Log the known fallback warning and preserve normal handling for other warnings."""
+
+    for warning in captured:
+        if _is_unsupported_tool_choice_warning(warning):
+            logger.warning(
+                "Provider %s emitted recoverable warning: %s; continuing with structured-output fallback",
+                get_model_id_from_model(model),
+                warning.message,
+            )
+            continue
+
+        warnings.showwarning(
+            warning.message,
+            warning.category,
+            warning.filename,
+            warning.lineno,
+            warning.file,
+            warning.line,
+        )
+
+
+async def _iterate_provider_events(provider_stream: Any, model: Any):
+    """Iterate a provider stream while routing recoverable warnings to the logger."""
+
+    iterator = provider_stream.__aiter__()
+    while True:
+        captured: list[warnings.WarningMessage] = []
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                event = await iterator.__anext__()
+                captured = caught
+        except StopAsyncIteration:
+            _handle_provider_warnings(captured, model)
+            return
+        except BaseException:
+            _handle_provider_warnings(captured, model)
+            raise
+
+        _handle_provider_warnings(captured, model)
+        yield event
+
 
 def patch_model_provider_class(model_cls: type[Any], limiter: ThreadSafeRateLimiter) -> None:
     """
@@ -317,15 +375,16 @@ def patch_model_provider_class(model_cls: type[Any], limiter: ThreadSafeRateLimi
         for attempt in range(limiter.cfg.max_retries + 1):
             release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
             try:
-                async for event in orig_stream(
-                        self,
-                        messages,
-                        tool_specs,
-                        system_prompt,
-                        tool_choice=tool_choice,
-                        system_prompt_content=system_prompt_content,
-                        **kwargs,
-                ):
+                provider_stream = orig_stream(
+                    self,
+                    messages,
+                    tool_specs,
+                    system_prompt,
+                    tool_choice=tool_choice,
+                    system_prompt_content=system_prompt_content,
+                    **kwargs,
+                )
+                async for event in _iterate_provider_events(provider_stream, self):
                     # Check for 429/503 error event
                     # Strands models typically yield events as dicts or objects
                     # We need to detect if any of them represent an HTTP error
@@ -367,7 +426,10 @@ def patch_model_provider_class(model_cls: type[Any], limiter: ThreadSafeRateLimi
             for attempt in range(limiter.cfg.max_retries + 1):
                 release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
                 try:
-                    async for event in orig_struct(self, output_model, prompt, system_prompt=system_prompt, **kwargs):
+                    provider_stream = orig_struct(
+                        self, output_model, prompt, system_prompt=system_prompt, **kwargs
+                    )
+                    async for event in _iterate_provider_events(provider_stream, self):
                         if isinstance(event, dict) and event.get("type") == "error":
                             code = event.get("code")
                             if code and limiter.report_error(code):

@@ -23,7 +23,27 @@ const BAND_VISUALS: Record<OperationHealthBand, { emoji: string; color: string }
   poor: { emoji: '♥️', color: 'red' },
 };
 
-export const formatOperationHealth = (health: unknown): OperationHealthVisual | null => {
+const POST_ASSESSMENT_OPERATION_STAGES = new Set(['final_report', 'ragas_evaluation']);
+const POST_ASSESSMENT_EVENT_TYPES = new Set([
+  'assessment_complete',
+  'operation_complete',
+  'operation_finalized',
+]);
+
+export const isPostAssessmentStage = (
+  operationStage: unknown,
+  step?: unknown,
+  eventType?: unknown,
+): boolean => (
+  POST_ASSESSMENT_OPERATION_STAGES.has(String(operationStage ?? ''))
+  || String(step ?? '').toUpperCase() === 'FINAL REPORT'
+  || POST_ASSESSMENT_EVENT_TYPES.has(String(eventType ?? ''))
+);
+
+export const formatOperationHealth = (
+  health: unknown,
+  showAssessmentStatus = false,
+): OperationHealthVisual | null => {
   if (!health || typeof health !== 'object') return null;
   const snapshot = health as OperationHealthSnapshot;
   if (snapshot.status && snapshot.status !== 'available') return null;
@@ -35,17 +55,25 @@ export const formatOperationHealth = (health: unknown): OperationHealthVisual | 
   if (!visual) return null;
 
   const scorePercent = Math.round(snapshot.score * 100);
-  const assessmentIncomplete = snapshot.completion_feasible === false;
+  const assessmentStatus = showAssessmentStatus
+    ? snapshot.completion_feasible === false
+      ? ' · INCOMPLETE'
+      : ' · COMPLETE'
+    : '';
   return {
     scorePercent,
     band,
     emoji: visual.emoji,
     color: visual.color,
-    label: `${visual.emoji} ${scorePercent}% ${band.toUpperCase()}${assessmentIncomplete ? ' · ASSESSMENT INCOMPLETE' : ''}`,
+    label: `${visual.emoji} ${scorePercent}% ${band.toUpperCase()}${assessmentStatus}`,
   };
 };
 
-export const appendOperationHealth = (message: string, health: unknown): string => {
-  const visual = formatOperationHealth(health);
+export const appendOperationHealth = (
+  message: string,
+  health: unknown,
+  showAssessmentStatus = false,
+): string => {
+  const visual = formatOperationHealth(health, showAssessmentStatus);
   return visual ? `${message} | ${visual.label}` : message;
 };

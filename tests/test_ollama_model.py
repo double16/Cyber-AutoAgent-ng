@@ -1,4 +1,6 @@
+import asyncio
 import re
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import BaseModel
@@ -242,6 +244,85 @@ async def test_stream_handles_non_streaming_chat_response(monkeypatch):
             }
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_closes_async_client_after_success(monkeypatch):
+    response = mod.ChatResponse(
+        message=mod.ollama.Message(role="assistant", content="done"),
+        done_reason="stop",
+    )
+
+    class FakeClient:
+        def __init__(self):
+            self.close = AsyncMock()
+
+        async def chat(self, **request):
+            return response
+
+    client = FakeClient()
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda host, **kwargs: client)
+
+    _ = [chunk async for chunk in _non_streaming_model().stream(
+        [{"role": "user", "content": [{"text": "go"}]}]
+    )]
+
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stream_closes_response_iterator_and_client_when_consumption_stops(monkeypatch):
+    class FakeResponse:
+        def __init__(self):
+            self.aclose = AsyncMock()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(1)
+
+    class FakeClient:
+        def __init__(self):
+            self.close = AsyncMock()
+
+        async def chat(self, **request):
+            return response
+
+    response = FakeResponse()
+    client = FakeClient()
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda host, **kwargs: client)
+
+    stream = _non_streaming_model().stream([{"role": "user", "content": [{"text": "go"}]}])
+    await stream.__anext__()
+    await stream.aclose()
+
+    response.aclose.assert_awaited_once()
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_structured_output_closes_async_client_after_failure(monkeypatch):
+    class Output(BaseModel):
+        answer: int
+
+    class FakeClient:
+        def __init__(self):
+            self.close = AsyncMock()
+
+        async def chat(self, **request):
+            raise RuntimeError("request failed")
+
+    client = FakeClient()
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda host, **kwargs: client)
+
+    with pytest.raises(RuntimeError, match="request failed"):
+        async for _chunk in _model().structured_output(
+            Output, [{"role": "user", "content": [{"text": "go"}]}]
+        ):
+            pass
+
+    client.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
