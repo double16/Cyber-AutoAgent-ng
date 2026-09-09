@@ -113,6 +113,7 @@ from modules.tools import browser, channel_close_all
 from modules.tools.memory import (
     OperationTarget,
     create_application_store,
+    current_workflow_tasks,
     get_application_database_path,
     get_memory_client,
     require_existing_operation,
@@ -1243,9 +1244,13 @@ def _workflow_coverage_summary(plan: Any) -> list[dict[str, Any]]:
     rows = []
     for phase in phases:
         try:
-            tasks = state.list_tasks(phase=phase.id)
+            all_tasks = state.list_tasks(phase=phase.id)
         except Exception:
-            tasks = []
+            all_tasks = []
+        archived_replanned_task_count = sum(
+            1 for task in all_tasks if str(task.status) == "replanned"
+        )
+        tasks = current_workflow_tasks(all_tasks)
         counts = Counter(str(task.status) for task in tasks)
         rows.append(
             {
@@ -1254,6 +1259,7 @@ def _workflow_coverage_summary(plan: Any) -> list[dict[str, Any]]:
                 "status": phase.status,
                 "task_count": len(tasks),
                 "task_status_counts": dict(sorted(counts.items())),
+                "archived_replanned_task_count": archived_replanned_task_count,
             }
         )
     return rows

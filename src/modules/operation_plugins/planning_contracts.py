@@ -15,7 +15,7 @@ import yaml
 
 _VALID_MODES = frozenset({"fanout", "fanout_with_synthesis"})
 _VALID_ROLES = frozenset({"mapping", "synthesis", "direct_single_step"})
-_VALID_SYNTHESIS_EXECUTIONS = frozenset({"controller"})
+_VALID_SYNTHESIS_EXECUTIONS = frozenset({"controller", "executor"})
 
 
 @dataclass(frozen=True)
@@ -139,7 +139,10 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         if synthesis_output_kind not in {"artifact", "inventory_manifest"}:
             raise ValueError(f"synthesis_output_kind is invalid for {module}")
         if synthesis_execution not in _VALID_SYNTHESIS_EXECUTIONS:
-            raise ValueError(f"synthesis_execution must be controller for {module}")
+            raise ValueError(
+                f"synthesis_execution must be one of: {', '.join(sorted(_VALID_SYNTHESIS_EXECUTIONS))} "
+                f"for {module}"
+            )
     else:
         synthesis_workstream = None
         synthesis_execution = None

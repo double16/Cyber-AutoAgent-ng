@@ -83,6 +83,85 @@ def test_replanned_phase_bypasses_phase_evaluation_for_fresh_task_creation():
     controller._log_workflow.assert_called_once()
 
 
+def test_replanned_tasks_are_excluded_from_phase_evaluator_and_coverage():
+    acceptance = AcceptanceContract(
+        mode="coverage",
+        basis=AcceptanceBasis(
+            kind="snapshot",
+            description="Frozen endpoint inventory",
+            source_refs=["artifact:artifacts/inventory.json"],
+            snapshot_hash="inventory-hash",
+            item_ids=["endpoint-current"],
+        ),
+        criteria=[AcceptanceCriterion(
+            id="coverage",
+            description="Assess the frozen endpoint",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    archived_acceptance = AcceptanceContract(
+        mode="coverage",
+        basis=AcceptanceBasis(
+            kind="snapshot",
+            description="Frozen archived endpoint inventory",
+            source_refs=["artifact:artifacts/archived-inventory.json"],
+            snapshot_hash="archived-inventory-hash",
+            item_ids=["endpoint-archived"],
+        ),
+        criteria=[AcceptanceCriterion(
+            id="coverage",
+            description="Assess the archived frozen endpoint",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )],
+    )
+    archived = Task(
+        task_uid="archived",
+        title="Archived endpoint assessment",
+        objective="Assess the archived endpoint",
+        acceptance=archived_acceptance,
+        phase=1,
+        status="replanned",
+    )
+    current = Task(
+        task_uid="current",
+        title="Current endpoint assessment",
+        objective="Assess the current endpoint",
+        acceptance=acceptance,
+        phase=1,
+        status="done",
+    )
+    state = FakeState(_plan(), tasks=[archived, current])
+    state.acceptance_results[current.task_uid] = [AcceptanceResult(
+        criterion_id="coverage",
+        status="satisfied",
+        disposition="observation",
+        summary="Current endpoint was assessed.",
+        evidence_refs=["artifact:artifacts/current.txt"],
+        coverage=[CoverageResult(
+            item_id="endpoint-current",
+            status="satisfied",
+            evidence_refs=["artifact:artifacts/current.txt"],
+        )],
+    )]
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    prompt = controller._phase_evaluator_prompt(_plan(), _plan().phases[0])
+    summary = controller._workflow_coverage_summary(_plan())[0]
+
+    assert "archived" not in prompt
+    assert "endpoint-archived" not in prompt
+    assert "current" in prompt
+    assert summary["task_count"] == 1
+    assert summary["task_status_counts"] == {"done": 1}
+    assert summary["archived_replanned_task_count"] == 1
+    assert summary["inventory_item_count"] == 1
+    assert summary["assessed_item_count"] == 1
+
+
 def _artifact_acceptance(criterion_id="artifact-output"):
     return AcceptanceContract(
         mode="outcome",
@@ -1375,6 +1454,27 @@ def _runtime(progress=0, env_ints=None, env_floats=None):
         ],
         optional_tools_list=[_tool("mcp_scan"), _tool("module_probe")],
     )
+
+
+def test_phase_contract_prompt_distinguishes_controller_and_executor_synthesis():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Mapping", status="active")],
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+    )
+
+    assert "controller-owned inventory synthesis" in controller._phase_task_contract_prompt(plan.phases[0])
+
+    runtime.config.module = "ctf"
+    assert "executor-owned synthesis" in controller._phase_task_contract_prompt(plan.phases[0])
 
 
 def test_controller_resolves_task_local_request_artifact_as_execution_evidence(monkeypatch, tmp_path):

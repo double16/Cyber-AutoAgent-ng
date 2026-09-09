@@ -94,6 +94,188 @@ def test_report_helpers_cover_incomplete_status_and_nested_artifact_sanitization
     assert _has_artifact_reference({"artifact": "artifacts/evidence.txt"}) is True
 
 
+def test_report_canonicalization_keeps_validation_states_separate():
+    items = [
+        {
+            "id": "verified-config",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Information disclosure via /api/config without authentication.",
+            "parsed": {
+                "vulnerability": "Information disclosure via /api/config",
+                "where": "http://example.test/api/config",
+            },
+            "metadata": {
+                "finding_uid": "finding-1",
+                "task_uid": "task-1",
+                "validation_status": "verified",
+            },
+        },
+        {
+            "id": "rejected-config",
+            "category": "validation_failure",
+            "severity": "HIGH",
+            "content": "Sensitive configuration disclosure via /api/config requires validation.",
+            "parsed": {
+                "vulnerability": "Sensitive configuration disclosure via /api/config",
+                "where": "http://example.test/",
+            },
+            "metadata": {
+                "finding_uid": "finding-2",
+                "task_uid": "task-2",
+                "validation_status": "failed",
+            },
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
+    assert len(canonical) == 2
+    assert {
+        item["canonical_finding_identity"]["validation_status"] for item in canonical
+    } == {"verified", "failed"}
+    assert all(len(item["source_provenance"]) == 1 for item in canonical)
+
+
+def test_report_canonicalization_uses_structured_filesystem_subjects(tmp_path):
+    from modules.tools.memory import OperationTarget
+
+    target_root = tmp_path / "assessed-source"
+    subject = target_root / "config" / "secrets.env"
+    items = [
+        {
+            "id": "filesystem-finding-1",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": f"File read evidence copied to {tmp_path / 'artifacts' / 'first.txt'}.",
+            "parsed": {"vulnerability": "Arbitrary file read", "where": str(subject)},
+            "metadata": {"target_id": "filesystem-1", "task_uid": "task-1"},
+        },
+        {
+            "id": "filesystem-finding-2",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": f"Corroborating artifact: {tmp_path / 'artifacts' / 'second.txt'}.",
+            "parsed": {"vulnerability": "Arbitrary file read", "where": "config/secrets.env"},
+            "metadata": {"target_id": "filesystem-1", "task_uid": "task-2"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(
+        items,
+        {"filesystem-1": OperationTarget("filesystem-1", str(target_root), "filesystem")},
+    )
+
+    assert len(canonical) == 1
+    assert canonical[0]["canonical_finding_identity"]["endpoint"] == str(subject)
+    assert [source["evidence_id"] for source in canonical[0]["source_provenance"]] == [
+        "filesystem-finding-1",
+        "filesystem-finding-2",
+    ]
+
+
+def test_report_canonicalization_uses_structured_network_endpoint_not_evidence_urls():
+    from modules.tools.memory import OperationTarget
+
+    items = [
+        {
+            "id": "network-finding-1",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Evidence mentions https://external.example/collector, not the assessed endpoint.",
+            "parsed": {"vulnerability": "Information disclosure", "where": "/api/config"},
+            "metadata": {"target_id": "network-1", "task_uid": "task-1"},
+        },
+        {
+            "id": "network-finding-2",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Corroborating evidence mentions https://external.example/other.",
+            "parsed": {
+                "vulnerability": "Sensitive configuration disclosure",
+                "where": "https://assessed.example:8443/api/config?source=validation",
+            },
+            "metadata": {"target_id": "network-1", "task_uid": "task-2"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(
+        items,
+        {"network-1": OperationTarget("network-1", "https://assessed.example:8443", "network")},
+    )
+
+    assert len(canonical) == 1
+    assert canonical[0]["canonical_finding_identity"]["endpoint"] == "https://assessed.example:8443/api/config"
+    assert [source["evidence_id"] for source in canonical[0]["source_provenance"]] == [
+        "network-finding-1",
+        "network-finding-2",
+    ]
+
+
+def test_report_canonicalization_keeps_same_route_findings_separate_by_input_location():
+    from modules.tools.memory import OperationTarget
+
+    target = {"network-1": OperationTarget("network-1", "https://assessed.example", "network")}
+    items = [
+        {
+            "id": "xss-query",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "/search"},
+            "metadata": {
+                "target_id": "network-1",
+                "parameter_name": "q",
+                "input_location": "query",
+            },
+        },
+        {
+            "id": "xss-query-corroborating",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "/search"},
+            "metadata": {
+                "target_id": "network-1",
+                "input": {"name": "q", "location": "query"},
+            },
+        },
+        {
+            "id": "xss-sort",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "/search"},
+            "metadata": {
+                "target_id": "network-1",
+                "parameter_name": "sort",
+                "input_location": "query",
+            },
+        },
+        {
+            "id": "lfi-file",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "LFI", "where": "/search"},
+            "metadata": {
+                "target_id": "network-1",
+                "parameter_name": "file",
+                "input_location": "query",
+            },
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items, target)
+
+    assert len(canonical) == 3
+    identities = {item["canonical_finding_identity"]["input_location"] for item in canonical}
+    assert identities == {"query:q", "query:sort", "query:file"}
+    xss_query = next(
+        item for item in canonical if item["canonical_finding_identity"]["input_location"] == "query:q"
+    )
+    assert [source["evidence_id"] for source in xss_query["source_provenance"]] == [
+        "xss-query",
+        "xss-query-corroborating",
+    ]
+
+
 def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch, tmp_path):
     manifest = tmp_path / "inventory.json"
     manifest.write_text(
@@ -2736,6 +2918,20 @@ def test_fallback_report_uses_controller_snapshot_when_store_sections_fail(tmp_p
 
     assert result["status"] == "fallback"
     assert "| 1 | Recon | done |" in result["content"]
+
+
+def test_fallback_report_excludes_replanned_tasks_from_current_counts():
+    sections = report_generator_module._fallback_sections_from_operation_snapshot({
+        "plan": {"phases": [{"id": 1, "title": "Recon", "status": "done"}]},
+        "tasks": [
+            {"phase": 1, "title": "Current", "status": "done"},
+            {"phase": 1, "title": "Archived", "status": "replanned"},
+        ],
+    })
+
+    assert sections["total_task_count"] == 1
+    assert sections["task_status_counts"] == {"done": 1}
+    assert sections["archived_replanned_task_count"] == 1
 
 
 def test_sanitize_mermaid_diagrams_quotes_supported_node_and_edge_labels():

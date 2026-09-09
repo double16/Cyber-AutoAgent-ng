@@ -35,12 +35,13 @@ export const formatOperationHealth = (health: unknown): OperationHealthVisual | 
   if (!visual) return null;
 
   const scorePercent = Math.round(snapshot.score * 100);
+  const assessmentIncomplete = snapshot.completion_feasible === false;
   return {
     scorePercent,
     band,
     emoji: visual.emoji,
     color: visual.color,
-    label: `${visual.emoji} ${scorePercent}% ${band.toUpperCase()}`,
+    label: `${visual.emoji} ${scorePercent}% ${band.toUpperCase()}${assessmentIncomplete ? ' · ASSESSMENT INCOMPLETE' : ''}`,
   };
 };
 

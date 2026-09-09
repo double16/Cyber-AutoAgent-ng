@@ -174,6 +174,18 @@ TargetScope = Literal["all", "subset"]
 AcceptanceMode = Literal["outcome", "coverage"]
 AcceptanceBasisKind = Literal["procedure", "snapshot"]
 ProcedureOutputKind = Literal["artifact", "inventory_manifest"]
+
+
+def current_workflow_tasks(tasks: Iterable["Task"]) -> list["Task"]:
+    """Return tasks eligible for current workflow decisions and coverage.
+
+    Replanned tasks are retained durably for audit history, but represent archived
+    work. They must not affect current workflow control or coverage claims.
+    """
+
+    return [task for task in tasks if str(task.status) != "replanned"]
+
+
 DISCOVERY_PROCEDURE_LIMIT_KEYS = (
     "max_duration_minutes",
     "max_requests",
@@ -2223,11 +2235,11 @@ class SQLiteApplicationStore:
             now = datetime.now().isoformat()
             placeholders = ", ".join("?" for _ in requested_phase_ids)
             task_rows = conn.execute(
-                "SELECT task_uid, kind, status, status_reason FROM tasks "
+                "SELECT task_uid, kind, status, status_reason, recovery_context FROM tasks "
                 f"WHERE logical_target = ? AND operation_id = ? AND phase IN ({placeholders})",
                 (self.logical_target, operation_id, *requested_phase_ids),
             ).fetchall()
-            for task_uid, kind, prior_status, prior_reason in task_rows:
+            for task_uid, kind, prior_status, prior_reason, raw_context in task_rows:
                 is_finding_validation = kind == "finding_validation"
                 next_status = "pending" if is_finding_validation else "replanned"
                 reset_reason = (
@@ -2235,12 +2247,29 @@ class SQLiteApplicationStore:
                     if is_finding_validation
                     else f"Archived for explicit phase replan from {prior_status}."
                 )
-                if prior_reason:
-                    reset_reason = f"{reset_reason} Prior reason: {prior_reason}"
+                recovery_context = json.loads(raw_context or "{}")
+                history = recovery_context.get("replan_history", [])
+                if not isinstance(history, list):
+                    history = []
+                history.append({
+                    "at": now,
+                    "transition": "explicit_phase_replan",
+                    "from_status": prior_status,
+                    "prior_reason": prior_reason or "",
+                })
+                recovery_context["replan_history"] = history
                 conn.execute(
-                    "UPDATE tasks SET status = ?, status_reason = ?, updated_at = ? "
+                    "UPDATE tasks SET status = ?, status_reason = ?, recovery_context = ?, updated_at = ? "
                     "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
-                    (next_status, reset_reason, now, self.logical_target, operation_id, task_uid),
+                    (
+                        next_status,
+                        reset_reason,
+                        json.dumps(recovery_context, sort_keys=True),
+                        now,
+                        self.logical_target,
+                        operation_id,
+                        task_uid,
+                    ),
                 )
 
             active_phase_id = requested_phase_ids[0]
@@ -5598,8 +5627,6 @@ class TaskProposal(_StrictTaskWireModel):
         snapshot_fields = bool(self.snapshot_refs)
         if self.methods and snapshot_fields:
             raise ValueError("proposal must not mix procedure and snapshot fields")
-        if self.task_role == "synthesis" and self.methods:
-            raise ValueError("controller-owned synthesis proposal must leave methods empty")
         if snapshot_fields:
             if self.output_kind != "artifact":
                 raise ValueError("snapshot proposal must not set output_kind")
@@ -7032,10 +7059,55 @@ def _normalize_task_proposal(proposal: TaskProposal) -> _NormalizedTaskProposal:
     return _NormalizedTaskProposal(proposal=proposal, basis_kind=basis_kind, limits=limits)
 
 
-def _proposal_procedure_methods(proposal: TaskProposal) -> list[str]:
-    """Return deterministic internal methods for controller-owned synthesis."""
+def _is_supported_controller_synthesis(
+    proposal: TaskProposal,
+    phase_task_contract: Any | None,
+) -> bool:
+    """Return whether a proposal uses the one implemented controller synthesis path."""
 
-    if proposal.task_role == "synthesis" and not proposal.methods:
+    return bool(
+        proposal.task_role == "synthesis"
+        and phase_task_contract is not None
+        and getattr(phase_task_contract, "mode", "") == "fanout_with_synthesis"
+        and getattr(phase_task_contract, "synthesis_execution", "") == "controller"
+        and getattr(phase_task_contract, "synthesis_output_kind", "") == "inventory_manifest"
+        and proposal.workstream == getattr(phase_task_contract, "synthesis_workstream", None)
+        and proposal.output_kind == "inventory_manifest"
+        and not proposal.methods
+    )
+
+
+def _validate_synthesis_execution_model(
+    proposal: TaskProposal,
+    phase_task_contract: Any | None,
+) -> None:
+    """Reject synthesis proposals that lack a declared, runnable execution model."""
+
+    if proposal.task_role != "synthesis":
+        return
+    if _is_supported_controller_synthesis(proposal, phase_task_contract):
+        return
+    if phase_task_contract is not None and getattr(phase_task_contract, "synthesis_execution", "") == "executor":
+        if proposal.methods:
+            return
+        raise ValueError(
+            "task_preflight:unsupported_synthesis_execution: executor-owned synthesis requires a declared "
+            "runtime procedure method"
+        )
+    raise ValueError(
+        "task_preflight:unsupported_synthesis_execution: controller_synthesis is reserved for declared "
+        "inventory-manifest synthesis; use an explicit executor procedure or snapshot proposal"
+    )
+
+
+def _proposal_procedure_methods(
+    proposal: TaskProposal,
+    phase_task_contract: Any | None,
+) -> list[str]:
+    """Return methods after validating the proposal's declared execution model."""
+
+    _validate_synthesis_execution_model(proposal, phase_task_contract)
+    if _is_supported_controller_synthesis(proposal, phase_task_contract):
         return ["controller_synthesis"]
     return proposal.methods
 
@@ -7101,12 +7173,13 @@ def _proposal_execution_requirements(
     proposal: TaskProposal,
     plan: OperationPlan,
     criterion_id: str,
+    phase_task_contract: Any | None = None,
 ) -> tuple[ExecutionRequirement, ...]:
     """Derive narrow, controller-owned execution obligations for procedure work."""
 
     if proposal.inferred_basis_kind != "procedure":
         return ()
-    if proposal.task_role == "synthesis":
+    if _is_supported_controller_synthesis(proposal, phase_task_contract):
         return ()
     selected_ids = proposal.target_ids or [target.target_id for target in plan.targets]
     selected_targets = [target for target in plan.targets if target.target_id in selected_ids]
@@ -7129,6 +7202,7 @@ def _proposal_acceptance_contract(
     plan: OperationPlan,
     *,
     proposal_index: int | None = None,
+    phase_task_contract: Any | None = None,
 ) -> AcceptanceContract:
     """Compile a small task proposal into the full immutable acceptance contract."""
 
@@ -7150,7 +7224,12 @@ def _proposal_acceptance_contract(
                     ),
                     min_count=1,
                 )],
-                execution_requirements=_proposal_execution_requirements(proposal, plan, criterion_id),
+                execution_requirements=_proposal_execution_requirements(
+                    proposal,
+                    plan,
+                    criterion_id,
+                    phase_task_contract,
+                ),
             ))
         except ValueError as error:
             raise TaskProposalValidationError(
@@ -7171,7 +7250,7 @@ def _proposal_acceptance_contract(
             description=proposal.effective_basis_description,
             source_refs=source_refs,
             procedure=DiscoveryProcedure(
-                methods=_proposal_procedure_methods(proposal),
+                methods=_proposal_procedure_methods(proposal, phase_task_contract),
                 limits=normalized.limits or {},
                 stop_condition="first_limit_reached",
                 gap_policy="record_unassessed",
@@ -7756,9 +7835,15 @@ def _create_tasks_from_proposals(
                 "depends_on_workstreams": list(proposal.depends_on_workstreams),
                 "inapplicability_reason": proposal.inapplicability_reason,
             }
+        _validate_synthesis_execution_model(proposal, phase_task_contract)
         _validate_procedure_proposal_route_atomicity(proposal, selected_targets, proposal_index)
         acceptance = _freeze_and_validate_acceptance(
-            _proposal_acceptance_contract(proposal, plan, proposal_index=proposal_index),
+            _proposal_acceptance_contract(
+                proposal,
+                plan,
+                proposal_index=proposal_index,
+                phase_task_contract=phase_task_contract,
+            ),
             [*existing_tasks, *staged_tasks],
         )
         if coverage_item_ids is not None and acceptance.mode != "coverage":
@@ -7927,6 +8012,8 @@ def _create_tasks_from_proposals(
         proposal_expanded_count = len(acceptance_groups)
         for group_title, group_objective, group_acceptance, group_target_scope, group_target_ids in acceptance_groups:
             group_planning_context = dict(planning_context)
+            if required_finding_refs is not None:
+                group_planning_context["upstream_finding_refs"] = list(finding_refs)
             if hypothesis_source_task_uids_by_item_id and group_acceptance.mode == "coverage":
                 source_task_uids = sorted({
                     task_uid
@@ -8757,6 +8844,29 @@ def _bind_acceptance_finding_reference(
     return normalized
 
 
+def _validate_existing_finding_reference(task: Task, evidence_refs: list[str]) -> None:
+    """Require finding-dependent tasks to cite their declared verified finding input."""
+
+    upstream_refs = task.recovery_context.get("upstream_finding_refs", [])
+    if not isinstance(upstream_refs, list):
+        return
+    declared_refs = {str(reference) for reference in upstream_refs if str(reference).startswith("finding:")}
+    if not declared_refs:
+        return
+    supplied_refs = {str(reference) for reference in evidence_refs if str(reference).startswith("finding:")}
+    if not supplied_refs:
+        raise ValueError(
+            "Acceptance disposition existing_finding requires an explicit declared upstream finding reference: "
+            + ", ".join(sorted(declared_refs))
+        )
+    invalid_refs = sorted(supplied_refs - declared_refs)
+    if invalid_refs:
+        raise ValueError(
+            "Acceptance disposition existing_finding references findings not declared for this task: "
+            + ", ".join(invalid_refs)
+        )
+
+
 def _task_execution_receipts(task: Task, criterion: AcceptanceCriterion) -> dict[str, list[str]]:
     """Return validated controller receipts persisted in the task recovery context."""
 
@@ -8966,6 +9076,8 @@ def build_record_task_acceptance_tool(
         ]
         evidence_refs = list(dict.fromkeys([*evidence_refs, *execution_evidence_refs]))
         evidence_refs = _bind_acceptance_finding_reference(normalized_uid, disposition, evidence_refs)
+        if disposition == "existing_finding":
+            _validate_existing_finding_reference(current_task, evidence_refs)
         coverage = tuple(
             CoverageResult(item_id=item_id, status=status, evidence_refs=tuple(evidence_refs))
             for item_id in coverage_item_ids

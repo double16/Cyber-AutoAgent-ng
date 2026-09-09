@@ -7,7 +7,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from modules.tools.memory import OperationPlan, PlanPhase, Task
+from modules.tools.memory import OperationPlan, PlanPhase, Task, current_workflow_tasks
 
 HEALTH_VERSION = "1"
 
@@ -128,7 +128,7 @@ def _phase_health(
 ) -> dict[str, Any]:
     future_phase = phase.status == "pending" and phase.id != current_phase
     inconsistent = phase.status == "done" and (
-        not tasks or any(task.status not in {"done", "superseded", "replanned"} for task in tasks)
+        not tasks or any(task.status not in {"done", "superseded"} for task in tasks)
     )
 
     if future_phase:
@@ -207,7 +207,7 @@ def _coverage_feasibility(
     remaining_work = 0
     for task in tasks:
         weight = _task_weight(task)
-        if str(task.status) in {"done", "superseded", "replanned"}:
+        if str(task.status) in {"done", "superseded"}:
             completed_work += weight
         else:
             remaining_work += weight
@@ -259,6 +259,8 @@ def compute_operation_health(
         }
 
     predictions = predictions or {}
+    archived_replanned_tasks = [task for task in tasks if str(task.status) == "replanned"]
+    tasks = current_workflow_tasks(tasks)
     health_cap = _normalize_health_cap(incomplete_health_cap)
     tasks_by_phase: dict[int, list[Task]] = {}
     for task in tasks:
@@ -349,6 +351,7 @@ def compute_operation_health(
         "phase_count": len(plan.phases),
         "applicable_phase_count": len(phase_rows),
         "task_status_counts": dict(sorted(task_counts.items())),
+        "archived_replanned_task_count": len(archived_replanned_tasks),
         "deferred_count": int(task_counts.get("pending", 0)),
         "failure_count": int(task_counts.get("partial_failure", 0) + task_counts.get("blocked", 0)),
         "phase_inconsistent": phase_inconsistent,

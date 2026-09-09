@@ -10,6 +10,7 @@ This is NOT a Strands tool - it's a handler utility function.
 import base64
 import contextlib
 import hashlib
+import ipaddress
 import json
 import math
 import os
@@ -23,6 +24,7 @@ from csv import reader as csv_reader
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ValidationError
 from strands.types.exceptions import MaxTokensReachedException
@@ -65,6 +67,7 @@ from modules.tools.memory import (
     _canonical_assertion_predicate,
     _finding_validation_contradictions,
     _json_pointer_value,
+    current_workflow_tasks,
     get_memory_client,
     list_persisted_operation_model_metrics,
     memory_is_cross_operation,
@@ -130,6 +133,8 @@ _NARRATIVE_FINDING_REFERENCE_STOPWORDS = frozenset({
     "hypotheses",
     "validation",
 })
+_REPORT_ENDPOINT_URL = re.compile(r"https?://[^\s/?#]+(?:/[^\s?#]*)?", re.IGNORECASE)
+_REPORT_ENDPOINT_PATH = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[A-Za-z0-9_.~%-]+/)*[A-Za-z0-9_.~%-]+")
 _EXCERPT_STOPWORDS = {
     "about",
     "after",
@@ -3628,7 +3633,9 @@ def _fallback_sections_from_operation_snapshot(snapshot: dict[str, Any]) -> dict
     """Create minimal canonical report sections when the SQLite store is unavailable."""
 
     tasks = [item for item in snapshot.get("tasks", []) if isinstance(item, dict)]
-    status_counts = Counter(str(task.get("status") or "unknown") for task in tasks)
+    archived_replanned_tasks = [task for task in tasks if str(task.get("status") or "") == "replanned"]
+    current_tasks = [task for task in tasks if str(task.get("status") or "") != "replanned"]
+    status_counts = Counter(str(task.get("status") or "unknown") for task in current_tasks)
     plan = snapshot.get("plan") if isinstance(snapshot.get("plan"), dict) else {}
     phase_rows = plan.get("phases") if isinstance(plan.get("phases"), list) else []
     phase_coverage = "\n".join(
@@ -3636,10 +3643,11 @@ def _fallback_sections_from_operation_snapshot(snapshot: dict[str, Any]) -> dict
         for item in phase_rows if isinstance(item, dict)
     ) or "No phase coverage data was retained."
     return {
-        "total_task_count": len(tasks),
+        "total_task_count": len(current_tasks),
         "completed_task_count": sum(status_counts.get(status, 0) for status in ("done", "superseded")),
         "superseded_task_count": status_counts.get("superseded", 0),
         "task_status_counts": dict(status_counts),
+        "archived_replanned_task_count": len(archived_replanned_tasks),
         "verified_findings_total": 0,
         "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
         "summary_table": "No verified findings were retained in the controller snapshot.",
@@ -4506,6 +4514,254 @@ def _trim_evidence_for_report(
     return trimmed
 
 
+def _canonical_filesystem_subject(item: dict[str, Any], target: OperationTarget) -> str:
+    """Resolve a filesystem finding from structured target and location metadata only."""
+
+    parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    root = os.path.realpath(os.path.expanduser(str(target.value)))
+    for value in (
+        metadata.get("subject_path"),
+        metadata.get("path"),
+        metadata.get("location"),
+        parsed.get("where"),
+    ):
+        location = str(value or "").strip()
+        if not location:
+            continue
+        candidate = os.path.realpath(
+            os.path.expanduser(location)
+            if os.path.isabs(location)
+            else os.path.join(root, location)
+        )
+        try:
+            if os.path.commonpath((root, candidate)) == root:
+                return candidate
+        except ValueError:
+            continue
+    return root
+
+
+def _normalized_structured_url(value: Any) -> str:
+    """Normalize an absolute structured URL without retaining query or fragment data."""
+
+    parsed = urlsplit(str(value or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", ""))
+
+
+def _structured_url_matches_target(candidate: str, target: OperationTarget) -> bool:
+    """Return whether a structured URL belongs to the registered network target."""
+
+    if _target_value_matches(candidate, target.value):
+        return True
+    parsed = urlsplit(candidate)
+    if not parsed.hostname:
+        return False
+    if target.type == "network_range":
+        try:
+            return ipaddress.ip_address(parsed.hostname) in ipaddress.ip_network(target.value, strict=False)
+        except ValueError:
+            return False
+    target_parts = urlsplit(target.value if "://" in target.value else f"//{target.value}")
+    if not target_parts.hostname or parsed.hostname.lower() != target_parts.hostname.lower():
+        return False
+    try:
+        return target_parts.port is None or parsed.port == target_parts.port
+    except ValueError:
+        return False
+
+
+def _canonical_network_subject(item: dict[str, Any], target: OperationTarget) -> str:
+    """Resolve a network finding from registered target and structured location metadata only."""
+
+    parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    for value in (
+        metadata.get("endpoint"),
+        metadata.get("location"),
+        metadata.get("target"),
+        parsed.get("where"),
+    ):
+        location = str(value or "").strip()
+        candidate = _normalized_structured_url(location)
+        if candidate and _structured_url_matches_target(candidate, target):
+            return candidate.lower()
+        base = _normalized_structured_url(target.value)
+        if location.startswith("/") and base:
+            base_parts = urlsplit(base)
+            candidate = urlunsplit((base_parts.scheme, base_parts.netloc, location.rstrip("/"), "", ""))
+            if _structured_url_matches_target(candidate, target):
+                return candidate.lower()
+    return str(target.value).strip().rstrip("/").lower()
+
+
+def _canonical_input_location(item: dict[str, Any]) -> str:
+    """Return a structured input identity without deriving it from query values or prose."""
+
+    parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    for source in (metadata, parsed):
+        structured_input = source.get("input")
+        if isinstance(structured_input, dict):
+            name = structured_input.get("name") or structured_input.get("parameter")
+            location = structured_input.get("location") or structured_input.get("kind")
+        else:
+            name = source.get("input_name") or source.get("parameter_name") or source.get("parameter")
+            location = source.get("input_location") or source.get("parameter_location")
+        name_text = str(name or "").strip().lower()
+        location_text = str(location or "").strip().lower()
+        if name_text:
+            return f"{location_text or 'unspecified'}:{name_text}"
+    return ""
+
+
+def _canonical_report_endpoint(
+    item: dict[str, Any],
+    registered_targets: dict[str, OperationTarget] | None = None,
+) -> str:
+    """Return the most specific endpoint referenced by a report item."""
+
+    parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    target = (registered_targets or {}).get(str(metadata.get("target_id") or ""))
+    if target is not None and target.type == "filesystem":
+        return _canonical_filesystem_subject(item, target)
+    if target is not None and target.type in {"network", "network_range"}:
+        return _canonical_network_subject(item, target)
+    values = [
+        parsed.get("vulnerability"),
+        item.get("title"),
+        item.get("content"),
+        parsed.get("where"),
+        metadata.get("location"),
+        metadata.get("target"),
+    ]
+    url_endpoints: list[str] = []
+    path_endpoints: list[str] = []
+    for value in values:
+        text = str(value or "")
+        url_endpoints.extend(match.group(0).rstrip("/") for match in _REPORT_ENDPOINT_URL.finditer(text))
+        path_endpoints.extend(match.group(0).rstrip("/") for match in _REPORT_ENDPOINT_PATH.finditer(text))
+    specific_url = next(
+        (endpoint for endpoint in url_endpoints if urlsplit(endpoint).path not in {"", "/"}),
+        "",
+    )
+    if specific_url:
+        return specific_url.lower()
+    root_url = next((endpoint for endpoint in url_endpoints if endpoint), "")
+    path = next((endpoint for endpoint in path_endpoints if endpoint and endpoint != "/"), "")
+    if root_url and path:
+        return f"{root_url.rstrip('/')}{path}".lower()
+    return (root_url or path).lower()
+
+
+def _canonical_finding_behavior(item: dict[str, Any]) -> str:
+    """Return a stable behavior family without relying on report prose alone."""
+
+    parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
+    title = " ".join(
+        str(value or "")
+        for value in (item.get("title"), parsed.get("vulnerability"), item.get("content"))
+    ).lower()
+    if "redirect" in title:
+        return "open_redirect"
+    if "cross-site scripting" in title or re.search(r"\bxss\b", title):
+        return "cross_site_scripting"
+    if "local file inclusion" in title or re.search(r"\blfi\b", title):
+        return "local_file_inclusion"
+    if "sql injection" in title or re.search(r"\bsqli\b", title):
+        return "sql_injection"
+    if "file read" in title or "path traversal" in title:
+        return "arbitrary_file_read"
+    if "authentication bypass" in title or "auth bypass" in title:
+        return "authentication_bypass"
+    if "security header" in title:
+        return "missing_security_headers"
+    if "version disclosure" in title:
+        return "version_disclosure"
+    if any(marker in title for marker in ("disclosure", "exposure", "sensitive configuration", "secret")):
+        return "information_disclosure"
+    normalized = re.sub(r"[^a-z0-9]+", " ", _report_item_title(item, "finding").lower())
+    return " ".join(normalized.split()) or "unknown"
+
+
+def _canonical_validation_status(item: dict[str, Any]) -> str:
+    """Normalize validation state for report identity without inferring it from prose."""
+
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    raw_status = item.get("validation_status") or metadata.get("validation_status") or metadata.get("status")
+    normalized = str(raw_status or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"verified", "confirmed", "success", "successful"}:
+        return "verified"
+    if normalized in {"failed", "not_confirmed", "rejected", "unverified"}:
+        return "failed"
+    if normalized in {"pending", "pending_validation", "validation_required", "inaccessible"}:
+        return "validation_required"
+    return "verified" if str(item.get("category") or "") == "finding" else "validation_required"
+
+
+def _canonicalize_report_evidence(
+    items: list[dict[str, Any]],
+    registered_targets: dict[str, OperationTarget] | None = None,
+) -> list[dict[str, Any]]:
+    """Merge overlapping report findings while retaining all source provenance."""
+
+    merged: list[dict[str, Any]] = []
+    by_identity: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for item in items:
+        category = str(item.get("category") or "")
+        if category not in {"finding", "validation_failure"}:
+            merged.append(item)
+            continue
+        endpoint = _canonical_report_endpoint(item, registered_targets)
+        behavior = _canonical_finding_behavior(item)
+        input_location = _canonical_input_location(item)
+        validation_status = _canonical_validation_status(item)
+        if not endpoint or behavior == "unknown":
+            merged.append(item)
+            continue
+        identity = (endpoint, behavior, input_location, validation_status, category)
+        existing = by_identity.get(identity)
+        source = {
+            "evidence_id": str(item.get("id") or ""),
+            "finding_uid": str((item.get("metadata") or {}).get("finding_uid") or ""),
+            "task_uid": str((item.get("metadata") or {}).get("task_uid") or ""),
+            "artifact_refs": sorted(_artifact_references(item)),
+            "category": category,
+            "validation_status": validation_status,
+        }
+        if existing is None:
+            canonical = deepcopy(item)
+            canonical_identity = {"endpoint": endpoint, "behavior": behavior}
+            if input_location:
+                canonical_identity["input_location"] = input_location
+            canonical_identity["validation_status"] = validation_status
+            canonical["canonical_finding_identity"] = canonical_identity
+            canonical["source_provenance"] = [source]
+            by_identity[identity] = canonical
+            merged.append(canonical)
+            continue
+
+        existing.setdefault("source_provenance", []).append(source)
+        existing_category = str(existing.get("category") or "")
+        if existing_category != category:
+            existing.setdefault("validation_conflicts", []).append(source)
+        if category == "finding" and existing_category != "finding":
+            existing["category"] = "finding"
+            existing["severity"] = item.get("severity", existing.get("severity", "MEDIUM"))
+            existing["validation_status"] = item.get("validation_status", existing.get("validation_status"))
+        existing["merged_artifact_refs"] = sorted(
+            {
+                reference
+                for provenance in existing["source_provenance"]
+                for reference in provenance["artifact_refs"]
+            }
+        )
+    return merged
+
+
 def _clean_remediation_text(text: str) -> str:
     if not text:
         return ""
@@ -4634,6 +4890,15 @@ def build_report_sections(
 
         operation_plan = memory_client.get_active_plan(operation_id=operation_id)
         task_records = memory_client.list_tasks(operation_id=operation_id)
+        registered_targets: dict[str, OperationTarget] = {}
+        for raw_target in list(getattr(operation_plan, "targets", []) or []):
+            try:
+                registered_target = OperationTarget.from_obj(raw_target)
+            except (TypeError, ValueError):
+                continue
+            registered_targets[registered_target.target_id] = registered_target
+        archived_replanned_tasks = [task for task in task_records if str(task.status) == "replanned"]
+        current_task_records = current_workflow_tasks(task_records)
         endpoint_values = _inventory_endpoint_values(task_records)
         target_values = {
             str(item.target_id): str(item.value)
@@ -4652,7 +4917,9 @@ def build_report_sections(
         acceptance_history_rows = []
         phase_coverage_state: dict[int, dict[str, Any]] = {}
         for task in task_records:
-            task_status_counts[str(task.status)] += 1
+            archived = str(task.status) == "replanned"
+            if not archived:
+                task_status_counts[str(task.status)] += 1
             acceptance_results = memory_client.list_task_acceptance_results(
                 task.task_uid,
                 operation_id=operation_id,
@@ -4717,14 +4984,15 @@ def build_report_sections(
                         "evidence_refs": ", ".join(result.evidence_refs) if result else "—",
                     }
                 )
-            phase_state = phase_coverage_state.setdefault(
-                task.phase,
-                {"task_status_counts": Counter(), "expected_items": set(), "assessed_items": set()},
-            )
-            phase_state["task_status_counts"][task.status] += 1
-            phase_state["expected_items"].update(str(item_id) for item_id in task.acceptance.basis.item_ids)
-            for result in acceptance_results:
-                phase_state["assessed_items"].update(str(item.item_id) for item in result.coverage)
+            if not archived:
+                phase_state = phase_coverage_state.setdefault(
+                    task.phase,
+                    {"task_status_counts": Counter(), "expected_items": set(), "assessed_items": set()},
+                )
+                phase_state["task_status_counts"][task.status] += 1
+                phase_state["expected_items"].update(str(item_id) for item_id in task.acceptance.basis.item_ids)
+                for result in acceptance_results:
+                    phase_state["assessed_items"].update(str(item.item_id) for item in result.coverage)
 
         phase_coverage = []
         for phase in operation_plan.phases if operation_plan else []:
@@ -4739,6 +5007,9 @@ def build_report_sections(
                 "title": phase.title,
                 "status": phase.status,
                 "task_status_counts": dict(sorted(phase_state["task_status_counts"].items())),
+                "archived_replanned_task_count": sum(
+                    1 for task in archived_replanned_tasks if task.phase == phase.id
+                ),
                 "inventory_item_count": len(expected_items),
                 "assessed_item_count": len(assessed_items),
                 "omitted_item_count": len(expected_items - assessed_items),
@@ -4747,7 +5018,7 @@ def build_report_sections(
                 phase_row["status_reason"] = "No finding candidates required validation."
             phase_coverage.append(phase_row)
 
-        total_task_count = len(task_records)
+        total_task_count = len(current_task_records)
         completed_task_count = task_status_counts.get("done", 0) + task_status_counts.get("superseded", 0)
         superseded_task_count = task_status_counts.get("superseded", 0)
 
@@ -4944,6 +5215,7 @@ def build_report_sections(
         # Format evidence for report (cap to avoid context explosions)
         evidence.sort(key=lambda entry: _SEVERITY_ORDER.get(str(entry.get("severity", "")).upper(), 5))
         evidence = _trim_evidence_for_report(evidence, MAX_REPORT_FINDINGS)
+        evidence = _canonicalize_report_evidence(evidence, registered_targets)
         vulnerability_evidence = [
             item
             for item in evidence
@@ -5143,6 +5415,7 @@ def build_report_sections(
                 "acceptance": acceptance_history_rows,
             },
             "task_status_counts": dict(sorted(task_status_counts.items())),
+            "archived_replanned_task_count": len(archived_replanned_tasks),
             "total_task_count": total_task_count,
             "completed_task_count": completed_task_count,
             "superseded_task_count": superseded_task_count,
@@ -5393,6 +5666,8 @@ def _format_summary_table(findings: list[dict[str, Any]]) -> str:
             content = finding.get("content", "")
             title = content.split("[WHERE]")[0] if "[WHERE]" in content else content
             location = "See appendix"
+        if finding.get("validation_conflicts"):
+            title = f"{title} (conflicting validation recorded)"
 
         table.append(
             f"| {i} | {severity} | {_markdown_table_cell(title)} | {_markdown_table_cell(location)} |"

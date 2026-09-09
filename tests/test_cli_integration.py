@@ -450,10 +450,71 @@ def test_cli_metrics_and_workflow_summary_cover_empty_state_and_task_failures(mo
             "status": "active",
             "task_count": 0,
             "task_status_counts": {},
+            "archived_replanned_task_count": 0,
         }
     ]
     assert cyberautoagent._workflow_coverage_summary(None) == []
     assert cyberautoagent._workflow_coverage_summary(SimpleNamespace(phases="invalid")) == []
+
+
+def test_cli_workflow_coverage_summary_excludes_replanned_tasks(monkeypatch):
+    phase = SimpleNamespace(id=6, title="Impact", status="done")
+    state = SimpleNamespace(
+        list_tasks=Mock(
+            return_value=[
+                SimpleNamespace(status="done"),
+                SimpleNamespace(status="replanned"),
+            ]
+        )
+    )
+    monkeypatch.setattr(cyberautoagent, "get_memory_client", lambda **_kwargs: state)
+
+    assert cyberautoagent._workflow_coverage_summary(SimpleNamespace(phases=[phase])) == [
+        {
+            "phase_id": 6,
+            "title": "Impact",
+            "status": "done",
+            "task_count": 1,
+            "task_status_counts": {"done": 1},
+            "archived_replanned_task_count": 1,
+        }
+    ]
+
+
+def test_final_termination_uses_filtered_workflow_coverage(monkeypatch):
+    phase = SimpleNamespace(id=6, title="Impact", status="done")
+    plan = SimpleNamespace(phases=[phase], assessment_complete=False)
+    state = SimpleNamespace(
+        get_active_plan=lambda: plan,
+        list_tasks=lambda **_kwargs: [
+            SimpleNamespace(status="done"),
+            SimpleNamespace(status="replanned"),
+        ],
+    )
+    callback = SimpleNamespace(
+        termination_reason="partial_failure",
+        termination_message="Earlier phase failures remain.",
+        emit_operation_terminated=Mock(),
+        ensure_report_generated=Mock(),
+        trigger_evaluation_on_completion=Mock(),
+        emit_operation_finalized=Mock(),
+        _report_status="generated",
+    )
+    monkeypatch.setattr(cyberautoagent, "get_memory_client", lambda **_kwargs: state)
+
+    cyberautoagent.finalize_report_and_evaluation(
+        agent=None,
+        callback_handler=callback,
+        target="target",
+        objective="objective",
+        module="web",
+        logger=Mock(),
+    )
+
+    coverage = callback.emit_operation_terminated.call_args.args[1]
+    assert coverage[0]["task_count"] == 1
+    assert coverage[0]["task_status_counts"] == {"done": 1}
+    assert coverage[0]["archived_replanned_task_count"] == 1
 
 
 def test_recovery_guidance_returns_empty_or_delegates_shell_help(monkeypatch):
