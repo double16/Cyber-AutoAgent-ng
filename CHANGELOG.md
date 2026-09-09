@@ -1,5 +1,7 @@
 # Cyber-AutoAgent-ng Changelog
 
+## v0.10.0
+
 ### Features
 
 - Add a seven-day Qdrant semantic cache for successful web-search responses, shared across operations that use the

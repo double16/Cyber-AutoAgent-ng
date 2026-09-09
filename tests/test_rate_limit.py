@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from unittest.mock import Mock
 
 import httpx
@@ -332,6 +333,79 @@ async def test_stream_does_not_retry_unrelated_exception(monkeypatch, inline_to_
         rl.unpatch_model_provider_class(DummyModel)
 
     assert calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_logs_and_suppresses_recoverable_tool_choice_warning(
+    monkeypatch, inline_to_thread, caplog
+):
+    cfg = types.RateLimitConfig(max_retries=0, assume_output_tokens=0)
+    limiter = rl.ThreadSafeRateLimiter(cfg)
+
+    class DummyModel:
+        async def stream(self, *args, **kwargs):
+            warnings.warn(rl._UNSUPPORTED_TOOL_CHOICE_WARNING, UserWarning, stacklevel=2)
+            yield {"ok": True}
+
+    try:
+        rl.patch_model_provider_class(DummyModel, limiter)
+        with caplog.at_level("WARNING", logger="RateLimit"):
+            events = [event async for event in DummyModel().stream(messages=[])]
+    finally:
+        rl.unpatch_model_provider_class(DummyModel)
+
+    assert events == [{"ok": True}]
+    assert rl._UNSUPPORTED_TOOL_CHOICE_WARNING in caplog.text
+    assert "continuing with structured-output fallback" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_structured_output_logs_and_suppresses_recoverable_tool_choice_warning(
+    monkeypatch, inline_to_thread, caplog
+):
+    cfg = types.RateLimitConfig(max_retries=0, assume_output_tokens=0)
+    limiter = rl.ThreadSafeRateLimiter(cfg)
+
+    class DummyModel:
+        async def stream(self, *args, **kwargs):
+            yield {"stream": True}
+
+        async def structured_output(self, *args, **kwargs):
+            warnings.warn(rl._UNSUPPORTED_TOOL_CHOICE_WARNING, UserWarning, stacklevel=2)
+            yield {"structured": True}
+
+    try:
+        rl.patch_model_provider_class(DummyModel, limiter)
+        with caplog.at_level("WARNING", logger="RateLimit"):
+            events = [event async for event in DummyModel().structured_output(dict, prompt=[])]
+    finally:
+        rl.unpatch_model_provider_class(DummyModel)
+
+    assert events == [{"structured": True}]
+    assert rl._UNSUPPORTED_TOOL_CHOICE_WARNING in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_provider_warning_handler_preserves_unrelated_warnings(recwarn):
+    class DummyModel:
+        async def stream(self, *args, **kwargs):
+            warnings.warn(
+                "provider diagnostic",
+                RuntimeWarning,
+                stacklevel=2,
+                source=object(),
+            )
+            yield {"ok": True}
+
+    limiter = rl.ThreadSafeRateLimiter(types.RateLimitConfig(max_retries=0, assume_output_tokens=0))
+    try:
+        rl.patch_model_provider_class(DummyModel, limiter)
+        assert [event async for event in DummyModel().stream(messages=[])] == [{"ok": True}]
+    finally:
+        rl.unpatch_model_provider_class(DummyModel)
+
+    assert len(recwarn) == 1
+    assert str(recwarn[0].message) == "provider diagnostic"
 
 
 @pytest.mark.asyncio

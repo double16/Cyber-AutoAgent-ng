@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
 
 
+async def _close_async_client(client: Any) -> None:
+    """Close an Ollama async client when the installed client exposes ``aclose``."""
+
+    close = getattr(client, "aclose", None)
+    if close is not None:
+        await close()
+
+
 class OllamaModel(Model):
     """Ollama model provider implementation.
 
@@ -451,55 +459,58 @@ class OllamaModel(Model):
         tool_requested = [False]  # holder pattern
 
         client = ollama.AsyncClient(self.host, **self.client_args)
-        response = await self._chat_with_fallback(client, request)
+        try:
+            response = await self._chat_with_fallback(client, request)
 
-        logger.debug("got response from model")
-        yield self.format_chunk({"chunk_type": "message_start"})
-        yield self.format_chunk({"chunk_type": "content_start", "data_type": "text"})
+            logger.debug("got response from model")
+            yield self.format_chunk({"chunk_type": "message_start"})
+            yield self.format_chunk({"chunk_type": "content_start", "data_type": "text"})
 
-        def produce_chunks(event: ChatResponse) -> list[StreamEvent]:
-            chunks = []
+            def produce_chunks(event: ChatResponse) -> list[StreamEvent]:
+                chunks = []
 
-            for tool_call in event.message.tool_calls or []:
-                chunks.append(self.format_chunk({"chunk_type": "content_start", "data_type": "tool", "data": tool_call}))
-                chunks.append(self.format_chunk({"chunk_type": "content_delta", "data_type": "tool", "data": tool_call}))
-                chunks.append(self.format_chunk({"chunk_type": "content_stop", "data_type": "tool", "data": tool_call}))
-                tool_requested[0] = True
+                for tool_call in event.message.tool_calls or []:
+                    chunks.append(self.format_chunk({"chunk_type": "content_start", "data_type": "tool", "data": tool_call}))
+                    chunks.append(self.format_chunk({"chunk_type": "content_delta", "data_type": "tool", "data": tool_call}))
+                    chunks.append(self.format_chunk({"chunk_type": "content_stop", "data_type": "tool", "data": tool_call}))
+                    tool_requested[0] = True
 
-            chunks.append(self.format_chunk(
-                {"chunk_type": "content_delta", "data_type": "text", "data": event.message.content}))
-            if event.message.thinking:
                 chunks.append(self.format_chunk(
-                    {"chunk_type": "content_delta", "data_type": "reasoning_text", "data": event.message.thinking}))
+                    {"chunk_type": "content_delta", "data_type": "text", "data": event.message.content}))
+                if event.message.thinking:
+                    chunks.append(self.format_chunk(
+                        {"chunk_type": "content_delta", "data_type": "reasoning_text", "data": event.message.thinking}))
 
-            return chunks
+                return chunks
 
-        last_event = None
-        if hasattr(response, "__aiter__"):
-            async for event in response:
-                last_event = event
-                for se in produce_chunks(event):
+            last_event = None
+            if hasattr(response, "__aiter__"):
+                async for event in response:
+                    last_event = event
+                    for se in produce_chunks(event):
+                        yield se
+            elif isinstance(response, ChatResponse):
+                last_event = response
+                for se in produce_chunks(response):
                     yield se
-        elif isinstance(response, ChatResponse):
-            last_event = response
-            for se in produce_chunks(response):
-                yield se
-        else:
-            raise ValueError(f"Invalid response type: {type(response)}")
+            else:
+                raise ValueError(f"Invalid response type: {type(response)}")
 
-        yield self.format_chunk({"chunk_type": "content_stop", "data_type": "text"})
+            yield self.format_chunk({"chunk_type": "content_stop", "data_type": "text"})
 
-        if last_event is not None:
-            yield self.format_chunk(
-                {"chunk_type": "message_stop", "data": "tool_use" if tool_requested[0] else last_event.done_reason}
-            )
-            yield self.format_chunk({"chunk_type": "metadata", "data": last_event})
-        else:
-            yield self.format_chunk(
-                {"chunk_type": "message_stop", "data": "end_turn"}
-            )
+            if last_event is not None:
+                yield self.format_chunk(
+                    {"chunk_type": "message_stop", "data": "tool_use" if tool_requested[0] else last_event.done_reason}
+                )
+                yield self.format_chunk({"chunk_type": "metadata", "data": last_event})
+            else:
+                yield self.format_chunk(
+                    {"chunk_type": "message_stop", "data": "end_turn"}
+                )
 
-        logger.debug("finished streaming response from model")
+            logger.debug("finished streaming response from model")
+        finally:
+            await _close_async_client(client)
 
     @override
     async def structured_output(
@@ -522,14 +533,17 @@ class OllamaModel(Model):
 
         client = ollama.AsyncClient(self.host, **self.client_args)
         try:
-            response = await self._chat_with_fallback(client, formatted_request)
-        except ollama.ResponseError as error:
-            if any(message in str(error).lower() for message in self.OVERFLOW_MESSAGES):
-                raise ContextWindowOverflowException(str(error)) from error
-            raise
+            try:
+                response = await self._chat_with_fallback(client, formatted_request)
+            except ollama.ResponseError as error:
+                if any(message in str(error).lower() for message in self.OVERFLOW_MESSAGES):
+                    raise ContextWindowOverflowException(str(error)) from error
+                raise
 
-        try:
-            content = response.message.content.strip()
-            yield {"output": output_model.model_validate_json(content)}
-        except Exception as e:
-            raise ValueError(f"Failed to parse or load content into model: {e}") from e
+            try:
+                content = response.message.content.strip()
+                yield {"output": output_model.model_validate_json(content)}
+            except Exception as e:
+                raise ValueError(f"Failed to parse or load content into model: {e}") from e
+        finally:
+            await _close_async_client(client)
