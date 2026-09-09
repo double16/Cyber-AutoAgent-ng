@@ -198,15 +198,32 @@ def test_sqlite_store_replans_selected_phases_without_discarding_task_context(tm
     assert tasks["archived"].status == "replanned"
     assert "Archived for explicit phase replan from done." in tasks["archived"].status_reason
     assert tasks["archived"].evidence == ["artifact:mapping.json"]
-    assert tasks["archived"].recovery_context == {"source": "retained"}
+    assert tasks["archived"].recovery_context["source"] == "retained"
+    assert tasks["archived"].recovery_context["replan_history"][0]["from_status"] == "done"
     assert tasks["active"].status == "replanned"
     assert "Archived for explicit phase replan from active." in tasks["active"].status_reason
     assert tasks["finding-validation"].status == "pending"
     assert "Reset finding validation for explicit phase replan from done." in tasks["finding-validation"].status_reason
-    assert "Prior reason: Original validation completed" in tasks["finding-validation"].status_reason
+    assert "Prior reason:" not in tasks["finding-validation"].status_reason
     assert tasks["finding-validation"].reference_id == "finding-1"
     assert tasks["finding-validation"].evidence == ["artifact:validation.json"]
-    assert tasks["finding-validation"].recovery_context == {"binding": "retained"}
+    assert tasks["finding-validation"].recovery_context["binding"] == "retained"
+    assert tasks["finding-validation"].recovery_context["replan_history"] == [
+        {
+            "at": tasks["finding-validation"].updated_at,
+            "transition": "explicit_phase_replan",
+            "from_status": "done",
+            "prior_reason": "Original validation completed",
+        }
+    ]
+
+    store.reset_phases_for_replan(operation_id, [2])
+    replanned_again = {task.task_uid: task for task in store.get_tasks(operation_id)}["archived"]
+    assert replanned_again.status_reason == "Archived for explicit phase replan from replanned."
+    assert [entry["from_status"] for entry in replanned_again.recovery_context["replan_history"]] == [
+        "done",
+        "replanned",
+    ]
 
 
 def test_sqlite_store_replan_rejects_unknown_phase_without_mutating_state(tmp_path):
@@ -5655,6 +5672,47 @@ def test_acceptance_finding_binding_deduplicates_and_rejects_other_task_candidat
                 "finding:other-task-candidate",
             ],
         )
+
+    impact_task = mod.Task(
+        task_uid="impact-task",
+        title="Demonstrate impact of a verified finding",
+        objective="Demonstrate bounded impact",
+        acceptance=make_acceptance("impact"),
+        phase=2,
+        status="active",
+        recovery_context={"upstream_finding_refs": ["finding:verified-upstream"]},
+    )
+    store.store_task("op1", impact_task)
+    store.findings["verified-upstream"] = {
+        "candidate_data": {"source_task_uids": ["source-task"]},
+        "resolution": "verified",
+    }
+    impact_acceptance_tool = mod.build_record_task_acceptance_tool(impact_task.task_uid)
+
+    with pytest.raises(ValueError, match="requires an explicit declared upstream"):
+        impact_acceptance_tool(
+            status="satisfied",
+            disposition="existing_finding",
+            summary="Confirmed impact of the existing finding",
+            evidence_refs=[f"artifact:{manifest}"],
+        )
+
+    with pytest.raises(ValueError, match="not declared for this task.*other-task-owned-candidate"):
+        impact_acceptance_tool(
+            status="satisfied",
+            disposition="existing_finding",
+            summary="Confirmed impact of the existing finding",
+            evidence_refs=[f"artifact:{manifest}", "finding:other-task-owned-candidate"],
+        )
+
+    result = json.loads(impact_acceptance_tool(
+        status="satisfied",
+        disposition="existing_finding",
+        summary="Confirmed impact of the existing finding",
+        evidence_refs=[f"artifact:{manifest}", "finding:verified-upstream"],
+    ))
+
+    assert result["complete"] is True
 
 
 def test_qdrant_memory_client_scope_and_workflow_methods(fake_memory_client, monkeypatch):

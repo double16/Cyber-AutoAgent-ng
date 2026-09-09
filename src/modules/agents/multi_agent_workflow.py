@@ -126,6 +126,7 @@ from modules.tools.memory import (
     build_record_task_acceptance_tool,
     canonical_artifact_reference,
     canonical_procedure_methods,
+    current_workflow_tasks,
     detect_secret_exposures,
     finalize_finding_validation,
     finalize_objective_validation,
@@ -853,7 +854,10 @@ class WorkflowStateStore:
         """Return whether every phase and task reached a successful terminal state."""
 
         phases_complete = all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
-        tasks_complete = all(task.status in {"done", "superseded", "replanned"} for task in self.list_tasks())
+        tasks_complete = all(
+            task.status in {"done", "superseded"}
+            for task in current_workflow_tasks(self.list_tasks())
+        )
         objective_records = self.list_objective_validation_records()
         objective_complete = not objective_records or any(
             record.get("resolution") == "objective_verified" for record in objective_records
@@ -890,7 +894,7 @@ class WorkflowStateStore:
         if status not in TERMINAL_PLAN_STATUSES:
             raise ValueError(f"phase status must be terminal, got {status}")
         if status in {"done", "not_applicable"}:
-            phase_tasks = self.list_tasks(phase=phase_id)
+            phase_tasks = current_workflow_tasks(self.list_tasks(phase=phase_id))
             blocking_tasks = [
                 task
                 for task in self.list_tasks(status=["active", "pending"])
@@ -2194,7 +2198,10 @@ class MultiAgentWorkflowController:
 
         return (
             all(phase.status in {"done", "not_applicable"} for phase in plan.phases)
-            and all(task.status in {"done", "superseded", "replanned"} for task in self.state.list_tasks())
+            and all(
+                task.status in {"done", "superseded"}
+                for task in current_workflow_tasks(self.state.list_tasks())
+            )
         )
 
     def _mark_phase(self, plan: OperationPlan, phase_id: int, status: str) -> OperationPlan:
@@ -2202,7 +2209,7 @@ class MultiAgentWorkflowController:
 
         reconciled = self._reconcile_superseded_tasks(phase_id)
         if status in {"partial_failure", "blocked"}:
-            phase_tasks = self.state.list_tasks(phase=phase_id)
+            phase_tasks = current_workflow_tasks(self.state.list_tasks(phase=phase_id))
             remaining_failures = self.state.list_tasks(
                 phase=phase_id,
                 status=["active", "pending", "partial_failure", "blocked"],
@@ -2211,7 +2218,7 @@ class MultiAgentWorkflowController:
                 phase_tasks
                 and not remaining_failures
                 and any(task.status == "superseded" for task in phase_tasks)
-                and all(task.status in {"done", "superseded", "replanned"} for task in phase_tasks)
+                and all(task.status in {"done", "superseded"} for task in phase_tasks)
             ):
                 self._log_workflow(
                     "promoting phase with only successful terminal tasks phase=%s status=done reconciled=%s",
@@ -2281,7 +2288,10 @@ class MultiAgentWorkflowController:
 
         rows = []
         for phase in plan.phases:
-            tasks = self.state.list_tasks(phase=phase.id)
+            archived_tasks = [
+                task for task in self.state.list_tasks(phase=phase.id) if task.status == "replanned"
+            ]
+            tasks = current_workflow_tasks(self.state.list_tasks(phase=phase.id))
             expected_items: set[str] = set()
             assessed_items: set[str] = set()
             for task in tasks:
@@ -2295,6 +2305,7 @@ class MultiAgentWorkflowController:
                 "status": phase.status,
                 "task_count": len(tasks),
                 "task_status_counts": dict(sorted(status_counts.items())),
+                "archived_replanned_task_count": len(archived_tasks),
                 "inventory_item_count": len(expected_items),
                 "assessed_item_count": len(assessed_items),
                 "omitted_item_count": len(expected_items - assessed_items),
@@ -2732,10 +2743,10 @@ class MultiAgentWorkflowController:
 
         self._reconcile_superseded_tasks(phase_id)
         phase = next((item for item in plan.phases if item.id == phase_id), None)
-        phase_tasks = self.state.list_tasks(phase=phase_id)
+        phase_tasks = current_workflow_tasks(self.state.list_tasks(phase=phase_id))
         if phase is None or phase.status not in {"partial_failure", "blocked"}:
             return
-        if not phase_tasks or any(task.status not in {"done", "superseded", "replanned"} for task in phase_tasks):
+        if not phase_tasks or any(task.status not in {"done", "superseded"} for task in phase_tasks):
             return
         updated_plan = replace(
             plan,
@@ -8495,7 +8506,7 @@ applicability or a finding, and published proof of concepts must not be executed
     ) -> tuple[WorkflowDecision, Counter[str]]:
         """Classify a phase from persisted task and candidate state without model inference."""
 
-        tasks = self.state.list_tasks(phase=phase.id)
+        tasks = current_workflow_tasks(self.state.list_tasks(phase=phase.id))
         status_counts = Counter(task.status for task in tasks)
         if status_counts.get("blocked", 0):
             status = "blocked"
@@ -8503,7 +8514,7 @@ applicability or a finding, and published proof of concepts must not be executed
         elif status_counts.get("active", 0) or status_counts.get("pending", 0):
             status = "continue"
             classification_reason = "actionable phase tasks remain"
-        elif tasks and all(task.status in {"done", "superseded", "replanned"} for task in tasks):
+        elif tasks and all(task.status in {"done", "superseded"} for task in tasks):
             status = "done"
             classification_reason = "all phase tasks reached successful terminal states"
         elif not tasks and _phase_semantically_requires_finding_candidates(phase):
@@ -8543,7 +8554,7 @@ applicability or a finding, and published proof of concepts must not be executed
             for item in self.state.get_plan().phases
             if item.id < phase.id and item.status in {"partial_failure", "blocked"}
         ]
-        phase_tasks = self.state.list_tasks(phase=phase.id)
+        phase_tasks = current_workflow_tasks(self.state.list_tasks(phase=phase.id))
         phase_has_work = bool(phase_tasks)
         explicit_empty_candidate_phase = (
             decision.status == "not_applicable"
@@ -9921,11 +9932,18 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
         mapping_workstreams = ", ".join(sorted(contract.mapping_workstreams))
         synthesis = ""
         if contract.mode == "fanout_with_synthesis":
+            synthesis_execution = str(contract.synthesis_execution or "")
+            execution_instruction = (
+                "This is controller-owned inventory synthesis: set `methods: []`; do not invent a synthesis "
+                "tool or runtime method."
+                if synthesis_execution == "controller"
+                else "This is executor-owned synthesis: supply one or more controller-advertised runtime "
+                "procedure methods; do not use `controller_synthesis`."
+            )
             synthesis = (
                 f"\n- Include exactly one `task_role: \"synthesis\"` proposal with `workstream: "
                 f"\"{contract.synthesis_workstream}\"`, `output_kind: \"{contract.synthesis_output_kind}\"`, "
-                "and `depends_on_workstreams` containing every submitted mapping workstream. This is controller-owned "
-                "synthesis: set `methods: []`; do not invent a synthesis tool or runtime method."
+                f"and `depends_on_workstreams` containing every submitted mapping workstream. {execution_instruction}"
             )
         direct_exception = ""
         if contract.allow_direct_single_step:
@@ -9946,13 +9964,7 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
         pending = self.state.list_tasks(phase=phase.id, status=["pending", "active"])
         if not pending:
-            phase_tasks = self.state.list_tasks(phase=phase.id)
-            if phase_tasks and all(task.status == "replanned" for task in phase_tasks):
-                self._log_workflow(
-                    "phase task creation trigger phase=%s reason=explicit_replan",
-                    self._phase_label(phase),
-                )
-                return False
+            phase_tasks = current_workflow_tasks(self.state.list_tasks(phase=phase.id))
             self._log_workflow(
                 "phase evaluation trigger phase=%s reason=no_pending_or_active has_tasks=%s",
                 self._phase_label(phase),
@@ -11901,7 +11913,7 @@ the task explicitly tests that difference.
     def _task_creator_compact_existing_task_context(self, phase: PlanPhase) -> str:
         """Return bounded task state without serializing the operation-wide task contracts."""
 
-        tasks = self.state.list_tasks()
+        tasks = current_workflow_tasks(self.state.list_tasks())
         counts = Counter((task.phase, str(task.status)) for task in tasks)
         lines = [f"task_phase_status_counts[{len(counts)}]{{phase,status,count}}:"]
         for (phase_id, status), count in sorted(counts.items()):
@@ -12040,13 +12052,14 @@ the task explicitly tests that difference.
     ) -> str:
         """Return compact task state relevant to one creation batch."""
 
-        counts = Counter((task.phase, str(task.status)) for task in self.state.list_tasks())
+        current_tasks = current_workflow_tasks(self.state.list_tasks())
+        counts = Counter((task.phase, str(task.status)) for task in current_tasks)
         lines = [f"task_phase_status_counts[{len(counts)}]{{phase,status,count}}:"]
         for (phase_id, status), count in sorted(counts.items()):
             lines.append(f"  {phase_id},{sanitize_toon_value(status)},{count}")
         matching = [
             task
-            for task in self.state.list_tasks(phase=phase.id)
+            for task in current_workflow_tasks(self.state.list_tasks(phase=phase.id))
             if set(task.acceptance.basis.item_ids) & batch.item_ids
         ]
         lines.append(Task.list_to_toon(matching))
@@ -14135,7 +14148,7 @@ tools and durable evidence before relying on it."""
                 "status": task.status,
                 "status_reason": task.status_reason,
             }
-            for task in self.state.list_tasks(phase=phase_id)
+            for task in current_workflow_tasks(self.state.list_tasks(phase=phase_id))
             if task.status in TERMINAL_PLAN_STATUSES
         ]
         return json.dumps(rows, indent=2, sort_keys=True)
@@ -14144,7 +14157,7 @@ tools and durable evidence before relying on it."""
         """Return authoritative accepted evidence without creator-predicted paths."""
 
         rows = []
-        for task in self.state.list_tasks(phase=phase_id):
+        for task in current_workflow_tasks(self.state.list_tasks(phase=phase_id)):
             results = self.state.list_task_acceptance_results(task.task_uid)
             result_by_id = {str(result.criterion_id): result for result in results}
             criteria = []

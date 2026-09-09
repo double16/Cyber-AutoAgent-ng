@@ -39,6 +39,12 @@ describe('operation health formatting', () => {
     )).toBe('➡️ Budget 42% | Duration 8m 10s | 💚 82% GOOD');
   });
 
+  it('marks incomplete assessments independently from the execution-health band', () => {
+    expect(formatOperationHealth(
+      {status: 'available', score: 0.82, band: 'good', completion_feasible: false},
+    )?.label).toBe('💚 82% GOOD · ASSESSMENT INCOMPLETE');
+  });
+
   it('leaves headless progress text unchanged when health is unavailable', () => {
     expect(appendOperationHealth('➡️ Budget 42%', { status: 'unavailable' })).toBe('➡️ Budget 42%');
   });

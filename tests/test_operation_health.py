@@ -95,6 +95,21 @@ def test_superseded_task_is_neutral_terminal_work():
     assert health["completion_feasible"] is True
 
 
+def test_replanned_tasks_are_archived_and_excluded_from_health_counts():
+    plan = _plan(PlanPhase(id=1, title="Done", status="done"))
+
+    health = compute_operation_health(
+        plan,
+        [_task("done", 1, "done"), _task("archived", 1, "replanned")],
+    )
+
+    assert health["current_phase"]["task_count"] == 1
+    assert health["current_phase"]["task_status_counts"] == {"done": 1}
+    assert health["task_status_counts"] == {"done": 1}
+    assert health["archived_replanned_task_count"] == 1
+    assert health["score"] == 1.0
+
+
 def test_done_phase_with_unfinished_task_is_not_perfect_and_is_inconsistent():
     plan = _plan(PlanPhase(id=1, title="Done", status="done"))
 

@@ -953,6 +953,8 @@ def test_operation_lifecycle_emits_one_termination_snapshot_and_one_finalization
 def test_report_error_delegates_to_report_generator_fallback(tmp_path, monkeypatch):
     handler = make_handler()
     handler.memory_ops = 1
+    report_path = tmp_path / "security_assessment_report.md"
+    report_path.write_text("# Deterministic fallback\napi_key=[REDACTED]")
     monkeypatch.setattr(rb, "get_output_path", lambda *_args: str(tmp_path))
     monkeypatch.setattr(
         "modules.handlers.report_generator.generate_security_report",
@@ -960,9 +962,13 @@ def test_report_error_delegates_to_report_generator_fallback(tmp_path, monkeypat
     )
     fallback = Mock(
         return_value={
-            "report_path": str(tmp_path / "security_assessment_report.md"),
+            "report_path": str(report_path),
             "report_json_path": str(tmp_path / "security_assessment_report.json"),
-            "content": "# Deterministic fallback",
+            "content": (
+                "# Deterministic fallback\napi_key=secret-value\n"
+                "postgres://report-user:report-password@db.example/report\n"
+                "AIzaSyD2wIxpYCuNI0Zjt8kChs2hLTS5abVQfRQ"
+            ),
             "status": "fallback",
         }
     )
@@ -981,7 +987,9 @@ def test_report_error_delegates_to_report_generator_fallback(tmp_path, monkeypat
 
     assert handler._report_status == "fallback"
     fallback.assert_called_once()
-    assert any(event["type"] == "report_content" for event in handler._events)
+    report_content = next(event["content"] for event in handler._events if event["type"] == "report_content")
+    assert "secret-value" not in report_content
+    assert "[REDACTED]" in report_content
     report_paths = next(event for event in handler._events if event["type"] == "report_paths")
     assert report_paths["report_json_path"].endswith("security_assessment_report.json")
 
