@@ -135,6 +135,28 @@ _NARRATIVE_FINDING_REFERENCE_STOPWORDS = frozenset({
 })
 _REPORT_ENDPOINT_URL = re.compile(r"https?://[^\s/?#]+(?:/[^\s?#]*)?", re.IGNORECASE)
 _REPORT_ENDPOINT_PATH = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[A-Za-z0-9_.~%-]+/)*[A-Za-z0-9_.~%-]+")
+_ATTACK_SURFACE_GROUP_LIMIT = 12
+_ATTACK_SURFACE_MEMBER_LIMIT = 5
+_WEB_CONFIGURATION_SEGMENTS = frozenset(
+    {".well-known", "actuator", "config", "configuration", "debug", "env", "health", "metrics"}
+)
+_WEB_DOCUMENTATION_SEGMENTS = frozenset({"api-docs", "docs", "openapi", "redoc", "swagger"})
+_WEB_AUTH_SEGMENTS = frozenset(
+    {
+        "account",
+        "auth",
+        "callback",
+        "login",
+        "logout",
+        "oauth",
+        "password",
+        "profile",
+        "register",
+        "session",
+        "signup",
+        "token",
+    }
+)
 _EXCERPT_STOPWORDS = {
     "about",
     "after",
@@ -420,6 +442,292 @@ def _inventory_endpoint_values(task_records: list[Any]) -> dict[str, str]:
     if conflicts:
         logger.warning("Leaving ambiguous inventory endpoint IDs unresolved: %s", ", ".join(conflicts))
     return resolved
+
+
+def _inventory_manifest_items(task_records: list[Any]) -> tuple[list[dict[str, Any]], int]:
+    """Load de-duplicated, typed inventory items attached to current-operation tasks."""
+    references: set[str] = set()
+    for task in task_records:
+        acceptance = getattr(task, "acceptance", None)
+        basis = getattr(acceptance, "basis", None)
+        references.update(_file_artifact_references(getattr(basis, "source_refs", ())))
+        references.update(_file_artifact_references(getattr(task, "evidence", ())))
+
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    manifests = 0
+    for reference in sorted(references):
+        try:
+            with open(_artifact_path_from_ref(reference), encoding="utf-8") as manifest_file:
+                manifest = json.load(manifest_file)
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        raw_items = manifest.get("items") if isinstance(manifest, dict) else None
+        if not isinstance(raw_items, list):
+            continue
+        manifests += 1
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").strip().lower()
+            value = str(item.get("value") or "").strip()
+            target_id = str(item.get("target_id") or "").strip()
+            if not kind or not value:
+                continue
+            identity = (kind, target_id, value)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            items.append(
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "kind": kind,
+                    "value": value,
+                    "target_id": target_id,
+                    "attributes": item.get("attributes") if isinstance(item.get("attributes"), dict) else {},
+                }
+            )
+    return items, manifests
+
+
+def _web_attack_surface_group(value: str) -> tuple[str, str]:
+    """Classify one observed HTTP endpoint using stable route-pattern rules."""
+    parsed = urlsplit(value)
+    segments = [segment.lower() for segment in parsed.path.split("/") if segment]
+    first = segments[0] if segments else ""
+    if "graphql" in segments:
+        return "graphql", "GraphQL"
+    if any(segment in _WEB_CONFIGURATION_SEGMENTS for segment in segments):
+        return "configuration", "Configuration and operations"
+    if any(segment in _WEB_DOCUMENTATION_SEGMENTS for segment in segments):
+        return "documentation", "Documentation and API descriptions"
+    if first == "admin":
+        return "administration", "Administration"
+    if any(segment in _WEB_AUTH_SEGMENTS for segment in segments):
+        return "authentication", "Authentication and account"
+    if first == "api" or re.fullmatch(r"v\d+(?:\.\d+)?", first or ""):
+        prefix = "/" + "/".join(segments[:2]) if len(segments) > 1 else "/" + first
+        return "api", f"API: {prefix}"
+    return "frontend", "Web application pages"
+
+
+def _surface_evidence_locations(item: dict[str, Any]) -> set[str]:
+    """Return only structured evidence locations usable for surface association."""
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
+    values = (
+        metadata.get("target"),
+        metadata.get("location"),
+        metadata.get("component"),
+        metadata.get("component_name"),
+        parsed.get("where"),
+    )
+    return {str(value).strip() for value in values if isinstance(value, str) and value.strip()}
+
+
+def _surface_location_matches_member(location: str, member: str) -> bool:
+    """Match structured endpoint or component locations without inspecting evidence prose."""
+    location_value = location.rstrip("/")
+    member_value = member.rstrip("/")
+    if not location_value or not member_value:
+        return False
+    if location_value == member_value:
+        return True
+    location_url = urlsplit(location_value)
+    member_url = urlsplit(member_value)
+    if location_url.scheme and member_url.scheme:
+        return (
+            location_url.scheme == member_url.scheme
+            and location_url.netloc == member_url.netloc
+            and (
+                location_url.path == member_url.path
+                or location_url.path.startswith(member_url.path.rstrip("/") + "/")
+            )
+        )
+    return False
+
+
+def _build_attack_surface(
+    inventory_items: list[dict[str, Any]],
+    registered_targets: dict[str, OperationTarget],
+    evidence: list[dict[str, Any]],
+    inventory_manifest_count: int,
+) -> dict[str, Any]:
+    """Build a bounded attack-surface summary from typed operation records only."""
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add_member(category: str, name: str, value: str, target_id: str = "") -> None:
+        key = (category, name)
+        group = groups.setdefault(
+            key,
+            {
+                "category": category,
+                "name": name,
+                "members": set(),
+                "target_ids": set(),
+                "findings": [],
+                "validation_items": [],
+            },
+        )
+        group["members"].add(value)
+        if target_id:
+            group["target_ids"].add(target_id)
+
+    inventory_target_ids: set[str] = set()
+    for item in inventory_items:
+        kind = item["kind"]
+        value = item["value"]
+        target_id = item["target_id"]
+        inventory_target_ids.add(target_id)
+        if kind == "endpoint" and urlsplit(value).scheme in {"http", "https"}:
+            category, name = _web_attack_surface_group(value)
+            add_member(category, name, value, target_id)
+        elif kind == "service":
+            interface = str((item["attributes"].get("interaction") or {}).get("interface") or "").lower()
+            name = "Web services" if interface == "http" else "Network services"
+            add_member("service", name, value, target_id)
+        elif kind in {"host", "port"}:
+            add_member("network", "Network hosts and services", value, target_id)
+        elif kind in {"component", "package", "dependency", "directory", "file"}:
+            labels = {
+                "component": "Code components",
+                "package": "Packages and dependencies",
+                "dependency": "Packages and dependencies",
+            }
+            label = labels.get(kind, "Filesystem and source locations")
+            add_member("code", label, value, target_id)
+        elif kind == "workflow":
+            add_member("workflow", "Observed application workflows", value, target_id)
+        elif kind == "technology":
+            add_member("technology", "Observed technologies", value, target_id)
+
+    for target_id, target in registered_targets.items():
+        if target_id in inventory_target_ids:
+            continue
+        label = "Filesystem targets" if target.type == "filesystem" else "Declared network targets"
+        category = "filesystem" if target.type == "filesystem" else "network"
+        add_member(category, label, target.value, target_id)
+
+    for item in evidence:
+        if not isinstance(item, dict) or item.get("category") not in {"finding", "validation_failure"}:
+            continue
+        metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        item_target_id = str(metadata.get("target_id") or "").strip()
+        locations = _surface_evidence_locations(item)
+        for group in groups.values():
+            matches_location = any(
+                _surface_location_matches_member(location, member)
+                for location in locations
+                for member in group["members"]
+            )
+            matches_target = bool(
+                not locations and item_target_id and item_target_id in group["target_ids"]
+            )
+            if not matches_target and not matches_location:
+                continue
+            reference = {
+                "id": str(item.get("id") or ""),
+                "title": _report_item_title(item, "Recorded item"),
+                "status": _canonical_validation_status(item),
+            }
+            destination = "findings" if item.get("category") == "finding" else "validation_items"
+            if reference not in group[destination]:
+                group[destination].append(reference)
+
+    category_order = {
+        "configuration": 0,
+        "graphql": 1,
+        "authentication": 2,
+        "administration": 3,
+        "api": 4,
+        "frontend": 5,
+        "service": 6,
+        "network": 7,
+        "code": 8,
+        "filesystem": 9,
+        "workflow": 10,
+        "technology": 11,
+        "documentation": 12,
+    }
+    ordered_groups = sorted(
+        groups.values(),
+        key=lambda group: (
+            not bool(group["findings"] or group["validation_items"]),
+            category_order.get(group["category"], 99),
+            group["name"].lower(),
+        ),
+    )[:_ATTACK_SURFACE_GROUP_LIMIT]
+    rendered_groups = []
+    for group in ordered_groups:
+        members = sorted(group["members"])
+        rendered_groups.append(
+            {
+                "category": group["category"],
+                "name": group["name"],
+                "member_count": len(members),
+                "representative_members": members[:_ATTACK_SURFACE_MEMBER_LIMIT],
+                "omitted_member_count": max(0, len(members) - _ATTACK_SURFACE_MEMBER_LIMIT),
+                "linked_findings": group["findings"],
+                "linked_validation_items": group["validation_items"],
+                "notable": bool(group["findings"] or group["validation_items"]),
+            }
+        )
+    omitted_group_count = max(0, len(groups) - len(rendered_groups))
+    return {
+        "source": {
+            "inventory_manifest_count": inventory_manifest_count,
+            "registered_target_count": len(registered_targets),
+        },
+        "inventory_manifest_count": inventory_manifest_count,
+        "registered_target_count": len(registered_targets),
+        "groups": rendered_groups,
+        "omitted_group_count": omitted_group_count,
+        "limitations": (
+            "This is a summary of current operation records and is not a complete asset inventory."
+        ),
+    }
+
+
+def _format_attack_surface(attack_surface: Any) -> str:
+    """Render the bounded canonical attack-surface summary as Markdown."""
+    surface = attack_surface if isinstance(attack_surface, dict) else {}
+    groups = surface.get("groups") if isinstance(surface.get("groups"), list) else []
+    parts = [
+        '<a name="discovered-attack-surface"></a>\n',
+        "## DISCOVERED ATTACK SURFACE\n\n",
+        str(surface.get("limitations") or "No attack surface records were available.") + "\n\n",
+    ]
+    if not groups:
+        parts.append("No logical attack-surface groups were established from recorded evidence.\n")
+        return "".join(parts)
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        name = _escape_markdown_text(group.get("name") or "Recorded surface")
+        count = int(group.get("member_count") or 0)
+        parts.append(f"### {name}\n\n")
+        parts.append(f"Recorded members: **{count}**\n\n")
+        members = group.get("representative_members") if isinstance(group.get("representative_members"), list) else []
+        for member in members:
+            parts.append(f"- `{_escape_markdown_text(member)}`\n")
+        omitted_members = int(group.get("omitted_member_count") or 0)
+        if omitted_members:
+            parts.append(f"- … {omitted_members} additional recorded member(s) omitted\n")
+        references = []
+        for item in group.get("linked_findings", []):
+            if isinstance(item, dict):
+                references.append(f"verified finding: {_escape_markdown_text(item.get('title') or 'Recorded finding')}")
+        for item in group.get("linked_validation_items", []):
+            if isinstance(item, dict):
+                title = _escape_markdown_text(item.get("title") or "Recorded item")
+                references.append(f"validation-required item: {title}")
+        if references:
+            parts.append("\n**Notable recorded association:** " + "; ".join(references) + "\n")
+        parts.append("\n")
+    omitted_groups = int(surface.get("omitted_group_count") or 0)
+    if omitted_groups:
+        parts.append(f"{omitted_groups} additional logical group(s) were omitted from this compact summary.\n")
+    return "".join(parts)
 
 
 def _resolve_inventory_ids_for_display(value: Any, endpoint_values: dict[str, str], field_name: str = "") -> Any:
@@ -1075,6 +1383,7 @@ def _canonical_report_data(sections: dict[str, Any]) -> dict[str, Any]:
         "superseded_task_count": int(sections.get("superseded_task_count", 0) or 0),
         "phase_coverage": sections.get("phase_coverage") or [],
         "target_coverage": sections.get("target_coverage") or "",
+        "attack_surface": sections.get("attack_surface") or {},
         "completion_status": sections.get("completion_status") or {},
         "artifact_references": artifacts,
         "evidence_integrity_errors": sections.get("evidence_integrity_errors") or [],
@@ -3375,6 +3684,7 @@ def _assemble_security_assessment_report(
         _AI_CONTENT_DISCLAIMER + "\n\n",
         "## TABLE OF CONTENTS\n",
         "- [Executive Summary](#executive-summary)\n",
+        "- [Discovered Attack Surface](#discovered-attack-surface)\n",
         "- [Detailed Vulnerability Analysis](#detailed-vulnerability-analysis)\n",
         "- [Findings Requiring Validation](#findings-requiring-validation)\n",
     ]
@@ -3566,6 +3876,7 @@ def generate_deterministic_fallback_report(
         _format_verified_findings_summary(sections),
         _format_executive_deterministic_sections(sections),
         sections["taxonomy_coverage"],
+        _format_attack_surface(sections.get("attack_surface")),
         _PAGE_BREAK + '<a name="detailed-vulnerability-analysis"></a>\n## DETAILED VULNERABILITY ANALYSIS\n\n',
         "### Findings Summary\n\n" + str(sections.get("summary_table") or "No verified findings were recorded.") + "\n\n",
     ]
@@ -3656,6 +3967,10 @@ def _fallback_sections_from_operation_snapshot(snapshot: dict[str, Any]) -> dict
         "summary_table": "No verified findings were retained in the controller snapshot.",
         "raw_evidence": [],
         "target_coverage": phase_coverage,
+        "attack_surface": {
+            "groups": [],
+            "limitations": "No typed attack-surface records were retained in the controller snapshot.",
+        },
         "execution_history": _format_execution_history(tasks, []),
         "latest_run": {},
         "reportable_tools_used": [],
@@ -3955,6 +4270,10 @@ Narrative context:
                 + taxonomy_coverage,
             )
             report_parts_files.append(exec_summary_file)
+
+        attack_surface_file = os.path.join(output_path, "report_attack_surface.md")
+        _write_redacted_report_text(attack_surface_file, _format_attack_surface(sections.get("attack_surface")))
+        report_parts_files.append(attack_surface_file)
 
         # Part 2: Detailed Findings
         logger.info("Generating Detailed Findings...")
@@ -4903,6 +5222,7 @@ def build_report_sections(
         archived_replanned_tasks = [task for task in task_records if str(task.status) == "replanned"]
         current_task_records = current_workflow_tasks(task_records)
         endpoint_values = _inventory_endpoint_values(task_records)
+        inventory_items, inventory_manifest_count = _inventory_manifest_items(task_records)
         target_values = {
             str(item.target_id): str(item.value)
             for item in list(getattr(operation_plan, "targets", []) or [])
@@ -5339,6 +5659,12 @@ def build_report_sections(
 
         # Build complete sections dictionary
         target_coverage = _format_target_coverage(operation_plan, task_records, evidence, target_values)
+        attack_surface = _build_attack_surface(
+            inventory_items,
+            registered_targets,
+            evidence,
+            inventory_manifest_count,
+        )
         evidence_integrity_errors = []
         if advisory_memory_count:
             evidence_integrity_errors.append(
@@ -5426,6 +5752,7 @@ def build_report_sections(
             "findings_table": findings_table,
             "summary_table": summary_table,
             "target_coverage": target_coverage,
+            "attack_surface": attack_surface,
             "phase_coverage": phase_coverage,
             "analysis": report_content.get("analysis", ""),
             "immediate_recommendations": report_content.get("immediate", ""),

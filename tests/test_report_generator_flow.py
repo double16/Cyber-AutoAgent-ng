@@ -283,9 +283,24 @@ def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch,
             {
                 "items": [
                     "invalid",
-                    {"id": "endpoint-1", "value": "https://one.test"},
-                    {"id": "endpoint-2", "value": "https://first.test"},
-                    {"id": "endpoint-2", "value": "https://second.test"},
+                    {
+                        "id": "endpoint-1",
+                        "kind": "endpoint",
+                        "target_id": "target-1",
+                        "value": "https://one.test",
+                    },
+                    {
+                        "id": "endpoint-2",
+                        "kind": "endpoint",
+                        "target_id": "target-1",
+                        "value": "https://first.test",
+                    },
+                    {
+                        "id": "endpoint-2",
+                        "kind": "endpoint",
+                        "target_id": "target-1",
+                        "value": "https://second.test",
+                    },
                 ]
             }
         ),
@@ -307,6 +322,13 @@ def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch,
 
     endpoint_values = _inventory_endpoint_values([task])
     assert endpoint_values == {"endpoint-1": "https://one.test"}
+    inventory_items, manifest_count = report_generator_module._inventory_manifest_items([task])
+    assert manifest_count == 1
+    assert [item["value"] for item in inventory_items] == [
+        "https://one.test",
+        "https://first.test",
+        "https://second.test",
+    ]
     assert report_generator_module._resolve_inventory_ids_for_display(
         {"description": ["endpoint-1", ("endpoint-1",)]}, endpoint_values
     ) == {"description": ["https://one.test", ("https://one.test",)]}
@@ -335,6 +357,113 @@ def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch,
         lambda reference: str(invalid_manifest) if "invalid" in reference else str(manifest),
     )
     assert _inventory_endpoint_values([invalid_task]) == {}
+
+
+def test_attack_surface_groups_typed_records_and_links_only_structured_locations():
+    inventory_items = [
+        {
+            "kind": "endpoint",
+            "value": f"https://example.test/api/users/{index}",
+            "target_id": "web-1",
+            "attributes": {},
+        }
+        for index in range(7)
+    ] + [
+        {
+            "kind": "endpoint",
+            "value": "https://example.test/graphql",
+            "target_id": "web-1",
+            "attributes": {},
+        },
+        {
+            "kind": "endpoint",
+            "value": "https://example.test/api/config",
+            "target_id": "web-1",
+            "attributes": {},
+        },
+        {"kind": "component", "value": "identity-service", "target_id": "code-1", "attributes": {}},
+    ]
+    targets = {
+        "network-1": report_generator_module.OperationTarget(
+            target_id="network-1",
+            value="10.0.0.10",
+            type="network",
+        ),
+        "filesystem-1": report_generator_module.OperationTarget(
+            target_id="filesystem-1",
+            value="/srv/app",
+            type="filesystem",
+        ),
+    }
+    evidence = [
+        {
+            "id": "config-finding",
+            "title": "Sensitive configuration exposed",
+            "category": "finding",
+            "validation_status": "verified",
+            "metadata": {"location": "https://example.test/api/config"},
+        },
+        {
+            "id": "graphql-candidate",
+            "title": "GraphQL authorization requires validation",
+            "category": "validation_failure",
+            "metadata": {"location": "https://example.test/graphql"},
+        },
+        {
+            "id": "unstructured",
+            "title": "Unstructured mention",
+            "category": "finding",
+            "content": "https://example.test/api/users/1 appeared in prose only",
+            "metadata": {},
+        },
+    ]
+
+    surface = report_generator_module._build_attack_surface(inventory_items, targets, evidence, 1)
+    groups = {group["name"]: group for group in surface["groups"]}
+
+    assert surface["source"] == {"inventory_manifest_count": 1, "registered_target_count": 2}
+    api_group = groups["API: /api/users"]
+    assert api_group["member_count"] == 7
+    assert len(api_group["representative_members"]) == 5
+    assert api_group["omitted_member_count"] == 2
+    assert api_group["notable"] is False
+    assert groups["Configuration and operations"]["linked_findings"] == [
+        {"id": "config-finding", "title": "Sensitive configuration exposed", "status": "verified"}
+    ]
+    assert groups["GraphQL"]["linked_validation_items"] == [
+        {
+            "id": "graphql-candidate",
+            "title": "GraphQL authorization requires validation",
+            "status": "validation_required",
+        }
+    ]
+    assert groups["Declared network targets"]["representative_members"] == ["10.0.0.10"]
+    assert groups["Filesystem targets"]["representative_members"] == ["/srv/app"]
+
+    markdown = report_generator_module._format_attack_surface(surface)
+    assert "## DISCOVERED ATTACK SURFACE" in markdown
+    assert "Notable recorded association" in markdown
+    assert "unstructured" not in markdown
+
+
+def test_attack_surface_enforces_group_limit_and_reports_absent_typed_records():
+    inventory_items = [
+        {
+            "kind": "endpoint",
+            "value": f"https://example.test/api/feature-{index}",
+            "target_id": "web-1",
+            "attributes": {},
+        }
+        for index in range(13)
+    ]
+
+    surface = report_generator_module._build_attack_surface(inventory_items, {}, [], 1)
+
+    assert len(surface["groups"]) == 12
+    assert surface["omitted_group_count"] == 1
+    empty = report_generator_module._build_attack_surface([], {}, [], 0)
+    assert empty["groups"] == []
+    assert "not a complete asset inventory" in report_generator_module._format_attack_surface(empty)
 
 
 def test_artifact_reference_and_excerpt_helpers_cover_fallback_paths(tmp_path):
@@ -2869,6 +2998,7 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
     assert "Stored XSS" in markdown
     assert "Possible SQL injection" in markdown
     assert "Server banner" in markdown
+    assert "## DISCOVERED ATTACK SURFACE" in markdown
     assert "## TARGET COVERAGE" in markdown
     assert "## EXECUTION HISTORY" in markdown
     assert "## APPENDIX A: ASSESSMENT METHODOLOGY" in markdown
@@ -2884,6 +3014,7 @@ def test_deterministic_fallback_report_renders_canonical_sections_without_narrat
     assert "report-json-secret" not in json.dumps(payload)
     assert payload["narrative"] == {}
     assert payload["canonical"]["verified_findings_total"] == 1
+    assert payload["canonical"]["attack_surface"] == {}
 
 
 def test_report_artifact_writers_redact_text_and_secret_bearing_json_fields(tmp_path):
