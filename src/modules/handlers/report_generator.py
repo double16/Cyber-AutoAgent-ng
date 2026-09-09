@@ -36,7 +36,11 @@ from modules.agents.structured_outputs import (
     is_structured_output_unavailable,
     structured_output_dict,
 )
-from modules.config import get_config_manager, get_report_refinement_cycles
+from modules.config import (
+    get_config_manager,
+    get_report_evidence_grouping_enabled,
+    get_report_refinement_cycles,
+)
 from modules.config.system.logger import get_logger
 from modules.config.types import DEFAULT_MAX_DURATION
 from modules.handlers.max_token_recovery import reset_agent_conversation_for_recovery
@@ -79,6 +83,26 @@ logger = get_logger("Handlers.ReportGenerator")
 
 MAX_REPORT_FINDINGS = int(os.getenv("CYBER_REPORT_MAX_FINDINGS", "200"))
 _SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+_LEGACY_INPUT_LOCATION_ALIASES = {
+    "query": "query",
+    "query string": "query",
+    "query-string": "query",
+    "path": "path",
+    "body": "body",
+    "header": "header",
+    "cookie": "cookie",
+}
+_LEGACY_INPUT_LOCATION_PATTERN = re.compile(
+    r"\b(?:(?P<name_before>[A-Za-z][A-Za-z0-9_.-]*)\s+)?"
+    r"(?P<location>query(?:[ -]string)?|path|body|header|cookie)\s+"
+    r"(?:parameter|field|input)\b",
+    re.IGNORECASE,
+)
+_LEGACY_NAMED_INPUT_PATTERN = re.compile(
+    r"\b(?P<location>query(?:[ -]string)?|path|body|header|cookie)\s+"
+    r"(?:parameter|field|input)\s+(?:named|called)\s*[`\"']?(?P<name_after>[A-Za-z][A-Za-z0-9_.-]*)",
+    re.IGNORECASE,
+)
 _PAGE_BREAK = """\n<div class="page-break" style="page-break-before: always;"></div>\n\n"""
 _AI_CONTENT_DISCLAIMER = (
     "> **AI-Generated Content Disclaimer:** This report was generated with artificial intelligence and may contain "
@@ -299,7 +323,9 @@ def _report_item_title(item: dict[str, Any], default: str) -> str:
         or item.get("content")
         or default
     )
-    return safe_truncate(str(title).strip() or default, 80)
+    secret_type = _secret_exposure_label(item)
+    suffix = f" — {secret_type}" if secret_type else ""
+    return safe_truncate(f"{str(title).strip() or default}{suffix}", 80)
 
 
 def _has_artifact_reference(value: Any) -> bool:
@@ -693,6 +719,7 @@ def _format_attack_surface(attack_surface: Any) -> str:
     surface = attack_surface if isinstance(attack_surface, dict) else {}
     groups = surface.get("groups") if isinstance(surface.get("groups"), list) else []
     parts = [
+        _PAGE_BREAK,
         '<a name="discovered-attack-surface"></a>\n',
         "## DISCOVERED ATTACK SURFACE\n\n",
         str(surface.get("limitations") or "No attack surface records were available.") + "\n\n",
@@ -1343,6 +1370,20 @@ def _is_reportable_informational_observation(item: Any) -> bool:
     return source not in _WORKFLOW_BOOKKEEPING_SOURCES and not publication_key.startswith("task_acceptance:")
 
 
+def _report_safe_evidence(value: Any) -> Any:
+    """Remove secret-exposure digests from emitted report data only."""
+
+    if isinstance(value, list):
+        return [_report_safe_evidence(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: _report_safe_evidence(item)
+        for key, item in value.items()
+        if not (value.get("type") == "secret_exposure" and key == "digest")
+    }
+
+
 def _canonical_report_data(sections: dict[str, Any]) -> dict[str, Any]:
     """Return the Python-owned, JSON-safe contract used to assemble a report.
 
@@ -1369,13 +1410,13 @@ def _canonical_report_data(sections: dict[str, Any]) -> dict[str, Any]:
             "module": sections.get("module"),
             "date": sections.get("date"),
         },
-        "findings": findings,
+        "findings": _report_safe_evidence(findings),
         "severity_counts": dict(sections.get("severity_counts") or {}),
         "verified_findings_total": int(sections.get("verified_findings_total", len(findings)) or 0),
-        "validation_failures": validation,
+        "validation_failures": _report_safe_evidence(validation),
         "validation_failure_count": len(validation),
-        "pending_candidates": validation,
-        "observations": observations,
+        "pending_candidates": _report_safe_evidence(validation),
+        "observations": _report_safe_evidence(observations),
         "observation_count": len(observations),
         "task_status_counts": dict(sections.get("task_status_counts") or {}),
         "total_task_count": int(sections.get("total_task_count", 0) or 0),
@@ -4919,8 +4960,44 @@ def _canonical_network_subject(item: dict[str, Any], target: OperationTarget) ->
     return str(target.value).strip().rstrip("/").lower()
 
 
+def _legacy_input_location(item: dict[str, Any]) -> str:
+    """Return an unambiguous input identity from legacy finding prose.
+
+    This compatibility fallback intentionally recognizes only explicit input-location
+    wording. It never derives a name from a query value or guesses from an endpoint.
+    """
+
+    parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    matches: set[tuple[str, str]] = set()
+    for value in (
+        item.get("title"),
+        parsed.get("title"),
+        parsed.get("vulnerability"),
+        item.get("content"),
+        metadata.get("title"),
+    ):
+        text = str(value or "")
+        for pattern in (_LEGACY_INPUT_LOCATION_PATTERN, _LEGACY_NAMED_INPUT_PATTERN):
+            for match in pattern.finditer(text):
+                location = _LEGACY_INPUT_LOCATION_ALIASES.get(str(match.group("location") or "").lower())
+                name = str(match.groupdict().get("name_before") or match.groupdict().get("name_after") or "").lower()
+                name = name.rstrip(".,;:")
+                if name in {"a", "an", "the"}:
+                    name = ""
+                if location:
+                    matches.add((location, name))
+    locations = {location for location, _name in matches}
+    if len(locations) != 1:
+        return ""
+    names = {name for _location, name in matches if name}
+    if len(names) > 1:
+        return ""
+    return f"{locations.pop()}:{next(iter(names), 'unspecified')}"
+
+
 def _canonical_input_location(item: dict[str, Any]) -> str:
-    """Return a structured input identity without deriving it from query values or prose."""
+    """Return a structured input identity, with a conservative legacy fallback."""
 
     parsed = item.get("parsed", {}) if isinstance(item.get("parsed"), dict) else {}
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
@@ -4936,7 +5013,42 @@ def _canonical_input_location(item: dict[str, Any]) -> str:
         location_text = str(location or "").strip().lower()
         if name_text:
             return f"{location_text or 'unspecified'}:{name_text}"
-    return ""
+    return _legacy_input_location(item)
+
+
+def _secret_exposure_predicates(item: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return typed secret predicates without inspecting secret-bearing report text."""
+
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    exposures: set[tuple[str, str]] = set()
+    for assertions in (metadata.get("candidate_evidence_assertions"), metadata.get("evidence_assertions")):
+        if not isinstance(assertions, list):
+            continue
+        for assertion in assertions:
+            if not isinstance(assertion, dict) or assertion.get("type") != "secret_exposure":
+                continue
+            kind = str(assertion.get("kind") or "").strip().lower()
+            digest = str(assertion.get("digest") or "").strip().lower()
+            if kind and re.fullmatch(r"[0-9a-f]{64}", digest):
+                exposures.add((kind, digest))
+    return sorted(exposures)
+
+
+def _secret_exposure_label(item: dict[str, Any]) -> str:
+    """Return the safe secret type qualifier for a split report finding."""
+
+    exposure = item.get("canonical_exposure")
+    if not isinstance(exposure, dict):
+        return ""
+    return str(exposure.get("kind") or "").replace("_", " ").strip()
+
+
+def _report_item_severity(item: dict[str, Any]) -> str:
+    """Return the normalized severity used for canonical report selection."""
+
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    severity = str(item.get("severity") or metadata.get("severity") or "MEDIUM").upper()
+    return severity if severity in _SEVERITY_ORDER else "MEDIUM"
 
 
 def _canonical_report_endpoint(
@@ -5028,60 +5140,100 @@ def _canonicalize_report_evidence(
     items: list[dict[str, Any]],
     registered_targets: dict[str, OperationTarget] | None = None,
 ) -> list[dict[str, Any]]:
-    """Merge overlapping report findings while retaining all source provenance."""
+    """Canonicalize report findings, preferring validated evidence over matching unvalidated claims."""
 
-    merged: list[dict[str, Any]] = []
-    by_identity: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
-    for item in items:
+    grouped: dict[
+        tuple[str, str, str, tuple[str, str] | None],
+        list[tuple[int, dict[str, Any], str, dict[str, Any]]],
+    ] = {}
+    rows: list[tuple[int, dict[str, Any]]] = []
+    for index, item in enumerate(items):
         category = str(item.get("category") or "")
         if category not in {"finding", "validation_failure"}:
-            merged.append(item)
+            rows.append((index, item))
             continue
         endpoint = _canonical_report_endpoint(item, registered_targets)
         behavior = _canonical_finding_behavior(item)
         input_location = _canonical_input_location(item)
         validation_status = _canonical_validation_status(item)
         if not endpoint or behavior == "unknown":
-            merged.append(item)
+            rows.append((index, item))
             continue
-        identity = (endpoint, behavior, input_location, validation_status, category)
-        existing = by_identity.get(identity)
-        source = {
-            "evidence_id": str(item.get("id") or ""),
-            "finding_uid": str((item.get("metadata") or {}).get("finding_uid") or ""),
-            "task_uid": str((item.get("metadata") or {}).get("task_uid") or ""),
-            "artifact_refs": sorted(_artifact_references(item)),
-            "category": category,
-            "validation_status": validation_status,
-        }
-        if existing is None:
-            canonical = deepcopy(item)
-            canonical_identity = {"endpoint": endpoint, "behavior": behavior}
+        secret_exposures = _secret_exposure_predicates(item) if behavior == "information_disclosure" else []
+        variants: list[tuple[dict[str, Any], tuple[str, str] | None]] = [(item, None)]
+        if secret_exposures:
+            variants = []
+            for kind, digest in secret_exposures:
+                variant = deepcopy(item)
+                variant["canonical_exposure"] = {"kind": kind}
+                variants.append((variant, (kind, digest)))
+        for variant, secret_exposure in variants:
+            source = {
+                "evidence_id": str(item.get("id") or ""),
+                "finding_uid": str((item.get("metadata") or {}).get("finding_uid") or ""),
+                "task_uid": str((item.get("metadata") or {}).get("task_uid") or ""),
+                "artifact_refs": sorted(_artifact_references(item)),
+                "category": category,
+                "validation_status": validation_status,
+            }
+            grouped.setdefault((endpoint, behavior, input_location, secret_exposure), []).append(
+                (index, variant, validation_status, source)
+            )
+
+    for (endpoint, behavior, input_location, secret_exposure), entries in grouped.items():
+        verified_entries = [entry for entry in entries if entry[2] == "verified"]
+        selected_entries = verified_entries or entries
+        suppressed_entries = [entry for entry in entries if entry[2] != "verified"] if verified_entries else []
+
+        canonical_by_status: dict[tuple[str, str], list[tuple[int, dict[str, Any], dict[str, Any]]]] = {}
+        canonical_indexes: dict[tuple[str, str], int] = {}
+        for index, item, validation_status, source in selected_entries:
+            category = str(item.get("category") or "")
+            status_key = (validation_status, category)
+            canonical_by_status.setdefault(status_key, []).append((index, item, source))
+            canonical_indexes[status_key] = min(canonical_indexes.get(status_key, index), index)
+
+        for (validation_status, _category), candidates in canonical_by_status.items():
+            _index, highest_severity_item, _source = min(
+                candidates,
+                key=lambda candidate: (_SEVERITY_ORDER[_report_item_severity(candidate[1])], candidate[0]),
+            )
+            canonical = deepcopy(highest_severity_item)
+            canonical["severity"] = _report_item_severity(highest_severity_item)
+            canonical_identity = {"endpoint": endpoint, "behavior": behavior, "validation_status": validation_status}
             if input_location:
                 canonical_identity["input_location"] = input_location
-            canonical_identity["validation_status"] = validation_status
+            if secret_exposure:
+                canonical_identity["exposure_kind"] = secret_exposure[0]
             canonical["canonical_finding_identity"] = canonical_identity
-            canonical["source_provenance"] = [source]
-            by_identity[identity] = canonical
-            merged.append(canonical)
-            continue
+            canonical["source_provenance"] = [source for _index, _item, source in candidates]
+            canonical["merged_artifact_refs"] = sorted(
+                {
+                    reference
+                    for provenance in canonical["source_provenance"]
+                    for reference in provenance["artifact_refs"]
+                }
+            )
+            if suppressed_entries:
+                canonical["suppressed_unvalidated_evidence_ids"] = [
+                    entry[3]["evidence_id"] for entry in suppressed_entries if entry[3]["evidence_id"]
+                ]
+                canonical["suppressed_unvalidated_count"] = len(suppressed_entries)
+            rows.append((canonical_indexes[(validation_status, _category)], canonical))
 
-        existing.setdefault("source_provenance", []).append(source)
-        existing_category = str(existing.get("category") or "")
-        if existing_category != category:
-            existing.setdefault("validation_conflicts", []).append(source)
-        if category == "finding" and existing_category != "finding":
-            existing["category"] = "finding"
-            existing["severity"] = item.get("severity", existing.get("severity", "MEDIUM"))
-            existing["validation_status"] = item.get("validation_status", existing.get("validation_status"))
-        existing["merged_artifact_refs"] = sorted(
-            {
-                reference
-                for provenance in existing["source_provenance"]
-                for reference in provenance["artifact_refs"]
-            }
-        )
-    return merged
+    return [item for _index, item in sorted(rows, key=lambda row: row[0])]
+
+
+def _prepare_report_evidence(
+    evidence: list[dict[str, Any]],
+    registered_targets: dict[str, OperationTarget],
+    grouping_enabled: bool,
+) -> list[dict[str, Any]]:
+    """Return report evidence with optional, explicitly enabled canonicalization."""
+
+    if not grouping_enabled:
+        return evidence
+    return _canonicalize_report_evidence(evidence, registered_targets)
 
 
 def _clean_remediation_text(text: str) -> str:
@@ -5538,7 +5690,11 @@ def build_report_sections(
         # Format evidence for report (cap to avoid context explosions)
         evidence.sort(key=lambda entry: _SEVERITY_ORDER.get(str(entry.get("severity", "")).upper(), 5))
         evidence = _trim_evidence_for_report(evidence, MAX_REPORT_FINDINGS)
-        evidence = _canonicalize_report_evidence(evidence, registered_targets)
+        evidence = _prepare_report_evidence(
+            evidence,
+            registered_targets,
+            get_report_evidence_grouping_enabled(manager),
+        )
         vulnerability_evidence = [
             item
             for item in evidence

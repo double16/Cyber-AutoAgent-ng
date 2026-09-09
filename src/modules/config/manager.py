@@ -1033,6 +1033,16 @@ def get_report_refinement_cycles(config_manager: ConfigManager | None = None) ->
     return max(0, value)
 
 
+def get_report_evidence_grouping_enabled(config_manager: ConfigManager | None = None) -> bool:
+    """Return whether report evidence canonicalization is explicitly enabled."""
+    manager = config_manager or get_config_manager()
+    try:
+        enabled = manager.getenv_bool("CYBER_REPORT_EVIDENCE_GROUPING", False)
+    except Exception:
+        return False
+    return enabled if isinstance(enabled, bool) else False
+
+
 def get_model_config(server: str, **overrides) -> ServerConfig:
     """Get model configuration for the specified server.
 

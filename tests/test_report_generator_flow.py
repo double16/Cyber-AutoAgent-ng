@@ -94,7 +94,7 @@ def test_report_helpers_cover_incomplete_status_and_nested_artifact_sanitization
     assert _has_artifact_reference({"artifact": "artifacts/evidence.txt"}) is True
 
 
-def test_report_canonicalization_keeps_validation_states_separate():
+def test_report_canonicalization_prefers_validated_evidence_over_matching_unvalidated_claims():
     items = [
         {
             "id": "verified-config",
@@ -130,11 +130,43 @@ def test_report_canonicalization_keeps_validation_states_separate():
 
     canonical = report_generator_module._canonicalize_report_evidence(items)
 
+    assert len(canonical) == 1
+    assert canonical[0]["category"] == "finding"
+    assert canonical[0]["canonical_finding_identity"]["validation_status"] == "verified"
+    assert [source["evidence_id"] for source in canonical[0]["source_provenance"]] == ["verified-config"]
+    assert canonical[0]["suppressed_unvalidated_evidence_ids"] == ["rejected-config"]
+
+
+def test_report_canonicalization_retains_unvalidated_statuses_without_verified_evidence():
+    items = [
+        {
+            "id": "failed-config",
+            "category": "validation_failure",
+            "severity": "HIGH",
+            "parsed": {
+                "vulnerability": "Information disclosure via /api/config",
+                "where": "http://example.test/api/config",
+            },
+            "metadata": {"validation_status": "failed"},
+        },
+        {
+            "id": "pending-config",
+            "category": "validation_failure",
+            "severity": "HIGH",
+            "parsed": {
+                "vulnerability": "Sensitive configuration disclosure via /api/config",
+                "where": "http://example.test/",
+            },
+            "metadata": {"validation_status": "pending"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
     assert len(canonical) == 2
     assert {
         item["canonical_finding_identity"]["validation_status"] for item in canonical
-    } == {"verified", "failed"}
-    assert all(len(item["source_provenance"]) == 1 for item in canonical)
+    } == {"failed", "validation_required"}
 
 
 def test_report_canonicalization_uses_structured_filesystem_subjects(tmp_path):
@@ -274,6 +306,163 @@ def test_report_canonicalization_keeps_same_route_findings_separate_by_input_loc
         "xss-query",
         "xss-query-corroborating",
     ]
+
+
+def test_report_canonicalization_uses_unambiguous_legacy_input_locations():
+    items = [
+        {
+            "id": "query",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the q query parameter.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+        {
+            "id": "path",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the q path parameter.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+        {
+            "id": "body",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the body parameter named payload.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+        {
+            "id": "header",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the header parameter named X-Search.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+        {
+            "id": "cookie",
+            "category": "finding",
+            "severity": "HIGH",
+            "content": "Reflected XSS through the cookie parameter named search_pref.",
+            "parsed": {"vulnerability": "Reflected XSS", "where": "https://example.test/search"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
+    assert len(canonical) == 5
+    assert {item["canonical_finding_identity"]["input_location"] for item in canonical} == {
+        "query:q",
+        "path:q",
+        "body:payload",
+        "header:x-search",
+        "cookie:search_pref",
+    }
+    assert report_generator_module._canonical_input_location(
+        {"content": "The query parameter and path parameter were both tested."}
+    ) == ""
+
+
+def test_report_canonicalization_uses_highest_severity_for_merged_findings():
+    items = [
+        {
+            "id": "medium",
+            "category": "finding",
+            "severity": "MEDIUM",
+            "parsed": {"vulnerability": "Open redirect", "where": "https://example.test/goto"},
+        },
+        {
+            "id": "critical",
+            "category": "finding",
+            "severity": "CRITICAL",
+            "parsed": {"vulnerability": "Open redirect", "where": "https://example.test/goto"},
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
+    assert len(canonical) == 1
+    assert canonical[0]["severity"] == "CRITICAL"
+    assert [source["evidence_id"] for source in canonical[0]["source_provenance"]] == ["medium", "critical"]
+
+
+def test_report_canonicalization_splits_exact_secret_exposures_without_emitting_digests():
+    connection_digest = "a" * 64
+    provider_key_digest = "b" * 64
+    items = [
+        {
+            "id": "config-both",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {
+                "vulnerability": "Sensitive configuration disclosure",
+                "where": "https://example.test/api/config",
+            },
+            "metadata": {
+                "candidate_evidence_assertions": [
+                    {"type": "secret_exposure", "kind": "connection_string", "digest": connection_digest},
+                    {"type": "secret_exposure", "kind": "provider_api_key", "digest": provider_key_digest},
+                ]
+            },
+        },
+        {
+            "id": "config-connection-corroborating",
+            "category": "finding",
+            "severity": "MEDIUM",
+            "parsed": {
+                "vulnerability": "Information disclosure",
+                "where": "https://example.test/api/config",
+            },
+            "metadata": {
+                "candidate_evidence_assertions": [
+                    {"type": "secret_exposure", "kind": "connection_string", "digest": connection_digest}
+                ]
+            },
+        },
+    ]
+
+    canonical = report_generator_module._canonicalize_report_evidence(items)
+
+    assert len(canonical) == 2
+    assert {
+        item["canonical_finding_identity"]["exposure_kind"] for item in canonical
+    } == {"connection_string", "provider_api_key"}
+    connection = next(
+        item for item in canonical if item["canonical_finding_identity"]["exposure_kind"] == "connection_string"
+    )
+    assert connection["severity"] == "HIGH"
+    assert [source["evidence_id"] for source in connection["source_provenance"]] == [
+        "config-both",
+        "config-connection-corroborating",
+    ]
+    assert "connection string" in report_generator_module._report_item_title(connection, "Finding")
+
+    emitted = report_generator_module._canonical_report_data({"raw_evidence": canonical})
+    assert connection_digest not in json.dumps(emitted)
+    assert provider_key_digest not in json.dumps(emitted)
+
+
+def test_report_evidence_grouping_is_disabled_by_default_and_opt_in():
+    items = [
+        {
+            "id": "first",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Open redirect", "where": "https://example.test/goto"},
+        },
+        {
+            "id": "second",
+            "category": "finding",
+            "severity": "HIGH",
+            "parsed": {"vulnerability": "Open redirect", "where": "https://example.test/goto"},
+        },
+    ]
+
+    disabled = report_generator_module._prepare_report_evidence(items, {}, grouping_enabled=False)
+    enabled = report_generator_module._prepare_report_evidence(items, {}, grouping_enabled=True)
+
+    assert disabled is items
+    assert len(disabled) == 2
+    assert len(enabled) == 1
 
 
 def test_inventory_display_helpers_handle_invalid_and_nested_values(monkeypatch, tmp_path):

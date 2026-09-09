@@ -3,6 +3,7 @@
 from modules.config.manager import (
     ConfigManager,
     get_config_manager,
+    get_report_evidence_grouping_enabled,
     get_report_refinement_cycles,
 )
 from modules.config.models import (
@@ -48,6 +49,7 @@ __all__ = [
     "get_capabilities",
     # Configuration management
     "get_config_manager",
+    "get_report_evidence_grouping_enabled",
     "get_report_refinement_cycles",
     "setup_logging",
 ]
