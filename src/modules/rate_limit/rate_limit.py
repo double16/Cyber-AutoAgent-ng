@@ -7,6 +7,7 @@ the operation.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import threading
@@ -337,6 +338,21 @@ async def _iterate_provider_events(provider_stream: Any, model: Any):
         yield event
 
 
+async def _close_async_resource(resource: Any) -> None:
+    """Close an async or sync provider stream when it exposes a close method."""
+
+    if resource is None:
+        return
+
+    close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+    if close is None:
+        return
+
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
 def patch_model_provider_class(model_cls: type[Any], limiter: ThreadSafeRateLimiter) -> None:
     """
     Monkey-patches model_cls.stream and model_cls.structured_output (if present),
@@ -384,17 +400,20 @@ def patch_model_provider_class(model_cls: type[Any], limiter: ThreadSafeRateLimi
                     system_prompt_content=system_prompt_content,
                     **kwargs,
                 )
-                async for event in _iterate_provider_events(provider_stream, self):
-                    # Check for 429/503 error event
-                    # Strands models typically yield events as dicts or objects
-                    # We need to detect if any of them represent an HTTP error
-                    if isinstance(event, dict) and event.get("type") == "error":
-                        code = event.get("code")
-                        if code and limiter.report_error(code):
-                            # It's a retryable error
-                            raise _RetryableError(code)
-                    yield event
-                return  # Success
+                try:
+                    async for event in _iterate_provider_events(provider_stream, self):
+                        # Check for 429/503 error event
+                        # Strands models typically yield events as dicts or objects
+                        # We need to detect if any of them represent an HTTP error
+                        if isinstance(event, dict) and event.get("type") == "error":
+                            code = event.get("code")
+                            if code and limiter.report_error(code):
+                                # It's a retryable error
+                                raise _RetryableError(code)
+                        yield event
+                    return  # Success
+                finally:
+                    await _close_async_resource(provider_stream)
             except Exception as e:
                 await limiter.ahandle_exception(e, attempt)
             finally:
@@ -429,13 +448,16 @@ def patch_model_provider_class(model_cls: type[Any], limiter: ThreadSafeRateLimi
                     provider_stream = orig_struct(
                         self, output_model, prompt, system_prompt=system_prompt, **kwargs
                     )
-                    async for event in _iterate_provider_events(provider_stream, self):
-                        if isinstance(event, dict) and event.get("type") == "error":
-                            code = event.get("code")
-                            if code and limiter.report_error(code):
-                                raise _RetryableError(code)
-                        yield event
-                    return
+                    try:
+                        async for event in _iterate_provider_events(provider_stream, self):
+                            if isinstance(event, dict) and event.get("type") == "error":
+                                code = event.get("code")
+                                if code and limiter.report_error(code):
+                                    raise _RetryableError(code)
+                            yield event
+                        return
+                    finally:
+                        await _close_async_resource(provider_stream)
                 except Exception as e:
                     await limiter.ahandle_exception(e, attempt)
                 finally:

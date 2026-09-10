@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import warnings
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -281,6 +282,45 @@ async def test_patch_and_unpatch_stream(monkeypatch, inline_to_thread):
         rl.unpatch_model_provider_class(DummyModel)
         assert not hasattr(DummyModel, rl._ORIG_STREAM_ATTR)
         assert DummyModel.stream is orig
+    finally:
+        rl.unpatch_model_provider_class(DummyModel)
+
+
+@pytest.mark.asyncio
+async def test_patched_stream_closes_provider_when_consumer_stops(inline_to_thread):
+    closed = AsyncMock()
+
+    class ProviderStream:
+        def __init__(self):
+            self.first = True
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.first:
+                self.first = False
+                return {"ok": True}
+            await asyncio.sleep(1)
+
+        async def aclose(self):
+            await closed()
+
+    class DummyModel:
+        def stream(self, *args, **kwargs):
+            del args, kwargs
+            return ProviderStream()
+
+    limiter = Mock(spec=rl.ThreadSafeRateLimiter)
+    limiter.cfg = types.RateLimitConfig(rpm=10.0, tpm=None, max_concurrent=None, assume_output_tokens=0)
+    limiter.acquire_blocking.return_value = lambda: None
+
+    try:
+        rl.patch_model_provider_class(DummyModel, limiter)
+        stream = DummyModel().stream(messages=[])
+        await stream.__anext__()
+        await stream.aclose()
+        closed.assert_awaited_once()
     finally:
         rl.unpatch_model_provider_class(DummyModel)
 
