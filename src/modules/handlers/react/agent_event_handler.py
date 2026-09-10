@@ -30,6 +30,7 @@ from modules.handlers.utils import (
     get_output_path,
     sanitize_target_name,
 )
+from modules.tools.memory import get_memory_client
 from modules.tools.semantic_enum import normalize_semantic_enum
 
 from ...config import get_config_manager, get_report_refinement_cycles
@@ -3675,6 +3676,18 @@ class AgentEventHandler(PrintingCallbackHandler):
             ).strip()
             if operation_objective:
                 evaluator_kwargs["operation_objective"] = operation_objective
+            try:
+                finding_records = get_memory_client().list_finding_records(
+                    operation_id=self.operation_id
+                )
+                if isinstance(finding_records, list):
+                    evaluator_kwargs["finding_records"] = finding_records
+            except Exception:
+                logger.debug(
+                    "Authoritative finding records unavailable for evaluation %s",
+                    self.operation_id,
+                    exc_info=True,
+                )
 
             eval_manager = EvaluationManager(
                 **evaluator_kwargs,

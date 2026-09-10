@@ -1758,12 +1758,14 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
             operation_id,
             emitter,
             report_path=None,
+            finding_records=None,
             usage_callback=None,
             progress_callback=None,
         ):
             self.operation_id = operation_id
             self.emitter = emitter
             self.report_path = report_path
+            self.finding_records = finding_records
             self.usage_callback = usage_callback
             self.progress_callback = progress_callback
 

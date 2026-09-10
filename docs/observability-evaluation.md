@@ -240,7 +240,14 @@ otherwise `.json`, `.yaml`, and `.yml` output filenames select their matching fo
 ## Advanced
 
 Ragas sample size is derived from the configured evaluation model's context window. The evaluator reserves part of
-that window for Ragas prompts and output, so no separate sample-size environment variable is required.
+that window for Ragas prompts and output, so no separate sample-size environment variable is required. It measures
+payloads with the evaluator tokenizer when available and otherwise uses UTF-8 byte length as a conservative bound.
+When a trace is too large, evaluator replay keeps the objective and recent conversation, then selects a small set of
+deduplicated contexts using typed provenance; current-operation validated findings take precedence over generic tool
+output. Verified findings from the operation store are rendered as a pinned, deterministic evidence manifest for both
+operation and report multi-turn evaluation, so trace compaction cannot discard them. Summary, topic, rubric, and
+policy helper calls use the same context-derived input budget. Score metadata records the token budget and the number
+of authoritative verified findings available to the evaluation.
 
 Each evaluation attempt has its own Langfuse score-host traces, identified by `evaluation.run_id`. This keeps a
 failed replay from being confused with scores retained from an earlier attempt. Scope-preparation errors are reported

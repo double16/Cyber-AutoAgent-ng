@@ -15,7 +15,8 @@ class RecordingEmitter:
 
 
 def test_register_filter_and_summary():
-    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter())
+    records = [{"finding_uid": "verified", "resolution": "verified"}]
+    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter(), finding_records=records)
 
     manager.register_trace("t1", mod.TraceType.MAIN_AGENT, "s1", "Main", {"x": 1})
     manager.register_trace("t2", mod.TraceType.REPORT_GENERATION, "s2", "Report")
@@ -43,9 +44,17 @@ async def _fake_scores(trace_id, _max_retries):
 @pytest.mark.asyncio
 async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeypatch):
     class FakeEvaluator:
-        def __init__(self, emitter, report_path=None, usage_callback=None, progress_callback=None):
+        def __init__(
+            self,
+            emitter,
+            report_path=None,
+            finding_records=None,
+            usage_callback=None,
+            progress_callback=None,
+        ):
             self.emitter = emitter
             self.report_path = report_path
+            self.finding_records = finding_records
             self.usage_callback = usage_callback
             self.progress_callback = progress_callback
 
@@ -53,7 +62,8 @@ async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeyp
             return await _fake_scores(trace_id, _max_retries)
 
     monkeypatch.setattr(mod, "CyberAgentEvaluator", FakeEvaluator)
-    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter())
+    records = [{"finding_uid": "verified", "resolution": "verified"}]
+    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter(), finding_records=records)
     manager.register_trace("t1", mod.TraceType.MAIN_AGENT, "s1", "Main")
     manager.register_trace("t2", mod.TraceType.SWARM_AGENT, "s2", "Swarm")
 
@@ -63,6 +73,7 @@ async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeyp
     assert manager.traces["t1"].evaluated is True
     assert manager.traces["t1"].evaluation_scores == {"plain": 0.5, "tuple": 0.75}
     assert manager.traces["t2"].evaluated is True
+    assert manager.evaluator.finding_records == records
 
 
 def test_wait_for_completion_without_thread_returns_true():

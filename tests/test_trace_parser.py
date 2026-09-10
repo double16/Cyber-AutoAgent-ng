@@ -284,7 +284,7 @@ def test_context_formatting_memory_findings_and_current_counts():
     assert "[Memory Store] SQL injection" in contexts
     assert "[HTTP Response] HTTP 500" in contexts
     assert "[Security Finding - unknown/unknown] SQL injection" in contexts
-    assert "[System] finding: exposed token" in contexts
+    assert not any(context.startswith("[System]") for context in contexts)
     assert parser.count_current_evidence_findings(trace) == 1
 
 
@@ -386,6 +386,32 @@ async def test_sample_creation_and_topic_generation_fallbacks():
     multi = await parser._create_multi_turn_sample(multi_trace)
     assert multi.reference_topics == ["Assess auth"]
     assert len(multi.user_input) >= 3
+
+@pytest.mark.asyncio
+async def test_create_evaluation_sample_can_skip_trace_parser_topic_generation(monkeypatch):
+    parser = TraceParser()
+    trace = ParsedTrace(
+        trace_id="m",
+        trace_name="Multi",
+        objective="Assess auth",
+        messages=[ParsedMessage("user", "Objective: Assess auth")],
+        tool_calls=[
+            ParsedToolCall("shell", {"cmd": "id"}, output="uid=0"),
+            ParsedToolCall("http_request", {"url": "/"}, output="HTTP 200"),
+        ],
+    )
+    async def fail_topic_generation(_trace):
+        raise AssertionError("topic generation must be skipped")
+
+    monkeypatch.setattr(
+        parser,
+        "_generate_reference_topics_from_trace",
+        fail_topic_generation,
+    )
+
+    sample = await parser.create_evaluation_sample(trace, generate_reference_topics=False)
+
+    assert sample.reference_topics == []
 
 
 @pytest.mark.asyncio

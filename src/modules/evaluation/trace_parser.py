@@ -41,6 +41,18 @@ class ParsedToolCall:
     timestamp: float | None = None
 
 
+@dataclass(frozen=True)
+class EvaluationContextItem:
+    """Typed, operation-scoped context available to evaluator payload compaction."""
+
+    content: str
+    source_tool: str
+    source_category: str
+    sequence: int
+    operation_id: str | None
+    is_current_finding: bool = False
+
+
 @dataclass
 class ParsedTrace:
     """Represents fully parsed trace data ready for evaluation."""
@@ -729,7 +741,10 @@ class TraceParser:
         return metadata
 
     async def create_evaluation_sample(
-        self, parsed_trace: ParsedTrace
+        self,
+        parsed_trace: ParsedTrace,
+        *,
+        generate_reference_topics: bool = True,
     ) -> SingleTurnSample | MultiTurnSample:
         """
         Create appropriate Ragas evaluation sample from parsed trace.
@@ -741,7 +756,10 @@ class TraceParser:
             SingleTurnSample or MultiTurnSample for evaluation
         """
         if parsed_trace.is_multi_turn:
-            return await self._create_multi_turn_sample(parsed_trace)
+            return await self._create_multi_turn_sample(
+                parsed_trace,
+                generate_reference_topics=generate_reference_topics,
+            )
         else:
             return self._create_single_turn_sample(parsed_trace)
 
@@ -754,24 +772,64 @@ class TraceParser:
         Returns:
             List of formatted context strings from tool outputs
         """
-        contexts = []
+        return [item.content for item in self._prepare_tool_context_items(parsed_trace)]
+
+    def _prepare_tool_context_items(self, parsed_trace: ParsedTrace) -> list[EvaluationContextItem]:
+        """Return evaluation contexts with structured provenance for deterministic filtering."""
+
+        contexts: list[EvaluationContextItem] = []
+        current_operation_id = None
+        if isinstance(parsed_trace.metadata, dict):
+            current_operation_id = parsed_trace.metadata.get("operation_id") or parsed_trace.metadata.get("session_id")
 
         # Extract tool outputs with clear formatting
-        for tool in parsed_trace.tool_calls:
+        for sequence, tool in enumerate(parsed_trace.tool_calls):
             if tool.output and str(tool.output).strip() not in ["", "None"]:
-                # Format tool context for better evaluation
                 tool_context = self._format_tool_context(tool)
                 if tool_context:
-                    contexts.append(tool_context)
+                    metadata = tool.input_data.get("metadata", {}) if isinstance(tool.input_data, dict) else {}
+                    operation_id = metadata.get("operation_id") if isinstance(metadata, dict) else None
+                    contexts.append(
+                        EvaluationContextItem(
+                            content=tool_context,
+                            source_tool=tool.name,
+                            source_category="tool_output",
+                            sequence=sequence,
+                            operation_id=operation_id,
+                            is_current_finding=False,
+                        )
+                    )
 
         # Extract memory-stored findings
-        memory_findings = self._extract_memory_findings(parsed_trace)
-        contexts.extend(memory_findings)
-
-        # Include significant system messages
-        for msg in parsed_trace.messages:
-            if msg.role == "system" and "finding" in msg.content.lower():
-                contexts.append(f"[System] {msg.content[:300]}")
+        for sequence, tool in enumerate(parsed_trace.tool_calls):
+            if tool.name != "store_finding" or not isinstance(tool.input_data, dict):
+                continue
+            metadata = tool.input_data.get("metadata", {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            operation_id = metadata.get("operation_id")
+            same_operation = not operation_id or not current_operation_id or operation_id == current_operation_id
+            content = tool.input_data.get("claim") or tool.input_data.get("content") or ""
+            if content and same_operation:
+                if isinstance(content, str):
+                    rendered_content = content
+                else:
+                    try:
+                        rendered_content = json.dumps(content, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        rendered_content = "[unserializable]"
+                contexts.append(
+                    EvaluationContextItem(
+                        content=(
+                            f"[Security Finding - {metadata.get('severity', 'unknown')}/"
+                            f"{metadata.get('category', 'unknown')}] {rendered_content[:500]}"
+                        ),
+                        source_tool=tool.name,
+                        source_category="finding",
+                        sequence=sequence,
+                        operation_id=operation_id or current_operation_id,
+                        is_current_finding=True,
+                    )
+                )
 
         return contexts
 
@@ -1091,7 +1149,10 @@ Return a JSON list of topic strings that represent the key areas this assessment
             )
 
     async def _create_multi_turn_sample(
-        self, parsed_trace: ParsedTrace
+        self,
+        parsed_trace: ParsedTrace,
+        *,
+        generate_reference_topics: bool = True,
     ) -> MultiTurnSample:
         """Create a MultiTurnSample for complex conversation evaluations."""
         # Convert messages to conversation format
@@ -1142,8 +1203,10 @@ Return a JSON list of topic strings that represent the key areas this assessment
         )
 
         # Generate reference topics based on objective and tool usage
-        reference_topics = await self._generate_reference_topics_from_trace(
-            parsed_trace
+        reference_topics = (
+            await self._generate_reference_topics_from_trace(parsed_trace)
+            if generate_reference_topics
+            else []
         )
 
         return MultiTurnSample(

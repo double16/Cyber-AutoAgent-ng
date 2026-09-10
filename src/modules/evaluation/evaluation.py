@@ -15,12 +15,12 @@ import time
 import types
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import ollama
 from langchain_aws import BedrockEmbeddings, ChatBedrock
 from langchain_core.callbacks import BaseCallbackHandler
-from langchain_core.load.dump import dumps
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_litellm import ChatLiteLLM
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -67,7 +67,7 @@ from modules.utils.json_repair import parse_json_response_with_metadata
 from ..config.providers.ollama_config import get_ollama_timeout
 from ..config.system import EnvironmentReader
 from ..handlers.events import EventEmitter
-from .trace_parser import TraceParser
+from .trace_parser import EvaluationContextItem, TraceParser
 
 logger = get_logger("Evaluation.Evaluation")
 
@@ -79,6 +79,18 @@ DEFAULT_SECURITY_TOPICS = [
     "vulnerability validation",
     "evidence collection",
 ]
+
+
+@dataclass(frozen=True)
+class EvaluationEvidenceItem:
+    """Authoritative, current-operation finding evidence available to evaluation."""
+
+    finding_uid: str
+    severity: str
+    category: str
+    title: str
+    validation_summary: str
+    evidence_refs: tuple[str, ...]
 
 EXECUTION_AGENT_ROLES = {
     "task_executor",
@@ -241,15 +253,19 @@ class CyberAgentEvaluator:
         operation_objective: str | None = None,
         usage_callback: Callable[[dict[str, Any]], None] | None = None,
         progress_callback: Callable[[], None] | None = None,
+        finding_records: list[dict[str, Any]] | None = None,
     ):
         """Initialize evaluator with Langfuse and evaluation metrics."""
         self._emitter = emitter
         self.report_path = report_path
         self.operation_objective = str(operation_objective or "").strip()
+        self._authoritative_evidence_items = self._build_evidence_items(finding_records or [])
+        self._last_authoritative_evidence_included = 0
         self._evaluation_operation_id: str | None = None
         self._evaluation_step_index = 0
         self._evaluation_step_total = 0
         self._current_evaluation_scope: str | None = None
+        self._current_evaluation_context_items: list[EvaluationContextItem] = []
         self._native_structured_output_available: bool | None = None
         self._usage_callback = usage_callback
         self._progress_callback = progress_callback
@@ -779,6 +795,94 @@ class CyberAgentEvaluator:
             },
         )
 
+    @staticmethod
+    def _evidence_text(value: Any, limit: int) -> str:
+        """Render a short evidence field without using Python representations."""
+
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()[:limit]
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))[:limit]
+        except (TypeError, ValueError):
+            return ""
+
+    @classmethod
+    def _build_evidence_items(cls, finding_records: list[dict[str, Any]]) -> list[EvaluationEvidenceItem]:
+        """Normalize verified finding records into evaluator-owned typed evidence."""
+
+        items: list[EvaluationEvidenceItem] = []
+        for record in finding_records:
+            if not isinstance(record, dict) or record.get("resolution") != "verified":
+                continue
+            candidate = record.get("candidate_data")
+            validation = record.get("validation_data")
+            candidate = candidate if isinstance(candidate, dict) else {}
+            validation = validation if isinstance(validation, dict) else {}
+            title = cls._evidence_text(
+                candidate.get("title")
+                or candidate.get("claim")
+                or candidate.get("name")
+                or candidate.get("description"),
+                240,
+            )
+            if not title:
+                title = "Verified finding"
+            summary = cls._evidence_text(
+                validation.get("summary")
+                or validation.get("claim")
+                or validation.get("evidence")
+                or candidate.get("claim")
+                or candidate.get("description"),
+                500,
+            )
+            refs = validation.get("evidence_refs") or validation.get("artifact_refs") or []
+            if not isinstance(refs, list):
+                refs = [refs]
+            items.append(
+                EvaluationEvidenceItem(
+                    finding_uid=cls._evidence_text(record.get("finding_uid"), 80),
+                    severity=cls._evidence_text(candidate.get("severity"), 32) or "unknown",
+                    category=cls._evidence_text(candidate.get("category"), 80) or "unknown",
+                    title=title,
+                    validation_summary=summary,
+                    evidence_refs=tuple(
+                        ref
+                        for ref in (cls._evidence_text(value, 160) for value in refs[:4])
+                        if ref
+                    ),
+                )
+            )
+        return items
+
+    def _authoritative_evidence_context(self, token_budget: int) -> str:
+        """Render verified findings as deterministic TOON for a pinned multi-turn message."""
+
+        items = self._authoritative_evidence_items
+        self._last_authoritative_evidence_included = 0
+        if not items or token_budget <= 0:
+            return ""
+        rows = [
+            f"verified_findings[{len(items)}]{{finding_uid,severity,category,title,validation,evidence_refs}}:"
+        ]
+        remaining = token_budget
+        for item in items:
+            refs = ",".join(item.evidence_refs)
+            row = (
+                f"- {item.finding_uid}|{item.severity}|{item.category}|{item.title}|"
+                f"{item.validation_summary}|{refs}"
+            )
+            excerpt = self._truncate_payload_text(row, remaining)
+            if not excerpt:
+                break
+            rows.append(excerpt)
+            self._last_authoritative_evidence_included += 1
+            remaining -= self._payload_tokens(excerpt)
+            if remaining <= 0:
+                break
+        return "\n".join(rows)
+
     def _sample_max_chars(self) -> int:
         """Derive a safe Ragas sample size from the evaluator context window."""
         try:
@@ -792,9 +896,73 @@ class CyberAgentEvaluator:
             # Reserve roughly 40% of the window for Ragas templates, rubric
             # instructions, output, and provider-side framing. Three chars/token
             # is deliberately conservative for the structured trace content used here.
-            return max(4_000, context_tokens * 3 // 5)
+            return max(1, context_tokens * 3 // 5)
         except Exception:
             return 24_000
+
+    def _evaluation_payload_token_budget(self) -> int:
+        """Reserve most evaluator context for Ragas prompts, output, and provider framing."""
+
+        try:
+            config_manager = get_config_manager()
+            provider = config_manager.get_provider()
+            model_id = self._evaluation_model_id(
+                config_manager,
+                config_manager.get_server_config(provider),
+            )
+            return max(1, require_prompt_token_limit(provider, model_id) * 45 // 100)
+        except Exception:
+            # UTF-8 bytes are the fallback token upper bound, so retain the
+            # established 24k-character fallback as a 24k-token budget.
+            return 24_000
+
+    @staticmethod
+    def _json_safe_value(value: Any) -> Any:
+        """Normalize model payload values without using Python representations."""
+
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {str(key): CyberAgentEvaluator._json_safe_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [CyberAgentEvaluator._json_safe_value(item) for item in value]
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            with contextlib.suppress(Exception):
+                return CyberAgentEvaluator._json_safe_value(model_dump())
+        return {"type": type(value).__name__, "content": "[unserializable]"}
+
+    def _payload_text(self, value: Any) -> str:
+        """Render an evaluator payload in deterministic JSON-safe form."""
+
+        if isinstance(value, str):
+            return value
+        return json.dumps(self._json_safe_value(value), ensure_ascii=False, separators=(",", ":"))
+
+    def _payload_tokens(self, value: Any) -> int:
+        """Measure payload tokens using the evaluator tokenizer or a safe byte fallback."""
+
+        text = self._payload_text(value)
+        tokenizer = getattr(getattr(self, "_chat_model", None), "get_num_tokens", None)
+        if callable(tokenizer):
+            with contextlib.suppress(Exception):
+                measured = int(tokenizer(text))
+                if measured >= 0:
+                    return measured
+        return len(text.encode("utf-8"))
+
+    def _auxiliary_payload_token_budget(self) -> int:
+        """Return a context-derived input allowance for evaluator helper calls."""
+
+        return max(1, self._evaluation_payload_token_budget() * 3 // 4)
+
+    def _bounded_auxiliary_json(self, value: Any) -> str:
+        """Serialize helper-call data as JSON and bound it with the shared budget."""
+
+        return self._truncate_payload_text(
+            self._payload_text(value),
+            self._auxiliary_payload_token_budget(),
+        )
 
     def _failed_metric_map(self) -> dict[str, str]:
         failures = getattr(self, "last_failed_metrics", None)
@@ -826,13 +994,16 @@ class CyberAgentEvaluator:
         else:
             role = getattr(message, "role", None) or getattr(message, "type", "user")
             content = getattr(message, "content", "")
-        if isinstance(content, str):
-            rendered_content = content
-        elif content is None:
-            rendered_content = ""
-        else:
-            rendered_content = json.dumps(content, default=str)
+        rendered_content = CyberAgentEvaluator._payload_text_static(content)
         return str(role), rendered_content
+
+    @staticmethod
+    def _payload_text_static(value: Any) -> str:
+        """Static counterpart for message rendering used before evaluator initialization."""
+
+        if isinstance(value, str):
+            return value
+        return json.dumps(CyberAgentEvaluator._json_safe_value(value), ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
     def _message_with_content(message: Any, content: str) -> Any:
@@ -880,6 +1051,185 @@ class CyberAgentEvaluator:
                 break
 
         sample.user_input = compacted
+
+    def _truncate_payload_text(self, text: str, token_limit: int) -> str:
+        """Truncate text to a measured token limit with an explicit marker."""
+
+        if token_limit <= 0:
+            return ""
+        if self._payload_tokens(text) <= token_limit:
+            return text
+        marker = "\n[content truncated for bounded evaluation]"
+        low, high = 0, len(text)
+        best = ""
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = text[:middle] + marker
+            if self._payload_tokens(candidate) <= token_limit:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        return best or marker[: max(1, token_limit)]
+
+    def _evaluation_context_items(self, sample: Any) -> list[EvaluationContextItem]:
+        """Return typed trace contexts plus evaluator-attached contexts not present in the trace."""
+
+        items = list(getattr(self, "_current_evaluation_context_items", []) or [])
+        known = {item.content for item in items}
+        for sequence, context in enumerate(getattr(sample, "retrieved_contexts", []) or [], start=len(items)):
+            text = self._payload_text_static(context)
+            if text not in known:
+                items.append(
+                    EvaluationContextItem(
+                        content=text,
+                        source_tool="evaluator_context",
+                        source_category="attached_context",
+                        sequence=sequence,
+                        operation_id=None,
+                    )
+                )
+        return items
+
+    def _compact_contexts(self, sample: Any, token_budget: int) -> list[str]:
+        """Select typed contexts by structured provenance within a shared token budget."""
+
+        unique: dict[tuple[str, str], EvaluationContextItem] = {}
+        for item in self._evaluation_context_items(sample):
+            digest = hashlib.sha256(item.content.encode("utf-8")).hexdigest()
+            key = (item.source_category, digest)
+            if key not in unique:
+                unique[key] = item
+        ordered = sorted(
+            unique.values(),
+            key=lambda item: (0 if item.is_current_finding else 1, -item.sequence, item.source_category),
+        )
+        compacted: list[str] = []
+        remaining = token_budget
+        for index, item in enumerate(ordered[:8]):
+            slots = min(8 - index, len(ordered) - index)
+            allowance = max(1, remaining // max(1, slots))
+            excerpt = self._truncate_payload_text(item.content, allowance)
+            if excerpt:
+                compacted.append(excerpt)
+                remaining -= self._payload_tokens(excerpt)
+            if remaining <= 0:
+                break
+        return compacted
+
+    def _compact_evaluation_sample(self, sample: Any) -> None:
+        """Apply one context-derived budget across all Ragas sample fields."""
+
+        budget = self._evaluation_payload_token_budget()
+        # JSON field names, roles, and Ragas serialization need room in addition
+        # to content. Keep the content allocation deliberately below the sample cap.
+        content_budget = max(1, budget * 3 // 4)
+        if isinstance(sample, SingleTurnSample):
+            objective_budget = max(1, content_budget * 10 // 100)
+            response_budget = max(1, content_budget * 35 // 100)
+            contexts_budget = max(1, content_budget - objective_budget - response_budget)
+            sample.user_input = self._truncate_payload_text(
+                self._payload_text_static(sample.user_input), objective_budget
+            )
+            sample.response = self._truncate_payload_text(
+                self._payload_text_static(sample.response), response_budget
+            )
+            if hasattr(sample, "retrieved_contexts"):
+                sample.retrieved_contexts = self._compact_contexts(sample, contexts_budget)
+        else:
+            objective_budget = max(1, content_budget * 10 // 100)
+            evidence_budget = max(1, content_budget * 40 // 100)
+            messages_budget = max(1, content_budget * 40 // 100)
+            contexts_budget = max(1, content_budget * 10 // 100)
+            topics_budget = max(
+                1,
+                content_budget - objective_budget - evidence_budget - messages_budget - contexts_budget,
+            )
+            messages = list(sample.user_input or [])
+            compacted: list[Any] = []
+            if messages:
+                first = messages[0]
+                _role, content = self._message_role_and_content(first)
+                compacted.append(
+                    self._message_with_content(
+                        first,
+                        self._truncate_payload_text(content, objective_budget),
+                    )
+                )
+                evidence_context = self._authoritative_evidence_context(evidence_budget)
+                if evidence_context:
+                    compacted.append(
+                        {
+                            "role": "system",
+                            "content": "Authoritative current-operation evidence (verified only):\n"
+                            + evidence_context,
+                        }
+                    )
+                remaining = messages_budget
+                for message in reversed(messages[1:]):
+                    _role, content = self._message_role_and_content(message)
+                    excerpt = self._truncate_payload_text(content, max(1, remaining // 8))
+                    if excerpt:
+                        compacted.append(self._message_with_content(message, excerpt))
+                        remaining -= self._payload_tokens(excerpt)
+                    if remaining <= 0 or len(compacted) >= 10:
+                        break
+                pinned = compacted[:2] if evidence_context else compacted[:1]
+                recent = compacted[len(pinned):]
+                sample.user_input = pinned + list(reversed(recent))
+            if hasattr(sample, "retrieved_contexts"):
+                sample.retrieved_contexts = self._compact_contexts(sample, contexts_budget)
+            topics: list[str] = []
+            remaining = topics_budget
+            for topic in getattr(sample, "reference_topics", []) or []:
+                excerpt = self._truncate_payload_text(self._payload_text_static(topic), remaining)
+                if excerpt:
+                    topics.append(excerpt)
+                    remaining -= self._payload_tokens(excerpt)
+                if remaining <= 0:
+                    break
+            sample.reference_topics = topics
+
+        measured = self._payload_tokens(self._sample_payload_for_measurement(sample))
+        # Pydantic/Ragas serialization can add a small amount of structural
+        # overhead. If it exceeds the target, reduce the optional context fields
+        # once more before the sample reaches a metric prompt.
+        if measured > budget and hasattr(sample, "retrieved_contexts"):
+            excess = measured - budget
+            sample.retrieved_contexts = self._compact_contexts(
+                sample,
+                max(1, contexts_budget - excess),
+            )
+            measured = self._payload_tokens(self._sample_payload_for_measurement(sample))
+        while measured > budget and getattr(sample, "retrieved_contexts", None):
+            # Contexts are optional for a valid Ragas sample. Remove the
+            # lowest-priority tail only when serializer overhead still exceeds
+            # the preflight bound after token-aware truncation.
+            sample.retrieved_contexts = sample.retrieved_contexts[:-1]
+            measured = self._payload_tokens(self._sample_payload_for_measurement(sample))
+        while measured > budget and getattr(sample, "reference_topics", None):
+            sample.reference_topics = sample.reference_topics[:-1]
+            measured = self._payload_tokens(self._sample_payload_for_measurement(sample))
+        logger.info(
+            "Evaluation payload bounded budget_tokens=%s measured_tokens=%s contexts=%s "
+            "verified_findings_available=%s verified_findings_included=%s tokenizer=%s",
+            budget,
+            measured,
+            len(getattr(sample, "retrieved_contexts", []) or []),
+            len(self._authoritative_evidence_items),
+            self._last_authoritative_evidence_included,
+            "model" if callable(getattr(getattr(self, "_chat_model", None), "get_num_tokens", None)) else "utf8_bytes",
+        )
+
+    @staticmethod
+    def _sample_payload_for_measurement(sample: Any) -> dict[str, Any]:
+        """Return the Ragas-relevant fields used for final payload budget measurement."""
+
+        payload = {"user_input": getattr(sample, "user_input", None)}
+        for field_name in ("response", "retrieved_contexts", "reference_topics"):
+            if hasattr(sample, field_name):
+                payload[field_name] = getattr(sample, field_name)
+        return payload
 
     async def _find_operation_traces(self, operation_id: str) -> list[Any]:
         """
@@ -1179,39 +1529,49 @@ class CyberAgentEvaluator:
 
         # Log operation metrics for debugging
         memory_ops = self.trace_parser.count_memory_operations(parsed_trace.tool_calls)
-        evidence_count = self.trace_parser.count_evidence_findings(
+        trace_evidence_count = self.trace_parser.count_evidence_findings(
             parsed_trace.tool_calls
         )
+        evidence_count = len(self._authoritative_evidence_items)
         # Store lightweight stats for score metadata
         try:
             self._last_eval_stats = {
                 "memory_ops": int(memory_ops),
                 "evidence_count": int(evidence_count),
+                "trace_evidence_count": int(trace_evidence_count),
+                "evidence_source": "finding_records" if evidence_count else "trace",
                 "tool_calls_count": len(parsed_trace.tool_calls),
             }
         except Exception:
             self._last_eval_stats = {
                 "memory_ops": memory_ops,
                 "evidence_count": evidence_count,
+                "trace_evidence_count": trace_evidence_count,
+                "evidence_source": "finding_records" if evidence_count else "trace",
                 "tool_calls_count": len(parsed_trace.tool_calls),
             }
 
         logger.info(
             f"Operation metrics - Memory ops: {memory_ops}, Evidence: {evidence_count}, "
+            f"Trace evidence: {trace_evidence_count}, "
             f"Tool calls: {len(parsed_trace.tool_calls)}"
         )
 
         # Create appropriate evaluation sample (handles async for multi-turn)
         try:
-            evaluation_data = await self.trace_parser.create_evaluation_sample(parsed_trace)
+            prepare_contexts = getattr(self.trace_parser, "_prepare_tool_context_items", None)
+            self._current_evaluation_context_items = (
+                prepare_contexts(parsed_trace) if callable(prepare_contexts) else []
+            )
+            evaluation_data = await self.trace_parser.create_evaluation_sample(
+                parsed_trace,
+                generate_reference_topics=False,
+            )
         except Exception:
             self._emit_evaluation_step_complete(
                 "evaluation_data", "failed", message="Unable to prepare evaluation sample"
             )
             raise
-
-        if isinstance(evaluation_data, MultiTurnSample):
-            self._compact_multi_turn_sample(evaluation_data)
 
         # Log sample type and basic info
         sample_type = (
@@ -1316,6 +1676,8 @@ class CyberAgentEvaluator:
                 evaluation_data.reference_topics = DEFAULT_SECURITY_TOPICS
         except Exception:
             pass
+
+        self._compact_evaluation_sample(evaluation_data)
 
         # Optionally short-circuit when insufficient evidence to avoid 0/1 collapse
         try:
@@ -1681,6 +2043,9 @@ class CyberAgentEvaluator:
                 "evaluation_scope": getattr(self, "_last_evaluation_scope", "trace"),
                 "evaluation_run_id": getattr(self, "evaluation_run_id", "legacy"),
                 "sample_max_chars": self._sample_max_chars(),
+                "payload_budget_tokens": self._evaluation_payload_token_budget(),
+                "verified_findings_available": len(self._authoritative_evidence_items),
+                "verified_findings_included": self._last_authoritative_evidence_included,
             }
 
             # Unpack rubric metadata if present
@@ -1800,11 +2165,12 @@ class CyberAgentEvaluator:
         try:
             parsed = getattr(self, "_last_parsed_trace", None)
             if parsed:
-                # current-session evidence count
-                try:
-                    current_ev = self.trace_parser.count_current_evidence_findings(parsed)
-                except Exception:
-                    current_ev = 0
+                # Verified records are authoritative when available. Trace-local
+                # tool calls are retained only as a compatibility fallback.
+                current_ev = len(self._authoritative_evidence_items)
+                if not current_ev:
+                    with contextlib.suppress(Exception):
+                        current_ev = self.trace_parser.count_current_evidence_findings(parsed)
                 # tool calls + failed count
                 total_tools = len(parsed.tool_calls or [])
                 failed = sum(
@@ -1841,7 +2207,7 @@ class CyberAgentEvaluator:
         )
         user_prompt = (
             "Features (JSON):\n"
-            + dumps(feats)
+            + self._bounded_auxiliary_json(feats)
             + "\n\n"
             + "Rules (conceptual, not hard-coded):\n"
             "- If evidence_count produced in this operation is low, cap evidence_quality and overall quality.\n"
@@ -1982,19 +2348,24 @@ class CyberAgentEvaluator:
             if hasattr(eval_data, "user_input") and eval_data.user_input:
                 ui = eval_data.user_input
                 if isinstance(ui, list):
-                    context_blob_parts.extend([str(m)[:400] for m in ui[-6:]])
+                    context_blob_parts.extend(
+                        [self._payload_text(m)[:400] for m in ui[-6:]]
+                    )
                 else:
-                    context_blob_parts.append(str(ui)[:800])
+                    context_blob_parts.append(self._payload_text(ui)[:800])
             if (
                 hasattr(eval_data, "retrieved_contexts")
                 and eval_data.retrieved_contexts
             ):
                 context_blob_parts.extend(
-                    [str(c)[:800] for c in eval_data.retrieved_contexts[-3:]]
+                    [self._payload_text(c)[:800] for c in eval_data.retrieved_contexts[-3:]]
                 )
         except Exception:
             pass
-        context_blob = "\n---\n".join(context_blob_parts)[:4000]
+        context_blob = self._truncate_payload_text(
+            "\n---\n".join(context_blob_parts),
+            self._auxiliary_payload_token_budget(),
+        )
 
         user_prompt = user_template.format(
             context=context_blob, target=target, objective=objective
@@ -2118,9 +2489,9 @@ class CyberAgentEvaluator:
                 out = getattr(tc, "output", None) or getattr(tc, "result", None) or ""
                 calls.append(
                     {
-                        "name": str(name)[:64],
-                        "input": str(inp)[:256],
-                        "output": str(out)[:256],
+                        "name": self._payload_text(name)[:64],
+                        "input": self._payload_text(inp)[:256],
+                        "output": self._payload_text(out)[:256],
                     }
                 )
         except Exception:
@@ -2140,7 +2511,12 @@ class CyberAgentEvaluator:
                     or (m.get("content") if isinstance(m, dict) else None)
                     or ""
                 )
-                messages.append({"role": str(role)[:16], "content": str(content)[:256]})
+                messages.append(
+                    {
+                        "role": self._payload_text(role)[:16],
+                        "content": self._payload_text(content)[:256],
+                    }
+                )
         except Exception:
             pass
 
@@ -2154,6 +2530,10 @@ class CyberAgentEvaluator:
         system_prompt = (
             "You are an expert security evaluator. Given raw operation data, produce a concise, strictly factual "
             "EvaluationContext suitable for rubric-based scoring. Avoid speculation. Include only what the data supports."
+        )
+        raw_data = self._truncate_payload_text(
+            self._bounded_auxiliary_json(payload)[:max_chars],
+            self._auxiliary_payload_token_budget(),
         )
         user_prompt = (
             "Create a concise EvaluationContext with sections: Objective, Methods, Evidence, Findings, Outcomes, Gaps.\n"
@@ -2174,7 +2554,8 @@ class CyberAgentEvaluator:
             "Findings: Tooling verified; no new vulnerabilities validated this session.\n"
             "Outcomes: Objective achieved (tool testing complete).\n"
             "Gaps: No pentest validation attempted in-session.\n\n"
-            f"Raw data (JSON):\n{dumps(payload)[:max_chars]}\n\n"
+            "Raw data (JSON):\n"
+            f"{raw_data}\n\n"
             "Return plain text (no markdown tables)."
         )
         try:
@@ -2489,7 +2870,7 @@ class CyberAgentEvaluator:
                         or None
                     )
                     if name:
-                        tool_names.append(str(name)[:64])
+                        tool_names.append(self._payload_text(name)[:64])
             except Exception:
                 pass
 
@@ -2508,7 +2889,7 @@ class CyberAgentEvaluator:
             )
             user_prompt = (
                 "Context for topic generation (JSON):\n"
-                + dumps(payload)
+                + self._bounded_auxiliary_json(payload)
                 + "\n\n"
                 + "Rules:\n"
                 "- Focus on security topics relevant to the target and objective.\n"

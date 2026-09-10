@@ -342,6 +342,7 @@ def rerun_operation_evaluation(
         emitter=emitter,
         report_path=report_path,
         operation_objective=objective or None,
+        finding_records=store.list_findings(operation_id),
     )
     manager.register_trace(
         trace_id=operation_id,

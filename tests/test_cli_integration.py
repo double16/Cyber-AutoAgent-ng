@@ -157,7 +157,8 @@ def test_rerun_operation_evaluation_uses_persisted_objective_and_reports_failure
         cyberautoagent,
         "create_application_store",
         lambda *_args, **_kwargs: SimpleNamespace(
-            get_plan=lambda _operation_id: SimpleNamespace(objective="Persisted operation objective")
+            get_plan=lambda _operation_id: SimpleNamespace(objective="Persisted operation objective"),
+            list_findings=lambda _operation_id: [{"finding_uid": "verified", "resolution": "verified"}],
         ),
     )
     monkeypatch.setattr(cyberautoagent, "get_application_database_path", lambda _config: str(tmp_path / "state.db"))
@@ -173,6 +174,7 @@ def test_rerun_operation_evaluation_uses_persisted_objective_and_reports_failure
 
     assert success is expected_success
     assert captured["operation_objective"] == "Persisted operation objective"
+    assert captured["finding_records"] == [{"finding_uid": "verified", "resolution": "verified"}]
     assert captured["trace"]["session_id"] == "OP_TEST"
     assert emitted[-1]["status"] == expected_status
     assert emitted[-1]["scores"] == (

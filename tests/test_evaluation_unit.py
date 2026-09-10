@@ -164,6 +164,9 @@ def evaluator(monkeypatch, cfg=None):
     ev._current_evaluation_scope = None
     ev._evaluation_provider = "litellm"
     ev._native_structured_output_available = None
+    ev._current_evaluation_context_items = []
+    ev._authoritative_evidence_items = []
+    ev._last_authoritative_evidence_included = 0
     ev.evaluation_run_id = "run-123"
     return ev
 
@@ -439,6 +442,90 @@ def test_compact_multiturn_sample_preserves_langchain_message_types(monkeypatch)
 
     assert [type(message) for message in sample.user_input] == [HumanMessage, AIMessage]
     assert sum(len(message.content) for message in sample.user_input) <= 500
+
+
+def test_compact_evaluation_sample_uses_token_budget_and_prioritizes_current_findings(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_model = SimpleNamespace(get_num_tokens=lambda text: len(text))
+    ev._evaluation_payload_token_budget = lambda: 240
+    ev._current_evaluation_context_items = [
+        mod.EvaluationContextItem(
+            content="generic context " * 40,
+            source_tool="http_request",
+            source_category="tool_output",
+            sequence=10,
+            operation_id="OP1",
+        ),
+        mod.EvaluationContextItem(
+            content="validated SQL injection finding",
+            source_tool="store_finding",
+            source_category="finding",
+            sequence=1,
+            operation_id="OP1",
+            is_current_finding=True,
+        ),
+    ]
+    sample = SingleTurnSample(
+        user_input="Assess target " * 40,
+        response="validated response " * 50,
+        retrieved_contexts=["generic context " * 40],
+    )
+
+    ev._compact_evaluation_sample(sample)
+
+    assert ev._payload_tokens(ev._sample_payload_for_measurement(sample)) <= 240
+    assert any("validated SQL injection finding" in context for context in sample.retrieved_contexts)
+
+
+def test_payload_tokens_uses_utf8_bytes_when_model_has_no_tokenizer(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_model = SimpleNamespace()
+
+    assert ev._payload_tokens("é") == len("é".encode())
+    assert ev._payload_text({"value": {"nested": True}}) == '{"value":{"nested":true}}'
+
+
+def test_multiturn_compaction_pins_verified_finding_manifest(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_model = SimpleNamespace(get_num_tokens=lambda text: len(text))
+    ev._evaluation_payload_token_budget = lambda: 1_200
+    ev._authoritative_evidence_items = ev._build_evidence_items(
+        [
+            {
+                "finding_uid": "verified-1",
+                "resolution": "verified",
+                "candidate_data": {
+                    "title": "Unauthenticated data disclosure",
+                    "severity": "HIGH",
+                    "category": "information disclosure",
+                },
+                "validation_data": {
+                    "summary": "GET /api/products/latest returned data without authentication.",
+                    "evidence_refs": ["artifacts/latest_headers.txt"],
+                },
+            },
+            {
+                "finding_uid": "rejected-1",
+                "resolution": "validation_failure",
+                "candidate_data": {"title": "Rejected finding"},
+            },
+        ]
+    )
+    sample = mod.MultiTurnSample(
+        user_input=[
+            {"role": "user", "content": "Objective: assess target"},
+            {"role": "assistant", "content": "x" * 1_000},
+        ],
+        reference_topics=["web testing"],
+    )
+
+    ev._compact_evaluation_sample(sample)
+
+    contents = [ev._message_role_and_content(message)[1] for message in sample.user_input]
+    assert any("verified-1" in content for content in contents)
+    assert not any("rejected-1" in content for content in contents)
+    assert ev._last_authoritative_evidence_included == 1
+    assert ev._payload_tokens(ev._sample_payload_for_measurement(sample)) <= 1_200
 
 
 def test_evaluation_model_resolution_ignores_blank_override(monkeypatch):
@@ -914,6 +1001,23 @@ async def test_infer_policy_and_rubric_judge(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_policy_uses_verified_finding_count_before_trace_tool_count(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
+    ev._authoritative_evidence_items = [
+        mod.EvaluationEvidenceItem("finding-1", "HIGH", "xss", "XSS", "validated", ())
+    ]
+    ev.trace_parser = SimpleNamespace(count_current_evidence_findings=lambda _parsed: 0)
+    ev._last_parsed_trace = SimpleNamespace(tool_calls=[], metadata={})
+    prompts = []
+    ev._chat_invoke_evaluation_json = lambda _system, user, _schema: prompts.append(user) or {"caps": {}, "disable": []}
+
+    assert await ev._infer_evaluation_policy(SimpleNamespace(user_input="objective")) == {"caps": {}, "disable": []}
+    assert '"current_evidence":1' in prompts[0]
+
+
+@pytest.mark.asyncio
 async def test_policy_and_rubric_failures_emit_semantic_status(monkeypatch):
     ev = evaluator(monkeypatch)
     ev._evaluation_operation_id = "OP_TEST"
@@ -998,7 +1102,7 @@ async def test_create_evaluation_data_success_and_insufficient_evidence(monkeypa
         objective="Assess",
         target="target",
     )
-    async def make_sample(_parsed):
+    async def make_sample(_parsed, **_kwargs):
         return SingleTurnSample(user_input="Assess", response="", retrieved_contexts=[])
 
     ev.trace_parser = SimpleNamespace(
@@ -1019,7 +1123,13 @@ async def test_create_evaluation_data_success_and_insufficient_evidence(monkeypa
     assert result.response == "context"
     assert result.retrieved_contexts == ["context"]
     ev._synthesize_topics.assert_called()
-    assert ev._last_eval_stats == {"memory_ops": 1, "evidence_count": 0, "tool_calls_count": 1}
+    assert ev._last_eval_stats == {
+        "memory_ops": 1,
+        "evidence_count": 0,
+        "trace_evidence_count": 0,
+        "evidence_source": "trace",
+        "tool_calls_count": 1,
+    }
     statuses = [
         event["status"]
         for event in ev._emitter.events
@@ -1041,7 +1151,7 @@ async def test_create_evaluation_data_reports_parse_and_sample_failures(monkeypa
 
     parsed = SimpleNamespace(trace_id="trace", messages=[], tool_calls=[], metadata={})
 
-    async def fail_sample(_parsed):
+    async def fail_sample(_parsed, **_kwargs):
         raise RuntimeError("sample failed")
 
     ev.trace_parser = SimpleNamespace(
@@ -1564,7 +1674,7 @@ async def test_create_evaluation_data_attaches_summary_topics_and_allows_low_evi
         reference_topics=[],
     )
 
-    async def create_sample(_parsed):
+    async def create_sample(_parsed, **_kwargs):
         return sample
 
     ev.trace_parser = SimpleNamespace(
