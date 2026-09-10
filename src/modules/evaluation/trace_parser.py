@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ragas.dataset_schema import MultiTurnSample, SingleTurnSample
+from ragas.messages import AIMessage, HumanMessage
 
 from modules.config.system.logger import get_logger
 
@@ -1155,33 +1156,62 @@ Return a JSON list of topic strings that represent the key areas this assessment
         generate_reference_topics: bool = True,
     ) -> MultiTurnSample:
         """Create a MultiTurnSample for complex conversation evaluations."""
-        # Convert messages to conversation format
-        conversation = []
+        # Ragas models multi-turn conversations as typed messages.  Passing
+        # application ``role`` dictionaries is unsafe: Pydantic accepts them
+        # but silently coerces every item to the first union member
+        # (``HumanMessage``), which destroys the conversation semantics.
+        conversation: list[HumanMessage | AIMessage] = []
 
         # Ensure we have the objective as context
         if parsed_trace.objective:
-            conversation.append(
-                {"role": "user", "content": f"Objective: {parsed_trace.objective}"}
-            )
+            conversation.append(HumanMessage(content=f"Objective: {parsed_trace.objective}"))
 
         # Add all messages
         for msg in parsed_trace.messages:
             # Skip duplicate objective messages
             if msg.metadata.get("source") == "objective" and len(conversation) > 0:
                 continue
-            conversation.append({"role": msg.role, "content": msg.content})
+            role = msg.role.lower()
+            if role == "assistant":
+                conversation.append(AIMessage(content=msg.content))
+            elif role == "tool":
+                conversation.append(AIMessage(content=f"Observed tool result:\n{msg.content}"))
+            else:
+                # System, user, and unknown source roles are controller context,
+                # not model answers.  Ragas has no SystemMessage type.
+                conversation.append(HumanMessage(content=msg.content))
 
-        # Interleave tool outputs chronologically if possible
-        tool_messages = []
-        for tool in parsed_trace.tool_calls:
+        # Ragas metrics project samples down to their required fields before
+        # re-validating them. That projection drops AI tool_calls for several
+        # metrics while retaining ToolMessage values, producing orphaned tool
+        # results. Use typed AI execution narratives so every projection stays
+        # valid while the canonical evaluator ledger retains structured detail.
+        tool_messages: list[AIMessage] = []
+        for index, tool in enumerate(parsed_trace.tool_calls):
             if tool.output:
-                output_str = str(tool.output).strip()
+                output_str = tool.output.strip()
                 if output_str and output_str != "None":
-                    # Include more context for evaluation
-                    content = f"Tool [{tool.name}]: {output_str[:400]}"
-                    tool_messages.append({"role": "system", "content": content})
+                    try:
+                        input_text = json.dumps(
+                            tool.input_data,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    except (TypeError, ValueError):
+                        input_text = '{"unserializable":true}'
+                    tool_messages.append(
+                        AIMessage(
+                            content=(
+                                f"Tool execution: {tool.name}\n"
+                                f"success: {json.dumps(bool(tool.success))}\n"
+                                f"input: {input_text[:240]}\n"
+                                f"output: {output_str[:400]}"
+                            ),
+                            metadata={"evaluation_tool_index": index, "tool_name": tool.name},
+                        )
+                    )
 
-        # Add tool messages to conversation
+        # Add bounded execution narratives to the conversation.
         conversation.extend(tool_messages[:10])  # Limit to prevent overwhelming
 
         # Ensure we have substantive content
@@ -1190,10 +1220,12 @@ Return a JSON list of topic strings that represent the key areas this assessment
             if parsed_trace.tool_calls:
                 tools_used = list({t.name for t in parsed_trace.tool_calls})
                 conversation.append(
-                    {
-                        "role": "assistant",
-                        "content": f"Executed {len(parsed_trace.tool_calls)} operations using {len(tools_used)} distinct tools",
-                    }
+                    AIMessage(
+                        content=(
+                            f"Executed {len(parsed_trace.tool_calls)} operations using "
+                            f"{len(tools_used)} distinct tools"
+                        )
+                    )
                 )
 
         logger.debug(

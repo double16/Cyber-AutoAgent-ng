@@ -327,6 +327,28 @@ async def test_multi_turn_sample_adds_operation_summary_when_messages_are_sparse
     assert any("Executed 1 operations" in message.content for message in sample.user_input)
 
 
+@pytest.mark.asyncio
+async def test_multi_turn_sample_uses_typed_ragas_messages_for_tool_execution():
+    parser = TraceParser()
+    trace = ParsedTrace(
+        trace_id="t",
+        trace_name="Trace",
+        objective="Assess target",
+        messages=[ParsedMessage("assistant", "Starting validation")],
+        tool_calls=[ParsedToolCall("shell", {"cmd": "id"}, output="uid=0")],
+    )
+
+    sample = await parser._create_multi_turn_sample(trace, generate_reference_topics=False)
+
+    assert sample.user_input[0].type == "human"
+    assert sample.user_input[1].type == "ai"
+    assert {message.type for message in sample.user_input} == {"human", "ai"}
+    execution = next(message for message in sample.user_input if "Tool execution: shell" in message.content)
+    assert "input: {\"cmd\":\"id\"}" in execution.content
+    assert "output: uid=0" in execution.content
+    sample.__class__(**sample.model_dump(include={"user_input"}))
+
+
 def test_parse_trace_returns_none_on_error_and_metadata_extraction():
     parser = TraceParser()
     assert parser.parse_trace(object()) is not None

@@ -523,6 +523,9 @@ def test_multiturn_compaction_pins_verified_finding_manifest(monkeypatch):
 
     contents = [ev._message_role_and_content(message)[1] for message in sample.user_input]
     assert any("verified-1" in content for content in contents)
+    manifest = next(message for message in sample.user_input if "verified-1" in message.content)
+    assert manifest.type == "ai"
+    assert manifest.metadata["source"] == "evaluation_evidence_manifest"
     assert not any("rejected-1" in content for content in contents)
     assert ev._last_authoritative_evidence_included == 1
     assert ev._payload_tokens(ev._sample_payload_for_measurement(sample)) <= 1_200
@@ -593,7 +596,13 @@ def test_build_operation_evaluation_trace_deduplicates_observations(monkeypatch)
     ev.trace_parser = SimpleNamespace(
         _extract_objective=lambda _trace: "Assess target",
         _fetch_observations=Mock(side_effect=[[shared], [shared, unique]]),
-        _extract_final_output=Mock(side_effect=["first", "second"]),
+        _parse_tool_observation=Mock(
+            side_effect=[
+                SimpleNamespace(name="shell", success=True, input_data={"cmd": "id"}, output="uid=0"),
+                SimpleNamespace(name="shell", success=True, input_data={"cmd": "id"}, output="uid=0"),
+                SimpleNamespace(name="http_request", success=True, input_data={"url": "https://target"}, output="200"),
+            ]
+        ),
     )
     ev._score_host_trace_id = Mock(return_value="operation-evaluation")
 
@@ -601,7 +610,8 @@ def test_build_operation_evaluation_trace_deduplicates_observations(monkeypatch)
 
     assert trace.id == "operation-evaluation"
     assert [observation.id for observation in trace.observations] == ["shared", "unique"]
-    assert trace.output == "first\n\nsecond"
+    payload = json.loads(trace.output)
+    assert [row["tool"] for row in payload["tool_executions"]] == ["shell", "http_request"]
     assert trace.metadata["attributes"]["evaluation.source_trace_count"] == 2
 
 
@@ -610,12 +620,16 @@ def test_build_operation_evaluation_trace_uses_default_objective_and_empty_outpu
     ev.trace_parser = SimpleNamespace(
         _extract_objective=lambda _trace: "",
         _fetch_observations=lambda _trace: [],
-        _extract_final_output=lambda _trace: "",
+        _parse_tool_observation=lambda _trace: None,
     )
     ev._score_host_trace_id = Mock(return_value="fallback")
     trace = ev._build_operation_evaluation_trace("OP", [SimpleNamespace(id="source")])
     assert trace.input == "Security assessment"
-    assert trace.output == ""
+    assert json.loads(trace.output) == {
+        "operation_id": "OP",
+        "objective": "Security assessment",
+        "tool_executions": [],
+    }
     assert trace.observations == []
 
 
@@ -1170,27 +1184,30 @@ async def _sample(sample):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_single_trace_applies_policy_caps_and_uploads(monkeypatch):
+async def test_evaluate_single_trace_publishes_calibrated_scores_and_ragas_diagnostics(monkeypatch):
     ev = evaluator(monkeypatch)
     metric = SimpleNamespace(name="metric", init=Mock())
     ev.all_metrics = [metric]
     ev._create_evaluation_data = Mock(side_effect=lambda _trace: _sample(SimpleNamespace()))
     ev._evaluate_all_metrics = Mock(side_effect=lambda _data: _sample({"keep": 0.9, "drop": 0.8, "tuple": (0.9, {"m": 1})}))
-    ev._rubric_judge_scores = Mock(side_effect=lambda _data: _sample({"rubric/overall_quality": 0.7}))
-    ev._infer_evaluation_policy = Mock(side_effect=lambda _data: _sample({"caps": {"keep": 0.5, "tuple": 0.4}, "disable": ["drop"]}))
+    ev._deterministic_public_scores = Mock(return_value={"evidence_quality": (0.9, {"source": "facts"})})
+    ev._continuous_public_rubric_scores = Mock(
+        side_effect=lambda _data, _scope: _sample({"tool_selection_accuracy": (0.7, {"source": "rubric"})})
+    )
     uploaded = []
     ev._upload_scores_to_langfuse = Mock(side_effect=lambda trace_id, scores: uploaded.append((trace_id, scores)) or _sample(None))
 
     scores = await ev._evaluate_single_trace(SimpleNamespace(id="trace-id"))
 
-    assert scores["keep"] == 0.5
-    assert scores["tuple"] == (0.4, {"m": 1})
-    assert "drop" not in scores
+    assert scores["evidence_quality"] == (0.9, {"source": "facts"})
+    assert scores["tool_selection_accuracy"] == (0.7, {"source": "rubric"})
+    assert scores["diagnostic/ragas/keep"] == 0.9
+    assert scores["diagnostic/ragas/tuple"] == (0.9, {"m": 1})
     assert uploaded[0][0] == "trace-id"
 
 
 @pytest.mark.asyncio
-async def test_evaluate_single_trace_report_scope_skips_rubric_policy_and_handles_non_numeric_scores(monkeypatch):
+async def test_evaluate_single_trace_report_scope_publishes_calibrated_and_diagnostic_scores(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.all_metrics = []
     ev.evidence_quality = SimpleNamespace(name="evidence_quality")
@@ -1202,32 +1219,112 @@ async def test_evaluate_single_trace_report_scope_skips_rubric_policy_and_handle
             {"metric": "unavailable", "tuple": (0.4, {"source": "x"})}
         )
     )
-    ev._rubric_judge_scores = Mock(side_effect=AssertionError("report scope skips rubric"))
-    ev._infer_evaluation_policy = Mock(side_effect=AssertionError("report scope skips policy"))
+    ev._deterministic_public_scores = Mock(return_value={"evidence_quality": (0.5, {"source": "facts"})})
+    ev._continuous_public_rubric_scores = Mock(
+        side_effect=lambda _data, _scope: _sample({"cybersecurity_focus": (0.6, {"source": "rubric"})})
+    )
     ev._upload_scores_to_langfuse = Mock(side_effect=AssertionError("no trace id to upload"))
 
     scores = await ev._evaluate_single_trace(SimpleNamespace(), metric_scope="report")
 
-    assert scores == {"report/metric": "unavailable", "report/tuple": (0.4, {"source": "x"})}
+    assert scores == {
+        "report/evidence_quality": (0.5, {"source": "facts"}),
+        "report/cybersecurity_focus": (0.6, {"source": "rubric"}),
+        "report/diagnostic/ragas/metric": "unavailable",
+        "report/diagnostic/ragas/tuple": (0.4, {"source": "x"}),
+    }
 
 
 @pytest.mark.asyncio
-async def test_evaluate_single_trace_ignores_malformed_policy_fields_and_preserves_bad_values(monkeypatch):
+async def test_evaluate_single_trace_keeps_invalid_ragas_values_out_of_public_scores(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.all_metrics = []
     ev._create_evaluation_data = Mock(side_effect=lambda _trace: _sample(SimpleNamespace()))
     ev._evaluate_all_metrics = Mock(
         side_effect=lambda _data, **_kwargs: _sample({"score": "not-a-number", "good": 0.8})
     )
-    ev._rubric_judge_scores = Mock(side_effect=lambda _data: _sample({}))
-    ev._infer_evaluation_policy = Mock(side_effect=lambda _data: _sample({"caps": [], "disable": "score"}))
+    ev._deterministic_public_scores = Mock(return_value={})
+    ev._continuous_public_rubric_scores = Mock(side_effect=lambda _data, _scope: _sample({}))
     uploaded = []
     ev._upload_scores_to_langfuse = Mock(side_effect=lambda trace_id, scores: uploaded.append((trace_id, scores)) or _sample(None))
 
     scores = await ev._evaluate_single_trace(SimpleNamespace(id="trace"), metric_scope="operation")
 
-    assert scores == {"operation/score": "not-a-number", "operation/good": 0.8}
+    assert scores == {
+        "operation/diagnostic/ragas/score": "not-a-number",
+        "operation/diagnostic/ragas/good": 0.8,
+    }
     assert uploaded[0][0] == "trace"
+
+
+def test_deterministic_public_scores_use_verified_evidence_and_controller_completion(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._authoritative_evidence_items = ev._build_evidence_items(
+        [
+            {
+                "finding_uid": "verified-1",
+                "resolution": "verified",
+                "candidate_data": {"title": "Unauthenticated disclosure"},
+                "validation_data": {"summary": "GET /api/config returned secrets", "evidence_refs": ["artifact-1"]},
+            },
+            {
+                "finding_uid": "verified-2",
+                "resolution": "verified",
+                "candidate_data": {"title": "Incomplete proof"},
+                "validation_data": {"summary": "Response was observed"},
+            },
+        ]
+    )
+    ev._operation_facts = {"assessment_complete": False}
+
+    scores = ev._deterministic_public_scores("operation")
+
+    assert scores["evidence_quality"][0] == pytest.approx((1.0 + 0.55) / 2)
+    assert scores["penetration_test_goal_accuracy"][0] == 0.0
+    assert scores["penetration_test_goal_accuracy"][1]["assessment_complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_continuous_public_rubric_accepts_only_requested_bounded_scores(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._operation_facts = {"assessment_complete": True}
+    ev._chat_invoke_evaluation_json = Mock(
+        return_value={
+            "scores": {
+                "tool_selection_accuracy": 1.4,
+                "methodology_adherence": 0.6,
+                "cybersecurity_focus": 0.7,
+                "penetration_test_quality": 0.8,
+                "unrequested": 0.9,
+            },
+            "rationale": "Canonical tool evidence supports the score.",
+            "insufficient_evidence": False,
+        }
+    )
+    sample = SingleTurnSample(user_input="Assess target", response="Tool execution ledger", retrieved_contexts=[])
+
+    scores = await ev._continuous_public_rubric_scores(sample, "operation")
+
+    assert set(scores) == {
+        "tool_selection_accuracy",
+        "methodology_adherence",
+        "cybersecurity_focus",
+        "penetration_test_quality",
+    }
+    assert scores["tool_selection_accuracy"][0] == 1.0
+    assert scores["methodology_adherence"][1]["score_source"] == "continuous_structured_rubric"
+
+
+@pytest.mark.asyncio
+async def test_continuous_public_rubric_skips_insufficient_evidence(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._chat_invoke_evaluation_json = Mock(return_value={"scores": {}, "insufficient_evidence": True})
+    sample = SingleTurnSample(user_input="Assess target", response="", retrieved_contexts=[])
+
+    assert await ev._continuous_public_rubric_scores(sample, "report") == {}
+    assert ev._emitter.events[-1]["status"] == "skipped"
 
 
 def test_setup_models_supports_all_configured_providers(monkeypatch):
@@ -1737,6 +1834,31 @@ async def test_multiturn_metric_dispatch_covers_supported_skipped_none_and_error
         "operation/multi-broken": "no metric",
     }
     assert ev.last_skipped_metrics == {"operation/multi-unsupported"}
+
+
+def test_ragas_diagnostic_projection_guard_skips_invalid_multi_turn_sample(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
+
+    class InvalidMultiTurnSample:
+        def model_dump(self, **_kwargs):
+            return {"user_input": [{"type": "tool", "content": "orphaned"}]}
+
+        def __init__(self, **_kwargs):
+            raise ValueError("orphaned tool result")
+
+    monkeypatch.setattr(mod, "MultiTurnSample", InvalidMultiTurnSample)
+    sample = object.__new__(InvalidMultiTurnSample)
+    metrics = [SimpleNamespace(name="evidence_quality"), SimpleNamespace(name="methodology_adherence")]
+
+    assert ev._ragas_diagnostic_sample_is_valid(sample, metrics) is False
+    assert ev.last_skipped_metrics == {
+        "operation/diagnostic/ragas/evidence_quality",
+        "operation/diagnostic/ragas/methodology_adherence",
+    }
+    assert ev._emitter.events[-1]["evaluation_step_kind"] == "diagnostic_compatibility"
+    assert ev._emitter.events[-1]["status"] == "skipped"
 
 
 @pytest.mark.asyncio

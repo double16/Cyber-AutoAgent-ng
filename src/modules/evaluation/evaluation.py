@@ -43,6 +43,7 @@ import contextlib
 from ragas.dataset_schema import MultiTurnSample, SingleTurnSample
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
+from ragas.messages import AIMessage
 from ragas.metrics import (
     AgentGoalAccuracyWithoutReference,
     AspectCritic,
@@ -254,12 +255,14 @@ class CyberAgentEvaluator:
         usage_callback: Callable[[dict[str, Any]], None] | None = None,
         progress_callback: Callable[[], None] | None = None,
         finding_records: list[dict[str, Any]] | None = None,
+        operation_facts: dict[str, Any] | None = None,
     ):
         """Initialize evaluator with Langfuse and evaluation metrics."""
         self._emitter = emitter
         self.report_path = report_path
         self.operation_objective = str(operation_objective or "").strip()
         self._authoritative_evidence_items = self._build_evidence_items(finding_records or [])
+        self._operation_facts = dict(operation_facts or {})
         self._last_authoritative_evidence_included = 0
         self._evaluation_operation_id: str | None = None
         self._evaluation_step_index = 0
@@ -712,28 +715,48 @@ class CyberAgentEvaluator:
             return fallback_trace_id
 
     def _build_operation_evaluation_trace(self, operation_id: str, traces: list[Any]) -> Any:
+        """Build a canonical execution-only trace for operation evaluation.
+
+        Generated agent finals are deliberately excluded.  A session can contain
+        report revisions and earlier evaluator summaries whose claims are not
+        controller-owned evidence and may contradict the persisted findings.
+        """
         objective = self._operation_objective(traces)
         observations = []
         seen_observation_ids = set()
-        outputs = []
+        execution_rows: list[dict[str, Any]] = []
+        parse_tool = getattr(self.trace_parser, "_parse_tool_observation", None)
         for trace in traces:
             for observation in self.trace_parser._fetch_observations(trace):
+                parsed_tool = parse_tool(observation) if callable(parse_tool) else None
+                if callable(parse_tool) and parsed_tool is None:
+                    continue
                 observation_id = str(getattr(observation, "id", "") or id(observation))
                 if observation_id in seen_observation_ids:
                     continue
                 seen_observation_ids.add(observation_id)
                 observations.append(observation)
-            output = self.trace_parser._extract_final_output(trace)
-            if output:
-                outputs.append(str(output)[:4000])
+                if parsed_tool is not None:
+                    execution_rows.append(
+                        {
+                            "tool": parsed_tool.name,
+                            "success": bool(parsed_tool.success),
+                            "input": self._json_safe_value(parsed_tool.input_data),
+                            "output": self._truncate_payload_text(
+                                self._payload_text(parsed_tool.output or ""), 200
+                            ),
+                        }
+                    )
 
-        combined_output = "\n\n".join(outputs)
+        execution_ledger = self._bounded_auxiliary_json(
+            {"operation_id": operation_id, "objective": objective, "tool_executions": execution_rows[-80:]}
+        )
         fallback_trace_id = str(getattr(traces[0], "id", operation_id))
         trace_id = self._score_host_trace_id(
             operation_id,
             "operation_evaluation",
             input_data=objective,
-            output_data=combined_output,
+            output_data=execution_ledger,
             fallback_trace_id=fallback_trace_id,
             source_trace_count=len(traces),
         )
@@ -742,7 +765,7 @@ class CyberAgentEvaluator:
             name=f"Cyber-AutoAgent Operation Evaluation - {operation_id}",
             session_id=operation_id,
             input=objective,
-            output=combined_output,
+            output=execution_ledger,
             observations=observations,
             metadata={
                 "attributes": {
@@ -750,6 +773,7 @@ class CyberAgentEvaluator:
                     "objective.description": objective,
                     "agent.role": "operation_evaluation",
                     "evaluation.source_trace_count": len(traces),
+                    "evaluation.source_kind": "execution_tool_observations",
                 }
             },
         )
@@ -1159,11 +1183,11 @@ class CyberAgentEvaluator:
                 evidence_context = self._authoritative_evidence_context(evidence_budget)
                 if evidence_context:
                     compacted.append(
-                        {
-                            "role": "system",
-                            "content": "Authoritative current-operation evidence (verified only):\n"
+                        AIMessage(
+                            content="Authoritative current-operation evidence (verified only):\n"
                             + evidence_context,
-                        }
+                            metadata={"source": "evaluation_evidence_manifest"},
+                        )
                     )
                 remaining = messages_budget
                 for message in reversed(messages[1:]):
@@ -1346,54 +1370,30 @@ class CyberAgentEvaluator:
             logger.error("Could not create evaluation data from trace")
             return {}
 
-        # Evaluate all metrics
+        # Ragas AspectCritic and goal metrics are binary.  Keep them available
+        # for diagnosis, but do not publish them under the calibrated public
+        # score names.
         metrics = self._metrics_for_scope(metric_scope)
-        if metric_scope:
-            scores = await self._evaluate_all_metrics(eval_data, metrics=metrics)
+        if self._ragas_diagnostic_sample_is_valid(eval_data, metrics):
+            if metric_scope:
+                diagnostic_scores = await self._evaluate_all_metrics(eval_data, metrics=metrics)
+            else:
+                diagnostic_scores = await self._evaluate_all_metrics(eval_data)
         else:
-            scores = await self._evaluate_all_metrics(eval_data)
+            diagnostic_scores = {}
 
-        # Optionally run rubric-based judge for narrative scoring and rationale
-        if metric_scope != "report":
-            try:
-                rubric_scores = await self._rubric_judge_scores(eval_data)
-                if rubric_scores:
-                    scores.update(rubric_scores)
-            except Exception as e:
-                logger.debug("Rubric judge scoring failed: %s", e)
-
-        # Ask judge for a policy (caps/disable) to make perfect scores rare and session-evidence-bound
+        scores = self._deterministic_public_scores(metric_scope)
         try:
-            policy = await self._infer_evaluation_policy(eval_data) if metric_scope != "report" else {}
-            if isinstance(policy, dict):
-                caps = (
-                    policy.get("caps", {})
-                    if isinstance(policy.get("caps", {}), dict)
-                    else {}
-                )
-                disabled = set(policy.get("disable", []) or [])
-                # Apply caps/disable to all numeric scores, preserving metadata
-                adjusted = {}
-                for name, val in scores.items():
-                    if name in disabled:
-                        continue
-                    cap = caps.get(name)
-                    if isinstance(val, tuple) and len(val) == 2:
-                        value, meta = val
-                    else:
-                        value, meta = val, None
-                    try:
-                        value_f = float(value)
-                        if isinstance(cap, (int, float)):
-                            value_f = min(value_f, float(cap))
-                        adjusted[name] = (
-                            (value_f, meta) if meta is not None else value_f
-                        )
-                    except Exception:
-                        adjusted[name] = val
-                scores = adjusted
-        except Exception as e:
-            logger.debug("Evaluation policy inference failed: %s", exc_info=e)
+            scores.update(await self._continuous_public_rubric_scores(eval_data, metric_scope))
+        except Exception as error:
+            logger.warning("Continuous evaluation rubric failed error_type=%s", error.__class__.__name__)
+
+        scores.update(
+            {
+                f"diagnostic/ragas/{name}": value
+                for name, value in diagnostic_scores.items()
+            }
+        )
 
         if metric_scope:
             scores = {f"{metric_scope}/{name}": value for name, value in scores.items()}
@@ -1446,6 +1446,136 @@ class CyberAgentEvaluator:
                 )
 
         return scores
+
+    def _ragas_diagnostic_sample_is_valid(self, eval_data: Any, metrics: list[Any]) -> bool:
+        """Verify the Ragas projection used by multi-turn metrics before invoking them."""
+
+        if not isinstance(eval_data, MultiTurnSample):
+            return True
+        try:
+            MultiTurnSample(**eval_data.model_dump(include={"user_input"}))
+            return True
+        except Exception as error:
+            scope = self._current_evaluation_scope or "operation"
+            for metric in metrics:
+                metric_name = str(getattr(metric, "name", "metric"))
+                self._skipped_metric_set().add(f"{scope}/diagnostic/ragas/{metric_name}")
+            logger.warning(
+                "Skipping Ragas diagnostics because the projected MultiTurnSample is invalid error_type=%s",
+                error.__class__.__name__,
+            )
+            self._emit_evaluation_step_complete(
+                "diagnostic_compatibility",
+                "skipped",
+                message="Ragas diagnostic sample is incompatible with this trace",
+            )
+            return False
+
+    def _deterministic_public_scores(self, metric_scope: str | None) -> dict[str, tuple[float, dict[str, Any]]]:
+        """Return public scores whose facts are controller-owned rather than inferred."""
+
+        evidence_items = self._authoritative_evidence_items
+        evidence_score = 0.0
+        if evidence_items:
+            completeness = [
+                (0.55 if item.validation_summary else 0.0) + (0.45 if item.evidence_refs else 0.0)
+                for item in evidence_items
+            ]
+            evidence_score = sum(completeness) / len(completeness)
+        result: dict[str, tuple[float, dict[str, Any]]] = {
+            "evidence_quality": (
+                evidence_score,
+                {
+                    "score_source": "deterministic_verified_finding_completeness",
+                    "verified_finding_count": len(evidence_items),
+                },
+            )
+        }
+        operation_facts = getattr(self, "_operation_facts", {})
+        assessment_complete = operation_facts.get("assessment_complete")
+        if isinstance(assessment_complete, bool):
+            result["penetration_test_goal_accuracy"] = (
+                1.0 if assessment_complete else 0.0,
+                {
+                    "score_source": "controller_assessment_completion",
+                    "assessment_complete": assessment_complete,
+                },
+            )
+        return result
+
+    async def _continuous_public_rubric_scores(
+        self,
+        eval_data: Any,
+        metric_scope: str | None,
+    ) -> dict[str, tuple[float, dict[str, Any]]]:
+        """Return bounded, schema-validated continuous public rubric scores."""
+
+        self._emit_evaluation_preparation_progress("rubric_judge")
+        scope = metric_scope or "operation"
+        public_names = (
+            ["cybersecurity_focus"]
+            if scope == "report"
+            else [
+                "tool_selection_accuracy",
+                "methodology_adherence",
+                "cybersecurity_focus",
+                "penetration_test_quality",
+            ]
+        )
+        context = self._truncate_payload_text(
+            self._payload_text(self._sample_payload_for_measurement(eval_data)),
+            self._auxiliary_payload_token_budget(),
+        )
+        facts = {
+            "assessment_complete": getattr(self, "_operation_facts", {}).get("assessment_complete"),
+            "verified_finding_count": len(self._authoritative_evidence_items),
+            "scope": scope,
+        }
+        system_prompt = (
+            "You are a strict security-assessment evaluator. Score only the requested dimensions from "
+            "the canonical current-operation data. Return strict JSON. Scores are continuous floats from 0 to 1; "
+            "do not treat the presence of findings as proof that the assessment objective completed."
+        )
+        user_prompt = (
+            "Requested dimensions: "
+            + ", ".join(public_names)
+            + "\nController facts (JSON):\n"
+            + self._bounded_auxiliary_json(facts)
+            + "\nCanonical evaluation sample (JSON):\n"
+            + context
+            + "\nReturn {\"scores\": {dimension: float}, \"rationale\": string, "
+            "\"insufficient_evidence\": boolean}."
+        )
+        parsed = self._chat_invoke_evaluation_json(system_prompt, user_prompt, RubricJudgeOutput)
+        if not isinstance(parsed, dict) or bool(parsed.get("insufficient_evidence", False)):
+            self._emit_evaluation_step_complete(
+                "rubric_judge", "skipped", message="Insufficient evidence for continuous rubric"
+            )
+            return {}
+        values = parsed.get("scores")
+        if not isinstance(values, dict):
+            self._emit_evaluation_step_complete(
+                "rubric_judge", "failed", message="Continuous rubric returned invalid scores"
+            )
+            return {}
+        rationale = parsed.get("rationale")
+        result: dict[str, tuple[float, dict[str, Any]]] = {}
+        for name in public_names:
+            value = values.get(name)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            bounded = min(1.0, max(0.0, float(value)))
+            result[name] = (
+                bounded,
+                {
+                    "score_source": "continuous_structured_rubric",
+                    "rationale": rationale[:2000] if isinstance(rationale, str) else "",
+                },
+            )
+        self._emit_evaluation_step_complete(
+            "rubric_judge", "completed" if result else "failed", message=None if result else "No valid rubric scores"
+        )
+        return result
 
     async def evaluate_trace(
         self, trace_id: str, _max_retries: int = 5
@@ -2031,11 +2161,11 @@ class CyberAgentEvaluator:
             # Base score metadata
             score_metadata = {
                 "evaluation_framework": "ragas"
-                if "/rubric/" not in metric_name and not metric_name.startswith("rubric/")
-                else "rubric",
+                if "diagnostic/ragas/" in metric_name
+                else "hybrid",
                 "metric_category": metric_category,
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "evaluator_version": "v2",
+                "evaluator_version": "v3",
                 "used_context_summary": bool(self._last_eval_summary_sha256),
                 "eval_summary_sha256": self._last_eval_summary_sha256 or "",
                 # Lightweight stats for transparency in the UI
@@ -2060,9 +2190,9 @@ class CyberAgentEvaluator:
                     pass
 
             score_comment = (
-                f"Automated ragas evaluation: {metric_name} ({metric_category})"
-                if "/rubric/" not in metric_name and not metric_name.startswith("rubric/")
-                else f"Rubric judge evaluation: {metric_name}"
+                f"Diagnostic Ragas evaluation: {metric_name} ({metric_category})"
+                if "diagnostic/ragas/" in metric_name
+                else f"Calibrated v3 evaluation: {metric_name} ({metric_category})"
             )
             # Use v4 collection API when available, else fall back to legacy
             score_fallback = True
@@ -2123,7 +2253,7 @@ class CyberAgentEvaluator:
 
     def _get_metric_category(self, metric_name: str) -> str:
         """Categorize metrics for better organization in Langfuse."""
-        unscoped_name = metric_name.split("/", 1)[-1]
+        unscoped_name = metric_name.rsplit("/", 1)[-1]
         if unscoped_name in [
             "tool_selection_accuracy",
             "evidence_quality",

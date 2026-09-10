@@ -343,6 +343,9 @@ def rerun_operation_evaluation(
         report_path=report_path,
         operation_objective=objective or None,
         finding_records=store.list_findings(operation_id),
+        operation_facts={
+            "assessment_complete": bool(getattr(plan, "assessment_complete", False)),
+        },
     )
     manager.register_trace(
         trace_id=operation_id,

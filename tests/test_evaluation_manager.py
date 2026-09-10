@@ -49,12 +49,14 @@ async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeyp
             emitter,
             report_path=None,
             finding_records=None,
+            operation_facts=None,
             usage_callback=None,
             progress_callback=None,
         ):
             self.emitter = emitter
             self.report_path = report_path
             self.finding_records = finding_records
+            self.operation_facts = operation_facts
             self.usage_callback = usage_callback
             self.progress_callback = progress_callback
 
@@ -63,7 +65,12 @@ async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeyp
 
     monkeypatch.setattr(mod, "CyberAgentEvaluator", FakeEvaluator)
     records = [{"finding_uid": "verified", "resolution": "verified"}]
-    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter(), finding_records=records)
+    manager = mod.EvaluationManager(
+        "OP_TEST",
+        emitter=RecordingEmitter(),
+        finding_records=records,
+        operation_facts={"assessment_complete": True},
+    )
     manager.register_trace("t1", mod.TraceType.MAIN_AGENT, "s1", "Main")
     manager.register_trace("t2", mod.TraceType.SWARM_AGENT, "s2", "Swarm")
 
@@ -74,6 +81,7 @@ async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeyp
     assert manager.traces["t1"].evaluation_scores == {"plain": 0.5, "tuple": 0.75}
     assert manager.traces["t2"].evaluated is True
     assert manager.evaluator.finding_records == records
+    assert manager.evaluator.operation_facts == {"assessment_complete": True}
 
 
 def test_wait_for_completion_without_thread_returns_true():

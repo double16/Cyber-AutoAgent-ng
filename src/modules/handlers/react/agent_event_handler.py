@@ -3677,11 +3677,17 @@ class AgentEventHandler(PrintingCallbackHandler):
             if operation_objective:
                 evaluator_kwargs["operation_objective"] = operation_objective
             try:
-                finding_records = get_memory_client().list_finding_records(
+                memory_client = get_memory_client()
+                finding_records = memory_client.list_finding_records(
                     operation_id=self.operation_id
                 )
                 if isinstance(finding_records, list):
                     evaluator_kwargs["finding_records"] = finding_records
+                plan = memory_client.get_plan(self.operation_id)
+                if plan is not None:
+                    evaluator_kwargs["operation_facts"] = {
+                        "assessment_complete": bool(getattr(plan, "assessment_complete", False)),
+                    }
             except Exception:
                 logger.debug(
                     "Authoritative finding records unavailable for evaluation %s",

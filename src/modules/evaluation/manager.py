@@ -61,6 +61,7 @@ class EvaluationManager:
         usage_callback: Callable[[dict[str, Any]], None] | None = None,
         progress_callback: Callable[[], None] | None = None,
         finding_records: list[dict[str, Any]] | None = None,
+        operation_facts: dict[str, Any] | None = None,
     ):
         """
         Initialize the evaluation manager.
@@ -72,6 +73,7 @@ class EvaluationManager:
         self.report_path = report_path
         self.operation_objective = operation_objective
         self.finding_records = list(finding_records or [])
+        self.operation_facts = dict(operation_facts or {})
         self.traces: dict[str, TraceInfo] = {}
         self.evaluator: CyberAgentEvaluator | None = None
         self._lock = threading.Lock()
@@ -162,6 +164,8 @@ class EvaluationManager:
             }
             if self.operation_objective:
                 evaluator_kwargs["operation_objective"] = self.operation_objective
+            if self.operation_facts:
+                evaluator_kwargs["operation_facts"] = self.operation_facts
             self.evaluator = CyberAgentEvaluator(**evaluator_kwargs)
 
         results = {}
