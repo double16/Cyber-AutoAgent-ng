@@ -79,6 +79,8 @@ EVALUATION_RESULT_STATUS_ALIASES = {
     "empty": "no_results",
     "no_data": "no_results",
     "no_scores": "no_results",
+    "partial": "partial_failure",
+    "partial_failure": "partial_failure",
     "fail": "failed",
     "failure": "failed",
     "error": "failed",
@@ -90,7 +92,7 @@ EVALUATION_RESULT_STATUS_ALIASES = {
     "timeout": "failed",
     "timed_out": "failed",
 }
-EVALUATION_RESULT_STATUSES = {"completed", "no_results", "failed"}
+EVALUATION_RESULT_STATUSES = {"completed", "no_results", "partial_failure", "failed"}
 
 
 def _normalize_evaluation_result_status(status: str) -> str:
@@ -3658,12 +3660,24 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self.operation_id,
             )
 
+            evaluator_kwargs = {
+                "operation_id": self.operation_id,
+                "emitter": self.coordinator,
+                "report_path": getattr(self, "_evaluation_report_path", None),
+                "usage_callback": self._record_evaluation_usage,
+                "progress_callback": self.emit_budget_progress_update,
+            }
+            init_context = getattr(self, "init_context", {})
+            operation_objective = (
+                str(init_context.get("objective") or "")
+                if isinstance(init_context, dict)
+                else ""
+            ).strip()
+            if operation_objective:
+                evaluator_kwargs["operation_objective"] = operation_objective
+
             eval_manager = EvaluationManager(
-                operation_id=self.operation_id,
-                emitter=self.coordinator,
-                report_path=getattr(self, "_evaluation_report_path", None),
-                usage_callback=self._record_evaluation_usage,
-                progress_callback=self.emit_budget_progress_update,
+                **evaluator_kwargs,
             )
 
             eval_manager.register_trace(
@@ -3682,6 +3696,10 @@ class AgentEventHandler(PrintingCallbackHandler):
 
             results = loop.run_until_complete(eval_manager.evaluate_all_traces())
 
+            failed_metrics = dict(getattr(eval_manager, "last_failed_metrics", {}))
+            skipped_metrics = sorted(getattr(eval_manager, "last_skipped_metrics", set()))
+            scope_errors = dict(getattr(eval_manager, "last_scope_errors", {}))
+
             if results:
                 scores: dict[str, float] = {}
                 if isinstance(results, dict):
@@ -3694,34 +3712,41 @@ class AgentEventHandler(PrintingCallbackHandler):
                 average_score = (
                     sum(scores.values()) / len(scores) if scores else None
                 )
-                logger.info(
-                    "Evaluation completed successfully: %d traces evaluated",
-                    len(results),
-                )
+                status = "successful" if not failed_metrics and not scope_errors else "partial_failure"
+                logger.info("Evaluation %s: %d traces evaluated", status, len(results))
                 self.emit_ui_event(
                     {
                         "type": "evaluation_complete",
                         "operation_id": self.operation_id,
-                        "success": True,
-                        "status": _normalize_evaluation_result_status("successful"),
+                        "success": not failed_metrics and not scope_errors,
+                        "status": _normalize_evaluation_result_status(status),
                         "traces_evaluated": len(results),
                         "metrics_evaluated": len(scores),
                         "scores": scores,
                         "average_score": average_score,
+                        "metrics_failed": len(failed_metrics),
+                        "metrics_skipped": len(skipped_metrics),
+                        "failed_metrics": failed_metrics,
+                        "skipped_metrics": skipped_metrics,
+                        "scope_errors": scope_errors,
                     }
                 )
                 self.emit_budget_progress_update()
             else:
                 logger.warning("No evaluation results - check trace finding and metric evaluation")
+                status = "failed" if failed_metrics or scope_errors else "no_data"
                 self.emit_ui_event(
                     {
                         "type": "evaluation_complete",
                         "operation_id": self.operation_id,
                         "success": False,
-                        "status": _normalize_evaluation_result_status("no_data"),
+                        "status": _normalize_evaluation_result_status(status),
                         "traces_evaluated": 0,
                         "metrics_evaluated": 0,
                         "scores": {},
+                        "failed_metrics": failed_metrics,
+                        "skipped_metrics": skipped_metrics,
+                        "scope_errors": scope_errors,
                         "message": "Evaluation produced no scores",
                     }
                 )

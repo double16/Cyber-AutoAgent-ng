@@ -369,7 +369,9 @@ export function useOperationManager({
       const resetPhasesSuffix = assessmentParams.resetPhases
         ? ` after resetting phases ${assessmentParams.resetPhases}`
         : '';
-      const operationStartMessage = assessmentParams.reportOnly
+      const operationStartMessage = assessmentParams.evaluateOnly
+        ? `Re-running evaluation${operationSuffix(assessmentParams.evaluateOnly)} for ${assessmentParams.target}`
+        : assessmentParams.reportOnly
         ? `Regenerating report${operationSuffix(assessmentParams.reportOnly)} for ${assessmentParams.target}`
         : assessmentParams.continueOperation
           ? `Continuing operation${operationSuffix(assessmentParams.continueOperation)} for ${assessmentParams.target}${resetFailedSuffix}${resetPhasesSuffix}`

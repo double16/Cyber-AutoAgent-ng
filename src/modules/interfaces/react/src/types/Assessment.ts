@@ -11,6 +11,7 @@ export interface AssessmentParams {
   resetFailed?: boolean;
   resetPhases?: string;
   reportOnly?: string | boolean;
+  evaluateOnly?: string | boolean;
 }
 
 export interface AssessmentState {

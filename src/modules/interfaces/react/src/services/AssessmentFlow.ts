@@ -63,6 +63,7 @@ export class AssessmentFlow {
   private resetFailed = false;
   private resetPhases?: string;
   private reportOnly?: string | boolean;
+  private evaluateOnly?: string | boolean;
 
   /**
    * Dynamically maintained set of supported modules.
@@ -164,6 +165,9 @@ export class AssessmentFlow {
     if (this.reportOnly !== undefined) {
       params.reportOnly = this.reportOnly;
     }
+    if (this.evaluateOnly !== undefined) {
+      params.evaluateOnly = this.evaluateOnly;
+    }
     return params;
   }
 
@@ -215,10 +219,11 @@ export class AssessmentFlow {
     this.resetFailed = false;
     this.resetPhases = undefined;
     this.reportOnly = undefined;
+    this.evaluateOnly = undefined;
   }
 
   private processExecutionModeInput(userInput: string): FlowResult | null {
-    const match = userInput.match(/^(continue|report)(?:\s+(.+))?$/i);
+    const match = userInput.match(/^(continue|report|evaluate)(?:\s+(.+))?$/i);
     if (!match) {
       return null;
     }
@@ -246,18 +251,18 @@ export class AssessmentFlow {
       || resetPhasesIndexes.length > 1
       || (resetPhasesIndex !== undefined && (!resetPhases || resetPhasesIndex + 1 !== operationIdParts.length - 1))
       || (resetFailed && resetPhasesIndex !== undefined)
-      || (mode === 'report' && resetFailedCount > 0)
-      || (mode === 'report' && resetPhasesIndex !== undefined)
+      || ((mode === 'report' || mode === 'evaluate') && resetFailedCount > 0)
+      || ((mode === 'report' || mode === 'evaluate') && resetPhasesIndex !== undefined)
     ) {
       return {
         success: false,
         message: `Invalid ${mode} command`,
         error: mode === 'continue'
           ? 'Usage: continue [operation_id] [reset-failed | reset-phases <phase_selector>]'
-          : 'Usage: report [operation_id]',
+          : `Usage: ${mode} [operation_id]`,
         nextPrompt: mode === 'continue'
           ? 'Use an optional operation ID and one optional reset argument.'
-          : 'Provide at most one operation ID, e.g. report OP_20260320_101501'
+          : `Provide at most one operation ID, e.g. ${mode} OP_20260320_101501`
       };
     }
 
@@ -281,15 +286,27 @@ export class AssessmentFlow {
       this.resetFailed = resetFailed;
       this.resetPhases = resetPhases;
       this.reportOnly = undefined;
-    } else {
+      this.evaluateOnly = undefined;
+    } else if (mode === 'report') {
       this.reportOnly = operationValue;
+      this.evaluateOnly = undefined;
+      this.continueOperation = undefined;
+      this.resetFailed = false;
+      this.resetPhases = undefined;
+    } else {
+      this.evaluateOnly = operationValue;
+      this.reportOnly = undefined;
       this.continueOperation = undefined;
       this.resetFailed = false;
       this.resetPhases = undefined;
     }
 
     const operationLabel = typeof operationValue === 'string' ? ` ${operationValue}` : '';
-    const action = mode === 'continue' ? 'Continue operation' : 'Report regeneration';
+    const action = mode === 'continue'
+      ? 'Continue operation'
+      : mode === 'report'
+        ? 'Report regeneration'
+        : 'Evaluation replay';
 
     return {
       success: true,

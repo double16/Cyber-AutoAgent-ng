@@ -315,6 +315,85 @@ def restore_continuation_state(
     return objective, restored_targets
 
 
+def rerun_operation_evaluation(
+    *,
+    output_dir: str,
+    logical_target: str,
+    operation_id: str,
+    emitter: EventEmitter,
+    logger: Any,
+) -> bool:
+    """Re-evaluate one persisted operation without executing or reporting."""
+    from modules.evaluation.manager import EvaluationManager, TraceType
+
+    store = create_application_store(
+        get_application_database_path({"output_dir": output_dir}),
+        logical_target=logical_target,
+        read_only=True,
+    )
+    plan = store.get_plan(operation_id)
+    objective = str(getattr(plan, "objective", "") or "").strip()
+    report_path = os.path.join(
+        get_output_path(sanitize_target_name(logical_target), operation_id, "", output_dir),
+        "security_assessment_report.md",
+    )
+    manager = EvaluationManager(
+        operation_id=operation_id,
+        emitter=emitter,
+        report_path=report_path,
+        operation_objective=objective or None,
+    )
+    manager.register_trace(
+        trace_id=operation_id,
+        trace_type=TraceType.MAIN_AGENT,
+        name=f"Security Assessment - {operation_id}",
+        session_id=operation_id,
+    )
+    results = asyncio.run(manager.evaluate_all_traces())
+    scores = {
+        str(name): float(value)
+        for result_scores in results.values()
+        if isinstance(result_scores, dict)
+        for name, value in result_scores.items()
+        if isinstance(value, (int, float))
+    }
+    failed_metrics = dict(manager.last_failed_metrics)
+    skipped_metrics = sorted(manager.last_skipped_metrics)
+    scope_errors = dict(getattr(manager, "last_scope_errors", {}))
+    if failed_metrics or scope_errors:
+        status = "partial_failure" if scores else "failed"
+    elif scores:
+        status = "completed"
+    else:
+        status = "no_results"
+    emitter.emit(
+        {
+            "type": "evaluation_complete",
+            "operation_id": operation_id,
+            "success": status == "completed",
+            "status": status,
+            "traces_evaluated": len(results),
+            "metrics_evaluated": len(scores),
+            "metrics_failed": len(failed_metrics),
+            "metrics_skipped": len(skipped_metrics),
+            "scope_errors": scope_errors,
+            "scores": scores,
+            "average_score": sum(scores.values()) / len(scores) if scores else None,
+            "failed_metrics": failed_metrics,
+            "skipped_metrics": skipped_metrics,
+        }
+    )
+    logger.info(
+        "Evaluation replay for %s completed with status=%s scores=%d failures=%d scope_errors=%d",
+        operation_id,
+        status,
+        len(scores),
+        len(failed_metrics),
+        len(scope_errors),
+    )
+    return status == "completed"
+
+
 def reset_continuation_failed_work(
     *,
     output_dir: str,
@@ -1548,6 +1627,13 @@ def main():
         help="Generate report (without execution) of the last operation or the passed operation",
     )
     parser.add_argument(
+        "--evaluate",
+        nargs="?",
+        type=str,
+        const=True,
+        help="Re-run Ragas evaluation without execution or report generation for the last operation or the passed operation",
+    )
+    parser.add_argument(
         "--eval-rubric",
         action="store_true",
         help="Enable rubric-based evaluation in addition to Ragas metrics",
@@ -1585,12 +1671,20 @@ def main():
         parser.error("--reset-failed requires --continue")
     if args.reset_failed and bool(args.report):
         parser.error("--reset-failed cannot be used with --report")
+    if args.reset_failed and bool(args.evaluate):
+        parser.error("--reset-failed cannot be used with --evaluate")
     if args.reset_phases and not bool(args.cont):
         parser.error("--reset-phases requires --continue")
     if args.reset_phases and bool(args.report):
         parser.error("--reset-phases cannot be used with --report")
+    if args.reset_phases and bool(args.evaluate):
+        parser.error("--reset-phases cannot be used with --evaluate")
     if args.reset_phases and args.reset_failed:
         parser.error("--reset-phases cannot be used with --reset-failed")
+    if args.report and args.evaluate:
+        parser.error("--report cannot be used with --evaluate")
+    if args.cont and args.evaluate:
+        parser.error("--continue cannot be used with --evaluate")
     if args.memory_mode not in {"shared", "operation"}:
         parser.error("CYBER_MEMORY_MODE must be one of: shared, operation")
 
@@ -1624,7 +1718,7 @@ def main():
     if args.bug_bounty_header:
         os.environ["CYBER_BUG_BOUNTY_HEADERS"] = json.dumps(bug_bounty_headers)
 
-    if args.cont or args.report:
+    if args.cont or args.report or args.evaluate:
         args.memory_mode = "operation"
 
     ensure_workspace_marker_files()
@@ -1726,7 +1820,13 @@ def main():
         operation_id = args.cont
     elif isinstance(args.report, str) and args.report:
         operation_id = args.report
-    elif (isinstance(args.cont, bool) and args.cont) or (isinstance(args.report, bool) and args.report):
+    elif isinstance(args.evaluate, str) and args.evaluate:
+        operation_id = args.evaluate
+    elif (
+        (isinstance(args.cont, bool) and args.cont)
+        or (isinstance(args.report, bool) and args.report)
+        or (isinstance(args.evaluate, bool) and args.evaluate)
+    ):
         # get the last operation
         base_dir = os.path.abspath(
             args.output_dir
@@ -1754,7 +1854,7 @@ def main():
 
     # Keep memory and plan storage aligned with the output path selected by the CLI.
     os.environ["CYBER_AGENT_OUTPUT_DIR"] = server_config.output.base_dir
-    if args.report:
+    if args.report or args.evaluate:
         os.environ["CYBER_MEMORY_READ_ONLY"] = "true"
     else:
         os.environ.pop("CYBER_MEMORY_READ_ONLY", None)
@@ -1800,7 +1900,7 @@ def main():
     else:
         restored_targets = None
 
-    if args.report:
+    if args.report or args.evaluate:
         try:
             require_existing_operation(
                 output_dir=server_config.output.base_dir,
@@ -1808,10 +1908,24 @@ def main():
                 operation_id=operation_id,
             )
         except FileNotFoundError as error:
-            logger.error("Report-only operation data is unavailable: %s", error)
-            print_status(f"Report-only operation data is unavailable: {error}", "ERROR")
+            mode = "Evaluation-only" if args.evaluate else "Report-only"
+            logger.error("%s operation data is unavailable: %s", mode, error)
+            print_status(f"{mode} operation data is unavailable: {error}", "ERROR")
             restore_memory_environment()
             raise SystemExit(2) from error
+
+    if args.evaluate:
+        success = rerun_operation_evaluation(
+            output_dir=server_config.output.base_dir,
+            logical_target=args.target,
+            operation_id=operation_id,
+            emitter=get_emitter(operation_id=operation_id),
+            logger=logger,
+        )
+        restore_memory_environment()
+        if not success:
+            raise SystemExit(1)
+        return
 
     operation_targets: list[OperationTarget] = []
     if not bool(args.report):

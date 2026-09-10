@@ -57,6 +57,7 @@ class EvaluationManager:
         operation_id: str,
         emitter: EventEmitter | None = None,
         report_path: str | None = None,
+        operation_objective: str | None = None,
         usage_callback: Callable[[dict[str, Any]], None] | None = None,
         progress_callback: Callable[[], None] | None = None,
     ):
@@ -68,6 +69,7 @@ class EvaluationManager:
         """
         self.operation_id = operation_id
         self.report_path = report_path
+        self.operation_objective = operation_objective
         self.traces: dict[str, TraceInfo] = {}
         self.evaluator: CyberAgentEvaluator | None = None
         self._lock = threading.Lock()
@@ -76,6 +78,9 @@ class EvaluationManager:
         self._emitter = emitter or get_emitter(operation_id=operation_id)
         self._usage_callback = usage_callback
         self._progress_callback = progress_callback
+        self.last_failed_metrics: dict[str, str] = {}
+        self.last_skipped_metrics: set[str] = set()
+        self.last_scope_errors: dict[str, str] = {}
 
     def register_trace(
         self,
@@ -146,12 +151,15 @@ class EvaluationManager:
         """
         # Initialize evaluator if not already done
         if not self.evaluator:
-            self.evaluator = CyberAgentEvaluator(
-                emitter=self._emitter,
-                report_path=self.report_path,
-                usage_callback=self._usage_callback,
-                progress_callback=self._progress_callback,
-            )
+            evaluator_kwargs = {
+                "emitter": self._emitter,
+                "report_path": self.report_path,
+                "usage_callback": self._usage_callback,
+                "progress_callback": self._progress_callback,
+            }
+            if self.operation_objective:
+                evaluator_kwargs["operation_objective"] = self.operation_objective
+            self.evaluator = CyberAgentEvaluator(**evaluator_kwargs)
 
         results = {}
         unevaluated = self.get_unevaluated_traces()
@@ -182,6 +190,10 @@ class EvaluationManager:
                     value = value[0]
                 if isinstance(value, (int, float)):
                     numeric_scores[key] = float(value)
+
+            self.last_failed_metrics = dict(getattr(self.evaluator, "last_failed_metrics", {}))
+            self.last_skipped_metrics = set(getattr(self.evaluator, "last_skipped_metrics", set()))
+            self.last_scope_errors = dict(getattr(self.evaluator, "last_scope_errors", {}))
 
             if numeric_scores:
                 with self._lock:

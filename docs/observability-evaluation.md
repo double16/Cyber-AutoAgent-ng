@@ -229,6 +229,13 @@ otherwise `.json`, `.yaml`, and `.yml` output filenames select their matching fo
 
 ## Advanced
 
+Ragas sample size is derived from the configured evaluation model's context window. The evaluator reserves part of
+that window for Ragas prompts and output, so no separate sample-size environment variable is required.
+
+Each evaluation attempt has its own Langfuse score-host traces, identified by `evaluation.run_id`. This keeps a
+failed replay from being confused with scores retained from an earlier attempt. Scope-preparation errors are reported
+separately from metric failures and never create replacement zero scores.
+
 - **Custom metrics**: Extend `CyberAgentEvaluator` in `src/modules/evaluation/evaluation.py`
 - **Performance**: Scale with `langfuse-worker` replicas
 - **Export data**: Coming in next release

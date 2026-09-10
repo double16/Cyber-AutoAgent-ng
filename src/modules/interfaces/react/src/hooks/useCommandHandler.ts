@@ -267,6 +267,7 @@ ASSESSMENT COMMANDS:
   continue [operation] [reset-failed | reset-phases <selector>]
                       - Continue and optionally reset work
   report [operation]  - Re-generate a report for a previous operation
+  evaluate [operation] - Re-run evaluation for a previous operation
   reset               - Clear current configuration
 
 SLASH COMMANDS:

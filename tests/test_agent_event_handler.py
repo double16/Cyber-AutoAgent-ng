@@ -1813,6 +1813,21 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     assert no_results["status"] == "no_results"
     assert no_results["success"] is False
 
+    class ScopeFailedEvaluationManager(FakeEvaluationManager):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.last_scope_errors = {"operation": "sample preparation failed"}
+
+        async def evaluate_all_traces(self):
+            return {}
+
+    handler = make_handler()
+    monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", ScopeFailedEvaluationManager)
+    handler.trigger_evaluation_on_completion()
+    scope_failed = handler._events[event_types(handler).index("evaluation_complete")]
+    assert scope_failed["status"] == "failed"
+    assert scope_failed["scope_errors"] == {"operation": "sample preparation failed"}
+
     class FailedEvaluationManager(FakeEvaluationManager):
         async def evaluate_all_traces(self):
             raise RuntimeError("provider unavailable")

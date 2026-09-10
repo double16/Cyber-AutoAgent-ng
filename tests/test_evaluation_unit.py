@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from modules.evaluation import evaluation as mod
 
@@ -135,6 +136,7 @@ class FakeConfigManager:
             judge_temperature=0.1,
             judge_max_tokens=128,
             summary_max_chars=2000,
+            llm=SimpleNamespace(model_id="evaluation-model"),
         )
 
     def get_provider(self):
@@ -158,6 +160,7 @@ def evaluator(monkeypatch, cfg=None):
     ev._evaluation_step_index = 0
     ev._evaluation_step_total = 0
     ev._current_evaluation_scope = None
+    ev.evaluation_run_id = "run-123"
     return ev
 
 
@@ -205,6 +208,38 @@ async def test_find_operation_traces_falls_back_and_handles_empty_results(monkey
 
     assert await ev._find_operation_traces("OP1") == []
     assert ev.langfuse.api.trace.list.call_args_list[1].kwargs == {"limit": 200}
+
+
+@pytest.mark.asyncio
+async def test_find_operation_traces_paginates_past_report_traces_to_execution_traces(monkeypatch):
+    ev = evaluator(monkeypatch)
+    report_page = [
+        SimpleNamespace(
+            id=f"report-{index}",
+            session_id="OP1",
+            metadata={"attributes": {"agent.role": "report_generation"}},
+        )
+        for index in range(100)
+    ]
+    execution_trace = SimpleNamespace(
+        id="executor",
+        session_id="OP1",
+        metadata={"attributes": {"agent.role": "task_executor"}},
+    )
+    ev.langfuse.api.trace.list.side_effect = [
+        SimpleNamespace(data=report_page),
+        SimpleNamespace(data=[execution_trace]),
+    ]
+
+    found = await ev._find_operation_traces("OP1")
+
+    assert {trace.id for trace in found} == {trace.id for trace in report_page} | {"executor"}
+    assert ev.langfuse.api.trace.list.call_args_list[1].kwargs == {
+        "session_id": "OP1",
+        "limit": 100,
+        "page": 2,
+    }
+    assert ev._select_execution_traces(found) == [execution_trace]
 
 
 @pytest.mark.asyncio
@@ -282,6 +317,7 @@ async def test_evaluate_operation_traces_cleans_up_progress_after_scope_failure(
     ev._evaluate_single_trace = fail_evaluation
 
     assert await ev.evaluate_operation_traces("OP") == {}
+    assert ev.last_scope_errors == {"operation": "metric provider unavailable"}
     assert ev._evaluation_operation_id is None
     assert ev._evaluation_step_total == 0
     assert ev._current_evaluation_scope is None
@@ -307,7 +343,7 @@ async def _empty():
 
 
 @pytest.mark.asyncio
-async def test_evaluate_trace_returns_operation_or_report_fallback(monkeypatch):
+async def test_evaluate_trace_returns_all_successful_scope_scores(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.evaluate_operation_traces = Mock()
 
@@ -318,7 +354,7 @@ async def test_evaluate_trace_returns_operation_or_report_fallback(monkeypatch):
         }
 
     ev.evaluate_operation_traces = results_with_main
-    assert await ev.evaluate_trace("OP") == {"operation/score": 0.9}
+    assert await ev.evaluate_trace("OP") == {"operation/score": 0.9, "report/score": 0.3}
 
     async def results_without_main(_trace_id):
         return {"report": {"report/score": 0.4}}
@@ -360,7 +396,59 @@ def test_build_report_evaluation_trace_reads_assembled_report(monkeypatch, tmp_p
     assert trace.metadata["attributes"]["evaluation.scope"] == "report"
 
 
-def test_score_host_trace_uses_stable_dedicated_langfuse_trace(monkeypatch):
+def test_evaluator_uses_persisted_objective_and_context_derived_sample_limit(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev.operation_objective = "Persisted full assessment objective"
+    ev.trace_parser = SimpleNamespace(_extract_objective=lambda _trace: "Task objective")
+    prompt_limit = Mock(return_value=40_000)
+    monkeypatch.setattr(mod, "require_prompt_token_limit", prompt_limit)
+
+    assert ev._operation_objective([SimpleNamespace()]) == "Persisted full assessment objective"
+    assert ev._sample_max_chars() == 24_000
+    prompt_limit.assert_called_once_with("litellm", "evaluation-model")
+
+
+def test_compact_multiturn_sample_respects_context_derived_limit(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._sample_max_chars = lambda: 500
+    sample = SimpleNamespace(
+        user_input=[
+            {"role": "user", "content": "a" * 400},
+            {"role": "assistant", "content": "b" * 400},
+        ]
+    )
+
+    ev._compact_multi_turn_sample(sample)
+
+    assert sum(len(message["content"]) for message in sample.user_input) <= 500
+    assert [message["role"] for message in sample.user_input] == ["user", "assistant"]
+
+
+def test_compact_multiturn_sample_preserves_langchain_message_types(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._sample_max_chars = lambda: 500
+    sample = SimpleNamespace(
+        user_input=[HumanMessage(content="a" * 400), AIMessage(content="b" * 400)]
+    )
+
+    ev._compact_multi_turn_sample(sample)
+
+    assert [type(message) for message in sample.user_input] == [HumanMessage, AIMessage]
+    assert sum(len(message.content) for message in sample.user_input) <= 500
+
+
+def test_evaluation_model_resolution_ignores_blank_override(monkeypatch):
+    config_manager = SimpleNamespace(getenv=lambda _name, _default="": "   ")
+    server_config = SimpleNamespace(evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="configured-model")))
+
+    assert mod.CyberAgentEvaluator._evaluation_model_id(config_manager, server_config) == "configured-model"
+
+    missing_model = SimpleNamespace(evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="")))
+    with pytest.raises(ValueError, match="No evaluation model"):
+        mod.CyberAgentEvaluator._evaluation_model_id(config_manager, missing_model)
+
+
+def test_score_host_trace_uses_per_run_dedicated_langfuse_trace(monkeypatch):
     ev = evaluator(monkeypatch)
     span = SimpleNamespace(update_trace=Mock(), end=Mock())
     ev.langfuse = SimpleNamespace(
@@ -375,10 +463,18 @@ def test_score_host_trace_uses_stable_dedicated_langfuse_trace(monkeypatch):
         input_data="objective",
         output_data="result",
         fallback_trace_id="fallback",
+        source_trace_count=3,
     )
 
     assert trace_id == "stable-trace"
-    ev.langfuse.create_trace_id.assert_called_once_with(seed="OP:operation_evaluation")
+    ev.langfuse.create_trace_id.assert_called_once_with(seed="OP:operation_evaluation:run-123")
+    assert span.update_trace.call_args.kwargs["metadata"] == {
+        "operation.id": "OP",
+        "evaluation.scope": "operation_evaluation",
+        "evaluation.run_id": "run-123",
+        "evaluation.sample_max_chars": ev._sample_max_chars(),
+        "evaluation.source_trace_count": 3,
+    }
     span.update_trace.assert_called_once()
     span.end.assert_called_once()
     ev.langfuse.flush.assert_called_once()
@@ -394,6 +490,7 @@ def test_score_host_trace_falls_back_when_langfuse_trace_creation_fails(monkeypa
         input_data="objective",
         output_data="result",
         fallback_trace_id="fallback",
+        source_trace_count=1,
     ) == "fallback"
 
 
@@ -503,12 +600,9 @@ async def test_evaluate_all_metrics_single_turn_success_skip_and_error(monkeypat
     ev._evaluation_step_total = 4
     sample = SingleTurnSample(user_input="target", response="done", retrieved_contexts=[])
 
-    assert await ev._evaluate_all_metrics(sample) == {
-        "good": 0.75,
-        "none": 0.0,
-        "multi_only": 0.0,
-        "bad": 0.0,
-    }
+    assert await ev._evaluate_all_metrics(sample) == {"good": 0.75}
+    assert ev.last_failed_metrics == {"operation/none": "Metric returned no score", "operation/bad": "fail"}
+    assert ev.last_skipped_metrics == {"operation/multi_only"}
     assert not any(event["type"] in {"tool_start", "tool_end"} for event in ev._emitter.events)
     completed = [event for event in ev._emitter.events if event["type"] == "evaluation_step_complete"]
     assert [(event["evaluation_metric"], event["status"]) for event in completed] == [
@@ -1171,7 +1265,12 @@ async def test_metric_and_score_upload_orchestration_covers_success_skips_failur
         sample,
         metrics=[SuccessMetric(), UnsupportedMetric(), EmptyMetric(), BrokenMetric()],
     )
-    assert scores == {"success": 0.75, "unsupported": 0.0, "empty": 0.0, "broken": 0.0}
+    assert scores == {"success": 0.75}
+    assert ev.last_failed_metrics == {
+        "operation/empty": "Metric returned no score",
+        "operation/broken": "metric unavailable",
+    }
+    assert ev.last_skipped_metrics == {"operation/unsupported"}
     statuses = [event["status"] for event in ev._emitter.events if event["type"] == "evaluation_step_complete"]
     assert statuses == ["completed", "skipped", "failed", "failed"]
 
@@ -1303,10 +1402,12 @@ async def test_multiturn_metric_dispatch_covers_supported_skipped_none_and_error
     monkeypatch.setattr(mod, "MultiTurnSample", FakeMulti)
     assert await ev._evaluate_all_metrics(FakeMulti(), [Success(), Unsupported(), Empty(), Broken()]) == {
         "multi-success": 0.6,
-        "multi-unsupported": 0.0,
-        "multi-empty": 0.0,
-        "multi-broken": 0.0,
     }
+    assert ev.last_failed_metrics == {
+        "operation/multi-empty": "Metric returned no score",
+        "operation/multi-broken": "no metric",
+    }
+    assert ev.last_skipped_metrics == {"operation/multi-unsupported"}
 
 
 @pytest.mark.asyncio

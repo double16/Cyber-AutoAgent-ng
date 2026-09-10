@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import types
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -56,6 +57,7 @@ from modules.agents.structured_outputs import (
     structured_output_dict,
 )
 from modules.config.manager import get_config_manager
+from modules.config.models.factory import require_prompt_token_limit
 from modules.config.system.logger import get_logger
 from modules.tools.semantic_enum import normalize_semantic_enum
 
@@ -92,7 +94,6 @@ NON_EXECUTION_AGENT_ROLES = {
     "task_evaluator",
     "phase_evaluator",
 }
-MAX_REPORT_EVALUATION_CHARS = 100_000
 
 EVALUATION_STEP_STATUS_ALIASES = {
     "complete": "completed",
@@ -234,18 +235,24 @@ class CyberAgentEvaluator:
         self,
         emitter: EventEmitter,
         report_path: str | None = None,
+        operation_objective: str | None = None,
         usage_callback: Callable[[dict[str, Any]], None] | None = None,
         progress_callback: Callable[[], None] | None = None,
     ):
         """Initialize evaluator with Langfuse and evaluation metrics."""
         self._emitter = emitter
         self.report_path = report_path
+        self.operation_objective = str(operation_objective or "").strip()
         self._evaluation_operation_id: str | None = None
         self._evaluation_step_index = 0
         self._evaluation_step_total = 0
         self._current_evaluation_scope: str | None = None
         self._usage_callback = usage_callback
         self._progress_callback = progress_callback
+        self.last_failed_metrics: dict[str, str] = {}
+        self.last_skipped_metrics: set[str] = set()
+        self.last_scope_errors: dict[str, str] = {}
+        self.evaluation_run_id = uuid.uuid4().hex
         config_manager = get_config_manager()
         self.langfuse = Langfuse(
             public_key=config_manager.getenv("LANGFUSE_PUBLIC_KEY", "cyber-public"),
@@ -276,9 +283,7 @@ class CyberAgentEvaluator:
         # Get configuration from ConfigManager
         server_config = config_manager.get_server_config(server_type)
 
-        evaluation_model_id = config_manager.getenv(
-            "RAGAS_EVALUATOR_MODEL", server_config.evaluation.llm.model_id
-        )
+        evaluation_model_id = self._evaluation_model_id(config_manager, server_config)
         if server_type == "ollama":
             env_reader = EnvironmentReader()
             client_kwargs={
@@ -369,6 +374,23 @@ class CyberAgentEvaluator:
 
         # Internal cache for last evaluation context summary hash (used in score metadata)
         self._last_eval_summary_sha256: str | None = None
+
+    @staticmethod
+    def _evaluation_model_id(config_manager: Any, server_config: Any) -> str:
+        """Resolve the evaluator model, treating an empty override as unset."""
+        configured_model = str(
+            getattr(getattr(getattr(server_config, "evaluation", None), "llm", None), "model_id", "")
+            or ""
+        ).strip()
+        getenv = getattr(config_manager, "getenv", None)
+        override = getenv("RAGAS_EVALUATOR_MODEL", "") if callable(getenv) else ""
+        evaluation_model_id = str(override or "").strip() or configured_model
+        if not evaluation_model_id:
+            raise ValueError(
+                "No evaluation model is configured; set CYBER_AGENT_EVALUATION_MODEL "
+                "or configure the provider evaluation model"
+            )
+        return evaluation_model_id
 
     def setup_metrics(self):
         """Configure evaluation metrics using ragas prebuilt capabilities."""
@@ -473,6 +495,10 @@ class CyberAgentEvaluator:
         Returns:
             Scores keyed by the stable scopes ``operation`` and ``report``
         """
+        self.last_failed_metrics = {}
+        self.last_skipped_metrics = set()
+        self.last_scope_errors = {}
+
         # Find all traces for this operation with bounded retry from config manager
         config_manager = get_config_manager()
         eval_cfg = config_manager.get_server_config(config_manager.get_provider()).evaluation
@@ -536,6 +562,7 @@ class CyberAgentEvaluator:
                     if scores:
                         results[scope] = scores
                 except Exception as error:
+                    self._scope_error_map()[scope] = str(error)
                     logger.error(
                         "Error evaluating %s scope: %s",
                         scope,
@@ -583,6 +610,9 @@ class CyberAgentEvaluator:
         )
 
     def _operation_objective(self, traces: list[Any]) -> str:
+        operation_objective = str(getattr(self, "operation_objective", "") or "").strip()
+        if operation_objective:
+            return operation_objective
         for trace in traces:
             objective = self.trace_parser._extract_objective(trace)
             if objective:
@@ -597,23 +627,34 @@ class CyberAgentEvaluator:
         input_data: Any,
         output_data: Any,
         fallback_trace_id: str,
+        source_trace_count: int,
     ) -> str:
-        """Create a stable Langfuse trace to host aggregate scores, with a safe fallback."""
+        """Create a per-run Langfuse trace to host aggregate scores safely."""
         try:
-            trace_id = self.langfuse.create_trace_id(seed=f"{operation_id}:{scope}")
+            evaluation_run_id = getattr(self, "evaluation_run_id", uuid.uuid4().hex)
+            trace_id = self.langfuse.create_trace_id(
+                seed=f"{operation_id}:{scope}:{evaluation_run_id}"
+            )
+            metadata = {
+                "operation.id": operation_id,
+                "evaluation.scope": scope,
+                "evaluation.run_id": evaluation_run_id,
+                "evaluation.sample_max_chars": self._sample_max_chars(),
+                "evaluation.source_trace_count": source_trace_count,
+            }
             span = self.langfuse.start_span(
                 trace_context={"trace_id": trace_id},
                 name=f"Cyber-AutoAgent {scope.replace('_', ' ').title()}",
                 input=input_data,
                 output=output_data,
-                metadata={"operation.id": operation_id, "evaluation.scope": scope},
+                metadata=metadata,
             )
             span.update_trace(
                 name=f"Cyber-AutoAgent {scope.replace('_', ' ').title()}",
                 session_id=operation_id,
                 input=input_data,
                 output=output_data,
-                metadata={"operation.id": operation_id, "evaluation.scope": scope},
+                metadata=metadata,
                 tags=["Cyber-AutoAgent", "ragas", scope],
             )
             span.end()
@@ -648,6 +689,7 @@ class CyberAgentEvaluator:
             input_data=objective,
             output_data=combined_output,
             fallback_trace_id=fallback_trace_id,
+            source_trace_count=len(traces),
         )
         return types.SimpleNamespace(
             id=trace_id,
@@ -670,9 +712,10 @@ class CyberAgentEvaluator:
         if not self.report_path or not os.path.isfile(self.report_path):
             logger.info("Assembled report unavailable; skipping report Ragas evaluation")
             return None
+        sample_max_chars = self._sample_max_chars()
         try:
             with open(self.report_path, encoding="utf-8", errors="ignore") as report_file:
-                report_content = report_file.read(MAX_REPORT_EVALUATION_CHARS)
+                report_content = report_file.read(sample_max_chars)
         except OSError as error:
             logger.warning("Unable to read assembled report for evaluation: %s", error)
             return None
@@ -687,6 +730,7 @@ class CyberAgentEvaluator:
             input_data=objective,
             output_data=report_content,
             fallback_trace_id=fallback_trace_id,
+            source_trace_count=len(traces),
         )
         return types.SimpleNamespace(
             id=trace_id,
@@ -705,6 +749,108 @@ class CyberAgentEvaluator:
             },
         )
 
+    def _sample_max_chars(self) -> int:
+        """Derive a safe Ragas sample size from the evaluator context window."""
+        try:
+            config_manager = get_config_manager()
+            provider = config_manager.get_provider()
+            evaluation_model = self._evaluation_model_id(
+                config_manager,
+                config_manager.get_server_config(provider),
+            )
+            context_tokens = require_prompt_token_limit(provider, evaluation_model)
+            # Reserve roughly 40% of the window for Ragas templates, rubric
+            # instructions, output, and provider-side framing. Three chars/token
+            # is deliberately conservative for the structured trace content used here.
+            return max(4_000, context_tokens * 3 // 5)
+        except Exception:
+            return 24_000
+
+    def _failed_metric_map(self) -> dict[str, str]:
+        failures = getattr(self, "last_failed_metrics", None)
+        if not isinstance(failures, dict):
+            failures = {}
+            self.last_failed_metrics = failures
+        return failures
+
+    def _skipped_metric_set(self) -> set[str]:
+        skipped = getattr(self, "last_skipped_metrics", None)
+        if not isinstance(skipped, set):
+            skipped = set()
+            self.last_skipped_metrics = skipped
+        return skipped
+
+    def _scope_error_map(self) -> dict[str, str]:
+        errors = getattr(self, "last_scope_errors", None)
+        if not isinstance(errors, dict):
+            errors = {}
+            self.last_scope_errors = errors
+        return errors
+
+    @staticmethod
+    def _message_role_and_content(message: Any) -> tuple[str, str]:
+        """Read message fields from Ragas mappings and LangChain message objects."""
+        if isinstance(message, dict):
+            role = message.get("role") or message.get("type") or "user"
+            content = message.get("content", "")
+        else:
+            role = getattr(message, "role", None) or getattr(message, "type", "user")
+            content = getattr(message, "content", "")
+        if isinstance(content, str):
+            rendered_content = content
+        elif content is None:
+            rendered_content = ""
+        else:
+            rendered_content = json.dumps(content, default=str)
+        return str(role), rendered_content
+
+    @staticmethod
+    def _message_with_content(message: Any, content: str) -> Any:
+        """Return the same message representation with replacement text content."""
+        if isinstance(message, dict):
+            compacted = dict(message)
+            compacted["content"] = content
+            return compacted
+        model_copy = getattr(message, "model_copy", None)
+        if callable(model_copy):
+            return model_copy(update={"content": content})
+        try:
+            from copy import copy
+
+            compacted = copy(message)
+            compacted.content = content
+            return compacted
+        except Exception:
+            return message
+
+    def _compact_multi_turn_sample(self, sample: MultiTurnSample) -> None:
+        """Bound conversation content before Ragas expands it into metric prompts."""
+        limit = self._sample_max_chars()
+        messages = list(sample.user_input or [])
+        if not messages:
+            return
+
+        compacted: list[Any] = []
+        remaining = limit
+        for index, message in enumerate(messages):
+            _role, content = self._message_role_and_content(message)
+            remaining_messages = len(messages) - index
+            allowance = min(remaining, max(160, remaining // max(1, remaining_messages)))
+            excerpt = content[:allowance]
+            if len(content) > allowance:
+                excerpt += "\n[content truncated for bounded evaluation]"
+            rendered_size = len(excerpt)
+            if rendered_size > remaining:
+                excerpt = excerpt[:remaining]
+                rendered_size = len(excerpt)
+            if excerpt:
+                compacted.append(self._message_with_content(message, excerpt))
+                remaining -= rendered_size
+            if remaining <= 0:
+                break
+
+        sample.user_input = compacted
+
     async def _find_operation_traces(self, operation_id: str) -> list[Any]:
         """
         Find all traces associated with an operation ID.
@@ -715,23 +861,50 @@ class CyberAgentEvaluator:
         Returns:
             List of trace objects from Langfuse
         """
+        page_size = 100
+        all_traces: list[Any] = []
         try:
-            # Try to fetch by session ID first
-            all_traces = self.langfuse.api.trace.list(
-                session_id=operation_id, limit=100
-            )
-        except Exception as e:
-            logger.debug("Failed to fetch by session_id, using general list: %s", e)
-            # Fallback to fetching recent traces
-            all_traces = self.langfuse.api.trace.list(limit=200)
+            # A session may contain enough report traces to push task-execution
+            # traces off the newest page. Fetch every page before role selection.
+            page = 1
+            while True:
+                request = {"session_id": operation_id, "limit": page_size}
+                if page > 1:
+                    request["page"] = page
+                response = self.langfuse.api.trace.list(**request)
+                page_traces = getattr(response, "data", None)
+                if not page_traces:
+                    break
+                all_traces.extend(page_traces)
+                if len(page_traces) < page_size:
+                    break
+                page += 1
+        except Exception as error:
+            if all_traces:
+                logger.warning(
+                    "Trace pagination stopped after %d traces for %s: %s",
+                    len(all_traces),
+                    operation_id,
+                    error,
+                )
+            else:
+                logger.debug("Failed to fetch by session_id, using general list: %s", error)
+                # Legacy fallback for traces whose session metadata is unavailable.
+                response = self.langfuse.api.trace.list(limit=200)
+                all_traces = list(getattr(response, "data", None) or [])
 
-        if not hasattr(all_traces, "data") or not all_traces.data:
+        if not all_traces:
             return []
 
         # Find all traces that belong to this operation
         operation_traces = []
 
-        for trace in all_traces.data:
+        seen_trace_ids = set()
+        for trace in all_traces:
+            trace_id = str(getattr(trace, "id", "") or id(trace))
+            if trace_id in seen_trace_ids:
+                continue
+            seen_trace_ids.add(trace_id)
             # Check multiple ways to identify operation traces
             is_operation_trace = False
 
@@ -907,8 +1080,7 @@ class CyberAgentEvaluator:
             max_retries: Maximum number of retries if trace not found (unused)
 
         Returns:
-            Operation-level scores, falling back to report scores when no
-            eligible execution trace is available
+            Successful scores from every evaluated operation scope.
         """
         logger.info(
             "Evaluating all traces for operation %s",
@@ -937,8 +1109,10 @@ class CyberAgentEvaluator:
                 sum(numeric_scores) / len(numeric_scores) if numeric_scores else 0,
             )
 
-        # Backward compatibility: callers still receive one score mapping.
-        return all_results.get("operation") or all_results.get("report") or {}
+        combined_scores: dict[str, float] = {}
+        for scope_scores in all_results.values():
+            combined_scores.update(scope_scores)
+        return combined_scores
 
     async def _create_evaluation_data(self, trace):
         """
@@ -1005,6 +1179,9 @@ class CyberAgentEvaluator:
                 "evaluation_data", "failed", message="Unable to prepare evaluation sample"
             )
             raise
+
+        if isinstance(evaluation_data, MultiTurnSample):
+            self._compact_multi_turn_sample(evaluation_data)
 
         # Log sample type and basic info
         sample_type = (
@@ -1386,7 +1563,9 @@ class CyberAgentEvaluator:
                             step_index=step_index,
                             message="Metric does not support multi-turn evaluation",
                         )
-                        scores[metric.name] = 0.0
+                        self._skipped_metric_set().add(
+                            f"{self._current_evaluation_scope or 'operation'}/{metric.name}"
+                        )
                         continue
 
                 # For SingleTurnSample
@@ -1405,13 +1584,17 @@ class CyberAgentEvaluator:
                             step_index=step_index,
                             message="Metric does not support single-turn evaluation",
                         )
-                        scores[metric.name] = 0.0
+                        self._skipped_metric_set().add(
+                            f"{self._current_evaluation_scope or 'operation'}/{metric.name}"
+                        )
                         continue
 
                 # Process score
                 if score is None:
                     logger.warning("Score is None for %s", metric.name)
-                    scores[metric.name] = 0.0
+                    self._failed_metric_map()[
+                        f"{self._current_evaluation_scope or 'operation'}/{metric.name}"
+                    ] = "Metric returned no score"
                     self._emit_evaluation_step_complete(
                         "metric",
                         "failed",
@@ -1432,7 +1615,9 @@ class CyberAgentEvaluator:
                 logger.error(
                     "Error evaluating metric %s: %s", metric.name, str(e), exc_info=True
                 )
-                scores[metric.name] = 0.0
+                self._failed_metric_map()[
+                    f"{self._current_evaluation_scope or 'operation'}/{metric.name}"
+                ] = str(e)
                 self._emit_evaluation_step_complete(
                     "metric",
                     "failed",
@@ -1464,6 +1649,8 @@ class CyberAgentEvaluator:
                 # Lightweight stats for transparency in the UI
                 "stats": getattr(self, "_last_eval_stats", {}),
                 "evaluation_scope": getattr(self, "_last_evaluation_scope", "trace"),
+                "evaluation_run_id": getattr(self, "evaluation_run_id", "legacy"),
+                "sample_max_chars": self._sample_max_chars(),
             }
 
             # Unpack rubric metadata if present

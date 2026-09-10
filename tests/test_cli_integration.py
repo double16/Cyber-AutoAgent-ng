@@ -112,7 +112,75 @@ def test_restore_continuation_state_returns_current_objective_when_not_requested
     )
     assert objective == "current objective"
     assert restored is None
-    logger.warning.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("scores_by_scope", "failed_metrics", "scope_errors", "expected_success", "expected_status"),
+    [
+        ({"OP_TEST": {"operation/faithfulness": 0.8}}, {}, {}, True, "completed"),
+        (
+            {"OP_TEST": {"operation/faithfulness": 0.8}},
+            {"operation/context_precision": "context window exceeded"},
+            {},
+            False,
+            "partial_failure",
+        ),
+        ({}, {}, {"operation": "sample preparation failed"}, False, "failed"),
+    ],
+)
+def test_rerun_operation_evaluation_uses_persisted_objective_and_reports_failures(
+    monkeypatch,
+    tmp_path,
+    scores_by_scope,
+    failed_metrics,
+    scope_errors,
+    expected_success,
+    expected_status,
+):
+    emitted = []
+    captured = {}
+
+    class FakeEvaluationManager:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.last_failed_metrics = failed_metrics
+            self.last_skipped_metrics = {"operation/unsupported"}
+            self.last_scope_errors = scope_errors
+
+        def register_trace(self, **kwargs):
+            captured["trace"] = kwargs
+
+        async def evaluate_all_traces(self):
+            return scores_by_scope
+
+    monkeypatch.setattr(
+        cyberautoagent,
+        "create_application_store",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            get_plan=lambda _operation_id: SimpleNamespace(objective="Persisted operation objective")
+        ),
+    )
+    monkeypatch.setattr(cyberautoagent, "get_application_database_path", lambda _config: str(tmp_path / "state.db"))
+    monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FakeEvaluationManager)
+
+    success = cyberautoagent.rerun_operation_evaluation(
+        output_dir=str(tmp_path),
+        logical_target="example.test",
+        operation_id="OP_TEST",
+        emitter=SimpleNamespace(emit=emitted.append),
+        logger=Mock(),
+    )
+
+    assert success is expected_success
+    assert captured["operation_objective"] == "Persisted operation objective"
+    assert captured["trace"]["session_id"] == "OP_TEST"
+    assert emitted[-1]["status"] == expected_status
+    assert emitted[-1]["scores"] == (
+        {"operation/faithfulness": 0.8} if scores_by_scope else {}
+    )
+    assert emitted[-1]["failed_metrics"] == failed_metrics
+    assert emitted[-1]["scope_errors"] == scope_errors
+    assert emitted[-1]["metrics_skipped"] == 1
 
 
 def test_restore_continuation_state_warns_when_database_missing(tmp_path):

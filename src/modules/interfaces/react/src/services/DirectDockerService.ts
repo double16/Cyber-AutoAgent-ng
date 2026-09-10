@@ -294,6 +294,11 @@ export class DirectDockerService extends EventEmitter {
       } else if (params.reportOnly) {
         args.push('--report', params.reportOnly);
       }
+      if (params.evaluateOnly === true || params.evaluateOnly === "") {
+        args.push('--evaluate');
+      } else if (params.evaluateOnly) {
+        args.push('--evaluate', params.evaluateOnly);
+      }
 
       if (config.modelId) {
         args.push('--model', config.modelId);
