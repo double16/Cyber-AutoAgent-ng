@@ -354,3 +354,228 @@ async def test_channel_orchestration_handles_reverse_listener_and_broken_forward
     assert sent.bytes_sent == 0
     events = await mod.channel_poll(forward.id, timeout=0, max_events=10)
     assert events.events[-1].note == "stdin_closed"
+
+
+@pytest.mark.asyncio
+async def test_channel_queue_cap_and_poll_min_events(monkeypatch):
+    manager = mod.ChannelManager()
+    channel = manager.add(mod.Channel(id="queued", kind="reverse"))
+    monkeypatch.setattr(mod, "_CHANNEL_MANAGER", manager)
+
+    for index in range(50_001):
+        channel.events.put_nowait(mod.PollEvent(ts=index, stream="status", note=str(index)))
+    await channel.put_event(mod.PollEvent(ts=50_001, stream="status", note="newest"))
+
+    assert channel.events.qsize() == 50_001
+    assert (await mod.channel_poll("queued", timeout=0, max_events=1)).events[0].note == "1"
+
+    await channel.mark_status("threshold")
+    result = await mod.channel_poll("queued", timeout=0, max_events=10, min_events=1)
+    assert result.events
+
+
+@pytest.mark.asyncio
+async def test_channel_send_handles_missing_stdin_and_transport_errors(monkeypatch):
+    manager = mod.ChannelManager()
+    manager.add(mod.Channel(id="no-stdin", kind="forward", proc=SimpleNamespace(stdin=None)))
+    manager.add(mod.Channel(id="reset-forward", kind="forward", proc=SimpleNamespace(
+        stdin=SimpleNamespace(
+            write=lambda _payload: (_ for _ in ()).throw(ConnectionResetError()),
+            drain=lambda: asyncio.sleep(0),
+        )
+    )))
+
+    class BrokenWriter:
+        def is_closing(self):
+            return False
+
+        def write(self, _payload):
+            raise ConnectionResetError()
+
+        async def drain(self):
+            raise BrokenPipeError()
+
+    reverse = manager.add(mod.Channel(id="reset-reverse", kind="reverse"))
+    reverse._client_writer = BrokenWriter()
+    monkeypatch.setattr(mod, "_CHANNEL_MANAGER", manager)
+
+    with pytest.raises(RuntimeError, match="no stdin"):
+        await mod.channel_send("no-stdin", "payload")
+    assert (await mod.channel_send("reset-forward", "payload")).bytes_sent == 0
+    assert (await mod.channel_send("reset-reverse", "payload")).bytes_sent == 0
+
+
+@pytest.mark.asyncio
+async def test_channel_status_reports_dead_and_incomplete_channels(monkeypatch):
+    manager = mod.ChannelManager()
+    manager.add(mod.Channel(id="empty-forward", kind="forward"))
+    manager.add(mod.Channel(
+        id="dead-forward",
+        kind="forward",
+        closed=True,
+        proc=SimpleNamespace(pid=9, returncode=0, stdin=None),
+    ))
+
+    class Server:
+        sockets = [SimpleNamespace(getsockname=lambda: (_ for _ in ()).throw(OSError("gone")))]
+
+    manager.add(mod.Channel(id="bad-reverse", kind="reverse", server=Server()))
+    monkeypatch.setattr(mod, "_CHANNEL_MANAGER", manager)
+
+    empty = await mod.channel_status("empty-forward")
+    assert empty.connected is False
+    assert empty.details == {"pid": "", "proc_alive": "false"}
+    dead = await mod.channel_status("dead-forward")
+    assert dead.ready_for_send is False
+    reverse = await mod.channel_status("bad-reverse")
+    assert reverse.details["listening"] == "true"
+    assert reverse.details["port"] == ""
+
+
+@pytest.mark.asyncio
+async def test_channel_create_forward_without_stdout(monkeypatch):
+    class Process:
+        pid = 42
+        stdout = None
+
+    async def create_process(*_args, **_kwargs):
+        return Process()
+
+    manager = mod.ChannelManager()
+    monkeypatch.setattr(mod, "_CHANNEL_MANAGER", manager)
+    monkeypatch.setattr(mod.asyncio, "create_subprocess_exec", create_process)
+
+    result = await mod.channel_create_forward("command", env={"CHANNEL_TEST": "1"})
+    assert result.pid == 42
+    assert manager.get(result.channel_id)._output_task is None
+
+
+@pytest.mark.asyncio
+async def test_channel_close_handles_cancellation_writer_and_process_fallbacks():
+    class Task:
+        done_value = False
+
+        def done(self):
+            return self.done_value
+
+        def cancel(self):
+            self.cancelled = True
+
+    class Server:
+        def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            raise RuntimeError("server already closed")
+
+    class Writer:
+        def close(self):
+            raise RuntimeError("writer already closed")
+
+        async def wait_closed(self):
+            pass
+
+    class Process:
+        returncode = None
+
+        def terminate(self):
+            self.terminated = True
+
+        async def wait(self):
+            raise TimeoutError()
+
+        def kill(self):
+            self.killed = True
+
+    process = Process()
+    channel = mod.Channel(
+        id="close-fallbacks",
+        kind="reverse",
+        server=Server(),
+        _client_writer=Writer(),
+        proc=process,
+        _output_task=Task(),
+        _client_read_task=Task(),
+    )
+
+    await channel.close()
+    assert channel.closed is True
+    assert process.terminated is True
+    assert process.killed is True
+    await channel.close()
+    assert channel.events.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_channel_close_ignores_missing_process_and_queue_race():
+    class Process:
+        returncode = None
+
+        def terminate(self):
+            raise ProcessLookupError()
+
+    channel = mod.Channel(id="close-race", kind="forward", proc=Process())
+    await channel.close()
+    assert channel.closed is True
+    assert (await channel.events.get()).note == "channel_closed"
+
+
+@pytest.mark.asyncio
+async def test_channel_read_output_eof_and_close_wait_errors():
+    class EmptyReader:
+        async def read(self, _chunk):
+            return b""
+
+    class Writer:
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            raise RuntimeError("already closed")
+
+    channel = mod.Channel(id="eof", kind="reverse", _client_writer=Writer())
+    await mod._read_output(EmptyReader(), channel)
+
+    events = [await channel.events.get(), await channel.events.get()]
+    assert [event.note for event in events] == ["output_eof", "channel_closed"]
+
+
+@pytest.mark.asyncio
+async def test_channel_poll_timeout_is_non_fatal():
+    manager = mod.ChannelManager()
+    manager.add(mod.Channel(id="empty", kind="reverse"))
+    original_manager = mod._CHANNEL_MANAGER
+    mod._CHANNEL_MANAGER = manager
+    try:
+        result = await mod.channel_poll("empty", timeout=0.001, min_events=1)
+    finally:
+        mod._CHANNEL_MANAGER = original_manager
+    assert result.events == []
+
+
+@pytest.mark.asyncio
+async def test_reverse_client_cleanup_suppresses_writer_close_errors(monkeypatch):
+    captured = {}
+
+    async def start_server(callback, _host, _port):
+        captured["callback"] = callback
+        return SimpleNamespace(sockets=[SimpleNamespace(getsockname=lambda: ("127.0.0.1", 4000))])
+
+    async def read_output(_reader, _channel):
+        return None
+
+    class Writer:
+        def close(self):
+            pass
+
+        async def wait_closed(self):
+            raise RuntimeError("client already closed")
+
+    monkeypatch.setattr(mod, "_CHANNEL_MANAGER", mod.ChannelManager())
+    monkeypatch.setattr(mod.asyncio, "start_server", start_server)
+    monkeypatch.setattr(mod, "_read_output", read_output)
+    result = await mod.channel_create_reverse(listener_host="127.0.0.1")
+
+    await captured["callback"](SimpleNamespace(), Writer())
+    channel = mod._mgr().get(result.channel_id)
+    assert channel._client_writer is None
