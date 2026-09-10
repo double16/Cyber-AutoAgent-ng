@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+import ollama
 from langchain_aws import BedrockEmbeddings, ChatBedrock
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.load.dump import dumps
@@ -57,9 +58,11 @@ from modules.agents.structured_outputs import (
     structured_output_dict,
 )
 from modules.config.manager import get_config_manager
+from modules.config.models.agent_profiles import ReasoningLevel, translate_reasoning_to_provider
 from modules.config.models.factory import require_prompt_token_limit
 from modules.config.system.logger import get_logger
 from modules.tools.semantic_enum import normalize_semantic_enum
+from modules.utils.json_repair import parse_json_response_with_metadata
 
 from ..config.providers.ollama_config import get_ollama_timeout
 from ..config.system import EnvironmentReader
@@ -247,6 +250,7 @@ class CyberAgentEvaluator:
         self._evaluation_step_index = 0
         self._evaluation_step_total = 0
         self._current_evaluation_scope: str | None = None
+        self._native_structured_output_available: bool | None = None
         self._usage_callback = usage_callback
         self._progress_callback = progress_callback
         self.last_failed_metrics: dict[str, str] = {}
@@ -279,11 +283,13 @@ class CyberAgentEvaluator:
         """Configure evaluation models based on server type."""
         config_manager = get_config_manager()
         server_type = config_manager.get_provider()
+        self._evaluation_provider = server_type
 
         # Get configuration from ConfigManager
         server_config = config_manager.get_server_config(server_type)
 
         evaluation_model_id = self._evaluation_model_id(config_manager, server_config)
+        reasoning_kwargs = self._evaluation_reasoning_kwargs(server_type, evaluation_model_id)
         if server_type == "ollama":
             env_reader = EnvironmentReader()
             client_kwargs={
@@ -295,6 +301,7 @@ class CyberAgentEvaluator:
                 model=evaluation_model_id,
                 base_url=ollama_host,
                 client_kwargs=client_kwargs,
+                **reasoning_kwargs,
             )
             langchain_embeddings = OllamaEmbeddings(
                 model=config_manager.getenv(
@@ -336,6 +343,7 @@ class CyberAgentEvaluator:
             # Remote mode using Google GenAI
             langchain_chat = ChatGoogleGenerativeAI(
                 model=evaluation_model_id,
+                **reasoning_kwargs,
             )
             langchain_embeddings = GoogleGenerativeAIEmbeddings(
                 model=config_manager.getenv(
@@ -371,6 +379,10 @@ class CyberAgentEvaluator:
             callback=self._usage_callback,
         )
         self._chat_model.callbacks = [self._usage_tracker]
+        logger.info("Evaluation model reasoning disabled provider=%s", server_type)
+
+        # The provider/model capability can change when an evaluator is rebuilt.
+        self._native_structured_output_available = None
 
         # Internal cache for last evaluation context summary hash (used in score metadata)
         self._last_eval_summary_sha256: str | None = None
@@ -391,6 +403,24 @@ class CyberAgentEvaluator:
                 "or configure the provider evaluation model"
             )
         return evaluation_model_id
+
+    @staticmethod
+    def _evaluation_reasoning_kwargs(provider: str, model_id: str) -> dict[str, Any]:
+        """Return evaluator-only request options that explicitly disable reasoning."""
+
+        translated = translate_reasoning_to_provider(provider, model_id, ReasoningLevel.NONE)
+        provider_key = provider.lower()
+        if provider_key == "ollama":
+            # ChatOllama exposes Ollama's ``think`` request parameter as ``reasoning``.
+            return {"reasoning": translated.get("think", False)}
+        if provider_key == "gemini":
+            return {
+                "thinking_budget": translated.get("thinking_budget", 0),
+                "include_thoughts": False,
+            }
+        # LiteLLM and Bedrock represent disabled reasoning by omitting their optional
+        # request fields, rather than forwarding a null-valued provider parameter.
+        return {key: value for key, value in translated.items() if value is not None}
 
     def setup_metrics(self):
         """Configure evaluation metrics using ragas prebuilt capabilities."""
@@ -1826,16 +1856,11 @@ class CyberAgentEvaluator:
             "Return JSON with keys: caps (object of metric->cap 0..1), disable (array of metrics)."
         )
         try:
-            try:
-                data = self._chat_invoke_structured(
-                    system_prompt,
-                    user_prompt,
-                    EvaluationPolicyOutput,
-                )
-            except Exception as error:
-                if not is_structured_output_unavailable(error):
-                    raise
-                data = json.loads(self._chat_invoke(system_prompt, user_prompt))
+            data = self._chat_invoke_evaluation_json(
+                system_prompt,
+                user_prompt,
+                EvaluationPolicyOutput,
+            )
             if isinstance(data, dict):
                 self._emit_evaluation_step_complete("evaluation_policy", "completed")
                 return data
@@ -1845,8 +1870,11 @@ class CyberAgentEvaluator:
                 message="Evaluation policy returned invalid data",
             )
             return {}
-        except Exception as e:
-            logger.debug("Policy JSON parse failed: %s", e)
+        except Exception as error:
+            logger.warning(
+                "Evaluation policy calibration failed error_type=%s",
+                error.__class__.__name__,
+            )
             self._emit_evaluation_step_complete(
                 "evaluation_policy",
                 "failed",
@@ -1980,25 +2008,17 @@ class CyberAgentEvaluator:
                     temperature=eval_cfg.judge_temperature,
                     max_tokens=eval_cfg.judge_max_tokens,
                 )
-            try:
-                parsed = self._chat_invoke_structured(
-                    system_prompt,
-                    user_prompt,
-                    RubricJudgeOutput,
-                    chat_model=judge_model,
-                )
-            except Exception as error:
-                if not is_structured_output_unavailable(error):
-                    raise
-                text = self._chat_invoke(system_prompt, user_prompt)
-                try:
-                    parsed = json.loads(text)
-                except Exception:
-                    start = text.find("{")
-                    end = text.rfind("}")
-                    parsed = json.loads(text[start : end + 1]) if start != -1 and end != -1 else {}
-        except Exception as e:
-            logger.debug("Rubric judge LLM call failed: %s", e)
+            parsed = self._chat_invoke_evaluation_json(
+                system_prompt,
+                user_prompt,
+                RubricJudgeOutput,
+                chat_model=judge_model,
+            )
+        except Exception as error:
+            logger.warning(
+                "Rubric judge evaluation failed error_type=%s",
+                error.__class__.__name__,
+            )
             self._emit_evaluation_step_complete(
                 "rubric_judge", "failed", message="Rubric judge failed"
             )
@@ -2164,31 +2184,76 @@ class CyberAgentEvaluator:
             logger.debug("LLM summary generation error: %s", e)
             return ""
 
-    def _chat_invoke(self, system_prompt: str, user_prompt: str) -> str:
+    def _chat_invoke(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        chat_model: Any | None = None,
+    ) -> str:
         """Helper to invoke the configured LangChain chat model with a simple system+user prompt."""
-        try:
-            # LangChain ChatModels accept a list of messages; fallback to simple string if needed
-            from langchain_core.messages import (  # type: ignore
-                HumanMessage,
-                SystemMessage,
-            )
+        model = chat_model or self._chat_model
+        # LangChain ChatModels accept a list of messages; fall back only when the
+        # model rejects that message shape, never after a provider failure.
+        from langchain_core.messages import HumanMessage, SystemMessage  # type: ignore
 
-            msgs = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt),
-            ]
-            resp = self._chat_model.invoke(msgs)
-            content = getattr(resp, "content", None)
-            if isinstance(content, list):
-                # For tool-rich responses, join string parts
-                content = " ".join(str(part) for part in content)
-            return content if isinstance(content, str) else str(resp)
-        except Exception:
-            # Fallback: simple string invocation
+        msgs = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+        try:
+            resp = model.invoke(msgs)
+        except Exception as error:
+            if not self._is_message_list_compatibility_failure(error):
+                raise
             prompt = f"System: {system_prompt}\nUser: {user_prompt}"
-            resp = self._chat_model.invoke(prompt)
-            content = getattr(resp, "content", None)
-            return content if isinstance(content, str) else str(resp)
+            resp = model.invoke(prompt)
+        return self._evaluation_response_content_text(getattr(resp, "content", None))
+
+    @staticmethod
+    def _is_message_list_compatibility_failure(error: BaseException) -> bool:
+        """Return whether a model rejects LangChain's list-of-messages invocation shape."""
+
+        if isinstance(error, (ConnectionError, TimeoutError, ollama.ResponseError)):
+            return False
+        message = str(error).lower()
+        return any(
+            marker in message
+            for marker in (
+                "list unsupported",
+                "message list",
+                "messages must",
+                "unsupported message",
+                "expected a string prompt",
+                "expected string prompt",
+            )
+        )
+
+    @staticmethod
+    def _evaluation_response_content_text(content: Any) -> str:
+        """Return textual evaluator output without converting provider payloads with ``str()``."""
+
+        def normalize(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return value
+            if isinstance(value, dict):
+                block_type = value.get("type")
+                if block_type in {"thinking", "reasoning", "reasoning_content"}:
+                    return ""
+                for text_key in ("text", "content"):
+                    text_value = value.get(text_key)
+                    if isinstance(text_value, str):
+                        return text_value
+                    if isinstance(text_value, (dict, list, tuple)):
+                        return normalize(text_value)
+                return json.dumps(value, ensure_ascii=False)
+            if isinstance(value, (list, tuple)):
+                return " ".join(part for item in value if (part := normalize(item)))
+            return json.dumps(value, ensure_ascii=False)
+
+        return normalize(content)
 
     def _chat_invoke_structured(
         self,
@@ -2211,6 +2276,194 @@ class CyberAgentEvaluator:
             [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
         )
         return structured_output_dict(result)
+
+    def _structured_output_failure_category(self, error: BaseException) -> str | None:
+        """Classify structured-output failures without exposing provider response content."""
+
+        if is_structured_output_unavailable(error):
+            return "structured_output_unsupported"
+
+        pending: list[BaseException | None] = [error]
+        seen: set[int] = set()
+        compatibility_error_names = {"OutputParserException", "ValidationError"}
+        while pending:
+            current = pending.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            if self._provider_status_code(current) == 501:
+                return "structured_output_unsupported"
+            if current.__class__.__name__ in compatibility_error_names:
+                return "structured_output_invalid"
+            if isinstance(current, ollama.ResponseError):
+                if self._evaluation_provider != "ollama":
+                    return "provider_request_failed"
+                status_code = self._provider_status_code(current)
+                error_text = str(current).lower()
+                context_markers = ("context length", "context window", "maximum context")
+                structured_markers = ("format", "schema", "structured output", "json mode", "json schema")
+                if (
+                    status_code == 400
+                    and any(marker in error_text for marker in structured_markers)
+                    and not any(marker in error_text for marker in context_markers)
+                ):
+                    return "structured_output_unsupported"
+                return "provider_request_failed"
+            if isinstance(current, ValueError) and str(current).startswith(
+                "structured output must be a Pydantic model or dict"
+            ):
+                return "structured_output_invalid"
+            pending.extend((current.__cause__, current.__context__))
+        return None
+
+    @staticmethod
+    def _provider_status_code(error: BaseException) -> int | None:
+        """Return an integer HTTP status code when a provider error exposes one."""
+
+        pending: list[BaseException | None] = [error]
+        seen: set[int] = set()
+        while pending:
+            current = pending.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            try:
+                status_code = int(getattr(current, "status_code", 0) or 0) or None
+            except (TypeError, ValueError):
+                status_code = None
+            if status_code is not None:
+                return status_code
+            pending.extend((current.__cause__, current.__context__))
+        return None
+
+    def _log_structured_output_failure(
+        self,
+        output_model: type[BaseModel],
+        failure_category: str | None,
+        error: BaseException,
+        *,
+        fallback_attempted: bool,
+    ) -> None:
+        """Record safe structured-output failure diagnostics without model content."""
+
+        logger.warning(
+            "Evaluation structured output failed provider=%s schema=%s category=%s status_code=%s "
+            "fallback_attempted=%s native_structured_output_available=%s",
+            self._evaluation_provider,
+            output_model.__name__,
+            failure_category or "unknown",
+            self._provider_status_code(error),
+            fallback_attempted,
+            self._native_structured_output_available,
+        )
+
+    @staticmethod
+    def _validated_evaluation_json(
+        value: Any,
+        output_model: type[BaseModel],
+        *,
+        allow_array: bool = False,
+    ) -> dict[str, Any]:
+        """Validate evaluation output through its canonical strict model."""
+
+        candidate = {"topics": value} if allow_array and isinstance(value, list) else value
+        return structured_output_dict(output_model.model_validate(candidate))
+
+    def _chat_invoke_evaluation_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        output_model: type[BaseModel],
+        *,
+        chat_model: Any | None = None,
+        allow_array: bool = False,
+    ) -> dict[str, Any]:
+        """Invoke strict output first, then repair one compatible JSON-text retry."""
+
+        if self._native_structured_output_available is False:
+            return self._chat_invoke_evaluation_json_fallback(
+                system_prompt,
+                user_prompt,
+                output_model,
+                chat_model=chat_model,
+                allow_array=allow_array,
+                reason="native_structured_output_cached_unavailable",
+            )
+
+        try:
+            structured = self._chat_invoke_structured(
+                system_prompt,
+                user_prompt,
+                output_model,
+                chat_model=chat_model,
+            )
+            return self._validated_evaluation_json(
+                structured,
+                output_model,
+                allow_array=allow_array,
+            )
+            self._native_structured_output_available = True
+            return structured
+        except Exception as error:
+            failure_category = self._structured_output_failure_category(error)
+            if self._provider_status_code(error) == 501:
+                self._native_structured_output_available = False
+            fallback_attempted = failure_category in {
+                "structured_output_unsupported",
+                "structured_output_invalid",
+            }
+            self._log_structured_output_failure(
+                output_model,
+                failure_category,
+                error,
+                fallback_attempted=fallback_attempted,
+            )
+            if not fallback_attempted:
+                raise
+            return self._chat_invoke_evaluation_json_fallback(
+                system_prompt,
+                user_prompt,
+                output_model,
+                chat_model=chat_model,
+                allow_array=allow_array,
+                reason=failure_category,
+            )
+
+    def _chat_invoke_evaluation_json_fallback(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        output_model: type[BaseModel],
+        *,
+        chat_model: Any | None,
+        allow_array: bool,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Make one strict, prompted-JSON compatibility attempt after native output is unavailable."""
+        try:
+            text = self._chat_invoke(system_prompt, user_prompt, chat_model=chat_model)
+            parsed = parse_json_response_with_metadata(text, require_object=not allow_array)
+            validated = self._validated_evaluation_json(
+                parsed.value,
+                output_model,
+                allow_array=allow_array,
+            )
+        except Exception as error:
+            self._log_structured_output_failure(
+                output_model,
+                f"{reason}_json_fallback_failed",
+                error,
+                fallback_attempted=True,
+            )
+            raise
+        logger.info(
+            "Evaluation structured output fallback accepted model=%s reason=%s extracted=%s repaired=%s",
+            output_model.__name__,
+            reason,
+            parsed.metadata.extracted,
+            parsed.metadata.repaired,
+        )
+        return validated
 
     def _synthesize_topics(
         self, parsed_trace: Any, context_summary: str = ""
@@ -2270,19 +2523,12 @@ class CyberAgentEvaluator:
                 'Output: ["contract analysis", "oracle manipulation", "reentrancy testing", "flash loan", "liquidation logic", "event monitoring"]'
             )
 
-            try:
-                topics = self._chat_invoke_structured(
-                    system_prompt,
-                    user_prompt,
-                    TopicsOutput,
-                )["topics"]
-            except Exception as error:
-                if not is_structured_output_unavailable(error):
-                    raise
-                text = self._chat_invoke(system_prompt, user_prompt)
-                if not text:
-                    return []
-                topics = json.loads(text)
+            topics = self._chat_invoke_evaluation_json(
+                system_prompt,
+                user_prompt,
+                TopicsOutput,
+                allow_array=True,
+            )["topics"]
             if isinstance(topics, list):
                 cleaned = []
                 for t in topics:

@@ -1,3 +1,5 @@
+import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -160,6 +162,8 @@ def evaluator(monkeypatch, cfg=None):
     ev._evaluation_step_index = 0
     ev._evaluation_step_total = 0
     ev._current_evaluation_scope = None
+    ev._evaluation_provider = "litellm"
+    ev._native_structured_output_available = None
     ev.evaluation_run_id = "run-123"
     return ev
 
@@ -824,7 +828,9 @@ def test_metric_category_and_chat_helpers(monkeypatch):
     assert ev._get_metric_category("unknown") == "general"
     assert ev._chat_invoke("sys", "user") == "a b"
 
-    ev._chat_model = SimpleNamespace(invoke=Mock(side_effect=[RuntimeError("typed"), SimpleNamespace(content="fallback")]))
+    ev._chat_model = SimpleNamespace(
+        invoke=Mock(side_effect=[RuntimeError("message list unsupported"), SimpleNamespace(content="fallback")])
+    )
     assert ev._chat_invoke("sys", "user") == "fallback"
 
 
@@ -1136,8 +1142,12 @@ def test_setup_models_supports_all_configured_providers(monkeypatch):
             return "us-east-1"
 
     class Model:
-        def __init__(self, **_kwargs):
+        instances = []
+
+        def __init__(self, **kwargs):
             self.callbacks = []
+            self.kwargs = kwargs
+            self.instances.append(self)
 
     monkeypatch.setattr(mod, "ChatOllama", Model)
     monkeypatch.setattr(mod, "OllamaEmbeddings", Model)
@@ -1159,6 +1169,14 @@ def test_setup_models_supports_all_configured_providers(monkeypatch):
         assert ev.llm is not None
         assert ev.embeddings is not None
         assert ev._chat_model.callbacks
+        if provider == "ollama":
+            assert ev._chat_model.kwargs["reasoning"] is False
+        elif provider == "gemini":
+            assert ev._chat_model.kwargs["thinking_budget"] == 0
+            assert ev._chat_model.kwargs["include_thoughts"] is False
+        else:
+            assert "reasoning_effort" not in ev._chat_model.kwargs
+            assert "effort" not in ev._chat_model.kwargs
 def test_trace_helpers_select_roles_and_objective(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.trace_parser = SimpleNamespace(_extract_objective=lambda trace: getattr(trace, "objective", ""))
@@ -1192,6 +1210,46 @@ def test_chat_invoke_handles_list_content_and_fallback(monkeypatch):
     assert ev._chat_invoke("system", "user") == "ok"
 
 
+def test_chat_invoke_does_not_retry_provider_failures(monkeypatch):
+    ev = evaluator(monkeypatch)
+    invoke = Mock(side_effect=mod.ollama.ResponseError("model unavailable", status_code=503))
+    ev._chat_model = SimpleNamespace(invoke=invoke)
+
+    with pytest.raises(mod.ollama.ResponseError, match="model unavailable"):
+        ev._chat_invoke("system", "user")
+
+    invoke.assert_called_once()
+
+
+def test_chat_invoke_normalizes_content_blocks_as_json_without_reasoning(monkeypatch):
+    ev = evaluator(monkeypatch)
+    response = SimpleNamespace(
+        content=[
+            {"type": "thinking", "thinking": "private reasoning"},
+            {"type": "text", "text": '{"caps": {}, "disable": []}'},
+        ]
+    )
+    invoke = Mock(return_value=response)
+    ev._chat_model = SimpleNamespace(invoke=invoke)
+
+    assert ev._chat_invoke("system", "user") == '{"caps": {}, "disable": []}'
+    invoke.assert_called_once()
+
+    ev._chat_model = SimpleNamespace(invoke=Mock(return_value=SimpleNamespace(content={"caps": {}, "disable": []})))
+    assert json.loads(ev._chat_invoke("system", "user")) == {"caps": {}, "disable": []}
+
+
+def test_chat_invoke_rejects_non_json_serializable_content_without_retry(monkeypatch):
+    ev = evaluator(monkeypatch)
+    invoke = Mock(return_value=SimpleNamespace(content=object()))
+    ev._chat_model = SimpleNamespace(invoke=invoke)
+
+    with pytest.raises(TypeError):
+        ev._chat_invoke("system", "user")
+
+    invoke.assert_called_once()
+
+
 def test_synthesize_context_summary_handles_config_failure_and_llm_failure(monkeypatch):
     ev = evaluator(monkeypatch)
     ev._chat_model = SimpleNamespace(invoke=Mock(side_effect=RuntimeError("offline")))
@@ -1207,7 +1265,168 @@ async def test_policy_structured_fallback_and_invalid_payload(monkeypatch):
     data = SimpleNamespace(user_input="objective", retrieved_contexts=[], reference_topics=[])
     assert await ev._infer_evaluation_policy(data) == {"caps": {}, "disable": []}
     ev._chat_invoke_structured = Mock(return_value=["invalid"])
+    ev._chat_invoke = Mock(return_value="not-json")
     assert await ev._infer_evaluation_policy(data) == {}
+
+
+def test_evaluation_json_fallback_repairs_and_validates_payload(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    ev._chat_invoke = Mock(
+        return_value='Result: ```json\n{"caps": {"evidence_quality": 0.7,}, "disable": [],}\n```'
+    )
+
+    result = ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+
+    assert result == {"caps": {"evidence_quality": 0.7}, "disable": []}
+    ev._chat_invoke.assert_called_once()
+
+
+def test_evaluation_json_retries_malformed_structured_output_once(monkeypatch):
+    ev = evaluator(monkeypatch)
+    output_parser_error = type("OutputParserException", (RuntimeError,), {})
+    ev._chat_invoke_structured = Mock(side_effect=output_parser_error("malformed"))
+    ev._chat_invoke = Mock(return_value='{"caps": {}, "disable": []}')
+
+    assert ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput) == {
+        "caps": {},
+        "disable": [],
+    }
+    ev._chat_invoke_structured.assert_called_once()
+    ev._chat_invoke.assert_called_once()
+
+
+def test_evaluation_json_retries_ollama_structured_format_response_error(monkeypatch, caplog):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_provider = "ollama"
+    error = mod.ollama.ResponseError("structured format contains sensitive response text", status_code=400)
+    ev._chat_invoke_structured = Mock(side_effect=error)
+    ev._chat_invoke = Mock(return_value='{"caps": {}, "disable": []}')
+
+    with caplog.at_level(logging.WARNING, logger="Evaluation.Evaluation"):
+        assert ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput) == {
+            "caps": {},
+            "disable": [],
+        }
+
+    ev._chat_invoke.assert_called_once()
+    assert "provider=ollama" in caplog.text
+    assert "schema=EvaluationPolicyOutput" in caplog.text
+    assert "category=structured_output_unsupported" in caplog.text
+    assert "status_code=400" in caplog.text
+    assert "fallback_attempted=True" in caplog.text
+    assert "native_structured_output_available=None" in caplog.text
+    assert "sensitive response text" not in caplog.text
+
+
+def test_evaluation_json_does_not_retry_ollama_transport_or_context_response_errors(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_provider = "ollama"
+
+    unavailable = mod.ollama.ResponseError("model is unavailable", status_code=503)
+    ev._chat_invoke_structured = Mock(side_effect=unavailable)
+    ev._chat_invoke = Mock()
+    with pytest.raises(mod.ollama.ResponseError, match="model is unavailable"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+    ev._chat_invoke.assert_not_called()
+
+    context_error = mod.ollama.ResponseError("prompt is longer than the context length", status_code=400)
+    ev._chat_invoke_structured = Mock(side_effect=context_error)
+    with pytest.raises(mod.ollama.ResponseError, match="context length"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+    ev._chat_invoke.assert_not_called()
+
+    invalid_request = mod.ollama.ResponseError("invalid request parameter", status_code=400)
+    ev._chat_invoke_structured = Mock(side_effect=invalid_request)
+    with pytest.raises(mod.ollama.ResponseError, match="invalid request"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+    ev._chat_invoke.assert_not_called()
+
+
+def test_evaluation_json_does_not_retry_non_ollama_response_error(monkeypatch):
+    ev = evaluator(monkeypatch)
+    response_error = type("ResponseError", (RuntimeError,), {})
+    error = response_error("structured format is not supported")
+    error.status_code = 400
+    ev._chat_invoke_structured = Mock(side_effect=error)
+    ev._chat_invoke = Mock()
+
+    with pytest.raises(RuntimeError, match="structured format"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+
+    ev._chat_invoke.assert_not_called()
+
+
+def test_evaluation_json_retries_generic_schema_bound_501_and_caches_unavailability(monkeypatch):
+    ev = evaluator(monkeypatch)
+    response_error = type("ProviderResponseError", (RuntimeError,), {})
+    unsupported = response_error("not implemented")
+    unsupported.status_code = 501
+    ev._chat_invoke_structured = Mock(side_effect=unsupported)
+    ev._chat_invoke = Mock(return_value='{"caps": {}, "disable": []}')
+
+    assert ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput) == {
+        "caps": {},
+        "disable": [],
+    }
+    assert ev._native_structured_output_available is False
+    ev._chat_invoke_structured.assert_called_once()
+
+    ev._chat_invoke_structured = Mock(side_effect=AssertionError("native output should be skipped"))
+    ev._chat_invoke.reset_mock()
+    assert ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput) == {
+        "caps": {},
+        "disable": [],
+    }
+    ev._chat_invoke_structured.assert_not_called()
+    ev._chat_invoke.assert_called_once()
+
+
+def test_evaluation_json_does_not_retry_501_from_prompted_json_fallback(monkeypatch):
+    ev = evaluator(monkeypatch)
+    response_error = type("ProviderResponseError", (RuntimeError,), {})
+    fallback_error = response_error("not implemented")
+    fallback_error.status_code = 501
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    ev._chat_invoke = Mock(side_effect=fallback_error)
+
+    with pytest.raises(RuntimeError, match="not implemented"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+
+    ev._chat_invoke.assert_called_once()
+
+
+def test_evaluation_json_does_not_retry_transport_or_invalid_repaired_payload(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_invoke_structured = Mock(side_effect=RuntimeError("connection failed"))
+    ev._chat_invoke = Mock()
+
+    with pytest.raises(RuntimeError, match="connection failed"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+    ev._chat_invoke.assert_not_called()
+
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    ev._chat_invoke = Mock(return_value='{"caps": {"evidence_quality": 2.0}, "unknown": true}')
+    with pytest.raises(Exception):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+
+
+def test_evaluation_json_topics_accept_repaired_array_and_rubric_uses_bound_model(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    bound_model = SimpleNamespace()
+    ev._chat_invoke = Mock(return_value='```json\n["reconnaissance", "injection testing",]\n```')
+
+    topics = ev._chat_invoke_evaluation_json(
+        "system",
+        "user",
+        mod.TopicsOutput,
+        chat_model=bound_model,
+        allow_array=True,
+    )
+
+    assert topics == {"topics": ["reconnaissance", "injection testing"]}
+    assert ev._chat_invoke.call_args.kwargs["chat_model"] is bound_model
 
 
 @pytest.mark.asyncio

@@ -130,6 +130,16 @@ Each announced metric or preparation stage emits one `evaluation_step_complete` 
 or `failed` status. Skipped and failed events include a short user-safe message. After an attempted evaluation,
 `evaluation_complete` carries finalized policy-adjusted scores, their average, and an overall status. Evaluation
 internals never emit synthetic `tool_start` or `tool_end` events; those remain reserved for actual agent tools.
+Auxiliary evaluator calls for reference topics, rubric judging, and score-policy calibration prefer provider-native
+structured output. When that protocol is unavailable or returns malformed structured data, the evaluator makes one
+plain-JSON compatibility retry, extracts and repairs one unambiguous JSON value, and validates it against the same
+strict output schema before using it. Provider transport failures and invalid or ambiguous repaired payloads remain
+failures; repaired model text is never written to evaluation events or logs. Evaluator models explicitly disable
+provider reasoning where supported, and text extraction omits reasoning-only blocks while serializing structured
+payloads as JSON rather than Python representations. A schema-bound HTTP 501 marks native structured output as
+unavailable for the evaluation replay, so later auxiliary calls use the prompted-JSON path directly. Ollama
+structured-format request errors are retried as prompted JSON only for compatible client errors; outages and
+context-window failures are not retried.
 After every evaluation model response with provider usage metadata, the evaluator publishes its cumulative usage into
 the operation-wide accounting. The existing `metrics_update` event then reports assessment, reporting, and evaluation
 tokens and cost as one running total; evaluation does not define a separate cost event. When an integration supplies
