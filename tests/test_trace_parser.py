@@ -177,6 +177,84 @@ def test_trace_parser_covers_reference_topics_and_tool_message_variants():
     assert failed is not None and failed.success is False
 
 
+def test_trace_parser_covers_metadata_context_and_finding_fallbacks():
+    parser = TraceParser()
+    trace = SimpleNamespace(
+        metadata={"attributes": {"operation.id": "OP1"}},
+        session_id="SESSION",
+        latency=12.5,
+        tokenUsage=SimpleNamespace(input=3, output=4, total=7),
+    )
+    assert parser._extract_metadata(trace) == {
+        "attributes": {"operation.id": "OP1"},
+        "session_id": "SESSION",
+        "operation_id": "OP1",
+        "latency_ms": 12.5,
+        "token_usage": {"input": 3, "output": 4, "total": 7},
+    }
+
+    parsed = ParsedTrace(
+        "t",
+        "Trace",
+        "Assess",
+        [],
+        [
+            ParsedToolCall("shell", {}, output="uid=1"),
+            ParsedToolCall("store_observation", {"content": "observed"}, output="saved"),
+            ParsedToolCall("memory_retrieve", {}, output="retrieved"),
+            ParsedToolCall(
+                "store_finding",
+                {"claim": {"issue": "x"}, "metadata": {"operation_id": "OP1", "severity": "high"}},
+                output=None,
+            ),
+            ParsedToolCall(
+                "store_finding",
+                {"claim": "old", "metadata": {"operation_id": "OLD"}},
+                output=None,
+            ),
+        ],
+        metadata={"operation_id": "OP1"},
+    )
+    assert parser._prepare_tool_contexts(parsed) == [
+        "[Shell Command Output] uid=1",
+        "[Memory Store] observed",
+        "[Memory Operation] retrieved",
+        "[Security Finding - high/unknown] {\"issue\": \"x\"}",
+    ]
+    assert parser._extract_memory_findings(parsed) == [
+        "[Retrieved Finding] retrieved",
+        "[Security Finding - high/unknown] {'issue': 'x'}",
+    ]
+    assert parser.count_current_evidence_findings(parsed) == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        ("memory_list", "[Memory Operation] output"),
+        ("http_request", "[HTTP Response] output"),
+        ("swarm", "[Swarm Agent] output"),
+        ("editor", "[editor] output"),
+    ],
+)
+def test_trace_parser_formats_special_and_generic_tool_contexts(tool_name, expected):
+    parser = TraceParser()
+    assert parser._format_tool_context(ParsedToolCall(tool_name, {}, output="output")) == expected
+
+
+@pytest.mark.asyncio
+async def test_trace_parser_single_turn_and_reference_topic_fallbacks():
+    parser = TraceParser()
+    tool_only = ParsedTrace("t", "T", "", [], [ParsedToolCall("shell", {}, output="id")])
+    sample = parser._create_single_turn_sample(tool_only)
+    assert sample.user_input == ""
+    assert sample.response == "Tool [shell]: id"
+
+    assistant = ParsedTrace("t", "T", "", [ParsedMessage("assistant", "answer")], [])
+    assert parser._create_single_turn_sample(assistant).response == "answer"
+    assert await parser._generate_reference_topics_from_trace(tool_only) == ["cybersecurity assessment"]
+
+
 def test_parse_messages_and_content_from_observations():
     parser = TraceParser()
     trace = SimpleNamespace(
@@ -284,7 +362,7 @@ def test_context_formatting_memory_findings_and_current_counts():
     assert "[Memory Store] SQL injection" in contexts
     assert "[HTTP Response] HTTP 500" in contexts
     assert "[Security Finding - unknown/unknown] SQL injection" in contexts
-    assert "[System] finding: exposed token" in contexts
+    assert not any(context.startswith("[System]") for context in contexts)
     assert parser.count_current_evidence_findings(trace) == 1
 
 
@@ -325,6 +403,28 @@ async def test_multi_turn_sample_adds_operation_summary_when_messages_are_sparse
     sample = await parser._create_multi_turn_sample(trace)
 
     assert any("Executed 1 operations" in message.content for message in sample.user_input)
+
+
+@pytest.mark.asyncio
+async def test_multi_turn_sample_uses_typed_ragas_messages_for_tool_execution():
+    parser = TraceParser()
+    trace = ParsedTrace(
+        trace_id="t",
+        trace_name="Trace",
+        objective="Assess target",
+        messages=[ParsedMessage("assistant", "Starting validation")],
+        tool_calls=[ParsedToolCall("shell", {"cmd": "id"}, output="uid=0")],
+    )
+
+    sample = await parser._create_multi_turn_sample(trace, generate_reference_topics=False)
+
+    assert sample.user_input[0].type == "human"
+    assert sample.user_input[1].type == "ai"
+    assert {message.type for message in sample.user_input} == {"human", "ai"}
+    execution = next(message for message in sample.user_input if "Tool execution: shell" in message.content)
+    assert "input: {\"cmd\":\"id\"}" in execution.content
+    assert "output: uid=0" in execution.content
+    sample.__class__(**sample.model_dump(include={"user_input"}))
 
 
 def test_parse_trace_returns_none_on_error_and_metadata_extraction():
@@ -386,6 +486,32 @@ async def test_sample_creation_and_topic_generation_fallbacks():
     multi = await parser._create_multi_turn_sample(multi_trace)
     assert multi.reference_topics == ["Assess auth"]
     assert len(multi.user_input) >= 3
+
+@pytest.mark.asyncio
+async def test_create_evaluation_sample_can_skip_trace_parser_topic_generation(monkeypatch):
+    parser = TraceParser()
+    trace = ParsedTrace(
+        trace_id="m",
+        trace_name="Multi",
+        objective="Assess auth",
+        messages=[ParsedMessage("user", "Objective: Assess auth")],
+        tool_calls=[
+            ParsedToolCall("shell", {"cmd": "id"}, output="uid=0"),
+            ParsedToolCall("http_request", {"url": "/"}, output="HTTP 200"),
+        ],
+    )
+    async def fail_topic_generation(_trace):
+        raise AssertionError("topic generation must be skipped")
+
+    monkeypatch.setattr(
+        parser,
+        "_generate_reference_topics_from_trace",
+        fail_topic_generation,
+    )
+
+    sample = await parser.create_evaluation_sample(trace, generate_reference_topics=False)
+
+    assert sample.reference_topics == []
 
 
 @pytest.mark.asyncio

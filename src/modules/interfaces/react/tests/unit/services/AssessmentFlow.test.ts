@@ -92,7 +92,7 @@ describe('AssessmentFlow', () => {
         expect(flow.getValidatedAssessmentParameters()?.objective).toBe('final objective');
     });
 
-    it('sets continue and report execution modes from ready state', () => {
+    it('sets continue, report, and evaluation execution modes from ready state', () => {
         const flow = new AssessmentFlow();
 
         flow.processUserInput('target example.com');
@@ -139,6 +139,18 @@ describe('AssessmentFlow', () => {
         expect(flow.getValidatedAssessmentParameters()).toEqual(expect.objectContaining({
             reportOnly: 'OP_20260320_101501',
         }));
+
+        expect(flow.processUserInput('evaluate OP_20260320_101501')).toEqual(expect.objectContaining({
+            success: true,
+            message: 'Evaluation replay requested OP_20260320_101501',
+            readyToExecute: true,
+        }));
+        expect(flow.getValidatedAssessmentParameters()).toEqual({
+            module: 'web',
+            target: 'example.com',
+            objective: 'initial objective',
+            evaluateOnly: 'OP_20260320_101501',
+        });
     });
 
     it('accepts reset-failed with interactive continue in either argument order', () => {
@@ -249,7 +261,7 @@ describe('AssessmentFlow', () => {
         });
     });
 
-    it('rejects continue and report without a target or with too many operation IDs', () => {
+    it('rejects continue, report, and evaluation without a target or with too many operation IDs', () => {
         const flow = new AssessmentFlow();
 
         expect(flow.processUserInput('continue')).toEqual(expect.objectContaining({
@@ -260,6 +272,10 @@ describe('AssessmentFlow', () => {
             success: false,
             error: 'Usage: target <target_specification>, then report [operation_id]',
         }));
+        expect(flow.processUserInput('evaluate')).toEqual(expect.objectContaining({
+            success: false,
+            error: 'Usage: target <target_specification>, then evaluate [operation_id]',
+        }));
 
         flow.processUserInput('target example.com');
         expect(flow.processUserInput('continue OP_ONE OP_TWO')).toEqual(expect.objectContaining({
@@ -269,6 +285,10 @@ describe('AssessmentFlow', () => {
         expect(flow.processUserInput('report OP_ONE OP_TWO')).toEqual(expect.objectContaining({
             success: false,
             error: 'Usage: report [operation_id]',
+        }));
+        expect(flow.processUserInput('evaluate OP_ONE OP_TWO')).toEqual(expect.objectContaining({
+            success: false,
+            error: 'Usage: evaluate [operation_id]',
         }));
     });
 

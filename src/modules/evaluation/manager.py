@@ -26,6 +26,119 @@ from .evaluation import CyberAgentEvaluator
 logger = get_logger("Evaluation.Manager")
 
 
+_GOAL_ACHIEVED_ACCEPTANCE_STATUSES = frozenset({"satisfied", "assessed_negative", "duplicate"})
+_GOAL_ARCHIVED_TASK_STATUSES = frozenset({"replanned", "superseded"})
+_RAGAS_DIAGNOSTIC_PATH = "/diagnostic/ragas/"
+
+
+def _goal_value(value: Any, name: str, default: Any = None) -> Any:
+    """Read one field from either a persisted model or a serialized test value."""
+
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def build_goal_contract_facts(
+    plan: Any,
+    tasks: list[Any],
+    acceptance_results_by_task: dict[str, list[Any]],
+) -> dict[str, Any]:
+    """Build controller-owned, evidence-backed goal-attainment facts for evaluation.
+
+    One outcome criterion, or one frozen coverage inventory item, is one goal
+    unit. Archived work is not current operation scope. A unit is achieved only
+    when its owning task is done and its immutable acceptance ledger records a
+    successful or valid-negative terminal result.
+    """
+
+    achieved_units = 0
+    applicable_units = 0
+    excluded_units = 0
+    eligible_task_count = 0
+    unachieved_reasons: dict[str, int] = {}
+
+    def record_unit(result: Any, task_status: str) -> None:
+        nonlocal achieved_units, applicable_units, excluded_units
+        result_status = str(_goal_value(result, "status", "")).strip()
+        if result_status == "excluded":
+            excluded_units += 1
+            return
+        applicable_units += 1
+        if task_status != "done":
+            reason = f"task_status:{task_status or 'unknown'}"
+        elif result is None:
+            reason = "missing_acceptance_result"
+        elif result_status in _GOAL_ACHIEVED_ACCEPTANCE_STATUSES:
+            achieved_units += 1
+            return
+        elif result_status == "inaccessible":
+            reason = "inaccessible"
+        else:
+            reason = f"acceptance_status:{result_status or 'missing'}"
+        unachieved_reasons[reason] = unachieved_reasons.get(reason, 0) + 1
+
+    for task in tasks:
+        task_status = str(_goal_value(task, "status", "")).strip()
+        if task_status in _GOAL_ARCHIVED_TASK_STATUSES:
+            continue
+        eligible_task_count += 1
+        task_uid = str(_goal_value(task, "task_uid", "")).strip()
+        results = acceptance_results_by_task.get(task_uid, [])
+        results_by_criterion = {
+            str(_goal_value(result, "criterion_id", "")).strip(): result
+            for result in results
+        }
+        acceptance = _goal_value(task, "acceptance")
+        mode = str(_goal_value(acceptance, "mode", "")).strip()
+        if mode == "coverage":
+            basis = _goal_value(acceptance, "basis")
+            item_ids = _goal_value(basis, "item_ids", ()) or ()
+            coverage_by_item = {
+                str(_goal_value(item, "item_id", "")).strip(): item
+                for result in results
+                for item in (_goal_value(result, "coverage", ()) or ())
+            }
+            for item_id in item_ids:
+                record_unit(coverage_by_item.get(str(item_id).strip()), task_status)
+            continue
+
+        for criterion in _goal_value(acceptance, "criteria", ()) or ():
+            criterion_id = str(_goal_value(criterion, "id", "")).strip()
+            record_unit(results_by_criterion.get(criterion_id), task_status)
+
+    assessment_complete = bool(_goal_value(plan, "assessment_complete", False))
+    return {
+        "assessment_complete": assessment_complete,
+        "goal_contract_attainment": {
+            "version": 1,
+            "achieved_units": achieved_units,
+            "applicable_units": applicable_units,
+            "excluded_units": excluded_units,
+            "eligible_task_count": eligible_task_count,
+            "unachieved_reasons": dict(sorted(unachieved_reasons.items())),
+            "assessment_complete": assessment_complete,
+        }
+    }
+
+
+def public_score_averages(scores: dict[str, float]) -> dict[str, float | None]:
+    """Return public-only score averages for the stable operation and report scopes."""
+
+    averages: dict[str, float | None] = {}
+    for scope in ("operation", "report"):
+        values = [
+            float(value)
+            for name, value in scores.items()
+            if name.startswith(f"{scope}/")
+            and _RAGAS_DIAGNOSTIC_PATH not in name
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        ]
+        averages[f"{scope}_average_score"] = sum(values) / len(values) if values else None
+    return averages
+
+
 class TraceType(Enum):
     """Types of traces that can be evaluated."""
 
@@ -57,8 +170,11 @@ class EvaluationManager:
         operation_id: str,
         emitter: EventEmitter | None = None,
         report_path: str | None = None,
+        operation_objective: str | None = None,
         usage_callback: Callable[[dict[str, Any]], None] | None = None,
         progress_callback: Callable[[], None] | None = None,
+        finding_records: list[dict[str, Any]] | None = None,
+        operation_facts: dict[str, Any] | None = None,
     ):
         """
         Initialize the evaluation manager.
@@ -68,6 +184,9 @@ class EvaluationManager:
         """
         self.operation_id = operation_id
         self.report_path = report_path
+        self.operation_objective = operation_objective
+        self.finding_records = list(finding_records or [])
+        self.operation_facts = dict(operation_facts or {})
         self.traces: dict[str, TraceInfo] = {}
         self.evaluator: CyberAgentEvaluator | None = None
         self._lock = threading.Lock()
@@ -76,6 +195,9 @@ class EvaluationManager:
         self._emitter = emitter or get_emitter(operation_id=operation_id)
         self._usage_callback = usage_callback
         self._progress_callback = progress_callback
+        self.last_failed_metrics: dict[str, str] = {}
+        self.last_skipped_metrics: set[str] = set()
+        self.last_scope_errors: dict[str, str] = {}
 
     def register_trace(
         self,
@@ -146,12 +268,18 @@ class EvaluationManager:
         """
         # Initialize evaluator if not already done
         if not self.evaluator:
-            self.evaluator = CyberAgentEvaluator(
-                emitter=self._emitter,
-                report_path=self.report_path,
-                usage_callback=self._usage_callback,
-                progress_callback=self._progress_callback,
-            )
+            evaluator_kwargs = {
+                "emitter": self._emitter,
+                "report_path": self.report_path,
+                "finding_records": self.finding_records,
+                "usage_callback": self._usage_callback,
+                "progress_callback": self._progress_callback,
+            }
+            if self.operation_objective:
+                evaluator_kwargs["operation_objective"] = self.operation_objective
+            if self.operation_facts:
+                evaluator_kwargs["operation_facts"] = self.operation_facts
+            self.evaluator = CyberAgentEvaluator(**evaluator_kwargs)
 
         results = {}
         unevaluated = self.get_unevaluated_traces()
@@ -182,6 +310,10 @@ class EvaluationManager:
                     value = value[0]
                 if isinstance(value, (int, float)):
                     numeric_scores[key] = float(value)
+
+            self.last_failed_metrics = dict(getattr(self.evaluator, "last_failed_metrics", {}))
+            self.last_skipped_metrics = set(getattr(self.evaluator, "last_skipped_metrics", set()))
+            self.last_scope_errors = dict(getattr(self.evaluator, "last_scope_errors", {}))
 
             if numeric_scores:
                 with self._lock:

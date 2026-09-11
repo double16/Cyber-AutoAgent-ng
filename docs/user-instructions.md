@@ -43,7 +43,7 @@ options include:
 | `--auto-approve` | Skip interactive tool confirmations |
 | `--memory-mode` | `operation` (current operation only) or `shared` (same target across operations) |
 | `--provider` / `--model` / `--region` | Model configuration |
-| `--continue` / `--report` | Continue or regenerate the latest operation, optionally by ID |
+| `--continue` / `--report` / `--evaluate` | Continue, regenerate a report, or re-run evaluation for the latest operation, optionally by ID |
 | `--reset-failed` | With `--continue`, retry all partial-failure and blocked tasks and phases |
 | `--reset-phases` | With `--continue`, archive selected phase tasks and propose fresh work; accepts `3,5-` style selectors |
 | `--deployment-mode` | `local-cli`, `single-container`, or `full-stack` |
@@ -81,7 +81,7 @@ default is `web`; its provider choices are `bedrock`, `ollama`, `litellm`, and `
 | `--confirmations` | Enable confirmation prompts |
 | `--memory-path` / `--memory-mode` / `--keep-memory` | Memory configuration |
 | `--output-dir` | Output directory override |
-| `--continue` / `--report` | Continue or regenerate an operation |
+| `--continue` / `--report` / `--evaluate` | Continue, regenerate a report, or re-run evaluation for an operation |
 | `--reset-failed` | With `--continue`, reset partial-failure and blocked work before retrying the operation |
 | `--reset-phases SELECTOR` | With `--continue`, archive selected phase work and create fresh task proposals |
 | `--eval-rubric` | Enable evaluation with the selected rubric |
@@ -90,6 +90,21 @@ default is `web`; its provider choices are `bedrock`, `ollama`, `litellm`, and `
 | `--verbose` / `--heap-monitor` | Diagnostics |
 
 The Python parser does not provide the React short aliases for these options.
+
+### Re-running evaluation
+
+Re-run Ragas evaluation without executing targets or regenerating the report. The evaluator uses the exact
+operation ID's Langfuse session; omitting the ID selects the latest operation for the target.
+
+```bash
+uv run python src/cyberautoagent.py --target example.com --objective "via environment" --evaluate
+uv run python src/cyberautoagent.py --target example.com --objective "via environment" \
+  --evaluate OP_20260904_120000
+```
+
+In the React terminal, use `evaluate` or `evaluate OP_20260904_120000`. Evaluation input is automatically bounded
+from the configured evaluator model's context window; failed metric calls are reported as failures and are not
+recorded as zero scores.
 
 ### Retrying failed work
 

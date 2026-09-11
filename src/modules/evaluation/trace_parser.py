@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ragas.dataset_schema import MultiTurnSample, SingleTurnSample
+from ragas.messages import AIMessage, HumanMessage
 
 from modules.config.system.logger import get_logger
 
@@ -39,6 +40,18 @@ class ParsedToolCall:
     output: str | None = None
     success: bool = True
     timestamp: float | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationContextItem:
+    """Typed, operation-scoped context available to evaluator payload compaction."""
+
+    content: str
+    source_tool: str
+    source_category: str
+    sequence: int
+    operation_id: str | None
+    is_current_finding: bool = False
 
 
 @dataclass
@@ -729,7 +742,10 @@ class TraceParser:
         return metadata
 
     async def create_evaluation_sample(
-        self, parsed_trace: ParsedTrace
+        self,
+        parsed_trace: ParsedTrace,
+        *,
+        generate_reference_topics: bool = True,
     ) -> SingleTurnSample | MultiTurnSample:
         """
         Create appropriate Ragas evaluation sample from parsed trace.
@@ -741,7 +757,10 @@ class TraceParser:
             SingleTurnSample or MultiTurnSample for evaluation
         """
         if parsed_trace.is_multi_turn:
-            return await self._create_multi_turn_sample(parsed_trace)
+            return await self._create_multi_turn_sample(
+                parsed_trace,
+                generate_reference_topics=generate_reference_topics,
+            )
         else:
             return self._create_single_turn_sample(parsed_trace)
 
@@ -754,24 +773,64 @@ class TraceParser:
         Returns:
             List of formatted context strings from tool outputs
         """
-        contexts = []
+        return [item.content for item in self._prepare_tool_context_items(parsed_trace)]
+
+    def _prepare_tool_context_items(self, parsed_trace: ParsedTrace) -> list[EvaluationContextItem]:
+        """Return evaluation contexts with structured provenance for deterministic filtering."""
+
+        contexts: list[EvaluationContextItem] = []
+        current_operation_id = None
+        if isinstance(parsed_trace.metadata, dict):
+            current_operation_id = parsed_trace.metadata.get("operation_id") or parsed_trace.metadata.get("session_id")
 
         # Extract tool outputs with clear formatting
-        for tool in parsed_trace.tool_calls:
+        for sequence, tool in enumerate(parsed_trace.tool_calls):
             if tool.output and str(tool.output).strip() not in ["", "None"]:
-                # Format tool context for better evaluation
                 tool_context = self._format_tool_context(tool)
                 if tool_context:
-                    contexts.append(tool_context)
+                    metadata = tool.input_data.get("metadata", {}) if isinstance(tool.input_data, dict) else {}
+                    operation_id = metadata.get("operation_id") if isinstance(metadata, dict) else None
+                    contexts.append(
+                        EvaluationContextItem(
+                            content=tool_context,
+                            source_tool=tool.name,
+                            source_category="tool_output",
+                            sequence=sequence,
+                            operation_id=operation_id,
+                            is_current_finding=False,
+                        )
+                    )
 
         # Extract memory-stored findings
-        memory_findings = self._extract_memory_findings(parsed_trace)
-        contexts.extend(memory_findings)
-
-        # Include significant system messages
-        for msg in parsed_trace.messages:
-            if msg.role == "system" and "finding" in msg.content.lower():
-                contexts.append(f"[System] {msg.content[:300]}")
+        for sequence, tool in enumerate(parsed_trace.tool_calls):
+            if tool.name != "store_finding" or not isinstance(tool.input_data, dict):
+                continue
+            metadata = tool.input_data.get("metadata", {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            operation_id = metadata.get("operation_id")
+            same_operation = not operation_id or not current_operation_id or operation_id == current_operation_id
+            content = tool.input_data.get("claim") or tool.input_data.get("content") or ""
+            if content and same_operation:
+                if isinstance(content, str):
+                    rendered_content = content
+                else:
+                    try:
+                        rendered_content = json.dumps(content, ensure_ascii=False)
+                    except (TypeError, ValueError):
+                        rendered_content = "[unserializable]"
+                contexts.append(
+                    EvaluationContextItem(
+                        content=(
+                            f"[Security Finding - {metadata.get('severity', 'unknown')}/"
+                            f"{metadata.get('category', 'unknown')}] {rendered_content[:500]}"
+                        ),
+                        source_tool=tool.name,
+                        source_category="finding",
+                        sequence=sequence,
+                        operation_id=operation_id or current_operation_id,
+                        is_current_finding=True,
+                    )
+                )
 
         return contexts
 
@@ -1091,36 +1150,68 @@ Return a JSON list of topic strings that represent the key areas this assessment
             )
 
     async def _create_multi_turn_sample(
-        self, parsed_trace: ParsedTrace
+        self,
+        parsed_trace: ParsedTrace,
+        *,
+        generate_reference_topics: bool = True,
     ) -> MultiTurnSample:
         """Create a MultiTurnSample for complex conversation evaluations."""
-        # Convert messages to conversation format
-        conversation = []
+        # Ragas models multi-turn conversations as typed messages.  Passing
+        # application ``role`` dictionaries is unsafe: Pydantic accepts them
+        # but silently coerces every item to the first union member
+        # (``HumanMessage``), which destroys the conversation semantics.
+        conversation: list[HumanMessage | AIMessage] = []
 
         # Ensure we have the objective as context
         if parsed_trace.objective:
-            conversation.append(
-                {"role": "user", "content": f"Objective: {parsed_trace.objective}"}
-            )
+            conversation.append(HumanMessage(content=f"Objective: {parsed_trace.objective}"))
 
         # Add all messages
         for msg in parsed_trace.messages:
             # Skip duplicate objective messages
             if msg.metadata.get("source") == "objective" and len(conversation) > 0:
                 continue
-            conversation.append({"role": msg.role, "content": msg.content})
+            role = msg.role.lower()
+            if role == "assistant":
+                conversation.append(AIMessage(content=msg.content))
+            elif role == "tool":
+                conversation.append(AIMessage(content=f"Observed tool result:\n{msg.content}"))
+            else:
+                # System, user, and unknown source roles are controller context,
+                # not model answers.  Ragas has no SystemMessage type.
+                conversation.append(HumanMessage(content=msg.content))
 
-        # Interleave tool outputs chronologically if possible
-        tool_messages = []
-        for tool in parsed_trace.tool_calls:
+        # Ragas metrics project samples down to their required fields before
+        # re-validating them. That projection drops AI tool_calls for several
+        # metrics while retaining ToolMessage values, producing orphaned tool
+        # results. Use typed AI execution narratives so every projection stays
+        # valid while the canonical evaluator ledger retains structured detail.
+        tool_messages: list[AIMessage] = []
+        for index, tool in enumerate(parsed_trace.tool_calls):
             if tool.output:
-                output_str = str(tool.output).strip()
+                output_str = tool.output.strip()
                 if output_str and output_str != "None":
-                    # Include more context for evaluation
-                    content = f"Tool [{tool.name}]: {output_str[:400]}"
-                    tool_messages.append({"role": "system", "content": content})
+                    try:
+                        input_text = json.dumps(
+                            tool.input_data,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    except (TypeError, ValueError):
+                        input_text = '{"unserializable":true}'
+                    tool_messages.append(
+                        AIMessage(
+                            content=(
+                                f"Tool execution: {tool.name}\n"
+                                f"success: {json.dumps(bool(tool.success))}\n"
+                                f"input: {input_text[:240]}\n"
+                                f"output: {output_str[:400]}"
+                            ),
+                            metadata={"evaluation_tool_index": index, "tool_name": tool.name},
+                        )
+                    )
 
-        # Add tool messages to conversation
+        # Add bounded execution narratives to the conversation.
         conversation.extend(tool_messages[:10])  # Limit to prevent overwhelming
 
         # Ensure we have substantive content
@@ -1129,10 +1220,12 @@ Return a JSON list of topic strings that represent the key areas this assessment
             if parsed_trace.tool_calls:
                 tools_used = list({t.name for t in parsed_trace.tool_calls})
                 conversation.append(
-                    {
-                        "role": "assistant",
-                        "content": f"Executed {len(parsed_trace.tool_calls)} operations using {len(tools_used)} distinct tools",
-                    }
+                    AIMessage(
+                        content=(
+                            f"Executed {len(parsed_trace.tool_calls)} operations using "
+                            f"{len(tools_used)} distinct tools"
+                        )
+                    )
                 )
 
         logger.debug(
@@ -1142,8 +1235,10 @@ Return a JSON list of topic strings that represent the key areas this assessment
         )
 
         # Generate reference topics based on objective and tool usage
-        reference_topics = await self._generate_reference_topics_from_trace(
-            parsed_trace
+        reference_topics = (
+            await self._generate_reference_topics_from_trace(parsed_trace)
+            if generate_reference_topics
+            else []
         )
 
         return MultiTurnSample(

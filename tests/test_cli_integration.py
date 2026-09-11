@@ -112,7 +112,84 @@ def test_restore_continuation_state_returns_current_objective_when_not_requested
     )
     assert objective == "current objective"
     assert restored is None
-    logger.warning.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("scores_by_scope", "failed_metrics", "scope_errors", "expected_success", "expected_status"),
+    [
+        ({"OP_TEST": {"operation/faithfulness": 0.8}}, {}, {}, True, "completed"),
+        (
+            {"OP_TEST": {"operation/faithfulness": 0.8}},
+            {"operation/context_precision": "context window exceeded"},
+            {},
+            False,
+            "partial_failure",
+        ),
+        ({}, {}, {"operation": "sample preparation failed"}, False, "failed"),
+    ],
+)
+def test_rerun_operation_evaluation_uses_persisted_objective_and_reports_failures(
+    monkeypatch,
+    tmp_path,
+    scores_by_scope,
+    failed_metrics,
+    scope_errors,
+    expected_success,
+    expected_status,
+):
+    emitted = []
+    captured = {}
+
+    class FakeEvaluationManager:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.last_failed_metrics = failed_metrics
+            self.last_skipped_metrics = {"operation/unsupported"}
+            self.last_scope_errors = scope_errors
+
+        def register_trace(self, **kwargs):
+            captured["trace"] = kwargs
+
+        async def evaluate_all_traces(self):
+            return scores_by_scope
+
+    monkeypatch.setattr(
+        cyberautoagent,
+        "create_application_store",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            get_plan=lambda _operation_id: SimpleNamespace(
+                objective="Persisted operation objective", assessment_complete=False
+            ),
+            get_tasks=lambda _operation_id: [],
+            get_acceptance_results=lambda _operation_id, _task_uid: [],
+            list_findings=lambda _operation_id: [{"finding_uid": "verified", "resolution": "verified"}],
+        ),
+    )
+    monkeypatch.setattr(cyberautoagent, "get_application_database_path", lambda _config: str(tmp_path / "state.db"))
+    monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FakeEvaluationManager)
+
+    success = cyberautoagent.rerun_operation_evaluation(
+        output_dir=str(tmp_path),
+        logical_target="example.test",
+        operation_id="OP_TEST",
+        emitter=SimpleNamespace(emit=emitted.append),
+        logger=Mock(),
+    )
+
+    assert success is expected_success
+    assert captured["operation_objective"] == "Persisted operation objective"
+    assert captured["finding_records"] == [{"finding_uid": "verified", "resolution": "verified"}]
+    assert captured["operation_facts"]["goal_contract_attainment"]["applicable_units"] == 0
+    assert captured["trace"]["session_id"] == "OP_TEST"
+    assert emitted[-1]["status"] == expected_status
+    assert emitted[-1]["scores"] == (
+        {"operation/faithfulness": 0.8} if scores_by_scope else {}
+    )
+    assert emitted[-1]["average_score"] == (0.8 if scores_by_scope else None)
+    assert emitted[-1]["report_average_score"] is None
+    assert emitted[-1]["failed_metrics"] == failed_metrics
+    assert emitted[-1]["scope_errors"] == scope_errors
+    assert emitted[-1]["metrics_skipped"] == 1
 
 
 def test_restore_continuation_state_warns_when_database_missing(tmp_path):
@@ -160,6 +237,20 @@ def test_reset_continuation_failed_work_resets_persisted_operation(tmp_path):
     assert reset.phases[0].status == "active"
 
 
+def test_reset_continuation_failed_work_handles_empty_reset(monkeypatch, tmp_path):
+    store = SimpleNamespace(reset_failed_work=Mock(return_value=(SimpleNamespace(), 0, 0)))
+    monkeypatch.setattr(cyberautoagent, "create_application_store", lambda *args, **kwargs: store)
+
+    logger = Mock()
+    assert cyberautoagent.reset_continuation_failed_work(
+        output_dir=str(tmp_path),
+        logical_target="logical",
+        operation_id="OP_EMPTY",
+        logger=logger,
+    ) == (0, 0)
+    logger.info.assert_called_once_with("No failed work to reset for continuation %s", "OP_EMPTY")
+
+
 def test_parse_continuation_phase_selector_supports_ids_and_ranges():
     assert cyberautoagent.parse_continuation_phase_selector("1,3-4,6-", [1, 2, 3, 4, 5, 6, 7]) == (
         1,
@@ -168,6 +259,27 @@ def test_parse_continuation_phase_selector_supports_ids_and_ranges():
         6,
         7,
     )
+
+
+def test_parse_continuation_phase_selector_rejects_empty_plan_and_unknown_phase():
+    with pytest.raises(ValueError, match="no phases"):
+        cyberautoagent.parse_continuation_phase_selector("1", [])
+    with pytest.raises(ValueError, match="Unknown plan phase IDs"):
+        cyberautoagent.parse_continuation_phase_selector("4", [1, 2, 3])
+
+
+def test_reset_continuation_phases_rejects_missing_plan(monkeypatch, tmp_path):
+    store = SimpleNamespace(get_plan=Mock(return_value=None))
+    monkeypatch.setattr(cyberautoagent, "create_application_store", lambda *args, **kwargs: store)
+
+    with pytest.raises(ValueError, match="Unknown operation plan"):
+        cyberautoagent.reset_continuation_phases(
+            output_dir=str(tmp_path),
+            logical_target="logical",
+            operation_id="OP_MISSING",
+            phase_selector="1",
+            logger=Mock(),
+        )
 
 
 @pytest.mark.parametrize("selector", ["", "0", "3-1", "1,,2", "unknown", "8-"])
@@ -455,6 +567,72 @@ def test_cli_metrics_and_workflow_summary_cover_empty_state_and_task_failures(mo
     ]
     assert cyberautoagent._workflow_coverage_summary(None) == []
     assert cyberautoagent._workflow_coverage_summary(SimpleNamespace(phases="invalid")) == []
+
+
+def test_target_preflight_emits_success_and_failure_results(monkeypatch):
+    success = cyberautoagent.TargetValidationResult(
+        target_id="target-1", target="example.test", target_type="web", status="pass", checks=("dns",)
+    )
+    failure = cyberautoagent.TargetValidationResult(
+        target_id="target-2", target="bad.test", target_type="web", status="fail", checks=(), reason="unreachable"
+    )
+    emitter = Mock()
+    logger = SimpleNamespace(info=Mock(), error=Mock())
+    monkeypatch.setattr(cyberautoagent, "validate_operation_targets", Mock(return_value=[success, failure]))
+
+    targets, results = ORIGINAL_RUN_TARGET_PREFLIGHT(
+        logical_target="example.test",
+        objective="Assess",
+        operation_id="OP1",
+        logger=logger,
+        emitter=emitter,
+        targets=[SimpleNamespace(target="example.test")],
+    )
+
+    assert len(targets) == 1
+    assert results == [success, failure]
+    assert emitter.emit.call_count == 2
+    logger.info.assert_called_once()
+    logger.error.assert_called_once()
+
+
+def test_assistant_text_skips_tool_calls_and_malformed_content():
+    messages = [
+        {"role": "assistant", "content": [{"toolUse": {"name": "shell"}}]},
+        {"role": "assistant", "content": "not blocks"},
+        {"role": "assistant", "content": [{"text": "  final answer  "}]},
+    ]
+    assert cyberautoagent.extract_last_assistant_text(messages) == "final answer"
+    assert cyberautoagent.extract_last_assistant_text(None) == ""
+
+
+def test_signal_and_assistant_fallback_branches(capsys):
+    with pytest.raises(KeyboardInterrupt):
+        cyberautoagent.signal_handler(cyberautoagent.signal.SIGTSTP, None)
+    assert "SIGTSTP" in capsys.readouterr().out
+    cyberautoagent.interrupted = False
+    assert cyberautoagent.extract_last_assistant_text(
+        [{"role": "assistant", "content": "plain text"}]
+    ) == ""
+
+
+def test_terminal_policy_covers_successful_tools_and_text_limit():
+    handler = SimpleNamespace(
+        tool_counts={"scan": 1},
+        tool_outcome_journal=SimpleNamespace(
+            since=lambda _baseline: [SimpleNamespace(tool_name="scan", success=True)]
+        ),
+    )
+    policy = cyberautoagent.AgentRunPolicy(
+        min_tool_calls=1,
+        required_tool_names={"scan"},
+        terminal_after_required_tools=True,
+        allow_text_final_after_tools=True,
+        max_actionless_after_tools=2,
+    )
+    assert cyberautoagent._successful_required_tools_satisfied(handler, policy, 0) is True
+    assert cyberautoagent._run_policy_allows_terminal_text(handler, policy, 2) is False
+    assert cyberautoagent._run_policy_allows_terminal_text(handler, policy, 3) is True
 
 
 def test_cli_workflow_coverage_summary_excludes_replanned_tasks(monkeypatch):

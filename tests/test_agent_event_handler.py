@@ -1758,12 +1758,16 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
             operation_id,
             emitter,
             report_path=None,
+            finding_records=None,
+            operation_facts=None,
             usage_callback=None,
             progress_callback=None,
         ):
             self.operation_id = operation_id
             self.emitter = emitter
             self.report_path = report_path
+            self.finding_records = finding_records
+            self.operation_facts = operation_facts
             self.usage_callback = usage_callback
             self.progress_callback = progress_callback
 
@@ -1813,6 +1817,21 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     assert no_results["status"] == "no_results"
     assert no_results["success"] is False
 
+    class ScopeFailedEvaluationManager(FakeEvaluationManager):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.last_scope_errors = {"operation": "sample preparation failed"}
+
+        async def evaluate_all_traces(self):
+            return {}
+
+    handler = make_handler()
+    monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", ScopeFailedEvaluationManager)
+    handler.trigger_evaluation_on_completion()
+    scope_failed = handler._events[event_types(handler).index("evaluation_complete")]
+    assert scope_failed["status"] == "failed"
+    assert scope_failed["scope_errors"] == {"operation": "sample preparation failed"}
+
     class FailedEvaluationManager(FakeEvaluationManager):
         async def evaluate_all_traces(self):
             raise RuntimeError("provider unavailable")
@@ -1832,6 +1851,50 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     assert handler.has_reached_limit() is True
     summary = handler.get_summary()
     assert isinstance(summary.get("duration"), str)
+
+
+def test_live_evaluation_builds_goal_contract_facts(monkeypatch):
+    handler = make_handler()
+    monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
+    monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
+    contract = SimpleNamespace(
+        mode="outcome",
+        basis=SimpleNamespace(item_ids=()),
+        criteria=[SimpleNamespace(id="criterion")],
+    )
+    task = SimpleNamespace(task_uid="task-1", status="done", acceptance=contract)
+    memory_client = SimpleNamespace(
+        list_finding_records=lambda **_kwargs: [],
+        get_plan=lambda _operation_id: SimpleNamespace(assessment_complete=False),
+        list_tasks=lambda **_kwargs: [task],
+        list_task_acceptance_results=lambda *_args, **_kwargs: [
+            SimpleNamespace(criterion_id="criterion", status="assessed_negative", coverage=())
+        ],
+    )
+    captured = {}
+
+    class FakeEvaluationManager:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.last_failed_metrics = {}
+            self.last_skipped_metrics = set()
+            self.last_scope_errors = {}
+
+        def register_trace(self, **_kwargs):
+            pass
+
+        async def evaluate_all_traces(self):
+            return {"OP_TEST": {"operation/penetration_test_goal_accuracy": 1.0}}
+
+    monkeypatch.setattr("modules.handlers.react.agent_event_handler.get_memory_client", lambda: memory_client)
+    monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FakeEvaluationManager)
+
+    handler.trigger_evaluation_on_completion()
+
+    facts = captured["operation_facts"]["goal_contract_attainment"]
+    assert facts["achieved_units"] == 1
+    assert facts["applicable_units"] == 1
+    assert captured["operation_facts"]["assessment_complete"] is False
 
 
 def test_evaluation_result_status_aliases_are_canonical():
