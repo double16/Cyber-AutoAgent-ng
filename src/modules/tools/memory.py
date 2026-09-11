@@ -1908,7 +1908,7 @@ class SQLiteApplicationStore:
                     status,
                     status_actor,
                     "Credential stored",
-                    "[]",
+                    json.dumps(record.get("initial_status_evidence_refs") or []),
                     now,
                 ),
             )

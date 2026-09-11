@@ -13130,7 +13130,9 @@ def test_task_prompt_builder_and_fallback_preserve_credential_execution_rules():
 
     for prompt in (builder_prompt, fallback_prompt, executor_contract):
         assert "establish the unauthenticated baseline" in prompt
-        assert "store_credential(origin=\"registered\")" in prompt
+        assert "store_credential(origin=\"registered\", evidence_refs=[...])" in prompt
+        assert "Never replace a\n  user-provided credential" in prompt
+        assert "definitive authentication\n  outcome" in prompt
         assert "plan_access_control_comparisons" in prompt
         assert "never invent an account" in prompt
 

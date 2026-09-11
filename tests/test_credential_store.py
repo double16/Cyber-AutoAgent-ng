@@ -527,17 +527,31 @@ def test_operation_managed_credential_rotation_preserves_retired_history(tmp_pat
     )
     checkout_credential(original["credential_id"], "rotate expired API key")
 
+    with pytest.raises(ValueError, match="durable evidence"):
+        rotate_credential(
+            original["credential_id"],
+            {"api_key": "new-key", "placement": "header", "name": "X-API-Key"},
+            "rotated after expiry",
+        )
     result = json.loads(
         rotate_credential(
             original["credential_id"],
             {"api_key": "new-key", "placement": "header", "name": "X-API-Key"},
             "rotated after expiry",
+            evidence_refs=["artifact:artifacts/credential-rotation.txt"],
         )
     )
 
     assert store.get_credential(original["credential_id"])["status"] == "retired"
     assert result["credential"]["supersedes_credential_id"] == original["credential_id"]
     assert store.get_credential(result["credential"]["credential_id"], include_payload=True)["payload"]["api_key"] == "new-key"
+    with sqlite3.connect(tmp_path / "credentials.db") as connection:
+        events = connection.execute(
+            "SELECT status, evidence_refs FROM credential_status_events WHERE credential_id IN (?, ?) ORDER BY created_at",
+            (original["credential_id"], result["credential"]["credential_id"]),
+        ).fetchall()
+    assert ("retired", '["artifact:artifacts/credential-rotation.txt"]') in events
+    assert ("unknown", '["artifact:artifacts/credential-rotation.txt"]') in events
 
 
 def test_rotation_rejects_user_provided_credentials(tmp_path, monkeypatch):
@@ -559,6 +573,7 @@ def test_rotation_rejects_user_provided_credentials(tmp_path, monkeypatch):
             credential["credential_id"],
             {"api_key": "new-key", "placement": "header", "name": "X-API-Key"},
             "try agent rotation",
+            evidence_refs=["artifact:artifacts/credential-rotation.txt"],
         )
 
 
@@ -730,19 +745,89 @@ def test_agent_credential_store_query_and_status_tools_are_safe(tmp_path, monkey
             origin="provided",
         )
     _store_active_target_task(store)
-    stored = json.loads(
+    with pytest.raises(ValueError, match="durable evidence"):
         store_credential(
             "api_key", {"api_key": "secret", "name": "X-Key"}, "https://app.example.test", "reader", origin="found"
+        )
+    with pytest.raises(ValueError, match="must be a list"):
+        store_credential(
+            "api_key",
+            {"api_key": "secret", "name": "X-Key"},
+            "https://app.example.test",
+            "reader",
+            origin="found",
+            evidence_refs="artifact:artifacts/credential-discovery.txt",
+        )
+    with pytest.raises(ValueError, match="must use durable"):
+        store_credential(
+            "api_key",
+            {"api_key": "secret", "name": "X-Key"},
+            "https://app.example.test",
+            "reader",
+            origin="found",
+            evidence_refs=["https://app.example.test/leak"],
+        )
+    stored = json.loads(
+        store_credential(
+            "api_key",
+            {"api_key": "secret", "name": "X-Key"},
+            "https://app.example.test",
+            "reader",
+            origin="found",
+            evidence_refs=["artifact:artifacts/credential-discovery.txt", "artifact:artifacts/credential-discovery.txt"],
+        )
+    )
+    registered = json.loads(
+        store_credential(
+            "api_key",
+            {"api_key": "registered-secret", "name": "X-Registered-Key"},
+            "https://app.example.test",
+            "reader",
+            origin="registered",
+            evidence_refs=["memory:registration-result"],
         )
     )
     queried = json.loads(query_credentials("https://app.example.test", role="reader", credential_type="api_key"))
     checkout_credential(stored["credential"]["credential_id"], "validate API key")
-    status = json.loads(mark_credential_status(stored["credential"]["credential_id"], "valid", "login succeeded"))
+    with pytest.raises(ValueError, match="status reason"):
+        mark_credential_status(
+            stored["credential"]["credential_id"],
+            "valid",
+            "",
+            evidence_refs=["artifact:artifacts/authentication-result.txt"],
+        )
+    with pytest.raises(ValueError, match="durable evidence"):
+        mark_credential_status(stored["credential"]["credential_id"], "valid", "login succeeded")
+    with pytest.raises(ValueError, match="must use durable"):
+        mark_credential_status(
+            stored["credential"]["credential_id"],
+            "valid",
+            "login succeeded",
+            evidence_refs=["https://app.example.test/login"],
+        )
+    status = json.loads(
+        mark_credential_status(
+            stored["credential"]["credential_id"],
+            "valid",
+            "login succeeded",
+            evidence_refs=["artifact:artifacts/authentication-result.txt"],
+        )
+    )
 
     assert stored["stored"] is True
-    assert queried["credentials"][0]["credential_id"] == stored["credential"]["credential_id"]
+    assert registered["stored"] is True
+    assert {record["credential_id"] for record in queried["credentials"]} == {
+        stored["credential"]["credential_id"],
+        registered["credential"]["credential_id"],
+    }
     assert "secret" not in json.dumps(queried)
     assert status["credential"]["status"] == "valid"
+    with sqlite3.connect(tmp_path / "credentials.db") as connection:
+        event = connection.execute(
+            "SELECT evidence_refs FROM credential_status_events WHERE credential_id = ? ORDER BY created_at DESC LIMIT 1",
+            (stored["credential"]["credential_id"],),
+        ).fetchone()
+    assert json.loads(event[0]) == ["artifact:artifacts/authentication-result.txt"]
     with pytest.raises(ValueError, match="unknown credential_type"):
         query_credentials(credential_type="bearer")
     with pytest.raises(ValueError, match="unknown credential status"):
@@ -769,7 +854,12 @@ def test_agent_credential_tools_reject_access_outside_the_active_task_scope(tmp_
     with pytest.raises(ValueError, match="outside the active task"):
         plan_access_control_comparisons("https://other.example.test")
     with pytest.raises(ValueError, match="checked out"):
-        mark_credential_status(credential["credential_id"], "invalid", "not tested")
+        mark_credential_status(
+            credential["credential_id"],
+            "invalid",
+            "not tested",
+            evidence_refs=["artifact:artifacts/authentication-result.txt"],
+        )
 
 
 def test_password_and_totp_tools_reject_bad_inputs_and_generate_compliant_password():

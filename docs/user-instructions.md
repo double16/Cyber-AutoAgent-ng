@@ -266,6 +266,15 @@ and tenants from stored metadata for report provenance. Every stored credential 
 status-history event: user-supplied credentials are attributed to the user, while found and registered credentials are
 attributed to the operation. For a later operation, reusable registered credentials are listed before other reusable
 credentials; credentials explicitly scoped to that later operation still take precedence.
+An operation must cite at least one durable artifact, memory, or finding reference when it stores a found or registered
+credential; that reference is retained with the credential's initial status-history event. This prevents uncorroborated
+discovered credentials from being reused.
+Operation-managed credentials may be rotated only after a successful rotation is supported by a durable reference.
+The previous credential remains in the store with a retired status and the same reference; user-provided credentials
+are never replaced by an operation.
+An operation records a credential's validity only after a definitive authentication outcome and must provide both a
+specific reason and a durable reference. A generic request failure or an authorization denial does not alone mark a
+credential invalid.
 The workflow's controller-appended task contract, including deterministic prompt fallbacks, retains the same
 unauthenticated-baseline, authenticated-comparison, self-registration, and IDOR-comparison rules for every module.
 Every reported finding labels its authentication context. Authenticated findings include only opaque credential IDs;

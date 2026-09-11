@@ -11510,8 +11510,14 @@ while planning.
   acceptance summaries, findings, or prose.
 - If no eligible credential is available and the assigned target exposes an authorized self-registration path, create
   a strong password with `generate_password`, complete only that registration flow, and store the result with
-  `store_credential(origin="registered")` without operation_scope so later authorized operations can reuse it.
-  Otherwise record the missing identity as a coverage gap; never invent an account or bypass registration controls.
+  `store_credential(origin="registered", evidence_refs=[...])` without operation_scope so later authorized
+  operations can reuse it. Store found credentials the same way with durable discovery evidence. Otherwise record
+  the missing identity as a coverage gap; never invent an account or bypass registration controls.
+- Rotate only operation-managed credentials and cite durable evidence for the completed rotation. Never replace a
+  user-provided credential; report it as invalid or unavailable when supported by the authentication evidence.
+- Mark a checked-out credential valid, invalid, or otherwise unavailable only after a definitive authentication
+  outcome, with a durable evidence reference and a specific reason. A generic request failure or authorization denial
+  does not by itself prove that a credential is invalid.
 - When the task auth_context is authenticated, use only its declared credential IDs. When access-control or IDOR work
   requires a comparison, call `plan_access_control_comparisons` before checkout. Use only its distinct account, role,
   or tenant credential contexts and record any unavailable comparison as a coverage gap rather than inventing an

@@ -10,6 +10,10 @@
 
 ### Fixes
 
+- Require durable discovery, registration, or rotation evidence for operation-created credentials, and retain that
+  evidence with their initial credential status events.
+- Require durable, definitive authentication evidence before agents update credential validity, preventing generic
+  request failures from incorrectly invalidating a credential.
 - Record an initial, actor-attributed credential status event whenever a credential is stored, preserving complete
   lifecycle provenance for supplied, found, and registered credentials.
 - Prefer reusable registered credentials for later operations while retaining an operation's own scoped credentials as

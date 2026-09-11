@@ -34,6 +34,7 @@ from modules.tools.memory import (
 
 _CREDENTIAL_TYPES = frozenset({"username_password", "email_login", "api_key", "oauth2_client"})
 _STATUSES = frozenset({"unknown", "pending", "valid", "invalid", "expired", "revoked", "retired"})
+_DURABLE_EVIDENCE_REF_PREFIXES = ("artifact:", "artifact_id:", "memory:", "finding:")
 _OBJECTIVE_LOGIN_PATTERN = re.compile(
     r"(?is)\b(?:username|user)\s*[:=]\s*(?P<username>[^\s,;]+).*?\b(?:password|pass)\s*[:=]\s*(?P<password>[^\s,;]+)"
 )
@@ -250,6 +251,23 @@ def validate_credential_payload(credential_type: str, values: dict[str, Any]) ->
     return payload
 
 
+def _normalize_credential_evidence_refs(evidence_refs: list[str] | None) -> list[str]:
+    """Require safe durable references for credentials created by an operation."""
+
+    if evidence_refs is None:
+        return []
+    if not isinstance(evidence_refs, list):
+        raise ValueError("credential evidence_refs must be a list of durable references")
+    normalized = []
+    for reference in evidence_refs:
+        value = str(reference or "").strip()
+        if not value.startswith(_DURABLE_EVIDENCE_REF_PREFIXES):
+            raise ValueError("credential evidence_refs must use durable references")
+        if value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
 def _validate_credential_target_scope(store: Any, operation_id: str, target: str) -> str:
     """Require target credentials to use an operation's exact resolved target value."""
 
@@ -318,6 +336,7 @@ def store_user_credential(
     tenant_label: str | None = None,
     origin: str = "provided",
     management_policy: str = "user",
+    creation_evidence_refs: list[str] | None = None,
 ) -> dict[str, Any]:
     """Store an explicitly user-provided credential for UI and headless import callers."""
 
@@ -345,6 +364,7 @@ def store_user_credential(
             "origin": origin,
             "management_policy": management_policy,
             "status": "unknown",
+            "initial_status_evidence_refs": creation_evidence_refs or [],
         },
     )
 
@@ -359,16 +379,21 @@ def store_credential(
     origin: str = "found",
     account_label: str | None = None,
     tenant_label: str | None = None,
+    evidence_refs: list[str] | None = None,
 ) -> str:
     """Store a credential found in a target or created by authorized self-registration.
 
     Use `registered` for a successful self-registration and `found` for a credential recovered from target-owned
-    evidence. Never store user-provided credentials with this tool. Passwords and other secret values are not echoed.
+    evidence. Give `evidence_refs` durable references for the discovery or successful registration. Never store
+    user-provided credentials with this tool. Passwords and other secret values are not echoed.
     """
 
     normalized_origin = str(origin or "").strip().lower()
     if normalized_origin not in {"found", "registered"}:
         raise ValueError("agent credential origin must be found or registered")
+    normalized_evidence_refs = _normalize_credential_evidence_refs(evidence_refs)
+    if not normalized_evidence_refs:
+        raise ValueError("operation-created credentials require at least one durable evidence reference")
     store = _get_database_store()
     operation_id = _operation_id()
     _, target_values = _active_task_target_values(store, operation_id)
@@ -386,6 +411,7 @@ def store_credential(
         tenant_label=tenant_label,
         origin=normalized_origin,
         management_policy="operation",
+        creation_evidence_refs=normalized_evidence_refs,
     )
     return json.dumps({"stored": True, "credential": record})
 
@@ -584,25 +610,45 @@ def mark_credential_status(
     normalized_status = str(status or "").strip().lower()
     if normalized_status not in _STATUSES:
         raise ValueError("unknown credential status")
+    normalized_reason = str(reason or "").strip()
+    if not normalized_reason:
+        raise ValueError("credential status reason is required")
+    normalized_evidence_refs = _normalize_credential_evidence_refs(evidence_refs)
+    if not normalized_evidence_refs:
+        raise ValueError("credential status requires at least one durable evidence reference")
     store = _get_database_store()
     operation_id = _operation_id()
     _active_checked_out_credential(store, operation_id, str(credential_id))
     record = store.record_credential_status(
-        operation_id, str(credential_id), normalized_status, "operation", str(reason or ""), evidence_refs or []
+        operation_id,
+        str(credential_id),
+        normalized_status,
+        "operation",
+        normalized_reason,
+        normalized_evidence_refs,
     )
     return json.dumps({"credential": record})
 
 
 @tool(name="rotate_credential")
-def rotate_credential(credential_id: str, values: dict[str, Any], reason: str) -> str:
+def rotate_credential(
+    credential_id: str,
+    values: dict[str, Any],
+    reason: str,
+    evidence_refs: list[str] | None = None,
+) -> str:
     """Replace an operation-managed credential while retaining the retired credential's audit history.
 
-    This tool is limited to credentials created by an operation. User-provided credentials must be changed through the
-    React configuration or environment import path. The old record is retained with status `retired`.
+    This tool is limited to credentials created by an operation. Cite durable evidence for the successful rotation.
+    User-provided credentials must be changed through the React configuration or environment import path. The old
+    record is retained with status `retired`.
     """
 
     if not str(reason or "").strip():
         raise ValueError("credential rotation reason is required")
+    normalized_evidence_refs = _normalize_credential_evidence_refs(evidence_refs)
+    if not normalized_evidence_refs:
+        raise ValueError("credential rotation requires at least one durable evidence reference")
     store = _get_database_store()
     operation_id = _operation_id()
     _, previous = _active_checked_out_credential(store, operation_id, str(credential_id))
@@ -628,6 +674,7 @@ def rotate_credential(credential_id: str, values: dict[str, Any], reason: str) -
             "management_policy": "operation",
             "status": "unknown",
             "supersedes_credential_id": previous["credential_id"],
+            "initial_status_evidence_refs": normalized_evidence_refs,
         },
     )
     store.record_credential_status(
@@ -636,7 +683,7 @@ def rotate_credential(credential_id: str, values: dict[str, Any], reason: str) -
         "retired",
         "operation",
         str(reason).strip(),
-        [],
+        normalized_evidence_refs,
     )
     return json.dumps({"retired_credential_id": previous["credential_id"], "credential": replacement})
 
