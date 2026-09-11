@@ -6,8 +6,13 @@
   resolved-target scoping, explicit aliases, agent checkout tools, password/TOTP generation, objective sanitization,
   authentication context for tasks/findings, interactive email-MFA handoff, operation-managed credential rotation,
   target-scoped authenticated-task binding, and masked credential-use reporting.
+- Sanitize email-login and OAuth client secrets supplied in an operation objective before task planning or model use.
 
 ### Fixes
+
+- Require active, target-scoped credential checkout before an agent can request an MFA code or read a configured
+  email-MFA mailbox, preventing unrelated tasks from accessing MFA factors.
+- Reject credential imports and discovered credentials whose target is not an exact resolved operation target.
 
 ## v0.10.0
 

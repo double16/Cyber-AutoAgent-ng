@@ -16,6 +16,7 @@ from modules.tools.credentials import (
     plan_access_control_comparisons,
     query_credentials,
     request_mfa_code,
+    resolve_credential_target_for_operation,
     retrieve_email_mfa_code,
     rotate_credential,
     set_task_auth_context,
@@ -47,6 +48,35 @@ def test_credential_store_scopes_exact_targets_and_user_aliases(tmp_path, monkey
     store.add_credential_target_alias("https://example.test/app", "https://login.example.test/app")
     assert store.list_credentials("op-2", target="https://login.example.test/app")[0]["credential_id"] == credential["credential_id"]
     assert stat.S_IMODE((tmp_path / "credentials.db").stat().st_mode) == 0o600
+
+
+def test_credential_storage_rejects_targets_outside_an_existing_operation_plan(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    _store_active_target_task(store)
+
+    with pytest.raises(ValueError, match="exact resolved operation target"):
+        store_user_credential(
+            operation_id="op-1",
+            credential_type="api_key",
+            target="https://api.other.example.test",
+            role="reader",
+            values={"api_key": "must-not-store", "placement": "header", "name": "X-API-Key"},
+        )
+
+
+def test_configuration_credentials_require_exact_preflight_resolved_targets():
+    targets = [OperationTarget(target_id="app", value="https://app.example.test", type="network")]
+
+    assert (
+        resolve_credential_target_for_operation("api_key", "HTTPS://APP.EXAMPLE.TEST:443", targets)
+        == "https://app.example.test"
+    )
+    assert resolve_credential_target_for_operation("email_login", None, targets) is None
+    with pytest.raises(ValueError, match="exact resolved operation target"):
+        resolve_credential_target_for_operation("api_key", "https://other.example.test", targets)
+    with pytest.raises(ValueError, match="must not specify a target"):
+        resolve_credential_target_for_operation("email_login", "https://app.example.test", targets)
 
 
 def test_invalid_credential_is_retained_but_not_selectable(tmp_path, monkeypatch):
@@ -83,11 +113,23 @@ def test_typed_payload_validation_rejects_incomplete_and_unsafe_mailbox_configur
 
 
 def test_objective_credentials_are_extracted_and_sanitized_before_agent_use():
-    sanitized, drafts = extract_objective_credentials("Assess app. username=alice password=secret-value api_key=api-secret")
+    sanitized, drafts = extract_objective_credentials(
+        "Assess app. username=alice password=secret-value email=bob@example.test password=email-secret "
+        "api_key=api-secret oauth2_client_id=client-id oauth2_client_secret=client-secret"
+    )
 
     assert "secret-value" not in sanitized
+    assert "email-secret" not in sanitized
     assert "api-secret" not in sanitized
-    assert {draft["credential_type"] for draft in drafts} == {"username_password", "api_key"}
+    assert "client-secret" not in sanitized
+    assert [draft["credential_type"] for draft in drafts] == [
+        "username_password",
+        "username_password",
+        "api_key",
+        "oauth2_client",
+    ]
+    assert drafts[1]["values"]["email"] == "bob@example.test"
+    assert "token_url" not in drafts[-1]["values"]
 
 
 def test_react_credential_configuration_is_validated_without_returning_secrets_in_errors():
@@ -215,6 +257,8 @@ def test_interactive_email_mfa_handoff_persists_only_challenge_metadata(tmp_path
             "mfa": {"type": "email", "recipient": "alice@example.test", "mailbox_credential_id": "mailbox-1"},
         },
     )
+    _store_active_target_task(store)
+    checkout_credential(credential["credential_id"], "complete email MFA")
 
     assert request_mfa_code(credential["credential_id"], prompt="Enter mail code") == "123456"
     assert events[0]["type"] == "user_handoff"
@@ -251,6 +295,9 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
         role="reader",
         values={"username": "reader", "password": "secret", "mfa": {"type": "totp", "secret": "GEZDGNBV"}},
     )
+    _store_active_target_task(store)
+    checkout_credential(email_mfa_credential["credential_id"], "complete email MFA")
+    checkout_credential(totp_credential["credential_id"], "complete TOTP MFA")
     with pytest.raises(ValueError, match="TTL"):
         request_mfa_code(email_mfa_credential["credential_id"], ttl_seconds=29)
     with pytest.raises(ValueError, match="capture"):
@@ -272,6 +319,22 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
             "mailbox": {"host": "mail.example.test", "folder": "Codes"},
         },
     )
+    mailbox_bound_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        values={
+            "username": "alice-mail",
+            "password": "secret",
+            "mfa": {
+                "type": "email",
+                "recipient": "alice@example.test",
+                "mailbox_credential_id": mailbox_credential["credential_id"],
+            },
+        },
+    )
+    checkout_credential(mailbox_bound_credential["credential_id"], "retrieve email MFA")
     message = EmailMessage()
     message["From"] = "noreply@example.test"
     message["Subject"] = "Your code"
@@ -464,6 +527,9 @@ def test_credential_payload_validation_supports_all_types_and_mfa_variants():
 
     assert username_password["mfa"]["algorithm"] == "SHA256"
     assert email_login["mailbox"] == {"host": "mail.example.test", "port": 993, "tls": True, "folder": "Codes"}
+    assert "token_url" not in validate_credential_payload(
+        "oauth2_client", {"client_id": "client", "client_secret": "secret"}
+    )
     assert api_key["placement"] == "query"
     assert oauth["token_url"] == "https://auth.example.test/token"
     assert oauth["scopes"] == ["read", "write"]
@@ -696,16 +762,14 @@ def test_checkout_rejects_a_credential_outside_the_active_task_target(tmp_path, 
             target_ids=["app"],
         ),
     )
-    other_target_credential = store_user_credential(
-        operation_id="op-1",
-        credential_type="api_key",
-        target="https://api.other.example.test",
-        role="reader",
-        values={"api_key": "must-not-leak", "placement": "header", "name": "X-API-Key"},
-    )
-
-    with pytest.raises(ValueError, match="target scope"):
-        checkout_credential(other_target_credential["credential_id"], "wrong target")
+    with pytest.raises(ValueError, match="exact resolved operation target"):
+        store_user_credential(
+            operation_id="op-1",
+            credential_type="api_key",
+            target="https://api.other.example.test",
+            role="reader",
+            values={"api_key": "must-not-leak", "placement": "header", "name": "X-API-Key"},
+        )
 
 
 def test_mfa_tools_reject_missing_configuration_and_mailbox_errors(tmp_path, monkeypatch):
@@ -719,11 +783,15 @@ def test_mfa_tools_reject_missing_configuration_and_mailbox_errors(tmp_path, mon
         role="member",
         values={"username": "alice", "password": "secret"},
     )
-    with pytest.raises(ValueError, match="eligible credential"):
+    with pytest.raises(ValueError, match="active task"):
         request_mfa_code("missing")
+    _store_active_target_task(store)
+    with pytest.raises(ValueError, match="checked out"):
+        request_mfa_code(plain_credential["credential_id"])
+    checkout_credential(plain_credential["credential_id"], "test MFA configuration")
     with pytest.raises(ValueError, match="configured MFA"):
         request_mfa_code(plain_credential["credential_id"])
     with pytest.raises(ValueError, match="invalid MFA code pattern"):
         request_mfa_code(plain_credential["credential_id"], code_pattern="[")
-    with pytest.raises(ValueError, match="eligible email_login"):
+    with pytest.raises(ValueError, match="not configured by an active"):
         retrieve_email_mfa_code(plain_credential["credential_id"])

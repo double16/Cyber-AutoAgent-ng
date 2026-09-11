@@ -37,7 +37,15 @@ _STATUSES = frozenset({"unknown", "pending", "valid", "invalid", "expired", "rev
 _OBJECTIVE_LOGIN_PATTERN = re.compile(
     r"(?is)\b(?:username|user)\s*[:=]\s*(?P<username>[^\s,;]+).*?\b(?:password|pass)\s*[:=]\s*(?P<password>[^\s,;]+)"
 )
+_OBJECTIVE_EMAIL_LOGIN_PATTERN = re.compile(
+    r"(?is)\bemail\s*[:=]\s*(?P<email>[^\s,;]+).*?\b(?:password|pass)\s*[:=]\s*(?P<password>[^\s,;]+)"
+)
 _OBJECTIVE_API_KEY_PATTERN = re.compile(r"(?i)\b(?:api[_ -]?key|access[_ -]?key)\s*[:=]\s*(?P<api_key>[^\s,;]+)")
+_OBJECTIVE_OAUTH_PATTERN = re.compile(
+    r"(?is)\b(?:oauth2?[_ -]?)?(?:client[_ -]?id|client)\s*[:=]\s*(?P<client_id>[^\s,;]+)"
+    r".*?\b(?:oauth2?[_ -]?)?(?:client[_ -]?secret|secret)\s*[:=]\s*(?P<client_secret>[^\s,;]+)"
+    r"(?:.*?\b(?:oauth2?[_ -]?)?token[_ -]?url\s*[:=]\s*(?P<token_url>[^\s,;]+))?"
+)
 
 
 def extract_objective_credentials(objective: str) -> tuple[str, list[dict[str, Any]]]:
@@ -57,6 +65,22 @@ def extract_objective_credentials(objective: str) -> tuple[str, list[dict[str, A
 
     sanitized = _OBJECTIVE_LOGIN_PATTERN.sub(login_replacement, str(objective or ""))
 
+    def email_login_replacement(match: re.Match[str]) -> str:
+        drafts.append(
+            {
+                "credential_type": "username_password",
+                "role": "user",
+                "values": {
+                    "username": match.group("email"),
+                    "email": match.group("email"),
+                    "password": match.group("password"),
+                },
+            }
+        )
+        return "use the credential store for the supplied email login"
+
+    sanitized = _OBJECTIVE_EMAIL_LOGIN_PATTERN.sub(email_login_replacement, sanitized)
+
     def api_replacement(match: re.Match[str]) -> str:
         drafts.append(
             {
@@ -68,6 +92,15 @@ def extract_objective_credentials(objective: str) -> tuple[str, list[dict[str, A
         return "use the credential store for the supplied API key"
 
     sanitized = _OBJECTIVE_API_KEY_PATTERN.sub(api_replacement, sanitized)
+
+    def oauth_replacement(match: re.Match[str]) -> str:
+        values = {"client_id": match.group("client_id"), "client_secret": match.group("client_secret")}
+        if match.group("token_url"):
+            values["token_url"] = match.group("token_url")
+        drafts.append({"credential_type": "oauth2_client", "role": "api_user", "values": values})
+        return "use the credential store for the supplied OAuth client"
+
+    sanitized = _OBJECTIVE_OAUTH_PATTERN.sub(oauth_replacement, sanitized)
     return sanitized, drafts
 
 
@@ -205,14 +238,59 @@ def validate_credential_payload(credential_type: str, values: dict[str, Any]) ->
             "name": _require_string(values, "name"),
             "prefix": str(values.get("prefix") or ""),
         }
-    return {
+    payload = {
         "client_id": _require_string(values, "client_id"),
         "client_secret": _require_string(values, "client_secret"),
-        "token_url": canonicalize_credential_target(_require_string(values, "token_url")),
         "scopes": [str(scope).strip() for scope in values.get("scopes", []) if str(scope).strip()],
         "audience": str(values.get("audience") or "").strip(),
         "client_auth_method": str(values.get("client_auth_method") or "client_secret_basic").strip(),
     }
+    if values.get("token_url"):
+        payload["token_url"] = canonicalize_credential_target(_require_string(values, "token_url"))
+    return payload
+
+
+def _validate_credential_target_scope(store: Any, operation_id: str, target: str) -> str:
+    """Require target credentials to use an operation's exact resolved target value."""
+
+    normalized_target = canonicalize_credential_target(target)
+    plan = store.get_plan(operation_id)
+    if plan is None:
+        return normalized_target
+    resolved_targets = {
+        canonicalize_credential_target(str(operation_target.value))
+        for operation_target in plan.targets
+        if str(operation_target.value or "").strip()
+    }
+    if normalized_target not in resolved_targets:
+        raise ValueError("credential target must be an exact resolved operation target")
+    return normalized_target
+
+
+def resolve_credential_target_for_operation(
+    credential_type: str,
+    target: str | None,
+    operation_targets: list[Any],
+) -> str | None:
+    """Validate a configuration credential against the preflight-resolved operation targets."""
+
+    kind = str(credential_type or "").strip().lower()
+    supplied_target = str(target or "").strip()
+    if kind == "email_login":
+        if supplied_target:
+            raise ValueError("email_login credentials must not specify a target")
+        return None
+    if not supplied_target:
+        raise ValueError("credential target is required")
+    normalized_target = canonicalize_credential_target(supplied_target)
+    resolved_targets = {
+        canonicalize_credential_target(str(operation_target.value))
+        for operation_target in operation_targets
+        if str(getattr(operation_target, "value", "") or "").strip()
+    }
+    if normalized_target not in resolved_targets:
+        raise ValueError("credential target must be an exact resolved operation target")
+    return normalized_target
 
 
 def store_user_credential(
@@ -240,11 +318,13 @@ def store_user_credential(
         payload["account_label"] = str(account_label).strip()
     if tenant_label:
         payload["tenant_label"] = str(tenant_label).strip()
-    return _get_database_store().store_credential(
+    store = _get_database_store()
+    normalized_target = _validate_credential_target_scope(store, operation_id, target) if target else None
+    return store.store_credential(
         operation_id,
         {
             "credential_type": kind,
-            "target": canonicalize_credential_target(target) if target else None,
+            "target": normalized_target,
             "role": role,
             "operation_id": operation_scope,
             "payload": payload,
@@ -552,6 +632,48 @@ def generate_mfa_code(provisioning_secret: str, digits: int = 6, period: int = 3
     return str(binary % (10**digits)).zfill(digits)
 
 
+def _active_checked_out_credential(store: Any, operation_id: str, credential_id: str) -> tuple[Any, dict[str, Any]]:
+    """Return an active task and its selected, target-scoped target credential."""
+
+    active_task = active_credential_task(store, operation_id)
+    if active_task is None:
+        raise ValueError("an active task is required for MFA")
+    selected_ids = store.credential_ids_selected_by_task(operation_id, active_task.task_uid)
+    if credential_id not in selected_ids:
+        raise ValueError("MFA credential must be checked out by the active task")
+    record = store.get_credential(credential_id, include_payload=True)
+    if record is None or record["status"] not in {"unknown", "valid"}:
+        raise ValueError("eligible credential is required for MFA")
+    if record["credential_type"] == "email_login":
+        raise ValueError("MFA must use a target credential, not a mailbox credential")
+    target_values = set(_task_resolved_targets(store, operation_id, active_task))
+    if str(record.get("target") or "") not in target_values:
+        raise ValueError("MFA credential is outside the active task target scope")
+    return active_task, record
+
+
+def _active_mfa_mailbox_task(store: Any, operation_id: str, mailbox_credential_id: str) -> Any:
+    """Require an active selected target credential that explicitly references a mailbox."""
+
+    active_task = active_credential_task(store, operation_id)
+    if active_task is None:
+        raise ValueError("an active task is required for email MFA")
+    selected_ids = store.credential_ids_selected_by_task(operation_id, active_task.task_uid)
+    for credential_id in selected_ids:
+        try:
+            _, record = _active_checked_out_credential(store, operation_id, credential_id)
+        except ValueError:
+            continue
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        mfa = payload.get("mfa") if isinstance(payload.get("mfa"), dict) else {}
+        if (
+            str(mfa.get("type") or "").lower() == "email"
+            and str(mfa.get("mailbox_credential_id") or "") == mailbox_credential_id
+        ):
+            return active_task
+    raise ValueError("email MFA mailbox is not configured by an active checked-out credential")
+
+
 @tool(name="request_mfa_code")
 def request_mfa_code(
     credential_id: str,
@@ -575,9 +697,8 @@ def request_mfa_code(
     if pattern.groups:
         raise ValueError("MFA code pattern must not contain capture groups")
     store = _get_database_store()
-    record = store.get_credential(str(credential_id), include_payload=True)
-    if record is None or record["status"] not in {"unknown", "valid"}:
-        raise ValueError("eligible credential is required for MFA")
+    operation_id = _operation_id()
+    active_task, record = _active_checked_out_credential(store, operation_id, str(credential_id))
     payload = record["payload"]
     mfa = payload.get("mfa") if isinstance(payload, dict) else None
     if not isinstance(mfa, dict) or str(mfa.get("type") or "").lower() not in {"totp", "email"}:
@@ -586,7 +707,7 @@ def request_mfa_code(
         raise ValueError("configured TOTP credentials must use generate_mfa_code")
     expires_at = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat()
     challenge = store.create_mfa_challenge(
-        _operation_id(),
+        operation_id,
         record["credential_id"],
         "email",
         expires_at,
@@ -609,12 +730,11 @@ def request_mfa_code(
         raise ValueError("MFA code handoff is unavailable") from error
     if not pattern.fullmatch(code):
         raise ValueError("MFA code did not match the requested format")
-    store.complete_mfa_challenge(_operation_id(), challenge["challenge_id"])
-    active_task = active_credential_task(store, _operation_id())
+    store.complete_mfa_challenge(operation_id, challenge["challenge_id"])
     store.record_credential_usage(
-        _operation_id(),
+        operation_id,
         record["credential_id"],
-        task_uid=active_task.task_uid if active_task is not None else None,
+        task_uid=active_task.task_uid,
         authentication_mode="mfa",
         outcome="used",
     )
@@ -635,6 +755,8 @@ def retrieve_email_mfa_code(
     """
 
     store = _get_database_store()
+    operation_id = _operation_id()
+    active_task = _active_mfa_mailbox_task(store, operation_id, str(mailbox_credential_id))
     record = store.get_credential(str(mailbox_credential_id), include_payload=True)
     if record is None or record["credential_type"] != "email_login" or record["status"] not in {"unknown", "valid"}:
         raise ValueError("eligible email_login credential is required")
@@ -680,11 +802,10 @@ def retrieve_email_mfa_code(
         if len(matches) != 1:
             raise ValueError("email MFA code is missing or ambiguous")
         code = next(iter(matches))
-        active_task = active_credential_task(store, _operation_id())
         store.record_credential_usage(
-            _operation_id(),
+            operation_id,
             record["credential_id"],
-            task_uid=active_task.task_uid if active_task is not None else None,
+            task_uid=active_task.task_uid,
             authentication_mode="mfa",
             outcome="used",
         )

@@ -110,7 +110,12 @@ from modules.handlers.utils import (
     update_latest_output_pointer,
 )
 from modules.tools import browser, channel_close_all
-from modules.tools.credentials import extract_config_credentials, extract_objective_credentials, store_user_credential
+from modules.tools.credentials import (
+    extract_config_credentials,
+    extract_objective_credentials,
+    resolve_credential_target_for_operation,
+    store_user_credential,
+)
 from modules.tools.memory import (
     OperationTarget,
     create_application_store,
@@ -2229,8 +2234,11 @@ def main():
             try:
                 credential_type = str(draft["credential_type"])
                 credential_target = draft.get("target") or resolved_credential_target
-                if credential_type != "email_login" and not credential_target:
-                    raise ValueError("credential target must be explicit when the operation resolves multiple targets")
+                credential_target = resolve_credential_target_for_operation(
+                    credential_type,
+                    credential_target,
+                    operation_targets,
+                )
                 store_user_credential(
                     operation_id=operation_id,
                     credential_type=credential_type,

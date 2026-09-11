@@ -3581,6 +3581,46 @@ def test_cli_main_runs_workflow_controller(monkeypatch, tmp_path):
     assert Path.cwd() == expected_cwd
 
 
+def test_cli_imports_configuration_credentials_for_the_resolved_target(monkeypatch, tmp_path):
+    callback = CliCallback()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, CallableCliAgent(), callback)
+    store_user_credential = Mock()
+    monkeypatch.setattr(cyberautoagent, "store_user_credential", store_user_credential)
+    monkeypatch.setenv(
+        "CYBER_ASSESSMENT_CREDENTIALS",
+        json.dumps(
+            [
+                {
+                    "credential_type": "api_key",
+                    "role": "reader",
+                    "values": {"api_key": "configured-secret", "name": "X-API-Key"},
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        cyberautoagent.sys,
+        "argv",
+        [
+            "cyberautoagent",
+            "--target",
+            "example.com",
+            "--objective",
+            "test",
+            "--max-duration",
+            "60",
+            "--provider",
+            "ollama",
+        ],
+    )
+
+    cyberautoagent.main()
+
+    config_manager.workflow.run.assert_called_once()
+    assert store_user_credential.call_args.kwargs["target"] == "example.com"
+    assert store_user_credential.call_args.kwargs["credential_type"] == "api_key"
+
+
 def test_cli_preflight_persists_without_initializing_qdrant(monkeypatch, tmp_path):
     callback = CliCallback()
     plan_store = Mock()

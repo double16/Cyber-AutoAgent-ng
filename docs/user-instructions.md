@@ -246,12 +246,16 @@ The database currently stores credential payloads in plaintext. Restrict access 
 backups to the assessment user. Secret values are masked in reports, logs, UI events, and trace exports, but must not
 be committed to source control or copied into task artifacts.
 
-For a concise objective, common `username=... password=...` and `api_key=...` forms are moved into the credential
-store before the objective is logged or sent to a model. Use a dedicated credential source for complex or MFA-backed
-credentials. TOTP provisioning secrets support SHA-1/SHA-256/SHA-512, six to ten digits, and a 30-second default;
+For a concise objective, common `username=... password=...`, `email=... password=...`, `api_key=...`, and
+`oauth2_client_id=... oauth2_client_secret=...` forms are moved into the credential store before the objective is
+logged or sent to a model. Use a dedicated credential source for complex or MFA-backed credentials. TOTP provisioning
+secrets support SHA-1/SHA-256/SHA-512, six to ten digits, and a 30-second default;
 generated one-time codes are not persisted. For email MFA, an agent can retrieve a code from a configured TLS IMAP
 mailbox or request one through the React terminal or interactive CLI. The prompt is marked sensitive, the response is
 not kept in terminal history, and only challenge metadata (never the code) is retained in the database.
+Both MFA handoff methods require the active task to have checked out the target credential. Email mailbox retrieval
+also requires that selected target credential to explicitly reference the mailbox; a mailbox credential cannot be
+read independently by an unrelated task.
 Credentials created by an operation can be rotated by the agent when the authorized flow supports it; rotation creates
 a new credential record and retires the old one instead of overwriting history. User-provided credential payloads are
 never changed by an agent. Before an authenticated request, an agent binds its checked-out credentials to the active
