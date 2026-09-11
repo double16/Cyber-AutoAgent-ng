@@ -1,6 +1,9 @@
 # test_tool_use_id_class_patch.py
 from __future__ import annotations
 
+import asyncio
+from unittest.mock import AsyncMock
+
 import pytest
 from strands.hooks.events import AfterToolCallEvent
 
@@ -539,6 +542,26 @@ async def test_unpatch_restores_original_stream_behavior():
     m2 = FakeModelBasicBad()
     unpatched_out = [ev async for ev in m2.stream()]
     assert unpatched_out[0]["contentBlockStart"]["start"]["toolUse"]["toolUseId"] == "mytool"
+
+
+@pytest.mark.asyncio
+async def test_stream_patch_closes_provider_when_consumer_stops():
+    closed = AsyncMock()
+
+    class FakeModel:
+        async def stream(self):
+            try:
+                yield {"contentBlockStart": {"start": {}}}
+                await asyncio.sleep(1)
+            finally:
+                await closed()
+
+    patch_model_class_tool_use_id(FakeModel)
+    stream = FakeModel().stream()
+    await stream.__anext__()
+    await stream.aclose()
+
+    closed.assert_awaited_once()
 
 
 def test_patch_raises_if_no_stream_method():

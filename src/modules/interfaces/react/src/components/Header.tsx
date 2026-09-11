@@ -30,7 +30,7 @@ const compactLogo = `🔐 Cyber-AutoAgent`;
 const ultraCompactLogo = `🔐 CAA`;
 
 export const Header: React.FC<HeaderProps> = React.memo(({
-  version ="0.10.0",
+  version ="0.11.0",
   terminalWidth = 80,
   nightly = false,
   exitNotice = false

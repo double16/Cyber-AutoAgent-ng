@@ -3,7 +3,7 @@
 
 ARG APT_PROXY
 
-FROM --platform=$BUILDPLATFORM golang:1.26 AS gobuild
+FROM --platform=$BUILDPLATFORM golang:1.27 AS gobuild
 ARG TARGETARCH
 ARG BUILDPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
@@ -35,7 +35,7 @@ FROM kalilinux/kali-rolling
 
 LABEL org.opencontainers.image.title="Cyber-AutoAgent-ng Tools"
 LABEL org.opencontainers.image.description="Autonomous AI agent for ethical security assessments"
-LABEL org.opencontainers.image.version="0.10.0"
+LABEL org.opencontainers.image.version="0.11.0"
 LABEL org.opencontainers.image.source="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.url="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.licenses="MIT"
@@ -250,7 +250,7 @@ RUN set -eux; \
 RUN pip3 install --break-system-packages pycryptodomex
 
 # Install uv for fast dependency management
-COPY --from=ghcr.io/astral-sh/uv:0.11.26 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.9 /uv /usr/local/bin/uv
 
 # Install Ruby gems
 RUN gem install zsteg
@@ -312,7 +312,8 @@ RUN pipx install --global bloodhound && \
     # Install Coercer (AD Coercion)
     pipx install --global coercer && \
     pipx install --global ropgadget && \
-    pipx install --global ropper && \
+    # ropper failing to install 2026-09-02
+    # pipx install --global ropper && \
     # GraphQL Clairvoyance - GraphQL schema enumeration
     pipx install --global clairvoyance && \
     pipx install --global xsstrike && \
@@ -389,8 +390,11 @@ RUN mkdir -p -m 0700 "/root/.ssh" && touch "/root/.ssh/config" && chmod 0600 "/r
 # Load amass data (optional)
 RUN amass -h || true
 
+# Load httpx model data (optional)
+RUN httpx -kb || true
+
 # Validate expected tools are present in the PATH
 COPY docker/tools_check.py src/modules/config/system/environment.yaml /usr/local/bin/
-RUN bash -o pipefail -c 'python3 /usr/local/bin/tools_check.py 2>&1 | tee /var/log/tools_check.log' && \
+RUN bash -o pipefail -c 'python3 /usr/local/bin/tools_check.py --timeout=360 2>&1 | tee /var/log/tools_check.log' && \
     /tmp/apt_proxy_clean.sh && \
     rm -rf /tmp/* /var/tmp/*

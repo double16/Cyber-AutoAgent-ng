@@ -187,7 +187,7 @@ export class PythonExecutionService extends EventEmitter {
     const userHome = process.env.HOME || process.env.USERPROFILE || '';
     const condaPy = process.env.CONDA_PREFIX ? `${process.env.CONDA_PREFIX}/bin/python` : undefined;
 
-    const versioned = ['3.12', '3.13'];
+    const versioned = ['3.12', '3.13', '3.14'];
     const baseNames = [
       ...versioned.map(v => `python3.${v.split('.')[1]}`),
       'python3',

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
 import json
 import re
 from collections.abc import AsyncIterator, Callable
@@ -38,6 +39,18 @@ from modules.utils.reasoning_sanitization import (
 from modules.utils.tool_call_normalization import normalize_tool_call_payload
 
 logger = get_logger("Agents.CyberAutoAgent")
+
+
+async def _close_async_resource(resource: Any) -> None:
+    """Close an underlying provider stream when a patched stream is abandoned."""
+
+    close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+    if close is None:
+        return
+
+    result = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 @dataclass
@@ -385,47 +398,51 @@ def patch_model_class_tool_use_id(
             tuid = state(where=where, marker=marker, id_factory=id_factory)
             event["_toolUseId"] = event["toolUseId"] = tuid
 
-        async for ev in orig_stream(self, *args, **kwargs):
-            # contentBlockStart and current_tool_use may come in any order, but we assume for a given provider the order is consistent
+        provider_stream = orig_stream(self, *args, **kwargs)
+        try:
+            async for ev in provider_stream:
+                # contentBlockStart and current_tool_use may come in any order, but we assume for a given provider the order is consistent
 
-            # --- Pattern A: contentBlockStart -> toolUse ---
-            cbs = ev.get("contentBlockStart")
-            if isinstance(cbs, dict):
-                start = cbs.get("start")
-                if isinstance(start, dict):
-                    tool_use = start.get("toolUse")
-                    if isinstance(tool_use, dict):
-                        _patch_tool_use_id(tool_use, "contentBlockStart")
+                # --- Pattern A: contentBlockStart -> toolUse ---
+                cbs = ev.get("contentBlockStart")
+                if isinstance(cbs, dict):
+                    start = cbs.get("start")
+                    if isinstance(start, dict):
+                        tool_use = start.get("toolUse")
+                        if isinstance(tool_use, dict):
+                            _patch_tool_use_id(tool_use, "contentBlockStart")
 
-            # --- Pattern B: contentBlockDelta -> toolUse (keep consistent) ---
-            # Assumption: contentBlockDelta do not overlap with concurrent tool uses
-            cbd = ev.get("contentBlockDelta")
-            if isinstance(cbd, dict):
-                delta = cbd.get("delta")
-                if isinstance(delta, dict):
-                    dtu = delta.get("toolUse")
-                    if isinstance(dtu, dict):
-                        name = dtu.get("name")
-                        tuid = dtu.get("toolUseId")
-                        if (name or tuid) and state.current_tool_use_id:
-                            dtu["_toolUseId"] = dtu["toolUseId"] = state.current_tool_use_id
+                # --- Pattern B: contentBlockDelta -> toolUse (keep consistent) ---
+                # Assumption: contentBlockDelta do not overlap with concurrent tool uses
+                cbd = ev.get("contentBlockDelta")
+                if isinstance(cbd, dict):
+                    delta = cbd.get("delta")
+                    if isinstance(delta, dict):
+                        dtu = delta.get("toolUse")
+                        if isinstance(dtu, dict):
+                            name = dtu.get("name")
+                            tuid = dtu.get("toolUseId")
+                            if (name or tuid) and state.current_tool_use_id:
+                                dtu["_toolUseId"] = dtu["toolUseId"] = state.current_tool_use_id
 
-            # --- Pattern C: Strands convenience field current_tool_use ---
-            ctu = ev.get("current_tool_use")
-            if isinstance(ctu, dict):
-                _patch_tool_use_id(ctu, "current_tool_use")
+                # --- Pattern C: Strands convenience field current_tool_use ---
+                ctu = ev.get("current_tool_use")
+                if isinstance(ctu, dict):
+                    _patch_tool_use_id(ctu, "current_tool_use")
 
-            removed = sanitize_reasoning_event(ev, reasoning_sanitization)
-            if removed:
-                sanitized_reasoning_marker_count += removed
-                if sanitized_reasoning_marker_count == removed:
-                    logger.info(
-                        "reasoning_control_tokens_sanitized model_class=%s count=%d",
-                        model_cls.__name__,
-                        sanitized_reasoning_marker_count,
-                    )
+                removed = sanitize_reasoning_event(ev, reasoning_sanitization)
+                if removed:
+                    sanitized_reasoning_marker_count += removed
+                    if sanitized_reasoning_marker_count == removed:
+                        logger.info(
+                            "reasoning_control_tokens_sanitized model_class=%s count=%d",
+                            model_cls.__name__,
+                            sanitized_reasoning_marker_count,
+                        )
 
-            yield ev
+                yield ev
+        finally:
+            await _close_async_resource(provider_stream)
 
     model_cls.stream = stream_patched
     setattr(model_cls, enabled_attr, True)

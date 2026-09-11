@@ -3,11 +3,11 @@
 
 ARG APT_PROXY
 
-FROM public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:0.10.0
+FROM public.ecr.aws/bramblethorn/cyber-autoagent-ng/tools:0.11.0
 
 LABEL org.opencontainers.image.title="Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.description="Autonomous AI agent for ethical security assessments"
-LABEL org.opencontainers.image.version="0.10.0"
+LABEL org.opencontainers.image.version="0.11.0"
 LABEL org.opencontainers.image.source="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.url="https://github.com/double16/Cyber-AutoAgent-ng"
 LABEL org.opencontainers.image.licenses="MIT"
