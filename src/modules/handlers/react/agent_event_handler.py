@@ -3635,7 +3635,7 @@ class AgentEventHandler(PrintingCallbackHandler):
     # Evaluation methods
     def trigger_evaluation_on_completion(self) -> None:
         """Trigger evaluation after operation completion."""
-        from modules.evaluation.manager import EvaluationManager, TraceType
+        from modules.evaluation.manager import EvaluationManager, TraceType, build_goal_contract_facts
 
         logger.debug(
             "trigger_evaluation_on_completion called for operation %s",
@@ -3685,9 +3685,16 @@ class AgentEventHandler(PrintingCallbackHandler):
                     evaluator_kwargs["finding_records"] = finding_records
                 plan = memory_client.get_plan(self.operation_id)
                 if plan is not None:
-                    evaluator_kwargs["operation_facts"] = {
-                        "assessment_complete": bool(getattr(plan, "assessment_complete", False)),
+                    tasks = memory_client.list_tasks(operation_id=self.operation_id)
+                    acceptance_results_by_task = {
+                        task.task_uid: memory_client.list_task_acceptance_results(
+                            task.task_uid, operation_id=self.operation_id
+                        )
+                        for task in tasks
                     }
+                    evaluator_kwargs["operation_facts"] = build_goal_contract_facts(
+                        plan, tasks, acceptance_results_by_task
+                    )
             except Exception:
                 logger.debug(
                     "Authoritative finding records unavailable for evaluation %s",

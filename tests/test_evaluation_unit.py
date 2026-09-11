@@ -1257,7 +1257,7 @@ async def test_evaluate_single_trace_keeps_invalid_ragas_values_out_of_public_sc
     assert uploaded[0][0] == "trace"
 
 
-def test_deterministic_public_scores_use_verified_evidence_and_controller_completion(monkeypatch):
+def test_deterministic_public_scores_use_verified_evidence_and_goal_contract_attainment(monkeypatch):
     ev = evaluator(monkeypatch)
     ev._authoritative_evidence_items = ev._build_evidence_items(
         [
@@ -1275,13 +1275,39 @@ def test_deterministic_public_scores_use_verified_evidence_and_controller_comple
             },
         ]
     )
-    ev._operation_facts = {"assessment_complete": False}
+    ev._operation_facts = {
+        "goal_contract_attainment": {
+            "version": 1,
+            "achieved_units": 3,
+            "applicable_units": 4,
+            "excluded_units": 1,
+            "eligible_task_count": 2,
+            "unachieved_reasons": {"inaccessible": 1},
+            "assessment_complete": False,
+        }
+    }
 
     scores = ev._deterministic_public_scores("operation")
 
     assert scores["evidence_quality"][0] == pytest.approx((1.0 + 0.55) / 2)
-    assert scores["penetration_test_goal_accuracy"][0] == 0.0
+    assert scores["penetration_test_goal_accuracy"][0] == 0.75
     assert scores["penetration_test_goal_accuracy"][1]["assessment_complete"] is False
+    assert scores["penetration_test_goal_accuracy"][1]["score_source"] == "controller_goal_contract_attainment"
+
+
+def test_deterministic_public_scores_omits_goal_accuracy_without_applicable_units(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._operation_facts = {
+        "goal_contract_attainment": {
+            "version": 1,
+            "achieved_units": 0,
+            "applicable_units": 0,
+        }
+    }
+
+    scores = ev._deterministic_public_scores("operation")
+
+    assert "penetration_test_goal_accuracy" not in scores
 
 
 @pytest.mark.asyncio

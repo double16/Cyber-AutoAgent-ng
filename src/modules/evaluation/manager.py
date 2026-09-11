@@ -26,6 +26,99 @@ from .evaluation import CyberAgentEvaluator
 logger = get_logger("Evaluation.Manager")
 
 
+_GOAL_ACHIEVED_ACCEPTANCE_STATUSES = frozenset({"satisfied", "assessed_negative", "duplicate"})
+_GOAL_ARCHIVED_TASK_STATUSES = frozenset({"replanned", "superseded"})
+
+
+def _goal_value(value: Any, name: str, default: Any = None) -> Any:
+    """Read one field from either a persisted model or a serialized test value."""
+
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def build_goal_contract_facts(
+    plan: Any,
+    tasks: list[Any],
+    acceptance_results_by_task: dict[str, list[Any]],
+) -> dict[str, Any]:
+    """Build controller-owned, evidence-backed goal-attainment facts for evaluation.
+
+    One outcome criterion, or one frozen coverage inventory item, is one goal
+    unit. Archived work is not current operation scope. A unit is achieved only
+    when its owning task is done and its immutable acceptance ledger records a
+    successful or valid-negative terminal result.
+    """
+
+    achieved_units = 0
+    applicable_units = 0
+    excluded_units = 0
+    eligible_task_count = 0
+    unachieved_reasons: dict[str, int] = {}
+
+    def record_unit(result: Any, task_status: str) -> None:
+        nonlocal achieved_units, applicable_units, excluded_units
+        result_status = str(_goal_value(result, "status", "")).strip()
+        if result_status == "excluded":
+            excluded_units += 1
+            return
+        applicable_units += 1
+        if task_status != "done":
+            reason = f"task_status:{task_status or 'unknown'}"
+        elif result is None:
+            reason = "missing_acceptance_result"
+        elif result_status in _GOAL_ACHIEVED_ACCEPTANCE_STATUSES:
+            achieved_units += 1
+            return
+        elif result_status == "inaccessible":
+            reason = "inaccessible"
+        else:
+            reason = f"acceptance_status:{result_status or 'missing'}"
+        unachieved_reasons[reason] = unachieved_reasons.get(reason, 0) + 1
+
+    for task in tasks:
+        task_status = str(_goal_value(task, "status", "")).strip()
+        if task_status in _GOAL_ARCHIVED_TASK_STATUSES:
+            continue
+        eligible_task_count += 1
+        task_uid = str(_goal_value(task, "task_uid", "")).strip()
+        results = acceptance_results_by_task.get(task_uid, [])
+        results_by_criterion = {
+            str(_goal_value(result, "criterion_id", "")).strip(): result
+            for result in results
+        }
+        acceptance = _goal_value(task, "acceptance")
+        mode = str(_goal_value(acceptance, "mode", "")).strip()
+        if mode == "coverage":
+            basis = _goal_value(acceptance, "basis")
+            item_ids = _goal_value(basis, "item_ids", ()) or ()
+            coverage_by_item = {
+                str(_goal_value(item, "item_id", "")).strip(): item
+                for result in results
+                for item in (_goal_value(result, "coverage", ()) or ())
+            }
+            for item_id in item_ids:
+                record_unit(coverage_by_item.get(str(item_id).strip()), task_status)
+            continue
+
+        for criterion in _goal_value(acceptance, "criteria", ()) or ():
+            criterion_id = str(_goal_value(criterion, "id", "")).strip()
+            record_unit(results_by_criterion.get(criterion_id), task_status)
+
+    return {
+        "goal_contract_attainment": {
+            "version": 1,
+            "achieved_units": achieved_units,
+            "applicable_units": applicable_units,
+            "excluded_units": excluded_units,
+            "eligible_task_count": eligible_task_count,
+            "unachieved_reasons": dict(sorted(unachieved_reasons.items())),
+            "assessment_complete": bool(_goal_value(plan, "assessment_complete", False)),
+        }
+    }
+
+
 class TraceType(Enum):
     """Types of traces that can be evaluated."""
 

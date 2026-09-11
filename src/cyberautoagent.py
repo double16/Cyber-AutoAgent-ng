@@ -324,7 +324,7 @@ def rerun_operation_evaluation(
     logger: Any,
 ) -> bool:
     """Re-evaluate one persisted operation without executing or reporting."""
-    from modules.evaluation.manager import EvaluationManager, TraceType
+    from modules.evaluation.manager import EvaluationManager, TraceType, build_goal_contract_facts
 
     store = create_application_store(
         get_application_database_path({"output_dir": output_dir}),
@@ -332,6 +332,11 @@ def rerun_operation_evaluation(
         read_only=True,
     )
     plan = store.get_plan(operation_id)
+    tasks = store.get_tasks(operation_id)
+    acceptance_results_by_task = {
+        task.task_uid: store.get_acceptance_results(operation_id, task.task_uid)
+        for task in tasks
+    }
     objective = str(getattr(plan, "objective", "") or "").strip()
     report_path = os.path.join(
         get_output_path(sanitize_target_name(logical_target), operation_id, "", output_dir),
@@ -343,9 +348,7 @@ def rerun_operation_evaluation(
         report_path=report_path,
         operation_objective=objective or None,
         finding_records=store.list_findings(operation_id),
-        operation_facts={
-            "assessment_complete": bool(getattr(plan, "assessment_complete", False)),
-        },
+        operation_facts=build_goal_contract_facts(plan, tasks, acceptance_results_by_task),
     )
     manager.register_trace(
         trace_id=operation_id,

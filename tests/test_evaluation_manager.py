@@ -35,6 +35,85 @@ def test_register_filter_and_summary():
     assert summary["traces"][0]["score_count"] == 1
 
 
+def test_build_goal_contract_facts_scores_current_evidence_backed_units():
+    outcome_contract = SimpleNamespace(
+        mode="outcome",
+        basis=SimpleNamespace(item_ids=()),
+        criteria=[SimpleNamespace(id="test-auth"), SimpleNamespace(id="test-upload")],
+    )
+    coverage_contract = SimpleNamespace(
+        mode="coverage",
+        basis=SimpleNamespace(item_ids=("route-a", "route-b", "route-c")),
+        criteria=[SimpleNamespace(id="coverage")],
+    )
+    tasks = [
+        SimpleNamespace(task_uid="done", status="done", acceptance=outcome_contract),
+        SimpleNamespace(task_uid="partial", status="partial_failure", acceptance=coverage_contract),
+        SimpleNamespace(task_uid="inaccessible", status="done", acceptance=outcome_contract),
+        SimpleNamespace(task_uid="archived", status="replanned", acceptance=outcome_contract),
+    ]
+    results = {
+        "done": [
+            SimpleNamespace(criterion_id="test-auth", status="satisfied", coverage=()),
+            SimpleNamespace(criterion_id="test-upload", status="assessed_negative", coverage=()),
+        ],
+        "partial": [
+            SimpleNamespace(
+                criterion_id="coverage",
+                status="satisfied",
+                coverage=(
+                    SimpleNamespace(item_id="route-a", status="satisfied"),
+                    SimpleNamespace(item_id="route-b", status="excluded"),
+                ),
+            )
+        ],
+        "inaccessible": [
+            SimpleNamespace(criterion_id="test-auth", status="inaccessible", coverage=()),
+            SimpleNamespace(criterion_id="test-upload", status="excluded", coverage=()),
+        ],
+    }
+
+    facts = mod.build_goal_contract_facts(
+        SimpleNamespace(assessment_complete=False), tasks, results
+    )["goal_contract_attainment"]
+
+    assert facts["achieved_units"] == 2
+    assert facts["applicable_units"] == 5
+    assert facts["excluded_units"] == 2
+    assert facts["eligible_task_count"] == 3
+    assert facts["unachieved_reasons"] == {"inaccessible": 1, "task_status:partial_failure": 2}
+    assert facts["assessment_complete"] is False
+
+
+def test_build_goal_contract_facts_requires_done_task_and_acceptance_result():
+    contract = SimpleNamespace(
+        mode="outcome",
+        basis=SimpleNamespace(item_ids=()),
+        criteria=[SimpleNamespace(id="reachable"), SimpleNamespace(id="protected")],
+    )
+    tasks = [
+        SimpleNamespace(task_uid="incomplete", status="active", acceptance=contract),
+        SimpleNamespace(task_uid="missing", status="done", acceptance=contract),
+    ]
+    facts = mod.build_goal_contract_facts(
+        SimpleNamespace(assessment_complete=False),
+        tasks,
+        {
+            "incomplete": [
+                SimpleNamespace(criterion_id="reachable", status="satisfied", coverage=()),
+                SimpleNamespace(criterion_id="protected", status="inaccessible", coverage=()),
+            ]
+        },
+    )["goal_contract_attainment"]
+
+    assert facts["achieved_units"] == 0
+    assert facts["applicable_units"] == 4
+    assert facts["unachieved_reasons"] == {
+        "missing_acceptance_result": 2,
+        "task_status:active": 2,
+    }
+
+
 async def _fake_scores(trace_id, _max_retries):
     if trace_id in {"s1", "OP_TEST"}:
         return {"plain": 0.5, "tuple": (0.75, {"reason": "ok"}), "bad": "skip"}

@@ -1759,6 +1759,7 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
             emitter,
             report_path=None,
             finding_records=None,
+            operation_facts=None,
             usage_callback=None,
             progress_callback=None,
         ):
@@ -1766,6 +1767,7 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
             self.emitter = emitter
             self.report_path = report_path
             self.finding_records = finding_records
+            self.operation_facts = operation_facts
             self.usage_callback = usage_callback
             self.progress_callback = progress_callback
 
@@ -1849,6 +1851,49 @@ def test_generate_final_report_error_and_evaluation_paths(monkeypatch):
     assert handler.has_reached_limit() is True
     summary = handler.get_summary()
     assert isinstance(summary.get("duration"), str)
+
+
+def test_live_evaluation_builds_goal_contract_facts(monkeypatch):
+    handler = make_handler()
+    monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
+    monkeypatch.setenv("ENABLE_AUTO_EVALUATION", "true")
+    contract = SimpleNamespace(
+        mode="outcome",
+        basis=SimpleNamespace(item_ids=()),
+        criteria=[SimpleNamespace(id="criterion")],
+    )
+    task = SimpleNamespace(task_uid="task-1", status="done", acceptance=contract)
+    memory_client = SimpleNamespace(
+        list_finding_records=lambda **_kwargs: [],
+        get_plan=lambda _operation_id: SimpleNamespace(assessment_complete=False),
+        list_tasks=lambda **_kwargs: [task],
+        list_task_acceptance_results=lambda *_args, **_kwargs: [
+            SimpleNamespace(criterion_id="criterion", status="assessed_negative", coverage=())
+        ],
+    )
+    captured = {}
+
+    class FakeEvaluationManager:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.last_failed_metrics = {}
+            self.last_skipped_metrics = set()
+            self.last_scope_errors = {}
+
+        def register_trace(self, **_kwargs):
+            pass
+
+        async def evaluate_all_traces(self):
+            return {"OP_TEST": {"operation/penetration_test_goal_accuracy": 1.0}}
+
+    monkeypatch.setattr("modules.handlers.react.agent_event_handler.get_memory_client", lambda: memory_client)
+    monkeypatch.setattr("modules.evaluation.manager.EvaluationManager", FakeEvaluationManager)
+
+    handler.trigger_evaluation_on_completion()
+
+    facts = captured["operation_facts"]["goal_contract_attainment"]
+    assert facts["achieved_units"] == 1
+    assert facts["applicable_units"] == 1
 
 
 def test_evaluation_result_status_aliases_are_canonical():

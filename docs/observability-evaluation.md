@@ -110,9 +110,13 @@ The operation evaluation uses all 6 public metrics. The report evaluation uses e
 cybersecurity focus because tool selection and execution methodology do not apply to a completed report artifact.
 Scores are written to dedicated Langfuse traces using `operation/` and `report/` prefixes instead of being attached to
 the last role-agent call. Version-3 public scores preserve these names but use controller-owned facts and a
-schema-validated continuous rubric: verified-finding completeness determines evidence quality, controller completion
-determines goal accuracy, and the remaining applicable dimensions use the canonical operation digest. Ragas binary
-metrics are uploaded only as `diagnostic/ragas/...` scores and must not be interpreted as calibrated quality values.
+schema-validated continuous rubric: verified-finding completeness determines evidence quality, while goal accuracy is
+the percentage of applicable, current task acceptance units achieved with immutable evidence. Outcome contracts count
+one unit per frozen criterion and coverage contracts count one unit per frozen inventory item. Valid negative results
+count as achieved assessment work; inaccessible or missing results do not; explicitly excluded units and archived
+replanned or superseded tasks are omitted. `assessment_complete` remains completion context rather than making goal
+accuracy binary. The remaining applicable dimensions use the canonical operation digest. Ragas binary metrics are
+uploaded only as `diagnostic/ragas/...` scores and must not be interpreted as calibrated quality values.
 
 The existing `ENABLE_OBSERVABILITY` and `ENABLE_AUTO_EVALUATION` variables remain authoritative. If either required
 gate is disabled, trace discovery, evaluator initialization, Ragas model calls, and score uploads are skipped.

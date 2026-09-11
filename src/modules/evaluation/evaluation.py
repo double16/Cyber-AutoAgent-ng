@@ -1492,12 +1492,32 @@ class CyberAgentEvaluator:
             )
         }
         operation_facts = getattr(self, "_operation_facts", {})
-        assessment_complete = operation_facts.get("assessment_complete")
-        if isinstance(assessment_complete, bool):
+        goal_facts = operation_facts.get("goal_contract_attainment")
+        if isinstance(goal_facts, dict):
+            applicable_units = goal_facts.get("applicable_units")
+            achieved_units = goal_facts.get("achieved_units")
+            if (
+                isinstance(applicable_units, int)
+                and not isinstance(applicable_units, bool)
+                and applicable_units > 0
+                and isinstance(achieved_units, int)
+                and not isinstance(achieved_units, bool)
+                and 0 <= achieved_units <= applicable_units
+            ):
+                metadata = dict(goal_facts)
+                metadata["score_source"] = "controller_goal_contract_attainment"
+                result["penetration_test_goal_accuracy"] = (
+                    achieved_units / applicable_units,
+                    metadata,
+                )
+        elif isinstance(operation_facts.get("assessment_complete"), bool):
+            # Retain compatibility with callers that have not yet supplied the
+            # acceptance-ledger snapshot. New live and report paths always do.
+            assessment_complete = operation_facts["assessment_complete"]
             result["penetration_test_goal_accuracy"] = (
                 1.0 if assessment_complete else 0.0,
                 {
-                    "score_source": "controller_assessment_completion",
+                    "score_source": "legacy_controller_assessment_completion",
                     "assessment_complete": assessment_complete,
                 },
             )
