@@ -19,3 +19,9 @@ Code security reports serve diverse development and security stakeholders:
 - **DevOps/SRE**: Dependency versions, CI/CD integration, supply chain risk
 - **Security Teams**: Risk quantification, compliance gaps, remediation roadmaps
 </audience_adaptation>
+
+<deterministic_reporting_boundary>
+Use this module guidance only for narrative interpretation and remediation context. Python owns verified finding
+state, severity totals, validation and completion status, coverage, task/phase data, artifact references, taxonomy,
+and metrics. Do not calculate, restate as authoritative, or format those facts.
+</deterministic_reporting_boundary>

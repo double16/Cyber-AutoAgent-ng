@@ -18,7 +18,18 @@ import traceback
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
+
+
+@dataclass
+class LatestOutputPointerResult:
+    """Result from updating the per-target latest operation pointer."""
+
+    success: bool
+    mode: str
+    pointer_path: str
+    operation_path: str
+    message: str = ""
 
 
 def get_terminal_width(default=80):
@@ -45,7 +56,7 @@ def get_output_path(
     target_name: str,
     operation_id: str,
     subdir: str = "",
-    base_dir: Optional[str] = None,
+    base_dir: str | None = None,
 ) -> str:
     """Get path for unified output directory structure.
 
@@ -157,6 +168,75 @@ def create_output_directory(path: str) -> bool:
         return False
 
 
+def update_latest_output_pointer(
+    target_name: str,
+    operation_id: str,
+    base_dir: str | None = None,
+) -> LatestOutputPointerResult:
+    """Update {base_dir}/{target_name}/latest to point at the current operation.
+
+    The preferred pointer is a relative symlink named "latest". When symlinks
+    are unavailable, fall back to a regular text file containing the absolute
+    operation directory path. Existing directories are preserved.
+    """
+    target_dir = get_output_path(target_name, "", "", base_dir)
+    operation_dir = get_output_path(target_name, operation_id, "", base_dir)
+    latest_path = os.path.join(target_dir, "latest")
+    operation_path = os.path.abspath(operation_dir)
+
+    try:
+        os.makedirs(operation_dir, exist_ok=True)
+    except OSError as exc:
+        return LatestOutputPointerResult(
+            success=False,
+            mode="failed",
+            pointer_path=latest_path,
+            operation_path=operation_path,
+            message=f"Could not create operation directory: {exc}",
+        )
+
+    try:
+        if os.path.lexists(latest_path):
+            if os.path.islink(latest_path) or os.path.isfile(latest_path):
+                os.unlink(latest_path)
+            else:
+                return LatestOutputPointerResult(
+                    success=False,
+                    mode="skipped",
+                    pointer_path=latest_path,
+                    operation_path=operation_path,
+                    message="latest exists and is not a symlink or regular file",
+                )
+
+        os.symlink(operation_id, latest_path)
+        return LatestOutputPointerResult(
+            success=True,
+            mode="symlink",
+            pointer_path=latest_path,
+            operation_path=operation_path,
+            message=f"latest -> {operation_id}",
+        )
+    except OSError as symlink_exc:
+        try:
+            with open(latest_path, "w", encoding="utf-8") as latest_file:
+                latest_file.write(operation_path + "\n")
+            return LatestOutputPointerResult(
+                success=True,
+                mode="file",
+                pointer_path=latest_path,
+                operation_path=operation_path,
+                message=f"latest fallback file written after symlink failure: {symlink_exc}",
+            )
+        except OSError as file_exc:
+            return LatestOutputPointerResult(
+                success=False,
+                mode="failed",
+                pointer_path=latest_path,
+                operation_path=operation_path,
+                message=f"Could not update latest pointer: {file_exc}",
+            )
+
+
 # ANSI color codes for terminal output
 class Colors:
     """ANSI color codes for terminal output formatting."""
@@ -207,7 +287,7 @@ def print_banner():
     try:
         with open(pathlib.Path(os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "pyproject.toml"), "rb") as f:
             version = tomllib.load(f).get("project", {}).get("version", "???")
-    except IOError:
+    except OSError:
         version = "???"
 
     subtitle = "Full Spectrum Cyber Operations"
@@ -267,7 +347,7 @@ def print_section(title, content, color=Colors.BLUE, emoji=""):
 
     # Print section for CLI mode
     print("\n%s" % ("─" * 60))
-    print("%s %s%s%s%s" % (emoji, color, Colors.BOLD, title, Colors.RESET))
+    print(f"{emoji} {color}{Colors.BOLD}{title}{Colors.RESET}")
     print("%s" % ("─" * 60))
     print(content)
 
@@ -293,16 +373,7 @@ def print_status(message, status="INFO"):
     color, prefix = status_config.get(status, (Colors.BLUE, "[INFO]"))
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(
-        "%s[%s]%s %s %s%s %s"
-        % (
-            Colors.DIM,
-            timestamp,
-            Colors.RESET,
-            prefix,
-            color,
-            Colors.RESET,
-            message,
-        )
+        f"{Colors.DIM}[{timestamp}]{Colors.RESET} {prefix} {color}{Colors.RESET} {message}"
     )
 
 
@@ -311,8 +382,8 @@ class CyberEvent:
     """Structured event for terminal output."""
 
     type: str  # 'step_start', 'command', 'command_array', 'output', 'error', 'status', 'complete'
-    content: Union[str, List[str]]
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    content: str | list[str]
+    metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
     def to_json(self) -> str:
@@ -320,7 +391,7 @@ class CyberEvent:
         return f"__CYBER_EVENT__{json.dumps(asdict(self), separators=(',', ':'))}__CYBER_EVENT_END__"
 
 
-def emit_event(event_type: str, content: Union[str, List[str]], **metadata) -> None:
+def emit_event(event_type: str, content: str | list[str], **metadata) -> None:
     """Emit a structured event to stdout for React parsing.
 
     This replaces direct print() calls to prevent garbled output.
@@ -341,7 +412,7 @@ def emit_step_start(step: int, total_steps: int, tool_name: str) -> None:
     emit_event("step_start", tool_name, step=step, total_steps=total_steps)
 
 
-def emit_command(command: Union[str, List[str]]) -> None:
+def emit_command(command: str | list[str]) -> None:
     """Emit a command execution event."""
     if isinstance(command, list):
         emit_event("command_array", command)
@@ -368,19 +439,19 @@ def emit_status(message: str, level: str = "info") -> None:
 
 
 def dumpstacks(signal, frame):
-    id2name = dict([(th.ident, th.name) for th in threading.enumerate()])
+    id2name = {th.ident: th.name for th in threading.enumerate()}
     trace = []
     for threadId, stack in sys._current_frames().items():
         trace.append("\n# Thread: %s(%d)" % (id2name.get(threadId, ""), threadId))
         for filename, lineno, name, line in traceback.extract_stack(stack):
             trace.append('File: "%s", line %d, in %s' % (filename, lineno, name))
             if line:
-                trace.append("  %s" % (line.strip()))
-    print("\n".join(trace))
+                trace.append(f"  {line.strip()}")
+    print("\n".join(trace), file=sys.stderr)
     try:
         from guppy import hpy
         h = hpy()
-        print("\n".join(h.heap()[0:12]))
+        print(str(h.heap()), file=sys.stderr)
     except ImportError:
         pass
 
@@ -389,12 +460,52 @@ def b64(b: bytes) -> str:
     return base64.b64encode(b).decode("ascii")
 
 
+def get_tool_spec(tool) -> dict[str, Any] | None:
+    if hasattr(tool, "tool_spec"):
+        return tool.tool_spec
+    if hasattr(tool, "TOOL_SPEC"):
+        return tool.TOOL_SPEC
+    return None
+
+
 def get_tool_name(tool) -> str:
+    tool_spec = get_tool_spec(tool)
+    if tool_spec and tool_spec.get("name"):
+        return str(tool_spec["name"])
     try:
         tool_name = tool.tool_name
     except AttributeError:
         tool_name = getattr(tool, "__name__", tool.__class__.__name__).split(".")[-1]
-    return tool_name
+    return str(tool_name)
+
+
+def get_tool_description(tool) -> str:
+    tool_spec = get_tool_spec(tool)
+    if tool_spec and tool_spec.get("description"):
+        return str(tool_spec["description"])
+    description = getattr(tool, "description", None)
+    if description:
+        return str(description)
+    description = getattr(tool, "__doc__", None)
+    if description:
+        return str(description)
+    description = getattr(tool.__class__, "__doc__", None)
+    return str(description or "")
+
+
+def tool_rename(tool, new_name: str):
+    if hasattr(tool, "tool_name"):
+        tool.tool_name = new_name
+    tool_spec = get_tool_spec(tool)
+    if tool_spec:
+        tool_spec["name"] = new_name
+
+
+def tool_append_description(tool, description: str):
+    tool_spec = get_tool_spec(tool)
+    if tool_spec:
+        tool_description = tool_spec.get("description", "")
+        tool_spec["description"] = tool_description + "\n\n" + description
 
 
 def duration_max(*values):
@@ -424,3 +535,29 @@ def filter_none_values(d: dict) -> dict:
         for key, value in d.items()
         if value is not None
     }
+
+
+def sanitize_toon_value(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.replace(",", ";")
+
+
+def format_duration(seconds: Any) -> str:
+    """Format duration for human-readable display."""
+    try:
+        seconds = max(0, round(float(seconds)))
+    except (TypeError, ValueError):
+        return "N/A"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    elif seconds < 3600:
+        return f"{int(seconds / 60)}m {int(seconds % 60)}s"
+    elif seconds < 86400:
+        hours = int(seconds / 3600)
+        mins = int((seconds % 3600) / 60)
+        return f"{hours}h {mins}m"
+    else:
+        days = int(seconds / 86400)
+        hours = int((seconds % 86400) / 3600)
+        return f"{days}d {hours}h"

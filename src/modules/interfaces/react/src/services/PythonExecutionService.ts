@@ -3,7 +3,7 @@
  * 
  * Handles direct Python execution for local CLI mode, including:
  * - Virtual environment management
- * - Requirements installation
+ * - Requirement installation
  * - Process execution and monitoring
  * - Output streaming
  */
@@ -13,12 +13,16 @@ import { exec, spawn, ChildProcess, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
 import { createLogger } from '../utils/logger.js';
 import { AssessmentParams } from '../types/Assessment.js';
 import { Config } from '../contexts/ConfigContext.js';
-import { StreamEvent, EventType, ToolEvent, AgentEvent } from '../types/events.js';
+import { EventType } from '../types/events.js';
 import { flattenEnvironment } from '../utils/env.js';
+import {
+  CyberEventStreamParserState,
+  emitStatusEvents,
+  processCyberEventStreamChunk,
+} from './events/cyberEventStreamParser.js';
 
 // Define OutputEvent locally since it's part of PythonSystemEvent
 interface OutputEvent {
@@ -36,47 +40,19 @@ export class PythonExecutionService extends EventEmitter {
   private activeProcess?: ChildProcess;
   private isExecutionActive = false;
   private streamEventBuffer = '';
+  private discardingTruncatedEvent = false;
   private abortController?: AbortController;
   private sessionId = `py-${Date.now()}`;
   // Emit policy: only stream raw stdout during active tool execution
   private inToolExecution = false;
   private toolOutputBuffer = '';
+  private currentToolName: string | undefined = undefined;
   // Track execution start time for duration reporting
   private startTime?: number;
 
-  /** Emit a chunk of buffered tool output */
-  private emitToolOutputChunk(content: string): void {
-    try {
-      this.emit('event', {
-        type: 'output',
-        content,
-        timestamp: Date.now(),
-        metadata: { fromToolBuffer: true, tool: (this as any)._currentToolName, chunked: true }
-      });
-    } catch {}
-  }
-
-  /**
-   * Flush tool output buffer in chunks to keep memory flat and reduce latency.
-   * If force=true, flush remaining buffer even if smaller than chunk size.
-   */
-  private flushToolOutputChunks(force: boolean = false): void {
-    const CHUNK_SIZE = 64 * 1024; // 64 KiB
-    const MIN_SPLIT = 32 * 1024;  // Prefer newline split after 32 KiB
-    while (this.toolOutputBuffer.length > CHUNK_SIZE || (force && this.toolOutputBuffer.length > 0)) {
-      const window = this.toolOutputBuffer.slice(0, CHUNK_SIZE);
-      let n = Math.min(this.toolOutputBuffer.length, CHUNK_SIZE);
-      const nl = window.lastIndexOf('\n');
-      if (nl >= MIN_SPLIT && nl < CHUNK_SIZE) {
-        n = nl + 1; // split on newline
-      }
-      const chunk = this.toolOutputBuffer.slice(0, n);
-      this.emitToolOutputChunk(chunk);
-      this.toolOutputBuffer = this.toolOutputBuffer.slice(n);
-    }
-  }
   // Track whether backend emitted consolidated tool output to avoid duplication
   private sawBackendToolOutput = false;
+  private lastToolHadBackendOutput = false;
   // Track whether a user-initiated stop() was requested to treat exits as intentional
   private userStopRequested = false;
   
@@ -89,6 +65,9 @@ export class PythonExecutionService extends EventEmitter {
   private readonly requirementsPath: string;
   private pythonCommand: string = 'python3'; // Will be updated by checkPythonVersion
   private stderrBuffer: string = '';
+  private startupTimers = new Set<NodeJS.Timeout>();
+  private bufferedStartupEvents: any[] = [];
+  private startupEventConsumerAttached = false;
   
   constructor() {
     super();
@@ -111,6 +90,44 @@ export class PythonExecutionService extends EventEmitter {
     this.pipPath = path.join(this.venvPath, venvBinDir, pipExecutable);
     this.requirementsPath = path.join(this.projectRoot, 'pyproject.toml');
     // Note: Python version detection is performed in checkPythonVersion(), not in the constructor
+  }
+
+  drainBufferedStartupEvents(): any[] {
+    const events = this.bufferedStartupEvents;
+    this.bufferedStartupEvents = [];
+    return events;
+  }
+
+  markStartupEventConsumerAttached(): void {
+    this.startupEventConsumerAttached = true;
+  }
+
+  private emitParsedEvent(event: any): void {
+    if (!this.startupEventConsumerAttached && [
+      'tool_discovery_start',
+      'tool_available',
+      'tool_unavailable',
+      'environment_ready',
+    ].includes(event?.type)) {
+      this.bufferedStartupEvents.push(event);
+    }
+    this.emit('event', event);
+  }
+
+  private scheduleStartupTimer(callback: () => void, delayMs: number): NodeJS.Timeout {
+    const timer = setTimeout(() => {
+      this.startupTimers.delete(timer);
+      callback();
+    }, delayMs) as NodeJS.Timeout;
+    this.startupTimers.add(timer);
+    return timer;
+  }
+
+  private clearStartupTimers(): void {
+    for (const timer of this.startupTimers) {
+      clearTimeout(timer);
+    }
+    this.startupTimers.clear();
   }
 
   /**
@@ -170,7 +187,7 @@ export class PythonExecutionService extends EventEmitter {
     const userHome = process.env.HOME || process.env.USERPROFILE || '';
     const condaPy = process.env.CONDA_PREFIX ? `${process.env.CONDA_PREFIX}/bin/python` : undefined;
 
-    const versioned = ['3.12', '3.11', '3.10'];
+    const versioned = ['3.12', '3.13'];
     const baseNames = [
       ...versioned.map(v => `python3.${v.split('.')[1]}`),
       'python3',
@@ -196,7 +213,7 @@ export class PythonExecutionService extends EventEmitter {
           `${userHome}/.asdf/shims/python`,
         ]
       : [];
-    const windowsPy = isWindows ? ['py -3.12', 'py -3.11', 'py -3.10', 'py -3', 'py'] : [];
+    const windowsPy = isWindows ? ['py -3.12', 'py -3'] : [];
 
     const candidates = [
       ...(override ? [override] : []),
@@ -232,14 +249,14 @@ export class PythonExecutionService extends EventEmitter {
         }
         const major = parseInt(m[1]);
         const minor = parseInt(m[2]);
-        const ok = major > 3 || (major === 3 && minor >= 10);
+        const ok = major > 3 || (major === 3 && minor >= 12);
         detections.push({ cmd, versionStr: versionLine, major, minor, ok });
       } catch {
         // Ignore failures and continue to next candidate
       }
     }
 
-    // Choose the highest version that satisfies >= 3.10
+    // Choose the highest version that satisfies >= 3.12
     let best: Detected | undefined = undefined;
     for (const d of detections) {
       if (!d.ok || d.major === undefined || d.minor === undefined) continue;
@@ -268,7 +285,7 @@ export class PythonExecutionService extends EventEmitter {
       return { installed: true, version: best.versionStr };
     }
 
-    return { installed: false, error: 'Python 3.11+ is required but not found' };
+    return { installed: false, error: 'Python 3.12+ is required but not found' };
   }
   
   /**
@@ -305,6 +322,7 @@ export class PythonExecutionService extends EventEmitter {
   async stop(): Promise<void> {
     // Mark as user-initiated stop so exit handler treats non-zero exit as intentional
     this.userStopRequested = true;
+    this.clearStartupTimers();
     if (this.activeProcess) {
       this.logger.info('Stopping Python process', { pid: this.activeProcess.pid });
 
@@ -372,10 +390,22 @@ export class PythonExecutionService extends EventEmitter {
    */
   public cleanup(): void {
     try {
+      this.clearStartupTimers();
       // Best-effort stop
       void this.stop();
     } catch {}
     this.removeAllListeners();
+  }
+
+  public clearRuntimeState(): void {
+    this.clearStartupTimers();
+    this.streamEventBuffer = '';
+    this.discardingTruncatedEvent = false;
+    this.toolOutputBuffer = '';
+    this.stderrBuffer = '';
+    this.inToolExecution = false;
+    this.sawBackendToolOutput = false;
+    this.currentToolName = undefined;
   }
   
   /**
@@ -460,7 +490,7 @@ export class PythonExecutionService extends EventEmitter {
     const status = await this.checkEnvironmentStatus();
 
     if (!status.pythonInstalled) {
-      say('[ERR] Python 3.11+ not found');
+      say('[ERR] Python 3.12+ not found');
       ok = false;
     } else {
       say(`[OK] Python detected: ${status.pythonVersion}`);
@@ -513,7 +543,7 @@ export class PythonExecutionService extends EventEmitter {
       const status = await this.checkEnvironmentStatus();
       
       if (!status.pythonInstalled) {
-        throw new Error('Python 3.11+ is required but not found. Please install Python first.');
+        throw new Error('Python 3.12+ is required but not found. Please install Python first.');
       }
       
       progress(`[OK] Python ${status.pythonVersion} found`);
@@ -530,7 +560,7 @@ export class PythonExecutionService extends EventEmitter {
         await execAsync(`${this.pythonCommand} -m venv "${this.venvPath}"`);
         progress('[OK] Virtual environment recreated');
       } else {
-        // Validate venv Python version >= 3.10
+        // Validate venv Python version >= 3.12
         try {
           const { stdout: venvVerOut } = await execAsync(`"${this.pythonPath}" --version`);
           const versionStr = venvVerOut.trim();
@@ -539,7 +569,7 @@ export class PythonExecutionService extends EventEmitter {
             const vMaj = parseInt(m[1]);
             const vMin = parseInt(m[2]);
             if (!(vMaj > 3 || (vMaj === 3 && vMin >= 11))) {
-              progress('[INFO] Recreating virtual environment with Python 3.11+...');
+              progress('[INFO] Recreating virtual environment with Python 3.12+...');
               await execAsync(`rm -rf "${this.venvPath}"`);
               await execAsync(`${this.pythonCommand} -m venv "${this.venvPath}"`);
               progress('[OK] Virtual environment recreated with compatible Python');
@@ -638,20 +668,39 @@ export class PythonExecutionService extends EventEmitter {
         '--module', params.module,
         '--objective', 'via environment',  // Placeholder, actual value comes from env
         '--target', params.target,
-        '--iterations', String(config.iterations || 100),
+        '--max-duration', String(config.budgetMaxDuration),
         '--provider', config.modelProvider || 'bedrock',
+        '--memory-mode', config.memoryMode || 'operation',
       ];
+
+      if (config.budgetMaxTokens) {
+        args.push('--max-tokens', String(config.budgetMaxTokens));
+      }
+      if (config.budgetMaxCost) {
+        args.push('--max-cost', String(config.budgetMaxCost));
+      }
 
       if (params.continueOperation === true || params.continueOperation === "") {
         args.push('--continue');
       } else if (params.continueOperation) {
         args.push('--continue', params.continueOperation);
       }
+      if (params.resetFailed) {
+        args.push('--reset-failed');
+      }
+      if (params.resetPhases) {
+        args.push('--reset-phases', params.resetPhases);
+      }
 
       if (params.reportOnly === true || params.reportOnly === "") {
         args.push('--report');
       } else if (params.reportOnly) {
         args.push('--report', params.reportOnly);
+      }
+      if (params.evaluateOnly === true || params.evaluateOnly === "") {
+        args.push('--evaluate');
+      } else if (params.evaluateOnly) {
+        args.push('--evaluate', params.evaluateOnly);
       }
 
       if (config.modelId) {
@@ -736,7 +785,8 @@ export class PythonExecutionService extends EventEmitter {
         // Model Configuration - pass separate models from config
         ...(config.swarmModel ? { CYBER_AGENT_SWARM_MODEL: config.swarmModel } : {}),
         ...(config.evaluationModel ? { CYBER_AGENT_EVALUATION_MODEL: config.evaluationModel } : {}),
-        ...(config.memoryModel ? { MEM0_LLM_MODEL: config.memoryModel } : {}),
+        ...(config.qdrantUrl ? { QDRANT_URL: config.qdrantUrl } : {}),
+        ...(config.qdrantApiKey ? { QDRANT_API_KEY: config.qdrantApiKey } : {}),
         // Model rate limits
         ...(config.rateLimitTokensPerMinute ? { CYBER_RATE_LIMIT_TOKENS_PER_MIN: String(config.rateLimitTokensPerMinute) } : {}),
         ...(config.bugBountyHeaders && Object.keys(config.bugBountyHeaders).length > 0
@@ -816,7 +866,7 @@ export class PythonExecutionService extends EventEmitter {
       // Python backend will emit thinking(startup, urgent=true) immediately after operation_init
       // No need to emit it here as it causes activeThinkingRef to be set prematurely
       
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         this.emit('event', {
           type: 'output',
           content: '◆ Python environment ready',
@@ -824,7 +874,7 @@ export class PythonExecutionService extends EventEmitter {
         });
       }, 500);
       
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         this.emit('event', {
           type: 'output',
           content: '◆ Setting up direct Python security assessment environment',
@@ -833,7 +883,7 @@ export class PythonExecutionService extends EventEmitter {
       }, 1000);
 
       // Emit objective/target and plugin details early in the run
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         const objective = params.objective || `Comprehensive ${params.module.replace('_', ' ')} security assessment`;
         this.emit('event', {
           type: 'output',
@@ -854,7 +904,7 @@ export class PythonExecutionService extends EventEmitter {
       const resolvedOutputDir = path.isAbsolute(config.outputDir || '')
         ? (config.outputDir as string)
         : path.resolve(this.projectRoot, config.outputDir || './outputs');
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         this.emit('event', { type: 'output', content: '▶ Preflight checks', timestamp: Date.now() });
         // Python path and version
         try {
@@ -870,22 +920,11 @@ export class PythonExecutionService extends EventEmitter {
         this.emit('event', { type: 'output', content: `✓ Target: ${params.target}`, timestamp: Date.now() });
         this.emit('event', { type: 'output', content: `✓ Provider: ${config.modelProvider || 'unknown'} (${config.modelId || 'default-model'})`, timestamp: Date.now() });
         this.emit('event', { type: 'output', content: `✓ Region: ${env.AWS_REGION || 'unknown'}` , timestamp: Date.now() });
-        // Memory presence
-        const sanitizedTarget = params.target
-          .replace(/^https?:\/\//, '')  // Remove protocol
-          .replace(/^ftp:\/\//, '')     // Remove ftp protocol
-          .replace(/\/.*$/, '')         // Remove path components
-          .replace(/[^a-zA-Z0-9.-]/g, '_'); // Replace invalid chars
-        const memoryPath = path.join(resolvedOutputDir, sanitizedTarget, 'memory');
-        const faissPath = path.join(memoryPath, 'mem0.faiss');
-        if (fs.existsSync(faissPath)) {
-          this.emit('event', { type: 'output', content: `✓ Existing memory found: ${memoryPath}`, timestamp: Date.now() });
-        } else {
-          this.emit('event', { type: 'output', content: `○ No existing memory found for ${params.target}`, timestamp: Date.now() });
-        }
+        const memoryLocation = config.qdrantUrl || path.join(resolvedOutputDir, 'qdrant');
+        this.emit('event', { type: 'output', content: `✓ Qdrant memory: ${memoryLocation}`, timestamp: Date.now() });
       }, 900);
       
-      setTimeout(() => {
+      this.scheduleStartupTimer(() => {
         this.emit('event', {
           type: 'output',
           content: '◆ Loading Python-based cybersecurity tools...',
@@ -924,7 +963,6 @@ export class PythonExecutionService extends EventEmitter {
       this.activeProcess.stderr?.on('data', (data: Buffer) => {
         const output = data.toString();
         // Python may output regular messages to stderr
-        this.processOutputStream(output);
         // Keep a bounded buffer (~8KB) of stderr for error reporting
         this.stderrBuffer += output;
         if (this.stderrBuffer.length > 8192) {
@@ -935,6 +973,8 @@ export class PythonExecutionService extends EventEmitter {
       // Handle process exit
       this.activeProcess.on('exit', (code, signal) => {
         this.isExecutionActive = false;
+        this.clearStartupTimers();
+        this.activeProcess = undefined;
         
         const intentionalStop = this.userStopRequested || signal === 'SIGTERM' || signal === 'SIGINT' || signal === 'SIGKILL';
         if (intentionalStop) {
@@ -959,11 +999,13 @@ export class PythonExecutionService extends EventEmitter {
             duration: durationStr
           });
           
-          // Emit a terminal stream event indicating operation completion
+          // Emit the compatibility terminal event when a legacy Python runner exits without one.
           this.emit('event', {
-            type: 'operation_complete',
+            type: 'operation_finalized',
             duration: durationStr,
-            metrics: { duration: durationStr }
+            metrics: { duration: durationStr },
+            report_status: 'unknown',
+            evaluation_status: 'not_run',
           });
           
           this.emit('complete');
@@ -1019,21 +1061,23 @@ export class PythonExecutionService extends EventEmitter {
           reject(error); // Process failed
         }
 
-        this.activeProcess = undefined;
-        this.stderrBuffer = '';
+        this.clearRuntimeState();
       });
       
       // Handle process error
       this.activeProcess.on('error', (error) => {
         this.logger.error('Process error', error);
+        this.clearStartupTimers();
         this.emit('error', error);
         this.isExecutionActive = false;
         this.activeProcess = undefined;
+        this.clearRuntimeState();
         reject(error); // Process startup failed
       });
       
       } catch (error) {
         this.isExecutionActive = false;
+        this.clearStartupTimers();
         this.logger.error('Failed to start assessment', error as Error);
         reject(error);
       }
@@ -1045,206 +1089,44 @@ export class PythonExecutionService extends EventEmitter {
    * UNIFIED APPROACH: Use the exact same event parsing as DirectDockerService
    */
   private processOutputStream(data: string): void {
-    // Add to buffer
-    this.streamEventBuffer += data;
-
-    // Look for structured event markers (UNIFIED with Docker service)
-    // Use non-global regex with exec() loop to ensure proper cursor management
-    const eventRegex = /__CYBER_EVENT__(.+?)__CYBER_EVENT_END__/s;
-    let match;
-    let processedEvents = false;
-    let lastProcessedIndex = 0;
-
-    while ((match = eventRegex.exec(this.streamEventBuffer)) !== null) {
-      processedEvents = true;
-
-      // Emit any raw text preceding this structured event
-      const preText = this.streamEventBuffer.slice(lastProcessedIndex, match.index);
-        if (preText && this.inToolExecution) {
-          // Buffer raw output; flush on tool end so it appears once per tool
-          this.toolOutputBuffer += preText;
-          // Clamp tool output buffer to prevent unbounded growth
-          const MAX_TOOL_OUTPUT = 1 * 1024 * 1024; // 1 MiB cap
-          if (this.toolOutputBuffer.length > MAX_TOOL_OUTPUT) {
-            this.toolOutputBuffer = this.toolOutputBuffer.slice(-MAX_TOOL_OUTPUT);
-          }
-          // Chunked emission to keep latency low
-          this.flushToolOutputChunks(false);
-        }
-
-      try {
-        const eventData = JSON.parse(match[1]);
-
-        // Track tool execution state for raw output buffering (not for structured events)
-        if (eventData.type === 'tool_start' || eventData.type === 'tool_invocation_start') {
-          this.inToolExecution = true;
-          this.toolOutputBuffer = '';
-          this.sawBackendToolOutput = false; // reset per tool
-          // Remember the current tool name for proper attribution on flush
-          try { (this as any)._currentToolName = eventData.tool_name || eventData.toolName || eventData.tool || undefined; } catch {}
-
-          if (eventData.type === 'tool_start') {
-            this.emit('event', {
-              type: 'output',
-              content: `◆ ${eventData.tool_name} ${JSON.stringify(eventData.tool_input)}`,
-              timestamp: Date.now()
-            });
-          }
-        } else if (
-          eventData.type === 'tool_invocation_end' ||
-          eventData.type === 'tool_result' ||
-          eventData.type === 'step_header' ||
-          eventData.type === 'tool_end'
-        ) {
-          // Flush any remaining raw output when tool ends, but only if backend
-          // did NOT send a consolidated tool output event. This avoids duplicates.
-          if (!this.sawBackendToolOutput) {
-            // Flush remaining buffered output in chunks
-            this.flushToolOutputChunks(true);
-          }
-          this.toolOutputBuffer = '';
-          this.inToolExecution = false;
-          this.sawBackendToolOutput = false;
-          try { (this as any)._currentToolName = undefined; } catch {}
-
-          if (eventData.type === 'tool_end') {
-            var content : string;
-            if (eventData.success) {
-              content = `✓ ${eventData.tool_name}`;
-            } else {
-              content = `○ ${eventData.tool_name}`;
-            }
-            this.emit('event', {
-              type: 'output',
-              content: content,
-              timestamp: Date.now()
-            });
-          }
-        }
-
-        // Emit tool output immediately - backend already handles proper metadata and deduplication
-        if (eventData.type === 'output') {
-          // Track if this is backend-consolidated tool output
-          if (eventData.metadata && eventData.metadata.fromToolBuffer) {
-            this.sawBackendToolOutput = true;
-          }
-          // Always emit output events immediately for real-time display
-          this.emit('event', eventData);
-          lastProcessedIndex = match.index + match[0].length;
-          this.streamEventBuffer = this.streamEventBuffer.slice(lastProcessedIndex);
-          lastProcessedIndex = 0;
-          continue;
-        }
-
-        // Emit system status event exactly like Docker mode
-        if (eventData.type === 'tools_loaded') {
-          this.emit('event', {
-            type: 'output',
-            content: eventData.content,
-            timestamp: Date.now()
-          });
-        } else if (eventData.type === 'tool_discovery_start') {
-          this.emit('event', {
-            type: 'output',
-            content: '◆ Loading cybersecurity assessment tools:',
-            timestamp: Date.now()
-          });
-        } else if (eventData.type === 'tool_available') {
-          this.emit('event', {
-            type: 'output',
-            content: `  ✓ ${eventData.tool_name} (${eventData.description})`,
-            timestamp: Date.now()
-          });
-        } else if (eventData.type === 'tool_unavailable') {
-          this.emit('event', {
-            type: 'output',
-            content: `  ○ ${eventData.tool_name} (${eventData.description}) - unavailable`,
-            timestamp: Date.now()
-          });
-        } else if (eventData.type === 'environment_ready') {
-          this.emit('event', {
-            type: 'output',
-            content: `◆ Environment ready - ${eventData.tool_count} cybersecurity tools loaded`,
-            timestamp: Date.now()
-          });
-
-          setTimeout(() => {
-            this.emit('event', {
-              type: 'output',
-              content: '◆ Configuring assessment parameters and evidence collection',
-              timestamp: Date.now()
-            });
-          }, 500);
-
-          setTimeout(() => {
-            this.emit('event', {
-              type: 'output',
-              content: '◆ Security assessment environment ready - Beginning evaluation',
-              timestamp: Date.now()
-            });
-          }, 1000);
-        }
-        // Forward all other events (step headers, tool calls, reasoning, etc.)
-        else {
-          this.emit('event', eventData);
-        }
-
-        // Update last processed index
-        lastProcessedIndex = match.index + match[0].length;
-        
-        // Move past this match for next iteration
-        this.streamEventBuffer = this.streamEventBuffer.slice(lastProcessedIndex);
-        lastProcessedIndex = 0;
-
-      } catch (error) {
+    processCyberEventStreamChunk(data, this.getEventStreamParserState(), {
+      emitEvent: event => this.emit('event', event),
+      handleEvent: eventData => this.handleParsedPythonEvent(eventData),
+      onParseError: (error, rawEvent) => {
         this.logger.warn('Failed to parse event', {
-          data: match[1].substring(0, 100) + '...',
+          data: rawEvent.substring(0, 100) + '...',
           error: error instanceof Error ? error.message : 'Unknown error'
         });
-        // Move past this match to avoid infinite loop
-        const skipLength = match.index + match[0].length;
-        this.streamEventBuffer = this.streamEventBuffer.slice(skipLength);
-        lastProcessedIndex = 0;
       }
-    }
-
-    if (!processedEvents) {
-      // No structured events found in this chunk; emit raw output immediately
-      if (data) {
-        if (this.inToolExecution) {
-          this.toolOutputBuffer += data;
-          // Clamp tool output buffer to prevent unbounded growth
-          const MAX_TOOL_OUTPUT = 1 * 1024 * 1024; // 1 MiB cap
-          if (this.toolOutputBuffer.length > MAX_TOOL_OUTPUT) {
-            this.toolOutputBuffer = this.toolOutputBuffer.slice(-MAX_TOOL_OUTPUT);
-          }
-          // Chunk out as we accumulate
-          this.flushToolOutputChunks(false);
-        }
-        // Clear buffer regardless to avoid growth
-        this.streamEventBuffer = '';
-      }
-    }
-
-    // Always clamp stream buffer tail to avoid unbounded growth between chunks
-    const MAX_STREAM_BUFFER = 32 * 1024;
-    if (this.streamEventBuffer.length > MAX_STREAM_BUFFER) {
-      this.streamEventBuffer = this.streamEventBuffer.slice(-16 * 1024);
-    }
+    });
   }
-  
-  /**
-   * Get metrics for this execution session
-   */
-  getMetrics(): { 
-    sessionId: string;
-    startTime?: number;
-    isActive: boolean;
-  } {
+
+  private getEventStreamParserState(): CyberEventStreamParserState {
+    const service = this;
     return {
-      sessionId: this.sessionId,
-      startTime: this.startTime,
-      isActive: this.isExecutionActive
+      get streamEventBuffer() { return service.streamEventBuffer; },
+      set streamEventBuffer(value: string) { service.streamEventBuffer = value; },
+      get discardingTruncatedEvent() { return service.discardingTruncatedEvent; },
+      set discardingTruncatedEvent(value: boolean | undefined) { service.discardingTruncatedEvent = value ?? false; },
+      get inToolExecution() { return service.inToolExecution; },
+      set inToolExecution(value: boolean) { service.inToolExecution = value; },
+      get toolOutputBuffer() { return service.toolOutputBuffer; },
+      set toolOutputBuffer(value: string) { service.toolOutputBuffer = value; },
+      get sawBackendToolOutput() { return service.sawBackendToolOutput; },
+      set sawBackendToolOutput(value: boolean) { service.sawBackendToolOutput = value; },
+      get lastToolHadBackendOutput() { return service.lastToolHadBackendOutput; },
+      set lastToolHadBackendOutput(value: boolean | undefined) {
+        service.lastToolHadBackendOutput = value === true;
+      },
+      get currentToolName() { return service.currentToolName; },
+      set currentToolName(value: string | undefined) { service.currentToolName = value; }
     };
+  }
+
+  private handleParsedPythonEvent(eventData: any): void {
+    emitStatusEvents(eventData, {
+      emitEvent: event => this.emitParsedEvent(event),
+      onComplete: () => this.emit('complete')
+    });
   }
 }

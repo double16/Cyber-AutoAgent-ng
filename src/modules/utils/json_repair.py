@@ -1,0 +1,300 @@
+"""Best-effort normalization for JSON returned by language models."""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from typing import Any
+
+_JSON_ESCAPES = frozenset('"\\/bfnrtu')
+_CODE_BLOCK_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+
+
+@dataclass(frozen=True)
+class JSONParseMetadata:
+    """Describe how a structured response was accepted without retaining its content."""
+
+    extracted: bool
+    repaired: bool
+
+
+@dataclass(frozen=True)
+class JSONParseResult:
+    """A parsed structured response and non-sensitive parsing metadata."""
+
+    value: Any
+    metadata: JSONParseMetadata
+
+
+@dataclass(frozen=True)
+class JSONKeyCaseNormalizationResult:
+    """A JSON-compatible value after case-only dictionary-key normalization."""
+
+    value: Any
+    normalized: bool
+
+
+def normalize_json_key_case(value: Any) -> JSONKeyCaseNormalizationResult:
+    """Recursively lowercase JSON dictionary keys without changing values.
+
+    Case-only variants are a compatibility boundary for model-authored JSON. Keys that collide after
+    normalization remain safe only when their normalized values are identical; otherwise the model
+    response is ambiguous and rejected.
+    """
+
+    normalized = False
+
+    def normalize(current: Any, path: str) -> Any:
+        nonlocal normalized
+        if isinstance(current, list):
+            return [normalize(item, f"{path}[{index}]") for index, item in enumerate(current)]
+        if not isinstance(current, dict):
+            return current
+
+        result: dict[Any, Any] = {}
+        original_keys: dict[Any, Any] = {}
+        for key, item in current.items():
+            canonical_key = key.lower() if isinstance(key, str) else key
+            normalized_item = normalize(item, f"{path}.{canonical_key}")
+            if canonical_key in result:
+                if result[canonical_key] != normalized_item:
+                    raise ValueError(
+                        f"conflicting JSON keys after lowercasing at {path}: "
+                        f"{original_keys[canonical_key]!r} and {key!r}"
+                    )
+                normalized = True
+                continue
+            result[canonical_key] = normalized_item
+            original_keys[canonical_key] = key
+            normalized = normalized or canonical_key != key
+        return result
+
+    return JSONKeyCaseNormalizationResult(value=normalize(value, "$"), normalized=normalized)
+
+
+def strip_js_comments(text: str) -> str:
+    """Remove JavaScript comments without changing comment-like string content."""
+
+    output: list[str] = []
+    in_string = False
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                in_string = False
+            index += 1
+            continue
+        if char in ('"', "'"):
+            in_string = True
+            quote = char
+            output.append(char)
+            index += 1
+        elif text.startswith("//", index):
+            index = text.find("\n", index + 2)
+            if index < 0:
+                break
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = len(text) if end < 0 else end + 2
+        else:
+            output.append(char)
+            index += 1
+    return "".join(output)
+
+
+def _candidate(text: str) -> str:
+    blocks = _CODE_BLOCK_RE.findall(text)
+    if blocks:
+        return blocks[0].strip()
+    starts = [position for position in (text.find("{"), text.find("[")) if position >= 0]
+    if not starts:
+        return text.strip()
+    start = min(starts)
+    end = max(text.rfind("}"), text.rfind("]"))
+    return text[start : end + 1] if end >= start else text.strip()
+
+
+def _balanced_json_candidates(text: str) -> list[str]:
+    """Return complete top-level JSON object/array candidates embedded in text.
+
+    Braces inside quoted JSON strings do not affect balancing. Nested values are retained
+    as part of their enclosing top-level candidate rather than treated as alternatives.
+    """
+
+    candidates: list[str] = []
+    start: int | None = None
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"' and stack:
+            in_string = True
+            continue
+        if char in "{[":
+            if not stack:
+                start = index
+            stack.append(char)
+            continue
+        if char in "}]" and stack:
+            expected = "{" if char == "}" else "["
+            if stack[-1] != expected:
+                stack.clear()
+                start = None
+                continue
+            stack.pop()
+            if not stack and start is not None:
+                candidates.append(text[start : index + 1])
+                start = None
+    return candidates
+
+
+def _next_significant(text: str, index: int) -> str:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return text[index] if index < len(text) else ""
+
+
+def repair_json_text(text: str) -> str:
+    """Repair common model JSON mistakes while preserving valid JSON semantics."""
+
+    source = strip_js_comments(_candidate(text)).strip()
+    output: list[str] = []
+    in_string = False
+    string_is_key = False
+    escaped = False
+    previous_significant = ""
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if not in_string:
+            output.append(char)
+            if char == '"':
+                in_string = True
+                string_is_key = previous_significant in ("{", ",")
+            elif not char.isspace():
+                previous_significant = char
+            index += 1
+            continue
+
+        if escaped:
+            if char == "'" or char not in _JSON_ESCAPES:
+                output.append(char)
+            else:
+                output.extend(("\\", char))
+            escaped = False
+            index += 1
+            continue
+        if char == "\\":
+            if index + 1 < len(source) and source[index + 1] == "'":
+                output.append("'")
+                index += 2
+            elif index + 1 < len(source) and source[index + 1] not in _JSON_ESCAPES:
+                output.append(source[index + 1])
+                index += 2
+            else:
+                escaped = True
+                output.append(char)
+                index += 1
+            continue
+        if char == '"':
+            following = _next_significant(source, index + 1)
+            if following in (",", "}", "]", "") or (following == ":" and string_is_key):
+                output.append(char)
+                in_string = False
+            else:
+                output.extend(("\\", char))
+            index += 1
+            continue
+        output.append(char)
+        index += 1
+
+    repaired = "".join(output)
+    return re.sub(r",\s*([}\]])", r"\1", repaired)
+
+
+def _quoted_fenced_json_candidate(value: Any) -> str | None:
+    """Return JSON inside one decoded Markdown fence, if ``value`` is exactly that fence."""
+
+    if not isinstance(value, str):
+        return None
+    match = _CODE_BLOCK_RE.fullmatch(value.strip())
+    return match.group(1).strip() if match else None
+
+
+def parse_json_response_with_metadata(text: str, *, require_object: bool = False) -> JSONParseResult:
+    """Parse one unambiguous JSON value from a structured response.
+
+    A full valid response is preferred. Otherwise, balanced JSON values may be
+    extracted from surrounding prose or a Markdown code fence. Invalid extracted
+    candidates are ignored; valid candidates must all resolve to the same value so a
+    controller never guesses which decision to trust.
+    """
+
+    if not isinstance(text, str):
+        raise TypeError("agent response must be text")
+
+    stripped = text.strip()
+    try:
+        parsed = json.loads(stripped)
+        extracted = False
+        repaired = False
+        quoted_fence = _quoted_fenced_json_candidate(parsed)
+        if quoted_fence is not None:
+            try:
+                parsed = json.loads(quoted_fence)
+            except json.JSONDecodeError:
+                parsed = json.loads(repair_json_text(quoted_fence))
+            extracted = True
+            repaired = True
+    except json.JSONDecodeError:
+        candidates = _balanced_json_candidates(text)
+        valid_candidates: list[tuple[Any, bool]] = []
+        for candidate in candidates:
+            try:
+                parsed_candidate = json.loads(candidate.strip())
+                candidate_repaired = False
+            except json.JSONDecodeError:
+                try:
+                    parsed_candidate = json.loads(repair_json_text(candidate))
+                    candidate_repaired = True
+                except json.JSONDecodeError:
+                    continue
+            valid_candidates.append((parsed_candidate, candidate_repaired))
+
+        if not valid_candidates:
+            raise
+
+        parsed, repaired = valid_candidates[0]
+        if any(candidate != parsed for candidate, _ in valid_candidates[1:]):
+            raise ValueError("response contained multiple JSON values")
+        repaired = any(candidate_repaired for _, candidate_repaired in valid_candidates)
+        extracted = True
+    if require_object and not isinstance(parsed, dict):
+        raise ValueError("agent response must be a JSON object")
+    return JSONParseResult(
+        value=parsed,
+        metadata=JSONParseMetadata(extracted=extracted, repaired=repaired),
+    )
+
+
+def parse_json_response(text: str, *, require_object: bool = False) -> Any:
+    """Normalize and parse a model response intended to contain JSON."""
+
+    return parse_json_response_with_metadata(text, require_object=require_object).value

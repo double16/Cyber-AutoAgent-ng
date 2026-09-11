@@ -1,10 +1,13 @@
 import logging
 from dataclasses import dataclass
-import pytest
 
+import pytest
 from strands.agent.conversation_manager import SlidingWindowConversationManager
 from strands.types.exceptions import ContextWindowOverflowException
-from modules.handlers.conversation_budget import SlidingWindowConversationManagerWithPreservation
+
+from modules.handlers.conversation_budget import (
+    SlidingWindowConversationManagerWithPreservation,
+)
 
 logger = logging.getLogger(__name__)
 

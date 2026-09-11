@@ -36,12 +36,10 @@ from __future__ import annotations
 import json
 import logging
 import os
-
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +69,9 @@ class ModelPricing:
     """
     input: float
     output: float
-    cache_read: Optional[float] = None
-    cache_write: Optional[float] = None
-    reasoning: Optional[float] = None
+    cache_read: float | None = None
+    cache_write: float | None = None
+    reasoning: float | None = None
 
 
 @dataclass(frozen=True)
@@ -99,13 +97,13 @@ class ModelCapabilities:
     tool_call: bool
     attachment: bool
     temperature: bool
-    structured_output: Optional[bool]
-    knowledge: Optional[str]
-    release_date: Optional[str]
-    last_updated: Optional[str]
+    structured_output: bool | None
+    knowledge: str | None
+    release_date: str | None
+    last_updated: str | None
     open_weights: bool
-    modalities_input: List[str]
-    modalities_output: List[str]
+    modalities_input: list[str]
+    modalities_output: list[str]
 
 
 @dataclass(frozen=True)
@@ -125,7 +123,7 @@ class ModelInfo:
     full_id: str
     capabilities: ModelCapabilities
     limits: ModelLimits
-    pricing: Optional[ModelPricing]
+    pricing: ModelPricing | None
 
 
 class ModelsDevClient:
@@ -162,7 +160,7 @@ class ModelsDevClient:
     API_URL = "https://models.dev/api.json"
     CACHE_TTL = timedelta(hours=24)
 
-    def __init__(self, cache_dir: Optional[Path] = None):
+    def __init__(self, cache_dir: Path | None = None):
         """Initialize models.dev client.
 
         Args:
@@ -171,11 +169,11 @@ class ModelsDevClient:
         self.cache_dir = cache_dir or Path.home() / ".cache" / "cyber-autoagent"
         self.cache_file = self.cache_dir / "models.json"
         self.snapshot_file = Path(__file__).parent / "models_snapshot.json"
-        self._data: Optional[Dict] = None
-        self._data_source: Optional[str] = None
+        self._data: dict | None = None
+        self._data_source: str | None = None
 
     @lru_cache
-    def get_model_info(self, model_id: str) -> Optional[ModelInfo]:
+    def get_model_info(self, model_id: str) -> ModelInfo | None:
         """Get complete model information.
 
         Supports multiple model ID formats:
@@ -210,7 +208,7 @@ class ModelsDevClient:
         return None
 
     @lru_cache
-    def get_limits(self, model_id: str) -> Optional[ModelLimits]:
+    def get_limits(self, model_id: str) -> ModelLimits | None:
         """Get model token limits.
 
         Args:
@@ -223,7 +221,7 @@ class ModelsDevClient:
         return info.limits if info else None
 
     @lru_cache
-    def get_capabilities(self, model_id: str) -> Optional[ModelCapabilities]:
+    def get_capabilities(self, model_id: str) -> ModelCapabilities | None:
         """Get model capabilities and features.
 
         Args:
@@ -236,7 +234,7 @@ class ModelsDevClient:
         return info.capabilities if info else None
 
     @lru_cache
-    def get_pricing(self, model_id: str) -> Optional[ModelPricing]:
+    def get_pricing(self, model_id: str) -> ModelPricing | None:
         """Get model pricing information.
 
         Args:
@@ -257,7 +255,7 @@ class ModelsDevClient:
         info = self.get_model_info(model_id)
         return info.pricing if info else None
 
-    def list_providers(self) -> List[str]:
+    def list_providers(self) -> list[str]:
         """Get list of all available providers.
 
         Returns:
@@ -266,7 +264,7 @@ class ModelsDevClient:
         data = self._get_data()
         return sorted(data.keys())
 
-    def list_models(self, provider: Optional[str] = None) -> List[str]:
+    def list_models(self, provider: str | None = None) -> list[str]:
         """Get list of available models.
 
         Args:
@@ -286,7 +284,7 @@ class ModelsDevClient:
         all_models = []
         for provider_id, provider_data in data.items():
             if 'models' in provider_data:
-                for model_id in provider_data['models'].keys():
+                for model_id in provider_data['models']:
                     all_models.append(f"{provider_id}/{model_id}")
         return sorted(all_models)
 
@@ -308,7 +306,7 @@ class ModelsDevClient:
         self._data = None
         self._data_source = None
 
-    def _get_data(self) -> Dict:
+    def _get_data(self) -> dict:
         """Get models data from cache, API, or snapshot (in priority order).
 
         Priority:
@@ -396,7 +394,7 @@ class ModelsDevClient:
             logger.warning(f"Error checking cache validity: {e}")
             return False
 
-    def _save_cache(self, data: Dict):
+    def _save_cache(self, data: dict):
         """Save data to disk cache.
 
         Args:
@@ -410,7 +408,7 @@ class ModelsDevClient:
         except Exception as e:
             logger.warning(f"Failed to save cache: {e}")
 
-    def _lookup_model(self, data: Dict, model_id: str) -> Optional[ModelInfo]:
+    def _lookup_model(self, data: dict, model_id: str) -> ModelInfo | None:
         """Lookup model with exact matching.
 
         Args:
@@ -437,7 +435,7 @@ class ModelsDevClient:
 
         return None
 
-    def _fuzzy_lookup(self, data: Dict, model_id: str) -> Optional[ModelInfo]:
+    def _fuzzy_lookup(self, data: dict, model_id: str) -> ModelInfo | None:
         """Fuzzy lookup with alias resolution and normalization.
 
         Handles:
@@ -482,7 +480,7 @@ class ModelsDevClient:
                 return info
 
         # Handle Bedrock ARN format (us.anthropic.claude-sonnet-4-5-20250929-v1:0)
-        if model_id.startswith('us.') or model_id.startswith('anthropic.'):
+        if model_id.startswith(('us.', 'anthropic.')):
             # Extract the actual model name
             parts = model_id.split('.')
             if len(parts) >= 2:
@@ -501,7 +499,7 @@ class ModelsDevClient:
 
         return None
 
-    def _parse_model(self, data: Dict, provider: str, model: str) -> Optional[ModelInfo]:
+    def _parse_model(self, data: dict, provider: str, model: str) -> ModelInfo | None:
         """Parse model data into ModelInfo.
 
         Args:
@@ -582,7 +580,7 @@ class ModelsDevClient:
 
 
 # Global singleton instance
-_client: Optional[ModelsDevClient] = None
+_client: ModelsDevClient | None = None
 
 
 def get_models_client() -> ModelsDevClient:
@@ -599,10 +597,10 @@ def get_models_client() -> ModelsDevClient:
 
 # Public API
 __all__ = [
-    'ModelLimits',
-    'ModelPricing',
     'ModelCapabilities',
     'ModelInfo',
+    'ModelLimits',
+    'ModelPricing',
     'ModelsDevClient',
     'get_models_client',
 ]

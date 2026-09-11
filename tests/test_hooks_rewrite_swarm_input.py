@@ -1,10 +1,10 @@
 import unittest
 
-from strands.hooks import BeforeToolCallEvent
+from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent
 from strands.types.tools import ToolUse
 
 from modules.config import AgentConfig
-from modules.handlers.react.hooks import ReactHooks
+from modules.handlers.react.hooks import ReactHooks, classify_tool_outcome
 
 
 class RewriteSwarmArgsTests(unittest.TestCase):
@@ -112,3 +112,35 @@ class RewriteSwarmArgsTests(unittest.TestCase):
 
         # Input should still not have an 'agents' key
         self.assertNotIn("agents", event.tool_use["input"])
+
+    def test_tool_outcome_classification_distinguishes_non_execution(self):
+        validation_result = {
+            "status": "error",
+            "content": [{"text": "Error: Validation failed for input parameters: command required"}],
+        }
+
+        self.assertEqual(classify_tool_outcome({"status": "success"}), ("success", True))
+        self.assertEqual(classify_tool_outcome({"status": "error"}), ("error", True))
+        self.assertEqual(classify_tool_outcome(validation_result), ("validation_error", False))
+        self.assertEqual(classify_tool_outcome(validation_result, "policy blocked"), ("blocked", False))
+
+    def test_after_tool_annotates_and_emits_outcome_metadata(self):
+        events = []
+        hook = ReactHooks(emitter=type("Emitter", (), {"emit": lambda _, event: events.append(event)})())
+        result = {"status": "error", "toolUseId": "one", "content": [{"text": "blocked"}]}
+        event = AfterToolCallEvent(
+            agent=None,
+            selected_tool=None,
+            tool_use={"name": "shell", "toolUseId": "one", "input": {"command": "curl target"}},
+            invocation_state={},
+            result=result,
+            cancel_message="blocked by recovery",
+        )
+
+        hook._on_after_tool(event)
+
+        self.assertEqual(result["_cyber_outcome"], "blocked")
+        self.assertFalse(result["_cyber_executed"])
+        completion = next(item for item in events if item["type"] == "tool_end")
+        self.assertEqual(completion["outcome"], "blocked")
+        self.assertFalse(completion["executed"])

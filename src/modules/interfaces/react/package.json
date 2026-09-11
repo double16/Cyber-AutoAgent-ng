@@ -1,12 +1,11 @@
 {
   "name": "cyber-autoagent-cli",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Cyber-AutoAgent CLI with React + Ink",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
-    "cyber-react": "./dist/index.js",
-    "cyber-native": "./dist/index-native.js"
+    "cyber-react": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc",
@@ -25,14 +24,14 @@
     "validate": "npm run build && npm run test:all"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "ansi-escapes": "^7.0.0",
     "chokidar": "^5.0.0",
-    "commander": "^14.0.2",
-    "dockerode": "^4.0.9",
-    "ink": "^7.0.0",
+    "commander": "^15.0.0",
+    "dockerode": "^5.0.0",
+    "ink": "^7.1.0",
     "ink-big-text": "^2.0.0",
     "ink-gradient": "^4.0.0",
     "ink-link": "^5.0.0",
@@ -49,15 +48,14 @@
     "yaml": "^2.8.0"
   },
   "devDependencies": {
-    "@babel/core": "^7.29.0",
-    "@babel/preset-env": "^7.29.0",
+    "@babel/core": "^7.29.7",
+    "@babel/preset-env": "^7.29.7",
     "@jest/globals": "^30.2.0",
     "@types/dockerode": "^4.0.1",
     "@types/jest": "^30.0.0",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.17",
-    "@types/react-test-renderer": "^19.1.0",
     "babel-jest": "^30.4.1",
     "chalk": "^5.4.1",
     "ink-testing-library": "^4.0.0",
@@ -65,9 +63,17 @@
     "jest-environment-jsdom": "^30.2.0",
     "jsdom": "^29.0.2",
     "react-dom": "^19.1.1",
-    "react-test-renderer": "^19.2.4",
-    "ts-jest": "^29.4.6",
+    "ts-jest": "^29.4.11",
     "tsx": "^4.6.2",
     "typescript": "^6.0.2"
+  },
+  "allowScripts": {
+    "cpu-features@0.0.10": true,
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true,
+    "node-pty@1.1.0": true,
+    "protobufjs@7.6.4": true,
+    "ssh2@1.17.0": true,
+    "unrs-resolver@1.12.2": true
   }
 }

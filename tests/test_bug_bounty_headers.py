@@ -8,19 +8,23 @@ from modules.agents.cyber_autoagent import AgentConfig, create_agent
 
 
 @patch("modules.agents.cyber_autoagent.browser_set_headers")
+@patch("modules.agents.cyber_autoagent.resolve_seclists_root")
 @patch("modules.config.ConfigManager.validate_requirements")
 @patch("modules.config.models.factory.create_ollama_model")
 @patch("modules.agents.cyber_autoagent.Agent")
-@patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
+@patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
 @patch("modules.agents.cyber_autoagent.prompts.get_system_prompt")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
+@patch("modules.agents.cyber_autoagent.get_memory_client")
 def test_bug_bounty_headers_are_applied_and_added_to_prompt(
+        mock_get_memory_client,
     mock_init_memory,
     mock_get_prompt,
     mock_react_bridge_handler,
     mock_agent_class,
     mock_create_ollama,
     mock_validate,
+    mock_resolve_seclists_root,
     mock_browser_set_headers,
 ):
     mock_model = Mock()
@@ -30,6 +34,7 @@ def test_bug_bounty_headers_are_applied_and_added_to_prompt(
     mock_handler = Mock()
     mock_react_bridge_handler.return_value = mock_handler
     mock_get_prompt.return_value = "test prompt"
+    mock_resolve_seclists_root.return_value = "/usr/share/seclists"
 
     headers = {
         "User-Agent": "researcher@wearehackerone.com",
@@ -41,6 +46,7 @@ def test_bug_bounty_headers_are_applied_and_added_to_prompt(
         objective="authorized test",
         provider="ollama",
         bug_bounty_headers=headers,
+        available_tools=["ffuf"],
     )
     create_agent(target="example.com", objective="authorized test", config=config)
 
@@ -50,4 +56,5 @@ def test_bug_bounty_headers_are_applied_and_added_to_prompt(
     assert "BUG BOUNTY TRAFFIC MARKERS" in tools_context
     assert "X-HackerOne-Research: researcher" in tools_context
     assert "User-Agent: researcher@wearehackerone.com" in tools_context
-    assert "MCP tools" in tools_context
+    assert prompt_kwargs["seclists_root"] == "/usr/share/seclists"
+    mock_resolve_seclists_root.assert_called_once_with()

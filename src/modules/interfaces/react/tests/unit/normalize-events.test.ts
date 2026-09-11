@@ -33,5 +33,20 @@ describe('normalizeEvent', () => {
     const e = normalizeEvent({ type: 'tool_start', tool_name: 'http_request', tool_input: { url: 'http://x' } });
     expect(e.toolId || e.tool_id).toBeDefined();
   });
-});
 
+  it('normalizes preflight status and list fields', () => {
+    const event = normalizeEvent({
+      type: 'preflight_check',
+      status: 'PASS',
+      target: 123,
+      target_type: 'network',
+      checks: ['resolve'],
+      resolved_addresses: ['192.0.2.1'],
+    });
+
+    expect(event.status).toBe('pass');
+    expect(event.target).toBe('123');
+    expect(event.checks).toEqual(['resolve']);
+    expect(event.resolved_addresses).toEqual(['192.0.2.1']);
+  });
+});

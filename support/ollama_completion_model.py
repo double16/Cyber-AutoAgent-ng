@@ -6,10 +6,10 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 
-def http_json(url: str, method: str = "GET", body: Optional[dict] = None, timeout: int = 10) -> Dict[str, Any]:
+def http_json(url: str, method: str = "GET", body: dict | None = None, timeout: int = 10) -> dict[str, Any]:
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -58,9 +58,9 @@ def parse_num_ctx(num_ctx_val: Any) -> int:
         return 0
 
 
-def pick_best_model(host: str, timeout: int = 10, verbose: bool = False) -> Tuple[str, str, float]:
+def pick_best_model(host: str, timeout: int = 10, verbose: bool = False) -> tuple[str, str, float]:
     tags = http_json(f"{host}/api/tags", timeout=timeout)
-    models: List[Dict[str, Any]] = tags.get("models", [])
+    models: list[dict[str, Any]] = tags.get("models", [])
 
     best_name = ""
     best_param_str = ""

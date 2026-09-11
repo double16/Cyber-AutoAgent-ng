@@ -45,6 +45,34 @@ function truncateString(str: string, max: number): string {
   return str.slice(0, max) + `...(truncated ${omitted} chars)`;
 }
 
+export const formatDuration = (durationMs: number): string => {
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+
+  if (totalSeconds < 60) {
+    return `${totalSeconds} second${totalSeconds === 1 ? '' : 's'}`;
+  }
+
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  return [hours, minutes, seconds]
+      .map(value => value.toString().padStart(2, '0'))
+      .join(':');
+};
+
+export function sanitizeForLogging(input: string): string {
+  return input
+      // OSC (Operating System Command) - title sets, icons etc.
+      .replace(/\x1b][\s\S]*?(?:\x07|\x1b\\|$)/g, '')
+      // CSI sequences - colour, cursor movement, bold, underline etc.
+      .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+      // Device Control Strings / text area commands
+      .replace(/\x1b[P^_X][\s\S]*?(?:\x1b\\|$)/g, '')
+      // Remnant control chars (keep tab and newline)
+      .replace(/[\x00-\x08\x0b-\x1c\x1e-\x1f\x7f\uFFFD]/g, '');
+}
+
 function sanitizeValue(val: any, max: number, keyHint?: string): any {
   try {
     if (val == null) return val;
@@ -70,7 +98,7 @@ function sanitizeValue(val: any, max: number, keyHint?: string): any {
 }
 
 function sanitizeEntry(entry: LogEntry, max: number): LogEntry {
-  const safeMsg = truncateString(entry.message ?? '', max);
+  const safeMsg = truncateString(sanitizeForLogging(entry.message ?? ''), max);
   const safeError = entry.error
     ? {
         name: entry.error.name,

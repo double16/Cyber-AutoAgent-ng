@@ -2,7 +2,6 @@
  * Verify PythonExecutionService sets pricing override env vars from config.modelPricing
  */
 import { describe, it, expect, jest } from '@jest/globals';
-import { EventEmitter } from 'events';
 
 // Mock fs.existsSync to always return true for venv python presence
 jest.unstable_mockModule('fs', () => ({
@@ -37,7 +36,7 @@ describe('PythonExecutionService pricing env override', () => {
     // Avoid background logging from preflight checks after test completes
     (svc as any).preflightChecks = jest.fn(async () => true);
     const cfg: any = {
-      iterations: 1,
+      budgetMaxDuration: 60,
       modelProvider: 'openai',
       modelId: 'gpt-4o',
       modelPricing: {

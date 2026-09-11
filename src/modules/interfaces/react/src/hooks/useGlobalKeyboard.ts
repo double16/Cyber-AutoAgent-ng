@@ -6,7 +6,6 @@
  */
 
 import { useInput } from 'ink';
-import { useEffect } from 'react';
 
 export interface GlobalKeyboardOptions {
   onEscape?: () => void;

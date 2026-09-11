@@ -3,24 +3,46 @@
 - Docs: https://ollama.com/
 """
 
+import inspect
 import json
 import logging
+import uuid
 from collections.abc import AsyncGenerator
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, Unpack, cast, override
 
 import ollama
+from ollama import ChatResponse
 from pydantic import BaseModel
-from typing_extensions import TypedDict, Unpack, override
-
+from strands.models._validation import (
+    _has_location_source,
+    validate_config_keys,
+    warn_on_tool_choice_not_supported,
+)
+from strands.models.model import Model
 from strands.types.content import ContentBlock, Messages
+from strands.types.exceptions import ContextWindowOverflowException
 from strands.types.streaming import StopReason, StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
-from strands.models._validation import _has_location_source, validate_config_keys, warn_on_tool_choice_not_supported
-from strands.models.model import Model
+from typing_extensions import TypedDict
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+async def _close_async_resource(resource: Any) -> None:
+    """Close an async or sync Ollama resource when it exposes a close method."""
+
+    if resource is None:
+        return
+
+    close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+    if close is None:
+        return
+
+    result = close()
+    if inspect.isawaitable(result):
+        await result
 
 
 class OllamaModel(Model):
@@ -32,6 +54,13 @@ class OllamaModel(Model):
     - Streaming responses
     - Tool/function calling
     """
+
+    OVERFLOW_MESSAGES = {
+        "the prompt is longer than the context length",
+        "the input length exceeds the context length",
+        "exceeds the available context",
+        "exceeded max context length",
+    }
 
     class OllamaConfig(TypedDict, total=False):
         """Configuration parameters for Ollama models.
@@ -45,9 +74,11 @@ class OllamaModel(Model):
             stop_sequences: List of sequences that will stop generation when encountered.
             temperature: Controls randomness in generation (higher = more random).
             top_p: Controls diversity via nucleus sampling (alternative to temperature).
+            stream: True for streaming responses.
         """
 
         additional_args: dict[str, Any] | None
+        context_window_limit: int | None
         keep_alive: str | None
         max_tokens: int | None
         model_id: str
@@ -55,6 +86,8 @@ class OllamaModel(Model):
         stop_sequences: list[str] | None
         temperature: float | None
         top_p: float | None
+        top_k: int | None
+        stream: bool | None
 
     def __init__(
             self,
@@ -75,7 +108,7 @@ class OllamaModel(Model):
         validate_config_keys(model_config, self.OllamaConfig)
         self.config = OllamaModel.OllamaConfig(**model_config)
 
-        logger.debug("config=<%s> | initializing", self.config)
+        logger.info("config=<%s> | initializing", self.config)
 
     @override
     def update_config(self, **model_config: Unpack[OllamaConfig]) -> None:  # type: ignore
@@ -121,14 +154,16 @@ class OllamaModel(Model):
             return [{"role": role, "images": [content["image"]["source"]["bytes"]]}]
 
         if "toolUse" in content:
+            tool_use = content["toolUse"]
+            tool_name = tool_use.get("name") or tool_use["toolUseId"]
             return [
                 {
                     "role": role,
                     "tool_calls": [
                         {
                             "function": {
-                                "name": content["toolUse"]["toolUseId"],
-                                "arguments": content["toolUse"]["input"],
+                                "name": tool_name,
+                                "arguments": tool_use["input"],
                             }
                         }
                     ],
@@ -142,7 +177,7 @@ class OllamaModel(Model):
                 for formatted_tool_result_content in self._format_request_message_contents(
                     "tool",
                     (
-                        {"text": json.dumps(tool_result_content["json"])}
+                        {"text": json.dumps(tool_result_content["json"], ensure_ascii=False)}
                         if "json" in tool_result_content
                         else cast(ContentBlock, tool_result_content)
                     ),
@@ -202,12 +237,13 @@ class OllamaModel(Model):
                         ("num_predict", self.config.get("max_tokens")),
                         ("temperature", self.config.get("temperature")),
                         ("top_p", self.config.get("top_p")),
+                        ("top_k", self.config.get("top_k")),
                         ("stop", self.config.get("stop_sequences")),
                     ]
                     if value is not None
                 },
             },
-            "stream": True,
+            "stream": self.config.get("stream", True),
             "tools": [
                 {
                     "type": "function",
@@ -245,11 +281,12 @@ class OllamaModel(Model):
                 return {"messageStart": {"role": "assistant"}}
 
             case "content_start":
-                if event["data_type"] == "text":
+                if event["data_type"] in ("text", "reasoning_text"):
                     return {"contentBlockStart": {"start": {}}}
 
                 tool_name = event["data"].function.name
-                return {"contentBlockStart": {"start": {"toolUse": {"name": tool_name, "toolUseId": tool_name}}}}
+                tool_use_id = f"tooluse_{uuid.uuid4().hex[:24]}"
+                return {"contentBlockStart": {"start": {"toolUse": {"name": tool_name, "toolUseId": tool_use_id}}}}
 
             case "content_delta":
                 match event["data_type"]:
@@ -302,6 +339,101 @@ class OllamaModel(Model):
             case _:
                 raise RuntimeError(f"chunk_type=<{event['chunk_type']} | unknown type")
 
+    @staticmethod
+    def _fallback_think_param(
+            current_request: dict[str, Any], model_id: str, exc: Exception, registry: Any
+    ) -> tuple[bool, Any | None]:
+        """Progressively retry a rejected ``think`` value without omitting it."""
+        if "think" not in current_request or current_request["think"] is False:
+            return False, None
+
+        previous_value = current_request["think"]
+        if isinstance(previous_value, str):
+            from modules.config.models.agent_profiles import ReasoningLevel
+
+            fallback_value = ReasoningLevel.from_value(previous_value).to_bool()
+        else:
+            fallback_value = False
+
+        current_request["think"] = fallback_value
+        logger.warning(
+            "Ollama rejected think=%r for %s (%s). Retrying with think=%r",
+            previous_value,
+            model_id,
+            exc,
+            fallback_value,
+        )
+        return True, fallback_value
+
+    async def _chat_with_fallback(self, client: ollama.AsyncClient, request: dict[str, Any]) -> Any:
+        """Execute chat request with progressive parameter stripping upon provider errors."""
+        from modules.config.models.agent_profiles import get_agent_settings_registry
+        registry = get_agent_settings_registry()
+        model_id = str(request.get("model", self.config.get("model_id", "")))
+
+        current_request = dict(request)
+        current_options = dict(current_request.get("options") or {})
+        pending_think_fallback: Any | None = None
+
+        while True:
+            try:
+                response = await client.chat(**current_request)
+                if pending_think_fallback is not None:
+                    registry.record_parameter_fallback(
+                        "ollama",
+                        model_id,
+                        "think",
+                        pending_think_fallback,
+                        "Ollama think compatibility fallback accepted",
+                    )
+                return response
+            except Exception as exc:
+                if isinstance(exc, RecursionError):
+                    logger.error(
+                        "Ollama request failed for %s with RecursionError; no parameter fallback will be attempted",
+                        model_id,
+                    )
+                    raise
+                err_msg = str(exc).lower()
+
+                if "think" in err_msg or "reasoning" in err_msg:
+                    think_fallback_applied, fallback_value = self._fallback_think_param(
+                        current_request, model_id, exc, registry
+                    )
+                    if think_fallback_applied:
+                        pending_think_fallback = fallback_value
+                        continue
+
+                # Fallback for options: top_k -> temperature -> top_p.
+                if "top_k" in current_options and (
+                    "top_k" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
+                ):
+                    current_options.pop("top_k", None)
+                    current_request["options"] = current_options
+                    logger.warning("Ollama rejected top_k for %s (%s). Omitting top_k", model_id, exc)
+                    registry.record_parameter_fallback("ollama", model_id, "top_k", None, "Ollama top_k rejected")
+                    continue
+
+                if "temperature" in current_options and (
+                    "temperature" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
+                ):
+                    current_options.pop("temperature", None)
+                    current_request["options"] = current_options
+                    logger.warning("Ollama rejected temperature for %s (%s). Omitting temperature", model_id, exc)
+                    registry.record_parameter_fallback("ollama", model_id, "temperature", None, "Ollama temperature rejected")
+                    continue
+
+                if "top_p" in current_options and (
+                    "top_p" in err_msg or "option" in err_msg or "unsupported" in err_msg or "invalid" in err_msg or "unknown" in err_msg
+                ):
+                    current_options.pop("top_p", None)
+                    current_request["options"] = current_options
+                    logger.warning("Ollama rejected top_p for %s (%s). Omitting top_p", model_id, exc)
+                    registry.record_parameter_fallback("ollama", model_id, "top_p", None, "Ollama top_p rejected")
+                    continue
+
+                raise
+
     @override
     async def stream(
             self,
@@ -332,42 +464,65 @@ class OllamaModel(Model):
         logger.debug("request=<%s>", request)
 
         logger.debug("invoking model")
-        tool_requested = False
+        tool_requested = [False]  # holder pattern
 
         client = ollama.AsyncClient(self.host, **self.client_args)
-        response = await client.chat(**request)
+        response = None
+        try:
+            response = await self._chat_with_fallback(client, request)
 
-        logger.debug("got response from model")
-        yield self.format_chunk({"chunk_type": "message_start"})
-        yield self.format_chunk({"chunk_type": "content_start", "data_type": "text"})
+            logger.debug("got response from model")
+            yield self.format_chunk({"chunk_type": "message_start"})
+            yield self.format_chunk({"chunk_type": "content_start", "data_type": "text"})
 
-        event = None
-        async for event in response:
-            for tool_call in event.message.tool_calls or []:
-                yield self.format_chunk({"chunk_type": "content_start", "data_type": "tool", "data": tool_call})
-                yield self.format_chunk({"chunk_type": "content_delta", "data_type": "tool", "data": tool_call})
-                yield self.format_chunk({"chunk_type": "content_stop", "data_type": "tool", "data": tool_call})
-                tool_requested = True
+            def produce_chunks(event: ChatResponse) -> list[StreamEvent]:
+                chunks = []
 
-            yield self.format_chunk(
-                {"chunk_type": "content_delta", "data_type": "text", "data": event.message.content})
-            if event.message.thinking:
+                for tool_call in event.message.tool_calls or []:
+                    chunks.append(self.format_chunk({"chunk_type": "content_start", "data_type": "tool", "data": tool_call}))
+                    chunks.append(self.format_chunk({"chunk_type": "content_delta", "data_type": "tool", "data": tool_call}))
+                    chunks.append(self.format_chunk({"chunk_type": "content_stop", "data_type": "tool", "data": tool_call}))
+                    tool_requested[0] = True
+
+                chunks.append(self.format_chunk(
+                    {"chunk_type": "content_delta", "data_type": "text", "data": event.message.content}))
+                if event.message.thinking:
+                    chunks.append(self.format_chunk(
+                        {"chunk_type": "content_delta", "data_type": "reasoning_text", "data": event.message.thinking}))
+
+                return chunks
+
+            last_event = None
+            if hasattr(response, "__aiter__"):
+                async for event in response:
+                    last_event = event
+                    for se in produce_chunks(event):
+                        yield se
+            elif isinstance(response, ChatResponse):
+                last_event = response
+                for se in produce_chunks(response):
+                    yield se
+            else:
+                raise ValueError(f"Invalid response type: {type(response)}")
+
+            yield self.format_chunk({"chunk_type": "content_stop", "data_type": "text"})
+
+            if last_event is not None:
                 yield self.format_chunk(
-                    {"chunk_type": "content_delta", "data_type": "reasoning_text", "data": event.message.thinking})
+                    {"chunk_type": "message_stop", "data": "tool_use" if tool_requested[0] else last_event.done_reason}
+                )
+                yield self.format_chunk({"chunk_type": "metadata", "data": last_event})
+            else:
+                yield self.format_chunk(
+                    {"chunk_type": "message_stop", "data": "end_turn"}
+                )
 
-        yield self.format_chunk({"chunk_type": "content_stop", "data_type": "text"})
-
-        if event is not None:
-            yield self.format_chunk(
-                {"chunk_type": "message_stop", "data": "tool_use" if tool_requested else event.done_reason}
-            )
-            yield self.format_chunk({"chunk_type": "metadata", "data": event})
-        else:
-            yield self.format_chunk(
-                {"chunk_type": "message_stop", "data": "end_turn"}
-            )
-
-        logger.debug("finished streaming response from model")
+            logger.debug("finished streaming response from model")
+        finally:
+            try:
+                await _close_async_resource(response)
+            finally:
+                await _close_async_resource(client)
 
     @override
     async def structured_output(
@@ -389,10 +544,22 @@ class OllamaModel(Model):
         formatted_request["stream"] = False
 
         client = ollama.AsyncClient(self.host, **self.client_args)
-        response = await client.chat(**formatted_request)
-
+        response = None
         try:
-            content = response.message.content.strip()
-            yield {"output": output_model.model_validate_json(content)}
-        except Exception as e:
-            raise ValueError(f"Failed to parse or load content into model: {e}") from e
+            try:
+                response = await self._chat_with_fallback(client, formatted_request)
+            except ollama.ResponseError as error:
+                if any(message in str(error).lower() for message in self.OVERFLOW_MESSAGES):
+                    raise ContextWindowOverflowException(str(error)) from error
+                raise
+
+            try:
+                content = response.message.content.strip()
+                yield {"output": output_model.model_validate_json(content)}
+            except Exception as e:
+                raise ValueError(f"Failed to parse or load content into model: {e}") from e
+        finally:
+            try:
+                await _close_async_resource(response)
+            finally:
+                await _close_async_resource(client)

@@ -1,4 +1,3 @@
-import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 // Minimal ESM-compatible mock of ink-testing-library that renders the Ink

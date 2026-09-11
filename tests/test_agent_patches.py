@@ -2,9 +2,17 @@
 from __future__ import annotations
 
 import pytest
-
 from strands.hooks.events import AfterToolCallEvent
-from modules.agents.patches import patch_model_class_tool_use_id, unpatch_model_class_tool_use_id, ToolUseIdHook
+
+from modules.agents.patches import (
+    ToolUseIdHook,
+    patch_model_class_tool_use_id,
+    unpatch_model_class_tool_use_id,
+)
+from modules.utils.reasoning_sanitization import (
+    ReasoningSanitizationState,
+    sanitize_reasoning_control_text,
+)
 
 
 def _list_id_factory(ids: list[str]):
@@ -406,6 +414,118 @@ def test_patch_is_idempotent():
     patch_model_class_tool_use_id(FakeModelBasicBad, id_factory=_list_id_factory(["fixed-2"]))  # no-op
 
 
+def test_reasoning_sanitizer_removes_known_markers_without_changing_other_text():
+    clean, removed = sanitize_reasoning_control_text(
+        "<|channel>thought\nInspect headers.<|message|> Continue. <|unknown|>"
+    )
+
+    assert clean == "\nInspect headers. Continue. <|unknown|>"
+    assert removed == 2
+
+
+def test_reasoning_sanitizer_removes_malformed_channel_marker_without_changing_unknown_markers():
+    clean, removed = sanitize_reasoning_control_text(
+        "<|channel>|thought\nInspect headers. <|unknown|>"
+    )
+
+    assert clean == "\nInspect headers. <|unknown|>"
+    assert removed == 1
+
+
+def test_reasoning_sanitizer_reassembles_split_marker_before_emitting_text():
+    state = ReasoningSanitizationState()
+
+    first, first_removed = sanitize_reasoning_control_text("<|chan", state, "reasoning")
+    second, second_removed = sanitize_reasoning_control_text("nel>thought\nInspect headers.", state, "reasoning")
+
+    assert first == ""
+    assert first_removed == 0
+    assert second == "\nInspect headers."
+    assert second_removed == 1
+
+
+def test_reasoning_sanitizer_reassembles_split_malformed_channel_marker_before_emitting_text():
+    state = ReasoningSanitizationState()
+
+    first, first_removed = sanitize_reasoning_control_text("<|channel>", state, "reasoning")
+    second, second_removed = sanitize_reasoning_control_text("|thought\nInspect headers.", state, "reasoning")
+
+    assert first == ""
+    assert first_removed == 0
+    assert second == "\nInspect headers."
+    assert second_removed == 1
+
+
+def test_reasoning_sanitizer_reassembles_partially_streamed_malformed_channel_label():
+    state = ReasoningSanitizationState()
+
+    first, first_removed = sanitize_reasoning_control_text("<|channel>|tho", state, "reasoning")
+    second, second_removed = sanitize_reasoning_control_text("ught\nInspect headers.", state, "reasoning")
+
+    assert first == ""
+    assert first_removed == 0
+    assert second == "\nInspect headers."
+    assert second_removed == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_patch_sanitizes_reasoning_before_yielding_telemetry_events():
+    class FakeModelReasoningMarkers:
+        async def stream(self):
+            yield {
+                "message": {
+                    "content": [
+                        {"toolUse": {"name": "read_artifact", "toolUseId": "read_artifact"}},
+                        {"reasoningContent": {"reasoningText": {"text": "<|channel>"}}},
+                    ]
+                }
+            }
+            yield {
+                "message": {
+                    "content": [
+                        {"reasoningContent": {"reasoningText": {"text": "thought\nInspect the artifact."}}}
+                    ]
+                }
+            }
+
+    patch_model_class_tool_use_id(FakeModelReasoningMarkers)
+    events = [event async for event in FakeModelReasoningMarkers().stream()]
+    unpatch_model_class_tool_use_id(FakeModelReasoningMarkers)
+
+    second_reasoning = events[1]["message"]["content"][0]["reasoningContent"]["reasoningText"]["text"]
+    assert events[0]["message"]["content"] == [{"toolUse": {"name": "read_artifact", "toolUseId": "read_artifact"}}]
+    assert second_reasoning == "\nInspect the artifact."
+    assert events[0]["message"]["content"][0]["toolUse"]["toolUseId"] == "read_artifact"
+
+
+@pytest.mark.asyncio
+async def test_stream_patch_sanitizes_malformed_channel_marker_before_yielding_telemetry_events():
+    class FakeModelMalformedReasoningMarkers:
+        async def stream(self):
+            yield {
+                "message": {
+                    "content": [
+                        {"reasoningContent": {"reasoningText": {"text": "<|channel>"}}},
+                    ]
+                }
+            }
+            yield {
+                "message": {
+                    "content": [
+                        {"reasoningContent": {"reasoningText": {"text": "|thought\nInspect the artifact."}}}
+                    ]
+                }
+            }
+
+    patch_model_class_tool_use_id(FakeModelMalformedReasoningMarkers)
+    events = [event async for event in FakeModelMalformedReasoningMarkers().stream()]
+    unpatch_model_class_tool_use_id(FakeModelMalformedReasoningMarkers)
+
+    second_reasoning = events[1]["message"]["content"][0]["reasoningContent"]["reasoningText"]["text"]
+    assert events[0]["message"]["content"] == []
+    assert second_reasoning == "\nInspect the artifact."
+
+
 @pytest.mark.asyncio
 async def test_unpatch_restores_original_stream_behavior():
     patch_model_class_tool_use_id(FakeModelBasicBad, id_factory=_list_id_factory(["fixed-1"]))
@@ -455,20 +575,20 @@ def test_tooluseid_hook_reverts_tooluseid_and_result_when_generated_id_present_E
 
     class Event:
         def __init__(self):
-            self.tool_use = {"name": "mem0_store", "toolUseId": "tooluse_E-deadbeef"}
+            self.tool_use = {"name": "store_knowledge", "toolUseId": "tooluse_E-deadbeef"}
             self.result = {"toolUseId": "tooluse_E-deadbeef", "ok": True}
 
     ev = Event()
     hook.revert_tool_use_id(ev)  # type: ignore[arg-type]
 
     # tool_use reverted
-    assert ev.tool_use["name"] == "mem0_store"
-    assert ev.tool_use["toolUseId"] == "mem0_store"
+    assert ev.tool_use["name"] == "store_knowledge"
+    assert ev.tool_use["toolUseId"] == "store_knowledge"
     assert ev.tool_use["_toolUseId"] == "tooluse_E-deadbeef"
 
     # result reverted
     assert "name" not in ev.result
-    assert ev.result["toolUseId"] == "mem0_store"
+    assert ev.result["toolUseId"] == "store_knowledge"
     assert ev.result["_toolUseId"] == "tooluse_E-deadbeef"
 
 
@@ -477,7 +597,7 @@ def test_tooluseid_hook_reverts_tooluseid_and_result_when_generated_id_present_N
 
     class Event:
         def __init__(self):
-            self.tool_use = {"name": "mem0_store", "toolUseId": "tooluse_N-deadbeef"}
+            self.tool_use = {"name": "store_knowledge", "toolUseId": "tooluse_N-deadbeef"}
             self.result = {"toolUseId": "tooluse_N-deadbeef", "ok": True}
 
     ev = Event()
@@ -485,12 +605,12 @@ def test_tooluseid_hook_reverts_tooluseid_and_result_when_generated_id_present_N
 
     # tool_use reverted
     assert ev.tool_use["name"] == ""
-    assert ev.tool_use["toolUseId"] == "mem0_store"
+    assert ev.tool_use["toolUseId"] == "store_knowledge"
     assert ev.tool_use["_toolUseId"] == "tooluse_N-deadbeef"
 
     # result reverted
     assert "name" not in ev.result
-    assert ev.result["toolUseId"] == "mem0_store"
+    assert ev.result["toolUseId"] == "store_knowledge"
     assert ev.result["_toolUseId"] == "tooluse_N-deadbeef"
 
 
@@ -499,14 +619,14 @@ def test_tooluseid_hook_reverts_tooluseid_and_result_when_generated_id_present_X
 
     class Event:
         def __init__(self):
-            self.tool_use = {"name": "mem0_store", "toolUseId": "tooluse_X-deadbeef"}
+            self.tool_use = {"name": "store_knowledge", "toolUseId": "tooluse_X-deadbeef"}
             self.result = {"toolUseId": "tooluse_X-deadbeef", "ok": True}
 
     ev = Event()
     hook.revert_tool_use_id(ev)  # type: ignore[arg-type]
 
     # tool_use reverted
-    assert ev.tool_use["name"] == "mem0_store"
+    assert ev.tool_use["name"] == "store_knowledge"
     assert not ev.tool_use["toolUseId"]
     assert ev.tool_use["_toolUseId"] == "tooluse_X-deadbeef"
 
@@ -521,14 +641,14 @@ def test_tooluseid_hook_preserves_hallucinated_tooluseid():
 
     class Event:
         def __init__(self):
-            self.tool_use = {"name": "mem0_store", "toolUseId": "tooluse_deadbeef"}
+            self.tool_use = {"name": "store_knowledge", "toolUseId": "tooluse_deadbeef"}
             self.result = {"toolUseId": "tooluse_deadbeef", "ok": True}
 
     ev = Event()
     hook.revert_tool_use_id(ev)  # type: ignore[arg-type]
 
     # tool_use reverted
-    assert ev.tool_use["name"] == "mem0_store"
+    assert ev.tool_use["name"] == "store_knowledge"
     assert ev.tool_use["toolUseId"] == "tooluse_deadbeef"
     assert "_toolUseId" not in ev.tool_use
 
@@ -541,10 +661,10 @@ def test_tooluseid_hook_preserves_hallucinated_tooluseid():
 @pytest.mark.parametrize(
     "tool_name,tool_use_id",
     [
-        ("mem0_store", "mem0_store"),   # not generated
-        ("mem0_store", ""),              # empty id
+        ("store_knowledge", "store_knowledge"),  # not generated
+        ("store_knowledge", ""),  # empty id
         ("", "tooluse_deadbeef"),         # missing tool name => guard should prevent changes
-        ("mem0_store", "abc123"),        # doesn't start with tooluse_
+        ("store_knowledge", "abc123"),  # doesn't start with tooluse_
     ],
 )
 def test_tooluseid_hook_noop_when_not_generated_or_missing_name(tool_name, tool_use_id):

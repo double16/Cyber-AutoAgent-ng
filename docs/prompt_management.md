@@ -1,365 +1,105 @@
 # Module-Based Prompt System
 
-Cyber-AutoAgent uses a modular prompt architecture that enables specialized security assessments with domain-specific expertise, tools, and reporting.
+Cyber-AutoAgent loads domain-specific prompts and custom tools from operation modules. The Python agent factory
+combines the selected module with the base workflow prompt; the module does not replace workflow ownership of plans,
+tasks, or operation state.
 
-## Architecture Overview
-
-```mermaid
-graph TD
-    A[React UI] --> B[Module Selection]
-    B --> C[DirectDockerService]
-    C --> D[--module parameter]
-    D --> E[Python Agent Creation]
-    E --> F[ModulePromptLoader]
-    F --> G[Load Module Prompts]
-    F --> H[Discover Module Tools]
-    G --> I[System Prompt Integration]
-    H --> I
-    I --> J[Agent Execution]
-    J --> K[Report Generation]
-    K --> L[Module Report Prompt]
-```
-
-## Module Selection Flow
-
-### 1. User Interface Selection
-```typescript
-// React UI - Module selection
-interface AssessmentParams {
-  module: string;  // 'web'
-  target: string;
-  objective?: string;
-}
-```
-
-### 2. Parameter Passing
-```typescript
-// DirectDockerService.ts - Docker execution
-const args = [
-  '--module', params.module,
-  '--objective', objective,
-  '--target', params.target,
-  '--iterations', String(config.iterations || 100),
-  '--provider', config.modelProvider || 'bedrock',
-];
-```
-
-### 3. CLI Argument Processing
-```python
-# cyberautoagent.py - Command line parsing
-parser.add_argument(
-    "--module",
-    type=str,
-    default="web",
-    help="Security module to use (e.g., web)",
-)
-```
-
-## Module Structure
-
-```
-src/modules/operation_plugins/  (CYBER_PLUGIN_PATH, ~/.cyber-autoagent/modules/)
-├── web/
-│   ├── execution_prompt.md                        # Domain-specific system prompt
-│   ├── report_prompt.md                           # General report generation guidance
-│   ├── report_agent_executive_system_prompt.md    # Executive summary guidance
-│   ├── report_agent_finding_system_prompt.md      # Finding report guidance
-│   ├── report_agent_observation_system_prompt.md  # Observation report guidance
-│   ├── report_agent_appendix_system_prompt.md     # Report appendix guidance (additional sections can be specified)
-│   ├── module.yaml                                # Module configuration
-│   └── tools/                                     # Module-specific tools / specialist agents
-│       └── validation_specialist.py
-└── ctf/
-    ├── execution_prompt.md
-    ├── report_prompt.md
-    ├── module.yaml
-    └── tools/
-        └── __init__.py
-```
-
-**Module Configuration** (module.yaml):
-```yaml
-cognitive_level: 4
-configuration:
-  approach: Family-driven discovery and exploitation with curated-first probes and explicit success-state termination
-```
-
-**Available Modules**:
-- **web**: Comprehensive web application and network security testing
-  - Includes the `validation_specialist` tool (invoked via `load_tool("validation_specialist")`) and can be extended with additional specialist agents following the same pattern.
-- **ctf**: CTF challenge solving with flag recognition and success detection
-
-## Prompt Loading System
-
-### ModulePromptLoader Class
-
-```python
-# modules/prompts/module_loader.py
-class ModulePromptLoader:
-    def load_module_execution_prompt(self, module_name: str) -> Optional[str]
-    def load_module_report_prompt(self, module_name: str) -> Optional[str]
-    def discover_module_tools(self, module_name: str) -> List[str]
-    def get_available_modules(self) -> List[str]
-    def validate_module(self, module_name: str) -> bool
-```
-
-### Loading Process
+## Loading flow
 
 ```mermaid
-sequenceDiagram
-    participant A as Agent Creation
-    participant L as ModulePromptLoader
-    participant F as Filesystem
-    participant P as Operation Directory
-
-    A->>L: get_module_loader()
-    A->>L: load_module_execution_prompt('web', operation_root)
-    L->>P: Check operation_root/execution_prompt_optimized.txt
-    alt Optimized Prompt Exists
-        P-->>L: Optimized prompt content
-    else No Optimized Prompt
-        L->>F: Read modules/web/execution_prompt.md
-        F-->>L: Template prompt content
-    end
-    L-->>A: Module execution prompt
-
-    A->>L: discover_module_tools('web')
-    L->>F: Scan modules/web/tools/*.py
-    F-->>L: Tool file paths
-    L-->>A: ['quick_recon.py']
+flowchart TD
+    A[Selected module] --> B[ModulePromptLoader]
+    B --> C[module.yaml and inherited manifests]
+    B --> D[Execution and termination prompts]
+    B --> E[Allowlisted custom tools]
+    C --> F[Agent factory]
+    D --> F
+    E --> F
+    F --> G[Role-agent workflow]
+    G --> H[Module-aware report generation]
 ```
 
-The loader checks for operation-specific optimized prompts first (created by the prompt optimizer), falling back to the module template if not found.
+`ModulePromptLoader` is implemented in `src/modules/prompts/factory.py`. Agent integration is implemented in
+`src/modules/agents/cyber_autoagent.py`, and report integration is implemented in
+`src/modules/handlers/report_generator.py`.
 
-## System Prompt Integration
+## Module files
 
-### Base + Module Prompt Composition
-
-```python
-# modules/agents/cyber_autoagent.py - Agent creation
-def create_agent(module: str = "web"):
-    # Load module-specific execution prompt
-    module_loader = get_module_loader()
-    module_execution_prompt = module_loader.load_module_execution_prompt(module)
-    
-    # Discover module tools
-    module_tool_paths, module_tools_remaining = module_loader.discover_module_tools(module)
-    tool_names = [Path(tool_path).stem for tool_path in module_tool_paths]
-    
-    # Build tools context
-    module_tools_context = f"""
-## MODULE-SPECIFIC TOOLS
-Available {module} module tools (use load_tool to activate):
-{", ".join(tool_names)}
-"""
-    
-    # Generate enhanced system prompt
-    system_prompt = get_system_prompt(
-        target=target,
-        objective=objective,
-        tools_context=full_tools_context,
-        module_context=module_execution_prompt,
-    )
-```
-
-### Prompt Composition Flow
-
-```mermaid
-graph LR
-    A[Base System Prompt] --> C[Combined System Prompt]
-    B[Module Execution Prompt] --> C
-    D[Environmental Tools] --> E[Full Tools Context]
-    F[Module Tools] --> E
-    H[MCP Tools] --> E
-    E --> C
-    C --> G[Agent System Prompt]
-```
-
-### Example: General Module Integration
+Modules are directories under `src/modules/operation_plugins/` or under a configured plugin root. A module must have
+`module.yaml` or `module.yml`; prompt and tool files are optional when they are supplied by an inherited module.
 
 ```text
-# Ghost - Cyber Operations Specialist
-[Base system prompt with core behaviors]
-
-## MODULE-SPECIFIC GUIDANCE
-<role>
-You are a comprehensive security assessment specialist conducting general penetration testing.
-</role>
-
-<assessment_methodology>
-1. Initial Reconnaissance
-2. Service Classification  
-3. Adaptive Testing Strategy
-</assessment_methodology>
-
-## MODULE-SPECIFIC TOOLS
-Available general module tools (use load_tool to activate):
-quick_recon
-
-Load these tools when needed: load_tool(tool_name="tool_name")
+<module>/
+├── module.yaml
+├── execution_prompt.md
+├── termination_policy.md
+├── report_prompt.md
+├── report_agent_executive_system_prompt.md
+├── report_agent_finding_system_prompt.md
+├── report_agent_observation_system_prompt.md
+├── report_agent_appendix_system_prompt.md
+└── tools/
+    └── custom_tool.py
 ```
 
-## Tool Discovery System
+The report-agent prompt files are used for separate report sections. The next-steps prompt is supported by some
+bundled modules, but is not a required loader method; module-specific files are used when the report workflow requests
+them.
 
-### Discovery Process
+## Prompt inheritance
 
-```python
-# modules/prompts/module_loader.py
-def discover_module_tools(self, module_name: str) -> List[str]:
-    tools_path = self.modules_path / module_name / "tools"
-    tools = []
-    
-    if tools_path.exists():
-        for tool_file in tools_path.glob("*.py"):
-            if tool_file.name != "__init__.py":
-                tools.append(str(tool_file))
-    
-    return tools
+The loader searches plugin roots in this order:
+
+1. Paths in `CYBER_PLUGIN_PATH`, separated by `:`.
+2. `~/.cyber-autoagent/modules/`.
+3. The bundled `src/modules/operation_plugins/` directory.
+
+The Docker Compose configuration maps its external and home-plugin mounts into the first two categories. Within a
+module, the `extend` list is followed transitively. A child prompt takes precedence over an inherited prompt, while
+the first matching parent wins. Cycles in the inheritance graph are rejected.
+
+The loader exposes execution, termination, report, and report-agent prompt loading methods. If Langfuse prompt
+loading is enabled, the remote prompt is tried first and the local file remains the fallback.
+
+## Tool discovery
+
+Python files in a module's `tools/` directory are discovered as custom tools. The module's `tools` manifest key is an
+allowlist for custom and built-in tools; it is not inherited. Tool directories are inherited, and a child tool takes
+precedence over a same-named inherited tool. The agent factory imports the selected files and exposes their decorated
+functions to the agent.
+
+The workflow always provides its core tools according to the active role. Module documentation should describe tool
+capabilities and allowlists rather than instructing users to issue internal runtime tool-loading calls.
+
+## Workflow responsibilities
+
+`execution_prompt.md` defines domain methodology, target-access rules, evidence requirements, and prohibited actions.
+`termination_policy.md` defines evidence-backed completion outcomes. Python owns phase and task transitions; role agents
+work on assigned tasks, persist evidence, and record follow-up work.
+
+Report prompts provide domain-specific structure and emphasis. They do not replace the report generator's required
+sections, evidence validation, taxonomy handling, or output persistence.
+
+## Adding a module
+
+Create a directory beneath a plugin root with a manifest and the prompts needed by the module. Use the fields already
+used by bundled manifests:
+
+```yaml
+name: custom_module
+version: 1.0.0
+description: Specialized assessment for a custom domain
+license: Apache-2.0
+cognitive_level: 3
+capabilities:
+  - Domain-specific assessment
+supported_targets:
+  - custom-application
+tools:
+  - custom_scanner
+configuration:
+  approach: Evidence-driven assessment
 ```
 
-### Tool Integration Flow
-
-```mermaid
-sequenceDiagram
-    participant A as Agent
-    participant S as System Prompt
-    participant T as load_tool
-    participant M as Module Tool
-    
-    Note over A,S: Agent sees available module tools in system prompt
-    A->>T: load_tool(tool_name="quick_recon")
-    T->>M: Import modules/web/tools/quick_recon.py
-    M-->>T: Tool registered
-    T-->>A: Tool available for use
-    A->>M: quick_recon(target="example.com")
-    M-->>A: Reconnaissance results
-```
-
-## Report Generation System
-
-### Module Report Prompt Integration
-
-```python
-# modules/handler/report_generator.py
-def build_report_sections(
-    operation_id: str,
-    target: str,
-    objective: str,
-    module: str = "web",
-    steps_executed: int = 0,
-    tools_used: List[str] = None,
-) -> Dict[str, Any]:
-    """Build structured sections for the security assessment report.
-
-    Retrieves operation-scoped evidence and plan, summarizes findings,
-    and returns preformatted sections for the final report template.
-    """
-    # Load module report prompt for domain lens
-    module_loader = get_module_loader()
-    module_prompt = module_loader.load_module_report_prompt(module)
-    domain_lens = _extract_domain_lens(module_prompt)
-
-    # Transform evidence to content using domain lens
-    report_content = _transform_evidence_to_content(
-        evidence=evidence,
-        domain_lens=domain_lens,
-        target=target,
-        objective=objective
-    )
-
-    # Return structured sections for report generation
-    return {
-        "overview": report_content.get("overview", ""),
-        "evidence_text": evidence_text,
-        "findings_table": findings_table,
-        "analysis": report_content.get("analysis", ""),
-        "recommendations": report_content.get("immediate", ""),
-        # ... additional sections
-    }
-```
-
-### Report Generation Flow
-
-```mermaid
-sequenceDiagram
-    participant E as Agent Execution
-    participant T as build_report_sections Tool
-    participant M as Memory System
-    participant L as ModulePromptLoader
-    participant A as Report Agent
-
-    E->>T: build_report_sections(operation_id, target, objective, module)
-    T->>M: Retrieve evidence with category="finding"
-    M-->>T: Evidence list with metadata
-    T->>M: Retrieve active plan
-    M-->>T: Plan with phases and criteria
-    T->>L: load_module_report_prompt(module)
-    L-->>T: Domain lens and report guidance
-    T->>T: Transform evidence using domain lens
-    T-->>A: Structured report sections
-    A->>A: Generate final report markdown
-    A-->>E: Complete report with findings
-    E->>E: Write security_assessment_report.md/json to operation directory
-```
-
-## Module Examples
-
-### Web Security Module
-
-**Execution Prompt Features:**
-- Multi-domain security coverage (Network, Web, API, Infrastructure, Cloud)
-- Adaptive testing methodology based on discovered services
-- Risk-based vulnerability prioritization
-- Comprehensive reconnaissance approach
-- Evidence-driven exploitation with artifact validation
-
-**Available Tools:**
-- `quick_recon`: Basic reconnaissance and port scanning
-- Module tools can be pre-loaded or loaded dynamically via `load_tool()`
-
-**Report Characteristics:**
-- Multi-domain vulnerability grouping
-- Context-aware findings explanation
-- Vulnerability chaining analysis
-- Executive summary for business risk
-- Structured findings with severity-based prioritization
-
-### CTF Module
-
-**Execution Prompt Features:**
-- Flag recognition patterns and success detection
-- Family-driven vulnerability discovery
-- Curated-first probes for common CTF patterns
-- Explicit success-state termination
-- Challenge-specific exploitation strategies
-
-**Report Characteristics:**
-- Challenge solution documentation
-- Flag extraction methodology
-- Tool usage and command sequences
-- Lessons learned and technique breakdown
-
-
-## Implementation Details
-
-### Agent Creation with Modules
-
-```python
-# modules/agents/cyber_autoagent.py
-agent, callback_handler = create_agent(
-    target=args.target,
-    objective=args.objective,
-    max_steps=args.iterations,
-    available_tools=available_tools,
-    op_id=local_operation_id,
-    model_id=args.model,
-    region_name=args.region,
-    provider=args.provider,
-    memory_path=args.memory_path,
-    memory_mode=args.memory_mode,
-    module=args.module,  # Module parameter passed through
-)
-```
-
-
-The module system provides a powerful way to specialize Cyber-AutoAgent for different security domains while maintaining consistent core functionality and user experience.
+Test module discovery, inheritance, prompt fallback, and tool allowlisting before deployment. The authoritative loader
+behavior is covered by the prompt-loader and operation-plugin tests.

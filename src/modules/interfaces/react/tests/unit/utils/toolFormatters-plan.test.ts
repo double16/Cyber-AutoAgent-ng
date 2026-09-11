@@ -7,6 +7,9 @@ describe('TOON plan preview helper', () => {
 
     const content = `plan_overview[1]{objective,current_phase,total_phases}:
   Harden payments portal,2,3
+plan_constraints[2]{constraint}:
+  Use non-destructive checks
+  Keep requests within the authorized target
 plan_phases[3]{id,title,status,criteria}:
   1,Recon,done,map services
   2,Testing,active,validate IDOR

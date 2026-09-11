@@ -8,18 +8,21 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Box, Text } from 'ink';
+import { Box } from 'ink';
 import { StreamDisplay, StaticStreamDisplay, DisplayStreamEvent } from './StreamDisplay.js';
 import { ExecutionService } from '../services/ExecutionService.js';
 import { themeManager } from '../themes/theme-manager.js';
 import { loggingService } from '../services/LoggingService.js';
-import { useEventBatcher } from '../utils/useBatchedState.js';
 import { normalizeEvent } from '../services/events/normalize.js';
 import { RingBuffer } from '../utils/RingBuffer.js';
 import { ByteBudgetRingBuffer } from '../utils/ByteBudgetRingBuffer.js';
 import { DISPLAY_LIMITS } from '../constants/config.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
-import { calculateAvailableHeight } from '../utils/layoutConstants.js';
+import type { ThinkingContext, ThinkingStatus } from '../types/thinking.js';
+import {
+  formatOperationHealth,
+  type OperationHealthSnapshot,
+} from '../utils/operationHealthFormatting.js';
 
 // Exported helper: build a trimmed report preview to avoid storing huge content in memory
 export const buildTrimmedReportContent = (raw: string): string => {
@@ -28,17 +31,215 @@ export const buildTrimmedReportContent = (raw: string): string => {
     const lines = normalized.split('\n');
     const head = DISPLAY_LIMITS.REPORT_PREVIEW_LINES || 100;
     const tail = DISPLAY_LIMITS.REPORT_TAIL_LINES || 20;
-    if (lines.length <= head + tail) return normalized;
-    return [
+    const lineTrimmed = lines.length <= head + tail ? normalized : [
       ...lines.slice(0, head),
       '',
       '... (content continues)',
       '',
       ...lines.slice(-tail)
     ].join('\n');
+    const maxChars = DISPLAY_LIMITS.REPORT_CONTENT_MAX_TOTAL_CHARS || 30000;
+    if (lineTrimmed.length <= maxChars) return lineTrimmed;
+    return trimStringForMemory(lineTrimmed, maxChars);
   } catch {
     return String(raw || '');
   }
+};
+
+const DEFAULT_FINAL_REPORT_EVENT_BYTES = 2 * 1024 * 1024;
+const DEFAULT_REASONING_BUFFER_CHARS = 120000;
+const JSON_ESTIMATE_LIMIT = 64 * 1024 * 1024;
+
+const WORKFLOW_ACTIVITY_TERMINAL_STATUSES = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'canceled',
+  'skipped',
+  'terminated',
+  'done',
+  'success',
+  'error',
+  'partial_failure',
+  'blocked',
+  'not_applicable',
+]);
+
+const workflowActivityKey = (event: any): string => JSON.stringify([
+  event?.role ?? event?.action ?? event?.activity ?? 'workflow',
+  event?.phase_id ?? null,
+  event?.task_uid ?? event?.task_title ?? null,
+  event?.batch_index ?? null,
+  event?.attempt ?? null,
+]);
+
+const isWorkflowActivityTerminal = (event: any): boolean =>
+  WORKFLOW_ACTIVITY_TERMINAL_STATUSES.has(String(event?.status || '').trim().toLowerCase());
+
+const estimateJsonBytes = (value: unknown, maxBytes = JSON_ESTIMATE_LIMIT): number => {
+  try {
+    const seen = new WeakSet<object>();
+    const estimate = (nested: unknown, depth: number): number => {
+      if (nested == null) return 4;
+      if (typeof nested === 'string') return Math.min(nested.length, maxBytes);
+      if (typeof nested === 'number' || typeof nested === 'boolean') return 16;
+      if (typeof nested !== 'object') return 32;
+      if (seen.has(nested)) return 16;
+      if (depth <= 0) return 128;
+      seen.add(nested);
+
+      let total = Array.isArray(nested) ? 32 : 64;
+      if (Array.isArray(nested)) {
+        for (const item of nested.slice(0, 200)) {
+          total += estimate(item, depth - 1);
+          if (total >= maxBytes) return maxBytes;
+        }
+        if (nested.length > 200) total += 64;
+      } else {
+        for (const [key, item] of Object.entries(nested as Record<string, unknown>)) {
+          total += key.length + estimate(item, depth - 1);
+          if (total >= maxBytes) return maxBytes;
+        }
+      }
+      return Math.min(total, maxBytes);
+    };
+    return estimate(value, 5);
+  } catch {
+    return 256;
+  }
+};
+
+const safeJsonPreview = (value: unknown, maxChars = 8192): string => {
+  try {
+    const seen = new WeakSet<object>();
+    const summarize = (nested: unknown, depth: number): unknown => {
+      if (typeof nested === 'string') return trimStringForMemory(nested, 512);
+      if (!nested || typeof nested !== 'object') return nested;
+      if (seen.has(nested)) return '[Circular]';
+      if (depth <= 0) return '[Object]';
+      seen.add(nested);
+      if (Array.isArray(nested)) {
+        return {
+          length: nested.length,
+          preview: nested.slice(0, 5).map(item => summarize(item, depth - 1)),
+        };
+      }
+      const out: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(nested as Record<string, unknown>).slice(0, 12)) {
+        out[key] = summarize(item, depth - 1);
+      }
+      return out;
+    };
+    const json = JSON.stringify(summarize(value, 4));
+    return (json || '').slice(0, maxChars);
+  } catch {
+    return '[Unserializable object]';
+  }
+};
+
+export const estimateDisplayEventBytes = (event: DisplayStreamEvent | null | undefined): number => {
+  if (!event) return 0;
+  let bytes = 128;
+  const anyEvent = event as any;
+  const addValue = (value: unknown) => {
+    if (typeof value === 'string') {
+      bytes += value.length;
+    } else if (value && typeof value === 'object') {
+      bytes += estimateJsonBytes(value);
+    } else if (value !== undefined && value !== null) {
+      bytes += 16;
+    }
+  };
+
+  addValue(anyEvent.content);
+  addValue(anyEvent.command);
+  addValue(anyEvent.message);
+  addValue(anyEvent.delta);
+  addValue(anyEvent.output);
+  addValue(anyEvent.tool_input);
+  addValue(anyEvent.toolInput);
+  addValue(anyEvent.input);
+  addValue(anyEvent.metadata);
+  addValue(anyEvent.metrics);
+  addValue(anyEvent.reportPath);
+  addValue(anyEvent.logPath);
+  addValue(anyEvent.memoryPath);
+  return bytes;
+};
+
+const trimStringForMemory = (
+  value: string,
+  maxChars = Math.max(
+    DISPLAY_LIMITS.OUTPUT_PREVIEW_CHARS + DISPLAY_LIMITS.OUTPUT_TAIL_CHARS + 80,
+    4096
+  )
+): string => {
+  if (value.length <= maxChars) return value;
+  const headChars = Math.max(1, Math.floor(maxChars * 0.7));
+  const tailChars = Math.max(1, maxChars - headChars);
+  return `${value.slice(0, headChars)}\n... (content trimmed due to memory budget)\n${value.slice(-tailChars)}`;
+};
+
+const trimNestedValueForMemory = (value: unknown): unknown => {
+  if (typeof value === 'string') return trimStringForMemory(value);
+  if (!value || typeof value !== 'object') return value;
+  const estimatedBytes = estimateJsonBytes(value);
+  if (estimatedBytes < 8192) return value;
+  return {
+    omitted: true,
+    estimatedBytes,
+    preview: trimStringForMemory(safeJsonPreview(value)),
+  };
+};
+
+export const trimDisplayEventForMemory = (event: DisplayStreamEvent): DisplayStreamEvent => {
+  try {
+    const anyEvent: any = event as any;
+    const next: any = { ...anyEvent };
+    if (next.type === 'report_content' && typeof next.content === 'string') {
+      next.content = buildTrimmedReportContent(next.content);
+    } else if (typeof next.content === 'string') {
+      next.content = trimStringForMemory(next.content);
+    } else if (next.content) {
+      next.content = trimNestedValueForMemory(next.content);
+    }
+
+    for (const key of ['output', 'command', 'message', 'delta', 'tool_input', 'toolInput', 'input', 'metadata']) {
+      if (next[key] !== undefined) {
+        next[key] = trimNestedValueForMemory(next[key]);
+      }
+    }
+    return next as DisplayStreamEvent;
+  } catch {
+    return event;
+  }
+};
+
+const trimReasoningText = (value: string, maxChars: number): string => {
+  if (value.length <= maxChars) return value;
+  const marker = '\n\n... (reasoning trimmed due to memory budget) ...\n\n';
+  const available = Math.max(0, maxChars - marker.length);
+  const head = Math.floor(available * 0.7);
+  const tail = available - head;
+  return `${value.slice(0, head)}${marker}${value.slice(-tail)}`;
+};
+
+const trimEventArrayByByteBudget = (
+  events: DisplayStreamEvent[],
+  maxEvents: number,
+  maxBytes: number
+): DisplayStreamEvent[] => {
+  const out: DisplayStreamEvent[] = [];
+  let bytes = 0;
+  for (let i = events.length - 1; i >= 0 && out.length < maxEvents; i -= 1) {
+    const event = trimDisplayEventForMemory(events[i]);
+    const size = estimateDisplayEventBytes(event);
+    if (out.length > 0 && bytes + size > maxBytes) break;
+    if (size > maxBytes && out.length === 0) continue;
+    out.push(event);
+    bytes += size;
+  }
+  return out.reverse();
 };
 
 interface TerminalProps {
@@ -47,7 +248,9 @@ interface TerminalProps {
   terminalWidth?: number;
   collapsed?: boolean;
   onEvent?: (event: any) => void;
-  onMetricsUpdate?: (metrics: { tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number }) => void;
+  onMetricsUpdate?: (metrics: { tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number; progressPercent?: number }) => void;
+  onHealthUpdate?: (health: OperationHealthSnapshot) => void;
+  onThinkingUpdate?: (status: ThinkingStatus) => void;
   animationsEnabled?: boolean;
   cleanupRef?: React.MutableRefObject<(() => void) | null>;
 }
@@ -59,6 +262,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   collapsed = false,
   onEvent,
   onMetricsUpdate,
+  onHealthUpdate,
+  onThinkingUpdate,
   animationsEnabled = true,
   cleanupRef
 }) => {
@@ -76,7 +281,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       }
     } catch {}
   };
-// Direct event rendering without Static component
+  // Completed history uses append-style Static rendering; live events stay dynamic.
   // Limit event buffer to prevent memory leaks - events are already persisted to disk
   // Use stricter defaults for docker-stack (full-stack) mode
   const serviceMode = (executionService && typeof (executionService as any).getMode === 'function')
@@ -84,11 +289,22 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     : undefined;
   const isDockerStack = serviceMode === 'docker-stack';
   const MAX_EVENTS = Number(process.env.CYBER_MAX_EVENTS || (isDockerStack ? 2000 : 3000)); // Keep last N events
+  const MAX_FINAL_REPORT_EVENTS = Number(process.env.CYBER_MAX_FINAL_REPORT_EVENTS || 300);
+  const MAX_FINAL_REPORT_EVENT_BYTES = Number(
+    process.env.CYBER_MAX_FINAL_REPORT_EVENT_BYTES || DEFAULT_FINAL_REPORT_EVENT_BYTES
+  );
+  const MAX_REASONING_BUFFER_CHARS = Number(
+    process.env.CYBER_MAX_REASONING_BUFFER_CHARS || DEFAULT_REASONING_BUFFER_CHARS
+  );
+  const MAX_GLOBAL_OUTPUT_FINGERPRINTS = Number(process.env.CYBER_MAX_GLOBAL_OUTPUT_FINGERPRINTS || 5000);
+  const MAX_TOOL_OUTPUT_FINGERPRINTS = Number(process.env.CYBER_MAX_TOOL_OUTPUT_FINGERPRINTS || 1000);
+  const MAX_TOOL_DEDUPE_SESSIONS = Number(process.env.CYBER_MAX_TOOL_DEDUPE_SESSIONS || 100);
+  const MAX_OPERATION_SUMMARY_EVENTS = Number(process.env.CYBER_MAX_OPERATION_SUMMARY_EVENTS || 20);
   const [completedEvents, setCompletedEvents] = useState<DisplayStreamEvent[]>([]);
   const [activeEvents, setActiveEvents] = useState<DisplayStreamEvent[]>([]);
-  // Dedicated buffer for FINAL REPORT and its inline preview, rendered via a
-  // dynamic StreamDisplay so it can react to late-arriving report events.
-  const [finalReportEvents, setFinalReportEvents] = useState<DisplayStreamEvent[] | null>(null);
+  // Dedicated completion-phase buffer for FINAL REPORT, evaluation progress,
+  // and the inline preview. Keeping these events together preserves arrival order.
+  const [completionPhaseEvents, setCompletionPhaseEvents] = useState<DisplayStreamEvent[] | null>(null);
   const [staticSessionKey, setStaticSessionKey] = useState(0);
 
   // Ring buffers to bound memory regardless of session length
@@ -96,59 +312,35 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   const completedBufRef = useRef(new ByteBudgetRingBuffer<DisplayStreamEvent>(
     MAX_EVENT_BYTES,
     {
-      estimator: (e) => {
-        try {
-          if (!e) return 0;
-          let bytes = 64;
-          const any: any = e as any;
-          const add = (v: any) => { if (typeof v === 'string') bytes += v.length; };
-          add(any.content);
-          add(any.command);
-          add(any.message);
-          // Tool outputs are the largest; budget mostly on content
-          return bytes;
-        } catch { return 256; }
-      },
-      overflowReducer: (e) => {
-        // Summarize overly large events to preserve memory bounds
-        try {
-          const any: any = e as any;
-          if (any?.type === 'report_content' && typeof any.content === 'string') {
-            return { ...any, content: buildTrimmedReportContent(any.content) } as DisplayStreamEvent;
-          }
-          if (any?.type === 'output' && typeof any.content === 'string') {
-            const s = any.content as string;
-            const head = s.slice(0, DISPLAY_LIMITS.OUTPUT_PREVIEW_CHARS);
-            const tail = s.slice(-DISPLAY_LIMITS.OUTPUT_TAIL_CHARS);
-            return {
-              ...any,
-              content: `${head}\n... (content trimmed due to memory budget)\n${tail}`
-            } as DisplayStreamEvent;
-          }
-          return e;
-        } catch {
-          return e;
-        }
-      }
+      estimator: estimateDisplayEventBytes,
+      overflowReducer: trimDisplayEventForMemory
     }
   ));
   const activeBufRef = useRef(new RingBuffer<DisplayStreamEvent>(Math.min(200, Math.floor(MAX_EVENTS / 5))));
+  const appendCompletionPhaseEvent = useCallback((event: DisplayStreamEvent) => {
+    setCompletionPhaseEvents(prev => {
+      const next = [...(prev ?? []), event];
+      return trimEventArrayByByteBudget(next, MAX_FINAL_REPORT_EVENTS, MAX_FINAL_REPORT_EVENT_BYTES);
+    });
+  }, [MAX_FINAL_REPORT_EVENTS, MAX_FINAL_REPORT_EVENT_BYTES]);
   const [metrics, setMetrics] = useState({
     tokens: 0,
     cost: 0,
     duration: '0s',
     memoryOps: 0,
-    evidence: 0
+    evidence: 0,
+    progressPercent: 0
   });
   
   // Deduplication state: track seen output fingerprints per tool session and globally
   const perToolOutputSeenRef = useRef<Map<string, Set<string>>>(new Map());
   const globalOutputSeenRef = useRef<Set<string>>(new Set());
+  const globalOutputSeenOrderRef = useRef<string[]>([]);
   
   // Throttle state for metrics emissions to parent
   const lastEmitRef = useRef<number>(0);
   const pendingTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const pendingMetricsRef = useRef<{ tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number } | null>(null);
+  const pendingMetricsRef = useRef<{ tokens?: number; cost?: number; duration: string; memoryOps: number; evidence: number; progressPercent: number } | null>(null);
   const EMIT_INTERVAL_MS = 16;
   const METRICS_COALESCE_MS = 50;
   const lastMetricsTsRef = useRef<number>(0);
@@ -158,10 +350,53 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   // Keep a ref in sync with activeThinking to avoid setState race conditions
   const activeThinkingRef = useRef(false);
   useEffect(() => { activeThinkingRef.current = activeThinking; }, [activeThinking]);
+  const workflowActivityKeysRef = useRef<Set<string>>(new Set());
+  const setThinkingActive = useCallback((value: boolean) => {
+    activeThinkingRef.current = value;
+    setActiveThinking(value);
+  }, []);
   const [activeReasoning, setActiveReasoning] = useState(false);
-  const [currentToolId, setCurrentToolId] = useState<string | undefined>(undefined);
-  const [lastOutputContent, setLastOutputContent] = useState('');
-  const [lastOutputTime, setLastOutputTime] = useState(0);
+  const currentToolIdRef = useRef<string | undefined>(undefined);
+  const setCurrentToolId = (toolId: string | undefined) => {
+    currentToolIdRef.current = toolId;
+  };
+  const lastOutputContentRef = useRef('');
+  const lastOutputTimeRef = useRef(0);
+
+  const rememberGlobalOutputFingerprint = (fingerprint: string): boolean => {
+    if (globalOutputSeenRef.current.has(fingerprint)) {
+      return true;
+    }
+    globalOutputSeenRef.current.add(fingerprint);
+    globalOutputSeenOrderRef.current.push(fingerprint);
+    while (globalOutputSeenOrderRef.current.length > MAX_GLOBAL_OUTPUT_FINGERPRINTS) {
+      const oldest = globalOutputSeenOrderRef.current.shift();
+      if (oldest) globalOutputSeenRef.current.delete(oldest);
+    }
+    return false;
+  };
+
+  const rememberToolOutputFingerprint = (toolId: string, fingerprint: string): boolean => {
+    let seenForTool = perToolOutputSeenRef.current.get(toolId);
+    if (!seenForTool) {
+      seenForTool = new Set();
+      perToolOutputSeenRef.current.set(toolId, seenForTool);
+    }
+    if (seenForTool.has(fingerprint)) {
+      return true;
+    }
+    seenForTool.add(fingerprint);
+    if (seenForTool.size > MAX_TOOL_OUTPUT_FINGERPRINTS) {
+      seenForTool.clear();
+      seenForTool.add(fingerprint);
+    }
+    while (perToolOutputSeenRef.current.size > MAX_TOOL_DEDUPE_SESSIONS) {
+      const oldestKey = perToolOutputSeenRef.current.keys().next().value;
+      if (!oldestKey) break;
+      perToolOutputSeenRef.current.delete(oldestKey);
+    }
+    return false;
+  };
 
   // Per-step aggregated output (to display a single 'output' block per step)
   const stepAggRef = useRef<{ step?: number | null; head: string; tail: string; omitted: number } | null>({ step: null, head: '', tail: '', omitted: 0 });
@@ -220,14 +455,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   };
   const resetStepAgg = () => { stepAggRef.current = { step: null, head: '', tail: '', omitted: 0 }; };
   
-  // Swarm operation tracking for proper event enhancement
-  const [swarmActive, setSwarmActive] = useState(false);
-  const [currentSwarmAgent, setCurrentSwarmAgent] = useState<string | null>(null);
-  const swarmHandoffSequenceRef = useRef(0);
   const delayedThinkingTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const completionCleanupTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Track whether we're currently within the FINAL REPORT phase so we can
   // accumulate a dynamic event cluster for inline preview rendering.
-  const finalReportActiveRef = useRef<boolean>(false);
+  const completionPhaseActiveRef = useRef<boolean>(false);
   // Timer to detect idle gaps after tool-buffer output when no explicit tool_end is emitted
   const postToolIdleTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Timer to bridge the gap AFTER reasoning completes and BEFORE next step/tool begins
@@ -238,7 +470,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   const lastReasoningTextRef = useRef<string | null>(null);
   // Timestamp of the most recent tool-buffered output chunk
   const lastToolOutputTsRef = useRef<number>(0);
-  // Duplicate emission resolved in ReactBridgeHandler
+  // Duplicate emission resolved in the agent event handler.
   // Throttle for active tail updates when animations are disabled
   const activeUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingActiveUpdaterRef = useRef<((prev: DisplayStreamEvent[]) => DisplayStreamEvent[]) | null>(null);
@@ -263,8 +495,39 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     }, ACTIVE_EMIT_INTERVAL_MS);
   };
 
+  function activateThinking(
+    context: ThinkingContext = 'tool_execution',
+    message?: string,
+    extra: Partial<DisplayStreamEvent> = {},
+    immediate = false
+  ) {
+    setThinkingActive(true);
+    onThinkingUpdate?.({
+      active: true,
+      context,
+      message: message ?? (typeof (extra as any).message === 'string' ? (extra as any).message : undefined),
+      startTime: typeof (extra as any).startTime === 'number' ? (extra as any).startTime : Date.now(),
+      taskTitle: typeof (extra as any).taskTitle === 'string' ? (extra as any).taskTitle : undefined,
+    });
+  }
+
+  function deactivateThinking(force = false) {
+    if (!force && workflowActivityKeysRef.current.size > 0) {
+      return;
+    }
+    setThinkingActive(false);
+    onThinkingUpdate?.({ active: false });
+  }
+
   // Batch completed events updates to prevent memory churn
   const completedUpdateTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const flushCompletedEventsUpdate = () => {
+    if (completedUpdateTimerRef.current) {
+      clearTimeout(completedUpdateTimerRef.current);
+      completedUpdateTimerRef.current = null;
+    }
+    setCompletedEvents(completedBufRef.current.toArray());
+  };
   const scheduleCompletedEventsUpdate = () => {
     if (completedUpdateTimerRef.current) return;
     completedUpdateTimerRef.current = setTimeout(() => {
@@ -278,6 +541,30 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       }
     }, 33); // ~30fps coalescing
   };
+
+  const shouldFlushCompletedImmediately = (events: DisplayStreamEvent[]): boolean => (
+    events.some(event => (
+      event.type === 'progress_update' ||
+      event.type === 'reasoning' ||
+      event.type === 'tool_start' ||
+      event.type === 'tool_end' ||
+      event.type === 'tool_input_update' ||
+      event.type === 'tool_input_corrected' ||
+      event.type === 'tool_output' ||
+      event.type === 'output'
+    ))
+  );
+  const isCompletionPhaseEvent = (event: DisplayStreamEvent): boolean => (
+    (event.type === 'progress_update' && (
+      (event as any).operation_stage === 'final_report' ||
+      (event as any).operation_stage === 'ragas_evaluation' ||
+      (event as any).step === 'FINAL REPORT'
+    )) ||
+    String((event as any).type) === 'evaluation_step_complete' ||
+    String((event as any).type) === 'evaluation_complete' ||
+    String((event as any).type) === 'assessment_complete' ||
+    String((event as any).type) === 'operation_finalized'
+  );
 
   // Unified helpers for delayed thinking spinner scheduling/cancellation
   const cancelDelayedThinking = () => {
@@ -301,24 +588,28 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     }
   };
 
+  const cancelCompletionCleanupTimer = () => {
+    if (completionCleanupTimerRef.current) {
+      clearTimeout(completionCleanupTimerRef.current);
+      completionCleanupTimerRef.current = null;
+    }
+  };
+
+  const cancelCompletedEventsUpdateTimer = () => {
+    if (completedUpdateTimerRef.current) {
+      clearTimeout(completedUpdateTimerRef.current);
+      completedUpdateTimerRef.current = null;
+    }
+  };
+
   const scheduleDelayedThinking = (opts?: { delay?: number; context?: string; toolName?: string; toolCategory?: string; addSpacer?: boolean; }) => {
     // Always cancel any existing timer first to avoid overlap
     cancelDelayedThinking();
-    if (!animationsEnabled) return;
 
     const delay = Math.max(0, opts?.delay ?? 100);
     emitTestMarker && emitTestMarker(`scheduleDelayedThinking request ctx=${opts?.context || 'tool_execution'} delay=${delay}`);
     delayedThinkingTimerRef.current = setTimeout(() => {
-      // If a thinking spinner is already active AND visible in the active tail, do not schedule another
-      const activeHasThinking = (() => {
-        try {
-          const arr = activeBufRef.current.toArray();
-          return arr.some(e => e && (e as any).type === 'thinking');
-        } catch {
-          return false;
-        }
-      })();
-      if (activeThinkingRef.current && activeHasThinking) {
+      if (activeThinkingRef.current) {
         emitTestMarker && emitTestMarker('scheduleDelayedThinking skipped (already visible)');
         delayedThinkingTimerRef.current = null;
         return;
@@ -331,36 +622,22 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         scheduleCompletedEventsUpdate();
       }
 
-      const thinkingEvent: DisplayStreamEvent = {
-        type: 'thinking',
-        context: opts?.context || 'tool_execution',
-        startTime: Date.now(),
+      const thinkingContext = (opts?.context || 'tool_execution') as ThinkingContext;
+      activateThinking(thinkingContext, undefined, {
         ...(opts?.toolName ? { toolName: opts.toolName } : {}),
-        ...(opts?.toolCategory ? { toolCategory: opts.toolCategory } : {})
-      } as DisplayStreamEvent;
-
-      // Mark spinner active so backend 'thinking' doesn't duplicate it
-      setActiveThinking(true);
+        ...(opts?.toolCategory ? { toolCategory: opts.toolCategory } : {}),
+      });
       seenThinkingThisPhaseRef.current = true;
 
-      // Remove any existing thinking before adding a new one, but preserve
-      // existing active tail content (e.g., aggregated tool output) to avoid flicker.
-      // Insert thinking at the FRONT so the spinner is visible above output.
-      setActiveThrottled(() => {
-        const existing = activeBufRef.current.toArray().filter(e => e.type !== 'thinking');
-        activeBufRef.current.clear();
-        activeBufRef.current.push(thinkingEvent);
-        for (const e of existing) activeBufRef.current.push(e);
-        return activeBufRef.current.toArray();
-      });
-
-      emitTestMarker && emitTestMarker(`scheduleDelayedThinking fired ctx=${(thinkingEvent as any).context}`);
+      emitTestMarker && emitTestMarker(`scheduleDelayedThinking fired ctx=${thinkingContext}`);
       delayedThinkingTimerRef.current = null;
     }, delay) as unknown as NodeJS.Timeout;
   };
   
   const resetAllBuffers = useCallback((preserveEvents: DisplayStreamEvent[] = []) => {
     cancelDelayedThinking();
+    cancelCompletionCleanupTimer();
+    cancelCompletedEventsUpdateTimer();
     if (pendingTimerRef.current) {
       clearTimeout(pendingTimerRef.current);
       pendingTimerRef.current = null;
@@ -373,26 +650,26 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     stepAggRef.current = { step: null, head: '', tail: '', omitted: 0 };
     pendingReasoningsRef.current = [];
     opSummaryBufferRef.current = [];
-    swarmHandoffSequenceRef.current = 0;
     seenThinkingThisPhaseRef.current = false;
     suppressTerminationBannerRef.current = false;
     lastReasoningTextRef.current = null;
-    finalReportActiveRef.current = false;
-    setFinalReportEvents(null);
+    completionPhaseActiveRef.current = false;
+    hasSeenOperationActivityRef.current = false;
+    workflowActivityKeysRef.current.clear();
+    setCompletionPhaseEvents(null);
     perToolOutputSeenRef.current.clear();
     globalOutputSeenRef.current.clear();
+    globalOutputSeenOrderRef.current = [];
     setCurrentToolId(undefined);
-    setActiveThinking(false);
+    setThinkingActive(false);
+    onThinkingUpdate?.({ active: false });
     setActiveReasoning(false);
-    setLastOutputContent('');
-    setLastOutputTime(0);
-    setSwarmActive(false);
-    setCurrentSwarmAgent(null);
-    swarmHandoffSequenceRef.current = 0;
+    lastOutputContentRef.current = '';
+    lastOutputTimeRef.current = 0;
     pendingMetricsRef.current = null;
     lastMetricsTsRef.current = 0;
     lastEmitRef.current = 0;
-    setMetrics({ tokens: 0, cost: 0, duration: '0s', memoryOps: 0, evidence: 0 });
+    setMetrics({ tokens: 0, cost: 0, duration: '0s', memoryOps: 0, evidence: 0, progressPercent: 0 });
 
     completedBufRef.current.clear();
     activeBufRef.current.clear();
@@ -400,9 +677,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       completedBufRef.current.pushMany(preserveEvents);
     }
     setStaticSessionKey(prev => prev + 1);
-    scheduleCompletedEventsUpdate();
+    flushCompletedEventsUpdate();
     setActiveEvents(activeBufRef.current.toArray());
-  }, [cancelDelayedThinking, setActiveEvents, setCompletedEvents, setActiveThinking, setActiveReasoning, setSwarmActive, setCurrentSwarmAgent, setStaticSessionKey]);
+  }, [cancelDelayedThinking, onThinkingUpdate, setActiveEvents, setCompletedEvents, setThinkingActive, setActiveReasoning, setStaticSessionKey]);
   
   // Constants for event processing
   const COMMAND_BUFFER_MS = 100;
@@ -467,6 +744,17 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           setCompletedEvents(trimmed);
           activeBufRef.current.clear();
           setActiveEvents([]);
+          pendingReasoningsRef.current = [];
+          opSummaryBufferRef.current = [];
+          resetStepAgg();
+          perToolOutputSeenRef.current.clear();
+          globalOutputSeenRef.current.clear();
+          globalOutputSeenOrderRef.current = [];
+          setCompletionPhaseEvents(prev => (
+            prev
+              ? trimEventArrayByByteBudget(prev.slice(-20), 20, Math.floor(MAX_FINAL_REPORT_EVENT_BYTES / 2))
+              : prev
+          ));
           // Hint GC if available
           if (global.gc) { try { global.gc(); } catch {} }
           cooling = true;
@@ -481,11 +769,13 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
   // right after the execution begins, before any backend events (e.g., operation_init)
   // are received. This avoids a black screen during initial 3–5s setup gaps.
   React.useEffect(() => {
-    if (!executionService || !animationsEnabled) return;
+    if (!executionService) return;
     if (collapsed) return;
     // Only schedule if no spinner is active AND no events have rendered yet
     if (!activeThinkingRef.current && !activeReasoning && activeEvents.length === 0 && completedEvents.length === 0) {
-      scheduleDelayedThinking({ delay: 150, context: 'startup', addSpacer: false });
+      cancelDelayedThinking();
+      activateThinking('startup', undefined, {}, true);
+      seenThinkingThisPhaseRef.current = true;
     }
     // Cleanup is handled by the main effect's cleanup and cancelDelayedThinking()
     // to avoid duplicate timers and ensure consistent teardown.
@@ -506,26 +796,25 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     }
   };
   
-  // Step gating state (anchor step headers until first tool signal)
-  const pendingStepHeaderRef = useRef<DisplayStreamEvent | null>(null);
+  // Step gating state (anchor progress updates until first tool signal)
+  const pendingProgressUpdateRef = useRef<DisplayStreamEvent | null>(null);
   const pendingStepNumberRef = useRef<number | undefined>(undefined);
   const hasToolForPendingStepRef = useRef<boolean>(false);
   const lastEmittedStepNumberRef = useRef<number | undefined>(undefined);
 
-  const flushPendingStepHeader = (collector: DisplayStreamEvent[]) => {
-    if (pendingStepHeaderRef.current && !hasToolForPendingStepRef.current) {
-      collector.push(pendingStepHeaderRef.current);
+  const flushPendingProgressUpdate = (collector: DisplayStreamEvent[]) => {
+    if (pendingProgressUpdateRef.current && !hasToolForPendingStepRef.current) {
+      collector.push(pendingProgressUpdateRef.current);
       lastEmittedStepNumberRef.current = pendingStepNumberRef.current ?? lastEmittedStepNumberRef.current;
-      pendingStepHeaderRef.current = null;
+      pendingProgressUpdateRef.current = null;
       hasToolForPendingStepRef.current = true;
     }
   };
 
-  // Track max steps and operation id from operation_init for synthetic headers
-  const opMaxStepsRef = useRef<number | undefined>(undefined);
+  // Track operation metadata for synthetic headers
   const operationIdRef = useRef<string | undefined>(undefined);
   const targetRef = useRef<string | undefined>(undefined);
-  const stepCounterRef = useRef<number>(0);
+  const hasSeenOperationActivityRef = useRef<boolean>(false);
   const lastPushedTypeRef = useRef<string | null>(null);
   const firstHeaderSeenRef = useRef<boolean>(false);
   // Buffer for operation summary lines (paths) so we can show them after report preview/content
@@ -552,11 +841,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         }
         last = r || last;
       }
-      const merged = parts.join('\n\n');
+      const merged = trimReasoningText(parts.join('\n\n'), MAX_REASONING_BUFFER_CHARS);
       if (merged) {
         const mergedEvent: any = { type: 'reasoning', content: merged };
-        // Preserve swarm context from the last reasoning in the queue if present
-        if (last && (last as any).swarm_agent) mergedEvent.swarm_agent = (last as any).swarm_agent;
+        // Preserve agent context from the last reasoning in the queue if present
+        if (last && (last as any).agent_name) mergedEvent.agent_name = (last as any).agent_name;
         collector.push(mergedEvent as DisplayStreamEvent);
       }
       pendingReasoningsRef.current = [];
@@ -566,10 +855,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
       setActiveEvents(activeBufRef.current.toArray());
     }
   };
-
-  // Track swarm sub-steps per agent for synthesized headers
-  const swarmAgentStepsRef = useRef<Map<string, number>>(new Map());
-
 
   // Event processing function - replaces EventAggregator.processEvent
   const processEvent = (event: any): DisplayStreamEvent[] => {
@@ -586,10 +871,12 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     
     switch (event.type) {
       case 'operation_init':
+        hasSeenOperationActivityRef.current = true;
+        workflowActivityKeysRef.current.clear();
         // Reset all dedup sets and internal refs at operation start
         perToolOutputSeenRef.current.clear();
         globalOutputSeenRef.current.clear();
-        swarmAgentStepsRef.current.clear();
+        globalOutputSeenOrderRef.current = [];
         pendingReasoningsRef.current = [];
         opSummaryBufferRef.current = [];
         
@@ -603,17 +890,12 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         }
 
         // Cache operation metadata
-        if (typeof event.max_steps === 'number') {
-          opMaxStepsRef.current = event.max_steps;
-        }
         if (typeof event.operation_id === 'string') {
           operationIdRef.current = event.operation_id;
         }
         if (typeof event.target === 'string') {
       targetRef.current = event.target;
     }
-    // Reset counters at operation start
-    stepCounterRef.current = 0;
     lastPushedTypeRef.current = null;
     results.push(event as DisplayStreamEvent);
 
@@ -621,28 +903,45 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     // This covers the 10-15 second gap before the agent's first response
     // CRITICAL: Use scheduleDelayedThinking with 0 delay instead of direct manipulation
     // This ensures proper integration with the event loop and prevents race conditions
-    if (animationsEnabled) {
-      cancelDelayedThinking();
-      setActiveThinking(true);
-      seenThinkingThisPhaseRef.current = true;
+    cancelDelayedThinking();
+    activateThinking('waiting');
+    seenThinkingThisPhaseRef.current = true;
+        break;
 
-      // Immediately show urgent thinking event to bypass any delays
-      const thinkingEvent: DisplayStreamEvent = {
-        type: 'thinking',
-        context: 'waiting',
-        startTime: Date.now(),
-        urgent: true
-      } as DisplayStreamEvent;
+      case 'workflow_activity': {
+        const activityKey = workflowActivityKey(event);
+        const terminal = isWorkflowActivityTerminal(event);
+        const hadActiveWorkflowActivity = workflowActivityKeysRef.current.size > 0;
+        if (terminal) {
+          workflowActivityKeysRef.current.delete(activityKey);
+        } else {
+          workflowActivityKeysRef.current.add(activityKey);
+        }
+        results.push(event as DisplayStreamEvent);
 
-      // Push to results so it gets processed by the event loop
-      results.push(thinkingEvent);
-    }
-    break;
+        if (!terminal) {
+          const label = String(event.label || event.action || event.activity || 'Workflow activity')
+            .replaceAll('_', ' ')
+            .trim();
+          const taskTitle = typeof event.task_title === 'string' ? event.task_title.trim() : '';
+          activateThinking(
+            'tool_preparation',
+            taskTitle ? `${label}: ${taskTitle}` : label,
+            event,
+          );
+        } else if (hadActiveWorkflowActivity && workflowActivityKeysRef.current.size === 0) {
+          deactivateThinking(true);
+        }
+        break;
+      }
 
-      case 'step_header':
-        emitTestMarker(`step_header step=${event.step} max=${event.maxSteps}`);
+      case 'progress_update':
+        hasSeenOperationActivityRef.current = true;
+        emitTestMarker(`progress_update step=${event.step ?? ''} progress=${event.progressPercent ?? ''}`);
         cancelDelayedThinking();
         cancelPostReasoningIdleTimer();
+        const isReportProgress = event.operation_stage === 'final_report';
+        const isEvaluationProgress = event.operation_stage === 'ragas_evaluation';
         // End any active reasoning session
         setActiveReasoning(false);
         // Reset last reasoning dedupe on new step
@@ -650,31 +949,35 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // Reset output suppression for next operation phase
         suppressTerminationBannerRef.current = false;
         
-        // Track swarm agent from step header
-        if (event.is_swarm_operation && event.swarm_agent) {
-          setCurrentSwarmAgent(event.swarm_agent);
-        }
-        
         // Push header immediately (no gating)
         // Before starting a new step, flush any pending reasoning from the previous tool call
         // so it appears at the end of the previous step (below its outputs)
         flushPendingReasoning(results);
 
         const headerEvent: DisplayStreamEvent = {
-          type: 'step_header',
+          type: 'progress_update',
           step: event.step,
-          maxSteps: event.maxSteps,
+          progressPercent: event.progressPercent,
           operation: event.operation,
           duration: event.duration,
-          is_swarm_operation: event.is_swarm_operation,
-          swarm_agent: event.swarm_agent || currentSwarmAgent,
-          swarm_sub_step: event.swarm_sub_step,
-          swarm_max_sub_steps: event.swarm_max_sub_steps,
-          swarm_agent_max: event.swarm_agent_max,
-          swarm_total_iterations: event.swarm_total_iterations,
-          swarm_max_iterations: event.swarm_max_iterations,
-          agent_count: event.agent_count,
-          swarm_context: event.swarm_context || (swarmActive ? 'Multi-Agent Operation' : undefined)
+          agent_run_id: event.agent_run_id,
+          agent_name: event.agent_name,
+          agent_type: event.agent_type,
+          parent_agent_run_id: event.parent_agent_run_id,
+          agent_sub_step: event.agent_sub_step,
+          agent_total_actions: event.agent_total_actions,
+          operation_stage: event.operation_stage,
+          report_step_index: event.report_step_index,
+          report_step_total: event.report_step_total,
+          report_step_kind: event.report_step_kind,
+          report_step_label: event.report_step_label,
+          evaluation_step_index: event.evaluation_step_index,
+          evaluation_step_total: event.evaluation_step_total,
+          evaluation_step_kind: event.evaluation_step_kind,
+          evaluation_scope: event.evaluation_scope,
+          evaluation_metric: event.evaluation_metric,
+          evaluation_step_label: event.evaluation_step_label,
+          health: event.health,
         } as DisplayStreamEvent;
 
         results.push(headerEvent);
@@ -682,45 +985,64 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // Mark entry into FINAL REPORT phase and start a dynamic cluster that
         // will be rendered via StreamDisplay with an InlineReportViewer.
         if (event.step === 'FINAL REPORT') {
-          finalReportActiveRef.current = true;
-          setFinalReportEvents(prev => {
-            const base = prev && prev.length > 0 ? prev.filter(e => e.type !== 'step_header' || (e as any).step !== 'FINAL REPORT') : [];
-            return [...base, headerEvent];
+          completionPhaseActiveRef.current = true;
+          setCompletionPhaseEvents(prev => {
+            const base = prev && prev.length > 0 ? prev.filter(e => e.type !== 'progress_update' || (e as any).step !== 'FINAL REPORT') : [];
+            const next = [...base, headerEvent];
+            return trimEventArrayByByteBudget(next, MAX_FINAL_REPORT_EVENTS, MAX_FINAL_REPORT_EVENT_BYTES);
           });
+        } else if (isReportProgress) {
+          completionPhaseActiveRef.current = true;
+          appendCompletionPhaseEvent(headerEvent);
+        } else if (isEvaluationProgress) {
+          completionPhaseActiveRef.current = true;
+          appendCompletionPhaseEvent(headerEvent);
         }
 
         // Mark that we've seen the first header
         firstHeaderSeenRef.current = true;
-        if (typeof event.step === 'number') {
-          stepCounterRef.current = event.step;
-        }
-        lastPushedTypeRef.current = 'step_header';
+        lastPushedTypeRef.current = 'progress_update';
 
-        // Show thinking spinner while waiting for tool selection after step header
+        // Show thinking spinner while waiting for tool selection after progress update
         // Always reset and show spinner regardless of previous thinking state
-        if (animationsEnabled) {
-          setActiveThinking(true);
+        if (isReportProgress) {
+          const reportStepLabel = typeof event.report_step_label === 'string'
+            ? event.report_step_label.trim()
+            : '';
+          activateThinking(
+            'waiting',
+            'Generating report',
+            reportStepLabel ? { taskTitle: reportStepLabel } : {},
+            true
+          );
+          seenThinkingThisPhaseRef.current = true;
+        } else if (isEvaluationProgress) {
+          const evaluationStepLabel = typeof event.evaluation_step_label === 'string'
+            ? event.evaluation_step_label.trim()
+            : '';
+          activateThinking(
+            'waiting',
+            'Evaluating assessment',
+            evaluationStepLabel ? { taskTitle: evaluationStepLabel } : {},
+            true
+          );
+          seenThinkingThisPhaseRef.current = true;
+        } else {
+          activateThinking('tool_preparation', undefined, {}, true);
           seenThinkingThisPhaseRef.current = true;
 
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'tool_preparation',
-            startTime: Date.now(),
-            urgent: true  // Bypass throttle for immediate display
-          } as DisplayStreamEvent;
-
-          results.push(thinkingEvent);
-
-          // Update active buffer immediately to show spinner without delay
-          activeBufRef.current.clear();
-          activeBufRef.current.push(thinkingEvent);
-          setActiveEvents(activeBufRef.current.toArray());
+          // Footer owns the busy indicator; do not add spinner nodes to the stream.
         }
         break;
         
         
       case 'reasoning':
+        hasSeenOperationActivityRef.current = true;
         emitTestMarker('reasoning');
+        const reasoningAgg = flushAggregatedOutput();
+        if (reasoningAgg) {
+          results.push(reasoningAgg as DisplayStreamEvent);
+        }
         // Any pending post-tool idle spinner is no longer needed
         cancelPostToolIdleTimer();
         // Reset last tool output timestamp on entering reasoning
@@ -731,29 +1053,43 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         if (event.content && event.content.trim()) {
           // Clear any active thinking animations when reasoning is shown
           if (activeThinking) {
-            results.push({ type: 'thinking_end' } as DisplayStreamEvent);
-            setActiveThinking(false);
+            deactivateThinking();
           }
           // Cancel any pending delayed thinking and mark seen
           cancelDelayedThinking();
           seenThinkingThisPhaseRef.current = true;
-          
-          // Update swarm agent if present in event
-          if (event.swarm_agent && swarmActive) {
-            setCurrentSwarmAgent(event.swarm_agent);
-          }
           
           // Start reasoning session
           setActiveReasoning(true);
 
           const reasoningEvent: DisplayStreamEvent = {
             type: 'reasoning',
-            content: String(event.content).trim(),
-            ...(swarmActive && currentSwarmAgent ? { swarm_agent: currentSwarmAgent } : {})
+            content: trimReasoningText(String(event.content).trim(), MAX_REASONING_BUFFER_CHARS),
+            agent_run_id: event.agent_run_id,
+            agent_name: event.agent_name,
+            agent_type: event.agent_type,
+            parent_agent_run_id: event.parent_agent_run_id
           } as DisplayStreamEvent;
 
           // Queue reasoning for final placement under this step
           pendingReasoningsRef.current.push(reasoningEvent);
+          if (
+            pendingReasoningsRef.current.length > 20 ||
+            pendingReasoningsRef.current.reduce((sum, item) => (
+              sum + (typeof (item as any).content === 'string' ? (item as any).content.length : 0)
+            ), 0) > MAX_REASONING_BUFFER_CHARS
+          ) {
+            pendingReasoningsRef.current = [{
+              ...reasoningEvent,
+              content: trimReasoningText(
+                pendingReasoningsRef.current
+                  .map(item => (typeof (item as any).content === 'string' ? (item as any).content.trim() : ''))
+                  .filter(Boolean)
+                  .join('\n\n'),
+                MAX_REASONING_BUFFER_CHARS
+              ),
+            } as DisplayStreamEvent];
+          }
 
           // Immediately reflect the merged reasoning in the active tail so the user sees it during this step
           try {
@@ -762,7 +1098,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
               const s = (r as any).content ? String((r as any).content).trim() : '';
               if (s) parts.push(s);
             }
-            const merged = parts.join('\n\n');
+            const merged = trimReasoningText(parts.join('\n\n'), MAX_REASONING_BUFFER_CHARS);
             if (merged) {
               setActiveThrottled(prev => {
                 activeBufRef.current.clear();
@@ -771,33 +1107,15 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
               });
               // After rendering reasoning, briefly show a spinner while the agent
               // prepares the next step/tool selection to avoid a blank gap.
-              if (animationsEnabled) {
-                // Clear any existing timer and schedule a new one with minimal delay
-                cancelPostReasoningIdleTimer();
-                postReasoningIdleTimerRef.current = setTimeout(() => {
-                  // End the visible reasoning session
-                  setActiveReasoning(false);
-                  if (!activeThinkingRef.current) {
-                    setActiveThinking(true);
-                    seenThinkingThisPhaseRef.current = true;
-
-                    // Add thinking to active buffer, preserving any existing content
-                    const thinkingEvent: DisplayStreamEvent = {
-                      type: 'thinking',
-                      context: 'reasoning',
-                      startTime: Date.now(),
-                      urgent: true  // Bypass throttle to avoid post-reasoning gaps
-                    } as DisplayStreamEvent;
-
-                    const existing = activeBufRef.current.toArray().filter(e => e.type !== 'thinking' && e.type !== 'reasoning');
-                    activeBufRef.current.clear();
-                    activeBufRef.current.push(thinkingEvent);
-                    for (const e of existing) activeBufRef.current.push(e);
-                    setActiveEvents(activeBufRef.current.toArray());  // Immediate update
-                  }
-                  postReasoningIdleTimerRef.current = null;
-                }, 10) as unknown as NodeJS.Timeout;
-              }
+              cancelPostReasoningIdleTimer();
+              postReasoningIdleTimerRef.current = setTimeout(() => {
+                setActiveReasoning(false);
+                if (!activeThinkingRef.current) {
+                  activateThinking('reasoning');
+                  seenThinkingThisPhaseRef.current = true;
+                }
+                postReasoningIdleTimerRef.current = null;
+              }, 10) as unknown as NodeJS.Timeout;
             }
           } catch {}
         }
@@ -811,68 +1129,35 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           cancelPostToolIdleTimer();
           cancelPostReasoningIdleTimer();
           seenThinkingThisPhaseRef.current = true;
-          // Ensure the internal flag is set (fallback: it may already be true)
-          if (!activeThinkingRef.current) {
-            setActiveThinking(true);
-          }
-          // Create thinking event with urgent flag preserved
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: event.context,
-            startTime: event.startTime || Date.now(),
-            metadata: event.metadata,
-            urgent: (event as any).urgent || false  // Preserve urgent flag for immediate rendering
-          } as DisplayStreamEvent;
-
-          // ALWAYS add to results so event loop processes it
-          // The urgent flag will trigger immediate rendering in the event loop (line 1516-1518)
-          results.push(thinkingEvent);
+          activateThinking(event.context || 'tool_execution', event.message, event);
         }
         break;
         
       case 'thinking_end':
-        if (activeThinking) {
-          setActiveThinking(false);
-          results.push({
-            type: 'thinking_end'
-          } as DisplayStreamEvent);
-        }
+        deactivateThinking();
         break;
         
       case 'delayed_thinking_start':
-        // Suppress delayed thinking spacers when animations are disabled
-        if (!animationsEnabled) {
-          break;
-        }
         // Handle delayed thinking start - pass through and mark as active
         if (!activeThinking && !activeReasoning) {
-          setActiveThinking(true);
-          results.push(event as DisplayStreamEvent);
+          activateThinking(((event as any).context || 'tool_execution') as ThinkingContext);
         }
         break;
         
       case 'tool_start':
+        hasSeenOperationActivityRef.current = true;
         emitTestMarker(`tool_start tool=${event.toolName || event.tool_name}`);
         cancelPostToolIdleTimer();
         cancelPostReasoningIdleTimer();
 
         // Keep spinner showing during tool execution, just change context
-        if (!activeThinking && animationsEnabled) {
-          setActiveThinking(true);
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'tool_execution',
-            startTime: Date.now(),
-            urgent: true
-          } as DisplayStreamEvent;
-
-          results.push(thinkingEvent);
-          // Event loop will handle immediate rendering via urgent flag
+        if (!activeThinking) {
+          activateThinking('tool_execution');
         }
 
         // Reset last tool output timestamp for new tool
         lastToolOutputTsRef.current = 0;
-        // Do not flush pending reasoning here; wait for step_header to ensure correct attribution
+        // Do not flush pending reasoning here; wait for progress_update to ensure correct attribution
         // Get the tool ID from the event (support both camel/snake)
         let toolId: string | undefined = event.toolId || event.tool_id;
         // Some tools (e.g., orchestrators) don't emit IDs; use a stable fallback so headers render.
@@ -882,27 +1167,21 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           toolId = `${name}-${bucket}`;
         }
         
-        // Update swarm agent if present in event
-        if (event.swarm_agent && swarmActive) {
-          setCurrentSwarmAgent(event.swarm_agent);
-        }
-        
-        // Check if this is a handoff_to_agent tool and update swarm agent
         const toolName = event.toolName || event.tool_name || '';
-        if (toolName === 'handoff_to_agent' && swarmActive) {
-          // Extract target agent from tool_input
-          const toolInput = event.args || event.tool_input || {};
-          // Check both 'agent' and 'agent_name' fields (backend uses agent_name)
-          const targetAgent = toolInput.agent || toolInput.agent_name;
-          if (targetAgent) {
-            setCurrentSwarmAgent(targetAgent);
-          }
-        }
         
         // Always render the tool header now that we have a deterministic id
         
         // Initialize per-tool dedup set
-        try { if (toolId) perToolOutputSeenRef.current.set(toolId, new Set()); } catch {}
+        try {
+          if (toolId) {
+            perToolOutputSeenRef.current.set(toolId, new Set());
+            while (perToolOutputSeenRef.current.size > MAX_TOOL_DEDUPE_SESSIONS) {
+              const oldestKey = perToolOutputSeenRef.current.keys().next().value;
+              if (!oldestKey) break;
+              perToolOutputSeenRef.current.delete(oldestKey);
+            }
+          }
+        } catch {}
         
         // Reset phase flags
         seenThinkingThisPhaseRef.current = false;
@@ -912,7 +1191,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           setActiveReasoning(false);
         }
         
-        // Note: Do NOT synthesize swarm_handoff here; backend already emits swarm_handoff events
         // Always emit the tool event
         results.push({
           type: 'tool_start',
@@ -920,7 +1198,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           tool_input: event.args || event.tool_input || {},
           toolId: toolId,
           toolName: event.toolName,
-          tool_id: toolId  // Include tool_id for compatibility
+          tool_id: toolId,  // Include tool_id for compatibility
+          agent_run_id: event.agent_run_id,
+          agent_name: event.agent_name,
+          agent_type: event.agent_type,
+          parent_agent_run_id: event.parent_agent_run_id
         } as DisplayStreamEvent);
 
         // Show single unified thinking animation
@@ -928,13 +1210,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         if (!activeThinkingRef.current) {
           cancelDelayedThinking();
           
-          setActiveThinking(true);
+          activateThinking('tool_execution');
           seenThinkingThisPhaseRef.current = true;
-          results.push({
-            type: 'thinking',
-            context: 'tool_execution',
-            startTime: Date.now()
-          } as DisplayStreamEvent);
         }
         break;
         
@@ -965,6 +1242,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         break;
         
       case 'tool_invocation_end':
+        hasSeenOperationActivityRef.current = true;
+        const invocationEndAgg = flushAggregatedOutput();
+        if (invocationEndAgg) {
+          results.push(invocationEndAgg as DisplayStreamEvent);
+        }
         // Some backends emit tool_invocation_end without a corresponding tool_end.
         // Ensure we stop any active thinking spinner and reset tool state to avoid "still running" UI.
         cancelPostToolIdleTimer();
@@ -972,34 +1254,24 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // Mark end of tool streaming
         lastToolOutputTsRef.current = Date.now();
         if (activeThinking) {
-          results.push({ type: 'thinking_end' } as DisplayStreamEvent);
-          setActiveThinking(false);
+          deactivateThinking();
         }
         cancelDelayedThinking();
         seenThinkingThisPhaseRef.current = false;
         setCurrentToolId(undefined);
         // Immediately show a spinner while the agent processes the tool result and prepares reasoning
-        if (animationsEnabled && !activeReasoning) {
-          setActiveThinking(true);
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'waiting',
-            startTime: Date.now(),
-            urgent: true  // Bypass throttle for immediate display
-          } as DisplayStreamEvent;
-
-          results.push(thinkingEvent);
-          // Event loop will handle immediate rendering via urgent flag (no manual buffer manipulation)
+        if (!activeReasoning) {
+          activateThinking('waiting');
         }
         // Optionally, we do not emit a separate tool_end display item here to avoid duplicates
         break;
         
       case 'shell_command':
-        // Do not flush pending reasoning here; wait for step_header to ensure correct attribution
+        // Do not flush pending reasoning here; wait for progress_update to ensure correct attribution
         results.push({
           type: 'shell_command',
           command: event.command,
-          toolId: currentToolId,
+          toolId: currentToolIdRef.current,
           id: `shell_${Date.now()}`,
           timestamp: new Date().toISOString(),
           sessionId: 'current'
@@ -1018,18 +1290,18 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         break;
         
       case 'model_invocation_start':
+        hasSeenOperationActivityRef.current = true;
+        const modelStartAgg = flushAggregatedOutput();
+        if (modelStartAgg) {
+          results.push(modelStartAgg as DisplayStreamEvent);
+        }
         // When the model is invoked (post-tool), show a spinner immediately to indicate
         // the agent is preparing reasoning. This covers gaps before the first reasoning block.
         cancelDelayedThinking();
         cancelPostToolIdleTimer();
         cancelPostReasoningIdleTimer();
-        if (!activeThinkingRef.current && animationsEnabled) {
-          setActiveThinking(true);
-          results.push({
-            type: 'thinking',
-            context: 'reasoning',
-            startTime: Date.now()
-          } as DisplayStreamEvent);
+        if (!activeThinkingRef.current) {
+          activateThinking('reasoning');
         }
         // Do not render the model event itself; UI shows spinner instead
         break;
@@ -1041,38 +1313,38 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
       case 'output':
         emitTestMarker('output');
+        if ((event as any)?.metadata?.syntheticToolStart) {
+          break;
+        }
         // Normalize content to detect empty/whitespace-only lines
         const rawOut = (event as any).content != null ? String((event as any).content) : '';
         const isEmptyOut = rawOut.trim().length === 0;
         // Determine whether this output belongs to a tool buffer regardless of content
-        const fromToolBufferFlag = !!(((event as any)?.metadata?.fromToolBuffer) || ((event as any)?.metadata?.tool) || Boolean(currentToolId));
+        const activeToolId = currentToolIdRef.current;
+        const fromToolBufferFlag = !!(((event as any)?.metadata?.fromToolBuffer) || ((event as any)?.metadata?.tool) || Boolean(activeToolId));
 
         // Maintain post-tool bridging behavior even for empty outputs
         if (activeThinking && fromToolBufferFlag) {
-          results.push({ type: 'thinking_end' } as DisplayStreamEvent);
-          setActiveThinking(false);
+          deactivateThinking();
         }
 
         if (fromToolBufferFlag) {
           // Update last tool output timestamp and start idle timer to show spinner after output
           lastToolOutputTsRef.current = Date.now();
           cancelPostToolIdleTimer();
-          if (animationsEnabled) {
-            postToolIdleTimerRef.current = setTimeout(() => {
-              if (!activeThinkingRef.current && !activeReasoning) {
-                scheduleDelayedThinking({ delay: 0, context: 'waiting', addSpacer: false });
-              }
-              // Exit tool phase to avoid misclassifying subsequent non-tool output
-              setCurrentToolId(undefined);
-              postToolIdleTimerRef.current = null;
-            }, 60) as unknown as NodeJS.Timeout;
-          }
-        } else if (animationsEnabled) {
+          postToolIdleTimerRef.current = setTimeout(() => {
+            if (!activeThinkingRef.current && !activeReasoning) {
+              scheduleDelayedThinking({ delay: 0, context: 'waiting', addSpacer: false });
+            }
+            // Exit tool phase to avoid misclassifying subsequent non-tool output
+            setCurrentToolId(undefined);
+            postToolIdleTimerRef.current = null;
+          }, 60) as unknown as NodeJS.Timeout;
+        } else {
           // If a non-tool output arrives shortly after tool output, bridge with a spinner
           const sinceLastToolMs = Date.now() - (lastToolOutputTsRef.current || 0);
           if (sinceLastToolMs > 0 && sinceLastToolMs < 1500 && !activeThinkingRef.current && !activeReasoning) {
-            setActiveThinking(true);
-            results.push({ type: 'thinking', context: 'waiting', startTime: Date.now() } as DisplayStreamEvent);
+            activateThinking('waiting');
             // Also exit tool phase since we've transitioned to waiting for reasoning
             setCurrentToolId(undefined);
           }
@@ -1085,7 +1357,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
         // If we are still before operation_init, keep a startup spinner visible even as
         // status/output lines arrive. This avoids a dead UI during initial setup.
-        if (!operationIdRef.current && !activeThinkingRef.current && animationsEnabled) {
+        if (!operationIdRef.current && !hasSeenOperationActivityRef.current && !activeThinkingRef.current) {
           scheduleDelayedThinking({ delay: 0, context: 'startup', addSpacer: false });
         }
 
@@ -1093,11 +1365,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         // If output appears, we do NOT auto-flush pending reasoning; it may belong under the next header
         // Handle tool output or general output with deduplication
         if (event.content) {
-          // Update swarm agent if present in event
-          if (event.swarm_agent && swarmActive) {
-            setCurrentSwarmAgent(event.swarm_agent);
-          }
-          
           // Suppress verbose termination block lines after ESC
           if (suppressTerminationBannerRef.current) {
             const line = String(event.content).trim();
@@ -1117,6 +1384,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           // Enhanced deduplication - check for similar content
           const currentTime = Date.now();
           const contentStr = String(event.content);
+          const lastOutputContent = lastOutputContentRef.current;
+          const lastOutputTime = lastOutputTimeRef.current;
           
           // Check if this is a duplicate or subset of the last output
           if (lastOutputContent && currentTime - lastOutputTime < OUTPUT_DEDUPE_TIME_MS) {
@@ -1136,28 +1405,21 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           // Fingerprint-based dedup across tool session
           try {
             const fp = fingerprintContent(contentStr);
-            const set = currentToolId ? (perToolOutputSeenRef.current.get(currentToolId) || null) : null;
             let seen = false;
-            if (set) {
-              if (set.has(fp)) {
-                seen = true;
-              } else {
-                set.add(fp);
-              }
+            if (activeToolId) {
+              seen = rememberToolOutputFingerprint(activeToolId, fp);
             } else {
-              if (globalOutputSeenRef.current.has(fp)) {
-                seen = true;
-              } else {
-                globalOutputSeenRef.current.add(fp);
-              }
+              seen = rememberGlobalOutputFingerprint(fp);
             }
             if (seen) {
               break; // skip duplicate chunk/content for this tool/session
             }
           } catch {}
 
-          setLastOutputContent(contentStr);
-          setLastOutputTime(currentTime);
+          lastOutputContentRef.current = contentStr.length > 4096
+            ? `${contentStr.slice(0, 2048)}\n${contentStr.slice(-2048)}`
+            : contentStr;
+          lastOutputTimeRef.current = currentTime;
           
           // above we already handled spinner transitions irrespective of content
 
@@ -1178,8 +1440,11 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             opSummaryBufferRef.current.push({
               type: 'output',
               content: event.content,
-              toolId: currentToolId
+              toolId: activeToolId
             } as DisplayStreamEvent);
+            if (opSummaryBufferRef.current.length > MAX_OPERATION_SUMMARY_EVENTS) {
+              opSummaryBufferRef.current = opSummaryBufferRef.current.slice(-MAX_OPERATION_SUMMARY_EVENTS);
+            }
             break;
           }
 
@@ -1198,20 +1463,20 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           const outEvt: DisplayStreamEvent = {
             type: 'output',
             content: cleanedContent,
-            toolId: currentToolId,
+            toolId: activeToolId,
             // Preserve metadata so the renderer can identify tool-buffer outputs
-            ...(event.metadata ? { metadata: event.metadata } : {})
+            metadata: {
+              ...(event.metadata || {}),
+              ...(completionPhaseActiveRef.current ? { finalReportCluster: true } : {}),
+            },
           } as DisplayStreamEvent;
           results.push(outEvt);
 
           // If we're in the FINAL REPORT phase, include this output (typically the
           // ASCII summary banner) in the dynamic final report cluster so it
           // appears directly beneath the inline preview.
-          if (finalReportActiveRef.current) {
-            setFinalReportEvents(prev => {
-              const base = prev ?? [];
-              return [...base, outEvt];
-            });
+          if (completionPhaseActiveRef.current) {
+            appendCompletionPhaseEvent(outEvt);
           }
 
           // If this is a report preview block, immediately flush any buffered operation summary below it
@@ -1226,44 +1491,41 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         break;
         
       case 'tool_end':
+        hasSeenOperationActivityRef.current = true;
+        const toolEndAgg = flushAggregatedOutput();
+        if (toolEndAgg) {
+          results.push(toolEndAgg as DisplayStreamEvent);
+        }
         cancelPostToolIdleTimer();
         cancelPostReasoningIdleTimer();
-        // Update swarm agent if present in event
-        if (event.swarm_agent && swarmActive) {
-          setCurrentSwarmAgent(event.swarm_agent);
-        }
-        
         // Clear any active thinking when tool ends
         if (activeThinking) {
-          results.push({ type: 'thinking_end' } as DisplayStreamEvent);
-          setActiveThinking(false);
+          deactivateThinking();
         }
         // Exit tool phase on tool_end
         setCurrentToolId(undefined);
         // Immediately show a short waiting spinner while transitioning to reasoning
-        if (animationsEnabled && !activeReasoning) {
-          setActiveThinking(true);
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'waiting',
-            startTime: Date.now(),
-            urgent: true  // Bypass throttle for immediate display
-          } as DisplayStreamEvent;
-
-          results.push(thinkingEvent);
-          // Event loop will handle immediate rendering via urgent flag
+        if (!activeReasoning) {
+          activateThinking('waiting');
         }
         // Reset flags and cancel pending delayed thinking
         cancelDelayedThinking();
         seenThinkingThisPhaseRef.current = false;
 
-        // Don't flush reasoning here - let it accumulate until step_header
+        // Don't flush reasoning here - let it accumulate until progress_update
         // This ensures all reasoning within a step appears as one block
 
         results.push({
           type: 'tool_end',
           toolId: event.toolId,
           tool: event.toolName || 'unknown',
+          agent_run_id: event.agent_run_id,
+          agent_name: event.agent_name,
+          agent_type: event.agent_type,
+          parent_agent_run_id: event.parent_agent_run_id,
+          success: event.success,
+          outcome: event.outcome,
+          executed: event.executed,
           id: `tool_end_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
           timestamp: new Date().toISOString(),
           sessionId: 'current'
@@ -1276,7 +1538,7 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
       case 'operation_complete':
         // Clear any active states
-        setActiveThinking(false);
+        deactivateThinking();
         // Flush any pending reasoning before we finalize
         flushPendingReasoning(results);
         setActiveReasoning(false);
@@ -1295,7 +1557,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
 
         // CRITICAL: Aggressive memory cleanup after operation completes
         // Keep only the most recent events to prevent 6GB heap exhaustion
-        setTimeout(() => {
+        cancelCompletionCleanupTimer();
+        completionCleanupTimerRef.current = setTimeout(() => {
           // Keep only last 100 completed events (enough for final report + metrics)
           const MAX_RETAINED_EVENTS = 100;
           const allCompleted = completedBufRef.current.toArray();
@@ -1327,51 +1590,18 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
               // GC not available
             }
           }
+          completionCleanupTimerRef.current = null;
         }, 1000); // Wait 1s for final renders to complete
 
         break;
         
       case 'tool_output':
         // Standardized tool output: treat as first tool signal for pending step
-        flushPendingStepHeader(results);
-        // Do not flush pending reasoning here; wait for step_header to ensure correct attribution
+        flushPendingProgressUpdate(results);
+        // Do not flush pending reasoning here; wait for progress_update to ensure correct attribution
         results.push(event as DisplayStreamEvent);
         break;
 
-        
-      case 'swarm_start':
-        // Mark swarm as active and reset tracking
-        setSwarmActive(true);
-        swarmHandoffSequenceRef.current = 0;
-        
-        // Extract first agent if available
-        if (event.agent_names && Array.isArray(event.agent_names) && event.agent_names.length > 0) {
-          setCurrentSwarmAgent(event.agent_names[0]);
-        }
-        
-        // Pass through swarm_start event with all details
-        results.push(event as DisplayStreamEvent);
-        break;
-        
-      case 'swarm_handoff':
-        // This event type doesn't exist in actual SDK - keeping for backwards compatibility
-        // Actual handoffs use handoff_to_agent tool
-        if (event.to_agent) {
-          setCurrentSwarmAgent(event.to_agent);
-        }
-        results.push(event as DisplayStreamEvent);
-        break;
-        
-      case 'swarm_end':
-      case 'swarm_complete':
-        // Reset swarm tracking
-        setSwarmActive(false);
-        setCurrentSwarmAgent(null);
-        swarmHandoffSequenceRef.current = 0;
-        
-        // Pass through swarm end event
-        results.push(event as DisplayStreamEvent);
-        break;
         
       case 'report_content':
         // Trim massive report content to prevent OOM and rely on InlineReportViewer for full content.
@@ -1387,82 +1617,69 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         if (targetRef.current) rcEvent.target = targetRef.current;
         const displayRcEvent = rcEvent as DisplayStreamEvent;
         results.push(displayRcEvent);
-        // If we're inside the FINAL REPORT phase, add this to the dynamic
-        // finalReportEvents cluster so StreamDisplay can compute reportDetails
+        // If we're inside the completion phase, add this to the dynamic
+        // cluster so StreamDisplay can compute reportDetails
         // (path + inline content) for InlineReportViewer.
-        if (finalReportActiveRef.current) {
-          setFinalReportEvents(prev => {
-            const base = prev ?? [];
-            return [...base, displayRcEvent];
-          });
+        if (completionPhaseActiveRef.current) {
+          appendCompletionPhaseEvent(displayRcEvent);
         }
-        // Synthesize a paths section immediately below the report
-        try {
-          const opId = operationIdRef.current || '';
-          const target = targetRef.current || '';
-          const safeTarget = target ? target.replace(/^https?:\/\//, '').replace(/\.{2}|\.\//g, '').replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_').replace(/^[_\.]+|[_\.]+$/g, '') : '';
-          const base = safeTarget && opId ? `./outputs/${safeTarget}/${opId}` : '';
-          const memory = safeTarget ? `./outputs/${safeTarget}/memory` : '';
-          const reportPath = base ? `${base}/security_assessment_report.md` : '';
-          const logPath = base ? `${base}/cyber_operations.log` : '';
-          const pathsEvent: DisplayStreamEvent = {
-            type: 'report_paths',
-            operation_id: opId,
-            target,
-            outputDir: base,
-            reportPath,
-            logPath,
-            memoryPath: memory
-          } as unknown as DisplayStreamEvent;
-
-          results.push(pathsEvent);
-
-          if (finalReportActiveRef.current) {
-            setFinalReportEvents(prev => {
-              const baseEvents = prev ?? [];
-              return [...baseEvents, pathsEvent];
-            });
-          }
-        } catch {}
-        // Then flush any buffered operation summary (paths) so they appear beneath the report as well
+        // Then flush any buffered operation summary beneath the report. The backend's
+        // report_paths event is the sole source of truth for the paths panel.
         if (opSummaryBufferRef.current.length > 0) {
           results.push(...opSummaryBufferRef.current);
           opSummaryBufferRef.current = [];
         }
         break;
 
-      case 'assessment_complete': {
-        const acEvent = event as DisplayStreamEvent;
-        results.push(acEvent);
-        if (finalReportActiveRef.current) {
-          setFinalReportEvents(prev => {
-            const base = prev ?? [];
-            return [...base, acEvent];
-          });
-          // FINAL REPORT phase is complete once assessment_complete arrives
-          finalReportActiveRef.current = false;
+      case 'evaluation_complete': {
+        const evaluationEvent = event as DisplayStreamEvent;
+        results.push(evaluationEvent);
+        if (completionPhaseActiveRef.current) {
+          appendCompletionPhaseEvent(evaluationEvent);
+        }
+        deactivateThinking();
+        break;
+      }
+
+      case 'evaluation_step_complete': {
+        const evaluationStepEvent = event as DisplayStreamEvent;
+        results.push(evaluationStepEvent);
+        if (completionPhaseActiveRef.current) {
+          appendCompletionPhaseEvent(evaluationStepEvent);
         }
         break;
       }
 
-      case 'rate_limit':
-        if (animationsEnabled) {
-          cancelDelayedThinking();
-          setActiveThinking(true);
-          seenThinkingThisPhaseRef.current = true;
-
-          // Immediately show urgent thinking event to bypass any delays
-          const thinkingEvent: DisplayStreamEvent = {
-            type: 'thinking',
-            context: 'rate_limit',
-            message: `Rate Limit for ${Math.ceil(event.wait_total)}s${event.message ? `: ${event.message}` : ''}`,
-            startTime: Date.now(),
-            urgent: true
-          } as DisplayStreamEvent;
-
-          // Push to results so it gets processed by the event loop
-          results.push(thinkingEvent);
+      case 'assessment_complete': {
+        const acEvent = event as DisplayStreamEvent;
+        results.push(acEvent);
+        if (completionPhaseActiveRef.current) {
+          appendCompletionPhaseEvent(acEvent);
+          completionPhaseActiveRef.current = false;
         }
+        deactivateThinking();
+        break;
+      }
+
+      case 'operation_terminated': {
+        const terminatedEvent = event as DisplayStreamEvent;
+        results.push(terminatedEvent);
+        deactivateThinking();
+        break;
+      }
+
+      case 'operation_finalized': {
+        const finalizedEvent = event as DisplayStreamEvent;
+        results.push(finalizedEvent);
+        if (completionPhaseActiveRef.current) completionPhaseActiveRef.current = false;
+        deactivateThinking();
+        break;
+      }
+
+      case 'rate_limit':
+        cancelDelayedThinking();
+        activateThinking('rate_limit', `Rate Limit for ${Math.ceil(event.wait_total)}s${event.message ? `: ${event.message}` : ''}`);
+        seenThinkingThisPhaseRef.current = true;
         break;
 
       default:
@@ -1480,6 +1697,9 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
     // Listen for events from Docker service
     const handleEvent = (rawEvent: any) => {
       const event = normalizeEvent(rawEvent);
+      if (event.type === 'progress_update' && formatOperationHealth(event.health)) {
+        onHealthUpdate?.(event.health as OperationHealthSnapshot);
+      }
       // Debug logging disabled for production use
       // console.error(`[DEBUG] UnconstrainedTerminal received event:`, {
       //   type: event.type,
@@ -1507,7 +1727,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           // Duration and counts can be replaced
           duration: event.metrics.duration || metrics.duration,
           memoryOps: event.metrics.memoryOps !== undefined ? event.metrics.memoryOps : metrics.memoryOps,
-          evidence: event.metrics.evidence !== undefined ? event.metrics.evidence : metrics.evidence
+          evidence: event.metrics.evidence !== undefined ? event.metrics.evidence : metrics.evidence,
+          progressPercent: event.metrics.progressPercent !== undefined ? event.metrics.progressPercent : metrics.progressPercent
         };
         // Emit a test marker for metrics updates to aid PTY-based assertions
         try {
@@ -1533,7 +1754,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
               cost: newMetrics.cost,
               duration: newMetrics.duration,
               memoryOps: newMetrics.memoryOps,
-              evidence: newMetrics.evidence
+              evidence: newMetrics.evidence,
+              progressPercent: newMetrics.progressPercent,
             });
           } else {
             // Queue latest metrics and schedule trailing emit
@@ -1542,7 +1764,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
               cost: newMetrics.cost,
               duration: newMetrics.duration,
               memoryOps: newMetrics.memoryOps,
-              evidence: newMetrics.evidence
+              evidence: newMetrics.evidence,
+              progressPercent: newMetrics.progressPercent,
             };
             if (!pendingTimerRef.current) {
               const delay = EMIT_INTERVAL_MS - (now - lastEmitRef.current);
@@ -1570,10 +1793,6 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
         let currentAggDisplayEvent: DisplayStreamEvent | null = null;
         for (const processedEvent of processedEvents) {
           if (processedEvent.type === 'delayed_thinking_start') {
-            // Skip entirely when animations are disabled
-            if (!animationsEnabled) {
-              continue;
-            }
             // Use unified scheduler for delayed spinner; include spacing for this path
             const delay = (processedEvent as any).delay || 100;
             scheduleDelayedThinking({
@@ -1587,7 +1806,8 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
           }
 
           if (processedEvent.type === 'thinking_end') {
-            // End spinner but keep aggregated output visible in active tail
+            // End stream spinner but keep aggregated output visible in active tail.
+            deactivateThinking();
             setActiveThrottled(prev => {
               activeBufRef.current.clear();
               const aggEv = buildAggDisplayEvent();
@@ -1602,7 +1822,10 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             try {
               const any: any = processedEvent as any;
               // Consider output as tool-buffered if metadata says so OR we have an active toolId
-              const isToolBuffer = Boolean(any?.metadata?.fromToolBuffer || any?.metadata?.tool || Boolean(currentToolId));
+              const isToolBuffer = Boolean(
+                !any?.metadata?.aggregated &&
+                (any?.metadata?.fromToolBuffer || any?.metadata?.tool || Boolean(currentToolIdRef.current))
+              );
               if (isToolBuffer) {
                 let contentStr = '';
                 if (typeof any.content === 'string') contentStr = any.content;
@@ -1615,79 +1838,68 @@ export const Terminal: React.FC<TerminalProps> = React.memo(({
             } catch {}
           }
           
+          if (processedEvent.type === 'thinking') {
+            activateThinking(
+              ((processedEvent as any).context || 'tool_execution') as ThinkingContext,
+              (processedEvent as any).message,
+              processedEvent
+            );
+            continue;
+          }
+
           regularEvents.push(processedEvent);
         }
 
-        // Keep current thinking (if any) and aggregated output in active tail without duplication
-        // This runs on EVERY event to preserve thinking across all events
-        const thinkingEvents = regularEvents.filter(e => e.type === 'thinking');
-        // Preserve existing thinking even if no new events - prevents thinking from disappearing
-        const existingThinking = activeBufRef.current.toArray().filter(e => e.type === 'thinking');
-        const hasThinkingToDisplay = thinkingEvents.length > 0 || existingThinking.length > 0 || currentAggDisplayEvent;
-
-        if (hasThinkingToDisplay) {
-          // Check if any thinking event is marked urgent - needs immediate rendering
-          const hasUrgent = thinkingEvents.some(e => (e as any).urgent === true);
-
-          const updateActiveBuf = () => {
-            // Preserve existing thinking if no new thinking events in this batch
-            const thinkingToKeep = thinkingEvents.length > 0 ? thinkingEvents : existingThinking;
-            // Rebuild active tail: keep thinking, then aggregated output if present
+        if (currentAggDisplayEvent) {
+          setActiveThrottled(() => {
             activeBufRef.current.clear();
-            // Deduplicate thinking entries by identity (type-only for safety)
-            const uniqueThinking: DisplayStreamEvent[] = [];
-            for (const t of thinkingToKeep) {
-              if (!uniqueThinking.some(u => u.type === t.type)) uniqueThinking.push(t);
-            }
-            for (const t of uniqueThinking) activeBufRef.current.push(t);
-            if (currentAggDisplayEvent) activeBufRef.current.push(currentAggDisplayEvent);
+            activeBufRef.current.push(currentAggDisplayEvent as DisplayStreamEvent);
             return activeBufRef.current.toArray();
-          };
-
-          // Bypass throttle for urgent events (startup, post-reasoning) to ensure immediate visibility
-          if (hasUrgent) {
-            const events = updateActiveBuf();
-            setActiveEvents(events);
-          } else {
-            setActiveThrottled(updateActiveBuf);
-          }
+          });
         }
 
         if (regularEvents.length > 0) {
-          // Before anything else, if a new step header arrived, flush current aggregated output into completed
-          const stepHeaders = regularEvents.filter(e => e.type === 'step_header');
-          if (stepHeaders.length > 0) {
+          // Before anything else, if a new progress update arrived, flush current aggregated output into completed
+          const progressUpdates = regularEvents.filter(e =>
+            e.type === 'progress_update' &&
+            (e as any).operation_stage !== 'final_report' &&
+            (e as any).operation_stage !== 'ragas_evaluation'
+          );
+          if (progressUpdates.length > 0) {
             const aggEv = buildAggDisplayEvent();
             if (aggEv) {
               completedBufRef.current.push(aggEv as any);
-              scheduleCompletedEventsUpdate();
+              flushCompletedEventsUpdate();
               resetStepAgg();
             }
-            // Clear any live tail from previous step (reasoning/output) to prevent leakage
-            setActiveThrottled(() => {
-              activeBufRef.current.clear();
-              return activeBufRef.current.toArray();
-            });
-            // End any active thinking/reasoning state at step boundary
-            if (activeThinkingRef.current) setActiveThinking(false);
+            // End any active reasoning state at step boundary
             setActiveReasoning(false);
-            // Schedule a brief delayed spinner for the new step while waiting for tool/tool args
             cancelDelayedThinking();
-            if (animationsEnabled) {
-              scheduleDelayedThinking({ delay: 0, context: 'tool_execution', addSpacer: false });
+            const hasActiveThinking = activeBufRef.current.toArray().some(e => e.type === 'thinking');
+            if (!hasActiveThinking) {
+              // Clear any live tail from previous step (reasoning/output) to prevent leakage.
+              activeBufRef.current.clear();
+              setActiveEvents(activeBufRef.current.toArray());
+              // Show stream spinner for the new step while waiting for tool/tool args.
+              activateThinking('tool_execution', undefined, {}, true);
             }
           }
 
           // Move non-thinking items to completed (excluding output fragments, separators, dividers handled above)
           const newCompletedEvents = regularEvents.filter(e =>
             e.type !== 'thinking' &&
-            e.type !== 'output' &&
+            !(e.type === 'output' && Boolean((e as any).metadata?.finalReportCluster)) &&
             e.type !== 'separator' &&
-            e.type !== 'divider'
+            e.type !== 'divider' &&
+            !isCompletionPhaseEvent(e)
           );
           if (newCompletedEvents.length > 0) {
-completedBufRef.current.pushMany(newCompletedEvents);
-            scheduleCompletedEventsUpdate();
+            completedBufRef.current.pushMany(newCompletedEvents);
+            if (shouldFlushCompletedImmediately(newCompletedEvents)) {
+              flushCompletedEventsUpdate();
+            } else {
+              scheduleCompletedEventsUpdate();
+            }
           }
         }
       }
@@ -1705,6 +1917,11 @@ completedBufRef.current.pushMany(newCompletedEvents);
 
     // Subscribe to events
     executionService.on('event', handleEvent);
+    const bufferedStartupEvents = executionService.drainBufferedStartupEvents?.() ?? [];
+    executionService.markStartupEventConsumerAttached?.();
+    for (const bufferedEvent of bufferedStartupEvents) {
+      handleEvent(bufferedEvent);
+    }
     
     // Event flushing no longer needed - events are processed directly
     
@@ -1731,6 +1948,8 @@ completedBufRef.current.pushMany(newCompletedEvents);
     return () => {
       // Clean up any delayed thinking timers
       cancelDelayedThinking();
+      cancelCompletionCleanupTimer();
+      cancelCompletedEventsUpdateTimer();
       cancelPostToolIdleTimer();
       cancelPostReasoningIdleTimer();
       if (pendingTimerRef.current) {
@@ -1745,22 +1964,17 @@ completedBufRef.current.pushMany(newCompletedEvents);
       executionService.off('complete', handleComplete);
       executionService.off('stopped', handleStopped);
     };
-  }, [executionService, onEvent, onMetricsUpdate, sessionId, resetAllBuffers]); // Removed 'metrics' - not used in effect, was causing re-runs on every token update
+  }, [executionService, onEvent, onHealthUpdate, onMetricsUpdate, onThinkingUpdate, sessionId, resetAllBuffers]); // Removed 'metrics' - not used in effect, was causing re-runs on every token update
 
   if (collapsed) {
     return null;
   }
 
-
-  // Check if we have thinking-only events (spinner without other content)
-  const hasOnlyThinkingInActive = activeEvents.length > 0 &&
-    activeEvents.every(e => e.type === 'thinking' || e.type === 'thinking_end' || e.type === 'rate_limit');
-
-  const hasFinalReportCluster = finalReportEvents != null && finalReportEvents.length > 0;
+  const hasCompletionPhaseCluster = completionPhaseEvents != null && completionPhaseEvents.length > 0;
 
   return (
     <Box flexDirection="column" flexGrow={1}>
-      {/* Completed events - rendered normally (Static component broke rendering) */}
+      {/* Completed events - rendered via Ink Static so historical output is append-only. */}
       {completedEvents.length > 0 && (
         <StaticStreamDisplay
           key={staticSessionKey}
@@ -1770,31 +1984,20 @@ completedBufRef.current.pushMany(newCompletedEvents);
         />
       )}
 
-      {/* FINAL REPORT cluster: rendered via dynamic StreamDisplay so InlineReportViewer
-          can react to late-arriving report_content / assessment_complete events. */}
-      {hasFinalReportCluster && finalReportEvents && (
+      {/* Completion-phase cluster: rendered dynamically so report and evaluation
+          events remain append-only while InlineReportViewer receives late content. */}
+      {hasCompletionPhaseCluster && completionPhaseEvents && (
         <StreamDisplay
-          events={finalReportEvents}
+          events={completionPhaseEvents}
           animationsEnabled={animationsEnabled}
           terminalWidth={terminalWidth}
           availableHeight={availableHeight}
         />
       )}
 
-      {/* Thinking-only spinner rendered IMMEDIATELY after completed content for visibility
-          (suppressed once FINAL REPORT cluster is active). */}
-      {!hasFinalReportCluster && hasOnlyThinkingInActive && (
-        <StreamDisplay
-          events={activeEvents}
-          animationsEnabled={animationsEnabled}
-          terminalWidth={terminalWidth}
-          availableHeight={availableHeight}
-        />
-      )}
-
-      {/* Active events with content (reasoning, output, etc) - suppressed once FINAL
+      {/* Active events with content (reasoning, output, etc.) - suppressed once FINAL
           REPORT cluster takes over the dynamic tail. */}
-      {!hasFinalReportCluster && activeEvents.length > 0 && !hasOnlyThinkingInActive && (
+      {!hasCompletionPhaseCluster && activeEvents.length > 0 && (
         <StreamDisplay
           events={activeEvents}
           animationsEnabled={animationsEnabled}

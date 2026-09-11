@@ -1,124 +1,255 @@
 #!/usr/bin/env python3
 """Agent creation and management for Cyber-AutoAgent."""
+import contextlib
 import fnmatch
+import importlib.util
 import json
 import logging
 import os
 import sys
 import warnings
-import importlib.util
+from dataclasses import dataclass, field
 from datetime import datetime
 from math import ceil
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any
 
 from strands import Agent
 from strands.hooks import HookProvider
 from strands.tools.executors import ConcurrentToolExecutor
 
+# These tools are modules, not functions, the following imports MUST import the module
+from strands_tools import (
+    environment,
+    http_request,
+)
+
 # These tools have the @tool decorator, the function is to be imported
-from strands_tools.editor import editor
+from strands_tools.editor import editor as strands_editor
 from strands_tools.load_tool import load_tool
-from modules.tools.shell import shell
 from strands_tools.sleep import sleep
 from strands_tools.tavily import tavily_search
 
-# These tools are modules, not functions, the following imports MUST import the module
-from strands_tools import (
-    http_request,
-    python_repl,
-    environment,
+from modules import __version__, prompts
+from modules.agents.factory import (
+    AgentFactoryConfig,
+    create_agent_with_stateful_retry,
+    init_agent_factory,
+    model_uses_server_side_state,
 )
-from modules.tools import stop
-
-from modules import prompts, __version__
-from modules.agents.factory import AgentFactoryConfig, init_agent_factory
+from modules.agents.fail_fast_tool_executor import FailFastSequentialToolExecutor
 from modules.agents.patches import ToolUseIdHook
 from modules.config import (
     AgentConfig,
-    align_mem0_config,
-    check_existing_memories,
     configure_sdk_logging,
     get_config_manager,
 )
-from modules.config.system.logger import get_logger
-from modules.config.models.factory import (
-    _resolve_prompt_token_limit, create_strands_model,
+from modules.config.models.capabilities import (
+    allows_reasoning_content_replay,
+    get_capabilities,
 )
+from modules.config.models.factory import (
+    create_strands_model,
+    require_prompt_token_limit,
+)
+from modules.config.system.environment import resolve_seclists_root
+from modules.config.system.logger import get_logger
+from modules.handlers.agent_repair_hook import AgentRepairHook
 from modules.handlers.conversation_budget import (
+    PRESERVE_FIRST_DEFAULT,
+    PRESERVE_LAST_DEFAULT,
+    LargeToolResultMapper,
     MappingConversationManager,
     PromptBudgetHook,
-    LargeToolResultMapper,
-    register_conversation_manager,
     _ensure_prompt_within_budget,
-    PRESERVE_LAST_DEFAULT,
-    PRESERVE_FIRST_DEFAULT,
+    register_conversation_manager,
 )
-from modules.handlers.react import ReactBridgeHandler
-from modules.handlers.agent_repair_hook import AgentRepairHook
+from modules.handlers.react import AgentEventHandler
+from modules.handlers.terminal_tool import TerminalToolHook
+from modules.handlers.tool_recovery import (
+    EvaluatorArtifactReadLimitHook,
+    TaskFailureRecoveryHook,
+)
+from modules.handlers.tool_repeat_guard import (
+    DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
+    DEFAULT_TOOL_REPEAT_THRESHOLD,
+    ToolRepeatGuardHook,
+    normalize_tool_repeat_max_cycle_length,
+    normalize_tool_repeat_threshold,
+)
 from modules.handlers.tool_router import ToolRouterHook
-from modules.config.models.capabilities import get_capabilities
-from modules.handlers.utils import print_status, sanitize_target_name, get_tool_name
-from modules.tools import swarm, web_search
-
+from modules.handlers.utils import (
+    get_tool_name,
+    print_status,
+    sanitize_target_name,
+    tool_append_description,
+)
+from modules.tools import python_repl
+from modules.tools.advanced_payload_coordinator import advanced_payload_coordinator
+from modules.tools.artifact import create_artifact_reader, resolve_tool_result_max_chars
+from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
+from modules.tools.auth_chain_analyzer import auth_chain_analyzer
+from modules.tools.browser import (
+    browser_evaluate_js,
+    browser_get_cookies,
+    browser_get_page_html,
+    browser_goto_url,
+    browser_observe_page,
+    browser_perform_action,
+    browser_set_headers,
+    initialize_browser,
+)
+from modules.tools.channels import (
+    channel_close,
+    channel_create_forward,
+    channel_create_reverse,
+    channel_poll,
+    channel_send,
+    channel_status,
+)
+from modules.tools.client_bundle_inventory import client_bundle_inventory
+from modules.tools.editor import create_absolute_path_editor
+from modules.tools.idor_specialist import idor_specialist
 from modules.tools.mcp import (
     discover_mcp_tools,
 )
 from modules.tools.memory import (
+    create_tasks,
     get_memory_client,
     initialize_memory_system,
-    mem0_store,
-    mem0_retrieve,
-    mem0_list,
-    store_plan,
-    get_plan,
-    create_tasks,
-    list_uncompleted_tasks,
-    task_done,
-    get_active_task,
-)
-from modules.tools.browser import (
-    initialize_browser,
-    browser_goto_url,
-    browser_observe_page,
-    browser_get_page_html,
-    browser_set_headers,
-    browser_perform_action,
-    browser_evaluate_js,
-    browser_get_cookies,
-)
-from modules.tools.prompt_optimizer import prompt_optimizer
-from modules.tools.channels import (
-    channel_create_forward,
-    channel_create_reverse,
-    channel_send,
-    channel_poll,
-    channel_status,
-    channel_close,
+    memory_list,
+    memory_retrieve,
+    record_finding_validation,
+    record_objective_validation,
+    resolve_operation_targets,
+    set_memory_event_emitter,
+    store_finding,
+    store_knowledge,
+    store_objective_candidate,
+    store_observation,
 )
 from modules.tools.oast import (
-    oast_health,
+    oast_clear_http_responses,
     oast_endpoints,
+    oast_health,
     oast_poll,
     oast_register_http_response,
-    oast_clear_http_responses,
 )
-from modules.tools.tool_catalog import tool_catalog_wrapper, get_cyber_tools_by_caps
+from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
+from modules.tools.shell import shell
+from modules.tools.specialized_recon_orchestrator import specialized_recon_orchestrator
+from modules.tools.swarm import swarm
+from modules.tools.tool_catalog import (
+    get_shell_command_alternatives,
+    remove_shell_command,
+    tool_catalog_wrapper,
+)
+from modules.tools.web_search import create_web_search_tool, web_search
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 logger = get_logger("Agents.CyberAutoAgent")
 
+
+async def _tavily_web_search_provider(query: str, limit: int) -> dict[str, Any]:
+    """Adapt Tavily's provider-specific schema behind the agent-facing web-search wrapper."""
+
+    return await tavily_search(query=query, max_results=min(limit, 20))
+
+_SECLISTS_CONSUMER_TOOLS = {"dirb", "feroxbuster", "ffuf", "gobuster", "hydra", "ncrack", "wfuzz", "wpscan"}
+_FAIL_FAST_TOOL_ROLES = {"task_evaluator", "plan_critic", "task_prompt_critic"}
+
 # Backward compatibility: expose get_system_prompt from modules.prompts for legacy imports/tests
 get_system_prompt = prompts.get_system_prompt
 
 
-def create_agent(
+@dataclass
+class AgentRuntimeResources:
+    """Shared operation resources reused by agents created within one work loop."""
+
+    config: AgentConfig
+    operation_id: str
+    server_config: Any
+    config_manager: Any
+    callback_handler: AgentEventHandler
+    tools_list: list[Any]
+    tool_executor: ConcurrentToolExecutor
+    system_prompt_payload: Any
+    system_prompt: str
+    hooks: list[HookProvider]
+    conversation_manager: MappingConversationManager
+    sdk_context_manager: str | None
+    trace_attributes: dict[str, Any]
+    prompt_token_limit: int
+    core_tools_list: list[Any] = field(default_factory=list)
+    optional_tools_list: list[Any] = field(default_factory=list)
+    quarantined_shell_commands: set[str] = field(default_factory=set)
+    structured_output_fallbacks: dict[str, str] = field(default_factory=dict)
+    termination_policy: str = ""
+
+
+def _tool_names(tools: list[Any]) -> set[str]:
+    return {get_tool_name(tool) for tool in tools}
+
+
+def _create_tool_repeat_guard(config_manager: Any, agent_logger: logging.Logger) -> ToolRepeatGuardHook | None:
+    """Build the configured repeat guard, or return None when disabled."""
+
+    repeat_threshold = normalize_tool_repeat_threshold(
+        config_manager.getenv_int(
+            "CYBER_TOOL_REPEAT_THRESHOLD",
+            DEFAULT_TOOL_REPEAT_THRESHOLD,
+        )
+    )
+    if repeat_threshold == 0:
+        agent_logger.info("Repeated tool-call guard disabled")
+        return None
+
+    repeat_max_cycle_length = normalize_tool_repeat_max_cycle_length(
+        config_manager.getenv_int(
+            "CYBER_TOOL_REPEAT_MAX_CYCLE_LENGTH",
+            DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
+        )
+    )
+    agent_logger.info(
+        "Repeated tool-call guard threshold: %d; maximum cycle length: %d",
+        repeat_threshold,
+        repeat_max_cycle_length,
+    )
+    return ToolRepeatGuardHook(repeat_threshold, repeat_max_cycle_length)
+
+
+def build_role_tools(
+    runtime: AgentRuntimeResources,
+    *,
+    selected_optional_tool_names: list[str] | None = None,
+    include_create_tasks: bool = False,
+) -> list[Any]:
+    """Build a restricted tool list for a short-lived workflow agent."""
+
+    selected_optional_tool_names = selected_optional_tool_names or []
+    selected_optional_names = set(selected_optional_tool_names)
+    tools = []
+    core_tools = runtime.core_tools_list or runtime.tools_list
+    for tool_item in core_tools:
+        tool_name = get_tool_name(tool_item)
+        if tool_name == "create_tasks" and not include_create_tasks:
+            continue
+        tools.append(tool_item)
+
+    for tool_item in runtime.optional_tools_list:
+        if get_tool_name(tool_item) in selected_optional_names:
+            tools.append(tool_item)
+
+    return tools
+
+
+def create_agent_runtime_resources(
     target: str,
     objective: str,
-    config: Optional[AgentConfig] = None,
-) -> Tuple[Agent, ReactBridgeHandler]:
-    """Create autonomous agent"""
+    config: AgentConfig | None = None,
+) -> AgentRuntimeResources:
+    """Initialize shared operation resources used by one or more agents."""
 
     # Enable comprehensive SDK logging for debugging
     configure_sdk_logging(enable_debug=True)
@@ -159,51 +290,17 @@ def create_agent(
         config.model_id = server_config.llm.model_id
 
     # Use provided operation_id or generate new one
-    if not config.op_id:
-        operation_id = f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    else:
-        operation_id = config.op_id
+    operation_id = f"OP_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if not config.op_id else config.op_id
 
-    enable_prompt_optimization = (
-            os.getenv("CYBER_ENABLE_PROMPT_OPTIMIZATION", "false").lower() == "true"
-    )
+    # Keep environment and memory context aligned before any continuation reads occur.
+    os.environ["CYBER_OPERATION_ID"] = operation_id
 
     # Configure memory system using centralized configuration
-    memory_config = config_manager.get_mem0_service_config(config.provider)
-    align_mem0_config(config.model_id, memory_config)
-
-    # Configure vector store with memory path if provided
-    if config.memory_path:
-        # Validate existing memory store path
-        if not os.path.exists(config.memory_path):
-            raise ValueError(f"Memory path does not exist: {config.memory_path}")
-        if not os.path.isdir(config.memory_path):
-            raise ValueError(f"Memory path is not a directory: {config.memory_path}")
-
-        # Override vector store path in centralized config
-        memory_config["vector_store"] = {"config": {"path": config.memory_path}}
-        print_status(f"Loading existing memory from: {config.memory_path}", "SUCCESS")
-
-    # Check for existing memories before initializing to avoid race conditions
-    # Skip check if user explicitly wants fresh memory
-    if config.memory_mode == "fresh":
-        has_existing_memories = False
-        print_status(
-            "Using fresh memory mode - ignoring any existing memories", "WARNING"
-        )
-    else:
-        has_existing_memories = check_existing_memories(config.target, config.provider, operation_id)
-        # Log the result for debugging container vs local issues
-        if has_existing_memories:
-            print_status(
-                f"Previous memories detected for {config.target} - will be loaded",
-                "SUCCESS",
-            )
-        else:
-            print_status(
-                f"No previous memories found for {config.target} - will create new",
-                "INFO",
-            )
+    operation_targets = resolve_operation_targets(config.target, config.objective)
+    memory_config = config_manager.get_qdrant_memory_config(config.provider)
+    memory_config["target_values"] = [target.value for target in operation_targets]
+    memory_config["memory_mode"] = config.memory_mode
+    has_existing_memories = False
 
     # Initialize memory system
     target_name = sanitize_target_name(config.target)
@@ -243,23 +340,18 @@ def create_agent(
         logger.debug("Unable to set overlay environment context", exc_info=True)
 
     # Create agent with telemetry for token tracking
-    prompt_token_limit = _resolve_prompt_token_limit(
+    prompt_token_limit = require_prompt_token_limit(
         config.provider, config.model_id
     )
     logger.info("Prompt token limit (input tokens): %d", prompt_token_limit)
 
-    # Tool router to prevent unknown-tool failures by routing to shell before execution
-    # Allow configurable truncation of large tool outputs via env var
-    computed_max_results_chars = min(ceil(prompt_token_limit * 0.10), 30000)
-    try:
-        max_result_chars = int(os.getenv("CYBER_TOOL_MAX_RESULT_CHARS", str(computed_max_results_chars)))
-    except Exception:
-        max_result_chars = computed_max_results_chars
+    # Allow configurable truncation and externalization of large tool outputs via env var
+    max_result_chars = resolve_tool_result_max_chars(
+        prompt_token_limit,
+        os.getenv("CYBER_TOOL_MAX_RESULT_CHARS"),
+    )
 
-    if max_result_chars < 4000:
-        computed_artifact_threshold = max_result_chars
-    else:
-        computed_artifact_threshold = max(ceil(max_result_chars / 3), 2000)
+    computed_artifact_threshold = max_result_chars if max_result_chars < 4000 else max(ceil(max_result_chars / 3), 2000)
     try:
         artifact_threshold = int(
             os.getenv("CYBER_TOOL_RESULT_ARTIFACT_THRESHOLD", str(computed_artifact_threshold))
@@ -285,27 +377,27 @@ def create_agent(
         artifacts_dir=os.getenv("CYBER_ARTIFACTS_DIR"),
     )
     initialize_memory_system(
-        memory_config, operation_id, target_name, has_existing_memories
+        {**memory_config, "prompt_token_limit": prompt_token_limit},
+        operation_id,
+        target_name,
+        has_existing_memories,
+        logical_target=config.target,
     )
     print_status(f"Memory system initialized for operation: {operation_id}", "SUCCESS")
 
+    memory_client = get_memory_client(silent=True)
+
     # Get memory overview for system prompt enhancement and UI display
-    memory_overview = None
-    memory_client = None
-    if has_existing_memories or config.memory_path:
-        try:
-            memory_client = get_memory_client()
-            if memory_client:
-                memory_overview = memory_client.get_memory_overview()
-        except Exception as e:
-            agent_logger.debug(
-                "Could not get memory overview for system prompt: %s", str(e)
-            )
+    try:
+        memory_overview = memory_client.get_memory_overview()
+        has_existing_memories = bool(memory_overview.get("has_memories"))
+    except Exception as e:
+        memory_overview = None
+        agent_logger.debug("Could not get memory overview for system prompt: %s", str(e))
 
     tool_count = 0
 
     # Load module-specific tools and prepare for injection
-    module_tools_context = ""
     loaded_module_tools = []
 
     try:
@@ -358,15 +450,13 @@ def create_agent(
                     "INFO",
                 )
             # Log module and tool discovery explicitly for validation
-            try:
+            with contextlib.suppress(Exception):
                 agent_logger.info(
                     "CYBERAUTOAGENT: module='%s', tools_discovered=%d, tools='%s'",
                     config.module,
                     len(tool_names),
                     ", ".join(tool_names),
                 )
-            except Exception:
-                pass
 
             # Create specific tool examples for system prompt
             tool_examples = []
@@ -394,13 +484,6 @@ def create_agent(
                         )
 
             tool_count += len(tool_names)
-            module_tools_context = f"""
-### MODULE-SPECIFIC TOOLS
-Preferred over command line.
-
-{"Ready to use:" if loaded_module_tools else "Load when needed:"}
-{chr(10).join(f"  - {example}" for example in tool_examples)}
-"""
         else:
             print_status(
                 f"No module-specific tools found for '{config.module}'", "INFO"
@@ -408,48 +491,15 @@ Preferred over command line.
     except Exception as e:
         logger.warning("Error discovering module tools for '%s': %s", config.module, e)
 
-    tools_context = ""
-    if config.available_tools:
-        tool_count += len(config.available_tools)
-        tools_by_caps = get_cyber_tools_by_caps(config.available_tools)
-        tools_context = f"""
-### COMMAND LINE PROGRAMS
-
-- Use the **shell** tool for command line programs.
-- Capabilities → Preferred tools → Fallbacks
-- These programs are known to be installed.
-"""
-        for cap, cap_prefs in tools_by_caps.items():
-            tools_context += f"\n- **{cap}**\n"
-            pref_list = list(cap_prefs.keys())
-            pref_list.sort(key=lambda x: (not x.startswith("p"), x))
-            for pref in pref_list:
-                pref_tools = cap_prefs[pref]
-                tools_context += f"  - {pref}: {', '.join(map(lambda x: f'`{x}`', pref_tools))}\n"
-
     # Load MCP tools and prepare for injection
     mcp_tools = discover_mcp_tools(config)
-    if mcp_tools:
-        tool_count += len(mcp_tools)
-        mcp_tools_context = f"""
-### MCP TOOLS
 
-Available {config.module} MCP tools:
-{chr(10).join(f"- {mcp_tool.tool_name}" for mcp_tool in mcp_tools)}
-
-Prefer MCP tools over command line tools that offer similar capabilities.
-"""
-    else:
-        mcp_tools_context = ""
-
-    # Combine environmental and module tools context
-    # Prefer to include both environment-detected tools and module-specific tools
+    # Build additional environment context
     full_tools_context = ""
-    for tools_ctx in [tools_context, module_tools_context, mcp_tools_context]:
-        if tools_ctx:
-            if full_tools_context:
-                full_tools_context += "\n\n"
-            full_tools_context += str(tools_ctx)
+    available_tool_names = set(config.available_tools or [])
+    seclists_root = (
+        resolve_seclists_root() if available_tool_names.intersection(_SECLISTS_CONSUMER_TOOLS) else None
+    )
     if config.bug_bounty_headers:
         marker_headers = "\n".join(
             f"- {name}: {value}" for name, value in sorted(config.bug_bounty_headers.items())
@@ -457,20 +507,11 @@ Prefer MCP tools over command line tools that offer similar capabilities.
         marker_context = f"""
 ## BUG BOUNTY TRAFFIC MARKERS
 
-Authorized bug bounty traffic must include these HTTP headers:
+For all tools that make HTTP requests, include these bug bounty traffic HTTP headers:
 {marker_headers}
 
-Before using browser traffic, call `browser_set_headers` with these headers. For `http_request`, command-line tools, and MCP tools that make HTTP requests, include the same headers in the tool input, command flags, or prompt.
 """
         full_tools_context = f"{full_tools_context}\n\n{marker_context}" if full_tools_context else marker_context
-
-    if full_tools_context:
-        full_tools_context = f"""
-## TOOLS
-
-Prefer tools present in the following lists. If a capability is missing, follow Ask-Enable-Retry for minimal, non-interactive enablement, or choose an equivalent available tool.
-
-""" + full_tools_context
 
     if config.bug_bounty_headers:
         try:
@@ -483,6 +524,30 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             )
         except Exception as e:
             agent_logger.warning("Unable to pre-apply bug bounty browser headers: %s", e)
+
+    http_request_instructions = """
+- Purpose: Deterministic HTTP(S) requests for web page and API testing (including GraphQL/REST)
+- Validation: Save request/response transcript + negative/control case as artifacts, grep/sed to extract relevant data, store only file path in findings
+- Interoperability: May be selected or used alongside `curl`; overlapping HTTP clients are permitted
+- Managed endpoint keys are observations unless abuse/sensitive exposure demonstrated with artifacts
+"""
+    tool_append_description(http_request, http_request_instructions)
+
+    python_repl_instructions = """
+- Usage: Rapid PoC prototyping, batch multiple tests. NO TIMEOUT (avoid >600s operations)
+- File writes: MUST use absolute paths from OPERATION ARTIFACTS DIRECTORY (relative paths write to operation root)
+- Promotion trigger: POC works + logic needed >2 times → MUST promote via editor+load_tool to OPERATION TOOLS DIRECTORY
+- Results: Store all outputs as artifacts with descriptive names
+
+**editor + load_tool** (meta-tooling)
+- Purpose: Promote working POCs to reusable tools | Novel exploits when existing tools insufficient
+- Trigger: POC tested + works + pattern repeats >2 times → promote to tool (cost: create once vs rewrite each time)
+- Workflow: editor(path in OPERATION TOOLS DIRECTORY, @tool decorator) → load_tool(name) → invoke
+- Structure: @tool decorator, docstring, type hints | Location: tools/ subdirectory, NOT artifacts/
+- Debug first: Error in tool? Fix via editor → load_tool → test. Create new only if incompatible.
+- NOT for: Reports, documents, one-time scripts (use artifacts/ for those)
+"""
+    tool_append_description(python_repl, python_repl_instructions)
 
     # Always use original tools - event emission is handled by callback
     # The following are builtin_tools that can be selected by the module
@@ -506,52 +571,69 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         oast_poll,
         oast_register_http_response,
         oast_clear_http_responses,
+        specialized_recon_orchestrator,
+        advanced_payload_coordinator,
+        auth_chain_analyzer,
+        idor_specialist,
+        client_bundle_inventory,
     ]
 
-    if os.getenv("TAVILY_API_KEY"):
-        builtin_tools_list.append(tavily_search)
-    else:
-        builtin_tools_list.append(web_search)
+    web_search_instructions = """
+**Purpose**
+  - external intel, OSINT, NVD/CVE, Exploit‑DB, vendor advisories, Shodan/Censys, VirusTotal; save query and result artifacts and cite them as research context for hypothesis and test design or as evidence when applicable.
+  - NOT for: Do not run published proof-of-concepts; use them only to understand conditions and design an authorized test.
+"""
+    selected_web_search = (
+        create_web_search_tool(_tavily_web_search_provider)
+        if os.getenv("TAVILY_API_KEY")
+        else web_search
+    )
+    tool_append_description(selected_web_search, web_search_instructions)
+    builtin_tools_list.append(selected_web_search)
+
 
     logger.info(f"Built-in tools available for allow listing by module: {[get_tool_name(tool) for tool in builtin_tools_list]}")
 
-    # these tools are necessary and always present
-    tools_list = [
+    # Core tools are available to workflow workers unless a role narrows them further.
+    # Plan/task mutation remains owned by Python workflow code; create_tasks is included only for roles that need it.
+    editor = create_absolute_path_editor(strands_editor)
+    core_tools_list = [
         swarm,
         shell,
         editor,
         load_tool,
-        mem0_store,
-        mem0_retrieve,
-        mem0_list,
-        store_plan,
-        get_plan,
+        store_observation,
+        store_knowledge,
+        store_finding,
+        record_finding_validation,
+        store_objective_candidate,
+        record_objective_validation,
+        memory_retrieve,
+        memory_list,
+        create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
         create_tasks,
-        list_uncompleted_tasks,
-        task_done,
-        get_active_task,
-        stop,
         sleep,
         python_repl,
         environment,  # environment is referenced by other strands tools
     ]
 
-    if enable_prompt_optimization:
-        tools_list.append(prompt_optimizer)
+    optional_tools_list = [recon_output_to_inventory_manifest]
 
     if "module_tool_allowlist" in locals() and module_tool_allowlist is not None:
         for builtin_tool in builtin_tools_list:
             tool_name = get_tool_name(builtin_tool)
             if any(fnmatch.fnmatch(tool_name, tool_allowed) for tool_allowed in module_tool_allowlist):
-                tools_list.append(builtin_tool)
+                optional_tools_list.append(builtin_tool)
     else:
-        tools_list.extend(builtin_tools_list)
+        optional_tools_list.extend(builtin_tools_list)
 
+    tools_list = list(core_tools_list)
     tool_count += len(tools_list)
     # The tools below have already been counted. We cannot use `tool_count = len(tools_list)` because there may be unloaded tools
 
     # Inject module-specific tools if available
     if "loaded_module_tools" in locals() and loaded_module_tools:
+        optional_tools_list.extend(loaded_module_tools)
         tools_list.extend(loaded_module_tools)
         agent_logger.info(
             "Injected %d module tools into agent", len(loaded_module_tools)
@@ -559,6 +641,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
     # Inject MCP tools if available
     if "mcp_tools" in locals() and mcp_tools:
+        optional_tools_list.extend(mcp_tools)
         tools_list.extend(mcp_tools)
         agent_logger.info(
             "Injected %d MCP tools into agent", len(mcp_tools)
@@ -579,12 +662,15 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
     # Load module-specific execution prompt
     module_execution_prompt = None
+    module_termination_policy = ""
     try:
         module_loader = prompts.get_module_loader()
-        # Pass operation root to enable loading optimized execution prompt
         operation_root_path = paths.get("root") if paths else None
         module_execution_prompt = module_loader.load_module_execution_prompt(
             config.module, operation_root=operation_root_path
+        )
+        module_termination_policy = module_loader.load_module_termination_policy(
+            config.module
         )
         if module_execution_prompt:
             print_status(
@@ -601,10 +687,15 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             getattr(module_loader, "last_loaded_execution_prompt_source", None)
             or "default (none found)"
         )
+        termination_src = (
+            getattr(module_loader, "last_loaded_termination_policy_source", None)
+            or "default (none found)"
+        )
         agent_logger.info(
-            "CYBERAUTOAGENT: module='%s', execution_prompt_source='%s'",
+            "CYBERAUTOAGENT: module='%s', execution_prompt_source='%s', termination_policy_source='%s'",
             config.module,
             exec_src,
+            termination_src,
         )
     except Exception as e:
         logger.warning(
@@ -614,7 +705,6 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     plan_snapshot = None
     plan_current_phase = None
     try:
-        memory_client = get_memory_client(silent=True)
         plan_snapshot = memory_client.get_active_plan(operation_id=operation_id)
         plan_current_phase = plan_snapshot.current_phase if plan_snapshot else None
     except Exception as e:
@@ -625,15 +715,16 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         target=config.target,
         objective=config.objective,
         operation_id=operation_id,
-        max_steps=config.max_steps,
+        budget=config.budget,
         provider=config.provider,
-        has_memory_path=bool(config.memory_path),
         has_existing_memories=has_existing_memories,
         memory_overview=memory_overview,
         tools_context=full_tools_context if full_tools_context else None,
+        seclists_root=seclists_root,
         output_config={
             "base_dir": server_config.output.base_dir,
             "target_name": target_name,
+            "operation_path": paths.get("root"),
             "artifacts_path": paths.get("artifacts"),
             "tools_path": paths.get("tools"),
         },
@@ -682,7 +773,7 @@ Prefer tools present in the following lists. If a capability is missing, follow 
         logger.debug("system_prompt_payload %s", json.dumps(system_prompt_payload))
 
     # It works in both CLI and React modes
-    from modules.handlers.react.react_bridge_handler import ReactBridgeHandler
+    from modules.handlers.react.agent_event_handler import AgentEventHandler
 
     # Set up output interception to prevent duplicate output
     # This must be done before creating the handler to ensure all stdout is captured
@@ -691,57 +782,50 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
         setup_output_interception()
 
-    # Ensure react package namespace is importable even if some submodules are removed
-    # Tests import modules.handlers.react.react_bridge_handler directly
-    try:
-        from modules.handlers.react import ReactBridgeHandler as _RBH  # noqa: F401
-    except Exception:
-        pass
-
-    callback_handler = ReactBridgeHandler(
-        max_steps=config.max_steps,
+    callback_handler = AgentEventHandler(
         operation_id=operation_id,
         provider_id=config.provider,
         model_id=config.model_id,
-        swarm_model_id=server_config.swarm.llm.model_id,
+        specialist_model_id=server_config.swarm.llm.model_id,
+        agent_name=f"Cyber-AutoAgent {config.op_id or operation_id}",
+        agent_type="operation_controller",
         init_context={
             "objective": config.objective,
             "target": config.target,
             "module": config.module,
+            "operation_mode": config.operation_mode,
             "provider": config.provider,
             "model": config.model_id,
             "region": config.region_name,
             "tools_available": tool_count,
             "memory": {
                 "mode": config.memory_mode,
-                "path": config.memory_path or None,
-                "has_existing": has_existing_memories
-                if "has_existing_memories" in locals()
-                else False,
-                "reused": (
-                    (has_existing_memories and config.memory_mode != "fresh")
-                    if "has_existing_memories" in locals()
-                    else False
-                ),
-                "backend": (
-                    "mem0_cloud"
-                    if config_manager.getenv("MEM0_API_KEY")
-                    else (
-                        "opensearch"
-                        if config_manager.getenv("OPENSEARCH_HOST")
-                        else "faiss"
-                    )
-                ),
+                "path": None if config_manager.getenv("QDRANT_URL") else os.path.join(server_config.output.base_dir, "qdrant"),
+                "has_existing": has_existing_memories,
+                "reused": has_existing_memories,
+                "backend": "qdrant_service" if config_manager.getenv("QDRANT_URL") else "qdrant_local",
                 **(
                     memory_overview
                     if memory_overview and isinstance(memory_overview, dict)
                     else {}
                 ),
             },
+            "budget": config.budget.to_ui_dict(),
             "observability": config_manager.getenv_bool("ENABLE_OBSERVABILITY", False),
             "ui_mode": config_manager.getenv("CYBER_UI_MODE", "cli").lower(),
         },
     )
+    set_memory_event_emitter(callback_handler.emit_ui_event)
+
+    sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "false") or "false").strip().lower()
+    if sdk_context_manager in {"", "0", "false", "none", "off", "disabled"}:
+        sdk_context_manager = None
+    elif sdk_context_manager not in {"auto", "agentic"}:
+        agent_logger.warning(
+            "Unsupported CYBER_SDK_CONTEXT_MANAGER=%r; using 'auto'",
+            sdk_context_manager,
+        )
+        sdk_context_manager = "auto"
 
     # Create hooks for SDK lifecycle events (tool invocations, etc.)
     # These work alongside the callback handler to capture all events
@@ -749,42 +833,53 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
     # Use the same emitter as the callback handler for consistency
     react_hooks = ReactHooks(
-        emitter=callback_handler.emitter, operation_id=operation_id, agent_config=config
-    )
-
-    tool_router_hook = ToolRouterHook(
-        shell,
-        max_result_chars=max_result_chars,
-        artifacts_dir=paths.get("artifacts"),
-        artifact_threshold=artifact_threshold,
+        emitter=callback_handler.emitter,
+        operation_id=operation_id,
+        agent_config=config,
+        emit_tool_lifecycle=False,
     )
 
     tool_call_repair_hook = AgentRepairHook()
 
+    artifact_reference_input_normalization_hook = ArtifactReferenceInputNormalizationHook()
+
+    tool_repeat_guard_hook = _create_tool_repeat_guard(config_manager, agent_logger)
+
     prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
-    hooks: List[HookProvider] = [tool_call_repair_hook, tool_router_hook, react_hooks, prompt_budget_hook]
-    swarm_hooks: List[HookProvider] = [tool_call_repair_hook, tool_router_hook, prompt_budget_hook]
 
-    if enable_prompt_optimization:
-        # Create prompt rebuild hook for intelligent prompt updates
-        from modules.handlers.prompt_rebuild_hook import PromptRebuildHook
-        prompt_rebuild_hook = PromptRebuildHook(
-            callback_handler=callback_handler,
-            has_memory_path=bool(config.memory_path),
-            memory_instance=memory_client,
-            config=config,
-            target=config.target,
-            objective=config.objective,
-            operation_id=operation_id,
-            max_steps=config.max_steps,
-            module=config.module,
-            tools_context=full_tools_context if full_tools_context else None,
+    tool_router_hook = ToolRouterHook(
+        max_result_chars=max_result_chars,
+        artifacts_dir=paths.get("artifacts"),
+        artifact_threshold=artifact_threshold,
+    ) if sdk_context_manager is None else None
+
+    # hooks to include in agents, order is important
+    hooks: list[HookProvider] = list(
+        filter(
+            bool,
+            [
+                tool_call_repair_hook,
+                artifact_reference_input_normalization_hook,
+                tool_repeat_guard_hook,
+                tool_router_hook,
+                react_hooks,
+                prompt_budget_hook,
+            ],
         )
-        hooks.append(prompt_rebuild_hook)
-
-    model = create_strands_model(config.provider, config.model_id, "primary")
-
-    agent_logger.debug("Creating autonomous agent")
+    )
+    subagent_hooks: list[HookProvider] = list(
+        filter(
+            bool,
+            [
+                tool_call_repair_hook,
+                artifact_reference_input_normalization_hook,
+                tool_repeat_guard_hook,
+                tool_router_hook,
+                react_hooks,
+                prompt_budget_hook,
+            ],
+        )
+    )
 
     # Update conversation window size and limits from SDK config
     try:
@@ -806,11 +901,10 @@ Prefer tools present in the following lists. If a capability is missing, follow 
 
     preserve_recent_messages=PRESERVE_LAST_DEFAULT
     preserve_first_messages=PRESERVE_FIRST_DEFAULT
-    if not config_manager.getenv("CYBER_CONVERSATION_PRESERVE_LAST"):
-        if prompt_token_limit <= 49_152:
-            preserve_recent_messages = 2
+    if not config_manager.getenv("CYBER_CONVERSATION_PRESERVE_LAST") and prompt_token_limit <= 49_152:
+        preserve_recent_messages = 2
 
-    # Create and register conversation manager for all agents (including swarm children)
+    # Create and register conversation manager for all agents.
     # Use environment variables for preservation to enable effective pruning
     # Keep preserve_last low (5) to allow pruning: first (1) + last (5) = 6 preserved out of 120 window
     conversation_manager = MappingConversationManager(
@@ -822,98 +916,106 @@ Prefer tools present in the following lists. If a capability is missing, follow 
             # computed previously
             max_tool_chars=TOOL_COMPRESS_THRESHOLD,
             truncate_at=TOOL_COMPRESS_TRUNCATE
-        ),
+        ) if sdk_context_manager is None else None,
     )
     register_conversation_manager(conversation_manager)
     agent_logger.info(
-        "Conversation manager created: window=%d, preserve_first=%d, preserve_last=%d",
+        "Conversation manager created: window=%d, preserve_first=%d, preserve_last=%d, sdk_context_manager=%s",
         window_size,
         PRESERVE_FIRST_DEFAULT,
         PRESERVE_LAST_DEFAULT,
+        sdk_context_manager or "disabled",
     )
 
     # Initialize concurrent tool executor for parallel execution
     tool_executor = ConcurrentToolExecutor()
 
-    trace_attributes_tool_names = [get_tool_name(tool) for tool in tools_list]
-
     # Register toolUseId hook for patching toolUseId, must be last
     tool_use_id_hook = ToolUseIdHook()
     hooks.append(tool_use_id_hook)
-    swarm_hooks.append(tool_use_id_hook)
+    subagent_hooks.append(tool_use_id_hook)
 
     agent_logger.info(
-        "HOOK REGISTRATION: will register %d hooks total (%d shared with swarm agents)",
-        len(hooks), len(swarm_hooks)
+        "HOOK REGISTRATION: will register %d hooks total (%d shared with sub-agents)",
+        len(hooks), len(subagent_hooks)
     )
 
-    agent_kwargs = {
-        "model": model,
-        "name": f"Cyber-AutoAgent {config.op_id or operation_id}",
-        "tools": tools_list,
-        "tool_executor": tool_executor,
-        "system_prompt": system_prompt_payload,
-        "callback_handler": callback_handler,
-        "hooks": hooks if hooks else None,  # Add hooks if available
-        # Use proactive sliding + summarization fallback
-        "conversation_manager": conversation_manager,
-        "load_tools_from_directory": True,
-        "trace_attributes": {
-            # Core identification - session_id is the key for Langfuse trace naming
-            "langfuse.session.id": operation_id,
-            "langfuse.user.id": f"cyber-agent-{config.target}",
-            # Human-readable name that Langfuse will pick up
-            "name": f"Security Assessment - {config.target} - {operation_id}",
-            # Tags for filtering and categorization
-            "langfuse.tags": [
-                "Cyber-AutoAgent",
-                config.provider.upper(),
-                operation_id,
-            ],
-            "langfuse.environment": config_manager.getenv(
-                "DEPLOYMENT_ENV", "production"
-            ),
-            "langfuse.agent.type": "main_orchestrator",
-            "langfuse.capabilities.swarm": True,
-            # Standard OTEL attributes
-            "session.id": operation_id,
-            "user.id": f"cyber-agent-{config.target}",
-            # Agent identification
-            "agent.name": "Cyber-AutoAgent",
-            "agent.version": __version__,
-            "gen_ai.agent.name": "Cyber-AutoAgent",
-            "gen_ai.system": "Cyber-AutoAgent",
-            # Operation metadata
-            "operation.id": operation_id,
-            "operation.type": "security_assessment",
-            "operation.start_time": datetime.now().isoformat(),
-            "operation.max_steps": config.max_steps,
-            # Target and objective
-            "target.host": config.target,
-            "objective.description": config.objective,
-            # Model configuration
-            "model.provider": config.provider,
-            "model.id": config.model_id,
-            "model.region": config.region_name
-            if config.provider in ["bedrock", "litellm"]
-            else "local",
-            "gen_ai.request.model": config.model_id,
-            # Tool configuration
-            "tools.available": len(trace_attributes_tool_names),
-            "tools.names": trace_attributes_tool_names,
-            "tools.parallel_limit": 8,
-            # Memory configuration
-            "memory.enabled": True,
-            "memory.path": config.memory_path if config.memory_path else "ephemeral",
-        },
+    trace_attributes = {
+        # Core identification - session_id is the key for Langfuse trace naming
+        "langfuse.session.id": operation_id,
+        "langfuse.user.id": f"cyber-agent-{config.target}",
+        # Human-readable name that Langfuse will pick up
+        "name": f"Security Assessment - {config.target} - {operation_id}",
+        # Tags for filtering and categorization
+        "langfuse.tags": [
+            "Cyber-AutoAgent",
+            config.provider.upper(),
+            operation_id,
+        ],
+        "langfuse.environment": config_manager.getenv(
+            "DEPLOYMENT_ENV", "production"
+        ),
+        "langfuse.agent.type": "operation_controller",
+        "langfuse.capabilities.swarm": True,
+        # Standard OTEL attributes
+        "session.id": operation_id,
+        "user.id": f"cyber-agent-{config.target}",
+        # Agent identification
+        "agent.name": "Cyber-AutoAgent",
+        "agent.version": __version__,
+        "gen_ai.agent.name": "Cyber-AutoAgent",
+        "gen_ai.system": "Cyber-AutoAgent",
+        # Operation metadata
+        "operation.id": operation_id,
+        "operation.type": "security_assessment",
+        "operation.start_time": datetime.now().isoformat(),
+        "operation.budget.max_duration_minutes": config.budget.max_duration_minutes,
+        "operation.budget.max_tokens": config.budget.max_tokens,
+        "operation.budget.max_cost": config.budget.max_cost,
+        # Target and objective
+        "target.host": config.target,
+        "objective.description": config.objective,
+        # Model configuration
+        "model.provider": config.provider,
+        "model.id": config.model_id,
+        "model.region": config.region_name
+        if config.provider in ["bedrock", "litellm"]
+        else "local",
+        "gen_ai.request.model": config.model_id,
+        # Memory configuration
+        "memory.enabled": True,
+        "memory.path": config_manager.getenv("QDRANT_URL") or os.path.join(server_config.output.base_dir, "qdrant"),
     }
+
+    def create_subagent_callback_handler(
+            name: str,
+            agent_type: str,
+            model_id: str | None = None,
+            provider_id: str | None = None,
+    ) -> AgentEventHandler:
+        return AgentEventHandler(
+            operation_id=operation_id,
+            provider_id=provider_id or config.provider,
+            model_id=model_id or server_config.swarm.llm.model_id,
+            specialist_model_id=server_config.swarm.llm.model_id,
+            emitter=callback_handler.emitter,
+            init_context={"ui_mode": config_manager.getenv("CYBER_UI_MODE", "cli").lower()},
+            coordinator=callback_handler.coordinator,
+            agent_name=name,
+            agent_type=agent_type,
+            parent_agent_run_id=callback_handler.agent_run_id,
+            emit_operation_init=False,
+            start_metrics_thread=False,
+        )
 
     # apply wrapper to provide agent_factory to any tool that has a parameter named such
     agent_factory_config = AgentFactoryConfig(
-        hooks = swarm_hooks,
+        hooks=subagent_hooks,
         callback_handler = callback_handler,
+        callback_handler_factory=create_subagent_callback_handler,
         conversation_manager = conversation_manager,
-        base_trace_attributes = agent_kwargs["trace_attributes"],
+        context_manager = sdk_context_manager,
+        base_trace_attributes = trace_attributes,
     )
     init_agent_factory(agent_factory_config)
 
@@ -925,27 +1027,198 @@ Prefer tools present in the following lists. If a capability is missing, follow 
     os.environ["STRANDS_NON_INTERACTIVE"] = "true"
     os.environ["STRANDS_HTTP_ALLOW_INSECURE_SSL"] = "true"
 
+    return AgentRuntimeResources(
+        config=config,
+        operation_id=operation_id,
+        server_config=server_config,
+        config_manager=config_manager,
+        callback_handler=callback_handler,
+        tools_list=tools_list,
+        core_tools_list=core_tools_list,
+        optional_tools_list=optional_tools_list,
+        tool_executor=tool_executor,
+        system_prompt_payload=system_prompt_payload,
+        system_prompt=system_prompt,
+        hooks=hooks,
+        conversation_manager=conversation_manager,
+        sdk_context_manager=sdk_context_manager,
+        trace_attributes=trace_attributes,
+        prompt_token_limit=prompt_token_limit,
+        termination_policy=module_termination_policy.strip(),
+    )
+
+
+def create_agent(
+    target: str,
+    objective: str,
+    config: AgentConfig | None = None,
+    runtime_resources: AgentRuntimeResources | None = None,
+    *,
+    system_prompt: Any | None = None,
+    tools: list[Any] | None = None,
+    name: str | None = None,
+    agent_type: str | None = None,
+    include_tool_catalog: bool = True,
+) -> Agent:
+    """Create autonomous agent from shared runtime resources."""
+    runtime = runtime_resources or create_agent_runtime_resources(target, objective, config)
+    config = runtime.config
+    resolved_system_prompt = system_prompt if system_prompt is not None else runtime.system_prompt_payload
+    if isinstance(resolved_system_prompt, str):
+        resolved_system_prompt = prompts.get_role_system_prompt(resolved_system_prompt, agent_type)
+
+    agent_logger = logging.getLogger("CyberAutoAgent")
+    agent_logger.debug("Creating autonomous agent")
+
+    model = create_strands_model(config.provider, config.model_id, agent_type or "task_executor")
+
+    trace_attributes = dict(runtime.trace_attributes)
+    if agent_type:
+        trace_attributes.update({
+            "langfuse.agent.type": agent_type,
+            "agent.role": agent_type,
+            "agent.name": name or "Cyber-AutoAgent",
+            "gen_ai.agent.name": name or "Cyber-AutoAgent",
+        })
+
+    if system_prompt:
+        trace_attributes.update({
+            "system_prompt": resolved_system_prompt,
+        })
+
+    callback_handler = runtime.callback_handler
+    if agent_type and isinstance(runtime.callback_handler, AgentEventHandler):
+        try:
+            specialist_model_id = runtime.server_config.swarm.llm.model_id
+        except Exception:
+            specialist_model_id = config.model_id
+        try:
+            ui_mode = runtime.config_manager.getenv("CYBER_UI_MODE", "cli").lower()
+        except Exception:
+            ui_mode = os.getenv("CYBER_UI_MODE", "cli").lower()
+        callback_handler = AgentEventHandler(
+            operation_id=runtime.operation_id,
+            provider_id=config.provider,
+            model_id=config.model_id,
+            specialist_model_id=specialist_model_id,
+            emitter=runtime.callback_handler.emitter,
+            init_context={"ui_mode": ui_mode},
+            coordinator=runtime.callback_handler.coordinator,
+            agent_name=name or f"Cyber-AutoAgent {agent_type}",
+            agent_type=agent_type,
+            parent_agent_run_id=runtime.callback_handler.agent_run_id,
+            emit_operation_init=False,
+            start_metrics_thread=False,
+        )
+    if getattr(callback_handler, "agent_run_id", None):
+        trace_attributes["cyber.agent.run_id"] = str(callback_handler.agent_run_id)
+
+    agent_hooks = list(runtime.hooks) if runtime.hooks else []
+    failure_recovery_hook = None
+    evaluator_artifact_read_limit_hook = None
+    if agent_type == "task_evaluator":
+        evaluator_artifact_read_limit_hook = EvaluatorArtifactReadLimitHook()
+        agent_hooks.append(evaluator_artifact_read_limit_hook)
+    if agent_type == "task_executor" and isinstance(callback_handler, AgentEventHandler):
+        max_policy_violations = runtime.config_manager.getenv_int(
+            "CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS",
+            2,
+        )
+        max_corrections = runtime.config_manager.getenv_int(
+            "CYBER_TOOL_RECOVERY_MAX_CORRECTIONS",
+            2,
+        )
+        if config.available_tools is None:
+            config.available_tools = []
+
+        def quarantine_shell_command(executable: str) -> list[str]:
+            alternatives = get_shell_command_alternatives(executable, config.available_tools)
+            remove_shell_command(config.available_tools, executable)
+            agent_logger.warning(
+                "Quarantined unavailable shell executable '%s'; alternatives=%s",
+                executable,
+                ",".join(alternatives),
+            )
+            return alternatives
+
+        failure_recovery_hook = TaskFailureRecoveryHook(
+            callback_handler.tool_outcome_journal,
+            max_policy_violations=max_policy_violations,
+            max_corrections=max_corrections,
+            quarantine_callback=quarantine_shell_command,
+            quarantined_executables=runtime.quarantined_shell_commands,
+            efficiency_callback=callback_handler.record_efficiency_event,
+        )
+        agent_hooks.append(failure_recovery_hook)
+    if agent_type == "task_executor":
+        agent_hooks.append(TerminalToolHook(agent_type))
+
+    tool_executor = runtime.tool_executor
+    if agent_type in _FAIL_FAST_TOOL_ROLES:
+        tool_executor = FailFastSequentialToolExecutor()
+
+    agent_kwargs = {
+        "model": model,
+        "name": name or f"Cyber-AutoAgent {config.op_id or runtime.operation_id}",
+        "tools": tools if tools is not None else build_role_tools(runtime),
+        "tool_executor": tool_executor,
+        "system_prompt": resolved_system_prompt,
+        "callback_handler": callback_handler,
+        "hooks": agent_hooks or None,
+        "load_tools_from_directory": tools is None,
+        "trace_attributes": trace_attributes,
+    }
+    if model_uses_server_side_state(model):
+        agent_logger.info(
+            "Skipping local conversation manager for stateful model '%s'; "
+            "conversation state is managed server-side.",
+            config.model_id,
+        )
+    else:
+        # Use proactive sliding + summarization fallback for stateless models.
+        agent_kwargs["conversation_manager"] = runtime.conversation_manager
+        if runtime.sdk_context_manager:
+            # Let Strands add its context offloader/plugin support while our
+            # project-specific conversation manager remains authoritative.
+            agent_kwargs["context_manager"] = runtime.sdk_context_manager
+
     # Create agent (telemetry is handled globally by Strands SDK)
-    agent = Agent(**agent_kwargs)
+    agent = create_agent_with_stateful_retry(agent_kwargs, config.model_id, Agent)
+    context_reduction_states = [
+        state
+        for tool in agent_kwargs["tools"]
+        if isinstance((state := getattr(tool, "_cyber_context_reduction_state", None)), dict)
+    ]
+    if context_reduction_states:
+        agent._cyber_context_reduction_states = context_reduction_states
     # Allow reasoning deltas only when the provider/model supports them
     try:
         caps = get_capabilities(config.provider, config.model_id or "")
-        setattr(agent, "_allow_reasoning_content", bool(caps.supports_reasoning))
+        agent._allow_reasoning_content = allows_reasoning_content_replay(config.provider, config.model_id or "", caps)
     except Exception:
-        setattr(agent, "_allow_reasoning_content", False)
-    if prompt_token_limit:
-        setattr(agent, "_prompt_token_limit", prompt_token_limit)
-    # Ensure legacy-compatible system prompt is directly accessible for tests
+        agent._allow_reasoning_content = False
+    if runtime.prompt_token_limit:
+        agent._prompt_token_limit = runtime.prompt_token_limit
     try:
-        setattr(agent, "system_prompt", system_prompt)
+        agent._cyber_agent_name = agent_kwargs["name"]
+        agent._cyber_agent_type = agent_type or getattr(callback_handler, "agent_type", "agent")
+        agent._cyber_callback_handler = callback_handler
+        if failure_recovery_hook is not None:
+            agent._cyber_failure_recovery_hook = failure_recovery_hook
+        if evaluator_artifact_read_limit_hook is not None:
+            agent._cyber_evaluator_artifact_read_limit_hook = evaluator_artifact_read_limit_hook
+        if getattr(callback_handler, "agent_run_id", None):
+            agent._cyber_agent_run_id = callback_handler.agent_run_id
+        if getattr(callback_handler, "parent_agent_run_id", None):
+            agent._cyber_parent_agent_run_id = callback_handler.parent_agent_run_id
     except Exception:
         pass
-    try:
-        setattr(agent, "swarm_hooks", swarm_hooks)
-    except Exception as e:
-        logger.error("Could not set swarm_hooks on agent, swarm agents may not behave as intended", exc_info=e)
+    # Ensure legacy-compatible system prompt is directly accessible for tests
+    with contextlib.suppress(Exception):
+        agent.system_prompt = runtime.system_prompt
 
-    agent.tool_registry.register_tool(tool_catalog_wrapper(agent, config.available_tools))
+    if include_tool_catalog and agent_kwargs["tools"]:
+        agent.tool_registry.register_tool(tool_catalog_wrapper(agent, config.available_tools))
 
     agent_logger.debug("Agent initialized successfully")
-    return agent, callback_handler
+    return agent

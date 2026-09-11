@@ -11,11 +11,9 @@ import Spinner from 'ink-spinner';
 import { HealthMonitor, HealthStatus } from '../services/HealthMonitor.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { themeManager } from '../themes/theme-manager.js';
-import { Header } from './Header.js';
 import { ContainerManager } from '../services/ContainerManager.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import * as path from 'path';
 import * as fs from 'fs';
 import { getEnvironmentConfig, getDockerComposePaths } from '../config/environment.js';
 import { createLogger } from '../utils/logger.js';
@@ -106,7 +104,7 @@ export const InitializationFlow: React.FC<InitializationFlowProps> = ({ onComple
   │ >_ CLI  │
   │  Python │
   └─────────┘`,
-      requirements: ['~100MB disk', '1GB RAM', 'Python 3.11+', 'Direct LLM API access']
+      requirements: ['~100MB disk', '1GB RAM', 'Python 3.12+', 'Direct LLM API access']
     },
     {
       id: 'single-container' as DeploymentMode,
@@ -219,6 +217,7 @@ export const InitializationFlow: React.FC<InitializationFlowProps> = ({ onComple
     }
   });
 
+  /* istanbul ignore next -- legacy initialization path retained for fallback; the active setup flow uses setup-progress-screen. */
   const checkInitialization = async () => {
     const monitor = HealthMonitor.getInstance();
     
@@ -414,7 +413,7 @@ export const InitializationFlow: React.FC<InitializationFlowProps> = ({ onComple
         const pythonCheck = await pythonService.checkPythonVersion();
         
         if (!pythonCheck.installed) {
-          throw new Error(pythonCheck.error || 'Python 3.11+ is required');
+          throw new Error(pythonCheck.error || 'Python 3.12+ is required');
         }
         
         addSetupLog(`Python ${pythonCheck.version} detected`, 'success');
@@ -468,9 +467,9 @@ export const InitializationFlow: React.FC<InitializationFlowProps> = ({ onComple
       
       // Provide more user-friendly error messages
       if (errorMessage.includes('Python not found')) {
-        errorMessage = 'Python 3.11+ is not installed. Please install Python from https://python.org';
-      } else if (errorMessage.includes('Python 3.11+ is required')) {
-        errorMessage = 'Python 3.11 or higher is required. Please upgrade your Python installation.';
+        errorMessage = 'Python 3.12+ is not installed. Please install Python from https://python.org';
+      } else if (errorMessage.includes('Python 3.12+ is required')) {
+        errorMessage = 'Python 3.12 or higher is required. Please upgrade your Python installation.';
       } else if (errorMessage.includes('No requirements.txt')) {
         errorMessage = 'Missing requirements.txt or pyproject.toml in project root.';
       } else if (errorMessage.includes('Docker compose file not found')) {
@@ -674,6 +673,7 @@ export const InitializationFlow: React.FC<InitializationFlowProps> = ({ onComple
     );
   }
 
+  /* istanbul ignore next -- legacy initialization status UI retained for fallback; no active flow reaches this branch. */
   // Original initialization flow UI
   return (
     <Box flexDirection="column" paddingX={2} paddingY={1}>

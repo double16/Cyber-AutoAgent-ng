@@ -1,4 +1,12 @@
 import React from 'react';
+import {EventEmitter} from 'events';
+
+const stdin = new EventEmitter();
+stdin.isTTY = true;
+stdin.isRaw = true;
+stdin.write = () => {};
+stdin.setRawMode = () => {};
+global.__inkStdin = stdin;
 
 const toNumber = (value) => (typeof value === 'number' ? value : Number(value));
 
@@ -105,12 +113,14 @@ export const useInput = (handler) => {
 };
 
 export const useStdin = () => ({
-  stdin: { write: () => {} },
-  isRawModeSupported: true
+  stdin,
+  setRawMode: () => {},
+  isRawModeSupported: true,
 });
 
 export const useStdout = () => ({
-  stdout: { write: () => {}, columns: 80, rows: 24 }
+  stdout: { write: () => {}, columns: 80, rows: 24 },
+  write: () => {}
 });
 
 export const useApp = () => ({

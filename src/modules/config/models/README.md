@@ -121,7 +121,7 @@ bedrock_model = create_bedrock_model(
 
 # Ollama
 ollama_model = create_ollama_model(
-    model_id="qwen3-coder:30b-a3b-q4_K_M"
+    model_id="qwen3.6:27b"
 )
 
 # LiteLLM (Azure)
@@ -174,6 +174,10 @@ CYBER_REASONING_DENY="model-name"    # Force disable reasoning
 ```
 
 **Note:** UI config editor sets `MAX_COMPLETION_TOKENS` automatically when you configure `maxCompletionTokens` in settings.
+
+LiteLLM reasoning-capable models may still generate reasoning and receive supported reasoning parameters. Because the
+Strands LiteLLM integration uses Chat Completions, prior `reasoningContent` blocks are removed before later turns rather
+than replayed to that API.
 
 ### 2. Models.dev (Authoritative Source)
 - 500+ models across 58+ providers

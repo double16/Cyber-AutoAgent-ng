@@ -4,8 +4,8 @@ from .batch_emitter import BatchingEmitter
 from .emitters import EventEmitter, StdoutEventEmitter, get_emitter
 
 __all__ = [
+    "BatchingEmitter",
     "EventEmitter",
     "StdoutEventEmitter",
     "get_emitter",
-    "BatchingEmitter",
 ]

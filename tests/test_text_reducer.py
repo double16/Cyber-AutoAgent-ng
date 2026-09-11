@@ -1,7 +1,12 @@
-from modules.utils.text_reducer import collapse_first_repeated_sequence, reduce_lines_lossy
-import pytest
 import random
 import string
+
+import pytest
+
+from modules.utils.text_reducer import (
+    collapse_first_repeated_sequence,
+    reduce_lines_lossy,
+)
 
 
 @pytest.mark.parametrize(
@@ -1176,7 +1181,7 @@ def test_reduce_lines_lossy_long_text_no_repeated_sequence():
             continue
 
         # Tentatively append and enforce "no repeated sequence" for short windows.
-        candidate = words + [w]
+        candidate = [*words, w]
         if len(candidate) >= 4:
             window = tuple(candidate[-4:])
             if window in seen_windows:

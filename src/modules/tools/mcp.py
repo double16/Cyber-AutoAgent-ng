@@ -2,23 +2,24 @@
 MCP tool integration.
 """
 import asyncio
+import atexit
+import contextlib
 import json
 import os
 import re
-import threading
-import atexit
 import signal
+import threading
+from collections.abc import Callable
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, cast
+from typing import Any, cast
 
-from mcp.client.session import ClientSession
 from mcp import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
-
+from mcp.client.streamable_http import streamablehttp_client
+from strands.tools.mcp.mcp_client import MCPClient
 from strands.types.exceptions import MCPClientInitializationError
 from strands.types.tools import AgentTool, ToolGenerator, ToolSpec, ToolUse
-from strands.tools.mcp.mcp_client import MCPClient
 
 from modules.config import AgentConfig
 from modules.config.system.logger import get_logger
@@ -32,7 +33,7 @@ MCP_MAX_RETRIES = max(1, int(os.getenv("CYBER_MCP_MAX_SESSION_RETRIES", "2")))
 MCP_RESTART_BACKOFF = max(0.1, float(os.getenv("CYBER_MCP_RESTART_BACKOFF", "2.0")))
 
 
-def _start_keepalive(client: MCPClient) -> Optional[tuple[threading.Event, threading.Thread]]:
+def _start_keepalive(client: MCPClient) -> tuple[threading.Event, threading.Thread] | None:
     if MCP_HEARTBEAT_INTERVAL <= 0:
         return None
 
@@ -53,7 +54,7 @@ def _start_keepalive(client: MCPClient) -> Optional[tuple[threading.Event, threa
     thread = threading.Thread(target=_loop, name="mcp-heartbeat", daemon=True)
     thread.start()
     handle = (stop_event, thread)
-    setattr(client, "_cyber_keepalive_handle", handle)
+    client._cyber_keepalive_handle = handle
     return handle
 
 
@@ -65,19 +66,19 @@ def _stop_keepalive(client: MCPClient) -> None:
     stop_event.set()
     if thread.is_alive() and threading.current_thread() != thread:
         thread.join(timeout=5)
-    setattr(client, "_cyber_keepalive_handle", None)
+    client._cyber_keepalive_handle = None
 
 
 def _send_ping(client: MCPClient) -> None:
-    if not client._is_session_active():  # noqa: SLF001 - best-effort keepalive
+    if not client._is_session_active():
         raise MCPClientInitializationError("MCP session inactive during keepalive")
 
     async def _ping() -> None:
-        if client._background_thread_session is None:  # noqa: SLF001
+        if client._background_thread_session is None:
             raise MCPClientInitializationError("No MCP session available")
-        await cast(ClientSession, client._background_thread_session).send_ping()  # noqa: SLF001
+        await cast(ClientSession, client._background_thread_session).send_ping()
 
-    future = client._invoke_on_background_thread(_ping())  # noqa: SLF001
+    future = client._invoke_on_background_thread(_ping())
     future.result(timeout=MCP_HEARTBEAT_TIMEOUT)
 
 
@@ -150,7 +151,7 @@ class ResilientMCPToolAdapter(AgentTool):
         Note: Timeout is handled by inner SDK tool (MCPAgentTool.timeout).
         This method adds retry logic and session restart capability.
         """
-        last_error: Optional[Exception] = None
+        last_error: Exception | None = None
         for attempt in range(1, self._max_retries + 1):
             try:
                 # SDK's MCPAgentTool handles timeout via read_timeout_seconds
@@ -178,15 +179,13 @@ class ResilientMCPToolAdapter(AgentTool):
     def _is_recoverable(exc: Exception) -> bool:
         if isinstance(exc, MCPClientInitializationError):
             return True
-        if isinstance(exc, RuntimeError) and "MCP server was closed" in str(exc):
-            return True
-        return False
+        return bool(isinstance(exc, RuntimeError) and "MCP server was closed" in str(exc))
 
 
 _VAR_PATTERN = re.compile(r"\$\{([^}]+)}")
 
 
-def resolve_env_vars_in_dict(input_dict: Dict[str, str], env: Dict[str, str]) -> Dict[str, str]:
+def resolve_env_vars_in_dict(input_dict: dict[str, str], env: dict[str, str]) -> dict[str, str]:
     """
     Replace ${VAR} references in values with env['VAR'] where available.
     Unrecognized variables are left as-is.
@@ -194,7 +193,7 @@ def resolve_env_vars_in_dict(input_dict: Dict[str, str], env: Dict[str, str]) ->
     if input_dict is None:
         return {}
 
-    resolved: Dict[str, str] = {}
+    resolved: dict[str, str] = {}
 
     for key, value in input_dict.items():
         def _sub(match: re.Match) -> str:
@@ -206,7 +205,7 @@ def resolve_env_vars_in_dict(input_dict: Dict[str, str], env: Dict[str, str]) ->
     return resolved
 
 
-def resolve_env_vars_in_list(input_array: List[str], env: Dict[str, str]) -> List[str]:
+def resolve_env_vars_in_list(input_array: list[str], env: dict[str, str]) -> list[str]:
     """
     Replace ${VAR} references in values with env['VAR'] where available.
     Unrecognized variables are left as-is.
@@ -214,7 +213,7 @@ def resolve_env_vars_in_list(input_array: List[str], env: Dict[str, str]) -> Lis
     if input_array is None:
         return []
 
-    resolved: List[str] = []
+    resolved: list[str] = []
 
     for value in input_array:
         def _sub(match: re.Match) -> str:
@@ -255,7 +254,7 @@ def shorten_description(text: str, max_len: int) -> str:
     return text[:max_len].rstrip()
 
 
-def discover_mcp_tools(config: AgentConfig) -> List[AgentTool]:
+def discover_mcp_tools(config: AgentConfig) -> list[AgentTool]:
     """Discover and register MCP tools from configured connections."""
     tool_discovery_event = {
         "type": "tool_discovery_start",
@@ -275,25 +274,28 @@ def discover_mcp_tools(config: AgentConfig) -> List[AgentTool]:
                     case "stdio":
                         if not mcp_conn.command:
                             raise ValueError(f"{mcp_conn.transport} requires command")
-                        command_list: List[str] = resolve_env_vars_in_list(mcp_conn.command, environ)
-                        transport = lambda: stdio_client(StdioServerParameters(
-                            command=command_list[0], args=command_list[1:],
-                            env=environ,
-                        ))
+                        command_list: list[str] = resolve_env_vars_in_list(mcp_conn.command, environ)
+                        def transport():
+                            return stdio_client(StdioServerParameters(
+                                                    command=command_list[0], args=command_list[1:],
+                                                    env=environ,
+                                                ))
                         tool_path = mcp_conn.command
                     case "streamable-http":
-                        transport = lambda: streamablehttp_client(
-                            url=mcp_conn.server_url,
-                            headers=headers,
-                            timeout=mcp_conn.timeoutSeconds if mcp_conn.timeoutSeconds else 30,
-                        )
+                        def transport():
+                            return streamablehttp_client(
+                                                    url=mcp_conn.server_url,
+                                                    headers=headers,
+                                                    timeout=mcp_conn.timeoutSeconds if mcp_conn.timeoutSeconds else 30,
+                                                )
                         tool_path = mcp_conn.server_url
                     case "sse":
-                        transport = lambda: sse_client(
-                            url=mcp_conn.server_url,
-                            headers=headers,
-                            timeout=mcp_conn.timeoutSeconds if mcp_conn.timeoutSeconds else 30,
-                        )
+                        def transport():
+                            return sse_client(
+                                                    url=mcp_conn.server_url,
+                                                    headers=headers,
+                                                    timeout=mcp_conn.timeoutSeconds if mcp_conn.timeoutSeconds else 30,
+                                                )
                         tool_path = mcp_conn.server_url
                     case _:
                         raise ValueError(f"Unsupported MCP transport {mcp_conn.transport}")
@@ -313,10 +315,8 @@ def discover_mcp_tools(config: AgentConfig) -> List[AgentTool]:
                         tool_name_base = tool.tool_name[prefix_idx:]
                         if '*' in mcp_conn.allowed_tools or tool_name_base in mcp_conn.allowed_tools:
                             logger.debug(f"Allowed tool: {tool.tool_name}")
-                            try:
+                            with contextlib.suppress(ValueError):
                                 missing_tools.remove(tool_name_base)
-                            except ValueError:
-                                pass
 
                             tool = ResilientMCPToolAdapter(tool, client)
                             mcp_tools.append(tool)
@@ -366,13 +366,13 @@ def discover_mcp_tools(config: AgentConfig) -> List[AgentTool]:
                     print(f"__CYBER_EVENT__{json.dumps(tool_event)}__CYBER_EVENT_END__")
 
             except Exception as e:
-                logger.error(f"Communicating with MCP: {repr(mcp_conn)}", exc_info=e)
-                raise e
+                logger.error(f"Communicating with MCP: {mcp_conn!r}", exc_info=e)
+                raise
 
     env_ready_event = {
         "type": "environment_ready",
         "timestamp": datetime.now().isoformat(),
-        "available_tools": list(map(lambda t: t.tool_name, mcp_tools)),
+        "available_tools": [t.tool_name for t in mcp_tools],
         "tool_count": len(mcp_tools),
         "message": f"Environment ready with {len(mcp_tools)} MCP tools",
     }

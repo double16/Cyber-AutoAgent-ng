@@ -52,14 +52,14 @@ describe('Event formatting minimal tests (no Ink render)', () => {
     expect(e.content).not.toContain('[object Object]');
   });
 
-  it('does not append (Step X/Y) in termination_reason messages (raw)', () => {
+  it('does not append step counters in termination_reason messages (raw)', () => {
     const event = {
       type: 'termination_reason' as const,
-      reason: 'step_limit',
-      message: 'Completed maximum allowed steps (10/10). Operation will now generate final report.'
+      reason: 'budget_limit',
+      message: 'Budget limit reached. Operation will now generate final report.'
     };
     // We assert the message remains unmodified here (UI adornment is tested in integration).
-    expect(event.message).toContain('Completed maximum allowed steps (10/10)');
+    expect(event.message).toContain('Budget limit reached');
     expect(event.message).not.toMatch(/\(Step\s+\d+\/\d+\)/);
   });
 
@@ -82,4 +82,3 @@ describe('Event formatting minimal tests (no Ink render)', () => {
 });
 // Note: grouping logic is covered via useEventStream hook; integration tests validate grouped rendering.
 // Removed computeDisplayGroups unit test to avoid coupling to internal non-exported helpers.
-

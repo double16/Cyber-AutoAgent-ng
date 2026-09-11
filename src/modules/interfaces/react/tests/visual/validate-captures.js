@@ -108,9 +108,9 @@ class CaptureValidator {
     const toolDisplayIssues = this.validateToolDisplayFormat(terminalContent);
     issues.push(...toolDisplayIssues);
     
-    // 7. Validate step header format
-    const stepHeaderIssues = this.validateStepHeaderFormat(terminalContent);
-    issues.push(...stepHeaderIssues);
+    // 7. Validate progress update format
+    const progressUpdateIssues = this.validateProgressUpdateFormat(terminalContent);
+    issues.push(...progressUpdateIssues);
     
     // 8. Validate output display format
     const outputDisplayIssues = this.validateOutputDisplayFormat(terminalContent);
@@ -227,34 +227,34 @@ class CaptureValidator {
   }
 
   /**
-   * Validate step header format
-   * Required format: [STEP X/Y] • [AGENT_INFO] ─────────────────
+   * Validate progress update format
+   * Required format: [BUDGET X%] • [AGENT_INFO] ─────────────────
    */
-  validateStepHeaderFormat(content) {
+  validateProgressUpdateFormat(content) {
     const issues = [];
     
     const stepLines = content.split('\n').filter(line => 
-      line.includes('STEP') && (line.includes('/') || line.includes('FINAL'))
+      line.includes('BUDGET') && (line.includes('/') || line.includes('FINAL'))
     );
     
     stepLines.forEach(line => {
       const trimmed = line.trim();
       
-      // Check for proper step format
-      if (!trimmed.match(/\[(?:STEP \d+\/\d+|FINAL STEP \d+\/\d+|FINAL REPORT)\]/)) {
+      // Check for proper progress update format
+      if (!trimmed.match(/\[(?:BUDGET \d+%|FINAL REPORT)\]/)) {
         issues.push({
-          type: 'STEP_HEADER_FORMAT',
+          type: 'PROGRESS_UPDATE_FORMAT',
           severity: 'HIGH',
-          description: `Step header doesn't match required format: "${trimmed}"`
+          description: `Progress update doesn't match required format: "${trimmed}"`
         });
       }
       
       // Check for divider line presence
       if (!trimmed.includes('─')) {
         issues.push({
-          type: 'STEP_DIVIDER_MISSING',
+          type: 'PROGRESS_DIVIDER_MISSING',
           severity: 'MEDIUM',
-          description: `Step header missing divider line: "${trimmed}"`
+          description: `Progress update missing divider line: "${trimmed}"`
         });
       }
     });

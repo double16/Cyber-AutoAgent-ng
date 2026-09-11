@@ -1,0 +1,311 @@
+import json
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from modules.evaluation import evaluation as eval_mod
+from modules.evaluation import manager as mod
+from modules.prompts import factory as prompts
+
+
+class RecordingEmitter:
+    def emit(self, event):
+        pass
+
+
+def test_register_filter_and_summary():
+    records = [{"finding_uid": "verified", "resolution": "verified"}]
+    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter(), finding_records=records)
+
+    manager.register_trace("t1", mod.TraceType.MAIN_AGENT, "s1", "Main", {"x": 1})
+    manager.register_trace("t2", mod.TraceType.REPORT_GENERATION, "s2", "Report")
+    manager.traces["t1"].evaluated = True
+    manager.traces["t1"].evaluation_scores = {"score": 1.0}
+
+    assert manager.get_trace_ids_by_type(mod.TraceType.MAIN_AGENT) == ["t1"]
+    assert [trace.trace_id for trace in manager.get_unevaluated_traces()] == ["t2"]
+
+    summary = manager.get_summary()
+    assert summary["operation_id"] == "OP_TEST"
+    assert summary["total_traces"] == 2
+    assert summary["evaluated_traces"] == 1
+    assert summary["evaluation_complete"] is False
+    assert summary["by_type"]["main_agent"] == {"total": 1, "evaluated": 1}
+    assert summary["traces"][0]["score_count"] == 1
+
+
+def test_build_goal_contract_facts_scores_current_evidence_backed_units():
+    outcome_contract = SimpleNamespace(
+        mode="outcome",
+        basis=SimpleNamespace(item_ids=()),
+        criteria=[SimpleNamespace(id="test-auth"), SimpleNamespace(id="test-upload")],
+    )
+    coverage_contract = SimpleNamespace(
+        mode="coverage",
+        basis=SimpleNamespace(item_ids=("route-a", "route-b", "route-c")),
+        criteria=[SimpleNamespace(id="coverage")],
+    )
+    tasks = [
+        SimpleNamespace(task_uid="done", status="done", acceptance=outcome_contract),
+        SimpleNamespace(task_uid="partial", status="partial_failure", acceptance=coverage_contract),
+        SimpleNamespace(task_uid="inaccessible", status="done", acceptance=outcome_contract),
+        SimpleNamespace(task_uid="archived", status="replanned", acceptance=outcome_contract),
+    ]
+    results = {
+        "done": [
+            SimpleNamespace(criterion_id="test-auth", status="satisfied", coverage=()),
+            SimpleNamespace(criterion_id="test-upload", status="assessed_negative", coverage=()),
+        ],
+        "partial": [
+            SimpleNamespace(
+                criterion_id="coverage",
+                status="satisfied",
+                coverage=(
+                    SimpleNamespace(item_id="route-a", status="satisfied"),
+                    SimpleNamespace(item_id="route-b", status="excluded"),
+                ),
+            )
+        ],
+        "inaccessible": [
+            SimpleNamespace(criterion_id="test-auth", status="inaccessible", coverage=()),
+            SimpleNamespace(criterion_id="test-upload", status="excluded", coverage=()),
+        ],
+    }
+
+    operation_facts = mod.build_goal_contract_facts(
+        SimpleNamespace(assessment_complete=False), tasks, results
+    )
+    facts = operation_facts["goal_contract_attainment"]
+
+    assert facts["achieved_units"] == 2
+    assert facts["applicable_units"] == 5
+    assert facts["excluded_units"] == 2
+    assert facts["eligible_task_count"] == 3
+    assert facts["unachieved_reasons"] == {"inaccessible": 1, "task_status:partial_failure": 2}
+    assert facts["assessment_complete"] is False
+    assert operation_facts["assessment_complete"] is False
+
+
+def test_build_goal_contract_facts_requires_done_task_and_acceptance_result():
+    contract = SimpleNamespace(
+        mode="outcome",
+        basis=SimpleNamespace(item_ids=()),
+        criteria=[SimpleNamespace(id="reachable"), SimpleNamespace(id="protected")],
+    )
+    tasks = [
+        SimpleNamespace(task_uid="incomplete", status="active", acceptance=contract),
+        SimpleNamespace(task_uid="missing", status="done", acceptance=contract),
+    ]
+    facts = mod.build_goal_contract_facts(
+        SimpleNamespace(assessment_complete=False),
+        tasks,
+        {
+            "incomplete": [
+                SimpleNamespace(criterion_id="reachable", status="satisfied", coverage=()),
+                SimpleNamespace(criterion_id="protected", status="inaccessible", coverage=()),
+            ]
+        },
+    )["goal_contract_attainment"]
+
+    assert facts["achieved_units"] == 0
+    assert facts["applicable_units"] == 4
+    assert facts["unachieved_reasons"] == {
+        "missing_acceptance_result": 2,
+        "task_status:active": 2,
+    }
+
+
+def test_public_score_averages_exclude_diagnostics_and_keep_scopes_separate():
+    averages = mod.public_score_averages(
+        {
+            "operation/evidence_quality": 0.6,
+            "operation/penetration_test_goal_accuracy": 0.8,
+            "operation/diagnostic/ragas/faithfulness": 0.0,
+            "report/evidence_quality": 0.4,
+            "report/diagnostic/ragas/topic_adherence": 1.0,
+        }
+    )
+
+    assert averages == {
+        "operation_average_score": pytest.approx(0.7),
+        "report_average_score": pytest.approx(0.4),
+    }
+
+
+def test_public_score_averages_return_none_without_public_scope_scores():
+    assert mod.public_score_averages({"operation/diagnostic/ragas/faithfulness": 0.5}) == {
+        "operation_average_score": None,
+        "report_average_score": None,
+    }
+
+
+async def _fake_scores(trace_id, _max_retries):
+    if trace_id in {"s1", "OP_TEST"}:
+        return {"plain": 0.5, "tuple": (0.75, {"reason": "ok"}), "bad": "skip"}
+    return {}
+
+
+@pytest.mark.asyncio
+async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeypatch):
+    class FakeEvaluator:
+        def __init__(
+            self,
+            emitter,
+            report_path=None,
+            finding_records=None,
+            operation_facts=None,
+            usage_callback=None,
+            progress_callback=None,
+        ):
+            self.emitter = emitter
+            self.report_path = report_path
+            self.finding_records = finding_records
+            self.operation_facts = operation_facts
+            self.usage_callback = usage_callback
+            self.progress_callback = progress_callback
+
+        async def evaluate_trace(self, trace_id, _max_retries):
+            return await _fake_scores(trace_id, _max_retries)
+
+    monkeypatch.setattr(mod, "CyberAgentEvaluator", FakeEvaluator)
+    records = [{"finding_uid": "verified", "resolution": "verified"}]
+    manager = mod.EvaluationManager(
+        "OP_TEST",
+        emitter=RecordingEmitter(),
+        finding_records=records,
+        operation_facts={"assessment_complete": True},
+    )
+    manager.register_trace("t1", mod.TraceType.MAIN_AGENT, "s1", "Main")
+    manager.register_trace("t2", mod.TraceType.SWARM_AGENT, "s2", "Swarm")
+
+    results = await manager.evaluate_all_traces()
+
+    assert results == {"OP_TEST": {"plain": 0.5, "tuple": 0.75}}
+    assert manager.traces["t1"].evaluated is True
+    assert manager.traces["t1"].evaluation_scores == {"plain": 0.5, "tuple": 0.75}
+    assert manager.traces["t2"].evaluated is True
+    assert manager.evaluator.finding_records == records
+    assert manager.evaluator.operation_facts == {"assessment_complete": True}
+
+
+def test_wait_for_completion_without_thread_returns_true():
+    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter())
+
+    assert manager.wait_for_completion(timeout=0) is True
+
+
+def test_trigger_async_evaluation_runs_once(monkeypatch):
+    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter())
+    calls = []
+
+    async def fake_evaluate_all_traces():
+        calls.append("called")
+        return {}
+
+    manager.evaluate_all_traces = fake_evaluate_all_traces
+    manager.trigger_async_evaluation()
+
+    assert manager.wait_for_completion(timeout=2) is True
+    assert calls == ["called"]
+
+
+def test_trigger_async_evaluation_skips_when_thread_alive(monkeypatch):
+    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter())
+    manager._evaluation_thread = type("Thread", (), {"is_alive": lambda self: True})()
+
+    manager.trigger_async_evaluation()
+
+    assert manager._evaluation_complete.is_set() is False
+
+
+
+class FakeResponse:
+    def __init__(self, status=200, body=None):
+        self.status = status
+        self.body = body if body is not None else {"prompt": "remote prompt"}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def read(self):
+        return json.dumps(self.body).encode("utf-8")
+
+
+def test_langfuse_prompt_helpers_cache_seed_and_remote(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
+    monkeypatch.setenv("ENABLE_LANGFUSE_PROMPTS", "true")
+    monkeypatch.setenv("LANGFUSE_PROMPT_LABEL", "test")
+    monkeypatch.setattr(prompts, "_lf_is_docker", lambda: False)
+    prompts._LF_CACHE.clear()
+    monkeypatch.setattr(prompts, "_LF_SEEDED", False)
+
+    calls = []
+
+    def fake_urlopen(req, data=None, timeout=0):
+        calls.append((req.full_url, data, timeout))
+        if data:
+            return FakeResponse(body={"id": "created"})
+        return FakeResponse(body={"prompt": [{"content": "chat one"}, {"content": "chat two"}]})
+
+    monkeypatch.setattr(prompts._urlreq, "urlopen", fake_urlopen)
+
+    remote = prompts._lf_get_prompt(prompts.LF_SYSTEM_PROMPT_NAME, "test")
+    assert remote["prompt"][0]["content"] == "chat one"
+    assert prompts._lf_get_prompt(prompts.LF_SYSTEM_PROMPT_NAME, "test") is remote
+    prompts._LF_CACHE[prompts._lf_ck(prompts.LF_SYSTEM_PROMPT_NAME, "test")]["ts"] = 0
+    assert prompts._lf_cache_get(prompts.LF_SYSTEM_PROMPT_NAME, "test") is None
+
+    created = prompts._lf_create_prompt_version(name="n", prompt_text="p", label="test")
+    assert created["id"] == "created"
+    assert prompts._lf_resolve_template_text("system_prompt.md") == "chat one\nchat two"
+    assert prompts._lf_resolve_template_text("missing.md") == ""
+
+    monkeypatch.setattr(prompts, "_lf_get_prompt", Mock(return_value=None))
+    monkeypatch.setattr(prompts, "_lf_read_local_template", lambda _name: "local template")
+    create = Mock(return_value={"id": "seed"})
+    monkeypatch.setattr(prompts, "_lf_create_prompt_version", create)
+    prompts._lf_ensure_seeded()
+    assert create.called
+    assert prompts._LF_SEEDED is True
+
+
+def test_evaluator_setup_models_all_providers(monkeypatch):
+    class FakeWrapper:
+        def __init__(self, inner):
+            self.inner = inner
+
+    class FakeEvaluator(eval_mod.CyberAgentEvaluator):
+        def __init__(self):
+            self._emitter = SimpleNamespace(emit=Mock())
+            self._usage_callback = None
+
+    manager = SimpleNamespace(
+        provider="ollama",
+        get_provider=lambda: manager.provider,
+        get_server_config=lambda _provider: SimpleNamespace(
+            evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model")),
+            embedding=SimpleNamespace(model_id="embed-model"),
+        ),
+        getenv=lambda name, default=None: {"OLLAMA_HOST": "http://ollama", "CYBER_AGENT_EMBEDDING_MODEL": "bedrock/embed"}.get(name, default),
+        get_default_region=lambda: "us-east-1",
+    )
+    monkeypatch.setattr(eval_mod, "get_config_manager", lambda: manager)
+    monkeypatch.setattr(eval_mod, "LangchainLLMWrapper", FakeWrapper)
+    monkeypatch.setattr(eval_mod, "LangchainEmbeddingsWrapper", FakeWrapper)
+    for attr in ["ChatOllama", "OllamaEmbeddings", "ChatLiteLLM", "BedrockEmbeddings", "ChatGoogleGenerativeAI", "GoogleGenerativeAIEmbeddings", "ChatBedrock"]:
+        monkeypatch.setattr(eval_mod, attr, lambda **kwargs: SimpleNamespace(kwargs=kwargs))
+
+    evaluator = FakeEvaluator()
+    for provider in ["ollama", "litellm", "gemini", "bedrock"]:
+        manager.provider = provider
+        evaluator.setup_models()
+        assert evaluator.llm.inner.kwargs
+        assert evaluator.embeddings.inner.kwargs
+
+    manager.provider = "bad"
+    with pytest.raises(ValueError):
+        evaluator.setup_models()

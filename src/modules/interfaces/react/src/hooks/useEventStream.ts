@@ -11,8 +11,7 @@ import { EventStore } from '../utils/EventStore.js';
 interface EventStreamState {
   events: DisplayStreamEvent[];
   isThinking: boolean;
-  currentStep: number;
-  maxSteps: number;
+  progressPercentage: number;
   reasoningBuffer: string[];
   lastToolName: string | null;
 }
@@ -25,7 +24,7 @@ interface EventStreamActions {
 }
 
 export const useEventStream = (
-  initialMaxSteps: number = 100,
+  _initialMaxSteps: number = 100,
   maxEvents: number = 5000
 ): [EventStreamState, EventStreamActions] => {
   // Use EventStore for efficient event management
@@ -35,8 +34,7 @@ export const useEventStream = (
   const [state, setState] = React.useState<EventStreamState>({
     events: [],
     isThinking: false,
-    currentStep: 0,
-    maxSteps: initialMaxSteps,
+    progressPercentage: 0,
     reasoningBuffer: [],
     lastToolName: null,
   });
@@ -63,7 +61,7 @@ export const useEventStream = (
       setState(prev => ({
         ...prev,
         events: [],
-        currentStep: 0,
+        progressPercentage: 0,
         reasoningBuffer: [],
         lastToolName: null,
       }));
@@ -74,12 +72,9 @@ export const useEventStream = (
         const newState = { ...prev };
 
         switch (event.type) {
-          case EVENT_TYPES.STEP_HEADER:
-            if ('step' in event && typeof event.step === 'number') {
-              newState.currentStep = event.step;
-            }
-            if ('maxSteps' in event && typeof event.maxSteps === 'number') {
-              newState.maxSteps = event.maxSteps;
+          case EVENT_TYPES.PROGRESS_UPDATE:
+            if ('progressPercent' in event && typeof event.progressPercent === 'number') {
+              newState.progressPercentage = event.progressPercent;
             }
             break;
 
@@ -188,81 +183,4 @@ export const useEventGroups = (events: DisplayStreamEvent[]) => {
 
     return groups;
   }, [events]);
-};
-
-/**
- * Hook for tracking swarm operations
- */
-export interface SwarmOperation {
-  id: string;
-  agents: string[];
-  currentAgent: string | null;
-  handoffCount: number;
-  startTime: number;
-  endTime?: number;
-  status: 'running' | 'completed' | 'failed';
-}
-
-export const useSwarmTracking = () => {
-  const [swarmOperations, setSwarmOperations] = React.useState<Map<string, SwarmOperation>>(
-    new Map()
-  );
-  const [activeSwarmId, setActiveSwarmId] = React.useState<string | null>(null);
-
-  const startSwarm = React.useCallback((id: string, agents: string[]) => {
-    const operation: SwarmOperation = {
-      id,
-      agents,
-      currentAgent: agents[0] || null,
-      handoffCount: 0,
-      startTime: Date.now(),
-      status: 'running',
-    };
-
-    setSwarmOperations(prev => new Map(prev).set(id, operation));
-    setActiveSwarmId(id);
-  }, []);
-
-  const handoffAgent = React.useCallback((fromAgent: string, toAgent: string) => {
-    if (!activeSwarmId) return;
-
-    setSwarmOperations(prev => {
-      const newMap = new Map(prev);
-      const operation = newMap.get(activeSwarmId);
-      if (operation) {
-        operation.currentAgent = toAgent;
-        operation.handoffCount++;
-      }
-      return newMap;
-    });
-  }, [activeSwarmId]);
-
-  const completeSwarm = React.useCallback((id: string, status: 'completed' | 'failed' = 'completed') => {
-    setSwarmOperations(prev => {
-      const newMap = new Map(prev);
-      const operation = newMap.get(id);
-      if (operation) {
-        operation.status = status;
-        operation.endTime = Date.now();
-      }
-      return newMap;
-    });
-    
-    if (activeSwarmId === id) {
-      setActiveSwarmId(null);
-    }
-  }, [activeSwarmId]);
-
-  const getActiveSwarm = React.useCallback(() => {
-    return activeSwarmId ? swarmOperations.get(activeSwarmId) : null;
-  }, [activeSwarmId, swarmOperations]);
-
-  return {
-    swarmOperations,
-    activeSwarmId,
-    startSwarm,
-    handoffAgent,
-    completeSwarm,
-    getActiveSwarm,
-  };
 };

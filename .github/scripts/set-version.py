@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import pathlib
 import re
 import sys
-import os
 
 UNDERSCORE_VERSION_PATTERN = re.compile(r'^(__version__\s*=\s*)"[^"]*"', re.MULTILINE)
 DOCKER_IMAGE_VERSION_PATTERN = re.compile(r'^(\s*image:\s+cyber-autoagent:)[0-9.]+$', re.MULTILINE)
@@ -227,12 +227,12 @@ def update_tsx_header_version(path: pathlib.Path, version: str) -> bool:
         stripped = line.strip()
 
         # Enter <Header section
-        if stripped.startswith("<Header") or stripped.startswith("export const Header:"):
+        if stripped.startswith(("<Header", "export const Header:")):
             in_header = True
             continue
 
         # Leaving <Header section when another section starts
-        if in_header and (stripped.endswith("/>") or stripped.endswith("})")):
+        if in_header and (stripped.endswith(("/>", "})"))):
             in_header = False
             continue
 
@@ -266,7 +266,7 @@ def update_package_json_version(package_file: pathlib.Path, version: str):
         package = json.load(f)
     package["version"] = version
     package.get("packages", {}).get("", {})["version"] = version
-    with open(package_file, "wt") as f:
+    with open(package_file, 'w') as f:
         json.dump(package, f, indent=2)
 
 
@@ -285,7 +285,7 @@ def main() -> int:
 
     update_uv_lock_version(pathlib.Path(root_path, "uv.lock"), args.version)
 
-    for root, dirs, files in os.walk(root_path):
+    for root, _dirs, files in os.walk(root_path):
         for file in filter(lambda f: f.endswith(".tsx"), files):
             file_path = pathlib.Path(root, file)
             update_tsx_header_version(file_path, args.version)

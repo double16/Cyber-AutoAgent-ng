@@ -27,7 +27,7 @@ describe('DirectDockerService pricing env override', () => {
     };
 
     const cfg: any = {
-      iterations: 1,
+      budgetMaxDuration: 60,
       modelProvider: 'openai',
       modelId: 'gpt-4o',
       outputDir: './outputs-test',

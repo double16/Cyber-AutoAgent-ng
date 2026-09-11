@@ -1,13 +1,13 @@
+import contextlib
 import sys
 import types
 from dataclasses import dataclass
-import pytest
 
-from modules.agents import factory
+import pytest
 import strands
 
+from modules.agents import factory
 from modules.agents.factory import AgentFactoryConfig
-
 
 # -------------------------
 # Test helpers / fakes
@@ -95,7 +95,7 @@ def install_fake_toolregistry(monkeypatch):
 
     # Ensure parent module `strands.tools` exists in sys.modules
     try:
-        import strands.tools  # type: ignore
+        importlib.import_module("strands.tools")
     except Exception:
         # If strands.tools isn't importable for some reason, create a placeholder.
         tools_mod = types.ModuleType("strands.tools")
@@ -145,10 +145,8 @@ def _isolate_toolregistry_register_tool_patch(monkeypatch):
     yield
 
     # Best-effort reset in case a test mutated the global directly.
-    try:
+    with contextlib.suppress(Exception):
         factory._TOOLREGISTRY_REGISTER_TOOL_PATCHED = False
-    except Exception:
-        pass
 
 
 # -------------------------
@@ -166,8 +164,6 @@ def test_agent_factory_sets_load_tools_from_directory_default(monkeypatch):
     monkeypatch.setattr(factory, "get_shared_conversation_manager", lambda: object())
     monkeypatch.setattr(factory, "get_capabilities", lambda provider, model_id: FakeCaps(supports_reasoning=False))
     monkeypatch.setattr(factory, "_resolve_prompt_token_limit", lambda provider, model_id: 123)
-    monkeypatch.setattr(factory, "get_tool_name", lambda t: "tool-x")
-
     cfg = factory.AgentFactoryConfig(hooks=[DummyHook()], base_trace_attributes={"k": "v"})
     make_agent = factory.init_agent_factory(cfg)
 
@@ -271,7 +267,23 @@ def test_agent_factory_allow_reasoning_content_true(monkeypatch):
     make_agent = factory.init_agent_factory(cfg)
 
     agent = make_agent("sub")
-    assert getattr(agent, "_allow_reasoning_content") is True
+    assert agent._allow_reasoning_content is True
+
+
+def test_agent_factory_disables_reasoning_replay_for_litellm(monkeypatch):
+    install_fake_tooluseidhook(monkeypatch)
+    fake_cm = FakeConfigManager(provider="litellm")
+
+    monkeypatch.setattr(factory, "get_config_manager", lambda: fake_cm)
+    monkeypatch.setattr(factory, "Agent", FakeAgent)
+    monkeypatch.setattr(factory, "create_strands_model", lambda provider, model_id, _: ("MODEL", provider, model_id))
+    monkeypatch.setattr(factory, "get_shared_conversation_manager", lambda: object())
+    monkeypatch.setattr(factory, "get_capabilities", lambda provider, model_id: FakeCaps(supports_reasoning=True))
+    monkeypatch.setattr(factory, "_resolve_prompt_token_limit", lambda provider, model_id: 1)
+
+    agent = factory.init_agent_factory(factory.AgentFactoryConfig())("sub")
+
+    assert agent._allow_reasoning_content is False
 
 
 def test_agent_factory_allow_reasoning_content_false_on_exception(monkeypatch):
@@ -293,10 +305,10 @@ def test_agent_factory_allow_reasoning_content_false_on_exception(monkeypatch):
     make_agent = factory.init_agent_factory(cfg)
 
     agent = make_agent("sub")
-    assert getattr(agent, "_allow_reasoning_content") is False
+    assert agent._allow_reasoning_content is False
 
 
-def test_agent_factory_trace_attributes_include_tools_and_names(monkeypatch):
+def test_agent_factory_trace_attributes_do_not_duplicate_strands_tool_metadata(monkeypatch):
     install_fake_tooluseidhook(monkeypatch)
     fake_cm = FakeConfigManager(provider="bedrock")
 
@@ -307,8 +319,6 @@ def test_agent_factory_trace_attributes_include_tools_and_names(monkeypatch):
     monkeypatch.setattr(factory, "get_capabilities", lambda provider, model_id: FakeCaps(supports_reasoning=False))
     monkeypatch.setattr(factory, "_resolve_prompt_token_limit", lambda provider, model_id: 1)
 
-    monkeypatch.setattr(factory, "get_tool_name", lambda t: f"name:{t}")
-
     cfg = factory.AgentFactoryConfig(base_trace_attributes={"base": 1})
     make_agent = factory.init_agent_factory(cfg)
 
@@ -317,8 +327,8 @@ def test_agent_factory_trace_attributes_include_tools_and_names(monkeypatch):
 
     assert ta["base"] == 1
     assert ta["langfuse.agent.type"] == "TypeA"
-    assert ta["tools.available"] == 3
-    assert ta["tools.names"] == ["name:t1", "name:t2", "name:t3"]
+    assert "tools.available" not in ta
+    assert "tools.names" not in ta
 
 
 def test_agent_factory_sets_prompt_token_limit_only_when_truthy(monkeypatch):
@@ -342,6 +352,96 @@ def test_agent_factory_sets_prompt_token_limit_only_when_truthy(monkeypatch):
 
     agent = make_agent("sub")
     assert not hasattr(agent, "_prompt_token_limit")
+
+
+def test_stateful_helpers_and_agent_creation_retry():
+    assert factory.model_uses_server_side_state(types.SimpleNamespace(stateful=True)) is True
+    assert factory.model_uses_server_side_state(types.SimpleNamespace(stateful="true")) is False
+    assert factory._is_stateful_model_manager_error(ValueError(
+        "context_manager and conversation_manager cannot be used with a stateful model"
+    )) is True
+    assert factory._is_stateful_model_manager_error(RuntimeError("no")) is False
+
+    calls = []
+
+    def stateful_agent(**kwargs):
+        calls.append(kwargs)
+        if "conversation_manager" in kwargs:
+            raise ValueError("context_manager and conversation_manager cannot be used with a stateful model")
+        return kwargs
+
+    result = factory.create_agent_with_stateful_retry(
+        {"conversation_manager": object(), "context_manager": "sliding", "model": object()}, "model", stateful_agent
+    )
+    assert "conversation_manager" not in result
+    assert "context_manager" not in result
+    assert len(calls) == 2
+
+
+def test_stateful_helpers_tolerate_state_lookup_errors_and_propagate_unrelated_errors():
+    class BrokenModel:
+        @property
+        def stateful(self):
+            raise RuntimeError("unavailable")
+
+    assert factory.model_uses_server_side_state(BrokenModel()) is False
+
+    with pytest.raises(ValueError, match="different construction error"):
+        factory.create_agent_with_stateful_retry(
+            {"conversation_manager": object()},
+            agent_cls=lambda **kwargs: (_ for _ in ()).throw(ValueError("different construction error")),
+        )
+
+
+def test_agent_factory_wrapper_handles_noncallable_and_bound_tool(monkeypatch):
+    def shared_factory():
+        return None
+
+    monkeypatch.setattr(factory, "_SHARED_AGENT_FACTORY", shared_factory)
+
+    marker = object()
+    assert factory.agent_factory_wrapper(marker) is marker
+
+    class Tool:
+        def __call__(self):
+            return "tool"
+
+        def method(self):
+            return "ok"
+
+    tool = Tool()
+    tool._tool_func = tool.method
+    assert factory.agent_factory_wrapper(tool) is tool
+    assert tool.agent_factory is shared_factory
+    assert tool.method.__func__.agent_factory is shared_factory
+
+    builtin_tool = Tool()
+    builtin_tool._tool_func = len
+    assert factory.agent_factory_wrapper(builtin_tool) is builtin_tool
+
+
+def test_patch_toolregistry_supports_keyword_tool_and_skips_duplicate(monkeypatch):
+    ToolRegistry = install_fake_toolregistry(monkeypatch)
+    seen = []
+    monkeypatch.setattr(factory, "agent_factory_wrapper", lambda tool: seen.append(tool) or tool)
+
+    factory.patch_toolregistry_register_tool()
+    registry = ToolRegistry()
+    tool = object()
+    assert registry.register_tool(tool=tool) is tool
+    assert seen == [tool]
+
+    factory.patch_toolregistry_register_tool()
+    assert factory._TOOLREGISTRY_REGISTER_TOOL_PATCHED is True
+
+
+def test_patch_toolregistry_skips_registry_without_callable_register_tool(monkeypatch):
+    ToolRegistry = install_fake_toolregistry(monkeypatch)
+    monkeypatch.setattr(ToolRegistry, "register_tool", None)
+
+    factory.patch_toolregistry_register_tool()
+
+    assert factory._TOOLREGISTRY_REGISTER_TOOL_PATCHED is False
 
 
 # -------------------------

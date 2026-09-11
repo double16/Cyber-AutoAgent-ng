@@ -8,15 +8,17 @@ import React, { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import { themeManager } from '../themes/theme-manager.js';
+import type { ThinkingContext } from '../types/thinking.js';
 
 interface ThinkingIndicatorProps {
-  context?: 'reasoning' | 'tool_preparation' | 'tool_execution' | 'waiting' | 'startup' | 'rate_limit';
+  context?: ThinkingContext;
   startTime?: number;
   message?: string;
   toolName?: string;
   toolCategory?: string;
   enabled?: boolean;
-  taskTitle?: string;
+  taskTitle?: string | null;
+  maxWidth?: number;
 }
 
 // Fun thinking phrases that cycle through
@@ -36,7 +38,6 @@ const THINKING_PHRASES = [
   'Connecting dots',
   'Crunching data',
   'Running scenarios',
-  'Mapping vectors',
   'Testing theories',
   'Building game plan',
   'Formulating tactics',
@@ -44,7 +45,6 @@ const THINKING_PHRASES = [
   'Piecing together',
   'Assembling strategy',
   'Decoding patterns',
-  'Optimizing route',
   'Spinning up ideas',
   'Cooking up plan'
 ];
@@ -66,20 +66,37 @@ const getContextMessage = (context?: string, phraseIndex?: number): string => {
   }
 };
 
+const truncateText = (value: string, maxWidth?: number): string => {
+  if (!maxWidth || maxWidth <= 0 || value.length <= maxWidth) {
+    return value;
+  }
+  if (maxWidth <= 1) {
+    return value.slice(0, maxWidth);
+  }
+  return `${value.slice(0, maxWidth - 1).trimEnd()}…`;
+};
+
 export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
   context,
   startTime,
   message,
   taskTitle,
+  maxWidth,
   enabled = true
 }) => {
   const theme = themeManager.getCurrentTheme();
+  const isRecordingMode = process.env.CYBER_RECORDING_MODE === 'true';
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [phraseIndex, setPhraseIndex] = useState(Math.floor(Math.random() * THINKING_PHRASES.length));
 
   // Elapsed time tracking (single interval)
   useEffect(() => {
     if (!startTime || !enabled) {
+      setElapsedSeconds(0);
+      return;
+    }
+
+    if (isRecordingMode) {
       setElapsedSeconds(0);
       return;
     }
@@ -92,18 +109,18 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
     const interval = setInterval(updateElapsed, 1000);
 
     return () => clearInterval(interval);
-  }, [startTime, enabled]);
+  }, [startTime, enabled, isRecordingMode]);
 
   // Cycle through phrases every 18 seconds (only for non-startup contexts)
   useEffect(() => {
-    if (context === 'startup' || !enabled) return;
+    if (context === 'startup' || !enabled || message) return;
 
     const interval = setInterval(() => {
       setPhraseIndex(prev => (prev + 1) % THINKING_PHRASES.length);
     }, 18000);
 
     return () => clearInterval(interval);
-  }, [context, enabled]);
+  }, [context, enabled, message]);
 
   // Format elapsed time
   const formatElapsed = (seconds: number): string => {
@@ -115,31 +132,28 @@ export const ThinkingIndicator: React.FC<ThinkingIndicatorProps> = ({
     return `${minutes}m ${secs}s`;
   };
 
-  const displayMessage = (taskTitle ? (taskTitle + ' - ') : '') + (message || getContextMessage(context, phraseIndex));
+  const statusSuffix = (startTime && !isRecordingMode) ? ` [${formatElapsed(elapsedSeconds)}]` : '';
+  const statusMessage = (message || getContextMessage(context, phraseIndex)) + statusSuffix;
+  const spinnerWidth = enabled ? 1 : '[BUSY]'.length;
+  const textWidth = maxWidth ? Math.max(0, maxWidth - spinnerWidth - 1) : undefined;
+  const titleWidth = taskTitle && textWidth !== undefined
+    ? Math.max(0, textWidth - statusMessage.length - 3)
+    : undefined;
+  const displayTitle = taskTitle ? truncateText(taskTitle, titleWidth) : '';
+  const displayMessage = displayTitle ? `${displayTitle} - ${statusMessage}` : statusMessage;
+  const displayText = truncateText(displayMessage, textWidth);
 
   return (
-    <Box flexDirection="column">
-      {/* Add visual breathing room before spinner */}
-      <Text>{'\n'}</Text>
-      <Box>
-        {enabled ? (
-          <Text color={theme.primary}>
-            <Spinner type="dots" />
-          </Text>
-        ) : (
-          <Text color={theme.muted}>[BUSY]</Text>
-        )}
-        <Text color={theme.muted}> </Text>
-        <Text color={theme.foreground}>
-          {displayMessage}
+    <Box>
+      {enabled ? (
+        <Text color={theme.primary}>
+          {isRecordingMode ? '⌛' : <Spinner type="dots" />}
         </Text>
-        {startTime && (
-          <>
-            <Text color={theme.muted}> </Text>
-            <Text color={theme.muted}>[{formatElapsed(enabled ? elapsedSeconds : Math.floor(((startTime && Date.now()) ? (Date.now() - startTime) : 0) / 1000))}]</Text>
-          </>
-        )}
-      </Box>
+      ) : (
+        <Text color={theme.muted}>[BUSY]</Text>
+      )}
+      <Text color={theme.muted}> </Text>
+      <Text color={theme.foreground}>{displayText}</Text>
     </Box>
   );
 };

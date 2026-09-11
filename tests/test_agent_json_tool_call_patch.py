@@ -14,7 +14,6 @@ import pytest
 
 import modules.agents.patches as m
 
-
 # -----------------------------
 # Helpers for building fake modules/classes
 # -----------------------------
@@ -35,7 +34,7 @@ def _install_fake_ollama_module(monkeypatch, *, cls):
     models_mod = sys.modules.get("strands.models") or types.ModuleType("strands.models")
     ollama_mod = types.ModuleType("modules.config.models.ollama")
 
-    setattr(ollama_mod, "OllamaModel", cls)
+    ollama_mod.OllamaModel = cls
 
     monkeypatch.setitem(sys.modules, "strands", strands_mod)
     monkeypatch.setitem(sys.modules, "strands.models", models_mod)
@@ -346,3 +345,114 @@ def test__extract_json_toolcall_fenced_json_block():
     txt = "```json\n" + '{"name":"t","arguments":{"x":1}}' + "\n```"
     tc = m._extract_json_toolcall(txt)
     assert tc == {"name": "t", "arguments": {"x": 1}}
+
+
+def test_json_toolcall_helpers_reject_invalid_shapes_and_preserve_non_tool_content():
+    assert m._extract_json_toolcall("[]") is None
+    assert m._extract_json_toolcall('{"name":"tool","arguments":[]}') is None
+    assert m._extract_json_toolcall('{"name":"","arguments":{}}') is None
+    assert m._to_openai_tool_calls({"name": " "}) == []
+    assert m._coerce_message_json_toolcall(None) is False
+    assert m._coerce_message_json_toolcall({"content": "not blocks"}) is False
+    assert m._coerce_message_json_toolcall({"content": [None, {"text": "  "}]}) is False
+
+
+def test_json_stream_state_handles_invalid_pending_and_large_non_tool_payloads():
+    state = m._JsonToolcallStreamState()
+    assert state.feed("") is None
+    state.queue_tool_use({"name": "", "arguments": {}})
+    assert state.has_pending() is False
+    assert state.next_pending_kind() is None
+
+    state.queue_tool_use({"name": "tool", "arguments": {"value": {1, 2}}})
+    assert state.next_pending_kind() == "start"
+    state.pending_stage = 2
+    assert state.next_pending_kind() == "delta"
+    state.pending_stage = 3
+    assert state.next_pending_kind() == "stop"
+    state.pending_stage = 4
+    assert state.next_pending_kind() is None
+    state.reset_pending()
+    assert state.has_pending() is False
+
+    payload = "{" + '"ordinary":"' + ("x" * 520) + '"}'
+    assert state.feed(payload) is None
+    assert state.pop_rejected() == payload
+
+
+def test_patch_ollama_token_usage_updates_metadata_and_survives_bad_events(monkeypatch):
+    class OllamaModel:
+        def format_chunk(self, event):
+            return event["out"]
+
+    module_name = "test_fake_ollama_usage"
+    monkeypatch.setitem(sys.modules, module_name, types.SimpleNamespace(OllamaModel=OllamaModel))
+    m.patch_ollama_model_token_usage(module_name=module_name)
+    model = OllamaModel()
+
+    result = model.format_chunk(
+        {
+            "data": _FakeOllamaEventData(prompt_eval_count=7, eval_count=3),
+            "out": {"metadata": {"usage": {}}},
+        }
+    )
+    assert result["metadata"]["usage"] == {"inputTokens": 7, "outputTokens": 3, "totalTokens": 10}
+
+    unchanged = model.format_chunk({"data": _FakeOllamaEventData(prompt_eval_count=1), "out": {"metadata": {"usage": {}}}})
+    assert unchanged["metadata"]["usage"] == {}
+    assert model.format_chunk({"out": {"metadata": None}}) == {"metadata": None}
+
+    m.patch_ollama_model_token_usage(module_name=module_name)
+    assert getattr(OllamaModel, m._OLLAMA_MODEL_TOKEN_USAGE_PATCH_ATTR)["is_patched"] is True
+
+
+def test_patch_ollama_token_usage_ignores_models_without_formatter(monkeypatch):
+    class OllamaModel:
+        pass
+
+    module_name = "test_fake_ollama_without_formatter"
+    monkeypatch.setitem(sys.modules, module_name, types.SimpleNamespace(OllamaModel=OllamaModel))
+    m.patch_ollama_model_token_usage(module_name=module_name)
+    assert not hasattr(OllamaModel, m._OLLAMA_MODEL_TOKEN_USAGE_PATCH_ATTR)
+
+
+@pytest.mark.parametrize("shape", ["content", "delta"])
+def test_patch_json_toolcalls_coerces_top_level_streaming_shapes(monkeypatch, shape):
+    class OllamaModel:
+        def format_response(self):
+            container = {"content": [{"text": '{"name":"top_tool","arguments":{}}'}]}
+            return {shape: container} if shape == "delta" else container
+
+    _install_fake_ollama_module(monkeypatch, cls=OllamaModel)
+    assert m.patch_ollama_model_json_toolcalls(validate=True) is True
+    model = OllamaModel()
+    out = model.format_response()
+    assert out["tool_calls"][0]["function"]["name"] == "top_tool"
+    assert out["stop_reason"] == "tool_use"
+    if shape == "delta":
+        assert out["delta"]["content"] == []
+    else:
+        assert out["content"] == []
+
+
+def test_patch_json_toolcalls_preserves_buffered_non_tool_text_at_message_stop(monkeypatch):
+    class OllamaModel:
+        def format_chunk(self, event):
+            return event["out"]
+
+    _install_fake_ollama_module(monkeypatch, cls=OllamaModel)
+    assert m.patch_ollama_model_json_toolcalls(validate=True) is True
+    model = OllamaModel()
+    model.format_chunk({"out": {"contentBlockDelta": {"delta": {"text": "{not a tool"}}}})
+    out = model.format_chunk({"out": {"messageStop": {"stopReason": "stop"}}})
+    assert out["contentBlockDelta"]["delta"]["text"] == "{not a tool"
+    assert out["messageStop"] is None
+
+
+def test_patch_json_toolcalls_uses_callable_fallback_when_no_explicit_method_exists(monkeypatch):
+    class OllamaModel:
+        pass
+
+    _install_fake_ollama_module(monkeypatch, cls=OllamaModel)
+    assert m.patch_ollama_model_json_toolcalls(validate=True) is True
+    assert getattr(OllamaModel, m._OLLAMA_MODEL_JSON_TOOLCALL_PATCH_ATTR)["where"] == "__call__"

@@ -6,6 +6,24 @@ from unittest.mock import Mock, patch
 import pytest
 
 
+class FakeReactHooks:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def register_hooks(self, registry, **kwargs):
+        pass
+
+
+def _stateless_model_mock():
+    model = Mock()
+    model.stateful = False
+    return model
+
+
+def _default_getenv(name, default=None):
+    return default
+
+
 def _minimal_server_config():
     # Create a minimal server_config with required nested attributes
     return SimpleNamespace(
@@ -19,7 +37,7 @@ def _minimal_server_config():
 @patch("modules.agents.cyber_autoagent.get_config_manager")
 @patch("modules.config.models.factory.create_litellm_model")
 @patch("modules.handlers.react.hooks.ReactHooks")
-@patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
+@patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
 @patch("modules.agents.cyber_autoagent.get_memory_client", return_value=None)
 def test_agent_creation_litellm(
@@ -31,37 +49,36 @@ def test_agent_creation_litellm(
     mock_get_cfg,
 ):
     # Stub out the UI handler to have an emitter attribute
-    mock_rbh.return_value = SimpleNamespace(emitter=None)
+    mock_rbh.return_value = SimpleNamespace(emitter=None, emit_ui_event=lambda _event: None)
 
     # Mock config manager
     mock_cfg = Mock()
     mock_cfg.validate_requirements.return_value = None
+    mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
-    mock_cfg.get_mem0_service_config.return_value = {
-        "vector_store": {"provider": "faiss", "config": {"path": "test"}},
-        "embedder": {"provider": "aws_bedrock", "config": {"model": "test"}},
-        "llm": {"provider": "aws_bedrock", "config": {"model": "test"}},
+    mock_cfg.get_qdrant_memory_config.return_value = {
+        "embedding_provider": "bedrock", "embedding_model": "test", "embedding_dimensions": 1024,
     }
     mock_get_cfg.return_value = mock_cfg
 
-    mock_model = Mock()
+    mock_hooks.side_effect = FakeReactHooks
+    mock_model = _stateless_model_mock()
     mock_create_litellm.return_value = mock_model
 
-    from modules.agents.cyber_autoagent import create_agent, AgentConfig
+    from modules.agents.cyber_autoagent import AgentConfig, create_agent
 
     config = AgentConfig(target="t", objective="o", provider="litellm", op_id="OP_TEST")
-    agent, handler = create_agent(target="t", objective="o", config=config)
+    agent = create_agent(target="t", objective="o", config=config)
 
     assert agent is not None
-    assert handler is not None
     mock_create_litellm.assert_called_once()
 
 
 @patch("modules.agents.cyber_autoagent.get_config_manager")
 @patch("modules.config.models.factory._handle_model_creation_error")
 @patch("modules.handlers.react.hooks.ReactHooks")
-@patch("modules.handlers.react.react_bridge_handler.ReactBridgeHandler")
+@patch("modules.handlers.react.agent_event_handler.AgentEventHandler")
 @patch("modules.agents.cyber_autoagent.initialize_memory_system")
 @patch("modules.agents.cyber_autoagent.get_memory_client", return_value=None)
 def test_agent_creation_unsupported_provider_raises(
@@ -72,19 +89,19 @@ def test_agent_creation_unsupported_provider_raises(
     mock_handle_error,
     mock_get_cfg,
 ):
-    mock_rbh.return_value = SimpleNamespace(emitter=None)
+    mock_rbh.return_value = SimpleNamespace(emitter=None, emit_ui_event=lambda _event: None)
     mock_cfg = Mock()
     mock_cfg.validate_requirements.return_value = None
+    mock_cfg.getenv.side_effect = _default_getenv
     mock_cfg.get_server_config.return_value = _minimal_server_config()
     mock_cfg.get_default_region.return_value = "us-east-1"
-    mock_cfg.get_mem0_service_config.return_value = {
-        "vector_store": {"provider": "faiss", "config": {"path": "test"}},
-        "embedder": {"provider": "aws_bedrock", "config": {"model": "test"}},
-        "llm": {"provider": "aws_bedrock", "config": {"model": "test"}},
+    mock_cfg.get_qdrant_memory_config.return_value = {
+        "embedding_provider": "bedrock", "embedding_model": "test", "embedding_dimensions": 1024,
     }
     mock_get_cfg.return_value = mock_cfg
+    mock_hooks.side_effect = FakeReactHooks
 
-    from modules.agents.cyber_autoagent import create_agent, AgentConfig
+    from modules.agents.cyber_autoagent import AgentConfig, create_agent
 
     with pytest.raises(ValueError):
         config = AgentConfig(

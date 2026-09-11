@@ -1,6 +1,5 @@
 import argparse
 import socket
-from typing import Tuple, List
 
 """
 When listening for connections from a target, we need to know which interface will be used. This utility provides the
@@ -13,7 +12,7 @@ except ImportError:
     psutil = None
 
 
-def pick_local_addr(dest_host: str, port: int = 53) -> Tuple[str, int]:
+def pick_local_addr(dest_host: str, port: int = 53) -> tuple[str, int]:
     """
     Returns (local_ip, family) that the OS would use to reach dest_host.
     Uses a UDP 'connect' which does not actually send packets.
@@ -21,7 +20,7 @@ def pick_local_addr(dest_host: str, port: int = 53) -> Tuple[str, int]:
     # Resolve like the OS would; prefer system order
     infos = socket.getaddrinfo(dest_host, port, socket.AF_UNSPEC, socket.SOCK_DGRAM)
     last_err = None
-    for family, socktype, proto, canonname, sockaddr in infos:
+    for family, _socktype, _proto, _canonname, sockaddr in infos:
         try:
             s = socket.socket(family, socket.SOCK_DGRAM)
             try:
@@ -36,7 +35,7 @@ def pick_local_addr(dest_host: str, port: int = 53) -> Tuple[str, int]:
     raise OSError(f"Could not determine local address for {dest_host}: {last_err}")
 
 
-def map_ip_to_interfaces(local_ip: str, family: int) -> List[str]:
+def map_ip_to_interfaces(local_ip: str, family: int) -> list[str]:
     """
     Returns a list of interface names that have local_ip assigned.
     If psutil is unavailable or nothing matches, returns [].

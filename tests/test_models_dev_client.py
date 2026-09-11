@@ -23,7 +23,6 @@ from modules.config.models.dev_client import (
     get_models_client,
 )
 
-
 # Test fixtures
 
 @pytest.fixture

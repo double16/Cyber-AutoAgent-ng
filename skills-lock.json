@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "langfuse": {
+      "source": "avivsinai/langfuse-mcp",
+      "sourceType": "github",
+      "skillPath": "skills/langfuse/SKILL.md",
+      "computedHash": "07bb7acb005f942fdbffbfbff67fc032a831802b2877d7778c8b4c67c7f148b1"
+    }
+  }
+}

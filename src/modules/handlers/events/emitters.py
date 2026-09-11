@@ -5,13 +5,21 @@ import json
 import os
 from collections import deque
 from datetime import datetime
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Protocol
+
+DEDUP_EVENT_TYPES = (
+    "tool_start",
+    "tool_end",
+    "tool_invocation_start",
+    "tool_invocation_end",
+    "metrics_update",
+)
 
 
 class EventEmitter(Protocol):
     """Protocol for event emitters - minimal interface."""
 
-    def emit(self, event: Dict[str, Any]) -> None:
+    def emit(self, event: dict[str, Any]) -> None:
         """Emit an event to the configured transport."""
         ...
 
@@ -23,7 +31,7 @@ class StdoutEventEmitter:
     adding intelligent deduplication to prevent duplicate events.
     """
 
-    def __init__(self, operation_id: Optional[str] = None):
+    def __init__(self, operation_id: str | None = None):
         """Initialize emitter with deduplication tracking.
 
         Args:
@@ -37,7 +45,7 @@ class StdoutEventEmitter:
         self._last_output_content = None
         self._last_output_time = None
 
-    def emit(self, event: Dict[str, Any]) -> None:
+    def emit(self, event: dict[str, Any]) -> None:
         """Emit event with deduplication and ID tracking.
 
         Args:
@@ -71,13 +79,7 @@ class StdoutEventEmitter:
         # Skip duplicate events based on signature
         # Tool events and metrics updates should not be deduplicated
         event_type = event.get("type", "")
-        if event_type not in (
-            "tool_start",
-            "tool_end",
-            "tool_invocation_start",
-            "tool_invocation_end",
-            "metrics_update",
-        ):
+        if event_type not in DEDUP_EVENT_TYPES:
             # Create signature for deduplication (only when needed)
             signature = self._create_signature(event)
             if signature in self._recent_signatures:
@@ -141,16 +143,10 @@ class StdoutEventEmitter:
         print(f"__CYBER_EVENT__{json_str}__CYBER_EVENT_END__\n", end="", flush=True)
 
         # Track for deduplication (except tool events and metrics updates)
-        if event_type not in (
-            "tool_start",
-            "tool_end",
-            "tool_invocation_start",
-            "tool_invocation_end",
-            "metrics_update",
-        ):
+        if event_type not in DEDUP_EVENT_TYPES:
             self._recent_signatures.append(self._create_signature(event))
 
-    def _clean_event_for_json(self, event: Dict[str, Any]) -> Dict[str, Any]:
+    def _clean_event_for_json(self, event: dict[str, Any]) -> dict[str, Any]:
         """Clean event data to ensure JSON serialization succeeds.
 
         Recursively processes the event dictionary to handle problematic
@@ -171,10 +167,8 @@ class StdoutEventEmitter:
                 return value
             elif isinstance(value, dict):
                 return {k: clean_value(v) for k, v in value.items()}
-            elif isinstance(value, list):
+            elif isinstance(value, (list, tuple)):
                 return [clean_value(item) for item in value]
-            elif isinstance(value, tuple):
-                return list(value)  # Convert tuples to lists
             elif hasattr(value, "__dict__"):
                 # Try to convert objects to dict
                 return clean_value(value.__dict__)
@@ -185,7 +179,7 @@ class StdoutEventEmitter:
         # Create a deep copy to avoid modifying the original
         return clean_value(event)
 
-    def _create_signature(self, event: Dict[str, Any]) -> str:
+    def _create_signature(self, event: dict[str, Any]) -> str:
         """Create a signature for event deduplication.
 
         Excludes timestamp, id, and other volatile fields.
@@ -199,13 +193,7 @@ class StdoutEventEmitter:
         event_type = event.get("type", "")
 
         # Tool events and metrics updates should have unique signatures to avoid deduplication
-        if event_type in (
-            "tool_start",
-            "tool_end",
-            "tool_invocation_start",
-            "tool_invocation_end",
-            "metrics_update",
-        ):
+        if event_type in DEDUP_EVENT_TYPES:
             # Include timestamp to make each event unique
             return f"{event_type}_{event.get('tool_name', '')}_{event.get('timestamp', datetime.now().isoformat())}"
 
@@ -220,9 +208,13 @@ class StdoutEventEmitter:
         if event_type == "output":
             # Normalize output content for comparison
             content = sig_dict.get("content", "")
-            if isinstance(content, str):
-                # Strip whitespace variations but preserve content
-                content = content.strip()
+            if not isinstance(content, str):
+                try:
+                    content = json.dumps(content, ensure_ascii=False, sort_keys=True)
+                except (TypeError, ValueError):
+                    content = str(content)
+            # Strip whitespace variations but preserve content
+            content = content.strip()
             sig_dict["content"] = content
 
             # Use a hash of the content for more efficient comparison
@@ -231,11 +223,14 @@ class StdoutEventEmitter:
                 return f"output_{content_hash}"
 
         # Create stable signature
-        return json.dumps(sig_dict, sort_keys=True)
+        try:
+            return json.dumps(sig_dict, sort_keys=True)
+        except (TypeError, ValueError):
+            return json.dumps(self._clean_event_for_json(sig_dict), sort_keys=True)
 
 
 def get_emitter(
-    transport: str = None, operation_id: Optional[str] = None
+    transport: str | None = None, operation_id: str | None = None
 ) -> EventEmitter:
     """Factory function to get the appropriate emitter.
 

@@ -21,8 +21,8 @@ logger = get_logger("Config.Validation")
 def validate_provider(
     provider: str,
     env_reader: EnvironmentReader,
-    ollama_host: str = None,
-    region: str = None,
+    ollama_host: str | None = None,
+    region: str | None = None,
     server_config=None,
 ) -> None:
     """Validate that all requirements are met for the specified provider.
@@ -53,7 +53,7 @@ def validate_provider(
 
 
 def validate_ollama_requirements(
-    env_reader: EnvironmentReader, ollama_host: str = None, server_config=None
+    env_reader: EnvironmentReader, ollama_host: str | None = None, server_config=None
 ) -> None:
     """Validate Ollama requirements.
 
@@ -124,7 +124,7 @@ def validate_ollama_requirements(
             or "Required models not found" in str(e)
             or "No models available" in str(e)
         ):
-            raise e
+            raise
         raise ConnectionError(f"Could not verify Ollama models: {e}") from e
 
 
@@ -141,7 +141,7 @@ def validate_bedrock_model_access(region: str) -> None:
         EnvironmentError: If AWS region is not configured
     """
     if not region:
-        raise EnvironmentError(
+        raise OSError(
             "AWS region not configured. Set AWS_REGION environment variable or configure default region."
         )
 
@@ -153,7 +153,7 @@ def validate_bedrock_model_access(region: str) -> None:
         # Model-specific errors will be handled by strands-agents during actual usage
 
 
-def validate_aws_requirements(env_reader: EnvironmentReader, region: str = None) -> None:
+def validate_aws_requirements(env_reader: EnvironmentReader, region: str | None = None) -> None:
     """Validate AWS requirements including Bedrock model access.
 
     Supports either standard AWS credentials (ACCESS_KEY/SECRET or PROFILE)
@@ -169,7 +169,7 @@ def validate_aws_requirements(env_reader: EnvironmentReader, region: str = None)
     """
     # Check region first
     if not region:
-        raise EnvironmentError(
+        raise OSError(
             "AWS region not configured. Set AWS_REGION environment variable or configure default region."
         )
 
@@ -179,7 +179,7 @@ def validate_aws_requirements(env_reader: EnvironmentReader, region: str = None)
 
     # Verify AWS credentials are configured (standard creds OR bearer token)
     if not (access_key or profile or bearer_token):
-        raise EnvironmentError(
+        raise OSError(
             "AWS credentials not configured for remote mode. "
             "Set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, configure AWS_PROFILE, "
             "or set AWS_BEARER_TOKEN_BEDROCK for API key authentication"
@@ -224,7 +224,7 @@ def validate_litellm_requirements(env_reader: EnvironmentReader, model_id: str =
     if model_id.startswith("bedrock/"):
         # LiteLLM does NOT support AWS bearer tokens - only standard credentials
         if not (env_reader.get("AWS_ACCESS_KEY_ID") or env_reader.get("AWS_PROFILE")):
-            raise EnvironmentError(
+            raise OSError(
                 "AWS credentials not configured for LiteLLM Bedrock models.\n"
                 "Required: AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY OR AWS_PROFILE\n"
                 "Note: LiteLLM does not support AWS_BEARER_TOKEN_BEDROCK"
@@ -232,31 +232,31 @@ def validate_litellm_requirements(env_reader: EnvironmentReader, model_id: str =
 
     elif model_id.startswith("openai/"):
         if not env_reader.get("OPENAI_API_KEY"):
-            raise EnvironmentError(
+            raise OSError(
                 "OPENAI_API_KEY not configured for LiteLLM OpenAI models. "
                 "Set OPENAI_API_KEY environment variable."
             )
     elif model_id.startswith("anthropic/"):
         if not env_reader.get("ANTHROPIC_API_KEY"):
-            raise EnvironmentError(
+            raise OSError(
                 "ANTHROPIC_API_KEY not configured for LiteLLM Anthropic models. "
                 "Set ANTHROPIC_API_KEY environment variable."
             )
     elif model_id.startswith("cohere/"):
         if not env_reader.get("COHERE_API_KEY"):
-            raise EnvironmentError(
+            raise OSError(
                 "COHERE_API_KEY not configured for LiteLLM Cohere models. "
                 "Set COHERE_API_KEY environment variable."
             )
     elif model_id.startswith("azure/"):
         if not env_reader.get("AZURE_API_KEY"):
-            raise EnvironmentError(
+            raise OSError(
                 "AZURE_API_KEY not configured for LiteLLM Azure models. "
                 "Set AZURE_API_KEY, AZURE_API_BASE, and AZURE_API_VERSION environment variables."
             )
     elif model_id.startswith("gemini/"):
         if not env_reader.get("GEMINI_API_KEY"):
-            raise EnvironmentError(
+            raise OSError(
                 "GEMINI_API_KEY not configured for LiteLLM Gemini models. "
                 "Set GEMINI_API_KEY environment variable."
             )
@@ -265,12 +265,12 @@ def validate_litellm_requirements(env_reader: EnvironmentReader, model_id: str =
             "AWS_SECRET_ACCESS_KEY"
         )
         if not (has_std_creds or env_reader.get("AWS_PROFILE")):
-            raise EnvironmentError(
+            raise OSError(
                 "AWS credentials not configured for LiteLLM SageMaker models.\n"
                 "Required: AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY OR AWS_PROFILE"
             )
         if not (env_reader.get("AWS_REGION") or env_reader.get("AWS_REGION_NAME")):
-            raise EnvironmentError(
+            raise OSError(
                 "AWS region not configured for LiteLLM SageMaker models.\n"
                 "Set AWS_REGION or AWS_REGION_NAME environment variable."
             )
@@ -296,7 +296,7 @@ def validate_gemini_requirements(env_reader: EnvironmentReader) -> None:
     """
     api_key = env_reader.get("GEMINI_API_KEY")
     if not api_key:
-        raise EnvironmentError(
+        raise OSError(
             "GEMINI_API_KEY environment variable must be set for native Gemini provider. "
             "Get your API key from https://ai.google.dev/"
         )

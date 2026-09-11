@@ -122,7 +122,7 @@ export class ContainerManager extends EventEmitter {
     };
   }> {
     // Check Docker availability
-    let dockerAvailable = false;
+    let dockerAvailable : boolean;
     try {
       await execAsync('docker info');
       dockerAvailable = true;
@@ -348,10 +348,8 @@ export class ContainerManager extends EventEmitter {
   private async detectCurrentMode(): Promise<void> {
     try {
       // First check if Docker is available
-      let dockerAvailable = false;
       try {
         await execAsync('docker info');
-        dockerAvailable = true;
       } catch {
         // Docker not available, default to local-cli mode
         this.currentMode = 'local-cli';
@@ -527,16 +525,23 @@ export class ContainerManager extends EventEmitter {
           }
         });
 
-        const timeout = new Promise<void>((_, reject) =>
-          setTimeout(() => reject(new Error('Docker command timeout after 10 minutes')), 600000)
-        );
+        let timeoutId: NodeJS.Timeout | null = null;
+        const timeout = new Promise<void>((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error('Docker command timeout after 10 minutes')), 600000);
+        });
 
-        return Promise.race([composePromise, timeout]);
+        try {
+          return await Promise.race([composePromise, timeout]);
+        } finally {
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+        }
       };
 
       // For single-container mode we can skip dependencies in up, but we still pull if needed
       // Check if cyber-autoagent image exists locally first
-      let needsBuild = false;
+      let needsBuild : boolean;
       try {
         // TODO: config.dockerImage
         const { stdout } = await execAsync('docker images -q cyber-autoagent:latest');

@@ -17,51 +17,57 @@ Key Components:
 
 import json
 import os
+from copy import deepcopy
 from functools import lru_cache
 from math import ceil
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import litellm
 import ollama
 
-from modules.config.models.factory import _resolve_prompt_token_limit
-from modules.handlers.utils import get_output_path, sanitize_target_name
-from modules.config.system.logger import get_logger
 from modules.config.models.dev_client import get_models_client
-from modules.config.types import (
-    ModelConfig,
-    LLMConfig,
-    EmbeddingConfig,
-    MemoryLLMConfig,
-    MemoryEmbeddingConfig,
-    MemoryVectorStoreConfig,
-    MemoryConfig,
-    EvaluationConfig,
-    SwarmConfig,
-    SDKConfig,
-    OutputConfig,
-    ServerConfig,
-    MCPConnection,
-    MCPConfig,
-    MEM0_PROVIDER_MAP,
-    get_default_base_dir,
-    RateLimitConfig,
-)
-from modules.config.system.env_reader import EnvironmentReader
-from modules.config.system.defaults import build_default_configs
-from modules.config.system.validation import validate_provider
+from modules.config.models.factory import _resolve_prompt_token_limit
 from modules.config.providers.bedrock_config import get_default_region
-from modules.config.providers.ollama_config import (
-    get_ollama_host as _get_ollama_host_from_env,
-    get_ollama_timeout as _get_ollama_timeout_from_env,
-    get_ollama_options as _get_ollama_options_from_env,
-    get_ollama_keep_alive as _get_ollama_keep_alive_from_env,
-)
 from modules.config.providers.litellm_config import (
     align_litellm_defaults,
     get_context_window_fallbacks,
     split_litellm_model_id,
 )
+from modules.config.providers.ollama_config import (
+    get_ollama_host as _get_ollama_host_from_env,
+)
+from modules.config.providers.ollama_config import (
+    get_ollama_keep_alive as _get_ollama_keep_alive_from_env,
+)
+from modules.config.providers.ollama_config import (
+    get_ollama_options as _get_ollama_options_from_env,
+)
+from modules.config.providers.ollama_config import (
+    get_ollama_timeout as _get_ollama_timeout_from_env,
+)
+from modules.config.system.defaults import build_default_configs
+from modules.config.system.env_reader import EnvironmentReader
+from modules.config.system.logger import get_logger
+from modules.config.system.validation import validate_provider
+from modules.config.types import (
+    EmbeddingConfig,
+    EvaluationConfig,
+    LLMConfig,
+    MCPConfig,
+    MCPConnection,
+    MemoryConfig,
+    MemoryEmbeddingConfig,
+    MemoryLLMConfig,
+    MemoryVectorStoreConfig,
+    ModelConfig,
+    OutputConfig,
+    RateLimitConfig,
+    SDKConfig,
+    ServerConfig,
+    SwarmConfig,
+    get_default_base_dir,
+)
+from modules.handlers.utils import get_output_path, sanitize_target_name
 
 litellm.drop_params = True
 litellm.modify_params = True
@@ -71,12 +77,10 @@ litellm.respect_retry_after_header = True
 logger = get_logger("Config.Manager")
 
 # Clamp model max tokens (a.k.a. output limit) to give more space to input and drive action (less reasoning).
-# MAX_TOKENS_LIMIT = 12_000
-MAX_TOKENS_LIMIT = 6144
+MAX_TOKENS_LIMIT = 12_000
 
 # Clamp thinking model max tokens (a.k.a. output limit) to give more space to input and drive action (less reasoning).
-# MAX_TOKENS_REASONING_LIMIT = 32_000
-MAX_TOKENS_REASONING_LIMIT = 10_000
+MAX_TOKENS_REASONING_LIMIT = 32_000
 
 
 class ConfigManager:
@@ -149,7 +153,7 @@ class ConfigManager:
             provider: str,
             model_id: str,
             *,
-            input_tokens: Optional[int] = None,
+            input_tokens: int | None = None,
             supports_reasoning: bool = False
     ) -> int:
         from modules.config import get_capabilities
@@ -162,13 +166,13 @@ class ConfigManager:
         if input_tokens is None and provider:
             input_tokens = _resolve_prompt_token_limit(provider, model_id)
         if input_tokens:
-            max_tokens_limit = min(max_tokens_limit, ceil(input_tokens / 8))
+            max_tokens_limit = min(max_tokens_limit, ceil(input_tokens / 4))
 
         return max_tokens_limit
 
     def get_thinking_model_config(
         self, model_id: str, region_name: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get configuration for thinking-enabled models."""
         # Base beta flags for thinking models
         beta_flags = ["interleaved-thinking-2025-05-14"]
@@ -208,7 +212,7 @@ class ConfigManager:
 
     def get_standard_model_config(
         self, model_id: str, region_name: str, provider: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get configuration for standard (non-thinking) models."""
         provider_config = self.get_server_config(provider)
         llm_config = provider_config.llm
@@ -219,6 +223,10 @@ class ConfigManager:
             "region_name": region_name,
             "temperature": llm_config.temperature,
             "max_tokens": max_tokens,
+            # A provider default is operational configuration, not an output
+            # ceiling for every role profile.  Factories use this value only
+            # when MAX_TOKENS explicitly requests a global ceiling.
+            "max_tokens_ceiling": self.getenv_int("MAX_TOKENS", 0) or None,
         }
 
         if "max_tokens" in llm_config.parameters:
@@ -261,7 +269,7 @@ class ConfigManager:
 
         return config
 
-    def get_local_model_config(self, model_id: str, provider: str) -> Dict[str, Any]:
+    def get_local_model_config(self, model_id: str, provider: str) -> dict[str, Any]:
         """Get configuration for local Ollama models."""
         provider_config = self.get_server_config(provider)
         llm_config = provider_config.llm
@@ -274,6 +282,9 @@ class ConfigManager:
             "keep_alive": self.get_ollama_keep_alive(),
             "temperature": llm_config.temperature,
             "max_tokens": max_tokens,
+            # See get_standard_model_config: profiles own their normal output
+            # budgets, while an explicit MAX_TOKENS value remains a hard cap.
+            "max_tokens_ceiling": self.getenv_int("MAX_TOKENS", 0) or None,
             "options": self.get_ollama_options(),
         }
 
@@ -321,7 +332,10 @@ class ConfigManager:
             )
             raise ValueError(f"Unsupported provider type: {provider}")
 
-        defaults = self._default_configs[provider].copy()
+        # Environment overrides mutate nested provider configuration objects. A
+        # deep copy prevents one operation's override from changing defaults
+        # used by later operations in this process.
+        defaults = deepcopy(self._default_configs[provider])
 
         # Apply environment variable overrides
         defaults = self._apply_environment_overrides(provider, defaults)
@@ -344,7 +358,7 @@ class ConfigManager:
             ):
                 defaults["evaluation_llm"].model_id = user_model
             # Don't override swarm LLM with user model - keep swarm using v2 for better performance
-            # Swarm model can be overridden via CYBER_AGENT_SWARM_MODEL env var if needed
+            # Sub-agent model can be overridden via env var if needed
             # For Ollama, also use the same model for embeddings if mxbai-embed-large:latest is not available
             if (
                 provider == "ollama"
@@ -379,25 +393,26 @@ class ConfigManager:
         )
 
         # Build evaluation configuration (with env-aware defaults)
+        evaluation_config_default = EvaluationConfig(llm=None, embedding=None)
         evaluation_config = EvaluationConfig(
             llm=self._get_evaluation_llm_config(provider, defaults),
             embedding=self._get_evaluation_embedding_config(provider, defaults),
-            min_tool_calls=self.getenv_int("EVAL_MIN_TOOL_CALLS", 3),
-            min_evidence=self.getenv_int("EVAL_MIN_EVIDENCE", 1),
-            max_wait_secs=self.getenv_int("EVALUATION_MAX_WAIT_SECS", 30),
-            poll_interval_secs=self.getenv_int("EVALUATION_POLL_INTERVAL_SECS", 5),
-            summary_max_chars=self.getenv_int("EVAL_SUMMARY_MAX_CHARS", 8000),
-            rubric_enabled=self.getenv_bool("EVAL_RUBRIC_ENABLED", False),
-            judge_temperature=self.getenv_float("EVAL_JUDGE_TEMPERATURE", 0.2),
-            judge_max_tokens=self.getenv_int("EVAL_JUDGE_MAX_TOKENS", 800),
-            rubric_profile=self.getenv("EVAL_RUBRIC_PROFILE", "default"),
+            min_tool_calls=self.getenv_int("EVAL_MIN_TOOL_CALLS", evaluation_config_default.min_tool_calls),
+            min_evidence=self.getenv_int("EVAL_MIN_EVIDENCE", evaluation_config_default.min_evidence),
+            max_wait_secs=self.getenv_int("EVALUATION_MAX_WAIT_SECS", evaluation_config_default.max_wait_secs),
+            poll_interval_secs=self.getenv_int("EVALUATION_POLL_INTERVAL_SECS", evaluation_config_default.poll_interval_secs),
+            summary_max_chars=self.getenv_int("EVAL_SUMMARY_MAX_CHARS", evaluation_config_default.summary_max_chars),
+            rubric_enabled=self.getenv_bool("EVAL_RUBRIC_ENABLED", evaluation_config_default.rubric_enabled),
+            judge_temperature=self.getenv_float("EVAL_JUDGE_TEMPERATURE", evaluation_config_default.judge_temperature),
+            judge_max_tokens=self.getenv_int("EVAL_JUDGE_MAX_TOKENS", evaluation_config_default.judge_max_tokens),
+            rubric_profile=self.getenv("EVAL_RUBRIC_PROFILE", evaluation_config_default.rubric_profile),
             judge_system_prompt=self.getenv("EVAL_JUDGE_SYSTEM_PROMPT"),
             judge_user_template=self.getenv("EVAL_JUDGE_USER_TEMPLATE"),
             skip_if_insufficient_evidence=self.getenv_bool(
-                "EVAL_SKIP_IF_INSUFFICIENT_EVIDENCE", True
+                "EVAL_SKIP_IF_INSUFFICIENT_EVIDENCE", evaluation_config_default.skip_if_insufficient_evidence
             ),
             rationale_persist_mode=self.getenv(
-                "EVAL_RATIONALE_PERSIST_MODE", "metadata"
+                "EVAL_RATIONALE_PERSIST_MODE", evaluation_config_default.rationale_persist_mode
             ),
         )
 
@@ -414,14 +429,24 @@ class ConfigManager:
         host = self.get_ollama_host() if provider == "ollama" else None
 
         # Build SDK configuration with environment overrides
+        sdk_config_default = SDKConfig()
         sdk_config = SDKConfig(
-            enable_hooks=overrides.get("enable_hooks", True),
-            enable_streaming=overrides.get("enable_streaming", True),
+            enable_hooks=overrides.get(
+                "enable_hooks",
+                self.getenv_bool("CYBER_SDK_ENABLE_HOOKS", sdk_config_default.enable_hooks)
+            ),
+            enable_streaming=overrides.get(
+                "enable_streaming",
+                self.getenv_bool("CYBER_SDK_ENABLE_STREAMING", sdk_config_default.enable_streaming)
+            ),
             conversation_window_size=overrides.get(
                 "conversation_window_size",
-                self.getenv_int("CYBER_CONVERSATION_WINDOW", 100)
+                self.getenv_int("CYBER_CONVERSATION_WINDOW", sdk_config_default.conversation_window_size)
             ),
-            enable_telemetry=self.getenv_bool("ENABLE_SDK_TELEMETRY", True),
+            enable_telemetry=overrides.get(
+                "enable_telemetry",
+                self.getenv_bool("ENABLE_SDK_TELEMETRY", sdk_config_default.enable_telemetry),
+            )
         )
 
         config = ServerConfig(
@@ -484,7 +509,7 @@ class ConfigManager:
     # ---------------------------------------------------------------------
     # Swarm helpers (used by specialist sub-agents)
     # ---------------------------------------------------------------------
-    def get_swarm_model_id(self, server: Optional[str] = None, **overrides) -> str:
+    def get_swarm_model_id(self, server: str | None = None, **overrides) -> str:
         """Return the configured swarm model_id for the given provider.
 
         Args:
@@ -552,7 +577,7 @@ class ConfigManager:
         operation_id: str,
         module: str = "web",
         **overrides,
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """Ensure operation output directories exist and return absolute paths.
 
         Creates operation-specific directories using configured base_dir:
@@ -560,7 +585,7 @@ class ConfigManager:
         - artifacts: outputs/<target>/<operation_id>/artifacts/
         - tools: outputs/<target>/<operation_id>/tools/ (for editor+load_tool meta-tooling)
 
-        Safe to call multiple times. Also copies master execution_prompt.md for optimization.
+        Safe to call multiple times.
 
         Returns:
             Dict[str, str]: Absolute paths to {'root', 'artifacts', 'tools'}
@@ -580,66 +605,9 @@ class ConfigManager:
             os.makedirs(artifacts, exist_ok=True)
             os.makedirs(tools, exist_ok=True)
 
-            # Copy master execution prompt to operation folder for optimization
-            self._copy_execution_prompt(root, module)
-
         except Exception as e:
             logger.debug("ensure_operation_output_dirs: could not create dirs: %s", e)
         return {"root": root, "artifacts": artifacts, "tools": tools}
-
-    def _copy_execution_prompt(self, operation_root: str, module: str) -> None:
-        """Copy master execution prompt to operation folder if not already present.
-
-        Args:
-            operation_root: Root directory of the operation
-            module: Module name (e.g., 'web', 'ctf')
-        """
-        from pathlib import Path
-
-        optimized_path = Path(operation_root) / "execution_prompt_optimized.txt"
-
-        # If optimized prompt already exists and has meaningful content, keep it
-        if optimized_path.exists():
-            file_size = optimized_path.stat().st_size
-            if file_size > 100:  # Anything over 100 bytes is likely real content
-                logger.debug(
-                    "Execution prompt already exists at %s (size: %d bytes)",
-                    optimized_path,
-                    file_size,
-                )
-                return
-
-        # Use the existing ModulePromptLoader to get correct paths
-        from modules.prompts import get_module_loader
-
-        module_loader = get_module_loader()
-
-        # Try to find the execution prompt file using the loader's plugins directory
-        candidate_content = module_loader.load_module_execution_prompt(module)
-
-        # If module-specific prompt not found and not already trying web, fall back
-        if (candidate_content is None or len(candidate_content) < 100) and module != "web":
-            logger.warning(
-                "Module %s execution prompt not found, falling back to web", module
-            )
-            candidate_content = module_loader.load_module_execution_prompt("web")
-
-        if candidate_content is None or len(candidate_content) < 100:
-            logger.error("No execution prompt found for module %s", module)
-            # Create a minimal prompt instead of failing silently
-            optimized_path.write_text(
-                f"# {module.upper()} Module Execution Prompt\n# No master prompt found - using minimal template\n"
-            )
-            return
-
-        try:
-            optimized_path.write_text(candidate_content)
-            logger.info(
-                "Copied master execution prompt to %s",
-                optimized_path,
-            )
-        except Exception as e:
-            logger.error("Failed to copy execution prompt: %s", e)
 
     def get_unified_memory_path(
         self, server: str, target_name: str, **overrides
@@ -659,131 +627,17 @@ class ConfigManager:
 
         return os.path.join(output_config.base_dir, sanitized_target, "memory")
 
-    def get_mem0_service_config(self, server: str, **overrides) -> Dict[str, Any]:
-        """Get complete Mem0 service configuration."""
+    def get_qdrant_memory_config(self, server: str, **overrides) -> dict[str, Any]:
+        """Return the embedding and Qdrant settings used by semantic memory."""
         server_config = self.get_server_config(server, **overrides)
-        memory_config = server_config.memory
-
-        # Build embedder config based on server type
-        if server == "ollama":
-            embedder_config = {
-                "provider": "ollama",
-                "config": {
-                    "model": memory_config.embedder.model_id,
-                    "ollama_base_url": self.get_ollama_host(),
-                },
-            }
-        elif server == "litellm":
-            prefix, base_model, model_name = self._split_litellm_model_id(
-                memory_config.embedder.model_id
-            )
-            mem0_provider = MEM0_PROVIDER_MAP.get(prefix, "huggingface")
-            embedder_config = {
-                "provider": mem0_provider,
-                "config": {
-                    "model": memory_config.embedder.model_id,
-                    "embedding_dims": memory_config.embedder.dimensions,
-                },
-            }
-            if mem0_provider == "aws_bedrock":
-                embedder_config["config"]["aws_region"] = (
-                    memory_config.embedder.aws_region
-                )
-            elif mem0_provider == "azure_openai":
-                embedder_config["config"]["model"] = model_name
-                embedder_config["config"]["azure_kwargs"] = {
-                    "api_key": self.getenv("AZURE_API_KEY"),
-                    "azure_deployment": model_name,
-                    "azure_endpoint": self.getenv("AZURE_API_BASE"),
-                    "api_version": self.getenv("AZURE_API_VERSION"),
-                }
-            elif mem0_provider == "ollama":
-                embedder_config["config"]["model"] = model_name
-        elif server == "gemini":
-            raise ValueError(f"Unsupported provider: {server}")
-        elif server == "bedrock":
-            embedder_config = {
-                "provider": "aws_bedrock",
-                "config": {
-                    "model": memory_config.embedder.model_id,
-                    "aws_region": memory_config.embedder.aws_region,
-                },
-            }
-        else:
-            raise ValueError(f"Unsupported provider: {server}")
-
-        # Build LLM config based on server type
-        if server == "ollama":
-            llm_config = {
-                "provider": "ollama",
-                "config": {
-                    "model": memory_config.llm.model_id,
-                    "temperature": memory_config.llm.temperature,
-                    "max_tokens": memory_config.llm.max_tokens,
-                    "ollama_base_url": self.get_ollama_host(),
-                },
-            }
-        elif server == "litellm":
-            # Map LiteLLM model prefix to a Mem0-supported provider (e.g., azure_openai, openai, aws_bedrock)
-            prefix, base_model, model_name = self._split_litellm_model_id(
-                memory_config.llm.model_id
-            )
-            mem0_llm_provider = MEM0_PROVIDER_MAP.get(prefix, "huggingface")
-            llm_config = {
-                "provider": mem0_llm_provider,
-                "config": {
-                    "model": memory_config.llm.model_id,
-                    "temperature": memory_config.llm.temperature,
-                    "max_tokens": memory_config.llm.max_tokens,
-                },
-            }
-            if mem0_llm_provider == "azure_openai":
-                llm_config["config"]["model"] = model_name
-                llm_config["config"]["azure_kwargs"] = {
-                    "api_key": self.getenv("AZURE_API_KEY"),
-                    "azure_deployment": model_name,
-                    "azure_endpoint": self.getenv("AZURE_API_BASE"),
-                    "api_version": self.getenv("AZURE_API_VERSION"),
-                }
-            if mem0_llm_provider == "ollama":
-                llm_config["config"]["model"] = model_name
-        elif server == "gemini":
-            raise ValueError(f"Unsupported provider: {server}")
-        elif server == "bedrock":
-            llm_config = {
-                "provider": "aws_bedrock",
-                "config": {
-                    "model": memory_config.llm.model_id,
-                    "temperature": memory_config.llm.temperature,
-                    "max_tokens": memory_config.llm.max_tokens,
-                },
-            }
-        else:
-            raise ValueError(f"Unsupported provider: {server}")
-
-        # Build vector store config
-        opensearch_host = self.getenv("OPENSEARCH_HOST")
-        if opensearch_host:
-            vector_store_config = {
-                "provider": "opensearch",
-                "config": memory_config.vector_store.get_config_for_provider(
-                    "opensearch", host=opensearch_host
-                ),
-            }
-        else:
-            vector_store_config = {
-                "provider": "faiss",
-                "config": memory_config.vector_store.get_config_for_provider("faiss"),
-            }
-
-        vector_store_config["config"]["embedding_model_dims"] = (
-            memory_config.embedder.dimensions
-        )
-
+        embedding = server_config.embedding
         return {
-            "embedder": embedder_config,
-            "llm": llm_config,
-            "vector_store": vector_store_config,
+            "embedding_provider": server,
+            "embedding_model": embedding.model_id,
+            "embedding_dimensions": embedding.dimensions,
+            "aws_region": self.get_default_region(),
+            "ollama_base_url": self.get_ollama_host() if server == "ollama" else None,
+            "collection_name": self.getenv("QDRANT_COLLECTION", "cyber_autoagent_memories"),
         }
 
     def validate_requirements(self, provider: str) -> None:
@@ -797,7 +651,7 @@ class ConfigManager:
 
     def get_context_window_fallbacks(
         self, provider: str
-    ) -> Optional[List[Dict[str, List[str]]]]:
+    ) -> list[dict[str, list[str]]] | None:
         """Optional model fallback mappings for context window resolution."""
         return get_context_window_fallbacks(provider)
 
@@ -813,26 +667,18 @@ class ConfigManager:
         """Get Ollama keep alive."""
         return _get_ollama_keep_alive_from_env(self.env)
 
-    def get_ollama_options(self) -> Dict[str, Any]:
+    def get_ollama_options(self) -> dict[str, Any]:
         """Get Ollama options, such as num_ctx."""
         return _get_ollama_options_from_env(self.env)
 
     def set_environment_variables(self, server: str) -> None:
-        """Set environment variables for backward compatibility."""
+        """Publish the configured embedding model for memory and evaluation."""
         server_config = self.get_server_config(server)
-
-        if server == "ollama":
-            os.environ["MEM0_LLM_PROVIDER"] = server_config.memory.llm.provider.value
-            os.environ["MEM0_LLM_PROVIDER"] = "ollama"
-            os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
-            os.environ["MEM0_EMBEDDING_MODEL"] = server_config.memory.embedder.model_id
-        else:
-            os.environ["MEM0_LLM_MODEL"] = server_config.memory.llm.model_id
-            os.environ["MEM0_EMBEDDING_MODEL"] = server_config.memory.embedder.model_id
+        os.environ["CYBER_AGENT_EMBEDDING_MODEL"] = server_config.embedding.model_id
 
     def _apply_environment_overrides(
-        self, _server: str, defaults: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, _server: str, defaults: dict[str, Any]
+    ) -> dict[str, Any]:
         """Apply environment variable overrides to default configuration."""
         llm_cfg = (
             defaults.get("llm") if isinstance(defaults.get("llm"), LLMConfig) else None
@@ -908,11 +754,6 @@ class ConfigManager:
             swarm_cfg = defaults["swarm_llm"]
             swarm_cfg.model_id = swarm_model
 
-        memory_llm_model = self.getenv("MEM0_LLM_MODEL")
-        if memory_llm_model and isinstance(defaults.get("memory_llm"), MemoryLLMConfig):
-            memory_llm_cfg = defaults["memory_llm"]
-            memory_llm_cfg.model_id = memory_llm_model
-
         # Apply AWS_REGION to region and aws_region fields (but not for ollama)
         if _server not in ("ollama",):
             aws_region = self.getenv("AWS_REGION", "us-east-1")
@@ -923,16 +764,16 @@ class ConfigManager:
 
         return defaults
 
-    def _split_litellm_model_id(self, model_id: str) -> Tuple[str, str, str]:
+    def _split_litellm_model_id(self, model_id: str) -> tuple[str, str, str]:
         """Split LiteLLM model id into provider prefix and base id."""
         return split_litellm_model_id(model_id)
 
-    def _align_litellm_defaults(self, defaults: Dict[str, Any]) -> None:
+    def _align_litellm_defaults(self, defaults: dict[str, Any]) -> None:
         """Ensure LiteLLM configuration components stay aligned with the selected model."""
         align_litellm_defaults(defaults, self.env)
 
     def _get_memory_embedder_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> MemoryEmbeddingConfig:
         """Get memory embedder configuration."""
         embedding_config = defaults["embedding"]
@@ -944,19 +785,19 @@ class ConfigManager:
         )
 
     def _get_memory_llm_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> MemoryLLMConfig:
         """Get memory LLM configuration."""
         return defaults["memory_llm"]
 
     def _get_evaluation_llm_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> ModelConfig:
         """Get evaluation LLM configuration."""
         return defaults["evaluation_llm"]
 
     def _get_evaluation_embedding_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> ModelConfig:
         """Get evaluation embedding configuration."""
         return defaults["embedding"]
@@ -1012,7 +853,7 @@ class ConfigManager:
         return 4096
 
     def _get_swarm_llm_config(
-        self, _server: str, defaults: Dict[str, Any]
+        self, _server: str, defaults: dict[str, Any]
     ) -> LLMConfig:
         """Get swarm LLM configuration with model-aware token limits."""
         swarm_cfg = defaults["swarm_llm"]
@@ -1039,7 +880,7 @@ class ConfigManager:
 
         return swarm_cfg
 
-    def _get_mcp_config(self, _server: str, defaults: Dict[str, Any], overrides: Dict[str, Any]) -> MCPConfig:
+    def _get_mcp_config(self, _server: str, defaults: dict[str, Any], overrides: dict[str, Any]) -> MCPConfig:
         """Get MCP configuration with validation."""
         enabled = overrides.get("mcp_enabled") or os.getenv("CYBER_MCP_ENABLED", "false").lower() == "true"
 
@@ -1058,7 +899,7 @@ class ConfigManager:
                     mcp_id = conn.get("id")
                     if mcp_id is None or len(mcp_id) == 0:
                         raise ValueError("CYBER_MCP_CONNECTIONS requires an id property")
-                    if mcp_id in map(lambda x: x.id, connections):
+                    if mcp_id in (x.id for x in connections):
                         raise ValueError("CYBER_MCP_CONNECTIONS id property must be unique")
 
                     mcp_transport = conn.get("transport")
@@ -1122,7 +963,7 @@ class ConfigManager:
         return MCPConfig(enabled=enabled, connections=connections)
 
     def _get_output_config(
-        self, _server: str, _defaults: Dict[str, Any], overrides: Dict[str, Any]
+        self, _server: str, _defaults: dict[str, Any], overrides: dict[str, Any]
     ) -> OutputConfig:
         """Get output configuration with environment variable and override support."""
         # Get base output directory
@@ -1138,20 +979,14 @@ class ConfigManager:
         # Get operation ID
         operation_id = overrides.get("operation_id")
 
-        # Get feature flags - unified output is now enabled by default
-        enable_unified_output = overrides.get(
-            "enable_unified_output", True
-        ) or self.getenv_bool("CYBER_AGENT_ENABLE_UNIFIED_OUTPUT", True)
-
         return OutputConfig(
             base_dir=base_dir,
             target_name=target_name,
-            enable_unified_output=enable_unified_output,
             operation_id=operation_id,
         )
 
     @lru_cache
-    def get_rate_limit_config(self, provider: Optional[str] = None) -> Optional[RateLimitConfig]:
+    def get_rate_limit_config(self, provider: str | None = None) -> RateLimitConfig | None:
         request_per_minute = self.getenv_float("CYBER_RATE_LIMIT_REQ_PER_MIN")
         tokens_per_minute = self.getenv_float("CYBER_RATE_LIMIT_TOKENS_PER_MIN")
         max_concurrent = self.getenv_int("CYBER_RATE_LIMIT_MAX_CONCURRENT")
@@ -1174,128 +1009,6 @@ class ConfigManager:
         )
 
 
-# Memory utility functions
-
-
-def align_mem0_config(model_id: Optional[str], memory_config: dict[str, Any]) -> None:
-    """Align Mem0 memory configuration provider based on model prefix.
-
-    Ensures memory provider matches the LLM provider for LiteLLM configurations.
-    Respects MEM0_LLM_MODEL override for non-Bedrock providers.
-
-    Args:
-        model_id: Model ID to extract provider from (e.g., "azure/gpt-4")
-        memory_config: Memory configuration dict to update in-place
-    """
-    if not model_id or not isinstance(memory_config, dict):
-        return
-    # Respect MEM0_LLM_MODEL override for non-Bedrock providers only. Bedrock configs
-    # still need alignment when switching to Azure/OpenAI-style models for memory LLM.
-    try:
-        if os.getenv("MEM0_LLM_MODEL"):
-            llm_section = memory_config.get("llm")
-            if isinstance(llm_section, dict):
-                current_provider = (llm_section.get("provider") or "").lower()
-                if current_provider and current_provider not in ("aws_bedrock",):
-                    logger.debug(
-                        "Skipping Mem0 alignment because MEM0_LLM_MODEL override is set and provider=%s",
-                        current_provider,
-                    )
-                    return
-    except Exception:
-        # If any issue occurs, continue with alignment logic
-        pass
-
-    # Split model ID to get provider prefix
-    prefix, remainder, remainder_variant = split_litellm_model_id(model_id)
-    if not prefix:
-        return
-    expected = MEM0_PROVIDER_MAP.get(prefix)
-    if not expected:
-        return
-    llm_section = memory_config.get("llm")
-    if not isinstance(llm_section, dict):
-        return
-    current_provider = (llm_section.get("provider") or "").lower()
-    if current_provider != expected.lower():
-        llm_section["provider"] = expected
-    config_section = llm_section.setdefault("config", {})
-    if expected == "azure_openai" and remainder_variant:
-        config_section["model"] = remainder_variant
-
-
-def check_existing_memories(target: str, _provider: str = "bedrock", operation_id: Optional[str] = None) -> bool:
-    """Check if existing memories exist for a target.
-
-    Checks FAISS, OpenSearch, or Mem0 Platform backends for existing memory.
-
-    Args:
-        target: Target system being assessed
-        _provider: Provider type for configuration (currently unused)
-        operation_id: operation ID
-
-    Returns:
-        True if existing memories are detected, False otherwise
-    """
-    try:
-        # Sanitize target name for consistent path handling
-        target_name = sanitize_target_name(target)
-
-        # Check based on backend type
-        if os.environ.get("MEM0_API_KEY"):
-            # Mem0 Platform - always check (cloud-based)
-            return True
-
-        elif os.environ.get("OPENSEARCH_HOST"):
-            # OpenSearch - always check (remote service)
-            return True
-
-        else:
-            from modules.tools.memory import memory_is_cross_operation
-
-            # FAISS - check if local store exists with actual memory content
-            # Use default relative outputs directory for compatibility with tests
-            output_dir = get_default_base_dir()
-            # Keep relative path for compatibility with tests and local runs
-            # Important: tests expect the sanitized target to include dot preserved (test.com)
-            # Our sanitize_target_name preserves dots, so join directly
-            memory_base_path = os.path.join(output_dir, target_name, "memory")
-            if operation_id and not memory_is_cross_operation():
-                memory_base_path = os.path.join(memory_base_path, operation_id)
-
-            # Check if memory directory exists and has FAISS index files
-            if os.path.exists(memory_base_path):
-                faiss_file = os.path.join(memory_base_path, "mem0.faiss")
-                pkl_file = os.path.join(memory_base_path, "mem0.pkl")
-
-                # In some environments, test fixture paths use underscore in sanitized name
-                alt_memory_base_path = os.path.join(
-                    output_dir, target_name.replace(".", "_"), "memory"
-                )
-                if operation_id and not memory_is_cross_operation():
-                    alt_memory_base_path = os.path.join(alt_memory_base_path, operation_id)
-
-                alt_faiss = os.path.join(alt_memory_base_path, "mem0.faiss")
-                alt_pkl = os.path.join(alt_memory_base_path, "mem0.pkl")
-
-                # Verify both FAISS index files exist with non-zero size
-                # In unit tests, getsize is mocked to 100; treat >0 as meaningful
-                has_faiss = (
-                    os.path.exists(faiss_file) and os.path.getsize(faiss_file) > 0
-                ) or (os.path.exists(alt_faiss) and os.path.getsize(alt_faiss) > 0)
-                has_pkl = (
-                    os.path.exists(pkl_file) and os.path.getsize(pkl_file) > 0
-                ) or (os.path.exists(alt_pkl) and os.path.getsize(alt_pkl) > 0)
-                if has_faiss and has_pkl:
-                    return True
-
-        return False
-
-    except Exception as e:
-        logger.debug("Error checking existing memories: %s", str(e))
-        return False
-
-
 # Global configuration manager instance
 CONFIG_MANAGER_INSTANCE = None
 
@@ -1306,6 +1019,28 @@ def get_config_manager() -> ConfigManager:
     if CONFIG_MANAGER_INSTANCE is None:
         CONFIG_MANAGER_INSTANCE = ConfigManager()
     return CONFIG_MANAGER_INSTANCE
+
+
+def get_report_refinement_cycles(config_manager: ConfigManager | None = None) -> int:
+    """Return the configured non-negative bound for report actor/critic refinement."""
+    manager = config_manager or get_config_manager()
+    try:
+        value = manager.getenv_int("CYBER_REPORT_REFINEMENT_CYCLES", 2)
+    except Exception:
+        return 2
+    if not isinstance(value, int) or isinstance(value, bool):
+        return 2
+    return max(0, value)
+
+
+def get_report_evidence_grouping_enabled(config_manager: ConfigManager | None = None) -> bool:
+    """Return whether report evidence canonicalization is explicitly enabled."""
+    manager = config_manager or get_config_manager()
+    try:
+        enabled = manager.getenv_bool("CYBER_REPORT_EVIDENCE_GROUPING", False)
+    except Exception:
+        return False
+    return enabled if isinstance(enabled, bool) else False
 
 
 def get_model_config(server: str, **overrides) -> ServerConfig:
@@ -1322,7 +1057,7 @@ def get_model_config(server: str, **overrides) -> ServerConfig:
 
 
 # Backward compatibility functions
-def get_default_model_configs(server: str) -> Dict[str, Any]:
+def get_default_model_configs(server: str) -> dict[str, Any]:
     """Get default model configurations (backward compatibility)."""
     config = get_model_config(server)
     return {

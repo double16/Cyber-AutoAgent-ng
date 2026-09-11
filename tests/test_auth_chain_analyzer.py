@@ -3,10 +3,13 @@
 
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
-import modules.operation_plugins.web.tools.auth_chain_analyzer as aca
+import modules.tools.auth_chain_analyzer as aca
+import modules.tools.recon_inventory_manifest as manifest_tool
+from modules.handlers.utils import get_tool_spec
 
 
 class DummyResp:
@@ -43,6 +46,86 @@ def _loads(out: str) -> dict:
     return json.loads(out)
 
 
+def test_auth_chain_coerce_str_handles_none_bytes_text_and_other_values():
+    assert aca._coerce_str(None) == ""
+    assert aca._coerce_str(b"token") == "token"
+    assert aca._coerce_str("token") == "token"
+    assert aca._coerce_str(42) == "42"
+
+
+def test_auth_chain_reuses_cache_for_normalized_target(monkeypatch):
+    calls = {"discover": 0}
+
+    def discover(url):
+        calls["discover"] += 1
+        return []
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", discover)
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+
+    first = _loads(aca.auth_chain_analyzer("example.test", auth_type="auto"))
+    second = _loads(aca.auth_chain_analyzer("https://example.test", auth_type="auto"))
+
+    assert first == second
+    assert calls["discover"] == 1
+
+
+def test_auth_chain_cache_key_includes_auth_type(monkeypatch):
+    calls = {"discover": 0}
+
+    def discover(url):
+        calls["discover"] += 1
+        return []
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", discover)
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+
+    aca.auth_chain_analyzer("https://example.test", auth_type="jwt")
+    aca.auth_chain_analyzer("https://example.test", auth_type="oauth")
+
+    assert calls["discover"] == 2
+
+
+def test_auth_chain_cache_key_includes_analysis_mode(monkeypatch):
+    calls = {"discover": 0}
+
+    def discover(url):
+        calls["discover"] += 1
+        return []
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", discover)
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+
+    aca.auth_chain_analyzer("https://mode-cache.example", analysis_mode="mapping_only")
+    aca.auth_chain_analyzer("https://mode-cache.example", analysis_mode="validation")
+
+    assert calls["discover"] == 2
+
+
 def test_auth_chain_analyzer_adds_scheme_and_emits_json(monkeypatch):
     monkeypatch.setattr(aca, "_discover_auth_endpoints", lambda url: [])
     monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
@@ -59,12 +142,196 @@ def test_auth_chain_analyzer_adds_scheme_and_emits_json(monkeypatch):
     assert j["tool"] == "auth_chain_analyzer"
     assert j["target"] == "https://example.com"
     assert j["auth_type"] == "auto"
+    assert j["analysis_mode"] == "mapping_only"
     assert "timestamp" in j
     assert "summary" in j
     assert "evidence" in j
+    assert "candidate_bypass_surfaces" in j
     assert "findings" in j
     assert "next_steps" in j
     assert "decision" in j
+
+
+def test_auth_chain_tool_schema_advertises_canonical_analysis_modes():
+    tool_spec = get_tool_spec(aca.auth_chain_analyzer)
+    schema = tool_spec["inputSchema"]["json"]
+
+    assert schema["properties"]["analysis_mode"]["enum"] == ["mapping_only", "validation"]
+    assert schema["properties"]["analysis_mode"]["default"] == "mapping_only"
+    assert "validation may perform active" in schema["properties"]["analysis_mode"]["description"]
+    assert "mapping_only is the default" in tool_spec["description"]
+    assert "Do not use validation mode for mapping/recon-only tasks" in tool_spec["description"]
+
+
+def test_mapping_only_records_candidate_surfaces_without_active_validation(monkeypatch):
+    calls = {"active": 0, "recommendations": 0}
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", lambda url: [
+        {"path": "/admin", "full_url": url.rstrip("/") + "/admin", "status": "302", "type": "Administrative"}
+    ])
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [{"type": "Session-based"}])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {
+            "authentication_steps": [{"description": "Authenticate through /login"}],
+            "bypass_opportunities": [{"type": "Administrative Access", "endpoint": "/admin"}],
+            "privilege_escalation": [{"type": "Administrative Access", "endpoint": "/admin"}],
+        },
+    )
+
+    def active_checks(url, results):
+        calls["active"] += 1
+        return [{"technique": "Forced Browsing", "successful": True}]
+
+    def recommendations(results):
+        calls["recommendations"] += 1
+        return [{"id": "VALIDATE", "confidence": 0.9}]
+
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", active_checks)
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", recommendations)
+
+    report = _loads(aca.auth_chain_analyzer("https://mapping-only.example", auth_type="auto"))
+
+    assert calls == {"active": 0, "recommendations": 0}
+    assert report["analysis_mode"] == "mapping_only"
+    assert report["candidate_bypass_surfaces"] == [{"type": "Administrative Access", "endpoint": "/admin"}]
+    assert report["findings"] == []
+    assert report["next_steps"] == []
+    assert report["summary"]["confirmed_exploits"] == 0
+    assert report["decision"]["best_attack_surface"] == "auth_inventory"
+    assert report["decision"]["next_phase"] == "recon"
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("mapping", "mapping_only"),
+        ("map", "mapping_only"),
+        ("bypass-testing", "validation"),
+        ("validate", "validation"),
+    ],
+)
+def test_analysis_mode_aliases_normalize_for_direct_calls(monkeypatch, mode, expected):
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", lambda url: [])
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+
+    report = _loads(aca.auth_chain_analyzer(f"https://{mode}.example", analysis_mode=mode))
+
+    assert report["analysis_mode"] == expected
+
+
+def test_unknown_analysis_mode_is_rejected():
+    with pytest.raises(ValueError, match="analysis_mode"):
+        aca.auth_chain_analyzer("https://unknown-mode.example", analysis_mode="exploit")
+
+
+def test_auth_chain_inventory_manifest_is_additive(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        aca,
+        "_discover_auth_endpoints",
+        lambda url: [{"path": "/login", "full_url": f"{url}/login", "status": 200}],
+    )
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [{"type": "Session-based"}])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {
+            "authentication_steps": [{"description": "Submit credentials"}],
+            "bypass_opportunities": [],
+            "privilege_escalation": [],
+        },
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+    monkeypatch.setattr(
+        manifest_tool,
+        "resolve_inventory_target",
+        lambda target, target_id="target-1": (target, target_id),
+    )
+    captured = {}
+
+    def write_manifest(path, manifest):
+        captured.update({"path": path, "manifest": manifest})
+        return {"path": path, "validation_status": "valid", "item_count": len(manifest["items"])}
+
+    monkeypatch.setattr(manifest_tool, "write_inventory_manifest", write_manifest)
+
+    regular = _loads(aca.auth_chain_analyzer("https://target.test"))
+    additional = _loads(
+        aca.auth_chain_analyzer(
+            "https://target.test",
+            inventory_manifest=str(tmp_path / "auth-inventory.json"),
+        )
+    )
+
+    assert "inventory_manifest" not in regular
+    assert additional["inventory_manifest"]["validation_status"] == "valid"
+    assert captured["path"] == str(tmp_path / "auth-inventory.json")
+    assert {item["kind"] for item in captured["manifest"]["items"]} >= {
+        "endpoint",
+        "service",
+        "technology",
+        "workflow",
+    }
+
+
+def test_auth_chain_error_keeps_requested_manifest_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", Mock(side_effect=RuntimeError("analysis failed")))
+
+    result = _loads(
+        aca.auth_chain_analyzer(
+            "https://target.test",
+            inventory_manifest=str(tmp_path / "auth-inventory.json"),
+        )
+    )
+
+    assert result["error"] == "analysis failed"
+    assert result["inventory_manifest"]["validation_status"] == "error"
+    assert "no inventory manifest was produced" in result["inventory_manifest"]["error"]
+
+
+def test_auth_chain_reports_manifest_validation_failure_without_replacing_analysis(monkeypatch, tmp_path):
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", lambda url: [])
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda url, eps, auth_type: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda url, mechs: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda url, results: {
+            "authentication_steps": [],
+            "bypass_opportunities": [],
+            "privilege_escalation": [],
+        },
+    )
+    monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
+    monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
+    monkeypatch.setattr(
+        manifest_tool,
+        "write_inventory_manifest",
+        Mock(side_effect=ValueError("manifest has no inventory items")),
+    )
+
+    result = _loads(
+        aca.auth_chain_analyzer(
+            "https://target.test",
+            inventory_manifest=str(tmp_path / "auth-inventory.json"),
+        )
+    )
+
+    assert result["summary"]["auth_endpoints"] == 0
+    assert result["inventory_manifest"]["validation_status"] == "error"
+    assert result["inventory_manifest"]["error"] == "manifest has no inventory items"
 
 
 def test_auth_chain_analyzer_handles_bypass_results_none(monkeypatch):
@@ -77,7 +344,7 @@ def test_auth_chain_analyzer_handles_bypass_results_none(monkeypatch):
     monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: None)
     monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
 
-    j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto"))
+    j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto", analysis_mode="validation"))
     assert j["findings"] == []
     assert j["summary"]["confirmed_exploits"] == 0
 
@@ -105,7 +372,7 @@ def test_auth_chain_analyzer_wraps_single_bypass_dict(monkeypatch):
     monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: bypass)
     monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [])
 
-    j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto"))
+    j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto", analysis_mode="validation"))
     assert len(j["findings"]) == 1
     f = j["findings"][0]
     assert f["status"] == "confirmed"
@@ -132,7 +399,7 @@ def test_decision_logic_prefers_bypass_validation_when_opps_exist(monkeypatch):
     monkeypatch.setattr(aca, "_test_advanced_auth_bypasses", lambda url, results: [])
     monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [{"id": "x", "confidence": 0.8}])
 
-    j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto"))
+    j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto", analysis_mode="validation"))
     assert j["decision"]["primary_auth"] == "session"
     assert j["decision"]["best_attack_surface"] == "bypass_validation"
     assert j["decision"]["next_phase"] == "bypass_testing"
@@ -155,6 +422,40 @@ def test_response_set_cookie_lines_prefers_duplicate_headers_get_all():
     )
     lines = aca._response_set_cookie_lines(resp)
     assert lines == ["set-cookie: a=1; Secure", "set-cookie: b=2; HttpOnly"]
+
+
+def test_response_cookie_and_wildcard_helpers_cover_fallback_signals(monkeypatch):
+    getlist_headers = SimpleNamespace(getlist=lambda _name: ["sid=one", "csrf=two"])
+    assert aca._response_set_cookie_lines(DummyResp(raw=SimpleNamespace(headers=getlist_headers))) == [
+        "set-cookie: sid=one",
+        "set-cookie: csrf=two",
+    ]
+    assert aca._response_set_cookie_lines(DummyResp(headers={"Set-Cookie": "sid=one"})) == ["set-cookie: sid=one"]
+
+    monkeypatch.setattr(aca, "_http_request", lambda *_args, **_kwargs: None)
+    assert aca._wildcard_baseline_signature("https://target.test")["code"] is None
+
+    response = DummyResp(
+        status_code=302,
+        headers={"Location": "/login", "Content-Type": "text/html", "Content-Length": "invalid", "ETag": "tag"},
+        raw=DummyRaw(prefix_bytes=b"body"),
+    )
+    monkeypatch.setattr(aca, "_http_request", lambda *_args, **_kwargs: response)
+    signature = aca._wildcard_baseline_signature("https://target.test")
+    assert signature["code"] == "302"
+    assert signature["clen"] is None
+    assert signature["body_prefix"] == b"body".hex()
+
+    baseline = {"code": "200", "clen": 10, "ctype": "text/html", "location": "/login", "etag": "tag"}
+    assert aca._looks_like_wildcard({"status": "404"}, baseline) is False
+    assert aca._looks_like_wildcard({"status": "200", "content_length": "10"}, baseline) is True
+    assert aca._looks_like_wildcard({"status": "200", "ctype": "text/html; charset=utf-8", "location": "/login"}, baseline) is True
+    assert aca._looks_like_wildcard({"status": "200", "ctype": "text/html", "etag": "tag"}, baseline) is True
+    assert aca._looks_like_wildcard({"status": "200", "body_prefix": "same"}, {"code": "200", "body_prefix": "same"}) is True
+    assert aca._looks_like_wildcard(
+        {"status": "200", "word_count": 4, "line_count": 2},
+        {"code": "200", "word_count": 4, "line_count": 2},
+    ) is True
 
 
 def test_analyze_cookie_security_flags_and_modern_none_without_secure():
@@ -217,6 +518,90 @@ Token payload values:
     assert a["claims"]["aud"] == "audience"
     assert a["claims"]["exp"] == "123456"
     assert a["claims"]["iat"] == "111"
+
+
+def test_auth_mechanism_parsers_and_flow_mapping():
+    jwt = aca._analyze_jwt_mechanism(
+        {"path": "/.well-known/jwks.json"},
+        '{"keys":[{"kid":"1"}]}',
+    )
+    assert jwt["properties"]["jwks_endpoint"] is True
+    assert jwt["properties"]["key_count"] == 1
+    assert jwt["confidence"] == "high"
+
+    oauth = aca._analyze_oauth_mechanism(
+        {"path": "/oauth/authorize"},
+        "client_id redirect_uri response_type scope state github microsoft",
+    )
+    assert oauth["description"] == "OAuth authorization endpoint"
+    assert "github" in oauth["properties"]["providers"]
+
+    saml = aca._analyze_saml_mechanism(
+        {"path": "/saml/metadata"},
+        '<xml xmlns="urn"><saml:Issuer entityID="x"><AssertionConsumerService/></xml>',
+    )
+    assert saml["properties"]["xml_metadata"] is True
+    assert saml["confidence"] == "high"
+
+    session = aca._analyze_session_mechanism(
+        {"path": "/login"},
+        '<form><input type="password" name="p"><input name="csrf"></form>',
+    )
+    assert session["properties"]["password_field"] is True
+    assert session["properties"]["csrf_protection"] is True
+
+    assert len(aca._generate_auth_steps({"type": "Session-based"})) == 4
+    assert len(aca._generate_auth_steps({"type": "JWT"})) == 4
+    assert len(aca._generate_auth_steps({"type": "OAuth"})) == 5
+    assert aca._generate_auth_steps({"type": "unknown"}) == []
+
+    flow = aca._map_authentication_flows(
+        "https://t.example",
+        {
+            "auth_mechanisms": [{"type": "Session-based"}, {"type": "JWT"}],
+            "flow_analysis": {
+                "session_management": {
+                    "security_analysis": [
+                        "Missing Secure flag",
+                        "Missing HttpOnly flag",
+                    ]
+                }
+            },
+            "tokens_discovered": [
+                {"type": "JWT", "analysis": {"algorithm": "none", "vulnerabilities": ["weak algorithm"]}}
+            ],
+            "auth_endpoints": [{"type": "Administrative", "path": "/admin"}],
+        },
+    )
+    assert len(flow["authentication_steps"]) == 8
+    assert any(item["type"] == "JWT None Algorithm" for item in flow["bypass_opportunities"])
+    assert flow["privilege_escalation"][0]["endpoint"] == "/admin"
+
+
+def test_jwt_tool_and_top_level_error_paths(monkeypatch):
+    assert aca._coerce_str(None) == ""
+    assert aca._coerce_str(b"\xffabc").endswith("abc")
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "--help" in cmd:
+            return SimpleNamespace(returncode=0, stdout="help")
+        return SimpleNamespace(returncode=0, stdout='[+] alg = "none"\n[+] sub = "u"\nweak algorithm')
+
+    monkeypatch.setattr(aca.subprocess, "run", fake_run)
+    tokens = aca._analyze_jwt_with_tools(
+        "https://t.example",
+        [{"endpoint": "/token", "properties": {"sample_tokens": ["eyJ.a.b"]}}],
+    )
+    assert tokens[0]["analysis"]["algorithm"] == "none"
+    assert tokens[0]["token_preview"].endswith("...")
+
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", Mock(side_effect=RuntimeError("boom")))
+    error = json.loads(aca.auth_chain_analyzer("https://t.example", auth_type="bad"))
+    assert "boom" in error["error"]
+    assert error["auth_type"] == "auto"
 
 
 def test_discover_auth_endpoints_ignores_wildcard_candidates(monkeypatch):
@@ -484,3 +869,120 @@ def test_generate_auth_recommendations_fallback_when_no_signal():
     assert len(steps) == 1
     assert steps[0]["id"] == "BROADEN_DISCOVERY"
     assert steps[0]["priority"] == 1
+
+
+def test_main_forwards_auth_type_and_requested_artifact_paths(monkeypatch, capsys, tmp_path):
+    analyzer = Mock(return_value='{"ok": true}')
+    monkeypatch.setattr(aca, "auth_chain_analyzer", analyzer)
+    output_file = tmp_path / "auth.json"
+    manifest_file = tmp_path / "inventory.json"
+    monkeypatch.setattr("sys.argv", [
+        "auth_chain_analyzer.py",
+        "example.test",
+        "--auth-type", "jwt",
+        "--output-file", str(output_file),
+        "--inventory-manifest", str(manifest_file),
+    ])
+
+    assert aca.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"ok": True}
+    assert analyzer.call_args.args == ("example.test",)
+    assert analyzer.call_args.kwargs == {
+        "auth_type": "jwt",
+        "analysis_mode": "mapping_only",
+        "output_file": str(output_file),
+        "inventory_manifest": str(manifest_file),
+    }
+
+
+def test_auth_endpoint_classifier_covers_token_and_api_variants():
+    assert aca._classify_auth_endpoint("/jwt/token", "") == "JWT"
+    assert aca._classify_auth_endpoint("/oauth/token", "") == "OAuth"
+    assert aca._classify_auth_endpoint("/refresh", "") == "API Authentication"
+    assert aca._classify_auth_endpoint("/api/login", "") == "Session-based"
+    assert aca._classify_auth_endpoint("/api/authenticate", "") == "API Authentication"
+    assert aca._classify_auth_endpoint("/administrator", "") == "Administrative"
+
+
+def test_mechanism_analyzers_cover_negative_and_content_free_paths():
+    jwt = aca._analyze_jwt_mechanism({"path": "/token"}, "")
+    assert jwt["properties"] == {"token_endpoint": True}
+    assert aca._analyze_jwt_mechanism({"path": "/jwks"}, "not-json")["properties"]["jwks_endpoint"] is True
+
+    oauth = aca._analyze_oauth_mechanism({"path": "/callback"}, "")
+    assert oauth["description"] == "OAuth callback endpoint"
+    saml = aca._analyze_saml_mechanism({"path": "/saml"}, "")
+    assert saml["properties"] == {}
+    session = aca._analyze_session_mechanism({"path": "/login"}, "plain text")
+    assert session["properties"] == {}
+
+
+def test_analyze_auth_mechanisms_dispatches_all_types_and_auto_detects(monkeypatch):
+    endpoints = [
+        {"path": "/jwt", "full_url": "https://t/jwt", "type": "JWT"},
+        {"path": "/oauth", "full_url": "https://t/oauth", "type": "OAuth"},
+        {"path": "/saml", "full_url": "https://t/saml", "type": "SAML"},
+        {"path": "/login", "full_url": "https://t/login", "type": "Session-based"},
+    ]
+    monkeypatch.setattr(aca, "_http_request", lambda *args, **kwargs: DummyResp(text="content"))
+    monkeypatch.setattr(aca, "_analyze_jwt_mechanism", lambda endpoint, content: {"type": "JWT"})
+    monkeypatch.setattr(aca, "_analyze_oauth_mechanism", lambda endpoint, content: {"type": "OAuth"})
+    monkeypatch.setattr(aca, "_analyze_saml_mechanism", lambda endpoint, content: {"type": "SAML"})
+    monkeypatch.setattr(aca, "_analyze_session_mechanism", lambda endpoint, content: {"type": "Session-based"})
+    assert {m["type"] for m in aca._analyze_auth_mechanisms("https://t", endpoints, "auto")} == {
+        "JWT", "OAuth", "SAML", "Session-based"
+    }
+
+    responses = iter([DummyResp(text="JWT bearer OAuth client_id session csrf")])
+    monkeypatch.setattr(aca, "_http_request", lambda *args, **kwargs: next(responses))
+    detected = aca._analyze_auth_mechanisms("https://t", [], "auto")
+    assert {m["type"] for m in detected} == {"JWT", "OAuth", "Session-based"}
+
+
+def test_analyze_tokens_handles_cookie_errors_and_jwt_tool_failures(monkeypatch):
+    monkeypatch.setattr(aca, "_http_request", lambda *args, **kwargs: DummyResp(raw=None))
+    monkeypatch.setattr(aca, "_analyze_jwt_with_tools", Mock(return_value=[]))
+    out = aca._analyze_tokens_and_sessions("https://t", [{"type": "JWT"}])
+    assert out == {"tokens": [], "session_info": {"session_cookies": 0, "security_analysis": ["No session cookies identified"]}}
+
+    def failed_run(*args, **kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(aca.subprocess, "run", failed_run)
+    assert aca._analyze_jwt_with_tools("https://t", [{"type": "JWT", "properties": {"sample_tokens": ["x"]}}]) == []
+
+
+def test_map_flows_handles_duplicate_session_and_jwt_hypotheses():
+    flow = aca._map_authentication_flows(
+        "https://t",
+        {
+            "auth_mechanisms": [],
+            "flow_analysis": {"session_management": {"security_analysis": ["Missing Secure flag", "Missing Secure flag"]}},
+            "tokens_discovered": [
+                {"type": "JWT", "analysis": {"algorithm": "HS256", "vulnerabilities": ["weak"]}},
+                {"type": "Cookie", "analysis": {}},
+            ],
+            "auth_endpoints": [],
+        },
+    )
+    assert len(flow["bypass_opportunities"]) == 2
+
+
+def test_recommendations_include_each_signal_and_remove_duplicate_ids():
+    results = {
+        "target": "https://t",
+        "auth_endpoints": [
+            {"path": "/login", "type": "Session-based"},
+            {"path": "/admin", "type": "Administrative"},
+        ],
+        "auth_mechanisms": [{"type": "JWT", "endpoint": "/jwt"}, {"type": "OAuth", "endpoint": "/oauth"}, {"type": "SAML", "endpoint": "/saml"}],
+        "tokens_discovered": [{"type": "Cookie", "name": "sid"}, {"type": "JWT", "token_preview": "eyJ.x.y"}],
+        "vulnerabilities": [],
+        "flow_analysis": {
+            "session_management": {"session_cookies": 1, "security_analysis": ["Missing Secure flag"]},
+            "bypass_opportunities": [{"type": "header", "technique": "header", "description": "check"}],
+            "privilege_escalation": [{"endpoint": "/admin"}],
+        },
+    }
+    ids = [step["id"] for step in aca._generate_auth_recommendations(results)]
+    assert {"MAP_AUTH_ENTRYPOINTS", "ADMIN_ENDPOINT_AUTHZ_MATRIX", "SESSION_REPLAY_AND_FIXATION", "JWT_CLAIM_TAMPER_VERIFY", "OAUTH_REDIRECT_AND_STATE_TESTS", "SAML_ASSERTION_VALIDATION_TESTS", "VERIFY_BYPASS_HYPOTHESIS_1", "PRIV_ESC_TARGETED_VALIDATION"} <= set(ids)

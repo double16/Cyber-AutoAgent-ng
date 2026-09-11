@@ -1,0 +1,40 @@
+import React from 'react';
+import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
+import {describe, expect, it} from '@jest/globals';
+import {
+    ConfigEditorLazy,
+    DocumentationViewerLazy,
+    ModuleSelectorLazy,
+    TerminalLazy,
+} from '../../../src/components/LazyComponents.js';
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+const textFromTree = (node: any): string => {
+    if (node == null || typeof node === 'boolean') return '';
+    if (typeof node === 'string' || typeof node === 'number') return String(node);
+    if (Array.isArray(node)) return node.map(textFromTree).join('');
+    return textFromTree(node.children || []);
+};
+
+describe('LazyComponents', () => {
+    it('renders descriptive suspense fallbacks for lazy component wrappers', () => {
+        let view!: ReactTestRenderer;
+        act(() => {
+            view = TestRenderer.create(
+                <>
+                    <ConfigEditorLazy/>
+                    <DocumentationViewerLazy/>
+                    <ModuleSelectorLazy/>
+                    <TerminalLazy/>
+                </>
+            );
+        });
+
+        const text = textFromTree(view.toJSON());
+        expect(text).toContain('Loading Configuration Editor...');
+        expect(text).toContain('Loading Documentation...');
+        expect(text).toContain('Loading Module Selector...');
+        expect(text).toContain('Loading Terminal...');
+    });
+});

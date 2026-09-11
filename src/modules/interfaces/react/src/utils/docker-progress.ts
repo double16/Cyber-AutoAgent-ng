@@ -241,16 +241,18 @@ if (/Starting\s+/i.test(line)) {
   }
 
   finalize() {
-    const meta = this.computeMeta();
     // Emit a final tidy message if we made progress but the last update was ago
 if (this.pullReady.size > 0) {
-      this.onUpdate(this.summarizePull(), meta);
+    const message = this.summarizePull();
+    this.onUpdate(message, this.computeMeta());
     }
     if (this.created.size > 0) {
-      this.onUpdate(this.summarizeCreate(), meta);
+        const message = this.summarizeCreate();
+        this.onUpdate(message, this.computeMeta());
     }
     if (this.started.size > 0) {
-      this.onUpdate(this.summarizeStart(), meta);
+        const message = this.summarizeStart();
+        this.onUpdate(message, this.computeMeta());
     }
   }
 
@@ -280,4 +282,3 @@ if (this.pullReady.size > 0) {
     };
   }
 }
-

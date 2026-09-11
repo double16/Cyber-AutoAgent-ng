@@ -8,12 +8,7 @@ from modules.config.models.ollama import OllamaModel
 class GetModelTimeoutTests(unittest.TestCase):
     @staticmethod
     def _ollama_model_with_timeout(timeout):
-        if timeout:
-            ollama_client_args = {
-                "timeout": timeout,
-            }
-        else:
-            ollama_client_args = None
+        ollama_client_args = {"timeout": timeout} if timeout else None
 
         return OllamaModel(
             host="http://127.0.0.1:11434",

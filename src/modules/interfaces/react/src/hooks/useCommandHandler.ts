@@ -5,12 +5,12 @@
  * Handles slash commands, natural language processing, and user input routing.
  */
 
-import { useCallback } from 'react';
-import { InputParser, ParsedCommand } from '../services/InputParser.js';
-import { AssessmentFlow } from '../services/AssessmentFlow.js';
-import { OperationManager } from '../services/OperationManager.js';
-import { ApplicationState } from './useApplicationState.js';
-import { loggingService } from '../services/LoggingService.js';
+import {useCallback} from 'react';
+import {InputParser, ParsedCommand} from '../services/InputParser.js';
+import {AssessmentFlow} from '../services/AssessmentFlow.js';
+import {OperationManager} from '../services/OperationManager.js';
+import {ApplicationState} from './useApplicationState.js';
+import {loggingService} from '../services/LoggingService.js';
 
 interface UseCommandHandlerProps {
   commandParser: InputParser;
@@ -126,18 +126,17 @@ export function useCommandHandler({
       } as const;
 
       const configuredModeKey = applicationConfig?.deploymentMode as keyof typeof deploymentModeNames | undefined;
-      let detectedMode: keyof typeof deploymentModeNames | 'unknown' = 'unknown';
+      let detectedMode: keyof typeof deploymentModeNames | 'unknown';
       try {
-        const rawMode = await containerManager.getCurrentMode();
-        detectedMode = rawMode;
+        detectedMode = await containerManager.getCurrentMode();
       } catch {
         detectedMode = 'unknown';
       }
-      
+
       // Format health report
       let healthReport = `\nSYSTEM HEALTH REPORT\n`;
       healthReport += `====================================\n\n`;
-      
+
       // Deployment information  
       const detectedLabel = detectedMode !== 'unknown'
         ? deploymentModeNames[detectedMode]
@@ -229,9 +228,8 @@ export function useCommandHandler({
     const aliases: Record<string, string> = {
       'c': 'config',
       'h': 'help',
-      'm': 'plugins',
-      'mod': 'plugins',
-      'p': 'plugins',
+      'm': 'modules',
+      'mod': 'modules',
       'clr': 'clear',
       'cls': 'clear',
       'q': 'exit',
@@ -252,8 +250,8 @@ export function useCommandHandler({
         } catch {}
         break;
       case 'memory':
-        // Memory functionality requires Python environment with Mem0
-        addOperationHistoryEntry('info', 'Memory operations require running in container mode with Mem0 installed');
+        // Semantic memory is managed by the Python Qdrant integration.
+        addOperationHistoryEntry('info', 'Memory operations are available during Python or container operations');
         break;
       case 'clear':
         handleScreenClear();
@@ -264,14 +262,18 @@ export function useCommandHandler({
 ▣ Cyber-AutoAgent Command Reference
 
 ASSESSMENT COMMANDS:
-  target <url>          - Set assessment target
-  execute [objective]   - Start assessment with optional focus
-  reset                 - Clear current configuration
+  target <url>        - Set assessment target
+  execute [objective] - Start assessment with optional focus
+  continue [operation] [reset-failed | reset-phases <selector>]
+                      - Continue and optionally reset work
+  report [operation]  - Re-generate a report for a previous operation
+  evaluate [operation] - Re-run evaluation for a previous operation
+  reset               - Clear current configuration
 
 SLASH COMMANDS:
   /help                 - Show this help message
   /docs                 - Browse documentation interactively
-  /plugins              - Select security assessment module
+  /modules              - Select security assessment module
   /config               - View current configuration
   /health               - Check system and container status
   /setup                - Setup wizard (initial setup or switch deployments)
@@ -283,6 +285,8 @@ KEYBORD SHORTCUTS:
 EXAMPLES:
   target https://testphp.vulnweb.com
   execute focus on OWASP Top 10
+  continue OP_20260320_101501
+  report OP_20260320_101501
 
 For detailed instructions, use: /docs`;
         addOperationHistoryEntry('info', helpMessage);
@@ -291,19 +295,19 @@ For detailed instructions, use: /docs`;
         // Perform detailed health check using HealthMonitor service
         await handleHealthCheck();
         break;
-      case 'plugins':
+      case 'modules':
         if (args.length > 0) {
           const moduleName = args[0];
           if (commandParser.getAvailableModules().includes(moduleName)) {
             assessmentFlowManager.processUserInput(`module ${moduleName}`);
-            addOperationHistoryEntry('info', `Plugin loaded: ${moduleName}`);
+            addOperationHistoryEntry('info', `Module loaded: ${moduleName}`);
           } else {
-            addOperationHistoryEntry('error', `Unknown plugin: ${moduleName}. Available plugins: ${commandParser.getAvailableModules().join(', ')}`);
+            addOperationHistoryEntry('error', `Unknown module: ${moduleName}. Available modules: ${commandParser.getAvailableModules().join(', ')}`);
           }
         } else {
           openModuleSelector((moduleName) => {
             assessmentFlowManager.processUserInput(`module ${moduleName}`);
-            addOperationHistoryEntry('info', `Plugin loaded: ${moduleName}`);
+            addOperationHistoryEntry('info', `Module loaded: ${moduleName}`);
           });
         }
         break;

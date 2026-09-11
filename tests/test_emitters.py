@@ -9,8 +9,9 @@ Tests for StdoutEventEmitter behavior:
 import io
 import json
 from contextlib import redirect_stdout
+from types import SimpleNamespace
 
-from modules.handlers.events.emitters import StdoutEventEmitter
+from modules.handlers.events.emitters import StdoutEventEmitter, get_emitter
 
 
 def test_emitter_appends_newline_and_serializes_output():
@@ -50,6 +51,25 @@ def test_emitter_deduplicates_non_tool_events():
     assert occurrences == 1, f"Expected 1 event, got {occurrences}"
 
 
+def test_emitter_keeps_actor_critic_cycles_distinct():
+    emitter = StdoutEventEmitter(operation_id="TEST_OP")
+    buf = io.StringIO()
+
+    with redirect_stdout(buf):
+        for cycle in (1, 2):
+            emitter.emit({
+                "type": "workflow_activity",
+                "role": "plan_creator",
+                "status": "started",
+                "attempt": 1,
+                "attempt_total": 1,
+                "cycle": cycle,
+                "cycle_total": 2,
+            })
+
+    assert buf.getvalue().count("__CYBER_EVENT__") == 2
+
+
 def test_emitter_always_json_format():
     """Test that all events always emit JSON format (no CLI mode)."""
     emitter = StdoutEventEmitter(operation_id="TEST_OP")
@@ -57,7 +77,16 @@ def test_emitter_always_json_format():
 
     events = [
         {"type": "operation_init", "operation_id": "test-123", "target": "example.com"},
-        {"type": "step_header", "step": 2, "maxSteps": 5},
+        {
+            "type": "preflight_check",
+            "operation_id": "test-123",
+            "target_id": "target-1",
+            "target": "example.com",
+            "target_type": "network",
+            "status": "pass",
+            "checks": ["resolve"],
+        },
+        {"type": "progress_update", "step": 1, "progressPercent": 40},
         {"type": "reasoning", "content": "Analyzing"},
         {"type": "tool_start", "tool_name": "nmap"},
         {"type": "output", "content": "Test output"},
@@ -91,3 +120,74 @@ def test_emitter_always_json_format():
         assert "type" in parsed
         assert "id" in parsed
         assert "timestamp" in parsed
+
+
+
+def _events(output):
+    parts = output.split("__CYBER_EVENT__")[1:]
+    return [json.loads(part.split("__CYBER_EVENT_END__", 1)[0]) for part in parts]
+
+
+def test_output_event_with_dict_content_is_stringified_before_signature():
+    emitter = StdoutEventEmitter(operation_id="OP")
+    buf = io.StringIO()
+
+    with redirect_stdout(buf):
+        emitter.emit({"type": "output", "content": {"answer": 42}})
+
+    [event] = _events(buf.getvalue())
+    assert event["content"] == '{"answer": 42}'
+
+
+def test_unserializable_non_output_event_is_cleaned_for_json_and_signature():
+    emitter = StdoutEventEmitter(operation_id="OP")
+    buf = io.StringIO()
+    payload = SimpleNamespace(value=("tuple", object()))
+
+    with redirect_stdout(buf):
+        emitter.emit({"type": "metadata", "payload": payload})
+
+    [event] = _events(buf.getvalue())
+    assert event["type"] == "metadata"
+    assert event["payload"]["value"][0] == "tuple"
+    assert isinstance(event["payload"]["value"][1], str)
+
+
+def test_tool_events_are_not_deduplicated():
+    emitter = StdoutEventEmitter(operation_id="OP")
+    buf = io.StringIO()
+
+    with redirect_stdout(buf):
+        emitter.emit({"type": "tool_start", "tool_name": "shell"})
+        emitter.emit({"type": "tool_start", "tool_name": "shell"})
+
+    assert len(_events(buf.getvalue())) == 2
+
+
+def test_get_emitter_uses_environment_and_unknown_transport_falls_back(monkeypatch):
+    monkeypatch.setenv("EVENT_TRANSPORT", "not-real")
+
+    emitter = get_emitter(operation_id="ENV_OP")
+
+    assert isinstance(emitter, StdoutEventEmitter)
+    assert emitter.operation_id == "ENV_OP"
+
+
+def test_event_emitter_signatures_handle_empty_output_and_explicit_stdout_transport():
+    emitter = StdoutEventEmitter(operation_id="OP")
+
+    assert emitter._create_signature({"type": "output", "content": "   "}) == '{"content": "", "type": "output"}'
+
+    explicit = get_emitter(transport="stdout", operation_id="EXPLICIT")
+    assert isinstance(explicit, StdoutEventEmitter)
+    assert explicit.operation_id == "EXPLICIT"
+
+
+def test_event_emitter_cleans_nested_unserializable_values():
+    emitter = StdoutEventEmitter(operation_id="OP")
+    payload = SimpleNamespace(value={"nested": (object(), None, True)})
+
+    cleaned = emitter._clean_event_for_json({"payload": payload})
+
+    assert cleaned["payload"]["value"]["nested"][1:] == [None, True]
+    assert isinstance(cleaned["payload"]["value"]["nested"][0], str)

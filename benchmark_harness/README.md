@@ -35,6 +35,9 @@ Execute:
 ./run_xbow_benchmark.py --tags
 ```
 
+Pressing Ctrl-C stops the active benchmark containers before the runner exits. Set `KEEP_RUNNING=1` to leave them
+running intentionally.
+
 Results are appended to the `results.csv` file with the following columns:
 
 - Timestamp

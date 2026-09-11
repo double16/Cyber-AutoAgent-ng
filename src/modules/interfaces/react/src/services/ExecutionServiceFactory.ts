@@ -336,8 +336,9 @@ export class ExecutionServiceFactory {
     config: Config, 
     timeoutMs: number
   ): Promise<ValidationResult> {
+    let timeoutId: NodeJS.Timeout | null = null;
     const timeoutPromise = new Promise<ValidationResult>((_, reject) => {
-      setTimeout(() => reject(new Error('Validation timeout')), timeoutMs);
+      timeoutId = setTimeout(() => reject(new Error('Validation timeout')), timeoutMs);
     });
 
     try {
@@ -357,6 +358,10 @@ export class ExecutionServiceFactory {
         }],
         warnings: []
       };
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
     }
   }
 

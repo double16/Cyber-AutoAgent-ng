@@ -4,8 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from modules.tools import initialize_browser, browser_get_cookies
-from modules.tools.browser import BrowserService, browser_evaluate_js, close_browser, _BROWSER, get_browser
+from modules.tools import browser_get_cookies, initialize_browser
+from modules.tools.browser import (
+    BrowserService,
+    browser_evaluate_js,
+    close_browser,
+    get_browser,
+)
 
 
 def _stop_browser_loop(browser: BrowserService, timeout: float = 2.0) -> None:

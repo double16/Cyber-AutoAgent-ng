@@ -10,10 +10,8 @@
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import * as pty from 'node-pty';
-import { mockConfiguredState, mockSetupState } from './mock-config.js';
+import { mockConfiguredState } from './mock-config.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const appPath = join(__dirname, '..', 'dist', 'index.js');
@@ -898,8 +896,8 @@ const journeys = [
   },
 
   {
-    name: 'Step Header Format Validation',
-    description: 'Test step header display format during assessment',
+    name: 'Progress Update Format Validation',
+    description: 'Test progress update display format during assessment',
     config: mockConfiguredState,
     steps: async (j) => {
       await j.capture('Main Interface');
@@ -909,7 +907,7 @@ const journeys = [
       await j.input('\r', 'Confirm');
       await j.wait(200);
       
-      await j.input('objective "Test step headers"', 'Set objective');
+      await j.input('objective "Test progress updates"', 'Set objective');
       await j.input('\r', 'Confirm');
       await j.wait(200);
       
@@ -923,14 +921,14 @@ const journeys = [
       await j.input('\r', 'Confirm');
       await j.wait(1500);
       
-      // Capture step headers
-      await j.capture('Step 1 Header');
+      // Capture progress update
+      await j.capture('Progress 1 Header');
       await j.wait(4000);
-      await j.capture('Step 2 Header');
+      await j.capture('Progress 2 Header');
       await j.wait(4000);
-      await j.capture('Step 3 Header');
+      await j.capture('Progress 3 Header');
       await j.wait(4000);
-      await j.capture('Step 4 Header');
+      await j.capture('Progress 4 Header');
       
       // Cancel before completion
       await j.input('\x1B', 'Cancel');

@@ -130,29 +130,25 @@ export const DeploymentRecovery: React.FC<DeploymentRecoveryProps> = ({
     setRecoveryMessage('Recovering full stack deployment...');
     
     // Try to start all containers with docker-compose
-    try {
-      setRecoveryMessage('Starting Docker Compose stack...');
-      await execAsync('docker-compose up -d', { cwd: process.cwd() });
-      
-      setRecoveryMessage('Waiting for services to initialize...');
-      await new Promise(resolve => setTimeout(resolve, 5000));
-      
-      // Check Langfuse health
-      setRecoveryMessage('Verifying Langfuse connection...');
-      const maxRetries = 10;
-      for (let i = 0; i < maxRetries; i++) {
-        try {
-          const response = await fetch('http://localhost:3000/api/public/health');
-          if (response.ok) break;
-        } catch {
-          if (i === maxRetries - 1) {
-            throw new Error('Langfuse service not responding after recovery');
-          }
-          await new Promise(resolve => setTimeout(resolve, 2000));
+    setRecoveryMessage('Starting Docker Compose stack...');
+    await execAsync('docker-compose up -d', { cwd: process.cwd() });
+
+    setRecoveryMessage('Waiting for services to initialize...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Check Langfuse health
+    setRecoveryMessage('Verifying Langfuse connection...');
+    const maxRetries = 10;
+    for (let i = 0; i < maxRetries; i++) {
+      try {
+        const response = await fetch('http://localhost:3000/api/public/health');
+        if (response.ok) break;
+      } catch {
+        if (i === maxRetries - 1) {
+          throw new Error('Langfuse service not responding after recovery');
         }
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
-    } catch (err) {
-      throw new Error('Failed to recover full stack deployment');
     }
   };
 

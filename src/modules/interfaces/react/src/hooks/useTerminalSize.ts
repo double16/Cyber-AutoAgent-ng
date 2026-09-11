@@ -55,7 +55,7 @@ export interface TerminalSize {
  * Hook for managing terminal dimensions with automatic resize handling.
  *
  * Subscribes to terminal resize events and provides both raw and padded dimensions.
- * Handles edge cases like missing stdout properties or extremely small terminals.
+ * Handles edge cases like missing stdout properties or small terminals.
  *
  * @returns TerminalSize object with current dimensions
  */
@@ -84,11 +84,17 @@ export function useTerminalSize(): TerminalSize {
     }
 
     // Subscribe to terminal resize events
-    process.stdout.on('resize', updateSize);
+    // Some non-TTY/test stdout shims do not expose resize event methods.
+    // The initial dimensions are still useful in those environments.
+    if (typeof process.stdout.on === 'function') {
+      process.stdout.on('resize', updateSize);
+    }
 
     // Cleanup listener on unmount
     return () => {
-      process.stdout.off('resize', updateSize);
+      if (typeof process.stdout.off === 'function') {
+        process.stdout.off('resize', updateSize);
+      }
     };
   }, []);
 

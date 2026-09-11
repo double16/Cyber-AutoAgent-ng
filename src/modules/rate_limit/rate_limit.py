@@ -7,13 +7,16 @@ the operation.
 from __future__ import annotations
 
 import asyncio
-import logging
-from datetime import datetime
-import time
-import threading
 import json
+import logging
+import threading
+import time
+import warnings
+from collections.abc import Callable
+from datetime import datetime
+from typing import Any, TypeVar
 
-from typing import Any, Optional, Type, TypeVar, Callable, Dict, List
+import httpx
 
 from modules.config.models.factory import get_model_id_from_model
 from modules.config.types import RateLimitConfig
@@ -195,8 +198,10 @@ class ThreadSafeRateLimiter:
         """
         assert e is not None
 
-        is_retryable = False
-        if isinstance(e, _RetryableError):
+        is_retryable = isinstance(e, httpx.ReadTimeout)
+        if is_retryable:
+            code = "read_timeout"
+        elif isinstance(e, _RetryableError):
             is_retryable = True
             code = e.code
             # Don't call self.report_error a second time
@@ -208,7 +213,7 @@ class ThreadSafeRateLimiter:
                 is_retryable = True
 
         if attempt >= self.cfg.max_retries:
-            logger.error("Rate limit: Max retries reached for code %d", code)
+            logger.error("Rate limit: Max retries reached for %s", code)
             is_retryable = False
 
         if not is_retryable:
@@ -220,6 +225,7 @@ class ThreadSafeRateLimiter:
         # TODO: use an EventEmitter object
         rate_limit_event = {
             "type": "rate_limit",
+            "reason": code,
             "timestamp": datetime.now().isoformat(),
             "needed": delay,
             "wait_total": delay,
@@ -232,7 +238,7 @@ class ThreadSafeRateLimiter:
 
 def _batch_messages_to_strands_messages(
         batch_messages: Any,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     LangChain ChatModel.generate/agenerate signature typically uses:
       generate(messages: list[list[BaseMessage]], ...)
@@ -273,8 +279,65 @@ def _batch_messages_to_strands_messages(
 _ORIG_STREAM_ATTR = "_rl_orig_stream"
 _ORIG_STRUCT_ATTR = "_rl_orig_structured_output"
 
+_UNSUPPORTED_TOOL_CHOICE_WARNING = (
+    "A ToolChoice was provided to this provider but is not supported and will be ignored"
+)
 
-def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimiter) -> None:
+
+def _is_unsupported_tool_choice_warning(warning: warnings.WarningMessage) -> bool:
+    """Return whether a provider warning is the recoverable tool-choice warning."""
+
+    return (
+        warning.category is UserWarning
+        and str(warning.message).strip() == _UNSUPPORTED_TOOL_CHOICE_WARNING
+    )
+
+
+def _handle_provider_warnings(captured: list[warnings.WarningMessage], model: Any) -> None:
+    """Log the known fallback warning and preserve normal handling for other warnings."""
+
+    for warning in captured:
+        if _is_unsupported_tool_choice_warning(warning):
+            logger.warning(
+                "Provider %s emitted recoverable warning: %s; continuing with structured-output fallback",
+                get_model_id_from_model(model),
+                warning.message,
+            )
+            continue
+
+        warnings.showwarning(
+            warning.message,
+            warning.category,
+            warning.filename,
+            warning.lineno,
+            warning.file,
+            warning.line,
+        )
+
+
+async def _iterate_provider_events(provider_stream: Any, model: Any):
+    """Iterate a provider stream while routing recoverable warnings to the logger."""
+
+    iterator = provider_stream.__aiter__()
+    while True:
+        captured: list[warnings.WarningMessage] = []
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                event = await iterator.__anext__()
+                captured = caught
+        except StopAsyncIteration:
+            _handle_provider_warnings(captured, model)
+            return
+        except BaseException:
+            _handle_provider_warnings(captured, model)
+            raise
+
+        _handle_provider_warnings(captured, model)
+        yield event
+
+
+def patch_model_provider_class(model_cls: type[Any], limiter: ThreadSafeRateLimiter) -> None:
     """
     Monkey-patches model_cls.stream and model_cls.structured_output (if present),
     preserving originals on the class.
@@ -295,7 +358,7 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
             self,
             messages,
             tool_specs=None,
-            system_prompt: Optional[str] = None,
+            system_prompt: str | None = None,
             *,
             tool_choice=None,
             system_prompt_content=None,
@@ -312,15 +375,16 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
         for attempt in range(limiter.cfg.max_retries + 1):
             release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
             try:
-                async for event in orig_stream(
-                        self,
-                        messages,
-                        tool_specs,
-                        system_prompt,
-                        tool_choice=tool_choice,
-                        system_prompt_content=system_prompt_content,
-                        **kwargs,
-                ):
+                provider_stream = orig_stream(
+                    self,
+                    messages,
+                    tool_specs,
+                    system_prompt,
+                    tool_choice=tool_choice,
+                    system_prompt_content=system_prompt_content,
+                    **kwargs,
+                )
+                async for event in _iterate_provider_events(provider_stream, self):
                     # Check for 429/503 error event
                     # Strands models typically yield events as dicts or objects
                     # We need to detect if any of them represent an HTTP error
@@ -347,9 +411,9 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
 
         async def structured_output(
                 self,
-                output_model: Type[T],
+                output_model: type[T],
                 prompt,
-                system_prompt: Optional[str] = None,
+                system_prompt: str | None = None,
                 **kwargs: Any,
         ):
             token_cost = estimate_prompt_tokens(
@@ -362,7 +426,10 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
             for attempt in range(limiter.cfg.max_retries + 1):
                 release = await asyncio.to_thread(limiter.acquire_blocking, token_cost)
                 try:
-                    async for event in orig_struct(self, output_model, prompt, system_prompt=system_prompt, **kwargs):
+                    provider_stream = orig_struct(
+                        self, output_model, prompt, system_prompt=system_prompt, **kwargs
+                    )
+                    async for event in _iterate_provider_events(provider_stream, self):
                         if isinstance(event, dict) and event.get("type") == "error":
                             code = event.get("code")
                             if code and limiter.report_error(code):
@@ -377,7 +444,7 @@ def patch_model_provider_class(model_cls: Type[Any], limiter: ThreadSafeRateLimi
         model_cls.structured_output = structured_output  # type: ignore[assignment]
 
 
-def unpatch_model_provider_class(model_cls: Type[Any]) -> None:
+def unpatch_model_provider_class(model_cls: type[Any]) -> None:
     if hasattr(model_cls, _ORIG_STREAM_ATTR):
         model_cls.stream = getattr(model_cls, _ORIG_STREAM_ATTR)  # type: ignore[assignment]
         delattr(model_cls, _ORIG_STREAM_ATTR)
@@ -395,14 +462,14 @@ _ORIG_GENERATE_ATTR = "_rl_orig_generate"
 _ORIG_AGENERATE_ATTR = "_rl_orig_agenerate"
 
 
-def patch_langchain_chat_class_generate(model_cls: Type[Any], limiter: ThreadSafeRateLimiter) -> None:
+def patch_langchain_chat_class_generate(model_cls: type[Any], limiter: ThreadSafeRateLimiter) -> None:
     """
     Monkey-patch LangChain chat model classes (ChatLiteLLM, ChatOllama, ChatBedrock, etc.)
     at the CLASS level, rate-limiting generate/agenerate.
     """
 
     # ---- generate (sync) ----
-    if hasattr(model_cls, "generate") and callable(getattr(model_cls, "generate")):
+    if hasattr(model_cls, "generate") and callable(model_cls.generate):
         if not hasattr(model_cls, _ORIG_GENERATE_ATTR):
             logger.info(
                 "Rate limit: Applying LangChain generate rate limit to %s: %s",
@@ -434,7 +501,7 @@ def patch_langchain_chat_class_generate(model_cls: Type[Any], limiter: ThreadSaf
         logger.warning("Rate limit: %s has no generate() to patch", model_cls)
 
     # ---- agenerate (async) ----
-    if hasattr(model_cls, "agenerate") and callable(getattr(model_cls, "agenerate")):
+    if hasattr(model_cls, "agenerate") and callable(model_cls.agenerate):
         if not hasattr(model_cls, _ORIG_AGENERATE_ATTR):
             logger.info(
                 "Rate limit: Applying LangChain agenerate rate limit to %s: %s",
@@ -469,7 +536,7 @@ def patch_langchain_chat_class_generate(model_cls: Type[Any], limiter: ThreadSaf
         logger.warning("Rate limit: %s has no agenerate() to patch", model_cls)
 
 
-def unpatch_langchain_chat_class_generate(model_cls: Type[Any]) -> None:
+def unpatch_langchain_chat_class_generate(model_cls: type[Any]) -> None:
     if hasattr(model_cls, _ORIG_GENERATE_ATTR):
         model_cls.generate = getattr(model_cls, _ORIG_GENERATE_ATTR)  # type: ignore[assignment]
         delattr(model_cls, _ORIG_GENERATE_ATTR)

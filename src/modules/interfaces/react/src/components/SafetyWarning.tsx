@@ -5,7 +5,7 @@
  * any security assessment execution to ensure proper authorization.
  */
 
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { themeManager } from '../themes/theme-manager.js';
 
@@ -24,13 +24,19 @@ export const SafetyWarning: React.FC<SafetyWarningProps> = React.memo(({
 }) => {
   const theme = themeManager.getCurrentTheme();
   const [acknowledged, setAcknowledged] = useState(false);
+  const acknowledgedRef = useRef(false);
+  const confirmedRef = useRef(false);
+  const cancelledRef = useRef(false);
 
   // In test mode, auto-acknowledge and auto-confirm to bypass manual input
   React.useEffect(() => {
     if (process.env.CYBER_TEST_MODE === 'true') {
       try { console.log('[TEST_EVENT] safety_auto'); } catch {}
+      acknowledgedRef.current = true;
       setAcknowledged(true);
       setTimeout(() => {
+        if (confirmedRef.current) return;
+        confirmedRef.current = true;
         try { console.log('[TEST_EVENT] safety_confirmed'); } catch {}
         onConfirm();
       }, 50);
@@ -39,22 +45,37 @@ export const SafetyWarning: React.FC<SafetyWarningProps> = React.memo(({
 
   useInput((input, key) => {
     if (key.escape) {
+      if (cancelledRef.current || confirmedRef.current) {
+        return;
+      }
+      cancelledRef.current = true;
       onCancel();
       return;
     }
-    
-    if (input === 'y' || input === 'Y') {
-      if (acknowledged) {
+
+    const normalizedInput = input.trim().toLowerCase();
+
+    if (normalizedInput === 'y' || normalizedInput === 'yes') {
+      if (acknowledgedRef.current) {
+        if (confirmedRef.current) {
+          return;
+        }
+        confirmedRef.current = true;
         try { if (process.env.CYBER_TEST_MODE === 'true') { console.log('[TEST_EVENT] safety_confirmed'); } } catch {}
         onConfirm();
       } else {
+        acknowledgedRef.current = true;
         setAcknowledged(true);
         try { if (process.env.CYBER_TEST_MODE === 'true') { console.log('[TEST_EVENT] safety_acknowledged'); } } catch {}
       }
       return;
     }
-    
-    if (input === 'n' || input === 'N') {
+
+    if (normalizedInput === 'n' || normalizedInput === 'no') {
+      if (cancelledRef.current || confirmedRef.current) {
+        return;
+      }
+      cancelledRef.current = true;
       onCancel();
       return;
     }

@@ -3,28 +3,75 @@ Provides a factory for creating agents that applies hooks, conversation_manager,
 for managing context, tool calls, observability, etc.
 """
 import functools
+import inspect
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Any, Dict, Optional
+from typing import Any
 
 from strands import Agent
-from strands.hooks import HookProvider
 from strands.agent.conversation_manager import ConversationManager
+from strands.hooks import HookProvider
 
 from modules.config import get_config_manager
-from modules.config.models import create_strands_model, get_capabilities
+from modules.config.models import (
+    allows_reasoning_content_replay,
+    create_strands_model,
+    get_capabilities,
+)
+from modules.config.models.factory import _resolve_prompt_token_limit
 from modules.config.system import get_logger
 from modules.handlers.conversation_budget import get_shared_conversation_manager
-from modules.config.models.factory import _resolve_prompt_token_limit
-from modules.handlers.utils import get_tool_name
 
 logger = get_logger("Agents.CyberAutoAgent")
 
-_SHARED_AGENT_FACTORY: Optional[Callable[..., "Agent"]] = None
+_SHARED_AGENT_FACTORY: Callable[..., "Agent"] | None = None
 _SHARED_AGENT_FACTORY_LOCK = threading.RLock()
 
 # Guard to ensure we only patch ToolRegistry once
 _TOOLREGISTRY_REGISTER_TOOL_PATCHED = False
+
+
+def model_uses_server_side_state(model: Any) -> bool:
+    """Return True when a Strands model explicitly manages state server-side."""
+    try:
+        stateful = getattr(model, "stateful", False)
+        return stateful is True
+    except Exception:
+        logger.debug("Unable to read model.stateful", exc_info=True)
+        return False
+
+
+def _is_stateful_model_manager_error(exc: Exception) -> bool:
+    return (
+        isinstance(exc, ValueError)
+        and "context_manager and conversation_manager cannot be used with a stateful model"
+        in str(exc)
+    )
+
+
+def create_agent_with_stateful_retry(
+    agent_kwargs: dict[str, Any],
+    model_id: str = "",
+    agent_cls: Any = None,
+) -> "Agent":
+    agent_cls = agent_cls or Agent
+    try:
+        return agent_cls(**agent_kwargs)
+    except ValueError as exc:
+        if _is_stateful_model_manager_error(exc) and (
+            "conversation_manager" in agent_kwargs or "context_manager" in agent_kwargs
+        ):
+            logger.info(
+                "Retrying agent creation without local conversation manager for stateful model '%s'.",
+                model_id,
+            )
+            retry_kwargs = agent_kwargs.copy()
+            retry_kwargs.pop("conversation_manager", None)
+            retry_kwargs.pop("context_manager", None)
+            return create_agent_with_stateful_retry(retry_kwargs, model_id, agent_cls)
+
+        raise
 
 
 def patch_toolregistry_register_tool() -> None:
@@ -59,23 +106,25 @@ def patch_toolregistry_register_tool() -> None:
         if args:
             tool_obj = args[0]
             tool_obj = agent_factory_wrapper(tool_obj)
-            args = (tool_obj,) + args[1:]
+            args = (tool_obj, *args[1:])
         elif "tool" in kwargs:
             kwargs["tool"] = agent_factory_wrapper(kwargs["tool"])
         return original_register_tool(self, *args, **kwargs)
 
-    setattr(patched_register_tool, "__cyber_agent_factory_wrapper_patched__", True)
-    setattr(ToolRegistry, "register_tool", patched_register_tool)
+    patched_register_tool.__cyber_agent_factory_wrapper_patched__ = True
+    ToolRegistry.register_tool = patched_register_tool
     _TOOLREGISTRY_REGISTER_TOOL_PATCHED = True
     logger.debug("Patched ToolRegistry.register_tool to call agent_factory_wrapper")
 
 
 @dataclass
 class AgentFactoryConfig:
-    hooks: Optional[List[HookProvider]] = None
-    callback_handler: Optional[Callable[..., Any]] = None
-    conversation_manager: Optional[ConversationManager] = None
-    base_trace_attributes: Optional[Dict[str, Any]] = None
+    hooks: list[HookProvider] | None = None
+    callback_handler: Callable[..., Any] | None = None
+    callback_handler_factory: Callable[..., Any] | None = None
+    conversation_manager: ConversationManager | None = None
+    context_manager: str | None = None
+    base_trace_attributes: dict[str, Any] | None = None
 
 
 def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
@@ -94,8 +143,8 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
 
     def agent_factory(
             name: str,
-            model_spec: Optional[Dict[str, Any]] = None,
-            agent_type: Optional[str] = None,
+            model_spec: dict[str, Any] | None = None,
+            agent_type: str | None = None,
             **kwargs,
     ) -> "Agent":
         """
@@ -120,7 +169,7 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
         agent_type = agent_type or name
 
         kwargs = kwargs.copy()
-        if not "load_tools_from_directory" in kwargs:
+        if "load_tools_from_directory" not in kwargs:
             kwargs["load_tools_from_directory"] = True
 
         # Configure model provider
@@ -140,8 +189,9 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
                 swarm_model_id = request_model_id
         # TODO: accept model parameters such as temperature
 
+        effective_role = agent_type or name or "swarm_agent"
         try:
-            strands_model = create_strands_model(provider, swarm_model_id, "swarm")
+            strands_model = create_strands_model(provider, swarm_model_id, effective_role)
         except Exception as exc:  # fall back to main LLM if swarm override is misconfigured
             provider_from_spec = provider
             model_from_spec = swarm_model_id
@@ -154,11 +204,15 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
                 exc,
                 swarm_model_id,
             )
-            strands_model = create_strands_model(provider, swarm_model_id, "swarm")
+            strands_model = create_strands_model(provider, swarm_model_id, effective_role)
 
         try:
             caps = get_capabilities(provider, swarm_model_id)
-            allow_reasoning_content = bool(caps.supports_reasoning)
+            allow_reasoning_content = allows_reasoning_content_replay(
+                provider,
+                swarm_model_id,
+                caps,
+            )
         except Exception:
             allow_reasoning_content = False
 
@@ -167,10 +221,6 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
         )
 
         if config.base_trace_attributes is not None:
-            trace_attributes_tool_names = []
-            for tool in kwargs.get("tools", []):
-                trace_attributes_tool_names.append(get_tool_name(tool))
-
             trace_attributes = config.base_trace_attributes | {
                 "langfuse.agent.type": agent_type,
                 "langfuse.capabilities.swarm": False,
@@ -181,9 +231,6 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
                 # Agent identification
                 "agent.name": f"Cyber-{name}",
                 "gen_ai.agent.name": f"Cyber-{name}",
-                # Tool configuration
-                "tools.available": len(trace_attributes_tool_names),
-                "tools.names": trace_attributes_tool_names,
             }
         else:
             trace_attributes = None
@@ -193,23 +240,45 @@ def init_agent_factory(config: AgentFactoryConfig) -> Callable[..., "Agent"]:
             # ToolUseIdHook must be last, so prepend agent specific hooks
             agent_hooks = list(kwargs["hooks"]) + agent_hooks
             kwargs.pop("hooks")
-        if not any([isinstance(h, ToolUseIdHook) for h in agent_hooks]):
+        if not any(isinstance(h, ToolUseIdHook) for h in agent_hooks):
             # we must have this for providers whose toolUseId is broken
             agent_hooks.append(ToolUseIdHook())
 
-        agent = Agent(
-            model=strands_model,
-            name=name,
-            conversation_manager=config.conversation_manager or get_shared_conversation_manager(),
-            callback_handler=config.callback_handler,
-            trace_attributes=trace_attributes,
-            hooks=agent_hooks,
+        callback_handler = config.callback_handler
+        if config.callback_handler_factory is not None:
+            callback_handler = config.callback_handler_factory(
+                name=name,
+                agent_type=agent_type,
+                model_id=swarm_model_id,
+                provider_id=provider,
+            )
+
+        agent_kwargs: dict[str, Any] = {
+            "model": strands_model,
+            "name": name,
+            "callback_handler": callback_handler,
+            "trace_attributes": trace_attributes,
+            "hooks": agent_hooks,
             **kwargs,
-        )
+        }
+        if model_uses_server_side_state(strands_model):
+            logger.info(
+                "Skipping local conversation manager for stateful model '%s'; "
+                "conversation state is managed server-side.",
+                swarm_model_id,
+            )
+        else:
+            agent_kwargs["conversation_manager"] = (
+                config.conversation_manager or get_shared_conversation_manager()
+            )
+            if config.context_manager:
+                agent_kwargs.setdefault("context_manager", config.context_manager)
+
+        agent = create_agent_with_stateful_retry(agent_kwargs, swarm_model_id)
 
         if prompt_token_limit:
-            setattr(agent, "_prompt_token_limit", prompt_token_limit)
-        setattr(agent, "_allow_reasoning_content", allow_reasoning_content)
+            agent._prompt_token_limit = prompt_token_limit
+        agent._allow_reasoning_content = allow_reasoning_content
 
         logger.debug(f"Created agent '{name}'")
 
@@ -231,13 +300,22 @@ def agent_factory_wrapper(agent_tool: Callable) -> Callable:
         return agent_tool
     target_func = agent_tool
     if hasattr(agent_tool, "_tool_func"):
-        target_func = getattr(agent_tool, "_tool_func")
+        target_func = agent_tool._tool_func
 
     with _SHARED_AGENT_FACTORY_LOCK:
         agent_factory = _SHARED_AGENT_FACTORY
     assert agent_factory is not None
 
-    setattr(agent_tool, "agent_factory", agent_factory)
-    setattr(target_func, "agent_factory", agent_factory)
+    agent_tool.agent_factory = agent_factory
+
+    # Strands 1.44 can expose DecoratedFunctionTool._tool_func as a bound
+    # method. Bound method objects do not allow arbitrary attributes, but the
+    # underlying function does.
+    if inspect.ismethod(target_func):
+        target_func = target_func.__func__
+    try:
+        target_func.agent_factory = agent_factory
+    except AttributeError:
+        logger.debug("Unable to attach agent_factory to %r", target_func, exc_info=True)
 
     return agent_tool

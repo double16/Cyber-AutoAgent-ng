@@ -17,7 +17,7 @@
 </p>
 
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue?logo=docker&style=for-the-badge)](https://hub.docker.com/r/cyberautoagent/cyber-autoagent)
-[![Python](https://img.shields.io/badge/Python-3.11+-yellow?logo=python&style=for-the-badge)](https://www.python.org)
+[![Python](https://img.shields.io/badge/Python-3.12+-yellow?logo=python&style=for-the-badge)](https://www.python.org)
 [![AWS Bedrock](https://img.shields.io/badge/AWS-Bedrock-orange?logo=amazon-aws&style=for-the-badge)](https://aws.amazon.com/bedrock/)
 [![Ollama](https://img.shields.io/badge/Ollama-Local_AI-green?style=for-the-badge)](https://ollama.ai)
 [![Discord](https://img.shields.io/badge/Discord-Join_Us-5865F2?logo=discord&logoColor=white&style=for-the-badge)](https://discord.gg/mxtSRhwY)
@@ -117,7 +117,7 @@ docker run --rm --entrypoint python \
   src/cyberautoagent.py \
   --target "http://testphp.vulnweb.com" \
   --objective "Identify SQL injection vulnerabilities" \
-  --iterations 50 \
+  --max-duration 60 \
   --provider litellm
 ```
 
@@ -166,7 +166,7 @@ The compose stack automatically provides:
 
 - **[User Guide](docs/user-instructions.md)** - Complete usage, configuration, and examples
 - **[Agent Architecture](docs/architecture.md)** - Strands framework, tools, and metacognitive design
-- **[Memory System](docs/memory.md)** - Mem0 backends, storage, and evidence management
+- **[Memory System](docs/memory.md)** - Qdrant storage, query scope, and evidence management
 - **[Observability & Evaluation](docs/observability-evaluation.md)** - Langfuse tracing, Ragas metrics, and performance monitoring
 - **[Deployment Guide](docs/deployment.md)** - Docker, Kubernetes, and production setup
 - **[Terminal Frontend](docs/terminal-frontend.md)** - React interface architecture and event protocol
@@ -175,14 +175,18 @@ The compose stack automatically provides:
 ## Features
 
 - **Autonomous Operation**: Conducts security assessments with minimal human intervention
+- **Python-Owned Workflow**: Coordinates short-lived role agents across durable plan phases and tasks
 - **Intelligent Tool Selection**: Automatically chooses appropriate security tools (nmap, sqlmap, nikto, etc.)
 - **Model Context Protocol (MCP)**: MCP support for local and remote, fine-grained tool selection
 - **Natural Language Reasoning**: Uses Strands framework with metacognitive architecture
-- **Evidence Collection**: Automatically stores findings with Mem0 memory (category="finding")
+- **Evidence Collection**: Stores observations and knowledge separately and verifies every finding in its own task
+- **Evidence-Grounded Taxonomy**: Seeds CWE candidates from vulnerability terminology, then enriches confirmed findings
+  with ATT&CK mappings after terminal workflow evidence is available
 - **Meta-Tool Creation**: Dynamically creates custom exploitation tools when needed
 - **Adaptive Execution**: Metacognitive assessment guides strategy based on confidence levels
-- **Assessment Reporting**: Generates comprehensive reports with findings and remediation
-- **Swarm Intelligence**: Deploy parallel agents with shared memory for complex tasks
+- **Assessment Reporting**: Generates comprehensive reports with findings, remediation, and a discovered
+  attack-surface summary grounded in current-operation records
+- **Swarm Intelligence**: Deploy parallel agents as an execution capability for complex tasks
 - **Real-Time Monitoring**: React interface displays live agent reasoning and tool execution
 - **Observability**: Built-in Langfuse tracing and Ragas evaluation metrics
 
@@ -218,7 +222,7 @@ graph LR
 - **Agent Core**: Strands framework orchestration with metacognitive reasoning and tool selection
 - **AI Models**: GenAI tool use models (AWS Bedrock remote) or local models (Ollama)
 - **Security Tools**: Pentesting tools (nmap, sqlmap, nikto, metasploit, custom tools, etc.)
-- **Evidence Storage**: Persistent memory with FAISS, OpenSearch, or Mem0 Platform backends
+- **Evidence Storage**: Qdrant semantic memory plus SQLite workflow state
 - **Observability**: Real-time tracing with Langfuse and automated evaluation with Ragas metrics
 
 ### Assessment Execution Flow
@@ -276,10 +280,10 @@ sequenceDiagram
 
 **Enhanced Execution Pattern:**
 - **Real-time Monitoring**: Every action traced for complete visibility
-- **Intelligent Analysis**: Agent continuously analyzes situation using metacognitive reasoning
+- **Intelligent Analysis**: Focused role agents analyze bounded objectives using metacognitive reasoning
 - **Dynamic Tool Selection**: Chooses appropriate tools based on confidence and findings
 - **Evidence Collection**: All discoveries stored in persistent memory with categorization
-- **Durable Tasks**: Durable tasks in long-term memory, enabling sustained multi-phase operations without losing threads.
+- **Durable Tasks**: Python-managed durable tasks in SQLite, enabling sustained multi-phase operations without losing threads.
 - **Automated Evaluation**: System scores tool selection, evidence quality, and methodology
 - **Report Generation**: Final analysis combines findings with performance metrics
 
@@ -323,16 +327,17 @@ flowchart TD
 
 **Metacognitive Process:**
 
-***Design Philosophy: Meta-Everything Architecture***
+***Design Philosophy: Python-Owned Workflow with Meta Capabilities***
 
-At the core of Cyber-AutoAgent is a "meta-everything" design philosophy that enables dynamic adaptation and scaling:
+At the core of Cyber-AutoAgent is a Python-owned workflow that creates focused agents for planning, prompt building, task execution, task creation, and evaluation. Meta capabilities remain available inside worker execution:
 
-- **Meta-Agent**: The swarm capability deploys dynamic agents as tools, each tailored for specific subtasks with their own reasoning loops
+- **Role Agents**: Short-lived agents work on defined planning, execution, and evaluation objectives
+- **Swarm Capability**: The swarm tool can deploy dynamic agents for complex subtasks
 - **Meta-Tooling**: Through the editor and load_tool capabilities, the agent can create, modify, and deploy new tools at runtime to address novel challenges
 - **Meta-Learning**: Continuous memory storage and retrieval enables cross-session learning, building expertise over time
 - **Meta-Cognition**: Self-reflection and confidence assessment drives strategic decisions about tool selection and approach
 
-This meta-architecture allows the system to transcend static tool limitations and evolve its capabilities during execution.
+This architecture keeps phase/task state deterministic in Python while preserving adaptive reasoning during execution.
 
 **Process Flow:**
 - **Assess Confidence**: Evaluate current knowledge and confidence level (High >80%, Medium 50-80%, Low <50%)
@@ -353,6 +358,10 @@ This meta-architecture allows the system to transcend static tool limitations an
 3. Parallel shell execution - for rapid multi-command reconnaissance
 4. Meta-tool creation - only for novel exploits when existing tools fail
 
+Shell batches never mask command failures. Sequential batches stop at the first failure; parallel batches report an
+error when any command fails while preserving each command's output and exit code. Task executors get one bounded
+diagnostic-and-correction opportunity before the task is marked partially failed.
+
 ## Model Providers
 
 Cyber-AutoAgent supports multiple model providers for maximum flexibility:
@@ -366,7 +375,7 @@ Cyber-AutoAgent supports multiple model providers for maximum flexibility:
 ### Ollama Provider (Local)
 - **Best for**: Privacy, offline use, cost control, local development
 - **Requirements**: Local Ollama installation
-- **Default Models**: `qwen3-coder:30b-a3b-q4_K_M` (LLM), `mxbai-embed-large:latest` (embeddings)
+- **Default Models**: `qwen3.6:27b` (LLM), `mxbai-embed-large:latest` (embeddings)
 - **Benefits**: No cloud dependencies, complete privacy, no API costs
 
 ### LiteLLM Provider (Universal)
@@ -418,7 +427,7 @@ When running with Docker Compose, observability and evaluation are enabled by de
 ```bash
 # Start with observability and evaluation
 cd docker
-docker-compose up -d
+docker compose -f docker-compose.yml up -d
 
 # Access Langfuse UI at http://localhost:3000
 # Login: admin@cyber-autoagent.com / changeme
@@ -465,7 +474,7 @@ LANGFUSE_ADMIN_PASSWORD=strong-password-here
 
 **System Requirements**
 - **Node.js**: Version 24+ required for React CLI interface
-- **Python**: Version 3.11+ for local installation
+- **Python**: Version 3.12+ for local installation
 - **Docker**: For containerized deployments
 - **macOS Users**: Xcode Command Line Tools required
 
@@ -537,7 +546,7 @@ curl -fsSL https://ollama.ai/install.sh | sh
 
 # Start service and pull models
 ollama serve
-ollama pull qwen3-coder:30b-a3b-q4_K_M
+ollama pull qwen3.6:27b
 ollama pull llama3.2:3b
 ollama pull mxbai-embed-large:latest
 ```
@@ -565,13 +574,13 @@ Configure the system to use model `qwen3-coder-30b:32k`. Other models can have t
 The recommended context window is 48KB (49152), 32KB can work. If memory constraints require lower, set the `MAX_TOKENS`
 environment variable to 4096 or slightly lower to allow more input tokens.
 
-As of Feb 2026, these models are known to work with varying degrees of success:
-- qwen3-coder:30b or higher
-- qwen3:4b-instruct or higher
-- qwen2.5-coder:7b-instruct
-- llama3.2:3b
+As of August 2026, these models are known to work with varying degrees of success:
+- qwen3.6:27b
+- gemma4:26b
+- gpt-oss:20b
 - glm-4.7-flash (runs slow)
-- gpt-oss:20b or higher
+- qwen3-coder:30b
+- qwen3:9b
 
 ### Docker Deployment (Recommended)
 
@@ -595,7 +604,7 @@ docker run --rm \
   cyber-autoagent \
   --target "x.x.x.x" \
   --objective "Identify vulnerabilities" \
-  --iterations 50
+  --max-duration 60
 ```
 
 ### Local Installation
@@ -610,7 +619,7 @@ python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install Python dependencies
-pip install -e .
+uv sync
 
 # Install React CLI interface
 cd src/modules/interfaces/react
@@ -626,14 +635,14 @@ cd src/modules/interfaces/react
 npm start
 
 # Or run Python directly
-python src/cyberautoagent.py \
+uv run python src/cyberautoagent.py \
   --target "http://testphp.vulnweb.com" \
   --objective "Comprehensive security assessment"
 ```
 
 ### Data Storage
 
-**Unified Output Structure** (default, enabled by `CYBER_AGENT_ENABLE_UNIFIED_OUTPUT=true`):
+**Unified Output Structure**:
 
 | Data Type  | Location                            |
 |------------|-------------------------------------|
@@ -653,15 +662,17 @@ The unified structure organizes all artifacts under operation-specific directori
 - `--target`: Target system/network to assess (ensure you have permission!)
 
 **Optional Arguments**:
-- `--provider`: Model provider - `bedrock` (AWS), `ollama` (local), or `litellm` (universal), default: bedrock
-- `--module`: Security module - `general` (web apps) or `ctf` (challenges), default: general
-- `--iterations`: Maximum tool executions before stopping, default: 100
-- `--model`: Model ID to use (default: remote=claude-sonnet-4-5, local=qwen3-coder:30b-a3b-q4_K_M)
+- `--provider`: Model provider - `bedrock`, `ollama`, `litellm`, or `gemini`, default: bedrock
+- `--module`: Security module, default: `web`; bundled modules also include `web_recon`, `ctf`, `threat_emulation`, `context_navigator`, and `code_security`
+- `--max-duration`: Optional duration budget in minutes
+- `--max-tokens`: Optional total token budget
+- `--max-cost`: Optional total cost budget
+- `--model`: Model ID to use (default: remote=claude-sonnet-4-5, local=qwen3.6:27b)
 - `--region`: AWS region for Bedrock, default: us-east-1
 - `--verbose`: Enable verbose output with detailed debug logging
 - `--confirmations`: Enable tool confirmation prompts (default: disabled)
-- `--memory-path`: Path to existing memory store to load past memories
-- `--memory-mode`: Memory initialization mode - `auto` (loads existing) or `fresh` (starts new), default: auto
+- `--memory-mode`: Qdrant query scope - `operation` (current operation) or `shared` (same target across operations),
+  default: `operation`
 - `--keep-memory`: Keep memory data after operation completes (default: true)
 - `--output-dir`: Custom output directory (default: ./outputs)
 - `--mcp-enabled`: Enable MCP tools
@@ -690,7 +701,7 @@ python src/cyberautoagent.py \
   --target "http://testphp.vulnweb.com" \
   --objective "Find SQL injection vulnerabilities" \
   --provider bedrock \
-  --iterations 50
+  --max-duration 60
 
 # Using LiteLLM with OpenAI
 export OPENAI_API_KEY=your_key
@@ -716,14 +727,14 @@ docker run --rm \
   cyber-autoagent:dev \
   --target "http://testphp.vulnweb.com" \
   --objective "Comprehensive SQL injection and XSS assessment" \
-  --iterations 25
+  --max-duration 30
 
 # Using MCP
 python src/cyberautoagent.py \
   --target "http://testphp.vulnweb.com" \
   --objective "Find SQL injection vulnerabilities" \
   --provider bedrock \
-  --iterations 50 \
+  --max-duration 60 \
   --mcp-enabled \
   --map-conns '[{"id":"mcp1","transport":"stdio","command":["python","-m","mymcp.server"]}]'
 ```
@@ -761,11 +772,18 @@ The `.env.example` file contains detailed configuration options with inline comm
 
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `AWS_REGION` for remote mode (AWS Bedrock)
 - `OLLAMA_HOST` for local mode (Ollama)
-- `CYBER_AGENT_OUTPUT_DIR`, `CYBER_AGENT_ENABLE_UNIFIED_OUTPUT` for output management
+- `CYBER_AGENT_OUTPUT_DIR` for output management
+- `CYBER_HEAP_MONITOR_AUTOSTART` to control diagnostic heap monitor autostart (`1` by default, set `0` to disable)
 - `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` for observability
-- `MEM0_API_KEY` or `OPENSEARCH_HOST` for memory backends
+- `QDRANT_URL` and optional `QDRANT_API_KEY` for service-backed semantic memory
 
 See `.env.example` for complete configuration options and usage examples.
+
+### Workflow Health Configuration
+
+| Variable                       | Default | Description                                                                                                                   |
+|--------------------------------|---------|-------------------------------------------------------------------------------------------------------------------------------|
+| `CYBER_INCOMPLETE_HEALTH_CAP`  | `0.99`  | Shared score ceiling for incomplete coverage and hard budget-limit termination. Natural health penalties are applied first.   |
 
 ## Development & Testing
 
@@ -783,8 +801,13 @@ uv run pytest tests/test_agent.py
 # Run tests with verbose output
 uv run pytest -v
 
-# Run tests with coverage
-uv run pytest --cov=src
+# Run branch-aware coverage for Python files changed from main
+uv run pytest --cov=src --cov-branch --cov-fail-under=80 --cov-report=json:coverage.json
+uv run python .github/scripts/check-python-coverage-floor.py coverage.json \
+  --min 80 --branch-min 80 --changed-from origin/main
+
+# Run opt-in Ollama taxonomy compatibility tests (requires an installed local model)
+uv run pytest -m ollama tests/test_taxonomy_ollama.py -v
 ```
 
 ## Project Structure
@@ -795,16 +818,17 @@ cyber-autoagent/
 │   ├── cyberautoagent.py      # Main entry point and CLI
 │   └── modules/               # Core modules (modular architecture)
 │       ├── agents/            # Agent implementations
-│       │   ├── cyber_autoagent.py  # Main Strands agent creation
+│       │   ├── cyber_autoagent.py  # Shared runtime resources and Strands agent creation
+│       │   ├── multi_agent_workflow.py # Python-owned workflow controller
 │       │   └── report_agent.py     # Dedicated report generation
 │       ├── config/            # Configuration management
 │       │   ├── manager.py     # Centralized configuration system
 │       │   └── environment.py # Environment setup and validation
 │       ├── tools/             # Tool implementations
-│       │   └── memory.py      # Mem0 memory management tool
+│       │   └── memory.py      # Qdrant semantic memory and SQLite workflow state
 │       ├── prompts/           # Prompt management
-│       │   ├── system.py      # AI prompts and configurations
-│       │   └── manager.py     # Langfuse prompt management
+│       │   ├── factory.py      # Prompt construction and module loading
+│       │   └── templates/      # Base prompt templates
 │       ├── evaluation/        # Evaluation system
 │       │   └── evaluation.py  # Ragas evaluation metrics
 │       ├── handlers/          # Callback handling and UI utilities
@@ -819,7 +843,7 @@ cyber-autoagent/
 │       └── operation_plugins/ # Security modules (web, ctf)
 ├── docs/                      # Documentation
 │   ├── architecture.md       # Agent architecture and tools
-│   ├── memory.md             # Memory system (Mem0 backends)
+│   ├── memory.md             # Qdrant memory system
 │   ├── observability.md      # Langfuse monitoring setup
 │   └── deployment.md         # Docker and production deployment
 ├── docker/                   # Docker deployment files
@@ -829,6 +853,8 @@ cyber-autoagent/
 ├── uv.lock                   # Dependency lockfile
 ├── .env.example              # Environment configuration template
 ├── outputs/                  # Unified output directory (auto-created)
+│   ├── qdrant/               # Shared physical semantic-memory database
+│   ├── cyber_autoagent.db    # Shared application/workflow database
 │   └── <target>/             # Target-specific organization
 │       ├── OP_<id>/          # Operation-specific files
 │       │   ├── security_assessment_report.md   # Final assessment report (when generated)
@@ -836,12 +862,11 @@ cyber-autoagent/
 │       │   ├── cyber_operations.log            # Operation log
 │       │   ├── artifacts/  # Ad-hoc files
 │       │   └── tools/      # Custom tools created by agent
-│       └── memory/         # Cross-operation memory
-│           ├── mem0.faiss
-│           ├── mem0.pkl
-│           └── plan_store.db
 └── README.md                 # This file
 ```
+
+Each running operation uses its `outputs/<target>/OP_<id>/` directory as the process working directory, so relative
+artifact and tool paths stay inside that operation workspace.
 
 ### Key Files
 
@@ -849,12 +874,12 @@ cyber-autoagent/
 |-----------------------------------------|-----------------------------------------------|
 | `src/cyberautoagent.py`                 | CLI entry point, observability setup          |
 | `src/modules/agents/cyber_autoagent.py` | Strands agent creation, model configuration   |
+| `src/modules/agents/multi_agent_workflow.py` | Python-owned phase/task workflow controller |
 | `src/modules/agents/report_agent.py`    | Report generation agent                       |
 | `src/modules/config/manager.py`         | Centralized configuration system              |
-| `src/modules/tools/memory.py`           | Unified Mem0 tool (FAISS/OpenSearch/Platform) |
+| `src/modules/tools/memory.py`           | Qdrant semantic memory and SQLite workflow state |
 | `src/modules/evaluation/evaluation.py`  | Ragas evaluation system                       |
-| `src/modules/prompts/system.py`         | AI prompts and configurations                 |
-| `src/modules/prompts/manager.py`        | Langfuse prompt management                    |
+| `src/modules/prompts/factory.py`        | Prompt construction, module loading, and Langfuse integration |
 | `.env.example`                          | Environment configuration template            |
 | `docker/docker-compose.yml`             | Complete observability stack                  |
 | `docker/Dockerfile`                     | Agent container build                         |
@@ -927,20 +952,14 @@ export AWS_REGION=us-east-1
 
 #### Memory System Errors
 
-> **See [Memory System Guide](docs/memory.md)** for complete backend configuration and troubleshooting
+> **See [Memory System Guide](docs/memory.md)** for complete storage configuration and troubleshooting.
 ```bash
-# For local FAISS backend (default)
-pip install faiss-cpu  # or faiss-gpu for CUDA
+# Filesystem-backed Qdrant is the default
+ls -la ./outputs/qdrant
 
-# For Mem0 Platform
-export MEM0_API_KEY=your_api_key
-
-# For OpenSearch backend
-export OPENSEARCH_HOST=your_host
-export AWS_REGION=your_region
-
-# Check memory storage location
-ls -la ./mem0_faiss_OP_*/
+# Or configure a Qdrant service
+export QDRANT_URL=http://localhost:6333
+export QDRANT_API_KEY=optional_secret
 ```
 
 #### Tool Not Found Errors
@@ -964,7 +983,7 @@ curl http://localhost:11434/api/version
 **Required Models Missing**
 ```bash
 # Pull required models
-ollama pull qwen3-coder:30b-a3b-q4_K_M
+ollama pull qwen3.6:27b
 ollama pull mxbai-embed-large:latest
 
 # List available models
@@ -976,7 +995,7 @@ ollama list
 # Check Ollama is accessible
 curl -X POST http://localhost:11434/api/generate \
   -H "Content-Type: application/json" \
-  -d '{"model": "qwen3-coder:30b-a3b-q4_K_M", "prompt": "test", "stream": false}'
+  -d '{"model": "qwen3.6:27b", "prompt": "test", "stream": false}'
 ```
 
 **Docker Networking (Local Mode)**
@@ -1033,7 +1052,7 @@ This tool is provided for educational and authorized security testing purposes o
 - [Strands Framework](https://github.com/anthropics/strands) - Agent orchestration & swarm intelligence
 - [AWS Bedrock](https://aws.amazon.com/bedrock/) - Foundation model access
 - [Ollama](https://ollama.ai) - Local model inference
-- [Mem0](https://github.com/mem0ai/mem0) - Advanced memory management with FAISS/OpenSearch/Platform backends
+- [Qdrant](https://qdrant.tech/) - Vector database for semantic memory
 ---
 
 **Remember: With great power comes great responsibility. Use this tool ethically and legally.**

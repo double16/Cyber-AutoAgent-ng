@@ -8,7 +8,10 @@ export interface AssessmentParams {
   objective?: string;
   availableTools?: string[];
   continueOperation?: string | boolean;
+  resetFailed?: boolean;
+  resetPhases?: string;
   reportOnly?: string | boolean;
+  evaluateOnly?: string | boolean;
 }
 
 export interface AssessmentState {

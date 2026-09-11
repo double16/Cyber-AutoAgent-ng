@@ -12,7 +12,7 @@
  * - Event-driven architecture support
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import { useStdout } from 'ink';
 import ansiEscapes from 'ansi-escapes';
 

@@ -168,7 +168,7 @@ export class DeploymentDetector {
       if (match) {
         const major = parseInt(match[1]);
         const minor = parseInt(match[2]);
-        status.details.pythonReady = major >= 3 && minor >= 9; // Reasonable minimum (Python 3.9+)
+        status.details.pythonReady = major >= 3 && minor >= 12; // Project minimum is Python 3.12
       }
     } catch {
       status.details.pythonReady = false;

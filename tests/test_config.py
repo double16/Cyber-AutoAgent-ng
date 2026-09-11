@@ -4,19 +4,27 @@ Unit tests for the centralized model configuration system.
 """
 
 import os
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 # Import the modules we're testing
 from modules.config.manager import (
+    MAX_TOKENS_REASONING_LIMIT,
     ConfigManager,
     get_config_manager,
     get_default_model_configs,
     get_model_config,
-    get_ollama_host, MAX_TOKENS_REASONING_LIMIT,
+    get_ollama_host,
+    get_report_evidence_grouping_enabled,
+    get_report_refinement_cycles,
 )
+from modules.config.system import validation
 from modules.config.types import (
+    DEFAULT_TEMPERATURE_EXECUTION,
+    DEFAULT_TEMPERATURE_SWARM,
+    BudgetConfig,
     EmbeddingConfig,
     EvaluationConfig,
     LLMConfig,
@@ -27,10 +35,10 @@ from modules.config.types import (
     ModelConfig,
     ModelProvider,
     OutputConfig,
+    SDKConfig,
     ServerConfig,
     SwarmConfig,
     get_default_base_dir,
-    DEFAULT_TEMPERATURE_EXECUTION, DEFAULT_TEMPERATURE_SWARM,
 )
 from modules.tools.mcp import resolve_env_vars_in_dict, resolve_env_vars_in_list
 
@@ -172,30 +180,40 @@ class TestMemoryVectorStoreConfig:
     def test_default_provider(self):
         """Test default vector store configuration."""
         config = MemoryVectorStoreConfig()
-        assert config.provider == "faiss"
-        assert "embedding_model_dims" in config.faiss_config
-        assert config.faiss_config["embedding_model_dims"] == 1024
+        assert config.provider == "qdrant"
+        assert config.qdrant_config["embedding_model_dims"] == 1024
 
-    def test_opensearch_config(self):
-        """Test OpenSearch configuration."""
+    def test_qdrant_config(self):
+        """Test Qdrant configuration."""
         config = MemoryVectorStoreConfig()
-        opensearch_config = config.get_config_for_provider("opensearch")
-        assert opensearch_config["port"] == 443
-        assert opensearch_config["collection_name"] == "mem0_memories"
-        assert opensearch_config["embedding_model_dims"] == 1024
-
-    def test_faiss_config(self):
-        """Test FAISS configuration."""
-        config = MemoryVectorStoreConfig()
-        faiss_config = config.get_config_for_provider("faiss")
-        assert faiss_config["embedding_model_dims"] == 1024
+        qdrant_config = config.get_config_for_provider("qdrant")
+        assert qdrant_config["collection_name"] == "cyber_autoagent_memories"
+        assert qdrant_config["embedding_model_dims"] == 1024
 
     def test_config_overrides(self):
         """Test configuration overrides."""
         config = MemoryVectorStoreConfig()
-        opensearch_config = config.get_config_for_provider("opensearch", host="test-host")
-        assert opensearch_config["host"] == "test-host"
-        assert opensearch_config["port"] == 443  # Default preserved
+        qdrant_config = config.get_config_for_provider("qdrant", collection_name="custom")
+        assert qdrant_config["collection_name"] == "custom"
+        assert qdrant_config["embedding_model_dims"] == 1024
+
+    def test_non_qdrant_provider_returns_only_overrides(self):
+        assert MemoryVectorStoreConfig().get_config_for_provider("other", endpoint="memory.test") == {
+            "endpoint": "memory.test"
+        }
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"max_duration_minutes": 0}, "max_duration_minutes"),
+        ({"max_duration_minutes": 1, "max_tokens": 0}, "max_tokens"),
+        ({"max_duration_minutes": 1, "max_cost": 0}, "max_cost"),
+    ],
+)
+def test_budget_config_rejects_non_positive_limits(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        BudgetConfig(**kwargs)
 
 
 class TestConfigManager:
@@ -220,7 +238,7 @@ class TestConfigManager:
 
             assert config.server_type == "ollama"
             assert config.llm.provider == ModelProvider.OLLAMA
-            assert config.llm.model_id == "qwen3-coder:30b-a3b-q4_K_M"
+            assert config.llm.model_id == "qwen3.6:27b"
             assert config.embedding.provider == ModelProvider.OLLAMA
             assert config.embedding.model_id == "mxbai-embed-large:latest"
             assert config.region == "ollama"
@@ -262,7 +280,7 @@ class TestConfigManager:
 
         assert isinstance(config, LLMConfig)
         assert config.provider == ModelProvider.OLLAMA
-        assert config.model_id == "qwen3-coder:30b-a3b-q4_K_M"
+        assert config.model_id == "qwen3.6:27b"
 
     def test_get_embedding_config(self):
         """Test getting embedding configuration."""
@@ -294,15 +312,43 @@ class TestConfigManager:
         assert config.llm.provider == ModelProvider.OLLAMA
         assert config.embedding.provider == ModelProvider.OLLAMA
 
+    def test_get_sdk_config_uses_default_streaming_mode(self):
+        """Test SDK streaming defaults to the dataclass default."""
+        with patch.dict(os.environ, {}, clear=True):
+            self.config_manager._config_cache = {}
+
+            config = self.config_manager.get_sdk_config("ollama")
+
+        assert isinstance(config, SDKConfig)
+        assert config.enable_streaming is False
+
+    @patch.dict(os.environ, {"CYBER_SDK_ENABLE_STREAMING": "true"}, clear=True)
+    def test_get_sdk_config_reads_streaming_mode_from_environment(self):
+        """Test SDK streaming can be enabled through environment config."""
+        self.config_manager._config_cache = {}
+
+        config = self.config_manager.get_sdk_config("ollama")
+
+        assert config.enable_streaming is True
+
+    @patch.dict(os.environ, {"CYBER_SDK_ENABLE_STREAMING": "true"}, clear=True)
+    def test_get_sdk_config_streaming_override_takes_precedence(self):
+        """Test explicit SDK streaming overrides take precedence over environment config."""
+        self.config_manager._config_cache = {}
+
+        config = self.config_manager.get_sdk_config("ollama", enable_streaming=False)
+
+        assert config.enable_streaming is False
+
     def test_get_swarm_config(self):
         """Test getting swarm configuration."""
         # Test local swarm config
         local_config = self.config_manager.get_swarm_config("ollama")
         assert isinstance(local_config, SwarmConfig)
         assert local_config.llm.provider == ModelProvider.OLLAMA
-        assert local_config.llm.model_id == "qwen3-coder:30b-a3b-q4_K_M"
+        assert local_config.llm.model_id == "qwen3.6:27b"
         assert local_config.llm.temperature == DEFAULT_TEMPERATURE_SWARM
-        assert local_config.llm.max_tokens == 3072
+        assert local_config.llm.max_tokens == 16000
 
         # Test remote swarm config
         remote_config = self.config_manager.get_swarm_config("bedrock")
@@ -310,69 +356,22 @@ class TestConfigManager:
         assert remote_config.llm.provider == ModelProvider.AWS_BEDROCK
         assert "claude" in remote_config.llm.model_id
         assert remote_config.llm.temperature == DEFAULT_TEMPERATURE_SWARM
-        assert remote_config.llm.max_tokens == 5000
+        assert remote_config.llm.max_tokens == 16_000
 
-    def test_get_mem0_service_config(self):
-        """Test getting Mem0 service configuration."""
-        # Test local config
+    def test_get_qdrant_memory_config(self):
+        """Test Qdrant embedding configuration for local and remote providers."""
         with patch.dict(os.environ, {}, clear=True):
-            # Clear cache to ensure fresh config
             self.config_manager._config_cache = {}
-            local_config = self.config_manager.get_mem0_service_config("ollama")
-            assert isinstance(local_config, dict)
-            assert "embedder" in local_config
-            assert "llm" in local_config
-            assert "vector_store" in local_config
+            local_config = self.config_manager.get_qdrant_memory_config("ollama")
+            assert local_config["embedding_provider"] == "ollama"
+            assert local_config["embedding_model"] == "mxbai-embed-large:latest"
+            assert local_config["ollama_base_url"].startswith("http://")
 
-            # Test embedder config
-            embedder_config = local_config["embedder"]
-            assert embedder_config["provider"] == "ollama"
-            assert embedder_config["config"]["model"] == "mxbai-embed-large:latest"
-
-            # Test LLM config
-            llm_config = local_config["llm"]
-            assert llm_config["provider"] == "ollama"
-            assert llm_config["config"]["model"] == "llama3.2:3b"
-            assert llm_config["config"]["temperature"] == 0.1
-            assert llm_config["config"]["max_tokens"] == 2000
-
-            # Test vector store config (should default to FAISS for local)
-            vector_store_config = local_config["vector_store"]
-            assert vector_store_config["provider"] == "faiss"
-            assert vector_store_config["config"]["embedding_model_dims"] == 1024
-
-            # Test remote config
-            remote_config = self.config_manager.get_mem0_service_config("bedrock")
-            assert isinstance(remote_config, dict)
-
-            # Test embedder config
-            embedder_config = remote_config["embedder"]
-            assert embedder_config["provider"] == "aws_bedrock"
-            assert "titan-embed" in embedder_config["config"]["model"]
-            assert embedder_config["config"]["aws_region"] == "us-east-1"
-
-            # Test LLM config
-            llm_config = remote_config["llm"]
-            assert llm_config["provider"] == "aws_bedrock"
-            assert "claude" in llm_config["config"]["model"]
-            assert llm_config["config"]["temperature"] == 0.1
-            assert llm_config["config"]["max_tokens"] == 2000
-            # aws_region is no longer passed to LLM config; Mem0 infers region from environment
-
-    @patch.dict(os.environ, {"OPENSEARCH_HOST": "test-opensearch.com"})
-    def test_get_mem0_service_config_with_opensearch(self):
-        """Test Mem0 service configuration with OpenSearch."""
-        # Clear cache to ensure fresh config
-        self.config_manager._config_cache = {}
-
-        config = self.config_manager.get_mem0_service_config("bedrock")
-
-        # Should use OpenSearch when OPENSEARCH_HOST is set
-        vector_store_config = config["vector_store"]
-        assert vector_store_config["provider"] == "opensearch"
-        assert vector_store_config["config"]["host"] == "test-opensearch.com"
-        assert vector_store_config["config"]["port"] == 443
-        assert vector_store_config["config"]["collection_name"] == "mem0_memories"
+            remote_config = self.config_manager.get_qdrant_memory_config("bedrock")
+            assert remote_config["embedding_provider"] == "bedrock"
+            assert "titan-embed" in remote_config["embedding_model"]
+            assert remote_config["aws_region"] == "us-east-1"
+            assert remote_config["collection_name"] == "cyber_autoagent_memories"
 
     @patch.dict(os.environ, {"CYBER_AGENT_LLM_MODEL": "custom-llm"})
     def test_environment_variable_override(self):
@@ -698,17 +697,14 @@ class TestConfigManager:
         with patch.dict(os.environ, {}, clear=True):
             self.config_manager.set_environment_variables("ollama")
 
-            assert os.environ["MEM0_LLM_PROVIDER"] == "ollama"
-            assert os.environ["MEM0_LLM_MODEL"] == "llama3.2:3b"
-            assert os.environ["MEM0_EMBEDDING_MODEL"] == "mxbai-embed-large:latest"
+            assert os.environ["CYBER_AGENT_EMBEDDING_MODEL"] == "mxbai-embed-large:latest"
 
     def test_set_environment_variables_remote(self):
         """Test setting environment variables for remote mode."""
         with patch.dict(os.environ, {}, clear=True):
             self.config_manager.set_environment_variables("bedrock")
 
-            assert "claude-sonnet-4-5" in os.environ["MEM0_LLM_MODEL"]
-            assert "titan-embed" in os.environ["MEM0_EMBEDDING_MODEL"]
+            assert "titan-embed" in os.environ["CYBER_AGENT_EMBEDDING_MODEL"]
 
     @patch.dict(os.environ, {"CYBER_MCP_ENABLED": "false"})
     def test_get_mcp_config_disabled(self):
@@ -980,6 +976,22 @@ class TestGlobalFunctions:
         manager2 = get_config_manager()
         assert manager1 is manager2
 
+    def test_get_report_refinement_cycles_clamps_invalid_values(self):
+        manager = MagicMock()
+        manager.getenv_int.side_effect = [3, -1, True]
+
+        assert get_report_refinement_cycles(manager) == 3
+        assert get_report_refinement_cycles(manager) == 0
+        assert get_report_refinement_cycles(manager) == 2
+
+    def test_get_report_evidence_grouping_enabled_defaults_to_false(self):
+        manager = MagicMock()
+        manager.getenv_bool.side_effect = [False, True, "invalid"]
+
+        assert get_report_evidence_grouping_enabled(manager) is False
+        assert get_report_evidence_grouping_enabled(manager) is True
+        assert get_report_evidence_grouping_enabled(manager) is False
+
     def test_get_model_config(self):
         """Test get_model_config function."""
         config = get_model_config("ollama")
@@ -994,7 +1006,7 @@ class TestGlobalFunctions:
         assert "llm_model" in config
         assert "embedding_model" in config
         assert "embedding_dims" in config
-        assert config["llm_model"] == "qwen3-coder:30b-a3b-q4_K_M"
+        assert config["llm_model"] == "qwen3.6:27b"
         assert config["embedding_model"] == "mxbai-embed-large:latest"
         assert config["embedding_dims"] == 1024
 
@@ -1044,10 +1056,8 @@ class TestEnvironmentIntegration:
             assert memory_config.llm.aws_region == "eu-west-1"
             assert memory_config.embedder.aws_region == "eu-west-1"
 
-            # Test mem0 service config uses centralized region
-            mem0_config = config_manager.get_mem0_service_config("bedrock")
-            # LLM no longer includes aws_region; region is inferred from environment
-            assert mem0_config["embedder"]["config"]["aws_region"] == "eu-west-1"
+            qdrant_config = config_manager.get_qdrant_memory_config("bedrock")
+            assert qdrant_config["aws_region"] == "eu-west-1"
 
         # Test without environment variable (should use default)
         with patch.dict(os.environ, {}, clear=True):
@@ -1083,7 +1093,7 @@ class TestEnvironmentIntegration:
             "us.anthropic.claude-opus-4-20250514-v1:0", "us-east-1"
         )
         assert thinking_config["temperature"] == 1.0
-        assert thinking_config["max_tokens"] == 10_000
+        assert thinking_config["max_tokens"] == 32_000
         assert "additional_request_fields" in thinking_config
         assert "anthropic_beta" in thinking_config["additional_request_fields"]
         assert "thinking" in thinking_config["additional_request_fields"]
@@ -1099,27 +1109,19 @@ class TestEnvironmentIntegration:
         # Test local model configuration
         local_config = config_manager.get_local_model_config("llama3.2:3b", "ollama")
         assert local_config["temperature"] == DEFAULT_TEMPERATURE_EXECUTION
-        assert local_config["max_tokens"] == 4096
+        assert local_config["max_tokens"] == 8192
         assert "host" in local_config
         assert local_config["host"].startswith("http://")
 
-    def test_centralized_mem0_service_config_local_vs_remote(self):
-        """Test that local and remote Mem0 configurations are properly differentiated."""
+    def test_centralized_qdrant_memory_config_local_vs_remote(self):
+        """Test local and remote embedding configuration for Qdrant."""
         config_manager = ConfigManager()
 
-        # Test local config has ollama_base_url
-        local_config = config_manager.get_mem0_service_config("ollama")
-        assert local_config["embedder"]["config"]["ollama_base_url"].startswith("http://")
-        assert local_config["llm"]["config"]["ollama_base_url"].startswith("http://")
-        assert "aws_region" not in local_config["embedder"]["config"]
-        assert "aws_region" not in local_config["llm"]["config"]
-
-        # Test remote config region handling
-        remote_config = config_manager.get_mem0_service_config("bedrock")
-        assert "aws_region" in remote_config["embedder"]["config"]
-        assert "aws_region" not in remote_config["llm"]["config"]
-        assert "ollama_base_url" not in remote_config["embedder"]["config"]
-        assert "ollama_base_url" not in remote_config["llm"]["config"]
+        local_config = config_manager.get_qdrant_memory_config("ollama")
+        assert local_config["ollama_base_url"].startswith("http://")
+        remote_config = config_manager.get_qdrant_memory_config("bedrock")
+        assert remote_config["ollama_base_url"] is None
+        assert remote_config["aws_region"]
 
 
 class TestOutputConfig:
@@ -1130,18 +1132,16 @@ class TestOutputConfig:
         config = OutputConfig()
         assert config.base_dir == get_default_base_dir()
         assert config.target_name is None
-        assert config.enable_unified_output is True
+        assert not hasattr(config, "enable_unified_output")
 
     def test_custom_output_config(self):
         """Test custom output configuration."""
         config = OutputConfig(
             base_dir="/tmp/custom_outputs",
             target_name="test_target",
-            enable_unified_output=True,
         )
         assert config.base_dir == "/tmp/custom_outputs"
         assert config.target_name == "test_target"
-        assert config.enable_unified_output is True
 
     def test_get_default_base_dir_project_root(self):
         """Test get_default_base_dir when in project root."""
@@ -1156,6 +1156,21 @@ class TestOutputConfig:
         project_root = os.path.dirname(base_dir)
         assert os.path.exists(os.path.join(project_root, "pyproject.toml"))
 
+    def test_get_default_base_dir_prefers_environment_override(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("CYBER_AGENT_OUTPUT_DIR", str(tmp_path / "configured-output"))
+
+        assert get_default_base_dir() == str(tmp_path / "configured-output")
+
+    def test_get_default_base_dir_walks_to_parent_project_root(self, monkeypatch, tmp_path):
+        project_root = tmp_path / "project"
+        child = project_root / "nested" / "working"
+        child.mkdir(parents=True)
+        (project_root / "pyproject.toml").touch()
+        monkeypatch.delenv("CYBER_AGENT_OUTPUT_DIR", raising=False)
+        monkeypatch.chdir(child)
+
+        assert get_default_base_dir() == str(project_root / "outputs")
+
 
 class TestOutputConfigIntegration:
     """Test output configuration integration with ConfigManager."""
@@ -1168,7 +1183,7 @@ class TestOutputConfigIntegration:
         assert isinstance(output_config, OutputConfig)
         assert output_config.base_dir == get_default_base_dir()
         assert output_config.target_name is None
-        assert output_config.enable_unified_output is True
+        assert not hasattr(output_config, "enable_unified_output")
 
     def test_get_output_config_with_overrides(self):
         """Test getting output configuration with overrides."""
@@ -1177,18 +1192,16 @@ class TestOutputConfigIntegration:
             "bedrock",
             output_dir="/tmp/custom",
             target_name="test_target",
-            enable_unified_output=True,
         )
 
         assert output_config.base_dir == "/tmp/custom"
         assert output_config.target_name == "test_target"
-        assert output_config.enable_unified_output is True
 
     @patch.dict(
         os.environ,
         {
             "CYBER_AGENT_OUTPUT_DIR": "/env/outputs",
-            "CYBER_AGENT_ENABLE_UNIFIED_OUTPUT": "true",
+            "CYBER_AGENT_ENABLE_UNIFIED_OUTPUT": "false",
         },
     )
     def test_get_output_config_with_env_vars(self):
@@ -1197,7 +1210,6 @@ class TestOutputConfigIntegration:
         output_config = config_manager.get_output_config("bedrock")
 
         assert output_config.base_dir == "/env/outputs"
-        assert output_config.enable_unified_output is True
 
     def test_output_config_in_server_config(self):
         """Test that output configuration is included in server configuration."""
@@ -1216,3 +1228,191 @@ class TestOutputConfigIntegration:
 
             # Override should take precedence over environment variable
             assert output_config.base_dir == "/override/outputs"
+
+
+def test_validation_provider_and_litellm_paths(monkeypatch):
+    env = SimpleNamespace(
+        get=lambda name, default=None: {
+            "OPENAI_API_KEY": "sk",
+            "ANTHROPIC_API_KEY": None,
+            "AWS_ACCESS_KEY_ID": "id",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "GEMINI_API_KEY": "g",
+        }.get(name, default)
+    )
+    monkeypatch.setattr(validation.requests, "get", Mock(return_value=SimpleNamespace(status_code=200)))
+    monkeypatch.setattr(
+        validation.ollama,
+        "Client",
+        lambda host: SimpleNamespace(list=Mock(return_value={"models": [{"model": "llama"}]})),
+    )
+    validation.validate_provider("bedrock", env, region="us-east-1")
+    validation.validate_provider("ollama", env, ollama_host="http://localhost:11434")
+    validation.validate_provider("litellm", env)
+    validation.validate_provider("gemini", env)
+    with pytest.raises(ValueError):
+        validation.validate_provider("bad", env)
+
+    validation.validate_litellm_requirements(env, "openai/gpt-4o")
+
+    missing = SimpleNamespace(get=lambda _name, default=None: default)
+    with pytest.raises(EnvironmentError):
+        validation.validate_litellm_requirements(missing, "openai/gpt-4o")
+    with pytest.raises(EnvironmentError):
+        validation.validate_gemini_requirements(missing)
+
+
+def test_validation_aws_and_ollama_requirements(monkeypatch):
+    env = SimpleNamespace(
+        get=lambda name, default=None: {
+            "AWS_ACCESS_KEY_ID": "id",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "AWS_SESSION_TOKEN": "token",
+        }.get(name, default)
+    )
+    validation.validate_aws_requirements(env, "us-east-1")
+
+    missing = SimpleNamespace(get=lambda _name, default=None: default)
+    with pytest.raises(EnvironmentError):
+        validation.validate_aws_requirements(missing, "us-east-1")
+
+    monkeypatch.setattr(validation.requests, "get", Mock(return_value=SimpleNamespace(status_code=200)))
+    monkeypatch.setattr(
+        validation.ollama,
+        "Client",
+        lambda host: SimpleNamespace(list=Mock(return_value={"models": [{"model": "llama"}]})),
+    )
+    validation.validate_ollama_requirements(env, "http://localhost:11434")
+    monkeypatch.setattr(validation.requests, "get", Mock(side_effect=RuntimeError("down")))
+    with pytest.raises(ConnectionError):
+        validation.validate_ollama_requirements(env, "http://localhost:11434")
+
+
+def test_config_manager_models_and_swarm_fallback_paths(monkeypatch):
+    manager = ConfigManager()
+    assert manager.is_thinking_model("", "sonnet") is False
+
+    monkeypatch.setenv("BEDROCK_EFFORT", "high")
+    standard = manager.get_standard_model_config(
+        "claude-sonnet-4-5-20250929", "us-east-1", "bedrock"
+    )
+    assert standard["additional_request_fields"]["anthropic_beta"] == [
+        "context-1m-2025-08-07", "effort-2025-11-24"
+    ]
+    assert standard["additional_request_fields"]["output_config"]["effort"] == "high"
+
+    thinking = manager.get_thinking_model_config("claude-sonnet-4-5-20250929", "us-east-1")
+    assert thinking["max_tokens"] == 16000
+    assert thinking["additional_request_fields"]["thinking"]["budget_tokens"] == 7000
+
+    manager.get_provider = lambda: "bedrock"
+    manager.get_server_config = lambda *_args, **_kwargs: SimpleNamespace(
+        swarm=None, llm=SimpleNamespace(model_id="primary")
+    )
+    assert manager.get_swarm_model_id() == "primary"
+    manager.get_server_config = Mock(side_effect=RuntimeError("unavailable"))
+    assert manager.get_swarm_model_id() == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ('{"id": "not-a-list"}', "not an array"),
+        ("not-json", "not valid JSON"),
+        ('[{"id": "", "transport": "sse", "server_url": "url"}]', "requires an id"),
+        ('[{"id": "a", "transport": "stdio", "command": 1}]', "expected to be a list"),
+        ('[{"id": "a", "transport": "sse", "server_url": "url", "headers": []}]', "headers property"),
+        ('[{"id": "a", "transport": "sse", "server_url": "url", "plugins": "all"}]', "plugins property"),
+        ('[{"id": "a", "transport": "sse", "server_url": "url", "timeoutSeconds": -1}]', "positive integer"),
+        ('[{"id": "a", "transport": "sse", "server_url": "url", "allowed_tools": "all"}]', "allowed_tools property"),
+    ],
+)
+def test_mcp_config_rejects_remaining_invalid_connection_shapes(payload, message):
+    manager = ConfigManager()
+    with pytest.raises(ValueError, match=message):
+        manager._get_mcp_config("bedrock", {}, {"mcp_enabled": True, "mcp_conns": payload})
+
+
+def test_report_refinement_cycles_and_compatibility_helpers_cover_invalid_inputs(monkeypatch):
+    assert get_report_refinement_cycles(SimpleNamespace(getenv_int=lambda *_args: True)) == 2
+    assert get_report_refinement_cycles(SimpleNamespace(getenv_int=lambda *_args: -3)) == 0
+    assert get_report_refinement_cycles(SimpleNamespace(getenv_int=Mock(side_effect=RuntimeError))) == 2
+
+    import modules.config.manager as manager_module
+
+    sentinel = SimpleNamespace(get_ollama_host=lambda: "host")
+    monkeypatch.setattr(manager_module, "get_config_manager", lambda: sentinel)
+    assert get_ollama_host() == "host"
+    assert get_ollama_host(SimpleNamespace(get=lambda *_args: "direct")) == "direct"
+
+
+def test_environment_overrides_update_all_configured_models(monkeypatch):
+    manager = ConfigManager()
+    monkeypatch.setenv("CYBER_AGENT_LLM_MODEL", "replacement")
+    monkeypatch.setenv("CYBER_AGENT_TEMPERATURE", "0.25")
+    monkeypatch.setenv("CYBER_AGENT_TOP_P", "0.75")
+    monkeypatch.setenv("MAX_TOKENS", "123")
+    monkeypatch.setenv("CYBER_AGENT_EMBEDDING_MODEL", "embedding-replacement")
+    monkeypatch.setenv("CYBER_AGENT_EVALUATION_MODEL", "evaluation-replacement")
+    monkeypatch.setenv("CYBER_AGENT_SWARM_MODEL", "swarm-replacement")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+
+    defaults = manager._default_configs["bedrock"]
+    updated = manager._apply_environment_overrides("bedrock", defaults)
+    assert updated["llm"].model_id == "replacement"
+    assert updated["llm"].temperature == 0.25
+    assert updated["llm"].top_p == 0.75
+    assert updated["llm"].max_tokens == 123
+    assert updated["embedding"].model_id == "embedding-replacement"
+    assert updated["evaluation_llm"].model_id == "evaluation-replacement"
+    assert updated["swarm_llm"].model_id == "swarm-replacement"
+    assert updated["region"] == "eu-west-1"
+    assert updated["memory_llm"].aws_region == "eu-west-1"
+
+
+def test_server_model_override_handles_ollama_embedding_fallbacks(monkeypatch):
+    import modules.config.manager as manager_module
+
+    manager = ConfigManager()
+    monkeypatch.setattr(manager.env, "has_changed", lambda: False)
+    monkeypatch.setattr(manager, "get_ollama_host", lambda: "http://ollama")
+    monkeypatch.setattr(manager_module.ollama, "Client", lambda **_kwargs: SimpleNamespace(
+        list=lambda: {"models": [{"model": "llama"}]}
+    ))
+    config = manager.get_server_config("ollama", model_id="chosen")
+    assert config.llm.model_id == "chosen"
+    assert config.embedding.model_id == "chosen"
+
+    manager._config_cache.clear()
+    monkeypatch.setattr(manager_module.ollama, "Client", Mock(side_effect=RuntimeError("down")))
+    config = manager.get_server_config("ollama", model_id="chosen-again")
+    assert config.embedding.model_id == "chosen-again"
+
+
+def test_safe_token_swarm_and_rate_limit_helpers_cover_default_paths(monkeypatch):
+    manager = ConfigManager()
+    manager.models_client = None
+    manager.get_safe_max_tokens.cache_clear()
+    assert manager.get_safe_max_tokens("unavailable", buffer=2) == 4096
+
+    manager.models_client = SimpleNamespace(get_model_info=lambda _model: SimpleNamespace(
+        limits=SimpleNamespace(output=8000, context=12000),
+        capabilities=SimpleNamespace(reasoning=True),
+    ))
+    manager.get_max_tokens = lambda *_args, **_kwargs: 6000
+    manager.get_safe_max_tokens.cache_clear()
+    assert manager.get_safe_max_tokens("available", buffer=0.5) == 3000
+
+    defaults = manager._default_configs["bedrock"]
+    manager.get_safe_max_tokens = lambda _model: 4321
+    monkeypatch.setattr(manager, "getenv_int", lambda key, default=0: 99 if key == "CYBER_AGENT_SWARM_MAX_TOKENS" else default)
+    assert manager._get_swarm_llm_config("bedrock", defaults).max_tokens == 99
+
+    manager.get_rate_limit_config.cache_clear()
+    manager.get_provider = lambda: "ollama"
+    monkeypatch.setattr(manager, "getenv_float", lambda _key, default=0.0: 1.0)
+    monkeypatch.setattr(manager, "getenv_int", lambda _key, default=0: 0)
+    assert manager.get_rate_limit_config().max_concurrent == 1
+
+    manager.get_rate_limit_config.cache_clear()
+    assert manager.get_rate_limit_config("bedrock").max_concurrent == 0

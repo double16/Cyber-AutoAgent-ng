@@ -59,6 +59,12 @@ export class AssessmentFlow {
     objective: null // Auto-generated based on module
   };
 
+  private continueOperation?: string | boolean;
+  private resetFailed = false;
+  private resetPhases?: string;
+  private reportOnly?: string | boolean;
+  private evaluateOnly?: string | boolean;
+
   /**
    * Dynamically maintained set of supported modules.
    * Defaults to ['web'] but should be updated by the UI with actual discovered modules.
@@ -142,11 +148,27 @@ export class AssessmentFlow {
       return null;
     }
     
-    return {
+    const params: AssessmentParams = {
       module: this.assessmentState.module!,
       target: this.assessmentState.target!,
       objective: this.assessmentState.objective || undefined
     };
+    if (this.continueOperation !== undefined) {
+      params.continueOperation = this.continueOperation;
+    }
+    if (this.resetFailed) {
+      params.resetFailed = true;
+    }
+    if (this.resetPhases) {
+      params.resetPhases = this.resetPhases;
+    }
+    if (this.reportOnly !== undefined) {
+      params.reportOnly = this.reportOnly;
+    }
+    if (this.evaluateOnly !== undefined) {
+      params.evaluateOnly = this.evaluateOnly;
+    }
+    return params;
   }
 
   /**
@@ -169,6 +191,7 @@ export class AssessmentFlow {
    * Useful for starting a completely new assessment configuration.
    */
   resetCompleteWorkflow(): void {
+    this.clearExecutionMode();
     this.assessmentState = {
       stage: 'target',
       module: this.defaultModule || 'web',
@@ -185,9 +208,112 @@ export class AssessmentFlow {
    * the same security domain without reselecting the module.
    */
   resetToTargetConfiguration(): void {
+    this.clearExecutionMode();
     this.assessmentState.stage = 'target';
     this.assessmentState.target = null;
     this.assessmentState.objective = null;
+  }
+
+  private clearExecutionMode(): void {
+    this.continueOperation = undefined;
+    this.resetFailed = false;
+    this.resetPhases = undefined;
+    this.reportOnly = undefined;
+    this.evaluateOnly = undefined;
+  }
+
+  private processExecutionModeInput(userInput: string): FlowResult | null {
+    const match = userInput.match(/^(continue|report|evaluate)(?:\s+(.+))?$/i);
+    if (!match) {
+      return null;
+    }
+
+    const mode = match[1].toLowerCase();
+    const rawOperationId = (match[2] || '').trim();
+    const operationIdParts = rawOperationId ? rawOperationId.split(/\s+/) : [];
+
+    const resetFailedCount = operationIdParts.filter((part) => part.toLowerCase() === 'reset-failed').length;
+    const resetPhasesIndexes = operationIdParts
+      .map((part, index) => part.toLowerCase() === 'reset-phases' ? index : -1)
+      .filter((index) => index >= 0);
+    const resetPhasesIndex = resetPhasesIndexes[0];
+    const resetPhaseSelectorIndex = resetPhasesIndex === undefined ? -1 : resetPhasesIndex + 1;
+    const resetPhases = resetPhaseSelectorIndex < 0 ? undefined : operationIdParts[resetPhaseSelectorIndex];
+    const operationIds = operationIdParts.filter((part, index) =>
+      part.toLowerCase() !== 'reset-failed'
+      && part.toLowerCase() !== 'reset-phases'
+      && index !== resetPhaseSelectorIndex
+    );
+    const resetFailed = mode === 'continue' && resetFailedCount === 1;
+    if (
+      operationIds.length > 1
+      || resetFailedCount > 1
+      || resetPhasesIndexes.length > 1
+      || (resetPhasesIndex !== undefined && (!resetPhases || resetPhasesIndex + 1 !== operationIdParts.length - 1))
+      || (resetFailed && resetPhasesIndex !== undefined)
+      || ((mode === 'report' || mode === 'evaluate') && resetFailedCount > 0)
+      || ((mode === 'report' || mode === 'evaluate') && resetPhasesIndex !== undefined)
+    ) {
+      return {
+        success: false,
+        message: `Invalid ${mode} command`,
+        error: mode === 'continue'
+          ? 'Usage: continue [operation_id] [reset-failed | reset-phases <phase_selector>]'
+          : `Usage: ${mode} [operation_id]`,
+        nextPrompt: mode === 'continue'
+          ? 'Use an optional operation ID and one optional reset argument.'
+          : `Provide at most one operation ID, e.g. ${mode} OP_20260320_101501`
+      };
+    }
+
+    if (!this.assessmentState.target) {
+      return {
+        success: false,
+        message: 'Please define your assessment target before using this command',
+        error: `Usage: target <target_specification>, then ${mode} [operation_id]`,
+        nextPrompt: 'Examples: target example.com, target 192.168.1.1, target https://api.example.com'
+      };
+    }
+
+    if (!this.assessmentState.objective) {
+      this.assessmentState.objective = this.generateDefaultObjective(this.assessmentState.module!);
+    }
+    this.assessmentState.stage = 'ready';
+
+    const operationValue: string | boolean = operationIds[0] || true;
+    if (mode === 'continue') {
+      this.continueOperation = operationValue;
+      this.resetFailed = resetFailed;
+      this.resetPhases = resetPhases;
+      this.reportOnly = undefined;
+      this.evaluateOnly = undefined;
+    } else if (mode === 'report') {
+      this.reportOnly = operationValue;
+      this.evaluateOnly = undefined;
+      this.continueOperation = undefined;
+      this.resetFailed = false;
+      this.resetPhases = undefined;
+    } else {
+      this.evaluateOnly = operationValue;
+      this.reportOnly = undefined;
+      this.continueOperation = undefined;
+      this.resetFailed = false;
+      this.resetPhases = undefined;
+    }
+
+    const operationLabel = typeof operationValue === 'string' ? ` ${operationValue}` : '';
+    const action = mode === 'continue'
+      ? 'Continue operation'
+      : mode === 'report'
+        ? 'Report regeneration'
+        : 'Evaluation replay';
+
+    return {
+      success: true,
+      message: `${action} requested${operationLabel}${resetFailed ? ' with failed work reset' : ''}${resetPhases ? ` with phase reset ${resetPhases}` : ''}`,
+      nextPrompt: 'Ready to execute - Press Enter to start operation',
+      readyToExecute: true
+    };
   }
 
   /**
@@ -217,6 +343,11 @@ export class AssessmentFlow {
     if (sanitizedInput.startsWith('module ')) {
       return this.processModuleSelectionInput(sanitizedInput);
     }
+
+    const executionModeResult = this.processExecutionModeInput(sanitizedInput);
+    if (executionModeResult) {
+      return executionModeResult;
+    }
     
     switch (this.assessmentState.stage) {
       case 'module':
@@ -232,6 +363,7 @@ export class AssessmentFlow {
         const lower = sanitizedInput.toLowerCase();
         // Allow overriding objective at the final stage using "execute <objective>"
         if (lower.startsWith('execute ')) {
+          this.clearExecutionMode();
           const objective = sanitizedInput.substring(8).trim();
           this.assessmentState.objective = objective || this.generateDefaultObjective(this.assessmentState.module!);
           return {
@@ -243,6 +375,7 @@ export class AssessmentFlow {
         }
         // Also allow updating the objective without immediate execution
         if (lower.startsWith('objective ')) {
+          this.clearExecutionMode();
           const objective = sanitizedInput.substring('objective '.length).trim();
           this.assessmentState.objective = objective || this.generateDefaultObjective(this.assessmentState.module!);
           return {
@@ -295,6 +428,7 @@ export class AssessmentFlow {
     // Update state and advance workflow regardless; backend will perform final validation
     this.assessmentState.module = requestedModuleName;
     this.assessmentState.stage = 'target';
+    this.clearExecutionMode();
 
     return {
       success: true,
@@ -338,6 +472,7 @@ export class AssessmentFlow {
     // Update state and advance workflow to objective
     this.assessmentState.target = targetSpecification;
     this.assessmentState.stage = 'objective';
+    this.clearExecutionMode();
     
     return {
       success: true,
@@ -358,6 +493,7 @@ export class AssessmentFlow {
     if (!userInput || userInput.trim() === '') {
       this.assessmentState.objective = this.generateDefaultObjective(this.assessmentState.module!);
       this.assessmentState.stage = 'ready';
+      this.clearExecutionMode();
       return {
         success: true,
         message: `Using default ${this.assessmentState.module} assessment objective`,
@@ -369,6 +505,7 @@ export class AssessmentFlow {
     if (userInput.toLowerCase().trim() === 'execute') {
       this.assessmentState.objective = this.generateDefaultObjective(this.assessmentState.module!);
       this.assessmentState.stage = 'ready';
+      this.clearExecutionMode();
       
       return {
         success: true,
@@ -383,6 +520,7 @@ export class AssessmentFlow {
       const objective = userInput.substring(8).trim(); // Remove 'execute ' prefix
       this.assessmentState.objective = objective || this.generateDefaultObjective(this.assessmentState.module!);
       this.assessmentState.stage = 'ready';
+      this.clearExecutionMode();
       
       return {
         success: true,
@@ -395,6 +533,7 @@ export class AssessmentFlow {
     // Set custom assessment objective (user typed something else)
     this.assessmentState.objective = userInput;
     this.assessmentState.stage = 'ready';
+    this.clearExecutionMode();
     
     return {
       success: true,
