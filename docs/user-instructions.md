@@ -263,6 +263,8 @@ a new credential record and retires the old one instead of overwriting history. 
 never changed by an agent. Before an authenticated request, an agent binds its checked-out credentials to the active
 task. The controller rejects credentials outside that task's resolved target scope and records the roles, accounts,
 and tenants from stored metadata for report provenance.
+Every reported finding labels its authentication context. Authenticated findings include only opaque credential IDs;
+unexpected identifier values and all credential payload values are redacted from report Markdown and JSON.
 
 The **Operations → Assessment Credentials (JSON)** field in the React configuration editor accepts either a JSON
 array or `{"credentials": [...]}`. Each item has `credential_type`, `role`, `values`, and optional `target`,

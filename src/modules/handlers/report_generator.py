@@ -159,6 +159,7 @@ _NARRATIVE_FINDING_REFERENCE_STOPWORDS = frozenset({
 })
 _REPORT_ENDPOINT_URL = re.compile(r"https?://[^\s/?#]+(?:/[^\s?#]*)?", re.IGNORECASE)
 _REPORT_ENDPOINT_PATH = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[A-Za-z0-9_.~%-]+/)*[A-Za-z0-9_.~%-]+")
+_CREDENTIAL_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 _ATTACK_SURFACE_GROUP_LIMIT = 12
 _ATTACK_SURFACE_MEMBER_LIMIT = 5
 _WEB_CONFIGURATION_SEGMENTS = frozenset(
@@ -1555,7 +1556,7 @@ def _format_credentials_used(sections: dict[str, Any]) -> str:
         seen.add(identity)
         lines.append(
             "| {credential_id} | {target} | {credential_type} | {role} | {origin} | {outcome} |".format(
-                credential_id=_markdown_table_cell(row.get("credential_id") or "Unknown"),
+                credential_id=_markdown_table_cell(_safe_report_credential_id(row.get("credential_id"))),
                 target=_markdown_table_cell(row.get("target") or "Mailbox"),
                 credential_type=_markdown_table_cell(row.get("credential_type") or "Unknown"),
                 role=_markdown_table_cell(row.get("role") or "—"),
@@ -1564,6 +1565,13 @@ def _format_credentials_used(sections: dict[str, Any]) -> str:
             )
         )
     return "\n".join(lines) + "\n"
+
+
+def _safe_report_credential_id(value: Any) -> str:
+    """Keep database-generated credential IDs while redacting unexpected identifier values."""
+
+    identifier = str(value or "")
+    return identifier if _CREDENTIAL_ID_PATTERN.fullmatch(identifier) else "[redacted]"
 
 
 def _item_artifact_count(item: dict[str, Any]) -> int:
@@ -1679,6 +1687,21 @@ def _format_executive_narrative_fallback(sections: dict[str, Any]) -> str:
     )
 
 
+def _format_finding_authentication_context(item: dict[str, Any]) -> str:
+    """Render credential provenance for a finding without reading credential payloads."""
+
+    metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+    auth_context = item.get("auth_context") if isinstance(item.get("auth_context"), dict) else metadata.get("auth_context")
+    auth_context = auth_context if isinstance(auth_context, dict) else {"mode": "unauthenticated"}
+    auth_mode = str(auth_context.get("mode") or "unauthenticated")
+    credential_ids = auth_context.get("credential_ids") if isinstance(auth_context.get("credential_ids"), list) else []
+    auth_line = f"- **Authentication context:** {_escape_markdown_text(auth_mode)}"
+    if auth_mode == "authenticated" and credential_ids:
+        safe_ids = ", ".join(_safe_report_credential_id(credential_id) for credential_id in credential_ids)
+        auth_line += f" (credential IDs: {safe_ids})"
+    return auth_line
+
+
 def _format_finding_with_narrative(item: dict[str, Any], index: int, narrative: str) -> str:
     """Combine Python-owned finding facts with a bounded LLM interpretation."""
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
@@ -1709,7 +1732,9 @@ def _format_finding_with_narrative(item: dict[str, Any], index: int, narrative: 
     return (
         f"### {title}\n\n"
         f"- **Severity:** {severity}\n"
-        f"- **Validation status:** {status}\n\n"
+        f"- **Validation status:** {status}\n"
+        + _format_finding_authentication_context(item)
+        + "\n\n"
         "#### Evidence\n\n"
         f"{content}\n\n"
         + _append_artifact_evidence("", item).strip()
@@ -3805,18 +3830,11 @@ def _format_deterministic_finding(item: dict[str, Any], index: int) -> str:
     severity = _escape_markdown_text(item.get("severity") or metadata.get("severity") or "Unknown")
     status = _escape_markdown_text(item.get("validation_status") or metadata.get("validation_status") or "verified")
     content = _format_markdown_xml_html_tags(str(item.get("content") or "No finding detail was recorded.").strip())
-    auth_context = item.get("auth_context") if isinstance(item.get("auth_context"), dict) else metadata.get("auth_context")
-    auth_context = auth_context if isinstance(auth_context, dict) else {"mode": "unauthenticated"}
-    auth_mode = str(auth_context.get("mode") or "unauthenticated")
-    credential_ids = auth_context.get("credential_ids") if isinstance(auth_context.get("credential_ids"), list) else []
-    auth_line = f"- **Authentication context:** {auth_mode}"
-    if auth_mode == "authenticated" and credential_ids:
-        auth_line += f" (credential IDs: {', '.join(_escape_markdown_text(credential_id) for credential_id in credential_ids)})"
     text = (
         f"### {title}\n\n"
         f"- **Severity:** {severity}\n"
         f"- **Validation status:** {status}\n\n"
-        f"{auth_line}\n\n"
+        f"{_format_finding_authentication_context(item)}\n\n"
         "#### Recorded Evidence\n\n"
         f"{content}\n\n"
         + _format_taxonomy_mappings(metadata.get("taxonomy", {}), metadata.get("taxonomy_annotation"))

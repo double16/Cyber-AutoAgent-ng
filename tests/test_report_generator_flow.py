@@ -21,6 +21,8 @@ from modules.handlers.report_generator import (
     _emit_report_progress,
     _extract_text_from_result,
     _format_artifact_excerpt,
+    _format_credentials_used,
+    _format_deterministic_finding,
     _format_execution_history,
     _format_executive_deterministic_sections,
     _format_finding_with_narrative,
@@ -914,6 +916,49 @@ def test_deterministic_renderers_keep_facts_out_of_llm_narrative():
         {"phases": [{"id": 1, "title": "Mapping", "status": "done", "criteria": "Inventory routes"}]}
     )
     assert "| 1 | done | **Mapping:** Inventory routes |" in plan
+
+
+def test_report_credential_provenance_and_finding_auth_context_never_render_secrets():
+    credential_id = "12c44444-3333-4222-8111-1234567890ab"
+    secret = "must-not-appear-in-report"
+    sections = {
+        "credentials_used": [
+            {
+                "credential_id": credential_id,
+                "target": "https://app.example.test",
+                "credential_type": "username_password",
+                "role": "member",
+                "origin": "registered",
+                "outcome": "succeeded",
+                "payload": {"password": secret},
+            }
+        ]
+    }
+    finding = {
+        "title": "Authenticated authorization finding",
+        "severity": "HIGH",
+        "content": "A response difference was observed.",
+        "auth_context": {
+            "mode": "authenticated",
+            "credential_ids": [credential_id, secret],
+        },
+    }
+
+    credentials = _format_credentials_used(sections)
+    narrated = _format_finding_with_narrative(finding, 0, "#### Impact\n\nSupported impact.")
+    deterministic = _format_deterministic_finding(finding, 0)
+
+    assert "Credentials Used" in credentials
+    assert "registered" in credentials
+    assert credential_id in credentials
+    assert secret not in credentials
+    assert "Authentication context:** authenticated" in narrated
+    assert credential_id in narrated
+    assert secret not in narrated
+    assert "[redacted]" in narrated
+    assert "Authentication context:** authenticated" in deterministic
+    assert secret not in deterministic
+    assert "[redacted]" in deterministic
 
 
 def test_finding_narrative_omits_unbacked_secret_shaped_examples():

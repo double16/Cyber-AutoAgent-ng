@@ -16,6 +16,8 @@
 - Restrict credential metadata queries, IDOR comparison planning, status changes, and rotation to the active task's
   resolved target scope.
 - Support `operation_scope: "current"` for credentials independently supplied to each operation.
+- Render deterministic authentication context for every finding and redact unexpected credential identifiers from
+  report output.
 
 ## v0.10.0
 
