@@ -293,6 +293,19 @@ def resolve_credential_target_for_operation(
     return normalized_target
 
 
+def _resolve_credential_operation_scope(operation_id: str, operation_scope: str | None) -> str | None:
+    """Normalize an optional scope to the operation currently importing the credential."""
+
+    scope = str(operation_scope or "").strip()
+    if not scope:
+        return None
+    if scope.casefold() in {"current", "$current"}:
+        return operation_id
+    if scope != operation_id:
+        raise ValueError("credential operation_scope must be current or match the importing operation")
+    return scope
+
+
 def store_user_credential(
     *,
     operation_id: str,
@@ -320,13 +333,14 @@ def store_user_credential(
         payload["tenant_label"] = str(tenant_label).strip()
     store = _get_database_store()
     normalized_target = _validate_credential_target_scope(store, operation_id, target) if target else None
+    normalized_operation_scope = _resolve_credential_operation_scope(operation_id, operation_scope)
     return store.store_credential(
         operation_id,
         {
             "credential_type": kind,
             "target": normalized_target,
             "role": role,
-            "operation_id": operation_scope,
+            "operation_id": normalized_operation_scope,
             "payload": payload,
             "origin": origin,
             "management_policy": management_policy,
@@ -355,8 +369,14 @@ def store_credential(
     normalized_origin = str(origin or "").strip().lower()
     if normalized_origin not in {"found", "registered"}:
         raise ValueError("agent credential origin must be found or registered")
+    store = _get_database_store()
+    operation_id = _operation_id()
+    _, target_values = _active_task_target_values(store, operation_id)
+    normalized_type = str(credential_type or "").strip().lower()
+    if normalized_type != "email_login" and canonicalize_credential_target(str(target or "")) not in target_values:
+        raise ValueError("credential target is outside the active task target scope")
     record = store_user_credential(
-        operation_id=_operation_id(),
+        operation_id=operation_id,
         credential_type=credential_type,
         target=target,
         role=role,
@@ -381,12 +401,22 @@ def query_credentials(
     normalized_type = str(credential_type or "").strip().lower() or None
     if normalized_type is not None and normalized_type not in _CREDENTIAL_TYPES:
         raise ValueError("unknown credential_type")
-    records = _get_database_store().list_credentials(
-        _operation_id(),
-        target=canonicalize_credential_target(target) if target else None,
-        role=str(role).strip() if role else None,
-        credential_type=normalized_type,
-    )
+    store = _get_database_store()
+    operation_id = _operation_id()
+    _, target_values = _active_task_target_values(store, operation_id)
+    requested_target = canonicalize_credential_target(target) if target else None
+    if requested_target and requested_target not in target_values:
+        raise ValueError("credential query target is outside the active task target scope")
+    records = [
+        record
+        for target_value in ([requested_target] if requested_target else sorted(target_values))
+        for record in store.list_credentials(
+            operation_id,
+            target=target_value,
+            role=str(role).strip() if role else None,
+            credential_type=normalized_type,
+        )
+    ]
     return json.dumps({"credentials": records})
 
 
@@ -399,7 +429,12 @@ def plan_access_control_comparisons(target: str) -> str:
     """
 
     normalized_target = canonicalize_credential_target(target)
-    records = _get_database_store().list_credentials(_operation_id(), target=normalized_target)
+    store = _get_database_store()
+    operation_id = _operation_id()
+    _, target_values = _active_task_target_values(store, operation_id)
+    if normalized_target not in target_values:
+        raise ValueError("comparison target is outside the active task target scope")
+    records = store.list_credentials(operation_id, target=normalized_target)
     comparisons: list[dict[str, str]] = []
     for index, left in enumerate(records):
         for right in records[index + 1 :]:
@@ -441,6 +476,18 @@ def _task_resolved_targets(store: Any, operation_id: str, task: Any) -> list[str
     return list(dict.fromkeys(values))
 
 
+def _active_task_target_values(store: Any, operation_id: str) -> tuple[Any, set[str]]:
+    """Return the active task and the exact resolved targets it is allowed to access."""
+
+    active_task = active_credential_task(store, operation_id)
+    if active_task is None:
+        raise ValueError("an active task is required for credential access")
+    target_values = set(_task_resolved_targets(store, operation_id, active_task))
+    if not target_values:
+        raise ValueError("active task does not have a resolved target scope")
+    return active_task, target_values
+
+
 @tool(name="set_task_auth_context")
 def set_task_auth_context(credential_ids: list[str]) -> str:
     """Bind checked-out, target-scoped credentials to the active task's authenticated context.
@@ -454,16 +501,11 @@ def set_task_auth_context(credential_ids: list[str]) -> str:
         raise ValueError("credential_ids requires at least one credential ID")
     store = _get_database_store()
     operation_id = _operation_id()
-    active_task = active_credential_task(store, operation_id)
-    if active_task is None:
-        raise ValueError("an active task is required to set an authentication context")
+    active_task, target_values = _active_task_target_values(store, operation_id)
     selected_ids = store.credential_ids_selected_by_task(operation_id, active_task.task_uid)
     missing_selection = sorted(set(normalized_ids) - selected_ids)
     if missing_selection:
         raise ValueError("authentication context credentials must be checked out by the active task")
-    target_values = _task_resolved_targets(store, operation_id, active_task)
-    if not target_values:
-        raise ValueError("active task does not have a resolved target scope")
     eligible_ids = {
         str(record["credential_id"])
         for target_value in target_values
@@ -513,10 +555,7 @@ def checkout_credential(credential_id: str, purpose: str) -> str:
     scoped_operation = record.get("operation_id")
     if scoped_operation and scoped_operation != _operation_id():
         raise ValueError("credential is scoped to another operation")
-    active_task = active_credential_task(store, _operation_id())
-    if active_task is None:
-        raise ValueError("an active task is required to check out a credential")
-    target_values = _task_resolved_targets(store, _operation_id(), active_task)
+    active_task, target_values = _active_task_target_values(store, _operation_id())
     eligible_ids = {
         str(candidate["credential_id"])
         for target_value in target_values
@@ -545,8 +584,11 @@ def mark_credential_status(
     normalized_status = str(status or "").strip().lower()
     if normalized_status not in _STATUSES:
         raise ValueError("unknown credential status")
-    record = _get_database_store().record_credential_status(
-        _operation_id(), str(credential_id), normalized_status, "operation", str(reason or ""), evidence_refs or []
+    store = _get_database_store()
+    operation_id = _operation_id()
+    _active_checked_out_credential(store, operation_id, str(credential_id))
+    record = store.record_credential_status(
+        operation_id, str(credential_id), normalized_status, "operation", str(reason or ""), evidence_refs or []
     )
     return json.dumps({"credential": record})
 
@@ -562,7 +604,8 @@ def rotate_credential(credential_id: str, values: dict[str, Any], reason: str) -
     if not str(reason or "").strip():
         raise ValueError("credential rotation reason is required")
     store = _get_database_store()
-    previous = store.get_credential(str(credential_id), include_payload=True)
+    operation_id = _operation_id()
+    _, previous = _active_checked_out_credential(store, operation_id, str(credential_id))
     if previous is None:
         raise ValueError("credential is unavailable")
     if previous["management_policy"] != "operation":
@@ -574,7 +617,7 @@ def rotate_credential(credential_id: str, values: dict[str, Any], reason: str) -
         if previous["payload"].get(label):
             payload[label] = previous["payload"][label]
     replacement = store.store_credential(
-        _operation_id(),
+        operation_id,
         {
             "credential_type": previous["credential_type"],
             "target": previous["target"],
@@ -588,7 +631,7 @@ def rotate_credential(credential_id: str, values: dict[str, Any], reason: str) -
         },
     )
     store.record_credential_status(
-        _operation_id(),
+        operation_id,
         previous["credential_id"],
         "retired",
         "operation",
@@ -635,18 +678,15 @@ def generate_mfa_code(provisioning_secret: str, digits: int = 6, period: int = 3
 def _active_checked_out_credential(store: Any, operation_id: str, credential_id: str) -> tuple[Any, dict[str, Any]]:
     """Return an active task and its selected, target-scoped target credential."""
 
-    active_task = active_credential_task(store, operation_id)
-    if active_task is None:
-        raise ValueError("an active task is required for MFA")
+    active_task, target_values = _active_task_target_values(store, operation_id)
     selected_ids = store.credential_ids_selected_by_task(operation_id, active_task.task_uid)
     if credential_id not in selected_ids:
-        raise ValueError("MFA credential must be checked out by the active task")
+        raise ValueError("credential must be checked out by the active task")
     record = store.get_credential(credential_id, include_payload=True)
     if record is None or record["status"] not in {"unknown", "valid"}:
         raise ValueError("eligible credential is required for MFA")
     if record["credential_type"] == "email_login":
-        raise ValueError("MFA must use a target credential, not a mailbox credential")
-    target_values = set(_task_resolved_targets(store, operation_id, active_task))
+        raise ValueError("credential access requires a target credential, not a mailbox credential")
     if str(record.get("target") or "") not in target_values:
         raise ValueError("MFA credential is outside the active task target scope")
     return active_task, record

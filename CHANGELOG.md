@@ -13,6 +13,9 @@
 - Require active, target-scoped credential checkout before an agent can request an MFA code or read a configured
   email-MFA mailbox, preventing unrelated tasks from accessing MFA factors.
 - Reject credential imports and discovered credentials whose target is not an exact resolved operation target.
+- Restrict credential metadata queries, IDOR comparison planning, status changes, and rotation to the active task's
+  resolved target scope.
+- Support `operation_scope: "current"` for credentials independently supplied to each operation.
 
 ## v0.10.0
 

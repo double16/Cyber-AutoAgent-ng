@@ -241,6 +241,8 @@ Credentials used for authorized assessments are stored in `outputs/cyber_autoage
 resolved target value (not an operation-local target ID), with optional operation scope and application role. Agents
 can query safe metadata and check out eligible credentials only for an active task; invalid, expired, revoked, and
 retired credentials are not selected. Registered accounts are target-scoped so later operations can reuse them.
+Credential queries, IDOR comparison planning, status updates, and operation-managed rotation use that same active
+task's resolved target scope. An agent cannot enumerate, modify, or compare credentials belonging to another target.
 
 The database currently stores credential payloads in plaintext. Restrict access to the output directory and its
 backups to the assessment user. Secret values are masked in reports, logs, UI events, and trace exports, but must not
@@ -265,7 +267,9 @@ and tenants from stored metadata for report provenance.
 The **Operations → Assessment Credentials (JSON)** field in the React configuration editor accepts either a JSON
 array or `{"credentials": [...]}`. Each item has `credential_type`, `role`, `values`, and optional `target`,
 `operation_scope`, `account_label`, and `tenant_label`. If a target is omitted, the runner uses the sole resolved
-operation target; multi-target operations require an explicit resolved target value.
+operation target; multi-target operations require an explicit resolved target value. Set `operation_scope` to
+`"current"` when the credential must be independent for each operation; the runner replaces it with that operation's
+generated ID during import.
 
 | Variable | Purpose |
 |---|---|

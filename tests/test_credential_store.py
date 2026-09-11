@@ -65,6 +65,32 @@ def test_credential_storage_rejects_targets_outside_an_existing_operation_plan(t
         )
 
 
+def test_credential_operation_scope_can_bind_to_the_current_importing_operation(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+
+    credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="api_key",
+        target="https://app.example.test",
+        role="reader",
+        operation_scope="current",
+        values={"api_key": "scoped-secret", "placement": "header", "name": "X-API-Key"},
+    )
+
+    assert store.get_credential(credential["credential_id"])["operation_id"] == "op-1"
+    assert store.list_credentials("op-2", target="https://app.example.test") == []
+    with pytest.raises(ValueError, match="operation_scope"):
+        store_user_credential(
+            operation_id="op-1",
+            credential_type="api_key",
+            target="https://app.example.test",
+            role="reader",
+            operation_scope="op-2",
+            values={"api_key": "must-not-store", "placement": "header", "name": "X-API-Key"},
+        )
+
+
 def test_configuration_credentials_require_exact_preflight_resolved_targets():
     targets = [OperationTarget(target_id="app", value="https://app.example.test", type="network")]
 
@@ -211,6 +237,7 @@ def test_access_control_comparisons_only_offer_distinct_account_role_or_tenant_p
     store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
     monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
     monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store)
     member = store_user_credential(
         operation_id="op-1",
         credential_type="username_password",
@@ -398,6 +425,7 @@ def test_operation_managed_credential_rotation_preserves_retired_history(tmp_pat
     store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
     monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
     monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store, target="https://api.example.test")
     original = store.store_credential(
         "op-1",
         {
@@ -409,6 +437,7 @@ def test_operation_managed_credential_rotation_preserves_retired_history(tmp_pat
             "management_policy": "operation",
         },
     )
+    checkout_credential(original["credential_id"], "rotate expired API key")
 
     result = json.loads(
         rotate_credential(
@@ -427,6 +456,7 @@ def test_rotation_rejects_user_provided_credentials(tmp_path, monkeypatch):
     store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
     monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
     monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store, target="https://api.example.test")
     credential = store_user_credential(
         operation_id="op-1",
         credential_type="api_key",
@@ -434,6 +464,7 @@ def test_rotation_rejects_user_provided_credentials(tmp_path, monkeypatch):
         role="reader",
         values={"api_key": "user-key", "placement": "header", "name": "X-API-Key"},
     )
+    checkout_credential(credential["credential_id"], "validate rotation policy")
 
     with pytest.raises(ValueError, match="only be updated by the user"):
         rotate_credential(
@@ -610,12 +641,14 @@ def test_agent_credential_store_query_and_status_tools_are_safe(tmp_path, monkey
             "reader",
             origin="provided",
         )
+    _store_active_target_task(store)
     stored = json.loads(
         store_credential(
             "api_key", {"api_key": "secret", "name": "X-Key"}, "https://app.example.test", "reader", origin="found"
         )
     )
     queried = json.loads(query_credentials("https://app.example.test", role="reader", credential_type="api_key"))
+    checkout_credential(stored["credential"]["credential_id"], "validate API key")
     status = json.loads(mark_credential_status(stored["credential"]["credential_id"], "valid", "login succeeded"))
 
     assert stored["stored"] is True
@@ -626,6 +659,29 @@ def test_agent_credential_store_query_and_status_tools_are_safe(tmp_path, monkey
         query_credentials(credential_type="bearer")
     with pytest.raises(ValueError, match="unknown credential status"):
         mark_credential_status(stored["credential"]["credential_id"], "broken", "no")
+
+
+def test_agent_credential_tools_reject_access_outside_the_active_task_scope(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+
+    with pytest.raises(ValueError, match="active task"):
+        query_credentials()
+    _store_active_target_task(store)
+    credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="api_key",
+        target="https://app.example.test",
+        role="reader",
+        values={"api_key": "secret", "name": "X-Key"},
+    )
+    with pytest.raises(ValueError, match="outside the active task"):
+        query_credentials("https://other.example.test")
+    with pytest.raises(ValueError, match="outside the active task"):
+        plan_access_control_comparisons("https://other.example.test")
+    with pytest.raises(ValueError, match="checked out"):
+        mark_credential_status(credential["credential_id"], "invalid", "not tested")
 
 
 def test_password_and_totp_tools_reject_bad_inputs_and_generate_compliant_password():
