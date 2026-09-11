@@ -945,6 +945,31 @@ class AcceptanceResult:
         }
 
 
+def _normalize_auth_context(value: Any) -> dict[str, Any]:
+    """Validate explicit authentication metadata used by tasks and findings."""
+
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("auth_context must be an object")
+    context = dict(value)
+    mode = str(context.get("mode") or "").strip().lower()
+    if not mode:
+        return context
+    if mode not in {"unauthenticated", "authenticated"}:
+        raise ValueError("auth_context.mode must be unauthenticated or authenticated")
+    credential_ids = _normalize_target_ids(context.get("credential_ids", []))
+    if mode == "authenticated" and not credential_ids:
+        raise ValueError("authenticated auth_context requires credential_ids")
+    if mode == "unauthenticated" and credential_ids:
+        raise ValueError("unauthenticated auth_context cannot include credential_ids")
+    context["mode"] = mode
+    context["credential_ids"] = credential_ids
+    for key in ("roles", "account_labels", "tenant_labels"):
+        context[key] = _normalize_target_ids(context.get(key, []))
+    return context
+
+
 @dataclass(frozen=True)
 class Task:
     """A single unit of work tied to an execution-prompt phase.
@@ -970,6 +995,7 @@ class Task:
     replacement_of: str | None = None
     supersedes_criteria: list[str] = field(default_factory=list)
     recovery_context: dict[str, Any] = field(default_factory=dict)
+    auth_context: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_uid, str) or not self.task_uid.strip():
@@ -986,6 +1012,7 @@ class Task:
         if not isinstance(self.recovery_context, dict):
             raise ValueError("recovery_context must be an object")
         object.__setattr__(self, "recovery_context", dict(self.recovery_context))
+        object.__setattr__(self, "auth_context", _normalize_auth_context(self.auth_context))
         if not isinstance(self.phase, int) or self.phase <= 0:
             raise ValueError("phase must be a positive int")
         if self.status not in ("active", "pending", "done", "partial_failure", "blocked", "superseded", "replanned"):
@@ -1023,6 +1050,7 @@ class Task:
             replacement_of=obj.get("replacement_of"),
             supersedes_criteria=_normalize_target_ids(obj.get("supersedes_criteria", [])),
             recovery_context=dict(obj.get("recovery_context") or {}),
+            auth_context=dict(obj.get("auth_context") or {}),
             target_scope=str(obj.get("target_scope", "all") or "all"),
             target_ids=_normalize_target_ids(obj.get("target_ids", [])),
         )
@@ -1044,6 +1072,7 @@ class Task:
             "replacement_of": self.replacement_of,
             "supersedes_criteria": self.supersedes_criteria,
             "recovery_context": self.recovery_context,
+            "auth_context": self.auth_context,
             "target_scope": self.target_scope,
             "target_ids": self.target_ids,
         })
@@ -1548,6 +1577,13 @@ class SQLiteApplicationStore:
         "list_objective_candidates",
         "store_objective_candidate",
         "store_objective_validation",
+        "store_credential",
+        "list_credentials",
+        "get_credential",
+        "record_credential_status",
+        "record_credential_usage",
+        "add_credential_target_alias",
+        "list_credential_usage",
     })
 
     def __getattribute__(self, name: str) -> Any:
@@ -1707,6 +1743,10 @@ class SQLiteApplicationStore:
         database_exists = Path(self.db_path).exists()
         try:
             SQLiteMigrationRunner(self.db_path).migrate()
+            try:
+                os.chmod(self.db_path, 0o600)
+            except OSError:
+                logger.warning("Unable to restrict application database permissions: %s", self.db_path)
             integrity = self._sqlite_integrity_check(self.db_path)
             if integrity.lower() == "ok":
                 return
@@ -1766,6 +1806,242 @@ class SQLiteApplicationStore:
             "ON CONFLICT(logical_target, operation_id) DO NOTHING",
             (self.logical_target, operation_id, datetime.now().isoformat()),
         )
+
+    @staticmethod
+    def _credential_row(row: sqlite3.Row | tuple[Any, ...], include_payload: bool = False) -> dict[str, Any]:
+        """Convert one credential row without exposing its payload by default."""
+
+        result = {
+            "credential_id": row[0],
+            "target": row[1],
+            "role": row[2],
+            "operation_id": row[3],
+            "credential_type": row[4],
+            "origin": row[6],
+            "management_policy": row[7],
+            "status": row[8],
+            "invalid_at": row[9],
+            "supersedes_credential_id": row[10],
+            "created_at": row[11],
+            "updated_at": row[12],
+        }
+        if include_payload:
+            result["payload"] = json.loads(row[5])
+        return result
+
+    def store_credential(self, operation_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        """Persist a typed credential record and return its safe metadata."""
+
+        credential_id = str(record.get("credential_id") or uuid.uuid4())
+        now = datetime.now().isoformat()
+        target = record.get("target")
+        with self._lock, closing(self._connect()) as conn, conn:
+            self._register_operation(conn, operation_id)
+            conn.execute(
+                """
+                INSERT INTO credential_records (
+                    credential_id, logical_target, target, role, operation_id, credential_type, payload, origin,
+                    management_policy, status, invalid_at, supersedes_credential_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    credential_id,
+                    self.logical_target,
+                    str(target).strip() if target is not None else None,
+                    str(record.get("role") or "").strip() or None,
+                    str(record.get("operation_id") or "").strip() or None,
+                    str(record["credential_type"]),
+                    json.dumps(record["payload"], sort_keys=True),
+                    str(record["origin"]),
+                    str(record["management_policy"]),
+                    str(record.get("status") or "unknown"),
+                    record.get("invalid_at"),
+                    str(record.get("supersedes_credential_id") or "").strip() or None,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT credential_id, target, role, operation_id, credential_type, payload, origin,
+                       management_policy, status, invalid_at, supersedes_credential_id, created_at, updated_at
+                FROM credential_records WHERE credential_id = ?
+                """,
+                (credential_id,),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("credential insert did not return a record")
+        return self._credential_row(row)
+
+    def add_credential_target_alias(self, canonical_target: str, alias_target: str) -> None:
+        """Add a user-owned, explicit credential target alias."""
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO credential_target_aliases (
+                    logical_target, canonical_target, alias_target, created_by, created_at
+                ) VALUES (?, ?, ?, 'user', ?)
+                ON CONFLICT(logical_target, canonical_target, alias_target) DO NOTHING
+                """,
+                (self.logical_target, canonical_target, alias_target, datetime.now().isoformat()),
+            )
+
+    def list_credentials(
+        self,
+        operation_id: str,
+        *,
+        target: str | None = None,
+        role: str | None = None,
+        credential_type: str | None = None,
+        statuses: Iterable[str] = ("unknown", "valid"),
+        include_payload: bool = False,
+    ) -> list[dict[str, Any]]:
+        """List credentials eligible for one operation without cross-target widening."""
+
+        allowed_statuses = tuple(str(status) for status in statuses)
+        if not allowed_statuses:
+            return []
+        clauses = ["logical_target = ?", "(operation_id IS NULL OR operation_id = ?)"]
+        params: list[Any] = [self.logical_target, operation_id]
+        if target is not None:
+            clauses.append(
+                "(target = ? OR target IN (SELECT canonical_target FROM credential_target_aliases "
+                "WHERE logical_target = ? AND alias_target = ?))"
+            )
+            params.extend([target, self.logical_target, target])
+        if role is not None:
+            clauses.append("role = ?")
+            params.append(role)
+        if credential_type is not None:
+            clauses.append("credential_type = ?")
+            params.append(credential_type)
+        placeholders = ", ".join("?" for _ in allowed_statuses)
+        clauses.append(f"status IN ({placeholders})")
+        params.extend(allowed_statuses)
+        query = (
+            "SELECT credential_id, target, role, operation_id, credential_type, payload, origin, management_policy, "
+            "status, invalid_at, supersedes_credential_id, created_at, updated_at FROM credential_records WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY CASE WHEN operation_id = ? THEN 0 ELSE 1 END, created_at"
+        )
+        params.append(operation_id)
+        with self._lock, closing(self._connect()) as conn, conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._credential_row(row, include_payload=include_payload) for row in rows]
+
+    def get_credential(self, credential_id: str, *, include_payload: bool = False) -> dict[str, Any] | None:
+        """Return one credential only in this logical-target boundary."""
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                """
+                SELECT credential_id, target, role, operation_id, credential_type, payload, origin,
+                       management_policy, status, invalid_at, supersedes_credential_id, created_at, updated_at
+                FROM credential_records WHERE credential_id = ? AND logical_target = ?
+                """,
+                (credential_id, self.logical_target),
+            ).fetchone()
+        return self._credential_row(row, include_payload=include_payload) if row is not None else None
+
+    def record_credential_status(
+        self,
+        operation_id: str,
+        credential_id: str,
+        status: str,
+        actor: str,
+        reason: str,
+        evidence_refs: list[str],
+    ) -> dict[str, Any]:
+        """Append an audit event and update the effective credential status."""
+
+        if status not in {"unknown", "pending", "valid", "invalid", "expired", "revoked", "retired"}:
+            raise ValueError("unsupported credential status")
+        if actor not in {"user", "operation"}:
+            raise ValueError("credential status actor must be user or operation")
+        now = datetime.now().isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            existing = conn.execute(
+                "SELECT credential_id FROM credential_records WHERE credential_id = ? AND logical_target = ?",
+                (credential_id, self.logical_target),
+            ).fetchone()
+            if existing is None:
+                raise ValueError(f"Unknown credential: {credential_id}")
+            self._register_operation(conn, operation_id)
+            conn.execute(
+                """
+                INSERT INTO credential_status_events (
+                    event_id, credential_id, logical_target, operation_id, status, actor, reason, evidence_refs,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()), credential_id, self.logical_target, operation_id, status, actor, reason,
+                    json.dumps(evidence_refs), now,
+                ),
+            )
+            conn.execute(
+                "UPDATE credential_records SET status = ?, invalid_at = ?, updated_at = ? WHERE credential_id = ?",
+                (status, now if status == "invalid" else None, now, credential_id),
+            )
+        record = self.get_credential(credential_id)
+        if record is None:
+            raise RuntimeError("credential status update did not return a record")
+        return record
+
+    def record_credential_usage(
+        self,
+        operation_id: str,
+        credential_id: str,
+        *,
+        task_uid: str | None = None,
+        authentication_mode: str = "authenticated",
+        outcome: str = "selected",
+        evidence_refs: list[str] | None = None,
+    ) -> None:
+        """Record controller-owned credential selection or use for reporting."""
+
+        if authentication_mode not in {"authenticated", "mfa"}:
+            raise ValueError("unsupported credential authentication mode")
+        if outcome not in {"selected", "used", "succeeded", "failed", "blocked"}:
+            raise ValueError("unsupported credential usage outcome")
+        with self._lock, closing(self._connect()) as conn, conn:
+            self._register_operation(conn, operation_id)
+            conn.execute(
+                """
+                INSERT INTO credential_usage_records (
+                    usage_id, credential_id, logical_target, operation_id, task_uid, authentication_mode, outcome,
+                    evidence_refs, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()), credential_id, self.logical_target, operation_id, task_uid,
+                    authentication_mode, outcome, json.dumps(evidence_refs or []), datetime.now().isoformat(),
+                ),
+            )
+
+    def list_credential_usage(self, operation_id: str) -> list[dict[str, Any]]:
+        """Return report-safe usage metadata joined to credential identity."""
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                """
+                SELECT u.credential_id, c.target, c.role, c.credential_type, c.origin, c.status, u.task_uid,
+                       u.authentication_mode, u.outcome, u.evidence_refs, u.created_at
+                FROM credential_usage_records AS u
+                JOIN credential_records AS c ON c.credential_id = u.credential_id
+                WHERE u.logical_target = ? AND u.operation_id = ? ORDER BY u.created_at
+                """,
+                (self.logical_target, operation_id),
+            ).fetchall()
+        return [
+            {
+                "credential_id": row[0], "target": row[1], "role": row[2], "credential_type": row[3],
+                "origin": row[4], "status": row[5], "task_uid": row[6], "authentication_mode": row[7],
+                "outcome": row[8], "evidence_refs": json.loads(row[9]), "created_at": row[10],
+            }
+            for row in rows
+        ]
 
     def append_operation_model_metrics(
         self,
@@ -1970,9 +2246,9 @@ class SQLiteApplicationStore:
                         logical_target, task_uid, operation_id, title, objective, acceptance_contract, phase,
                         status, status_reason, evidence,
                         created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context,
-                        target_scope, target_ids
+                        auth_context, target_scope, target_ids
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(logical_target, operation_id, task_uid) DO UPDATE SET
                         title=excluded.title,
                         objective=excluded.objective,
@@ -1986,6 +2262,7 @@ class SQLiteApplicationStore:
                         replacement_of=excluded.replacement_of,
                         supersedes_criteria=excluded.supersedes_criteria,
                         recovery_context=excluded.recovery_context,
+                        auth_context=excluded.auth_context,
                         target_scope=excluded.target_scope,
                         target_ids=excluded.target_ids,
                         updated_at=excluded.updated_at
@@ -2007,6 +2284,7 @@ class SQLiteApplicationStore:
                     task.replacement_of,
                     json.dumps(task.supersedes_criteria),
                     json.dumps(task.recovery_context, sort_keys=True),
+                    json.dumps(task.auth_context, sort_keys=True),
                     task.target_scope,
                     json.dumps(task.target_ids),
                 ))
@@ -2034,7 +2312,7 @@ class SQLiteApplicationStore:
             self._register_operation(conn, operation_id)
             row = conn.execute(
                 "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, "
-                "created_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
+                "created_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, auth_context, "
                 "target_scope, target_ids FROM tasks "
                 "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
                 (self.logical_target, operation_id, task_uid),
@@ -2091,8 +2369,9 @@ class SQLiteApplicationStore:
             replacement_of=row[10],
             supersedes_criteria=json.loads(row[11] or "[]"),
             recovery_context=recovery_context,
-            target_scope=row[13] or "all",
-            target_ids=json.loads(row[14] or "[]"),
+            auth_context=json.loads(row[13] or "{}"),
+            target_scope=row[14] or "all",
+            target_ids=json.loads(row[15] or "[]"),
         )
 
     def get_tasks(self, operation_id: str) -> list[Task]:
@@ -2102,7 +2381,7 @@ class SQLiteApplicationStore:
             cursor = conn.execute(
                 "SELECT title, objective, acceptance_contract, phase, status, status_reason, evidence, task_uid, "
                 "created_at, updated_at, kind, reference_id, replacement_of, supersedes_criteria, recovery_context, "
-                "target_scope, target_ids "
+                "auth_context, target_scope, target_ids "
                 "FROM tasks WHERE logical_target = ? AND operation_id = ?",
                 (self.logical_target, operation_id),
             )
@@ -2124,8 +2403,9 @@ class SQLiteApplicationStore:
                         replacement_of=row[12],
                         supersedes_criteria=json.loads(row[13] or "[]"),
                         recovery_context=json.loads(row[14] or "{}"),
-                        target_scope=row[15] or "all",
-                        target_ids=json.loads(row[16] or "[]"),
+                        auth_context=json.loads(row[15] or "{}"),
+                        target_scope=row[16] or "all",
+                        target_ids=json.loads(row[17] or "[]"),
                     )
                 )
         return tasks
@@ -4092,6 +4372,7 @@ def store_finding(
     reproduction_steps: list[str],
     artifacts: NonEmptyArtifactRefs,
     evidence_assertions: list[dict[str, Any]] | None = None,
+    auth_context: dict[str, Any] | None = None,
 ) -> str:
     """Submit one finding candidate and create its dedicated verification task.
 
@@ -4140,6 +4421,10 @@ def store_finding(
     op_id = _operation_id()
     store = _get_database_store()
     source_task = _active_finding_source_task(store, op_id)
+    effective_auth_context = auth_context if auth_context is not None else (
+        source_task.auth_context if source_task is not None else {"mode": "unauthenticated"}
+    )
+    candidate["auth_context"] = _normalize_auth_context(effective_auth_context) or {"mode": "unauthenticated"}
     candidate["evidence_assertions"] = _validated_evidence_assertions(
         evidence_assertions, candidate["artifacts"], require_one=True
     )
@@ -4221,6 +4506,7 @@ def store_finding(
         "evidence_assertions": candidate["evidence_assertions"],
         "artifacts": candidate["artifacts"],
         "artifact_fingerprints": candidate["artifact_fingerprints"],
+        "auth_context": candidate["auth_context"],
     }
     task = Task(
         task_uid=task_uid,
@@ -4248,6 +4534,7 @@ def store_finding(
         ),
         evidence=candidate["artifacts"],
         phase=verification_phase,
+        auth_context=candidate["auth_context"],
         status="pending",
         kind="finding_validation",
         reference_id=finding_uid,
@@ -9990,6 +10277,11 @@ class QdrantMemoryClient:
         """Return persisted preflight facts for an explicit or current operation."""
 
         return _get_database_store().list_preflight_results(_operation_id(operation_id))
+
+    def list_credential_usage(self, operation_id: str | None = None) -> list[dict[str, Any]]:
+        """Return report-safe credential use records for an operation."""
+
+        return _get_database_store().list_credential_usage(_operation_id(operation_id))
 
     def update_finding_taxonomy_annotation(
         self,

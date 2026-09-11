@@ -1430,6 +1430,7 @@ def _canonical_report_data(sections: dict[str, Any]) -> dict[str, Any]:
         "evidence_integrity_errors": sections.get("evidence_integrity_errors") or [],
         "execution_history": sections.get("execution_history") or "",
         "execution_history_rows": sections.get("execution_history_rows") or {},
+        "credentials_used": sections.get("credentials_used") or [],
         "taxonomy_coverage": sections.get("taxonomy_coverage") or "",
         "metrics": {
             key: sections.get(key)
@@ -1534,6 +1535,37 @@ def _format_verified_findings_summary(sections: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _format_credentials_used(sections: dict[str, Any]) -> str:
+    """Render credential provenance without exposing payload values."""
+
+    rows = sections.get("credentials_used")
+    if not isinstance(rows, list) or not rows:
+        return '<a name="credentials-used"></a>\n### Credentials Used\n\nNo stored credentials were used in this operation.\n'
+    lines = [
+        '<a name="credentials-used"></a>\n### Credentials Used', "", "| Credential | Target | Type | Role | Origin | Outcome |",
+        "|---|---|---|---|---|---|",
+    ]
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        identity = (str(row.get("credential_id") or ""), str(row.get("outcome") or ""))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        lines.append(
+            "| {credential_id} | {target} | {credential_type} | {role} | {origin} | {outcome} |".format(
+                credential_id=_markdown_table_cell(row.get("credential_id") or "Unknown"),
+                target=_markdown_table_cell(row.get("target") or "Mailbox"),
+                credential_type=_markdown_table_cell(row.get("credential_type") or "Unknown"),
+                role=_markdown_table_cell(row.get("role") or "—"),
+                origin=_markdown_table_cell(row.get("origin") or "Unknown"),
+                outcome=_markdown_table_cell(row.get("outcome") or "selected"),
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _item_artifact_count(item: dict[str, Any]) -> int:
     """Return the number of recorded artifact references for one report item."""
     metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
@@ -1617,6 +1649,8 @@ def _format_executive_deterministic_sections(sections: dict[str, Any]) -> str:
         + f"Assessment status: **{status}**. "
         + (str(completion.get("incomplete_reason") or "") if status == "Incomplete" else "")
         + "\n"
+        + "\n"
+        + _format_credentials_used(sections)
     )
 
 
@@ -3734,6 +3768,7 @@ def _assemble_security_assessment_report(
     parts.extend(
         [
             "- [Target Coverage](#target-coverage)\n",
+            "- [Credentials Used](#credentials-used)\n",
             "- [Execution History](#execution-history)\n",
             "- [Appendix A: Assessment Methodology](#appendix-a-assessment-methodology)\n",
             "- [Appendix B: Recommended Next Steps](#appendix-b-recommended-next-steps)\n\n",
@@ -3770,10 +3805,18 @@ def _format_deterministic_finding(item: dict[str, Any], index: int) -> str:
     severity = _escape_markdown_text(item.get("severity") or metadata.get("severity") or "Unknown")
     status = _escape_markdown_text(item.get("validation_status") or metadata.get("validation_status") or "verified")
     content = _format_markdown_xml_html_tags(str(item.get("content") or "No finding detail was recorded.").strip())
+    auth_context = item.get("auth_context") if isinstance(item.get("auth_context"), dict) else metadata.get("auth_context")
+    auth_context = auth_context if isinstance(auth_context, dict) else {"mode": "unauthenticated"}
+    auth_mode = str(auth_context.get("mode") or "unauthenticated")
+    credential_ids = auth_context.get("credential_ids") if isinstance(auth_context.get("credential_ids"), list) else []
+    auth_line = f"- **Authentication context:** {auth_mode}"
+    if auth_mode == "authenticated" and credential_ids:
+        auth_line += f" (credential IDs: {', '.join(_escape_markdown_text(credential_id) for credential_id in credential_ids)})"
     text = (
         f"### {title}\n\n"
         f"- **Severity:** {severity}\n"
         f"- **Validation status:** {status}\n\n"
+        f"{auth_line}\n\n"
         "#### Recorded Evidence\n\n"
         f"{content}\n\n"
         + _format_taxonomy_mappings(metadata.get("taxonomy", {}), metadata.get("taxonomy_annotation"))
@@ -5333,6 +5376,7 @@ def build_report_sections(
                 "title",
                 "target",
                 "location",
+                "auth_context",
             ):
                 if key in candidate and not metadata.get(key):
                     metadata[key] = candidate[key]
@@ -5364,6 +5408,12 @@ def build_report_sections(
 
         operation_plan = memory_client.get_active_plan(operation_id=operation_id)
         task_records = memory_client.list_tasks(operation_id=operation_id)
+        list_credential_usage = getattr(memory_client, "list_credential_usage", None)
+        credential_usage = (
+            list_credential_usage(operation_id=operation_id)
+            if callable(list_credential_usage)
+            else []
+        )
         registered_targets: dict[str, OperationTarget] = {}
         for raw_target in list(getattr(operation_plan, "targets", []) or []):
             try:
@@ -5899,6 +5949,7 @@ def build_report_sections(
                 "tasks": task_history_rows,
                 "acceptance": acceptance_history_rows,
             },
+            "credentials_used": credential_usage if isinstance(credential_usage, list) else [],
             "task_status_counts": dict(sorted(task_status_counts.items())),
             "archived_replanned_task_count": len(archived_replanned_tasks),
             "total_task_count": total_task_count,

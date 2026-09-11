@@ -108,6 +108,15 @@ from modules.tools.channels import (
     channel_status,
 )
 from modules.tools.client_bundle_inventory import client_bundle_inventory
+from modules.tools.credentials import (
+    checkout_credential,
+    generate_mfa_code,
+    generate_password,
+    mark_credential_status,
+    query_credentials,
+    retrieve_email_mfa_code,
+    store_credential,
+)
 from modules.tools.editor import create_absolute_path_editor
 from modules.tools.idor_specialist import idor_specialist
 from modules.tools.mcp import (
@@ -610,6 +619,13 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         record_objective_validation,
         memory_retrieve,
         memory_list,
+        store_credential,
+        query_credentials,
+        checkout_credential,
+        mark_credential_status,
+        generate_password,
+        generate_mfa_code,
+        retrieve_email_mfa_code,
         create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
         create_tasks,
         sleep,

@@ -110,6 +110,7 @@ from modules.handlers.utils import (
     update_latest_output_pointer,
 )
 from modules.tools import browser, channel_close_all
+from modules.tools.credentials import extract_objective_credentials, store_user_credential
 from modules.tools.memory import (
     OperationTarget,
     create_application_store,
@@ -1756,6 +1757,10 @@ def main():
     if env_objective and os.environ.get("CYBER_UI_MODE") == "react":
         args.objective = env_objective
 
+    # Remove common credential forms before the objective reaches logs, plans, or a model. Drafts remain only in
+    # process memory until the application database is initialized for this operation below.
+    args.objective, objective_credential_drafts = extract_objective_credentials(args.objective)
+
     # Persist provider/model selections to environment for downstream configuration
     if args.provider:
         os.environ["CYBER_AGENT_PROVIDER"] = args.provider
@@ -2215,6 +2220,17 @@ def main():
             config=config,
         )
         callback_handler = runtime_resources.callback_handler
+        for draft in objective_credential_drafts:
+            try:
+                store_user_credential(
+                    operation_id=operation_id,
+                    credential_type=str(draft["credential_type"]),
+                    target=args.target,
+                    role=str(draft["role"]),
+                    values=dict(draft["values"]),
+                )
+            except (TypeError, ValueError) as error:
+                logger.warning("Could not store an objective credential draft: %s", error)
 
         if not bool(args.report):
             def run_workflow_agent(

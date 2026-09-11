@@ -11551,6 +11551,12 @@ The generated prompt must instruct the task-executor agent:
 - Execute only the assigned task objective below.
 - Execute only against the assigned target scope. Do not scan, exploit, or validate unrelated targets.
 {finding_validation_guidance}- Preserve the exact assigned target boundary for every outgoing request.
+- For authentication-capable work, establish the unauthenticated baseline before using credentials. Query credential
+  metadata by the resolved target and role, then check out only an eligible credential for an assigned authenticated
+  comparison. Do not copy secret values into artifacts, acceptance summaries, findings, or prose.
+- When the task auth_context is authenticated, use only its declared credential IDs. When access-control or IDOR work
+  requires a comparison, prefer distinct account, role, or tenant credential contexts and record any unavailable
+  comparison as a coverage gap rather than inventing an identity.
 - If an assigned target is an explicit `scheme://host:port` URL or `host:port` netloc, preserve that exact host and port boundary.
   Do not convert it to a host-only target or treat it as authorization to enumerate other ports on the same host.
 - Treat every plan constraint as a mandatory execution guardrail.

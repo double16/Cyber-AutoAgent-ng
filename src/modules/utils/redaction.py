@@ -8,13 +8,14 @@ from typing import Any
 
 REDACTED = "[REDACTED]"
 SENSITIVE_KEY_PATTERN = re.compile(
-    r"(?:api[_-]?key|secret|password|token|authorization|cookie|credential|private[_-]?key|access[_-]?key)",
+    r"(?:api[_-]?key|secret|password|token|authorization|cookie|credential|private[_-]?key|access[_-]?key|otp|mfa)",
     re.IGNORECASE,
 )
 TEXT_REDACTION_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+"),
     re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+=*"),
     re.compile(r"(?i)\b((?:api[_-]?key|secret|password|token|access[_-]?key)\s*[:=]\s*)[^\s,;]+"),
+    re.compile(r"(?i)\b((?:otp|mfa[_-]?(?:code|secret))\s*[:=]\s*)[^\s,;]+"),
     re.compile(
         r'(?i)(["\']?(?:authorization|api[_-]?key|secret|password|token|access[_-]?key)["\']?\s*[:=]\s*'
         r'["\']?(?:bearer\s+)?)[^\s,;"\'}]+'

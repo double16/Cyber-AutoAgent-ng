@@ -235,6 +235,22 @@ prompt inheritance, and custom-tool development.
 operations with the same exact target value. Reports and logs are written beneath the configured output directory,
 normally `outputs/<target>/<operation-id>/`.
 
+## Assessment credentials
+
+Credentials used for authorized assessments are stored in `outputs/cyber_autoagent.db`. They are scoped to the exact
+resolved target value (not an operation-local target ID), with optional operation scope and application role. Agents
+can query safe metadata and check out eligible credentials only for an active task; invalid, expired, revoked, and
+retired credentials are not selected. Registered accounts are target-scoped so later operations can reuse them.
+
+The database currently stores credential payloads in plaintext. Restrict access to the output directory and its
+backups to the assessment user. Secret values are masked in reports, logs, UI events, and trace exports, but must not
+be committed to source control or copied into task artifacts.
+
+For a concise objective, common `username=... password=...` and `api_key=...` forms are moved into the credential
+store before the objective is logged or sent to a model. Use a dedicated credential source for complex or MFA-backed
+credentials. TOTP provisioning secrets support SHA-1/SHA-256/SHA-512, six to ten digits, and a 30-second default;
+generated one-time codes are not persisted.
+
 ## MCP configuration
 
 The React configuration editor and CLI options accept MCP connection data. The JSON value supplied to

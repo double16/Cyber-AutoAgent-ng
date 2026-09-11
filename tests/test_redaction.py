@@ -36,3 +36,12 @@ def test_bounded_redacted_text_returns_full_or_truncated_safe_text():
     result = bounded_redacted_text("x" * 10, limit=5)
 
     assert result == "xxxxx…[truncated]"
+
+
+def test_redaction_masks_mfa_codes_and_provisioning_secrets():
+    value = "mfa_code=123456 provisioning_secret=JBSWY3DPEHPK3PXP"
+
+    result = redact_text(value)
+
+    assert "123456" not in result
+    assert "JBSWY3DPEHPK3PXP" not in result

@@ -489,6 +489,7 @@ def test_store_finding_routes_task_to_future_validation_phase(memory_client, ope
         }],
         "artifacts": ["artifact:admin-response.txt"],
         "artifact_fingerprints": candidate["artifact_fingerprints"],
+        "auth_context": {"mode": "unauthenticated"},
     }
 
 
