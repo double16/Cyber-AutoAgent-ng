@@ -14,6 +14,8 @@
   lifecycle provenance for supplied, found, and registered credentials.
 - Prefer reusable registered credentials for later operations while retaining an operation's own scoped credentials as
   the highest-priority selection candidates.
+- Preserve unauthenticated-baseline, authenticated-comparison, self-registration, and IDOR credential rules in
+  deterministic workflow prompt fallbacks.
 - Require active, target-scoped credential checkout before an agent can request an MFA code or read a configured
   email-MFA mailbox, preventing unrelated tasks from accessing MFA factors.
 - Reject credential imports and discovered credentials whose target is not an exact resolved operation target.

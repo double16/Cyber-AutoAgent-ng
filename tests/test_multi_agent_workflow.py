@@ -13107,6 +13107,33 @@ def test_task_prompt_builder_adds_bounded_task_scoped_swarm_contract():
     assert "must not create or execute workflow tasks" in prompt
 
 
+def test_task_prompt_builder_and_fallback_preserve_credential_execution_rules():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+    task = Task(
+        task_uid="active",
+        title="Test authorization controls",
+        objective="Compare authenticated and unauthenticated access for the assigned target",
+        phase=1,
+        status="active",
+    )
+
+    builder_prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+    fallback_prompt = controller._deterministic_task_prompt_spec(
+        _plan(), _plan().phases[0], task, RuntimeError("prompt unavailable")
+    )["prompt"]
+
+    for prompt in (builder_prompt, fallback_prompt):
+        assert "establish the unauthenticated baseline" in prompt
+        assert "store_credential(origin=\"registered\")" in prompt
+        assert "plan_access_control_comparisons" in prompt
+        assert "never invent an account" in prompt
+
+
 def test_task_prompts_delegate_loop_recovery_to_controller_without_retry_ceiling():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),

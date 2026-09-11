@@ -7833,6 +7833,7 @@ Return JSON exactly: {response_schema}.
                 "target scope. Create durable evidence before recording each acceptance result. Do not create new "
                 "tasks or change plan state.\n\n"
                 f"## Assigned target scope\n{self._task_target_scope_text(plan, task)}\n\n"
+                f"## Credential Execution Rules\n{self._credential_execution_guidance()}\n"
                 f"## Active phase\n{json.dumps(phase.to_dict(), sort_keys=True)}\n\n"
                 f"## Assigned task\n{json.dumps(task.to_dict(), sort_keys=True)}\n\n"
                 f"{hypothesis_guidance}\n"
@@ -11498,6 +11499,25 @@ while planning.
 
 {policy}"""
 
+    @staticmethod
+    def _credential_execution_guidance() -> str:
+        """Return credential rules required in both generated and fallback task prompts."""
+
+        return """- For authentication-capable work, establish the unauthenticated baseline before using credentials.
+  Query credential metadata by the resolved target and role. When eligible credentials exist for the assigned target,
+  perform an authenticated comparison with only checked-out credentials. Call `set_task_auth_context` with the
+  checked-out credential IDs before authenticated requests or findings. Do not copy secret values into artifacts,
+  acceptance summaries, findings, or prose.
+- If no eligible credential is available and the assigned target exposes an authorized self-registration path, create
+  a strong password with `generate_password`, complete only that registration flow, and store the result with
+  `store_credential(origin="registered")` without operation_scope so later authorized operations can reuse it.
+  Otherwise record the missing identity as a coverage gap; never invent an account or bypass registration controls.
+- When the task auth_context is authenticated, use only its declared credential IDs. When access-control or IDOR work
+  requires a comparison, call `plan_access_control_comparisons` before checkout. Use only its distinct account, role,
+  or tenant credential contexts and record any unavailable comparison as a coverage gap rather than inventing an
+  identity.
+"""
+
     def _task_prompt_builder_prompt(
         self,
         plan: OperationPlan,
@@ -11551,18 +11571,7 @@ The generated prompt must instruct the task-executor agent:
 - Execute only the assigned task objective below.
 - Execute only against the assigned target scope. Do not scan, exploit, or validate unrelated targets.
 {finding_validation_guidance}- Preserve the exact assigned target boundary for every outgoing request.
-- For authentication-capable work, establish the unauthenticated baseline before using credentials. Query credential
-  metadata by the resolved target and role, then check out only an eligible credential for an assigned authenticated
-  comparison. Call `set_task_auth_context` with the checked-out credential IDs before authenticated requests or
-  findings. Do not copy secret values into artifacts, acceptance summaries, findings, or prose.
-- If no eligible credential is available and the assigned target exposes an authorized self-registration path, create
-  a strong password with `generate_password`, complete only that registration flow, and store the result with
-  `store_credential(origin="registered")` without operation_scope so later authorized operations can reuse it.
-  Otherwise record the missing identity as a coverage gap; never invent an account or bypass registration controls.
-- When the task auth_context is authenticated, use only its declared credential IDs. When access-control or IDOR work
-  requires a comparison, call `plan_access_control_comparisons` before checkout. Use only its distinct account, role,
-  or tenant credential contexts and record any unavailable comparison as a coverage gap rather than inventing an
-  identity.
+{self._credential_execution_guidance()}
 - If an assigned target is an explicit `scheme://host:port` URL or `host:port` netloc, preserve that exact host and port boundary.
   Do not convert it to a host-only target or treat it as authorization to enumerate other ports on the same host.
 - Treat every plan constraint as a mandatory execution guardrail.
