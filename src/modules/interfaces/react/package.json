@@ -40,7 +40,7 @@
     "ink-spinner": "^5.0.0",
     "ink-table": "^3.1.0",
     "ink-text-input": "^6.0.0",
-    "js-yaml": "^4.1.1",
+    "js-yaml": "^5.2.1",
     "meow": "^14.0.0",
     "node-pty": "^1.0.0",
     "react": "^19.1.1",
