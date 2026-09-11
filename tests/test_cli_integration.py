@@ -237,6 +237,20 @@ def test_reset_continuation_failed_work_resets_persisted_operation(tmp_path):
     assert reset.phases[0].status == "active"
 
 
+def test_reset_continuation_failed_work_handles_empty_reset(monkeypatch, tmp_path):
+    store = SimpleNamespace(reset_failed_work=Mock(return_value=(SimpleNamespace(), 0, 0)))
+    monkeypatch.setattr(cyberautoagent, "create_application_store", lambda *args, **kwargs: store)
+
+    logger = Mock()
+    assert cyberautoagent.reset_continuation_failed_work(
+        output_dir=str(tmp_path),
+        logical_target="logical",
+        operation_id="OP_EMPTY",
+        logger=logger,
+    ) == (0, 0)
+    logger.info.assert_called_once_with("No failed work to reset for continuation %s", "OP_EMPTY")
+
+
 def test_parse_continuation_phase_selector_supports_ids_and_ranges():
     assert cyberautoagent.parse_continuation_phase_selector("1,3-4,6-", [1, 2, 3, 4, 5, 6, 7]) == (
         1,
@@ -245,6 +259,27 @@ def test_parse_continuation_phase_selector_supports_ids_and_ranges():
         6,
         7,
     )
+
+
+def test_parse_continuation_phase_selector_rejects_empty_plan_and_unknown_phase():
+    with pytest.raises(ValueError, match="no phases"):
+        cyberautoagent.parse_continuation_phase_selector("1", [])
+    with pytest.raises(ValueError, match="Unknown plan phase IDs"):
+        cyberautoagent.parse_continuation_phase_selector("4", [1, 2, 3])
+
+
+def test_reset_continuation_phases_rejects_missing_plan(monkeypatch, tmp_path):
+    store = SimpleNamespace(get_plan=Mock(return_value=None))
+    monkeypatch.setattr(cyberautoagent, "create_application_store", lambda *args, **kwargs: store)
+
+    with pytest.raises(ValueError, match="Unknown operation plan"):
+        cyberautoagent.reset_continuation_phases(
+            output_dir=str(tmp_path),
+            logical_target="logical",
+            operation_id="OP_MISSING",
+            phase_selector="1",
+            logger=Mock(),
+        )
 
 
 @pytest.mark.parametrize("selector", ["", "0", "3-1", "1,,2", "unknown", "8-"])
@@ -569,6 +604,16 @@ def test_assistant_text_skips_tool_calls_and_malformed_content():
     ]
     assert cyberautoagent.extract_last_assistant_text(messages) == "final answer"
     assert cyberautoagent.extract_last_assistant_text(None) == ""
+
+
+def test_signal_and_assistant_fallback_branches(capsys):
+    with pytest.raises(KeyboardInterrupt):
+        cyberautoagent.signal_handler(cyberautoagent.signal.SIGTSTP, None)
+    assert "SIGTSTP" in capsys.readouterr().out
+    cyberautoagent.interrupted = False
+    assert cyberautoagent.extract_last_assistant_text(
+        [{"role": "assistant", "content": "plain text"}]
+    ) == ""
 
 
 def test_terminal_policy_covers_successful_tools_and_text_limit():
