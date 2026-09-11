@@ -126,6 +126,7 @@ def test_restore_continuation_state_returns_current_objective_when_not_requested
             "partial_failure",
         ),
         ({}, {}, {"operation": "sample preparation failed"}, False, "failed"),
+        ({}, {}, {}, False, "no_results"),
     ],
 )
 def test_rerun_operation_evaluation_uses_persisted_objective_and_reports_failures(

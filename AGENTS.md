@@ -4,7 +4,7 @@
 
 ## Testing and contribution
 - Always write unit tests and check that they pass for new and changed business logic.
-- Changed and new code should have at least 80% code and branch coverage.
+- Changed and new code should have at least 80% code and branch coverage per file.
 - Always run unit tests to verify changes.
 - Test both positive and negative scenarios.
 - Keep tests in files based on component or functionality. Use existing test files if applicable.
@@ -44,16 +44,21 @@
 - Prefix subsequent `uv` commands with the same cache setting. Use the repository's `.venv` through `uv run`; do not
   activate a different virtual environment or invoke tools from a system Python.
 - When running coverage or tests that import NumPy on macOS, also set `KMP_DUPLICATE_LIB_OK=TRUE` to avoid the
-  duplicate OpenMP-library import error.
+  duplicate OpenMP-library import error. This setting is unrelated to Python's "cannot load module more than once per
+  process" error.
 - Examples:
 
   ```bash
   UV_CACHE_DIR="$PWD/.uv-cache" uv run python3 --version
   KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q --tb=short
   UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
-  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest -q
-  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage report
+  # Use the repository coverage entry point. It configures pytest-cov correctly.
+  ./.github/scripts/run-python-coverage.sh
   ```
+
+- Do not invoke `coverage run -m pytest` as a replacement for the repository coverage script. In this environment it
+  can produce a NumPy "cannot load module more than once per process" error even when the pytest-cov-based script
+  completes successfully.
 
 - If `.uv-cache` is not present, create it before running commands. Keep it project-local and persistent between agent
   turns; do not use a temporary directory unless the project-local path is unavailable.

@@ -11553,7 +11553,8 @@ The generated prompt must instruct the task-executor agent:
 {finding_validation_guidance}- Preserve the exact assigned target boundary for every outgoing request.
 - For authentication-capable work, establish the unauthenticated baseline before using credentials. Query credential
   metadata by the resolved target and role, then check out only an eligible credential for an assigned authenticated
-  comparison. Do not copy secret values into artifacts, acceptance summaries, findings, or prose.
+  comparison. Call `set_task_auth_context` with the checked-out credential IDs before authenticated requests or
+  findings. Do not copy secret values into artifacts, acceptance summaries, findings, or prose.
 - If no eligible credential is available and the assigned target exposes an authorized self-registration path, create
   a strong password with `generate_password`, complete only that registration flow, and store the result with
   `store_credential(origin="registered")` without operation_scope so later authorized operations can reuse it.

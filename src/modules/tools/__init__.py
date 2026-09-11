@@ -31,6 +31,7 @@ from modules.tools.credentials import (
     request_mfa_code,
     retrieve_email_mfa_code,
     rotate_credential,
+    set_task_auth_context,
     store_credential,
     store_user_credential,
 )
@@ -108,6 +109,7 @@ __all__ = [
     "request_mfa_code",
     "retrieve_email_mfa_code",
     "rotate_credential",
+    "set_task_auth_context",
     "store_credential",
     "store_finding",
     "store_knowledge",

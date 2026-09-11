@@ -346,6 +346,77 @@ def plan_access_control_comparisons(target: str) -> str:
     )
 
 
+def _task_resolved_targets(store: Any, operation_id: str, task: Any) -> list[str]:
+    """Return the resolved target values authorized for one durable task."""
+
+    plan = store.get_plan(operation_id)
+    if plan is None:
+        return []
+    selected_target_ids = set(task.target_ids) if task.target_scope == "subset" else None
+    values = [
+        canonicalize_credential_target(str(target.value))
+        for target in plan.targets
+        if selected_target_ids is None or target.target_id in selected_target_ids
+    ]
+    return list(dict.fromkeys(values))
+
+
+@tool(name="set_task_auth_context")
+def set_task_auth_context(credential_ids: list[str]) -> str:
+    """Bind checked-out, target-scoped credentials to the active task's authenticated context.
+
+    Call this after checkout and before an authenticated request or authentication finding. The controller derives
+    roles and account/tenant labels from stored credential metadata; callers cannot supply or spoof that provenance.
+    """
+
+    normalized_ids = list(dict.fromkeys(str(item).strip() for item in credential_ids if str(item).strip()))
+    if not normalized_ids:
+        raise ValueError("credential_ids requires at least one credential ID")
+    store = _get_database_store()
+    operation_id = _operation_id()
+    active_task = active_credential_task(store, operation_id)
+    if active_task is None:
+        raise ValueError("an active task is required to set an authentication context")
+    selected_ids = store.credential_ids_selected_by_task(operation_id, active_task.task_uid)
+    missing_selection = sorted(set(normalized_ids) - selected_ids)
+    if missing_selection:
+        raise ValueError("authentication context credentials must be checked out by the active task")
+    target_values = _task_resolved_targets(store, operation_id, active_task)
+    if not target_values:
+        raise ValueError("active task does not have a resolved target scope")
+    eligible_ids = {
+        str(record["credential_id"])
+        for target_value in target_values
+        for record in store.list_credentials(operation_id, target=target_value)
+    }
+    if not set(normalized_ids).issubset(eligible_ids):
+        raise ValueError("authentication context credential is outside the active task target scope")
+    records = [store.get_credential(credential_id) for credential_id in normalized_ids]
+    if any(record is None or record["status"] not in {"unknown", "valid"} for record in records):
+        raise ValueError("authentication context credential is unavailable")
+    role_values = sorted({
+        str(record.get("role") or "") for record in records if record and record.get("role")
+    })
+    account_values = sorted({
+        str(record.get("account_label") or "") for record in records if record and record.get("account_label")
+    })
+    tenant_values = sorted({
+        str(record.get("tenant_label") or "") for record in records if record and record.get("tenant_label")
+    })
+    task = store.patch_task(
+        operation_id,
+        active_task.task_uid,
+        auth_context={
+            "mode": "authenticated",
+            "credential_ids": normalized_ids,
+            "roles": role_values,
+            "account_labels": account_values,
+            "tenant_labels": tenant_values,
+        },
+    )
+    return json.dumps({"task_uid": task.task_uid, "auth_context": task.auth_context}, sort_keys=True)
+
+
 @tool(name="checkout_credential")
 def checkout_credential(credential_id: str, purpose: str) -> str:
     """Retrieve one eligible credential for the active task and record selection for reporting.
@@ -363,10 +434,20 @@ def checkout_credential(credential_id: str, purpose: str) -> str:
     if scoped_operation and scoped_operation != _operation_id():
         raise ValueError("credential is scoped to another operation")
     active_task = active_credential_task(store, _operation_id())
+    if active_task is None:
+        raise ValueError("an active task is required to check out a credential")
+    target_values = _task_resolved_targets(store, _operation_id(), active_task)
+    eligible_ids = {
+        str(candidate["credential_id"])
+        for target_value in target_values
+        for candidate in store.list_credentials(_operation_id(), target=target_value)
+    }
+    if str(credential_id) not in eligible_ids:
+        raise ValueError("credential is outside the active task target scope")
     store.record_credential_usage(
         _operation_id(),
         str(credential_id),
-        task_uid=active_task.task_uid if active_task is not None else None,
+        task_uid=active_task.task_uid,
         outcome="selected",
     )
     return json.dumps({"credential_id": record["credential_id"], "credential_type": record["credential_type"], "values": record["payload"]})

@@ -119,6 +119,7 @@ from modules.tools.credentials import (
     request_mfa_code,
     retrieve_email_mfa_code,
     rotate_credential,
+    set_task_auth_context,
     store_credential,
 )
 from modules.tools.editor import create_absolute_path_editor
@@ -626,6 +627,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         store_credential,
         query_credentials,
         checkout_credential,
+        set_task_auth_context,
         mark_credential_status,
         plan_access_control_comparisons,
         generate_password,

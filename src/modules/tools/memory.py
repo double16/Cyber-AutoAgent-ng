@@ -1493,6 +1493,7 @@ class ApplicationStore(Protocol):
         evidence_replacement: Iterable[str] | None = None,
         recovery_context_updates: dict[str, Any] | None = None,
         recovery_context_removals: Iterable[str] = (),
+        auth_context: dict[str, Any] | None = None,
     ) -> Task: ...
 
     def get_tasks(self, operation_id: str) -> list[Task]: ...
@@ -2465,6 +2466,7 @@ class SQLiteApplicationStore:
         evidence_replacement: Iterable[str] | None = None,
         recovery_context_updates: dict[str, Any] | None = None,
         recovery_context_removals: Iterable[str] = (),
+        auth_context: dict[str, Any] | None = None,
     ) -> Task:
         """Atomically update mutable task fields without replacing unrelated task state."""
 
@@ -2497,13 +2499,18 @@ class SQLiteApplicationStore:
             for key in removals:
                 recovery_context.pop(key, None)
             recovery_context.update(updates)
+            next_auth_context = (
+                _normalize_auth_context(auth_context)
+                if auth_context is not None
+                else _normalize_auth_context(json.loads(row[13] or "{}"))
+            )
             now = datetime.now().isoformat()
             next_phase = int(phase) if phase is not None else int(row[3])
             next_status = str(status) if status is not None else str(row[4])
             next_reason = str(status_reason) if status_reason is not None else str(row[5] or "")
             conn.execute(
                 "UPDATE tasks SET phase = ?, status = ?, status_reason = ?, evidence = ?, "
-                "recovery_context = ?, updated_at = ? "
+                "recovery_context = ?, auth_context = ?, updated_at = ? "
                 "WHERE logical_target = ? AND operation_id = ? AND task_uid = ?",
                 (
                     next_phase,
@@ -2511,6 +2518,7 @@ class SQLiteApplicationStore:
                     next_reason,
                     json.dumps(evidence),
                     json.dumps(recovery_context, sort_keys=True),
+                    json.dumps(next_auth_context, sort_keys=True),
                     now,
                     self.logical_target,
                     operation_id,
@@ -2533,7 +2541,7 @@ class SQLiteApplicationStore:
             replacement_of=row[10],
             supersedes_criteria=json.loads(row[11] or "[]"),
             recovery_context=recovery_context,
-            auth_context=json.loads(row[13] or "{}"),
+            auth_context=next_auth_context,
             target_scope=row[14] or "all",
             target_ids=json.loads(row[15] or "[]"),
         )
@@ -10274,6 +10282,7 @@ class QdrantMemoryClient:
             evidence_replacement: Iterable[str] | None = None,
             recovery_context_updates: dict[str, Any] | None = None,
             recovery_context_removals: Iterable[str] = (),
+            auth_context: dict[str, Any] | None = None,
             user_id: str | None = None,
     ) -> Task:
         """Patch one persisted task without replacing independent task state."""
@@ -10293,6 +10302,7 @@ class QdrantMemoryClient:
                 evidence_replacement=evidence_replacement,
                 recovery_context_updates=recovery_context_updates,
                 recovery_context_removals=recovery_context_removals,
+                auth_context=auth_context,
             )
         current = next((item for item in store.get_tasks(operation_id) if item.task_uid == task_uid), None)
         if current is None:
@@ -10317,6 +10327,7 @@ class QdrantMemoryClient:
             phase=phase if phase is not None else current.phase,
             evidence=evidence,
             recovery_context=context,
+            auth_context=auth_context if auth_context is not None else current.auth_context,
         )
         store.store_task(operation_id, updated)
         return updated

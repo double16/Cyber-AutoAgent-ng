@@ -254,7 +254,9 @@ mailbox or request one through the React terminal or interactive CLI. The prompt
 not kept in terminal history, and only challenge metadata (never the code) is retained in the database.
 Credentials created by an operation can be rotated by the agent when the authorized flow supports it; rotation creates
 a new credential record and retires the old one instead of overwriting history. User-provided credential payloads are
-never changed by an agent.
+never changed by an agent. Before an authenticated request, an agent binds its checked-out credentials to the active
+task. The controller rejects credentials outside that task's resolved target scope and records the roles, accounts,
+and tenants from stored metadata for report provenance.
 
 The **Operations → Assessment Credentials (JSON)** field in the React configuration editor accepts either a JSON
 array or `{"credentials": [...]}`. Each item has `credential_type`, `role`, `values`, and optional `target`,

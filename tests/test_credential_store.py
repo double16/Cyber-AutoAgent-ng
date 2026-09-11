@@ -1,21 +1,29 @@
 import json
 import sqlite3
 import stat
+from email.message import EmailMessage
 
 import pytest
 
 from modules.tools.credentials import (
     canonicalize_credential_target,
+    checkout_credential,
     extract_config_credentials,
     extract_objective_credentials,
     generate_mfa_code,
+    generate_password,
+    mark_credential_status,
     plan_access_control_comparisons,
+    query_credentials,
     request_mfa_code,
+    retrieve_email_mfa_code,
     rotate_credential,
+    set_task_auth_context,
+    store_credential,
     store_user_credential,
     validate_credential_payload,
 )
-from modules.tools.memory import SQLiteApplicationStore, Task
+from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, SQLiteApplicationStore, Task
 from tests.helpers.acceptance import make_acceptance
 
 
@@ -102,6 +110,14 @@ def test_react_credential_configuration_is_validated_without_returning_secrets_i
     with pytest.raises(ValueError, match="valid JSON") as error:
         extract_config_credentials("configured-secret")
     assert "configured-secret" not in str(error.value)
+    with pytest.raises(ValueError, match="credentials array"):
+        extract_config_credentials(json.dumps({"credentials": {}}))
+    with pytest.raises(ValueError, match="must be an object"):
+        extract_config_credentials(json.dumps(["not-a-credential"]))
+    with pytest.raises(ValueError, match="requires role"):
+        extract_config_credentials(
+            json.dumps([{"credential_type": "api_key", "values": {"api_key": "secret", "name": "X-Key"}}])
+        )
 
 
 def test_totp_generation_matches_rfc6238_vector(monkeypatch):
@@ -213,6 +229,86 @@ def test_interactive_email_mfa_handoff_persists_only_challenge_metadata(tmp_path
     assert "123456" not in json.dumps(store.list_credential_usage("op-1"))
 
 
+def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    email_mfa_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        values={
+            "username": "alice",
+            "password": "secret",
+            "mfa": {"type": "email", "recipient": "alice@example.test", "mailbox_credential_id": "mailbox-1"},
+        },
+    )
+    totp_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="reader",
+        values={"username": "reader", "password": "secret", "mfa": {"type": "totp", "secret": "GEZDGNBV"}},
+    )
+    with pytest.raises(ValueError, match="TTL"):
+        request_mfa_code(email_mfa_credential["credential_id"], ttl_seconds=29)
+    with pytest.raises(ValueError, match="capture"):
+        request_mfa_code(email_mfa_credential["credential_id"], code_pattern=r"(\\d+)")
+    with pytest.raises(ValueError, match="generate_mfa_code"):
+        request_mfa_code(totp_credential["credential_id"])
+    monkeypatch.setattr("builtins.input", lambda: "not-a-code")
+    with pytest.raises(ValueError, match="did not match"):
+        request_mfa_code(email_mfa_credential["credential_id"])
+
+    mailbox_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="email_login",
+        target=None,
+        role=None,
+        values={
+            "email": "mfa@example.test",
+            "password": "mail-secret",
+            "mailbox": {"host": "mail.example.test", "folder": "Codes"},
+        },
+    )
+    message = EmailMessage()
+    message["From"] = "noreply@example.test"
+    message["Subject"] = "Your code"
+    message.set_content("Use 654321 to continue")
+
+    class FakeImapClient:
+        logged_out = False
+
+        def __init__(self, host, port):
+            assert (host, port) == ("mail.example.test", 993)
+
+        def login(self, email_address, password):
+            assert (email_address, password) == ("mfa@example.test", "mail-secret")
+
+        def select(self, folder, readonly):
+            assert (folder, readonly) == ("Codes", True)
+            return "OK", [b""]
+
+        def search(self, _charset, _query):
+            return "OK", [b"1"]
+
+        def fetch(self, message_id, _query):
+            assert message_id == b"1"
+            return "OK", [(b"RFC822", message.as_bytes())]
+
+        def logout(self):
+            self.logged_out = True
+
+    fake_client = FakeImapClient("mail.example.test", 993)
+    monkeypatch.setattr("modules.tools.credentials.imaplib.IMAP4_SSL", lambda *_args: fake_client)
+
+    assert retrieve_email_mfa_code(mailbox_credential["credential_id"], sender_contains="noreply") == "654321"
+    assert fake_client.logged_out is True
+    with pytest.raises(ValueError, match="capture"):
+        retrieve_email_mfa_code(mailbox_credential["credential_id"], code_pattern=r"(\\d+)")
+
+
 def test_mfa_challenge_cannot_be_completed_after_expiry(tmp_path):
     store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
     credential = store.store_credential(
@@ -306,3 +402,328 @@ def test_task_authentication_context_requires_a_credential_for_authenticated_wor
     )
 
     assert task.auth_context["credential_ids"] == ["credential-1"]
+
+
+def _store_active_target_task(store, operation_id="op-1", target="https://app.example.test"):
+    store.store_plan(
+        operation_id,
+        OperationPlan(
+            objective="Assess application",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(id=1, title="Testing", status="active")],
+            targets=[OperationTarget(target_id="app", value=target, type="network")],
+        ),
+    )
+    task = Task(
+        "task-1",
+        "Authenticated testing",
+        "Test the application",
+        make_acceptance("task-1"),
+        1,
+        "active",
+        target_scope="subset",
+        target_ids=["app"],
+    )
+    store.store_task(operation_id, task)
+    return task
+
+
+def test_credential_payload_validation_supports_all_types_and_mfa_variants():
+    username_password = validate_credential_payload(
+        "username_password",
+        {
+            "username": "alice",
+            "password": "not-logged",
+            "email": "alice@example.test",
+            "mfa": {"type": "totp", "secret": "GEZDGNBVGY3TQOJQ", "digits": 8, "algorithm": "sha256"},
+        },
+    )
+    email_login = validate_credential_payload(
+        "email_login",
+        {
+            "email": "mfa@example.test",
+            "password": "not-logged",
+            "mailbox": {"host": "mail.example.test", "folder": "Codes"},
+            "mfa": {"type": "email", "recipient": "mfa@example.test", "mailbox_credential_id": "mailbox-1"},
+        },
+    )
+    api_key = validate_credential_payload(
+        "api_key", {"api_key": "not-logged", "placement": "query", "name": "key", "prefix": "Bearer "}
+    )
+    oauth = validate_credential_payload(
+        "oauth2_client",
+        {
+            "client_id": "client",
+            "client_secret": "not-logged",
+            "token_url": "HTTPS://AUTH.EXAMPLE.TEST:443/token",
+            "scopes": ["read", " ", "write"],
+            "audience": "app",
+        },
+    )
+
+    assert username_password["mfa"]["algorithm"] == "SHA256"
+    assert email_login["mailbox"] == {"host": "mail.example.test", "port": 993, "tls": True, "folder": "Codes"}
+    assert api_key["placement"] == "query"
+    assert oauth["token_url"] == "https://auth.example.test/token"
+    assert oauth["scopes"] == ["read", "write"]
+
+    with pytest.raises(ValueError, match="TOTP"):
+        validate_credential_payload(
+            "username_password",
+            {"username": "alice", "password": "secret", "mfa": {"type": "totp", "secret": "a", "digits": 4}},
+        )
+    with pytest.raises(ValueError, match="placement"):
+        validate_credential_payload("api_key", {"api_key": "secret", "placement": "cookie", "name": "key"})
+    with pytest.raises(ValueError, match="mailbox"):
+        validate_credential_payload("email_login", {"email": "a@example.test", "password": "secret"})
+    with pytest.raises(ValueError, match="mfa must be an object"):
+        validate_credential_payload("username_password", {"username": "alice", "password": "secret", "mfa": "totp"})
+    with pytest.raises(ValueError, match="MFA type"):
+        validate_credential_payload(
+            "username_password", {"username": "alice", "password": "secret", "mfa": {"type": "push"}}
+        )
+    with pytest.raises(ValueError, match="values must be an object"):
+        validate_credential_payload("api_key", None)
+
+
+def test_credential_target_and_store_boundaries_cover_invalid_inputs_and_labels(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    invalid_targets = [
+        ("", "required"),
+        ("https://example.test:bad", "invalid port"),
+        ("https://a:b@example.test", "userinfo"),
+    ]
+    for target, message in invalid_targets:
+        with pytest.raises(ValueError, match=message):
+            canonicalize_credential_target(target)
+    assert canonicalize_credential_target("host.example.test///") == "host.example.test"
+
+    with pytest.raises(ValueError, match="target is required"):
+        store_user_credential(
+            operation_id="op-1",
+            credential_type="api_key",
+            target=None,
+            role="reader",
+            values={"api_key": "secret", "name": "X-Key"},
+        )
+    with pytest.raises(ValueError, match="role is required"):
+        store_user_credential(
+            operation_id="op-1",
+            credential_type="api_key",
+            target="https://app.example.test",
+            role=None,
+            values={"api_key": "secret", "name": "X-Key"},
+        )
+    record = store_user_credential(
+        operation_id="op-1",
+        credential_type="email_login",
+        target=None,
+        role=None,
+        account_label="mail-account",
+        tenant_label="mail-tenant",
+        values={"email": "mfa@example.test", "password": "secret", "mailbox": {"host": "mail.example.test"}},
+    )
+
+    payload = store.get_credential(record["credential_id"], include_payload=True)["payload"]
+    assert payload["account_label"] == "mail-account"
+    assert payload["tenant_label"] == "mail-tenant"
+
+
+def test_agent_credential_store_query_and_status_tools_are_safe(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+
+    with pytest.raises(ValueError, match="origin"):
+        store_credential(
+            "api_key",
+            {"api_key": "secret", "name": "X-Key"},
+            "https://app.example.test",
+            "reader",
+            origin="provided",
+        )
+    stored = json.loads(
+        store_credential(
+            "api_key", {"api_key": "secret", "name": "X-Key"}, "https://app.example.test", "reader", origin="found"
+        )
+    )
+    queried = json.loads(query_credentials("https://app.example.test", role="reader", credential_type="api_key"))
+    status = json.loads(mark_credential_status(stored["credential"]["credential_id"], "valid", "login succeeded"))
+
+    assert stored["stored"] is True
+    assert queried["credentials"][0]["credential_id"] == stored["credential"]["credential_id"]
+    assert "secret" not in json.dumps(queried)
+    assert status["credential"]["status"] == "valid"
+    with pytest.raises(ValueError, match="unknown credential_type"):
+        query_credentials(credential_type="bearer")
+    with pytest.raises(ValueError, match="unknown credential status"):
+        mark_credential_status(stored["credential"]["credential_id"], "broken", "no")
+
+
+def test_password_and_totp_tools_reject_bad_inputs_and_generate_compliant_password():
+    password = generate_password(24)
+
+    assert len(password) == 24
+    assert any(character.islower() for character in password)
+    assert any(character.isupper() for character in password)
+    assert any(character.isdigit() for character in password)
+    assert any(character in "!@#$%^&*-_" for character in password)
+    with pytest.raises(ValueError, match="between"):
+        generate_password(8)
+    with pytest.raises(ValueError, match="digits"):
+        generate_mfa_code("GEZDGNBV", digits=4)
+    with pytest.raises(ValueError, match="algorithm"):
+        generate_mfa_code("GEZDGNBV", algorithm="MD5")
+    with pytest.raises(ValueError, match="provisioning"):
+        generate_mfa_code("not base32!")
+
+
+def test_checkout_and_auth_context_reject_missing_task_scope_and_unavailable_credentials(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="api_key",
+        target="https://app.example.test",
+        role="reader",
+        values={"api_key": "secret", "name": "X-Key"},
+    )
+
+    with pytest.raises(ValueError, match="at least one"):
+        set_task_auth_context([])
+    with pytest.raises(ValueError, match="active task"):
+        set_task_auth_context([credential["credential_id"]])
+    with pytest.raises(ValueError, match="purpose"):
+        checkout_credential(credential["credential_id"], "")
+    with pytest.raises(ValueError, match="unavailable"):
+        checkout_credential("missing", "login")
+
+    _store_active_target_task(store)
+    foreign_operation_credential = store.store_credential(
+        "op-1",
+        {
+            "credential_type": "api_key",
+            "target": "https://app.example.test",
+            "role": "reader",
+            "operation_id": "other-operation",
+            "payload": {"api_key": "secret", "name": "X-Key", "placement": "header", "prefix": ""},
+            "origin": "provided",
+            "management_policy": "user",
+        },
+    )
+    with pytest.raises(ValueError, match="another operation"):
+        checkout_credential(foreign_operation_credential["credential_id"], "login")
+    store.record_credential_status("op-1", credential["credential_id"], "invalid", "operation", "failed", [])
+    with pytest.raises(ValueError, match="unavailable"):
+        checkout_credential(credential["credential_id"], "login")
+
+
+def test_checkout_and_auth_context_bind_credentials_to_the_active_task_target(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    plan = OperationPlan(
+        objective="Assess application",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Testing", status="active")],
+        targets=[OperationTarget(target_id="app", value="https://app.example.test", type="network")],
+    )
+    store.store_plan("op-1", plan)
+    task = Task(
+        "task-1",
+        "Authenticated testing",
+        "Test the application",
+        make_acceptance("task-1"),
+        1,
+        "active",
+        target_scope="subset",
+        target_ids=["app"],
+    )
+    store.store_task("op-1", task)
+    credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        account_label="alice",
+        tenant_label="tenant-a",
+        values={"username": "alice", "password": "must-not-leak"},
+    )
+
+    with pytest.raises(ValueError, match="checked out"):
+        set_task_auth_context([credential["credential_id"]])
+    checkout_credential(credential["credential_id"], "authenticated comparison")
+    result = json.loads(set_task_auth_context([credential["credential_id"]]))
+
+    assert result["auth_context"] == {
+        "mode": "authenticated",
+        "credential_ids": [credential["credential_id"]],
+        "roles": ["member"],
+        "account_labels": ["alice"],
+        "tenant_labels": ["tenant-a"],
+    }
+    assert "must-not-leak" not in json.dumps(result)
+
+
+def test_checkout_rejects_a_credential_outside_the_active_task_target(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    store.store_plan(
+        "op-1",
+        OperationPlan(
+            objective="Assess application",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(id=1, title="Testing", status="active")],
+            targets=[OperationTarget(target_id="app", value="https://app.example.test", type="network")],
+        ),
+    )
+    store.store_task(
+        "op-1",
+        Task(
+            "task-1",
+            "Testing",
+            "Test the application",
+            make_acceptance("task-1"),
+            1,
+            "active",
+            target_scope="subset",
+            target_ids=["app"],
+        ),
+    )
+    other_target_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="api_key",
+        target="https://api.other.example.test",
+        role="reader",
+        values={"api_key": "must-not-leak", "placement": "header", "name": "X-API-Key"},
+    )
+
+    with pytest.raises(ValueError, match="target scope"):
+        checkout_credential(other_target_credential["credential_id"], "wrong target")
+
+
+def test_mfa_tools_reject_missing_configuration_and_mailbox_errors(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    plain_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        values={"username": "alice", "password": "secret"},
+    )
+    with pytest.raises(ValueError, match="eligible credential"):
+        request_mfa_code("missing")
+    with pytest.raises(ValueError, match="configured MFA"):
+        request_mfa_code(plain_credential["credential_id"])
+    with pytest.raises(ValueError, match="invalid MFA code pattern"):
+        request_mfa_code(plain_credential["credential_id"], code_pattern="[")
+    with pytest.raises(ValueError, match="eligible email_login"):
+        retrieve_email_mfa_code(plain_credential["credential_id"])

@@ -17,6 +17,7 @@ _CREDENTIAL_BOOKKEEPING_TOOLS = {
     "query_credentials",
     "request_mfa_code",
     "retrieve_email_mfa_code",
+    "set_task_auth_context",
     "store_credential",
 }
 _SECRET_PAYLOAD_KEYS = {"api_key", "client_secret", "password", "secret"}
