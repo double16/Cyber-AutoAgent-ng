@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="JAVA_MODULE" version="4">
+  <component name="NewModuleRootManager" inherit-compiler-output="true">
+    <exclude-output />
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/5QLanwYIgrNBlYLz" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/TbX62KXosGrs3EaI" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/VptvzGKcVmqplW6n/langchain_classic/tools" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/bVhnOmMoaBG6s6Ay" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/cYHEs55H_nV2nbNO" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/hqMHc6LJ8mNRY-42" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/lWTMJ8D11MxGaGNz" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/archive-v0/nn11LvgTo8MzADar" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/environments-v2/c93ca2ed1a378b73/48cabffb289553ec/lib/python3.14/site-packages" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/botocore/1.43.74-py3-none-any" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/langchain-community/0.4.2-py3-none-any" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/langchain-litellm/0.7.0-py3-none-any" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/langfuse/3.14.6-py3-none-any" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/opentelemetry-api/1.39.1-py3-none-any" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/ragas/0.3.2-py3-none-any" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
+      <excludeFolder url="file://$MODULE_DIR$/.uv-cache" />
+      <excludeFolder url="file://$MODULE_DIR$/.venv" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+  <component name="TemplatesService">
+    <option name="TEMPLATE_FOLDERS">
+      <list>
+        <option value="$MODULE_DIR$/src/modules/prompts/templates" />
+      </list>
+    </option>
+  </component>
+</module>
