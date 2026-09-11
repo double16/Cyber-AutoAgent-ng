@@ -15,7 +15,8 @@ class RecordingEmitter:
 
 
 def test_register_filter_and_summary():
-    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter())
+    records = [{"finding_uid": "verified", "resolution": "verified"}]
+    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter(), finding_records=records)
 
     manager.register_trace("t1", mod.TraceType.MAIN_AGENT, "s1", "Main", {"x": 1})
     manager.register_trace("t2", mod.TraceType.REPORT_GENERATION, "s2", "Report")
@@ -34,6 +35,111 @@ def test_register_filter_and_summary():
     assert summary["traces"][0]["score_count"] == 1
 
 
+def test_build_goal_contract_facts_scores_current_evidence_backed_units():
+    outcome_contract = SimpleNamespace(
+        mode="outcome",
+        basis=SimpleNamespace(item_ids=()),
+        criteria=[SimpleNamespace(id="test-auth"), SimpleNamespace(id="test-upload")],
+    )
+    coverage_contract = SimpleNamespace(
+        mode="coverage",
+        basis=SimpleNamespace(item_ids=("route-a", "route-b", "route-c")),
+        criteria=[SimpleNamespace(id="coverage")],
+    )
+    tasks = [
+        SimpleNamespace(task_uid="done", status="done", acceptance=outcome_contract),
+        SimpleNamespace(task_uid="partial", status="partial_failure", acceptance=coverage_contract),
+        SimpleNamespace(task_uid="inaccessible", status="done", acceptance=outcome_contract),
+        SimpleNamespace(task_uid="archived", status="replanned", acceptance=outcome_contract),
+    ]
+    results = {
+        "done": [
+            SimpleNamespace(criterion_id="test-auth", status="satisfied", coverage=()),
+            SimpleNamespace(criterion_id="test-upload", status="assessed_negative", coverage=()),
+        ],
+        "partial": [
+            SimpleNamespace(
+                criterion_id="coverage",
+                status="satisfied",
+                coverage=(
+                    SimpleNamespace(item_id="route-a", status="satisfied"),
+                    SimpleNamespace(item_id="route-b", status="excluded"),
+                ),
+            )
+        ],
+        "inaccessible": [
+            SimpleNamespace(criterion_id="test-auth", status="inaccessible", coverage=()),
+            SimpleNamespace(criterion_id="test-upload", status="excluded", coverage=()),
+        ],
+    }
+
+    operation_facts = mod.build_goal_contract_facts(
+        SimpleNamespace(assessment_complete=False), tasks, results
+    )
+    facts = operation_facts["goal_contract_attainment"]
+
+    assert facts["achieved_units"] == 2
+    assert facts["applicable_units"] == 5
+    assert facts["excluded_units"] == 2
+    assert facts["eligible_task_count"] == 3
+    assert facts["unachieved_reasons"] == {"inaccessible": 1, "task_status:partial_failure": 2}
+    assert facts["assessment_complete"] is False
+    assert operation_facts["assessment_complete"] is False
+
+
+def test_build_goal_contract_facts_requires_done_task_and_acceptance_result():
+    contract = SimpleNamespace(
+        mode="outcome",
+        basis=SimpleNamespace(item_ids=()),
+        criteria=[SimpleNamespace(id="reachable"), SimpleNamespace(id="protected")],
+    )
+    tasks = [
+        SimpleNamespace(task_uid="incomplete", status="active", acceptance=contract),
+        SimpleNamespace(task_uid="missing", status="done", acceptance=contract),
+    ]
+    facts = mod.build_goal_contract_facts(
+        SimpleNamespace(assessment_complete=False),
+        tasks,
+        {
+            "incomplete": [
+                SimpleNamespace(criterion_id="reachable", status="satisfied", coverage=()),
+                SimpleNamespace(criterion_id="protected", status="inaccessible", coverage=()),
+            ]
+        },
+    )["goal_contract_attainment"]
+
+    assert facts["achieved_units"] == 0
+    assert facts["applicable_units"] == 4
+    assert facts["unachieved_reasons"] == {
+        "missing_acceptance_result": 2,
+        "task_status:active": 2,
+    }
+
+
+def test_public_score_averages_exclude_diagnostics_and_keep_scopes_separate():
+    averages = mod.public_score_averages(
+        {
+            "operation/evidence_quality": 0.6,
+            "operation/penetration_test_goal_accuracy": 0.8,
+            "operation/diagnostic/ragas/faithfulness": 0.0,
+            "report/evidence_quality": 0.4,
+            "report/diagnostic/ragas/topic_adherence": 1.0,
+        }
+    )
+
+    assert averages == {
+        "operation_average_score": pytest.approx(0.7),
+        "report_average_score": pytest.approx(0.4),
+    }
+
+
+def test_public_score_averages_return_none_without_public_scope_scores():
+    assert mod.public_score_averages({"operation/diagnostic/ragas/faithfulness": 0.5}) == {
+        "operation_average_score": None,
+        "report_average_score": None,
+    }
+
+
 async def _fake_scores(trace_id, _max_retries):
     if trace_id in {"s1", "OP_TEST"}:
         return {"plain": 0.5, "tuple": (0.75, {"reason": "ok"}), "bad": "skip"}
@@ -43,9 +149,19 @@ async def _fake_scores(trace_id, _max_retries):
 @pytest.mark.asyncio
 async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeypatch):
     class FakeEvaluator:
-        def __init__(self, emitter, report_path=None, usage_callback=None, progress_callback=None):
+        def __init__(
+            self,
+            emitter,
+            report_path=None,
+            finding_records=None,
+            operation_facts=None,
+            usage_callback=None,
+            progress_callback=None,
+        ):
             self.emitter = emitter
             self.report_path = report_path
+            self.finding_records = finding_records
+            self.operation_facts = operation_facts
             self.usage_callback = usage_callback
             self.progress_callback = progress_callback
 
@@ -53,7 +169,13 @@ async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeyp
             return await _fake_scores(trace_id, _max_retries)
 
     monkeypatch.setattr(mod, "CyberAgentEvaluator", FakeEvaluator)
-    manager = mod.EvaluationManager("OP_TEST", emitter=RecordingEmitter())
+    records = [{"finding_uid": "verified", "resolution": "verified"}]
+    manager = mod.EvaluationManager(
+        "OP_TEST",
+        emitter=RecordingEmitter(),
+        finding_records=records,
+        operation_facts={"assessment_complete": True},
+    )
     manager.register_trace("t1", mod.TraceType.MAIN_AGENT, "s1", "Main")
     manager.register_trace("t2", mod.TraceType.SWARM_AGENT, "s2", "Swarm")
 
@@ -63,6 +185,8 @@ async def test_evaluate_all_traces_normalizes_scores_and_marks_evaluated(monkeyp
     assert manager.traces["t1"].evaluated is True
     assert manager.traces["t1"].evaluation_scores == {"plain": 0.5, "tuple": 0.75}
     assert manager.traces["t2"].evaluated is True
+    assert manager.evaluator.finding_records == records
+    assert manager.evaluator.operation_facts == {"assessment_complete": True}
 
 
 def test_wait_for_completion_without_thread_returns_true():

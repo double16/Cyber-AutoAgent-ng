@@ -100,6 +100,7 @@ const cli = meow(`
     --reset-failed      With --continue, reset partial-failure and blocked work before resuming
     --reset-phases      With --continue, reset phase IDs/ranges and propose fresh work (e.g. 3,5-)
     --report            Re-generate a report, optionally by operation ID, defaults to last operation
+    --evaluate          Re-run evaluation, optionally by operation ID, defaults to last operation
     --deployment-mode   Deployment mode: local-cli, single-container, full-stack
     --mcp-enabled       Enable MCP servers
     --mcp-conns         Define MCP servers using JSON
@@ -179,6 +180,11 @@ const cli = meow(`
       type: 'string',
     },
     report: {
+        type: 'string',
+        isMultiple: false,
+        isRequired: false,
+    },
+    evaluate: {
       type: 'string',
       isMultiple: false,
       isRequired: false,
@@ -423,6 +429,7 @@ const runAutoAssessment = async () => {
         resetFailed: cli.flags.resetFailed,
         resetPhases: cli.flags.resetPhases,
         reportOnly: cli.flags.report,
+        evaluateOnly: cli.flags.evaluate,
       };
 
       // Execute assessment and wait for completion

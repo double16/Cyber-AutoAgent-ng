@@ -100,16 +100,27 @@ docker run --rm \
 
 ## Evaluation Metrics
 
-When enabled, the system performs at most two Ragas evaluations per operation:
+When enabled, the system performs at most two bounded operation evaluations per operation:
 
 1. An operation evaluation combining task-executor, swarm-agent, and validation-specialist traces while excluding
    planning, prompt-building, task-creation, and evaluator roles.
 2. A report evaluation of the assembled `security_assessment_report.md` artifact, when the report exists.
 
-The operation evaluation uses all 6 core metrics. The report evaluation uses only evidence quality, goal accuracy, and
-topic adherence because tool selection and execution methodology do not apply to a completed report artifact. Scores
-are written to dedicated Langfuse traces using `operation/` and `report/` prefixes instead of being attached to the
-last role-agent call.
+The operation evaluation uses all 6 public metrics. The report evaluation uses evidence quality, goal accuracy, and
+cybersecurity focus because tool selection and execution methodology do not apply to a completed report artifact.
+Scores are written to dedicated Langfuse traces using `operation/` and `report/` prefixes instead of being attached to
+the last role-agent call. Version-3 public scores preserve these names but use controller-owned facts and a
+schema-validated continuous rubric: verified-finding completeness determines evidence quality, while goal accuracy is
+the percentage of applicable, current task acceptance units achieved with immutable evidence. Outcome contracts count
+one unit per frozen criterion and coverage contracts count one unit per frozen inventory item. Valid negative results
+count as achieved assessment work; inaccessible or missing results do not; explicitly excluded units and archived
+replanned or superseded tasks are omitted. `assessment_complete` remains completion context rather than making goal
+accuracy binary. The remaining applicable dimensions use the canonical operation digest. Ragas binary metrics are
+uploaded only as `diagnostic/ragas/...` scores and must not be interpreted as calibrated quality values.
+
+The `evaluation_complete.average_score` is the arithmetic mean of public `operation/` metrics only. Diagnostic Ragas
+scores never affect it. When report metrics are available, `report_average_score` provides their separate public-only
+mean so repeated report metrics do not change the operation headline.
 
 The existing `ENABLE_OBSERVABILITY` and `ENABLE_AUTO_EVALUATION` variables remain authoritative. If either required
 gate is disabled, trace discovery, evaluator initialization, Ragas model calls, and score uploads are skipped.
@@ -120,16 +131,32 @@ the metric call. The event uses `operation_stage: "ragas_evaluation"` and includ
 bounded operation and optional report metric sets; progress reporting does not add model calls. No evaluation progress
 events are emitted when the existing evaluation gates disable evaluation.
 
+Multi-turn evaluation constructs native Ragas human and AI messages. Tool activity is represented as typed AI
+execution narratives because Ragas can project away tool-call metadata before re-validating a metric sample. The
+canonical operation digest contains only current-operation tool observations and verified finding records; generated
+report text, previous evaluation summaries, planning traces, and other non-execution output are excluded. This
+prevents a historical narrative from contradicting the durable evidence ledger.
+
 Multi-turn evaluation also emits an unindexed preparation event immediately before reference-topic generation. It uses
 `step: "RAGAS_PREPARATION"` and `evaluation_step_kind: "reference_topics"`, along with the current scope and a display
-label. Evaluation-data assembly, rubric judging, and policy calibration use the same event shape with
-`evaluation_step_kind` set to `evaluation_data`, `rubric_judge`, or `evaluation_policy`. Preparation events do not
+label. Evaluation-data assembly and rubric judging use the same event shape with `evaluation_step_kind` set to
+`evaluation_data` or `rubric_judge`. Preparation events do not
 change the metric `evaluation_step_index` or `evaluation_step_total` values.
 
 Each announced metric or preparation stage emits one `evaluation_step_complete` event with a `completed`, `skipped`,
 or `failed` status. Skipped and failed events include a short user-safe message. After an attempted evaluation,
-`evaluation_complete` carries finalized policy-adjusted scores, their average, and an overall status. Evaluation
+`evaluation_complete` carries finalized calibrated scores, their average, and an overall status. Evaluation
 internals never emit synthetic `tool_start` or `tool_end` events; those remain reserved for actual agent tools.
+Auxiliary evaluator calls for reference topics and rubric judging prefer provider-native
+structured output. When that protocol is unavailable or returns malformed structured data, the evaluator makes one
+plain-JSON compatibility retry, extracts and repairs one unambiguous JSON value, and validates it against the same
+strict output schema before using it. Provider transport failures and invalid or ambiguous repaired payloads remain
+failures; repaired model text is never written to evaluation events or logs. Evaluator models explicitly disable
+provider reasoning where supported, and text extraction omits reasoning-only blocks while serializing structured
+payloads as JSON rather than Python representations. A schema-bound HTTP 501 marks native structured output as
+unavailable for the evaluation replay, so later auxiliary calls use the prompted-JSON path directly. Ollama
+structured-format request errors are retried as prompted JSON only for compatible client errors; outages and
+context-window failures are not retried.
 After every evaluation model response with provider usage metadata, the evaluator publishes its cumulative usage into
 the operation-wide accounting. The existing `metrics_update` event then reports assessment, reporting, and evaluation
 tokens and cost as one running total; evaluation does not define a separate cost event. When an integration supplies
@@ -228,6 +255,20 @@ values are always replaced with `[REDACTED]`. Use `--format json` or `--format y
 otherwise `.json`, `.yaml`, and `.yml` output filenames select their matching format and YAML is the fallback.
 
 ## Advanced
+
+Ragas sample size is derived from the configured evaluation model's context window. The evaluator reserves part of
+that window for Ragas prompts and output, so no separate sample-size environment variable is required. It measures
+payloads with the evaluator tokenizer when available and otherwise uses UTF-8 byte length as a conservative bound.
+When a trace is too large, evaluator replay keeps the objective and recent conversation, then selects a small set of
+deduplicated contexts using typed provenance; current-operation validated findings take precedence over generic tool
+output. Verified findings from the operation store are rendered as a pinned, deterministic evidence manifest for both
+operation and report multi-turn evaluation, so trace compaction cannot discard them. Summary, topic, rubric, and
+policy helper calls use the same context-derived input budget. Score metadata records the token budget and the number
+of authoritative verified findings available to the evaluation.
+
+Each evaluation attempt has its own Langfuse score-host traces, identified by `evaluation.run_id`. This keeps a
+failed replay from being confused with scores retained from an earlier attempt. Scope-preparation errors are reported
+separately from metric failures and never create replacement zero scores.
 
 - **Custom metrics**: Extend `CyberAgentEvaluator` in `src/modules/evaluation/evaluation.py`
 - **Performance**: Scale with `langfuse-worker` replicas

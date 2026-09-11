@@ -65,7 +65,7 @@ export type AdditionalStreamEvent =
       [key: string]: any;
     }
   | { type: 'evaluation_step_complete'; status: 'completed' | 'skipped' | 'failed'; evaluation_step_kind: string; [key: string]: any }
-  | { type: 'evaluation_complete'; status?: 'completed' | 'no_results' | 'failed'; scores?: Record<string, number>; [key: string]: any }
+  | { type: 'evaluation_complete'; status?: 'completed' | 'no_results' | 'partial_failure' | 'failed'; scores?: Record<string, number>; [key: string]: any }
   | { type: 'reasoning'; content: string; [key: string]: any }
   | { type: 'thinking'; context?: 'reasoning' | 'tool_preparation' | 'tool_execution' | 'waiting' | 'startup' | 'rate_limit'; startTime?: number; urgent?: boolean; [key: string]: any }
   | { type: 'thinking_end'; [key: string]: any }

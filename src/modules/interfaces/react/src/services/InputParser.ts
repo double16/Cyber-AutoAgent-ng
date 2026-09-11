@@ -60,7 +60,7 @@ export class InputParser {
       return this.parseSlashCommand(trimmedInput);
     }
 
-    // Flow commands (module, target, objective, execute, continue, report)
+    // Flow commands (module, target, objective, execute, continue, report, evaluate)
     if (this.isFlowCommand(trimmedInput)) {
       return this.parseFlowCommand(trimmedInput);
     }
@@ -91,7 +91,7 @@ export class InputParser {
 
   // Check if input is a flow command
   private isFlowCommand(input: string): boolean {
-    const flowKeywords = ['module', 'target', 'objective', 'execute', 'continue', 'report', 'reset'];
+    const flowKeywords = ['module', 'target', 'objective', 'execute', 'continue', 'report', 'evaluate', 'reset'];
     const firstWord = input.split(' ')[0].toLowerCase();
     return flowKeywords.includes(firstWord);
   }

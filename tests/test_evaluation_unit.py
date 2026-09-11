@@ -1,7 +1,10 @@
+import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from modules.evaluation import evaluation as mod
 
@@ -135,6 +138,7 @@ class FakeConfigManager:
             judge_temperature=0.1,
             judge_max_tokens=128,
             summary_max_chars=2000,
+            llm=SimpleNamespace(model_id="evaluation-model"),
         )
 
     def get_provider(self):
@@ -158,6 +162,12 @@ def evaluator(monkeypatch, cfg=None):
     ev._evaluation_step_index = 0
     ev._evaluation_step_total = 0
     ev._current_evaluation_scope = None
+    ev._evaluation_provider = "litellm"
+    ev._native_structured_output_available = None
+    ev._current_evaluation_context_items = []
+    ev._authoritative_evidence_items = []
+    ev._last_authoritative_evidence_included = 0
+    ev.evaluation_run_id = "run-123"
     return ev
 
 
@@ -205,6 +215,38 @@ async def test_find_operation_traces_falls_back_and_handles_empty_results(monkey
 
     assert await ev._find_operation_traces("OP1") == []
     assert ev.langfuse.api.trace.list.call_args_list[1].kwargs == {"limit": 200}
+
+
+@pytest.mark.asyncio
+async def test_find_operation_traces_paginates_past_report_traces_to_execution_traces(monkeypatch):
+    ev = evaluator(monkeypatch)
+    report_page = [
+        SimpleNamespace(
+            id=f"report-{index}",
+            session_id="OP1",
+            metadata={"attributes": {"agent.role": "report_generation"}},
+        )
+        for index in range(100)
+    ]
+    execution_trace = SimpleNamespace(
+        id="executor",
+        session_id="OP1",
+        metadata={"attributes": {"agent.role": "task_executor"}},
+    )
+    ev.langfuse.api.trace.list.side_effect = [
+        SimpleNamespace(data=report_page),
+        SimpleNamespace(data=[execution_trace]),
+    ]
+
+    found = await ev._find_operation_traces("OP1")
+
+    assert {trace.id for trace in found} == {trace.id for trace in report_page} | {"executor"}
+    assert ev.langfuse.api.trace.list.call_args_list[1].kwargs == {
+        "session_id": "OP1",
+        "limit": 100,
+        "page": 2,
+    }
+    assert ev._select_execution_traces(found) == [execution_trace]
 
 
 @pytest.mark.asyncio
@@ -282,6 +324,7 @@ async def test_evaluate_operation_traces_cleans_up_progress_after_scope_failure(
     ev._evaluate_single_trace = fail_evaluation
 
     assert await ev.evaluate_operation_traces("OP") == {}
+    assert ev.last_scope_errors == {"operation": "metric provider unavailable"}
     assert ev._evaluation_operation_id is None
     assert ev._evaluation_step_total == 0
     assert ev._current_evaluation_scope is None
@@ -307,7 +350,7 @@ async def _empty():
 
 
 @pytest.mark.asyncio
-async def test_evaluate_trace_returns_operation_or_report_fallback(monkeypatch):
+async def test_evaluate_trace_returns_all_successful_scope_scores(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.evaluate_operation_traces = Mock()
 
@@ -318,7 +361,7 @@ async def test_evaluate_trace_returns_operation_or_report_fallback(monkeypatch):
         }
 
     ev.evaluate_operation_traces = results_with_main
-    assert await ev.evaluate_trace("OP") == {"operation/score": 0.9}
+    assert await ev.evaluate_trace("OP") == {"operation/score": 0.9, "report/score": 0.3}
 
     async def results_without_main(_trace_id):
         return {"report": {"report/score": 0.4}}
@@ -360,7 +403,146 @@ def test_build_report_evaluation_trace_reads_assembled_report(monkeypatch, tmp_p
     assert trace.metadata["attributes"]["evaluation.scope"] == "report"
 
 
-def test_score_host_trace_uses_stable_dedicated_langfuse_trace(monkeypatch):
+def test_evaluator_uses_persisted_objective_and_context_derived_sample_limit(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev.operation_objective = "Persisted full assessment objective"
+    ev.trace_parser = SimpleNamespace(_extract_objective=lambda _trace: "Task objective")
+    prompt_limit = Mock(return_value=40_000)
+    monkeypatch.setattr(mod, "require_prompt_token_limit", prompt_limit)
+
+    assert ev._operation_objective([SimpleNamespace()]) == "Persisted full assessment objective"
+    assert ev._sample_max_chars() == 24_000
+    prompt_limit.assert_called_once_with("litellm", "evaluation-model")
+
+
+def test_compact_multiturn_sample_respects_context_derived_limit(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._sample_max_chars = lambda: 500
+    sample = SimpleNamespace(
+        user_input=[
+            {"role": "user", "content": "a" * 400},
+            {"role": "assistant", "content": "b" * 400},
+        ]
+    )
+
+    ev._compact_multi_turn_sample(sample)
+
+    assert sum(len(message["content"]) for message in sample.user_input) <= 500
+    assert [message["role"] for message in sample.user_input] == ["user", "assistant"]
+
+
+def test_compact_multiturn_sample_preserves_langchain_message_types(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._sample_max_chars = lambda: 500
+    sample = SimpleNamespace(
+        user_input=[HumanMessage(content="a" * 400), AIMessage(content="b" * 400)]
+    )
+
+    ev._compact_multi_turn_sample(sample)
+
+    assert [type(message) for message in sample.user_input] == [HumanMessage, AIMessage]
+    assert sum(len(message.content) for message in sample.user_input) <= 500
+
+
+def test_compact_evaluation_sample_uses_token_budget_and_prioritizes_current_findings(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_model = SimpleNamespace(get_num_tokens=lambda text: len(text))
+    ev._evaluation_payload_token_budget = lambda: 240
+    ev._current_evaluation_context_items = [
+        mod.EvaluationContextItem(
+            content="generic context " * 40,
+            source_tool="http_request",
+            source_category="tool_output",
+            sequence=10,
+            operation_id="OP1",
+        ),
+        mod.EvaluationContextItem(
+            content="validated SQL injection finding",
+            source_tool="store_finding",
+            source_category="finding",
+            sequence=1,
+            operation_id="OP1",
+            is_current_finding=True,
+        ),
+    ]
+    sample = SingleTurnSample(
+        user_input="Assess target " * 40,
+        response="validated response " * 50,
+        retrieved_contexts=["generic context " * 40],
+    )
+
+    ev._compact_evaluation_sample(sample)
+
+    assert ev._payload_tokens(ev._sample_payload_for_measurement(sample)) <= 240
+    assert any("validated SQL injection finding" in context for context in sample.retrieved_contexts)
+
+
+def test_payload_tokens_uses_utf8_bytes_when_model_has_no_tokenizer(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_model = SimpleNamespace()
+
+    assert ev._payload_tokens("é") == len("é".encode())
+    assert ev._payload_text({"value": {"nested": True}}) == '{"value":{"nested":true}}'
+
+
+def test_multiturn_compaction_pins_verified_finding_manifest(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_model = SimpleNamespace(get_num_tokens=lambda text: len(text))
+    ev._evaluation_payload_token_budget = lambda: 1_200
+    ev._authoritative_evidence_items = ev._build_evidence_items(
+        [
+            {
+                "finding_uid": "verified-1",
+                "resolution": "verified",
+                "candidate_data": {
+                    "title": "Unauthenticated data disclosure",
+                    "severity": "HIGH",
+                    "category": "information disclosure",
+                },
+                "validation_data": {
+                    "summary": "GET /api/products/latest returned data without authentication.",
+                    "evidence_refs": ["artifacts/latest_headers.txt"],
+                },
+            },
+            {
+                "finding_uid": "rejected-1",
+                "resolution": "validation_failure",
+                "candidate_data": {"title": "Rejected finding"},
+            },
+        ]
+    )
+    sample = mod.MultiTurnSample(
+        user_input=[
+            {"role": "user", "content": "Objective: assess target"},
+            {"role": "assistant", "content": "x" * 1_000},
+        ],
+        reference_topics=["web testing"],
+    )
+
+    ev._compact_evaluation_sample(sample)
+
+    contents = [ev._message_role_and_content(message)[1] for message in sample.user_input]
+    assert any("verified-1" in content for content in contents)
+    manifest = next(message for message in sample.user_input if "verified-1" in message.content)
+    assert manifest.type == "ai"
+    assert manifest.metadata["source"] == "evaluation_evidence_manifest"
+    assert not any("rejected-1" in content for content in contents)
+    assert ev._last_authoritative_evidence_included == 1
+    assert ev._payload_tokens(ev._sample_payload_for_measurement(sample)) <= 1_200
+
+
+def test_evaluation_model_resolution_ignores_blank_override(monkeypatch):
+    config_manager = SimpleNamespace(getenv=lambda _name, _default="": "   ")
+    server_config = SimpleNamespace(evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="configured-model")))
+
+    assert mod.CyberAgentEvaluator._evaluation_model_id(config_manager, server_config) == "configured-model"
+
+    missing_model = SimpleNamespace(evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="")))
+    with pytest.raises(ValueError, match="No evaluation model"):
+        mod.CyberAgentEvaluator._evaluation_model_id(config_manager, missing_model)
+
+
+def test_score_host_trace_uses_per_run_dedicated_langfuse_trace(monkeypatch):
     ev = evaluator(monkeypatch)
     span = SimpleNamespace(update_trace=Mock(), end=Mock())
     ev.langfuse = SimpleNamespace(
@@ -375,10 +557,18 @@ def test_score_host_trace_uses_stable_dedicated_langfuse_trace(monkeypatch):
         input_data="objective",
         output_data="result",
         fallback_trace_id="fallback",
+        source_trace_count=3,
     )
 
     assert trace_id == "stable-trace"
-    ev.langfuse.create_trace_id.assert_called_once_with(seed="OP:operation_evaluation")
+    ev.langfuse.create_trace_id.assert_called_once_with(seed="OP:operation_evaluation:run-123")
+    assert span.update_trace.call_args.kwargs["metadata"] == {
+        "operation.id": "OP",
+        "evaluation.scope": "operation_evaluation",
+        "evaluation.run_id": "run-123",
+        "evaluation.sample_max_chars": ev._sample_max_chars(),
+        "evaluation.source_trace_count": 3,
+    }
     span.update_trace.assert_called_once()
     span.end.assert_called_once()
     ev.langfuse.flush.assert_called_once()
@@ -394,6 +584,7 @@ def test_score_host_trace_falls_back_when_langfuse_trace_creation_fails(monkeypa
         input_data="objective",
         output_data="result",
         fallback_trace_id="fallback",
+        source_trace_count=1,
     ) == "fallback"
 
 
@@ -405,7 +596,13 @@ def test_build_operation_evaluation_trace_deduplicates_observations(monkeypatch)
     ev.trace_parser = SimpleNamespace(
         _extract_objective=lambda _trace: "Assess target",
         _fetch_observations=Mock(side_effect=[[shared], [shared, unique]]),
-        _extract_final_output=Mock(side_effect=["first", "second"]),
+        _parse_tool_observation=Mock(
+            side_effect=[
+                SimpleNamespace(name="shell", success=True, input_data={"cmd": "id"}, output="uid=0"),
+                SimpleNamespace(name="shell", success=True, input_data={"cmd": "id"}, output="uid=0"),
+                SimpleNamespace(name="http_request", success=True, input_data={"url": "https://target"}, output="200"),
+            ]
+        ),
     )
     ev._score_host_trace_id = Mock(return_value="operation-evaluation")
 
@@ -413,7 +610,8 @@ def test_build_operation_evaluation_trace_deduplicates_observations(monkeypatch)
 
     assert trace.id == "operation-evaluation"
     assert [observation.id for observation in trace.observations] == ["shared", "unique"]
-    assert trace.output == "first\n\nsecond"
+    payload = json.loads(trace.output)
+    assert [row["tool"] for row in payload["tool_executions"]] == ["shell", "http_request"]
     assert trace.metadata["attributes"]["evaluation.source_trace_count"] == 2
 
 
@@ -422,12 +620,16 @@ def test_build_operation_evaluation_trace_uses_default_objective_and_empty_outpu
     ev.trace_parser = SimpleNamespace(
         _extract_objective=lambda _trace: "",
         _fetch_observations=lambda _trace: [],
-        _extract_final_output=lambda _trace: "",
+        _parse_tool_observation=lambda _trace: None,
     )
     ev._score_host_trace_id = Mock(return_value="fallback")
     trace = ev._build_operation_evaluation_trace("OP", [SimpleNamespace(id="source")])
     assert trace.input == "Security assessment"
-    assert trace.output == ""
+    assert json.loads(trace.output) == {
+        "operation_id": "OP",
+        "objective": "Security assessment",
+        "tool_executions": [],
+    }
     assert trace.observations == []
 
 
@@ -503,12 +705,9 @@ async def test_evaluate_all_metrics_single_turn_success_skip_and_error(monkeypat
     ev._evaluation_step_total = 4
     sample = SingleTurnSample(user_input="target", response="done", retrieved_contexts=[])
 
-    assert await ev._evaluate_all_metrics(sample) == {
-        "good": 0.75,
-        "none": 0.0,
-        "multi_only": 0.0,
-        "bad": 0.0,
-    }
+    assert await ev._evaluate_all_metrics(sample) == {"good": 0.75}
+    assert ev.last_failed_metrics == {"operation/none": "Metric returned no score", "operation/bad": "fail"}
+    assert ev.last_skipped_metrics == {"operation/multi_only"}
     assert not any(event["type"] in {"tool_start", "tool_end"} for event in ev._emitter.events)
     completed = [event for event in ev._emitter.events if event["type"] == "evaluation_step_complete"]
     assert [(event["evaluation_metric"], event["status"]) for event in completed] == [
@@ -730,7 +929,9 @@ def test_metric_category_and_chat_helpers(monkeypatch):
     assert ev._get_metric_category("unknown") == "general"
     assert ev._chat_invoke("sys", "user") == "a b"
 
-    ev._chat_model = SimpleNamespace(invoke=Mock(side_effect=[RuntimeError("typed"), SimpleNamespace(content="fallback")]))
+    ev._chat_model = SimpleNamespace(
+        invoke=Mock(side_effect=[RuntimeError("message list unsupported"), SimpleNamespace(content="fallback")])
+    )
     assert ev._chat_invoke("sys", "user") == "fallback"
 
 
@@ -811,6 +1012,23 @@ async def test_infer_policy_and_rubric_judge(monkeypatch):
         ("evaluation_policy", "completed"),
         ("rubric_judge", "completed"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_policy_uses_verified_finding_count_before_trace_tool_count(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
+    ev._authoritative_evidence_items = [
+        mod.EvaluationEvidenceItem("finding-1", "HIGH", "xss", "XSS", "validated", ())
+    ]
+    ev.trace_parser = SimpleNamespace(count_current_evidence_findings=lambda _parsed: 0)
+    ev._last_parsed_trace = SimpleNamespace(tool_calls=[], metadata={})
+    prompts = []
+    ev._chat_invoke_evaluation_json = lambda _system, user, _schema: prompts.append(user) or {"caps": {}, "disable": []}
+
+    assert await ev._infer_evaluation_policy(SimpleNamespace(user_input="objective")) == {"caps": {}, "disable": []}
+    assert '"current_evidence":1' in prompts[0]
 
 
 @pytest.mark.asyncio
@@ -898,7 +1116,7 @@ async def test_create_evaluation_data_success_and_insufficient_evidence(monkeypa
         objective="Assess",
         target="target",
     )
-    async def make_sample(_parsed):
+    async def make_sample(_parsed, **_kwargs):
         return SingleTurnSample(user_input="Assess", response="", retrieved_contexts=[])
 
     ev.trace_parser = SimpleNamespace(
@@ -919,7 +1137,13 @@ async def test_create_evaluation_data_success_and_insufficient_evidence(monkeypa
     assert result.response == "context"
     assert result.retrieved_contexts == ["context"]
     ev._synthesize_topics.assert_called()
-    assert ev._last_eval_stats == {"memory_ops": 1, "evidence_count": 0, "tool_calls_count": 1}
+    assert ev._last_eval_stats == {
+        "memory_ops": 1,
+        "evidence_count": 0,
+        "trace_evidence_count": 0,
+        "evidence_source": "trace",
+        "tool_calls_count": 1,
+    }
     statuses = [
         event["status"]
         for event in ev._emitter.events
@@ -941,7 +1165,7 @@ async def test_create_evaluation_data_reports_parse_and_sample_failures(monkeypa
 
     parsed = SimpleNamespace(trace_id="trace", messages=[], tool_calls=[], metadata={})
 
-    async def fail_sample(_parsed):
+    async def fail_sample(_parsed, **_kwargs):
         raise RuntimeError("sample failed")
 
     ev.trace_parser = SimpleNamespace(
@@ -960,27 +1184,30 @@ async def _sample(sample):
 
 
 @pytest.mark.asyncio
-async def test_evaluate_single_trace_applies_policy_caps_and_uploads(monkeypatch):
+async def test_evaluate_single_trace_publishes_calibrated_scores_and_ragas_diagnostics(monkeypatch):
     ev = evaluator(monkeypatch)
     metric = SimpleNamespace(name="metric", init=Mock())
     ev.all_metrics = [metric]
     ev._create_evaluation_data = Mock(side_effect=lambda _trace: _sample(SimpleNamespace()))
     ev._evaluate_all_metrics = Mock(side_effect=lambda _data: _sample({"keep": 0.9, "drop": 0.8, "tuple": (0.9, {"m": 1})}))
-    ev._rubric_judge_scores = Mock(side_effect=lambda _data: _sample({"rubric/overall_quality": 0.7}))
-    ev._infer_evaluation_policy = Mock(side_effect=lambda _data: _sample({"caps": {"keep": 0.5, "tuple": 0.4}, "disable": ["drop"]}))
+    ev._deterministic_public_scores = Mock(return_value={"evidence_quality": (0.9, {"source": "facts"})})
+    ev._continuous_public_rubric_scores = Mock(
+        side_effect=lambda _data, _scope: _sample({"tool_selection_accuracy": (0.7, {"source": "rubric"})})
+    )
     uploaded = []
     ev._upload_scores_to_langfuse = Mock(side_effect=lambda trace_id, scores: uploaded.append((trace_id, scores)) or _sample(None))
 
     scores = await ev._evaluate_single_trace(SimpleNamespace(id="trace-id"))
 
-    assert scores["keep"] == 0.5
-    assert scores["tuple"] == (0.4, {"m": 1})
-    assert "drop" not in scores
+    assert scores["evidence_quality"] == (0.9, {"source": "facts"})
+    assert scores["tool_selection_accuracy"] == (0.7, {"source": "rubric"})
+    assert scores["diagnostic/ragas/keep"] == 0.9
+    assert scores["diagnostic/ragas/tuple"] == (0.9, {"m": 1})
     assert uploaded[0][0] == "trace-id"
 
 
 @pytest.mark.asyncio
-async def test_evaluate_single_trace_report_scope_skips_rubric_policy_and_handles_non_numeric_scores(monkeypatch):
+async def test_evaluate_single_trace_report_scope_publishes_calibrated_and_diagnostic_scores(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.all_metrics = []
     ev.evidence_quality = SimpleNamespace(name="evidence_quality")
@@ -992,32 +1219,138 @@ async def test_evaluate_single_trace_report_scope_skips_rubric_policy_and_handle
             {"metric": "unavailable", "tuple": (0.4, {"source": "x"})}
         )
     )
-    ev._rubric_judge_scores = Mock(side_effect=AssertionError("report scope skips rubric"))
-    ev._infer_evaluation_policy = Mock(side_effect=AssertionError("report scope skips policy"))
+    ev._deterministic_public_scores = Mock(return_value={"evidence_quality": (0.5, {"source": "facts"})})
+    ev._continuous_public_rubric_scores = Mock(
+        side_effect=lambda _data, _scope: _sample({"cybersecurity_focus": (0.6, {"source": "rubric"})})
+    )
     ev._upload_scores_to_langfuse = Mock(side_effect=AssertionError("no trace id to upload"))
 
     scores = await ev._evaluate_single_trace(SimpleNamespace(), metric_scope="report")
 
-    assert scores == {"report/metric": "unavailable", "report/tuple": (0.4, {"source": "x"})}
+    assert scores == {
+        "report/evidence_quality": (0.5, {"source": "facts"}),
+        "report/cybersecurity_focus": (0.6, {"source": "rubric"}),
+        "report/diagnostic/ragas/metric": "unavailable",
+        "report/diagnostic/ragas/tuple": (0.4, {"source": "x"}),
+    }
 
 
 @pytest.mark.asyncio
-async def test_evaluate_single_trace_ignores_malformed_policy_fields_and_preserves_bad_values(monkeypatch):
+async def test_evaluate_single_trace_keeps_invalid_ragas_values_out_of_public_scores(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.all_metrics = []
     ev._create_evaluation_data = Mock(side_effect=lambda _trace: _sample(SimpleNamespace()))
     ev._evaluate_all_metrics = Mock(
         side_effect=lambda _data, **_kwargs: _sample({"score": "not-a-number", "good": 0.8})
     )
-    ev._rubric_judge_scores = Mock(side_effect=lambda _data: _sample({}))
-    ev._infer_evaluation_policy = Mock(side_effect=lambda _data: _sample({"caps": [], "disable": "score"}))
+    ev._deterministic_public_scores = Mock(return_value={})
+    ev._continuous_public_rubric_scores = Mock(side_effect=lambda _data, _scope: _sample({}))
     uploaded = []
     ev._upload_scores_to_langfuse = Mock(side_effect=lambda trace_id, scores: uploaded.append((trace_id, scores)) or _sample(None))
 
     scores = await ev._evaluate_single_trace(SimpleNamespace(id="trace"), metric_scope="operation")
 
-    assert scores == {"operation/score": "not-a-number", "operation/good": 0.8}
+    assert scores == {
+        "operation/diagnostic/ragas/score": "not-a-number",
+        "operation/diagnostic/ragas/good": 0.8,
+    }
     assert uploaded[0][0] == "trace"
+
+
+def test_deterministic_public_scores_use_verified_evidence_and_goal_contract_attainment(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._authoritative_evidence_items = ev._build_evidence_items(
+        [
+            {
+                "finding_uid": "verified-1",
+                "resolution": "verified",
+                "candidate_data": {"title": "Unauthenticated disclosure"},
+                "validation_data": {"summary": "GET /api/config returned secrets", "evidence_refs": ["artifact-1"]},
+            },
+            {
+                "finding_uid": "verified-2",
+                "resolution": "verified",
+                "candidate_data": {"title": "Incomplete proof"},
+                "validation_data": {"summary": "Response was observed"},
+            },
+        ]
+    )
+    ev._operation_facts = {
+        "goal_contract_attainment": {
+            "version": 1,
+            "achieved_units": 3,
+            "applicable_units": 4,
+            "excluded_units": 1,
+            "eligible_task_count": 2,
+            "unachieved_reasons": {"inaccessible": 1},
+            "assessment_complete": False,
+        }
+    }
+
+    scores = ev._deterministic_public_scores("operation")
+
+    assert scores["evidence_quality"][0] == pytest.approx((1.0 + 0.55) / 2)
+    assert scores["penetration_test_goal_accuracy"][0] == 0.75
+    assert scores["penetration_test_goal_accuracy"][1]["assessment_complete"] is False
+    assert scores["penetration_test_goal_accuracy"][1]["score_source"] == "controller_goal_contract_attainment"
+
+
+def test_deterministic_public_scores_omits_goal_accuracy_without_applicable_units(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._operation_facts = {
+        "goal_contract_attainment": {
+            "version": 1,
+            "achieved_units": 0,
+            "applicable_units": 0,
+        }
+    }
+
+    scores = ev._deterministic_public_scores("operation")
+
+    assert "penetration_test_goal_accuracy" not in scores
+
+
+@pytest.mark.asyncio
+async def test_continuous_public_rubric_accepts_only_requested_bounded_scores(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._operation_facts = {"assessment_complete": True}
+    ev._chat_invoke_evaluation_json = Mock(
+        return_value={
+            "scores": {
+                "tool_selection_accuracy": 1.4,
+                "methodology_adherence": 0.6,
+                "cybersecurity_focus": 0.7,
+                "penetration_test_quality": 0.8,
+                "unrequested": 0.9,
+            },
+            "rationale": "Canonical tool evidence supports the score.",
+            "insufficient_evidence": False,
+        }
+    )
+    sample = SingleTurnSample(user_input="Assess target", response="Tool execution ledger", retrieved_contexts=[])
+
+    scores = await ev._continuous_public_rubric_scores(sample, "operation")
+
+    assert set(scores) == {
+        "tool_selection_accuracy",
+        "methodology_adherence",
+        "cybersecurity_focus",
+        "penetration_test_quality",
+    }
+    assert scores["tool_selection_accuracy"][0] == 1.0
+    assert scores["methodology_adherence"][1]["score_source"] == "continuous_structured_rubric"
+
+
+@pytest.mark.asyncio
+async def test_continuous_public_rubric_skips_insufficient_evidence(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._chat_invoke_evaluation_json = Mock(return_value={"scores": {}, "insufficient_evidence": True})
+    sample = SingleTurnSample(user_input="Assess target", response="", retrieved_contexts=[])
+
+    assert await ev._continuous_public_rubric_scores(sample, "report") == {}
+    assert ev._emitter.events[-1]["status"] == "skipped"
 
 
 def test_setup_models_supports_all_configured_providers(monkeypatch):
@@ -1042,8 +1375,12 @@ def test_setup_models_supports_all_configured_providers(monkeypatch):
             return "us-east-1"
 
     class Model:
-        def __init__(self, **_kwargs):
+        instances = []
+
+        def __init__(self, **kwargs):
             self.callbacks = []
+            self.kwargs = kwargs
+            self.instances.append(self)
 
     monkeypatch.setattr(mod, "ChatOllama", Model)
     monkeypatch.setattr(mod, "OllamaEmbeddings", Model)
@@ -1065,6 +1402,14 @@ def test_setup_models_supports_all_configured_providers(monkeypatch):
         assert ev.llm is not None
         assert ev.embeddings is not None
         assert ev._chat_model.callbacks
+        if provider == "ollama":
+            assert ev._chat_model.kwargs["reasoning"] is False
+        elif provider == "gemini":
+            assert ev._chat_model.kwargs["thinking_budget"] == 0
+            assert ev._chat_model.kwargs["include_thoughts"] is False
+        else:
+            assert "reasoning_effort" not in ev._chat_model.kwargs
+            assert "effort" not in ev._chat_model.kwargs
 def test_trace_helpers_select_roles_and_objective(monkeypatch):
     ev = evaluator(monkeypatch)
     ev.trace_parser = SimpleNamespace(_extract_objective=lambda trace: getattr(trace, "objective", ""))
@@ -1098,6 +1443,46 @@ def test_chat_invoke_handles_list_content_and_fallback(monkeypatch):
     assert ev._chat_invoke("system", "user") == "ok"
 
 
+def test_chat_invoke_does_not_retry_provider_failures(monkeypatch):
+    ev = evaluator(monkeypatch)
+    invoke = Mock(side_effect=mod.ollama.ResponseError("model unavailable", status_code=503))
+    ev._chat_model = SimpleNamespace(invoke=invoke)
+
+    with pytest.raises(mod.ollama.ResponseError, match="model unavailable"):
+        ev._chat_invoke("system", "user")
+
+    invoke.assert_called_once()
+
+
+def test_chat_invoke_normalizes_content_blocks_as_json_without_reasoning(monkeypatch):
+    ev = evaluator(monkeypatch)
+    response = SimpleNamespace(
+        content=[
+            {"type": "thinking", "thinking": "private reasoning"},
+            {"type": "text", "text": '{"caps": {}, "disable": []}'},
+        ]
+    )
+    invoke = Mock(return_value=response)
+    ev._chat_model = SimpleNamespace(invoke=invoke)
+
+    assert ev._chat_invoke("system", "user") == '{"caps": {}, "disable": []}'
+    invoke.assert_called_once()
+
+    ev._chat_model = SimpleNamespace(invoke=Mock(return_value=SimpleNamespace(content={"caps": {}, "disable": []})))
+    assert json.loads(ev._chat_invoke("system", "user")) == {"caps": {}, "disable": []}
+
+
+def test_chat_invoke_rejects_non_json_serializable_content_without_retry(monkeypatch):
+    ev = evaluator(monkeypatch)
+    invoke = Mock(return_value=SimpleNamespace(content=object()))
+    ev._chat_model = SimpleNamespace(invoke=invoke)
+
+    with pytest.raises(TypeError):
+        ev._chat_invoke("system", "user")
+
+    invoke.assert_called_once()
+
+
 def test_synthesize_context_summary_handles_config_failure_and_llm_failure(monkeypatch):
     ev = evaluator(monkeypatch)
     ev._chat_model = SimpleNamespace(invoke=Mock(side_effect=RuntimeError("offline")))
@@ -1113,7 +1498,168 @@ async def test_policy_structured_fallback_and_invalid_payload(monkeypatch):
     data = SimpleNamespace(user_input="objective", retrieved_contexts=[], reference_topics=[])
     assert await ev._infer_evaluation_policy(data) == {"caps": {}, "disable": []}
     ev._chat_invoke_structured = Mock(return_value=["invalid"])
+    ev._chat_invoke = Mock(return_value="not-json")
     assert await ev._infer_evaluation_policy(data) == {}
+
+
+def test_evaluation_json_fallback_repairs_and_validates_payload(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    ev._chat_invoke = Mock(
+        return_value='Result: ```json\n{"caps": {"evidence_quality": 0.7,}, "disable": [],}\n```'
+    )
+
+    result = ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+
+    assert result == {"caps": {"evidence_quality": 0.7}, "disable": []}
+    ev._chat_invoke.assert_called_once()
+
+
+def test_evaluation_json_retries_malformed_structured_output_once(monkeypatch):
+    ev = evaluator(monkeypatch)
+    output_parser_error = type("OutputParserException", (RuntimeError,), {})
+    ev._chat_invoke_structured = Mock(side_effect=output_parser_error("malformed"))
+    ev._chat_invoke = Mock(return_value='{"caps": {}, "disable": []}')
+
+    assert ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput) == {
+        "caps": {},
+        "disable": [],
+    }
+    ev._chat_invoke_structured.assert_called_once()
+    ev._chat_invoke.assert_called_once()
+
+
+def test_evaluation_json_retries_ollama_structured_format_response_error(monkeypatch, caplog):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_provider = "ollama"
+    error = mod.ollama.ResponseError("structured format contains sensitive response text", status_code=400)
+    ev._chat_invoke_structured = Mock(side_effect=error)
+    ev._chat_invoke = Mock(return_value='{"caps": {}, "disable": []}')
+
+    with caplog.at_level(logging.WARNING, logger="Evaluation.Evaluation"):
+        assert ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput) == {
+            "caps": {},
+            "disable": [],
+        }
+
+    ev._chat_invoke.assert_called_once()
+    assert "provider=ollama" in caplog.text
+    assert "schema=EvaluationPolicyOutput" in caplog.text
+    assert "category=structured_output_unsupported" in caplog.text
+    assert "status_code=400" in caplog.text
+    assert "fallback_attempted=True" in caplog.text
+    assert "native_structured_output_available=None" in caplog.text
+    assert "sensitive response text" not in caplog.text
+
+
+def test_evaluation_json_does_not_retry_ollama_transport_or_context_response_errors(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_provider = "ollama"
+
+    unavailable = mod.ollama.ResponseError("model is unavailable", status_code=503)
+    ev._chat_invoke_structured = Mock(side_effect=unavailable)
+    ev._chat_invoke = Mock()
+    with pytest.raises(mod.ollama.ResponseError, match="model is unavailable"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+    ev._chat_invoke.assert_not_called()
+
+    context_error = mod.ollama.ResponseError("prompt is longer than the context length", status_code=400)
+    ev._chat_invoke_structured = Mock(side_effect=context_error)
+    with pytest.raises(mod.ollama.ResponseError, match="context length"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+    ev._chat_invoke.assert_not_called()
+
+    invalid_request = mod.ollama.ResponseError("invalid request parameter", status_code=400)
+    ev._chat_invoke_structured = Mock(side_effect=invalid_request)
+    with pytest.raises(mod.ollama.ResponseError, match="invalid request"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+    ev._chat_invoke.assert_not_called()
+
+
+def test_evaluation_json_does_not_retry_non_ollama_response_error(monkeypatch):
+    ev = evaluator(monkeypatch)
+    response_error = type("ResponseError", (RuntimeError,), {})
+    error = response_error("structured format is not supported")
+    error.status_code = 400
+    ev._chat_invoke_structured = Mock(side_effect=error)
+    ev._chat_invoke = Mock()
+
+    with pytest.raises(RuntimeError, match="structured format"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+
+    ev._chat_invoke.assert_not_called()
+
+
+def test_evaluation_json_retries_generic_schema_bound_501_and_caches_unavailability(monkeypatch):
+    ev = evaluator(monkeypatch)
+    response_error = type("ProviderResponseError", (RuntimeError,), {})
+    unsupported = response_error("not implemented")
+    unsupported.status_code = 501
+    ev._chat_invoke_structured = Mock(side_effect=unsupported)
+    ev._chat_invoke = Mock(return_value='{"caps": {}, "disable": []}')
+
+    assert ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput) == {
+        "caps": {},
+        "disable": [],
+    }
+    assert ev._native_structured_output_available is False
+    ev._chat_invoke_structured.assert_called_once()
+
+    ev._chat_invoke_structured = Mock(side_effect=AssertionError("native output should be skipped"))
+    ev._chat_invoke.reset_mock()
+    assert ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput) == {
+        "caps": {},
+        "disable": [],
+    }
+    ev._chat_invoke_structured.assert_not_called()
+    ev._chat_invoke.assert_called_once()
+
+
+def test_evaluation_json_does_not_retry_501_from_prompted_json_fallback(monkeypatch):
+    ev = evaluator(monkeypatch)
+    response_error = type("ProviderResponseError", (RuntimeError,), {})
+    fallback_error = response_error("not implemented")
+    fallback_error.status_code = 501
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    ev._chat_invoke = Mock(side_effect=fallback_error)
+
+    with pytest.raises(RuntimeError, match="not implemented"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+
+    ev._chat_invoke.assert_called_once()
+
+
+def test_evaluation_json_does_not_retry_transport_or_invalid_repaired_payload(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_invoke_structured = Mock(side_effect=RuntimeError("connection failed"))
+    ev._chat_invoke = Mock()
+
+    with pytest.raises(RuntimeError, match="connection failed"):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+    ev._chat_invoke.assert_not_called()
+
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    ev._chat_invoke = Mock(return_value='{"caps": {"evidence_quality": 2.0}, "unknown": true}')
+    with pytest.raises(Exception):
+        ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+
+
+def test_evaluation_json_topics_accept_repaired_array_and_rubric_uses_bound_model(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_invoke_structured = Mock(side_effect=NotImplementedError("unsupported"))
+    bound_model = SimpleNamespace()
+    ev._chat_invoke = Mock(return_value='```json\n["reconnaissance", "injection testing",]\n```')
+
+    topics = ev._chat_invoke_evaluation_json(
+        "system",
+        "user",
+        mod.TopicsOutput,
+        chat_model=bound_model,
+        allow_array=True,
+    )
+
+    assert topics == {"topics": ["reconnaissance", "injection testing"]}
+    assert ev._chat_invoke.call_args.kwargs["chat_model"] is bound_model
 
 
 @pytest.mark.asyncio
@@ -1171,7 +1717,12 @@ async def test_metric_and_score_upload_orchestration_covers_success_skips_failur
         sample,
         metrics=[SuccessMetric(), UnsupportedMetric(), EmptyMetric(), BrokenMetric()],
     )
-    assert scores == {"success": 0.75, "unsupported": 0.0, "empty": 0.0, "broken": 0.0}
+    assert scores == {"success": 0.75}
+    assert ev.last_failed_metrics == {
+        "operation/empty": "Metric returned no score",
+        "operation/broken": "metric unavailable",
+    }
+    assert ev.last_skipped_metrics == {"operation/unsupported"}
     statuses = [event["status"] for event in ev._emitter.events if event["type"] == "evaluation_step_complete"]
     assert statuses == ["completed", "skipped", "failed", "failed"]
 
@@ -1246,7 +1797,7 @@ async def test_create_evaluation_data_attaches_summary_topics_and_allows_low_evi
         reference_topics=[],
     )
 
-    async def create_sample(_parsed):
+    async def create_sample(_parsed, **_kwargs):
         return sample
 
     ev.trace_parser = SimpleNamespace(
@@ -1303,10 +1854,37 @@ async def test_multiturn_metric_dispatch_covers_supported_skipped_none_and_error
     monkeypatch.setattr(mod, "MultiTurnSample", FakeMulti)
     assert await ev._evaluate_all_metrics(FakeMulti(), [Success(), Unsupported(), Empty(), Broken()]) == {
         "multi-success": 0.6,
-        "multi-unsupported": 0.0,
-        "multi-empty": 0.0,
-        "multi-broken": 0.0,
     }
+    assert ev.last_failed_metrics == {
+        "operation/multi-empty": "Metric returned no score",
+        "operation/multi-broken": "no metric",
+    }
+    assert ev.last_skipped_metrics == {"operation/multi-unsupported"}
+
+
+def test_ragas_diagnostic_projection_guard_skips_invalid_multi_turn_sample(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_operation_id = "OP_TEST"
+    ev._current_evaluation_scope = "operation"
+
+    class InvalidMultiTurnSample:
+        def model_dump(self, **_kwargs):
+            return {"user_input": [{"type": "tool", "content": "orphaned"}]}
+
+        def __init__(self, **_kwargs):
+            raise ValueError("orphaned tool result")
+
+    monkeypatch.setattr(mod, "MultiTurnSample", InvalidMultiTurnSample)
+    sample = object.__new__(InvalidMultiTurnSample)
+    metrics = [SimpleNamespace(name="evidence_quality"), SimpleNamespace(name="methodology_adherence")]
+
+    assert ev._ragas_diagnostic_sample_is_valid(sample, metrics) is False
+    assert ev.last_skipped_metrics == {
+        "operation/diagnostic/ragas/evidence_quality",
+        "operation/diagnostic/ragas/methodology_adherence",
+    }
+    assert ev._emitter.events[-1]["evaluation_step_kind"] == "diagnostic_compatibility"
+    assert ev._emitter.events[-1]["status"] == "skipped"
 
 
 @pytest.mark.asyncio
