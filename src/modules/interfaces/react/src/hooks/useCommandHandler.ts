@@ -67,7 +67,7 @@ export function useCommandHandler({
         const service = appState.executionService as any;
         if (service.sendUserInput) {
           await service.sendUserInput(userInput);
-          addOperationHistoryEntry('info', `User response sent: ${userInput}`);
+          addOperationHistoryEntry('info', 'User response sent.');
           actions.setUserHandoff(false);
           return;
         } else {

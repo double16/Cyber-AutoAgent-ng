@@ -110,7 +110,7 @@ from modules.handlers.utils import (
     update_latest_output_pointer,
 )
 from modules.tools import browser, channel_close_all
-from modules.tools.credentials import extract_objective_credentials, store_user_credential
+from modules.tools.credentials import extract_config_credentials, extract_objective_credentials, store_user_credential
 from modules.tools.memory import (
     OperationTarget,
     create_application_store,
@@ -1760,6 +1760,10 @@ def main():
     # Remove common credential forms before the objective reaches logs, plans, or a model. Drafts remain only in
     # process memory until the application database is initialized for this operation below.
     args.objective, objective_credential_drafts = extract_objective_credentials(args.objective)
+    try:
+        configured_credential_drafts = extract_config_credentials(os.environ.get("CYBER_ASSESSMENT_CREDENTIALS"))
+    except ValueError as error:
+        parser.error(str(error))
 
     # Persist provider/model selections to environment for downstream configuration
     if args.provider:
@@ -2220,17 +2224,25 @@ def main():
             config=config,
         )
         callback_handler = runtime_resources.callback_handler
-        for draft in objective_credential_drafts:
+        resolved_credential_target = operation_targets[0].value if len(operation_targets) == 1 else None
+        for draft in [*objective_credential_drafts, *configured_credential_drafts]:
             try:
+                credential_type = str(draft["credential_type"])
+                credential_target = draft.get("target") or resolved_credential_target
+                if credential_type != "email_login" and not credential_target:
+                    raise ValueError("credential target must be explicit when the operation resolves multiple targets")
                 store_user_credential(
                     operation_id=operation_id,
-                    credential_type=str(draft["credential_type"]),
-                    target=args.target,
-                    role=str(draft["role"]),
+                    credential_type=credential_type,
+                    target=credential_target,
+                    role=draft.get("role"),
                     values=dict(draft["values"]),
+                    operation_scope=draft.get("operation_scope"),
+                    account_label=draft.get("account_label"),
+                    tenant_label=draft.get("tenant_label"),
                 )
             except (TypeError, ValueError) as error:
-                logger.warning("Could not store an objective credential draft: %s", error)
+                logger.warning("Could not store a credential configuration draft: %s", error)
 
         if not bool(args.report):
             def run_workflow_agent(

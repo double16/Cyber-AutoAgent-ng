@@ -187,6 +187,10 @@ const CONFIG_FIELDS: ConfigField[] = [
     key: 'bugBountyHeaders', label: 'Bug Bounty Headers (JSON)', type: 'text', section: 'Operations',
     description: 'JSON map of authorized bug bounty marker headers.'
   },
+  {
+    key: 'assessmentCredentialsJson', label: 'Assessment Credentials (JSON)', type: 'password', section: 'Operations',
+    description: 'Sensitive JSON array imported into the credential store at assessment start; do not commit it.'
+  },
 
   // Context Management
   {

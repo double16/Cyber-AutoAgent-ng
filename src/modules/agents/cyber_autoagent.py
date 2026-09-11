@@ -64,6 +64,7 @@ from modules.handlers.conversation_budget import (
     _ensure_prompt_within_budget,
     register_conversation_manager,
 )
+from modules.handlers.credential_usage import CredentialUsageHook
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.terminal_tool import TerminalToolHook
 from modules.handlers.tool_recovery import (
@@ -113,8 +114,11 @@ from modules.tools.credentials import (
     generate_mfa_code,
     generate_password,
     mark_credential_status,
+    plan_access_control_comparisons,
     query_credentials,
+    request_mfa_code,
     retrieve_email_mfa_code,
+    rotate_credential,
     store_credential,
 )
 from modules.tools.editor import create_absolute_path_editor
@@ -623,9 +627,12 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         query_credentials,
         checkout_credential,
         mark_credential_status,
+        plan_access_control_comparisons,
         generate_password,
         generate_mfa_code,
+        request_mfa_code,
         retrieve_email_mfa_code,
+        rotate_credential,
         create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
         create_tasks,
         sleep,
@@ -863,6 +870,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
 
+    credential_usage_hook = CredentialUsageHook()
+
     tool_router_hook = ToolRouterHook(
         max_result_chars=max_result_chars,
         artifacts_dir=paths.get("artifacts"),
@@ -879,6 +888,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
                 tool_repeat_guard_hook,
                 tool_router_hook,
                 react_hooks,
+                credential_usage_hook,
                 prompt_budget_hook,
             ],
         )
@@ -892,6 +902,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
                 tool_repeat_guard_hook,
                 tool_router_hook,
                 react_hooks,
+                credential_usage_hook,
                 prompt_budget_hook,
             ],
         )

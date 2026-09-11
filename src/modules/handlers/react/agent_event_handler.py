@@ -39,6 +39,7 @@ from ...config.models.factory import get_model_id_from_agent, get_provider_from_
 from ...config.system import EnvironmentReader
 from ...config.types import DEFAULT_MAX_DURATION
 from ...utils.reasoning_sanitization import sanitize_reasoning_control_text
+from ...utils.redaction import redact, redact_text
 from ...utils.text_reducer import collapse_first_repeated_sequence
 from ..base import BudgetLimitReached
 from ..conversation_budget import token_calc
@@ -1923,7 +1924,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                     "type": "tool_start",
                     "tool_name": tool_name,
                     "tool_id": tool_id,
-                    "tool_input": tool_input,
+                    "tool_input": redact(tool_input),
                 }
 
                 # Mark as having complete input if it's meaningful
@@ -1941,7 +1942,7 @@ class AgentEventHandler(PrintingCallbackHandler):
 
             # Emit tool-specific events for all tools.
             if tool_input and self._is_valid_input(tool_input):
-                self.tool_emitter.emit_tool_specific_events(tool_name, tool_input)
+                self.tool_emitter.emit_tool_specific_events(tool_name, redact(tool_input))
 
             # Emit thinking animation ONLY after a tool_start has been emitted
             # This prevents the UI from showing an 'Executing' spinner without a corresponding tool header
@@ -2012,7 +2013,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "type": "tool_start",
                         "tool_name": tool_name,
                         "tool_id": tool_id,
-                        "tool_input": new_input,
+                        "tool_input": redact(new_input),
                     }
                     self.emit_ui_event(tool_event)
                     # Also emit tool_invocation_start for compatibility
@@ -2036,7 +2037,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                             "type": "tool_start",
                             "tool_name": tool_name,
                             "tool_id": tool_id,
-                            "tool_input": new_input,
+                            "tool_input": redact(new_input),
                         }
                     )
                     self.emit_ui_event(
@@ -2058,7 +2059,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                                 {
                                     "type": "tool_input_update",
                                     "tool_id": tool_id,
-                                    "tool_input": new_input,
+                                    "tool_input": redact(new_input),
                                 }
                             )
                 except Exception:
@@ -2066,7 +2067,7 @@ class AgentEventHandler(PrintingCallbackHandler):
 
                 # Emit tool-specific events now that we have the real input.
                 if self._is_valid_input(new_input):
-                    self.tool_emitter.emit_tool_specific_events(tool_name, new_input)
+                    self.tool_emitter.emit_tool_specific_events(tool_name, redact(new_input))
 
     def _process_tool_result_from_message(self, tool_result: Any) -> None:
         """Process tool execution results."""
@@ -2332,7 +2333,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                 self.emit_ui_event(
                     {
                         "type": "output",
-                        "content": combined_output,
+                        "content": redact_text(combined_output),
                         "metadata": {"fromToolBuffer": True, "tool": tool_name},
                     }
                 )
@@ -2372,6 +2373,7 @@ class AgentEventHandler(PrintingCallbackHandler):
             output_text = self._parse_shell_tool_output_detailed(output_text)
         elif tool_name == "editor":
             output_text = self._parse_editor_tool_output(output_text)
+        output_text = redact_text(output_text)
 
         if not output_text.strip():
             # For python_repl with no textual output, emit executed code and suppress generic message if a preview was shown

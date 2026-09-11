@@ -20,6 +20,7 @@ from strands.hooks import (
 from modules.config.system.logger import get_logger
 
 from ...config import AgentConfig
+from ...utils.redaction import redact
 from ..events import EventEmitter, get_emitter
 from ..tool_failure_summary import normalize_failed_tool_result
 
@@ -136,7 +137,7 @@ class ReactHooks(HookProvider):
 
             # Log the tool invocation at INFO level for visibility
             logger.info("Tool invocation: %s (id=%s)", tool_name, tool_id)
-            logger.debug("Tool input: %s", tool_input)
+            logger.debug("Tool input: %s", redact(tool_input))
 
             if self.emit_tool_lifecycle:
                 # Emit structured events with already-parsed input
@@ -144,7 +145,7 @@ class ReactHooks(HookProvider):
                     "type": "tool_start",
                     "tool_name": tool_name,
                     "tool_id": tool_id,
-                    "tool_input": tool_input,
+                    "tool_input": redact(tool_input),
                 }
 
                 # Emit the tool_start event with complete information
@@ -162,7 +163,7 @@ class ReactHooks(HookProvider):
                         "type": "tool_input_corrected",
                         "tool_name": tool_name,
                         "tool_id": tool_id,
-                        "tool_input": tool_input,
+                        "tool_input": redact(tool_input),
                     }
                 )
 

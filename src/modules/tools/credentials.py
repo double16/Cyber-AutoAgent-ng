@@ -19,12 +19,18 @@ import secrets
 import string
 import struct
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from strands import tool
 
-from modules.tools.memory import _get_database_store, _operation_id
+from modules.tools.memory import (
+    _get_database_store,
+    _operation_id,
+    active_credential_task,
+    emit_memory_event,
+)
 
 _CREDENTIAL_TYPES = frozenset({"username_password", "email_login", "api_key", "oauth2_client"})
 _STATUSES = frozenset({"unknown", "pending", "valid", "invalid", "expired", "revoked", "retired"})
@@ -63,6 +69,49 @@ def extract_objective_credentials(objective: str) -> tuple[str, list[dict[str, A
 
     sanitized = _OBJECTIVE_API_KEY_PATTERN.sub(api_replacement, sanitized)
     return sanitized, drafts
+
+
+def extract_config_credentials(raw_value: str | None) -> list[dict[str, Any]]:
+    """Validate credential drafts supplied by the React configuration or environment.
+
+    The accepted value is a JSON array, or an object with a `credentials` array. Each item uses the same fields as
+    `store_user_credential`: credential_type, optional target, optional role, values, optional operation_scope,
+    account_label, and tenant_label. Validation errors intentionally identify only field names, never values.
+    """
+
+    value = str(raw_value or "").strip()
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError("assessment credential configuration must be valid JSON") from error
+    entries = parsed.get("credentials") if isinstance(parsed, dict) else parsed
+    if not isinstance(entries, list):
+        raise ValueError("assessment credential configuration must contain a credentials array")
+    drafts: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"assessment credential {index} must be an object")
+        credential_type = str(entry.get("credential_type") or "").strip().lower()
+        values = entry.get("values")
+        validate_credential_payload(credential_type, values)
+        target = str(entry.get("target") or "").strip() or None
+        role = str(entry.get("role") or "").strip() or None
+        if credential_type != "email_login" and role is None:
+            raise ValueError(f"assessment credential {index} requires role")
+        drafts.append(
+            {
+                "credential_type": credential_type,
+                "target": target,
+                "role": role,
+                "values": values,
+                "operation_scope": str(entry.get("operation_scope") or "").strip() or None,
+                "account_label": str(entry.get("account_label") or "").strip() or None,
+                "tenant_label": str(entry.get("tenant_label") or "").strip() or None,
+            }
+        )
+    return drafts
 
 
 def canonicalize_credential_target(target: str) -> str:
@@ -261,6 +310,42 @@ def query_credentials(
     return json.dumps({"credentials": records})
 
 
+@tool(name="plan_access_control_comparisons")
+def plan_access_control_comparisons(target: str) -> str:
+    """List safe, credential-ID-only account, role, and tenant comparison pairs for authorized IDOR testing.
+
+    Use the returned IDs to check out two distinct credentials and test only the assigned target. No pair is invented:
+    an empty comparison list is a coverage gap that must be reported rather than bypassed.
+    """
+
+    normalized_target = canonicalize_credential_target(target)
+    records = _get_database_store().list_credentials(_operation_id(), target=normalized_target)
+    comparisons: list[dict[str, str]] = []
+    for index, left in enumerate(records):
+        for right in records[index + 1 :]:
+            left_id = str(left["credential_id"])
+            right_id = str(right["credential_id"])
+            left_account = str(left.get("account_label") or "")
+            right_account = str(right.get("account_label") or "")
+            left_tenant = str(left.get("tenant_label") or "")
+            right_tenant = str(right.get("tenant_label") or "")
+            if left_account and right_account and left_account != right_account:
+                comparisons.append({"kind": "account", "left_credential_id": left_id, "right_credential_id": right_id})
+            if str(left.get("role") or "") != str(right.get("role") or ""):
+                comparisons.append({"kind": "role", "left_credential_id": left_id, "right_credential_id": right_id})
+            if left_tenant and right_tenant and left_tenant != right_tenant:
+                comparisons.append({"kind": "tenant", "left_credential_id": left_id, "right_credential_id": right_id})
+    unique_comparisons = list({(item["kind"], item["left_credential_id"], item["right_credential_id"]): item for item in comparisons}.values())
+    return json.dumps(
+        {
+            "target": normalized_target,
+            "comparisons": unique_comparisons,
+            "coverage_gap": None if unique_comparisons else "No distinct eligible account, role, or tenant credential pair.",
+        },
+        sort_keys=True,
+    )
+
+
 @tool(name="checkout_credential")
 def checkout_credential(credential_id: str, purpose: str) -> str:
     """Retrieve one eligible credential for the active task and record selection for reporting.
@@ -277,7 +362,13 @@ def checkout_credential(credential_id: str, purpose: str) -> str:
     scoped_operation = record.get("operation_id")
     if scoped_operation and scoped_operation != _operation_id():
         raise ValueError("credential is scoped to another operation")
-    store.record_credential_usage(_operation_id(), str(credential_id), outcome="selected")
+    active_task = active_credential_task(store, _operation_id())
+    store.record_credential_usage(
+        _operation_id(),
+        str(credential_id),
+        task_uid=active_task.task_uid if active_task is not None else None,
+        outcome="selected",
+    )
     return json.dumps({"credential_id": record["credential_id"], "credential_type": record["credential_type"], "values": record["payload"]})
 
 
@@ -297,6 +388,53 @@ def mark_credential_status(
         _operation_id(), str(credential_id), normalized_status, "operation", str(reason or ""), evidence_refs or []
     )
     return json.dumps({"credential": record})
+
+
+@tool(name="rotate_credential")
+def rotate_credential(credential_id: str, values: dict[str, Any], reason: str) -> str:
+    """Replace an operation-managed credential while retaining the retired credential's audit history.
+
+    This tool is limited to credentials created by an operation. User-provided credentials must be changed through the
+    React configuration or environment import path. The old record is retained with status `retired`.
+    """
+
+    if not str(reason or "").strip():
+        raise ValueError("credential rotation reason is required")
+    store = _get_database_store()
+    previous = store.get_credential(str(credential_id), include_payload=True)
+    if previous is None:
+        raise ValueError("credential is unavailable")
+    if previous["management_policy"] != "operation":
+        raise ValueError("user-provided credentials can only be updated by the user")
+    if previous["status"] in {"invalid", "revoked", "retired"}:
+        raise ValueError("credential is unavailable for rotation")
+    payload = validate_credential_payload(str(previous["credential_type"]), values)
+    for label in ("account_label", "tenant_label"):
+        if previous["payload"].get(label):
+            payload[label] = previous["payload"][label]
+    replacement = store.store_credential(
+        _operation_id(),
+        {
+            "credential_type": previous["credential_type"],
+            "target": previous["target"],
+            "role": previous["role"],
+            "operation_id": previous["operation_id"],
+            "payload": payload,
+            "origin": "registered",
+            "management_policy": "operation",
+            "status": "unknown",
+            "supersedes_credential_id": previous["credential_id"],
+        },
+    )
+    store.record_credential_status(
+        _operation_id(),
+        previous["credential_id"],
+        "retired",
+        "operation",
+        str(reason).strip(),
+        [],
+    )
+    return json.dumps({"retired_credential_id": previous["credential_id"], "credential": replacement})
 
 
 @tool(name="generate_password")
@@ -331,6 +469,75 @@ def generate_mfa_code(provisioning_secret: str, digits: int = 6, period: int = 3
     offset = digest[-1] & 0x0F
     binary = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
     return str(binary % (10**digits)).zfill(digits)
+
+
+@tool(name="request_mfa_code")
+def request_mfa_code(
+    credential_id: str,
+    prompt: str = "Enter the one-time code from your authenticator or email.",
+    code_pattern: str = r"\d{6,10}",
+    ttl_seconds: int = 300,
+) -> str:
+    """Request a one-time MFA code through the terminal UI without persisting the code.
+
+    Call only after the target has requested MFA. The controller records a pending challenge and emits a sensitive
+    user handoff; the React terminal or interactive CLI sends the response to this waiting tool. For TOTP configured
+    in the checked-out credential, prefer `generate_mfa_code` instead of requesting a user code.
+    """
+
+    if ttl_seconds < 30 or ttl_seconds > 900:
+        raise ValueError("MFA challenge TTL must be between 30 and 900 seconds")
+    try:
+        pattern = re.compile(code_pattern)
+    except re.error as error:
+        raise ValueError("invalid MFA code pattern") from error
+    if pattern.groups:
+        raise ValueError("MFA code pattern must not contain capture groups")
+    store = _get_database_store()
+    record = store.get_credential(str(credential_id), include_payload=True)
+    if record is None or record["status"] not in {"unknown", "valid"}:
+        raise ValueError("eligible credential is required for MFA")
+    payload = record["payload"]
+    mfa = payload.get("mfa") if isinstance(payload, dict) else None
+    if not isinstance(mfa, dict) or str(mfa.get("type") or "").lower() not in {"totp", "email"}:
+        raise ValueError("credential does not have a configured MFA method")
+    if str(mfa.get("type")).lower() == "totp":
+        raise ValueError("configured TOTP credentials must use generate_mfa_code")
+    expires_at = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat()
+    challenge = store.create_mfa_challenge(
+        _operation_id(),
+        record["credential_id"],
+        "email",
+        expires_at,
+        {"code_pattern": code_pattern, "prompt": str(prompt or "")[:240]},
+    )
+    emit_memory_event(
+        {
+            "type": "user_handoff",
+            "message": str(prompt or "Enter the one-time MFA code.")[:500],
+            "breakout": False,
+            "sensitive": True,
+            "handoff_kind": "mfa_code",
+            "challenge_id": challenge["challenge_id"],
+            "expires_at": challenge["expires_at"],
+        }
+    )
+    try:
+        code = input().strip()
+    except (EOFError, OSError) as error:
+        raise ValueError("MFA code handoff is unavailable") from error
+    if not pattern.fullmatch(code):
+        raise ValueError("MFA code did not match the requested format")
+    store.complete_mfa_challenge(_operation_id(), challenge["challenge_id"])
+    active_task = active_credential_task(store, _operation_id())
+    store.record_credential_usage(
+        _operation_id(),
+        record["credential_id"],
+        task_uid=active_task.task_uid if active_task is not None else None,
+        authentication_mode="mfa",
+        outcome="used",
+    )
+    return code
 
 
 @tool(name="retrieve_email_mfa_code")
@@ -392,7 +599,14 @@ def retrieve_email_mfa_code(
         if len(matches) != 1:
             raise ValueError("email MFA code is missing or ambiguous")
         code = next(iter(matches))
-        store.record_credential_usage(_operation_id(), record["credential_id"], authentication_mode="mfa", outcome="used")
+        active_task = active_credential_task(store, _operation_id())
+        store.record_credential_usage(
+            _operation_id(),
+            record["credential_id"],
+            task_uid=active_task.task_uid if active_task is not None else None,
+            authentication_mode="mfa",
+            outcome="used",
+        )
         return code
     finally:
         try:

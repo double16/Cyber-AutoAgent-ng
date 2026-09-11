@@ -437,6 +437,23 @@ def test_tool_result_success_error_task_stop_and_memory_paths():
     assert handler.coordinator.report_findings == 0
 
 
+def test_tool_result_output_redacts_checked_out_credential_values():
+    handler = make_handler()
+    handler.tool_name_buffer["credential"] = "checkout_credential"
+
+    handler._process_tool_result_from_message(
+        {
+            "toolUseId": "credential",
+            "status": "success",
+            "content": [{"text": '{"values":{"password":"must-not-leak","username":"alice"}}'}],
+        }
+    )
+
+    outputs = [event["content"] for event in handler._events if event["type"] == "output"]
+    assert "must-not-leak" not in "\n".join(outputs)
+    assert "[REDACTED]" in "\n".join(outputs)
+
+
 def test_empty_tool_error_emits_failure_reason_instead_of_success_completion(monkeypatch):
     handler = make_handler()
     handler.tool_name_buffer["acceptance-error"] = "record_task_acceptance"

@@ -249,7 +249,21 @@ be committed to source control or copied into task artifacts.
 For a concise objective, common `username=... password=...` and `api_key=...` forms are moved into the credential
 store before the objective is logged or sent to a model. Use a dedicated credential source for complex or MFA-backed
 credentials. TOTP provisioning secrets support SHA-1/SHA-256/SHA-512, six to ten digits, and a 30-second default;
-generated one-time codes are not persisted.
+generated one-time codes are not persisted. For email MFA, an agent can retrieve a code from a configured TLS IMAP
+mailbox or request one through the React terminal or interactive CLI. The prompt is marked sensitive, the response is
+not kept in terminal history, and only challenge metadata (never the code) is retained in the database.
+Credentials created by an operation can be rotated by the agent when the authorized flow supports it; rotation creates
+a new credential record and retires the old one instead of overwriting history. User-provided credential payloads are
+never changed by an agent.
+
+The **Operations → Assessment Credentials (JSON)** field in the React configuration editor accepts either a JSON
+array or `{"credentials": [...]}`. Each item has `credential_type`, `role`, `values`, and optional `target`,
+`operation_scope`, `account_label`, and `tenant_label`. If a target is omitted, the runner uses the sole resolved
+operation target; multi-target operations require an explicit resolved target value.
+
+| Variable | Purpose |
+|---|---|
+| `CYBER_ASSESSMENT_CREDENTIALS` | Sensitive JSON in the same format as the React field. It is imported into the SQLite credential store at operation start and is forwarded by Docker Compose. |
 
 ## MCP configuration
 

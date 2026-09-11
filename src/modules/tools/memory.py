@@ -1533,6 +1533,25 @@ class ApplicationStore(Protocol):
         replacement_task_uid: str,
     ) -> bool: ...
 
+    def create_mfa_challenge(
+        self,
+        operation_id: str,
+        credential_id: str,
+        method: str,
+        expires_at: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def complete_mfa_challenge(self, operation_id: str, challenge_id: str) -> dict[str, Any]: ...
+
+    def expire_mfa_challenges(self, operation_id: str) -> int: ...
+
+    def credential_ids_used_by_task(
+        self, operation_id: str, task_uid: str, credential_ids: Iterable[str]
+    ) -> set[str]: ...
+
+    def credential_ids_selected_by_task(self, operation_id: str, task_uid: str) -> set[str]: ...
+
 
 class SQLiteApplicationStore:
     """SQLite persistence for application workflow state.
@@ -1584,6 +1603,11 @@ class SQLiteApplicationStore:
         "record_credential_usage",
         "add_credential_target_alias",
         "list_credential_usage",
+        "create_mfa_challenge",
+        "complete_mfa_challenge",
+        "expire_mfa_challenges",
+        "credential_ids_used_by_task",
+        "credential_ids_selected_by_task",
     })
 
     def __getattribute__(self, name: str) -> Any:
@@ -1811,6 +1835,7 @@ class SQLiteApplicationStore:
     def _credential_row(row: sqlite3.Row | tuple[Any, ...], include_payload: bool = False) -> dict[str, Any]:
         """Convert one credential row without exposing its payload by default."""
 
+        payload = json.loads(row[5])
         result = {
             "credential_id": row[0],
             "target": row[1],
@@ -1825,8 +1850,11 @@ class SQLiteApplicationStore:
             "created_at": row[11],
             "updated_at": row[12],
         }
+        for label in ("account_label", "tenant_label"):
+            if isinstance(payload.get(label), str) and payload[label].strip():
+                result[label] = payload[label].strip()
         if include_payload:
-            result["payload"] = json.loads(row[5])
+            result["payload"] = payload
         return result
 
     def store_credential(self, operation_id: str, record: dict[str, Any]) -> dict[str, Any]:
@@ -2042,6 +2070,142 @@ class SQLiteApplicationStore:
             }
             for row in rows
         ]
+
+    def create_mfa_challenge(
+        self,
+        operation_id: str,
+        credential_id: str,
+        method: str,
+        expires_at: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Persist a non-secret MFA challenge for an interactive or mailbox flow."""
+
+        if method not in {"totp", "email"}:
+            raise ValueError("MFA challenge method must be totp or email")
+        now = datetime.now().isoformat()
+        challenge_id = str(uuid.uuid4())
+        with self._lock, closing(self._connect()) as conn, conn:
+            self._register_operation(conn, operation_id)
+            credential = conn.execute(
+                "SELECT credential_id FROM credential_records WHERE credential_id = ? AND logical_target = ?",
+                (credential_id, self.logical_target),
+            ).fetchone()
+            if credential is None:
+                raise ValueError(f"Unknown credential: {credential_id}")
+            conn.execute(
+                """
+                INSERT INTO mfa_challenges (
+                    challenge_id, credential_id, logical_target, operation_id, method, status, expires_at, metadata,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                """,
+                (
+                    challenge_id,
+                    credential_id,
+                    self.logical_target,
+                    operation_id,
+                    method,
+                    expires_at,
+                    json.dumps(metadata, sort_keys=True),
+                    now,
+                    now,
+                ),
+            )
+        return {
+            "challenge_id": challenge_id,
+            "credential_id": credential_id,
+            "method": method,
+            "status": "pending",
+            "expires_at": expires_at,
+            "metadata": dict(metadata),
+            "created_at": now,
+        }
+
+    def complete_mfa_challenge(self, operation_id: str, challenge_id: str) -> dict[str, Any]:
+        """Mark one pending MFA challenge completed without storing its one-time code."""
+
+        self.expire_mfa_challenges(operation_id)
+        now = datetime.now().isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                """
+                SELECT credential_id, method, status, expires_at, metadata, created_at
+                FROM mfa_challenges
+                WHERE challenge_id = ? AND logical_target = ? AND operation_id = ?
+                """,
+                (challenge_id, self.logical_target, operation_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("MFA challenge is unavailable")
+            if row[2] != "pending":
+                raise ValueError(f"MFA challenge is not pending: {row[2]}")
+            conn.execute(
+                "UPDATE mfa_challenges SET status = 'completed', updated_at = ? WHERE challenge_id = ?",
+                (now, challenge_id),
+            )
+        return {
+            "challenge_id": challenge_id,
+            "credential_id": row[0],
+            "method": row[1],
+            "status": "completed",
+            "expires_at": row[3],
+            "metadata": json.loads(row[4]),
+            "created_at": row[5],
+            "updated_at": now,
+        }
+
+    def expire_mfa_challenges(self, operation_id: str) -> int:
+        """Expire pending MFA challenges whose TTL elapsed."""
+
+        now = datetime.now().isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            cursor = conn.execute(
+                """
+                UPDATE mfa_challenges SET status = 'expired', updated_at = ?
+                WHERE logical_target = ? AND operation_id = ? AND status = 'pending' AND expires_at <= ?
+                """,
+                (now, self.logical_target, operation_id, now),
+            )
+        return max(0, int(cursor.rowcount))
+
+    def credential_ids_used_by_task(
+        self,
+        operation_id: str,
+        task_uid: str,
+        credential_ids: Iterable[str],
+    ) -> set[str]:
+        """Return declared IDs with a controller-recorded non-selection use in one task."""
+
+        requested_ids = sorted({str(item).strip() for item in credential_ids if str(item).strip()})
+        if not requested_ids or not str(task_uid).strip():
+            return set()
+        placeholders = ", ".join("?" for _ in requested_ids)
+        with self._lock, closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT credential_id FROM credential_usage_records
+                WHERE logical_target = ? AND operation_id = ? AND task_uid = ?
+                    AND credential_id IN ({placeholders}) AND outcome IN ('used', 'succeeded', 'failed', 'blocked')
+                """,
+                [self.logical_target, operation_id, task_uid, *requested_ids],
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def credential_ids_selected_by_task(self, operation_id: str, task_uid: str) -> set[str]:
+        """Return credentials that the current task explicitly checked out."""
+
+        if not str(task_uid).strip():
+            return set()
+        with self._lock, closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT credential_id FROM credential_usage_records
+                WHERE logical_target = ? AND operation_id = ? AND task_uid = ? AND outcome = 'selected'
+                """,
+                (self.logical_target, operation_id, task_uid),
+            ).fetchall()
+        return {str(row[0]) for row in rows}
 
     def append_operation_model_metrics(
         self,
@@ -3663,6 +3827,18 @@ def set_memory_event_emitter(emitter: Callable[[dict[str, Any]], None] | None) -
     _MEMORY_EVENT_EMITTER = emitter
 
 
+def emit_memory_event(event: dict[str, Any]) -> None:
+    """Publish one non-memory UI event through the configured operation emitter."""
+
+    emitter = _MEMORY_EVENT_EMITTER
+    if not callable(emitter):
+        return
+    try:
+        emitter(event)
+    except Exception:
+        logger.debug("Unable to emit memory-adjacent UI event", exc_info=True)
+
+
 def _emit_memory_added(memory_id: str, category: str, content: str) -> None:
     """Publish one best-effort event after a new memory receives a durable ID."""
 
@@ -4058,6 +4234,13 @@ def _active_finding_source_task(store: Any, operation_id: str) -> Task | None:
     return active[0] if len(active) == 1 else None
 
 
+def active_credential_task(store: Any, operation_id: str) -> Task | None:
+    """Return the sole active task permitted to check out or use credentials."""
+
+    active = [task for task in store.get_tasks(operation_id) if task.status == "active"]
+    return active[0] if len(active) == 1 else None
+
+
 def _effective_url_port(parsed: Any) -> int | None:
     """Return an explicit or conventional URL port without assuming HTTP-only targets."""
 
@@ -4429,6 +4612,15 @@ def store_finding(
         evidence_assertions, candidate["artifacts"], require_one=True
     )
     source_task_uid = source_task.task_uid if source_task is not None else ""
+    if candidate["auth_context"]["mode"] == "authenticated":
+        credential_ids = candidate["auth_context"]["credential_ids"]
+        used_ids = store.credential_ids_used_by_task(op_id, source_task_uid, credential_ids)
+        missing_ids = sorted(set(credential_ids) - used_ids)
+        if missing_ids:
+            raise ValueError(
+                "authenticated finding requires controller-recorded credential use by this task; "
+                f"missing credential_ids={', '.join(missing_ids)}"
+            )
     candidate["evidence_receipts"] = []
     if source_task is not None:
         for assertion in candidate["evidence_assertions"]:

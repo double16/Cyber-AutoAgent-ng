@@ -4,7 +4,8 @@
 
 - Add a SQLite-backed credential store with typed login/API/OAuth credentials, lifecycle status history, exact
   resolved-target scoping, explicit aliases, agent checkout tools, password/TOTP generation, objective sanitization,
-  authentication context for tasks/findings, and masked credential-use reporting.
+  authentication context for tasks/findings, interactive email-MFA handoff, operation-managed credential rotation,
+  and masked credential-use reporting.
 
 ### Fixes
 

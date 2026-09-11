@@ -728,6 +728,7 @@ export class PythonExecutionService extends EventEmitter {
         FORCE_COLOR: '1',
         // Always pass objective via environment to avoid escaping issues
         CYBER_OBJECTIVE: objective,
+        ...(config.assessmentCredentialsJson ? { CYBER_ASSESSMENT_CREDENTIALS: config.assessmentCredentialsJson } : {}),
         // React UI integration - critical for event emission
         BYPASS_TOOL_CONSENT: config.confirmations ? 'false' : 'true',
         CYBER_UI_MODE: 'react',
