@@ -177,6 +177,84 @@ def test_trace_parser_covers_reference_topics_and_tool_message_variants():
     assert failed is not None and failed.success is False
 
 
+def test_trace_parser_covers_metadata_context_and_finding_fallbacks():
+    parser = TraceParser()
+    trace = SimpleNamespace(
+        metadata={"attributes": {"operation.id": "OP1"}},
+        session_id="SESSION",
+        latency=12.5,
+        tokenUsage=SimpleNamespace(input=3, output=4, total=7),
+    )
+    assert parser._extract_metadata(trace) == {
+        "attributes": {"operation.id": "OP1"},
+        "session_id": "SESSION",
+        "operation_id": "OP1",
+        "latency_ms": 12.5,
+        "token_usage": {"input": 3, "output": 4, "total": 7},
+    }
+
+    parsed = ParsedTrace(
+        "t",
+        "Trace",
+        "Assess",
+        [],
+        [
+            ParsedToolCall("shell", {}, output="uid=1"),
+            ParsedToolCall("store_observation", {"content": "observed"}, output="saved"),
+            ParsedToolCall("memory_retrieve", {}, output="retrieved"),
+            ParsedToolCall(
+                "store_finding",
+                {"claim": {"issue": "x"}, "metadata": {"operation_id": "OP1", "severity": "high"}},
+                output=None,
+            ),
+            ParsedToolCall(
+                "store_finding",
+                {"claim": "old", "metadata": {"operation_id": "OLD"}},
+                output=None,
+            ),
+        ],
+        metadata={"operation_id": "OP1"},
+    )
+    assert parser._prepare_tool_contexts(parsed) == [
+        "[Shell Command Output] uid=1",
+        "[Memory Store] observed",
+        "[Memory Operation] retrieved",
+        "[Security Finding - high/unknown] {\"issue\": \"x\"}",
+    ]
+    assert parser._extract_memory_findings(parsed) == [
+        "[Retrieved Finding] retrieved",
+        "[Security Finding - high/unknown] {'issue': 'x'}",
+    ]
+    assert parser.count_current_evidence_findings(parsed) == 1
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        ("memory_list", "[Memory Operation] output"),
+        ("http_request", "[HTTP Response] output"),
+        ("swarm", "[Swarm Agent] output"),
+        ("editor", "[editor] output"),
+    ],
+)
+def test_trace_parser_formats_special_and_generic_tool_contexts(tool_name, expected):
+    parser = TraceParser()
+    assert parser._format_tool_context(ParsedToolCall(tool_name, {}, output="output")) == expected
+
+
+@pytest.mark.asyncio
+async def test_trace_parser_single_turn_and_reference_topic_fallbacks():
+    parser = TraceParser()
+    tool_only = ParsedTrace("t", "T", "", [], [ParsedToolCall("shell", {}, output="id")])
+    sample = parser._create_single_turn_sample(tool_only)
+    assert sample.user_input == ""
+    assert sample.response == "Tool [shell]: id"
+
+    assistant = ParsedTrace("t", "T", "", [ParsedMessage("assistant", "answer")], [])
+    assert parser._create_single_turn_sample(assistant).response == "answer"
+    assert await parser._generate_reference_topics_from_trace(tool_only) == ["cybersecurity assessment"]
+
+
 def test_parse_messages_and_content_from_observations():
     parser = TraceParser()
     trace = SimpleNamespace(

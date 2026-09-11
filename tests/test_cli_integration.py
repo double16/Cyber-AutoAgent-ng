@@ -534,6 +534,62 @@ def test_cli_metrics_and_workflow_summary_cover_empty_state_and_task_failures(mo
     assert cyberautoagent._workflow_coverage_summary(SimpleNamespace(phases="invalid")) == []
 
 
+def test_target_preflight_emits_success_and_failure_results(monkeypatch):
+    success = cyberautoagent.TargetValidationResult(
+        target_id="target-1", target="example.test", target_type="web", status="pass", checks=("dns",)
+    )
+    failure = cyberautoagent.TargetValidationResult(
+        target_id="target-2", target="bad.test", target_type="web", status="fail", checks=(), reason="unreachable"
+    )
+    emitter = Mock()
+    logger = SimpleNamespace(info=Mock(), error=Mock())
+    monkeypatch.setattr(cyberautoagent, "validate_operation_targets", Mock(return_value=[success, failure]))
+
+    targets, results = ORIGINAL_RUN_TARGET_PREFLIGHT(
+        logical_target="example.test",
+        objective="Assess",
+        operation_id="OP1",
+        logger=logger,
+        emitter=emitter,
+        targets=[SimpleNamespace(target="example.test")],
+    )
+
+    assert len(targets) == 1
+    assert results == [success, failure]
+    assert emitter.emit.call_count == 2
+    logger.info.assert_called_once()
+    logger.error.assert_called_once()
+
+
+def test_assistant_text_skips_tool_calls_and_malformed_content():
+    messages = [
+        {"role": "assistant", "content": [{"toolUse": {"name": "shell"}}]},
+        {"role": "assistant", "content": "not blocks"},
+        {"role": "assistant", "content": [{"text": "  final answer  "}]},
+    ]
+    assert cyberautoagent.extract_last_assistant_text(messages) == "final answer"
+    assert cyberautoagent.extract_last_assistant_text(None) == ""
+
+
+def test_terminal_policy_covers_successful_tools_and_text_limit():
+    handler = SimpleNamespace(
+        tool_counts={"scan": 1},
+        tool_outcome_journal=SimpleNamespace(
+            since=lambda _baseline: [SimpleNamespace(tool_name="scan", success=True)]
+        ),
+    )
+    policy = cyberautoagent.AgentRunPolicy(
+        min_tool_calls=1,
+        required_tool_names={"scan"},
+        terminal_after_required_tools=True,
+        allow_text_final_after_tools=True,
+        max_actionless_after_tools=2,
+    )
+    assert cyberautoagent._successful_required_tools_satisfied(handler, policy, 0) is True
+    assert cyberautoagent._run_policy_allows_terminal_text(handler, policy, 2) is False
+    assert cyberautoagent._run_policy_allows_terminal_text(handler, policy, 3) is True
+
+
 def test_cli_workflow_coverage_summary_excludes_replanned_tasks(monkeypatch):
     phase = SimpleNamespace(id=6, title="Impact", status="done")
     state = SimpleNamespace(
