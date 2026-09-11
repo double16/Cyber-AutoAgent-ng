@@ -266,8 +266,8 @@ and tenants from stored metadata for report provenance. Every stored credential 
 status-history event: user-supplied credentials are attributed to the user, while found and registered credentials are
 attributed to the operation. For a later operation, reusable registered credentials are listed before other reusable
 credentials; credentials explicitly scoped to that later operation still take precedence.
-The same unauthenticated-baseline, authenticated-comparison, self-registration, and IDOR-comparison rules are retained
-when the workflow uses its deterministic prompt fallback.
+The workflow's controller-appended task contract, including deterministic prompt fallbacks, retains the same
+unauthenticated-baseline, authenticated-comparison, self-registration, and IDOR-comparison rules for every module.
 Every reported finding labels its authentication context. Authenticated findings include only opaque credential IDs;
 unexpected identifier values and all credential payload values are redacted from report Markdown and JSON.
 

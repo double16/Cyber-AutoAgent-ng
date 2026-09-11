@@ -13126,8 +13126,9 @@ def test_task_prompt_builder_and_fallback_preserve_credential_execution_rules():
     fallback_prompt = controller._deterministic_task_prompt_spec(
         _plan(), _plan().phases[0], task, RuntimeError("prompt unavailable")
     )["prompt"]
+    executor_contract = controller._task_executor_contract(task, {"store_observation"})
 
-    for prompt in (builder_prompt, fallback_prompt):
+    for prompt in (builder_prompt, fallback_prompt, executor_contract):
         assert "establish the unauthenticated baseline" in prompt
         assert "store_credential(origin=\"registered\")" in prompt
         assert "plan_access_control_comparisons" in prompt

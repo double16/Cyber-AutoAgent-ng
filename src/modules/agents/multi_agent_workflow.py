@@ -12479,6 +12479,7 @@ Do not return `continue` merely because work is incomplete when the task history
             if available_tool_names is None
             else available_tool_names
         )
+        credential_guidance = MultiAgentWorkflowController._credential_execution_guidance()
         persistence_guidance = MultiAgentWorkflowController._task_persistence_guidance(
             tool_names,
             audience="executor",
@@ -12609,6 +12610,8 @@ evidence references as one operation observation for later tasks. The controller
 criterion, and coverage IDs; never guess or submit those IDs. End with a concise summary of completed work,
 partial progress, or a concrete blocker. Python owns task, phase, and operation state transitions; never claim or
 perform them.{finding_submission_methodology}{finding_validation_methodology}{execution_evidence_methodology}
+## Credential Execution Rules
+{credential_guidance}
 {execution_requirement_providers}"""
 
     @classmethod
