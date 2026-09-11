@@ -28,6 +28,7 @@ logger = get_logger("Evaluation.Manager")
 
 _GOAL_ACHIEVED_ACCEPTANCE_STATUSES = frozenset({"satisfied", "assessed_negative", "duplicate"})
 _GOAL_ARCHIVED_TASK_STATUSES = frozenset({"replanned", "superseded"})
+_RAGAS_DIAGNOSTIC_PATH = "/diagnostic/ragas/"
 
 
 def _goal_value(value: Any, name: str, default: Any = None) -> Any:
@@ -106,7 +107,9 @@ def build_goal_contract_facts(
             criterion_id = str(_goal_value(criterion, "id", "")).strip()
             record_unit(results_by_criterion.get(criterion_id), task_status)
 
+    assessment_complete = bool(_goal_value(plan, "assessment_complete", False))
     return {
+        "assessment_complete": assessment_complete,
         "goal_contract_attainment": {
             "version": 1,
             "achieved_units": achieved_units,
@@ -114,9 +117,26 @@ def build_goal_contract_facts(
             "excluded_units": excluded_units,
             "eligible_task_count": eligible_task_count,
             "unachieved_reasons": dict(sorted(unachieved_reasons.items())),
-            "assessment_complete": bool(_goal_value(plan, "assessment_complete", False)),
+            "assessment_complete": assessment_complete,
         }
     }
+
+
+def public_score_averages(scores: dict[str, float]) -> dict[str, float | None]:
+    """Return public-only score averages for the stable operation and report scopes."""
+
+    averages: dict[str, float | None] = {}
+    for scope in ("operation", "report"):
+        values = [
+            float(value)
+            for name, value in scores.items()
+            if name.startswith(f"{scope}/")
+            and _RAGAS_DIAGNOSTIC_PATH not in name
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        ]
+        averages[f"{scope}_average_score"] = sum(values) / len(values) if values else None
+    return averages
 
 
 class TraceType(Enum):

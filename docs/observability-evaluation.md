@@ -118,6 +118,10 @@ replanned or superseded tasks are omitted. `assessment_complete` remains complet
 accuracy binary. The remaining applicable dimensions use the canonical operation digest. Ragas binary metrics are
 uploaded only as `diagnostic/ragas/...` scores and must not be interpreted as calibrated quality values.
 
+The `evaluation_complete.average_score` is the arithmetic mean of public `operation/` metrics only. Diagnostic Ragas
+scores never affect it. When report metrics are available, `report_average_score` provides their separate public-only
+mean so repeated report metrics do not change the operation headline.
+
 The existing `ENABLE_OBSERVABILITY` and `ENABLE_AUTO_EVALUATION` variables remain authoritative. If either required
 gate is disabled, trace discovery, evaluator initialization, Ragas model calls, and score uploads are skipped.
 

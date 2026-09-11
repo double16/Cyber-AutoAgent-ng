@@ -1894,6 +1894,7 @@ def test_live_evaluation_builds_goal_contract_facts(monkeypatch):
     facts = captured["operation_facts"]["goal_contract_attainment"]
     assert facts["achieved_units"] == 1
     assert facts["applicable_units"] == 1
+    assert captured["operation_facts"]["assessment_complete"] is False
 
 
 def test_evaluation_result_status_aliases_are_canonical():

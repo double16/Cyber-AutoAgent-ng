@@ -185,6 +185,8 @@ def test_rerun_operation_evaluation_uses_persisted_objective_and_reports_failure
     assert emitted[-1]["scores"] == (
         {"operation/faithfulness": 0.8} if scores_by_scope else {}
     )
+    assert emitted[-1]["average_score"] == (0.8 if scores_by_scope else None)
+    assert emitted[-1]["report_average_score"] is None
     assert emitted[-1]["failed_metrics"] == failed_metrics
     assert emitted[-1]["scope_errors"] == scope_errors
     assert emitted[-1]["metrics_skipped"] == 1

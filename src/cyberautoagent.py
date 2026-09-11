@@ -324,7 +324,12 @@ def rerun_operation_evaluation(
     logger: Any,
 ) -> bool:
     """Re-evaluate one persisted operation without executing or reporting."""
-    from modules.evaluation.manager import EvaluationManager, TraceType, build_goal_contract_facts
+    from modules.evaluation.manager import (
+        EvaluationManager,
+        TraceType,
+        build_goal_contract_facts,
+        public_score_averages,
+    )
 
     store = create_application_store(
         get_application_database_path({"output_dir": output_dir}),
@@ -367,6 +372,7 @@ def rerun_operation_evaluation(
     failed_metrics = dict(manager.last_failed_metrics)
     skipped_metrics = sorted(manager.last_skipped_metrics)
     scope_errors = dict(getattr(manager, "last_scope_errors", {}))
+    averages = public_score_averages(scores)
     if failed_metrics or scope_errors:
         status = "partial_failure" if scores else "failed"
     elif scores:
@@ -385,7 +391,8 @@ def rerun_operation_evaluation(
             "metrics_skipped": len(skipped_metrics),
             "scope_errors": scope_errors,
             "scores": scores,
-            "average_score": sum(scores.values()) / len(scores) if scores else None,
+            "average_score": averages["operation_average_score"],
+            "report_average_score": averages["report_average_score"],
             "failed_metrics": failed_metrics,
             "skipped_metrics": skipped_metrics,
         }

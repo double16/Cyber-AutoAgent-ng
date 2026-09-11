@@ -3635,7 +3635,12 @@ class AgentEventHandler(PrintingCallbackHandler):
     # Evaluation methods
     def trigger_evaluation_on_completion(self) -> None:
         """Trigger evaluation after operation completion."""
-        from modules.evaluation.manager import EvaluationManager, TraceType, build_goal_contract_facts
+        from modules.evaluation.manager import (
+            EvaluationManager,
+            TraceType,
+            build_goal_contract_facts,
+            public_score_averages,
+        )
 
         logger.debug(
             "trigger_evaluation_on_completion called for operation %s",
@@ -3735,9 +3740,7 @@ class AgentEventHandler(PrintingCallbackHandler):
                         for name, value in result_scores.items():
                             if isinstance(value, (int, float)):
                                 scores[str(name)] = float(value)
-                average_score = (
-                    sum(scores.values()) / len(scores) if scores else None
-                )
+                averages = public_score_averages(scores)
                 status = "successful" if not failed_metrics and not scope_errors else "partial_failure"
                 logger.info("Evaluation %s: %d traces evaluated", status, len(results))
                 self.emit_ui_event(
@@ -3749,7 +3752,8 @@ class AgentEventHandler(PrintingCallbackHandler):
                         "traces_evaluated": len(results),
                         "metrics_evaluated": len(scores),
                         "scores": scores,
-                        "average_score": average_score,
+                        "average_score": averages["operation_average_score"],
+                        "report_average_score": averages["report_average_score"],
                         "metrics_failed": len(failed_metrics),
                         "metrics_skipped": len(skipped_metrics),
                         "failed_metrics": failed_metrics,

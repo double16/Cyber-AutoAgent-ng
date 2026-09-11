@@ -73,9 +73,10 @@ def test_build_goal_contract_facts_scores_current_evidence_backed_units():
         ],
     }
 
-    facts = mod.build_goal_contract_facts(
+    operation_facts = mod.build_goal_contract_facts(
         SimpleNamespace(assessment_complete=False), tasks, results
-    )["goal_contract_attainment"]
+    )
+    facts = operation_facts["goal_contract_attainment"]
 
     assert facts["achieved_units"] == 2
     assert facts["applicable_units"] == 5
@@ -83,6 +84,7 @@ def test_build_goal_contract_facts_scores_current_evidence_backed_units():
     assert facts["eligible_task_count"] == 3
     assert facts["unachieved_reasons"] == {"inaccessible": 1, "task_status:partial_failure": 2}
     assert facts["assessment_complete"] is False
+    assert operation_facts["assessment_complete"] is False
 
 
 def test_build_goal_contract_facts_requires_done_task_and_acceptance_result():
@@ -111,6 +113,30 @@ def test_build_goal_contract_facts_requires_done_task_and_acceptance_result():
     assert facts["unachieved_reasons"] == {
         "missing_acceptance_result": 2,
         "task_status:active": 2,
+    }
+
+
+def test_public_score_averages_exclude_diagnostics_and_keep_scopes_separate():
+    averages = mod.public_score_averages(
+        {
+            "operation/evidence_quality": 0.6,
+            "operation/penetration_test_goal_accuracy": 0.8,
+            "operation/diagnostic/ragas/faithfulness": 0.0,
+            "report/evidence_quality": 0.4,
+            "report/diagnostic/ragas/topic_adherence": 1.0,
+        }
+    )
+
+    assert averages == {
+        "operation_average_score": pytest.approx(0.7),
+        "report_average_score": pytest.approx(0.4),
+    }
+
+
+def test_public_score_averages_return_none_without_public_scope_scores():
+    assert mod.public_score_averages({"operation/diagnostic/ragas/faithfulness": 0.5}) == {
+        "operation_average_score": None,
+        "report_average_score": None,
     }
 
 
