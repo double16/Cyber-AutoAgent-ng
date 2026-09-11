@@ -50,6 +50,94 @@ def test_credential_store_scopes_exact_targets_and_user_aliases(tmp_path, monkey
     assert stat.S_IMODE((tmp_path / "credentials.db").stat().st_mode) == 0o600
 
 
+def test_credential_storage_creates_an_initial_provenance_status_event(tmp_path):
+    database_path = tmp_path / "credentials.db"
+    store = SQLiteApplicationStore(str(database_path), "logical-target")
+    provided = store.store_credential(
+        "op-1",
+        {
+            "credential_type": "api_key",
+            "target": "https://api.example.test",
+            "role": "reader",
+            "payload": {"api_key": "provided-key", "placement": "header", "name": "X-API-Key"},
+            "origin": "provided",
+            "management_policy": "user",
+        },
+    )
+    registered = store.store_credential(
+        "op-1",
+        {
+            "credential_type": "api_key",
+            "target": "https://api.example.test",
+            "role": "member",
+            "payload": {"api_key": "registered-key", "placement": "header", "name": "X-API-Key"},
+            "origin": "registered",
+            "management_policy": "operation",
+        },
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        events = connection.execute(
+            "SELECT credential_id, status, actor, reason, evidence_refs "
+            "FROM credential_status_events ORDER BY credential_id"
+        ).fetchall()
+
+    assert sorted(events) == sorted(
+        [
+            (provided["credential_id"], "unknown", "user", "Credential stored", "[]"),
+            (registered["credential_id"], "unknown", "operation", "Credential stored", "[]"),
+        ]
+    )
+
+
+def test_credential_listing_prefers_operation_scope_then_reusable_registered_accounts(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    provided = store.store_credential(
+        "op-1",
+        {
+            "credential_type": "api_key",
+            "target": "https://api.example.test",
+            "role": "reader",
+            "payload": {"api_key": "provided-key", "placement": "header", "name": "X-API-Key"},
+            "origin": "provided",
+            "management_policy": "user",
+        },
+    )
+    registered = store.store_credential(
+        "op-1",
+        {
+            "credential_type": "api_key",
+            "target": "https://api.example.test",
+            "role": "reader",
+            "payload": {"api_key": "registered-key", "placement": "header", "name": "X-API-Key"},
+            "origin": "registered",
+            "management_policy": "operation",
+        },
+    )
+    operation_scoped = store.store_credential(
+        "op-2",
+        {
+            "credential_type": "api_key",
+            "target": "https://api.example.test",
+            "role": "reader",
+            "operation_id": "op-2",
+            "payload": {"api_key": "operation-key", "placement": "header", "name": "X-API-Key"},
+            "origin": "found",
+            "management_policy": "operation",
+        },
+    )
+
+    assert [record["credential_id"] for record in store.list_credentials("op-3")] == [
+        registered["credential_id"],
+        provided["credential_id"],
+    ]
+    assert [record["credential_id"] for record in store.list_credentials("op-2")] == [
+        operation_scoped["credential_id"],
+        registered["credential_id"],
+        provided["credential_id"],
+    ]
+
+
 def test_credential_storage_rejects_targets_outside_an_existing_operation_plan(tmp_path, monkeypatch):
     store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
     monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)

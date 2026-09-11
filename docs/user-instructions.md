@@ -262,7 +262,10 @@ Credentials created by an operation can be rotated by the agent when the authori
 a new credential record and retires the old one instead of overwriting history. User-provided credential payloads are
 never changed by an agent. Before an authenticated request, an agent binds its checked-out credentials to the active
 task. The controller rejects credentials outside that task's resolved target scope and records the roles, accounts,
-and tenants from stored metadata for report provenance.
+and tenants from stored metadata for report provenance. Every stored credential also receives an initial `unknown`
+status-history event: user-supplied credentials are attributed to the user, while found and registered credentials are
+attributed to the operation. For a later operation, reusable registered credentials are listed before other reusable
+credentials; credentials explicitly scoped to that later operation still take precedence.
 Every reported finding labels its authentication context. Authenticated findings include only opaque credential IDs;
 unexpected identifier values and all credential payload values are redacted from report Markdown and JSON.
 

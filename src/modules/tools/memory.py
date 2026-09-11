@@ -1864,6 +1864,9 @@ class SQLiteApplicationStore:
         credential_id = str(record.get("credential_id") or uuid.uuid4())
         now = datetime.now().isoformat()
         target = record.get("target")
+        origin = str(record["origin"])
+        status = str(record.get("status") or "unknown")
+        status_actor = "user" if origin == "provided" else "operation"
         with self._lock, closing(self._connect()) as conn, conn:
             self._register_operation(conn, operation_id)
             conn.execute(
@@ -1881,12 +1884,31 @@ class SQLiteApplicationStore:
                     str(record.get("operation_id") or "").strip() or None,
                     str(record["credential_type"]),
                     json.dumps(record["payload"], sort_keys=True),
-                    str(record["origin"]),
+                    origin,
                     str(record["management_policy"]),
-                    str(record.get("status") or "unknown"),
+                    status,
                     record.get("invalid_at"),
                     str(record.get("supersedes_credential_id") or "").strip() or None,
                     now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO credential_status_events (
+                    event_id, credential_id, logical_target, operation_id, status, actor, reason, evidence_refs,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    credential_id,
+                    self.logical_target,
+                    operation_id,
+                    status,
+                    status_actor,
+                    "Credential stored",
+                    "[]",
                     now,
                 ),
             )
@@ -1952,7 +1974,8 @@ class SQLiteApplicationStore:
             "SELECT credential_id, target, role, operation_id, credential_type, payload, origin, management_policy, "
             "status, invalid_at, supersedes_credential_id, created_at, updated_at FROM credential_records WHERE "
             + " AND ".join(clauses)
-            + " ORDER BY CASE WHEN operation_id = ? THEN 0 ELSE 1 END, created_at"
+            + " ORDER BY CASE WHEN operation_id = ? THEN 0 ELSE 1 END, "
+            "CASE WHEN operation_id IS NULL AND origin = 'registered' THEN 0 ELSE 1 END, created_at"
         )
         params.append(operation_id)
         with self._lock, closing(self._connect()) as conn, conn:
