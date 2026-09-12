@@ -17,6 +17,8 @@
   credential store, and reserve direct provisioning-secret generation for standalone callers.
 - Add optional AES-256-GCM encryption at rest for credential payloads, including fail-closed key validation and
   in-place migration of existing plaintext credential records.
+- Support safe credential-store encryption-key rotation through temporary prior-key configuration and automatic
+  authenticated re-encryption under the new primary key.
 
 ### Fixes
 

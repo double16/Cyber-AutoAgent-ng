@@ -360,6 +360,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `CYBER_AGENT_EMBEDDING_MODEL`                      | Embedding model ID                                         | No (provider default)                                           |
 | `CYBER_ASSESSMENT_CREDENTIALS`                      | Sensitive credential JSON imported at operation start      | No                                                              |
 | `CYBER_CREDENTIAL_STORE_KEY`                        | URL-safe base64 32-byte AES-256-GCM credential-store key  | No (recommended when credentials persist)                      |
+| `CYBER_CREDENTIAL_STORE_PREVIOUS_KEYS`              | Temporary comma-separated prior keys for credential-store rotation | No (remove after startup migrates payloads)             |
 | `REASONING_EFFORT`                                 | Reasoning effort (low/medium/high)                         | No (default: medium)                                            |
 | `MAX_TOKENS`                                       | Override LLM max (output) tokens                           | No (models.dev default)                                         |
 | `CYBER_AGENT_SWARM_MODEL`                          | Swarm tool LLM model ID                                    | No                                                              |

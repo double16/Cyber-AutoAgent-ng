@@ -1826,18 +1826,21 @@ class SQLiteApplicationStore:
             for credential_id, logical_target, payload_value in rows:
                 payload = str(payload_value)
                 if self._credential_cipher.is_encrypted(payload):
-                    self._credential_cipher.decrypt(
+                    decoded_payload, key_index = self._credential_cipher.decrypt_with_key_index(
                         payload,
                         logical_target=str(logical_target),
                         credential_id=str(credential_id),
                     )
-                    continue
-                try:
-                    legacy_payload = json.loads(payload)
-                except json.JSONDecodeError as error:
-                    raise ValueError("legacy credential payload is not valid JSON") from error
-                if not isinstance(legacy_payload, dict):
-                    raise ValueError("legacy credential payload must be an object")
+                    if key_index == 0:
+                        continue
+                    legacy_payload = decoded_payload
+                else:
+                    try:
+                        legacy_payload = json.loads(payload)
+                    except json.JSONDecodeError as error:
+                        raise ValueError("legacy credential payload is not valid JSON") from error
+                    if not isinstance(legacy_payload, dict):
+                        raise ValueError("legacy credential payload must be an object")
                 conn.execute(
                     "UPDATE credential_records SET payload = ? WHERE credential_id = ? AND logical_target = ?",
                     (

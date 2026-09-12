@@ -141,7 +141,23 @@ def test_credential_payload_encryption_migrates_legacy_rows_and_fails_closed(tmp
     )
     assert encrypted_store.get_credential(newly_stored["credential_id"], include_payload=True) is not None
 
-    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_KEY", base64.urlsafe_b64encode(b"b" * 32).decode("ascii"))
+    rotated_key = base64.urlsafe_b64encode(b"b" * 32).decode("ascii")
+    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_KEY", rotated_key)
+    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_PREVIOUS_KEYS", key)
+    rotated_store = SQLiteApplicationStore(str(database_path), "logical-target")
+    assert rotated_store.get_credential(credential["credential_id"], include_payload=True) is not None
+    with sqlite3.connect(database_path) as connection:
+        rotated_payload = connection.execute(
+            "SELECT payload FROM credential_records WHERE credential_id = ?", (credential["credential_id"],)
+        ).fetchone()[0]
+    assert CredentialPayloadCipher(base64.urlsafe_b64decode(rotated_key)).decrypt(
+        rotated_payload,
+        logical_target="logical-target",
+        credential_id=credential["credential_id"],
+    )["api_key"] == "legacy-secret"
+
+    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_KEY", key)
+    monkeypatch.delenv("CYBER_CREDENTIAL_STORE_PREVIOUS_KEYS")
     with pytest.raises(CredentialEncryptionError, match="cannot be decrypted"):
         SQLiteApplicationStore(str(database_path), "logical-target")
 
@@ -158,6 +174,11 @@ def test_credential_payload_encryption_rejects_invalid_keys(tmp_path, monkeypatc
 
     monkeypatch.setenv("CYBER_CREDENTIAL_STORE_KEY", base64.urlsafe_b64encode(b"short").decode("ascii"))
     with pytest.raises(CredentialEncryptionError, match="exactly 32 bytes"):
+        SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+
+    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_KEY", base64.urlsafe_b64encode(b"a" * 32).decode("ascii"))
+    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_PREVIOUS_KEYS", "not a base64 key")
+    with pytest.raises(CredentialEncryptionError, match="PREVIOUS_KEYS.*base64"):
         SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
 
 
@@ -182,6 +203,21 @@ def test_credential_payload_cipher_rejects_malformed_tampered_and_non_object_pay
     non_object_envelope = "enc:v1:" + base64.urlsafe_b64encode(nonce + list_payload).decode("ascii")
     with pytest.raises(CredentialEncryptionError, match="must decode to an object"):
         cipher.decrypt(non_object_envelope, logical_target="logical-target", credential_id="credential-1")
+
+
+def test_credential_payload_cipher_accepts_a_previous_rotation_key():
+    old_cipher = CredentialPayloadCipher(b"a" * 32)
+    encrypted = old_cipher.encrypt({"password": "secret"}, logical_target="logical-target", credential_id="credential-1")
+    rotated_cipher = CredentialPayloadCipher(b"b" * 32, (b"a" * 32,))
+
+    payload, key_index = rotated_cipher.decrypt_with_key_index(
+        encrypted,
+        logical_target="logical-target",
+        credential_id="credential-1",
+    )
+
+    assert payload == {"password": "secret"}
+    assert key_index == 1
 
 
 def test_credential_listing_prefers_operation_scope_then_reusable_registered_accounts(tmp_path):
