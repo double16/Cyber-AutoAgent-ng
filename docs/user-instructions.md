@@ -282,6 +282,18 @@ and tenants from stored metadata for report provenance. Every stored credential 
 status-history event: user-supplied credentials are attributed to the user, while found and registered credentials are
 attributed to the operation. For a later operation, reusable registered credentials are listed before other reusable
 credentials; credentials explicitly scoped to that later operation still take precedence.
+
+### Credential manager
+
+Use `/credentials <resolved-target>` in the React terminal to review credential type, role, origin, management policy,
+status, rotation lineage, status-history events, and prior rotation requests. It reads the same `outputs` database in
+local and Docker execution modes and never renders credential payloads, one-time codes, tokens, passwords, or API
+keys. The target is the resolved target URL, not an operation-scoped target ID.
+
+Only operation-managed credentials can be queued for rotation from this view. Enter a reason and the terminal creates
+an auditable maintenance-operation identifier; the credential remains unchanged until an authorized operation completes
+the target-side rotation with durable evidence. User-provided credentials must be updated through the configuration or
+environment-import path.
 An operation must cite at least one durable artifact, memory, or finding reference when it stores a found or registered
 credential; that reference is retained with the credential's initial status-history event. This prevents uncorroborated
 discovered credentials from being reused.

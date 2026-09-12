@@ -40,10 +40,12 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         (6, "0006_task_recovery_context.sql"),
         (7, "0007_credential_store.sql"),
         (8, "0008_mfa_challenge_task_scope.sql"),
+        (9, "0009_credential_rotation_requests.sql"),
     ]
     assert {
         "operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts",
         "credential_records", "credential_status_events", "credential_usage_records", "mfa_challenges",
+        "credential_rotation_requests",
     }.issubset(tables)
     assert "correction_categories" in metric_columns
     assert "auth_context" in task_columns
@@ -73,7 +75,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with closing(sqlite3.connect(db_path)) as conn, conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 8
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 9
 
 
 def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):

@@ -14,6 +14,7 @@ jest.unstable_mockModule('../../../src/components/LazyComponents.js', () => ({
         </div>
     ),
     DocumentationViewerLazy: ({onClose, selectedDoc}: any) => <button onClick={onClose}>doc:{selectedDoc}</button>,
+    CredentialManagerLazy: ({onClose, initialTarget}: any) => <button onClick={onClose}>credentials:{initialTarget}</button>,
 }));
 
 jest.unstable_mockModule('../../../src/components/SafetyWarning.js', () => ({
@@ -133,6 +134,13 @@ describe('ModalRegistry', () => {
             );
         });
         expect(JSON.stringify(view.toJSON())).toContain('doc:');
+
+        act(() => {
+            view = TestRenderer.create(
+                <ModalRegistry activeModal={ModalType.CREDENTIALS} modalContext={{credentialTarget: 'https://app.example.test'}} onClose={onClose} terminalWidth={100}/>
+            );
+        });
+        expect(JSON.stringify(view.toJSON())).toContain('https://app.example.test');
     });
 
     it('handles optional modal context and fallback sizing paths', async () => {

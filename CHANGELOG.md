@@ -2,6 +2,8 @@
 
 ### Features
 
+- Add a secret-safe React credential-management workflow with lifecycle history and queued operation-managed
+  credential rotations.
 - Add target-scoped OAuth2 client-credentials exchange and API-key request-material tools that keep transient tokens
   and secrets out of persistent evidence.
 - Add credential-ID-backed IDOR specialist login replay for planned account, role, or tenant comparison pairs.

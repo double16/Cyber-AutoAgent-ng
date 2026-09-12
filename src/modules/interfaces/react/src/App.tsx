@@ -313,6 +313,7 @@ const AppContent: React.FC<AppProps> = ({
     openModuleSelector: modalManager.openModuleSelector,
     openSafetyWarning: modalManager.openSafetyWarning,
     openDocumentation: modalManager.openDocumentation,
+    openCredentials: modalManager.openCredentials,
     handleScreenClear,
     refreshStatic,
     modalManager,

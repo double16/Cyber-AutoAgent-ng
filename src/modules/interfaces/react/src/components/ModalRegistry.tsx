@@ -13,6 +13,7 @@ import {
   ModuleSelectorLazy,
   DocumentationViewerLazy 
 } from './LazyComponents.js';
+import { CredentialManagerLazy } from './LazyComponents.js';
 // These components are small enough to load directly
 import { SafetyWarning } from './SafetyWarning.js';
 import { InitializationFlow } from './InitializationFlow.js';
@@ -135,6 +136,13 @@ export const ModalRegistry: React.FC<ModalRegistryProps> = ({
             onClose={onClose}
             selectedDoc={modalContext.documentIndex}
           />
+        </ModalWrapper>
+      );
+
+    case ModalType.CREDENTIALS:
+      return (
+        <ModalWrapper terminalWidth={terminalWidth}>
+          <CredentialManagerLazy initialTarget={modalContext.credentialTarget} onClose={onClose} />
         </ModalWrapper>
       );
       

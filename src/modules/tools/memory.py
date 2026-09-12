@@ -1559,6 +1559,18 @@ class ApplicationStore(Protocol):
 
     def credential_ids_selected_by_task(self, operation_id: str, task_uid: str) -> set[str]: ...
 
+    def list_credential_history(self, credential_id: str) -> list[dict[str, Any]]: ...
+
+    def list_credential_inventory(self) -> list[dict[str, Any]]: ...
+
+    def create_credential_rotation_request(
+        self, request_operation_id: str, credential_id: str, reason: str, maintenance_operation_id: str
+    ) -> dict[str, Any]: ...
+
+    def list_credential_rotation_requests(self, credential_id: str | None = None) -> list[dict[str, Any]]: ...
+
+    def cancel_credential_rotation_request(self, request_id: str, reason: str) -> dict[str, Any]: ...
+
 
 class SQLiteApplicationStore:
     """SQLite persistence for application workflow state.
@@ -1610,6 +1622,11 @@ class SQLiteApplicationStore:
         "record_credential_usage",
         "add_credential_target_alias",
         "list_credential_usage",
+        "list_credential_history",
+        "list_credential_inventory",
+        "create_credential_rotation_request",
+        "list_credential_rotation_requests",
+        "cancel_credential_rotation_request",
         "create_mfa_challenge",
         "complete_mfa_challenge",
         "block_mfa_challenge",
@@ -2162,6 +2179,156 @@ class SQLiteApplicationStore:
             }
             for row in rows
         ]
+
+    def list_credential_history(self, credential_id: str) -> list[dict[str, Any]]:
+        """Return status history for one credential without returning its secret payload."""
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                """
+                SELECT event_id, operation_id, status, actor, reason, evidence_refs, created_at
+                FROM credential_status_events
+                WHERE logical_target = ? AND credential_id = ?
+                ORDER BY created_at, event_id
+                """,
+                (self.logical_target, credential_id),
+            ).fetchall()
+        return [
+            {
+                "event_id": row[0],
+                "operation_id": row[1],
+                "status": row[2],
+                "actor": row[3],
+                "reason": row[4],
+                "evidence_refs": json.loads(row[5]),
+                "created_at": row[6],
+            }
+            for row in rows
+        ]
+
+    def list_credential_inventory(self) -> list[dict[str, Any]]:
+        """Return every credential in this logical-target scope for operator review, without payloads."""
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                """
+                SELECT credential_id, target, role, operation_id, credential_type, payload, origin, management_policy,
+                       status, invalid_at, supersedes_credential_id, created_at, updated_at
+                FROM credential_records WHERE logical_target = ?
+                ORDER BY target, role, created_at, credential_id
+                """,
+                (self.logical_target,),
+            ).fetchall()
+        return [self._credential_row(row) for row in rows]
+
+    @staticmethod
+    def _rotation_request_row(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
+        """Convert a credential rotation request into report-safe metadata."""
+
+        return {
+            "request_id": row[0],
+            "credential_id": row[1],
+            "request_operation_id": row[2],
+            "maintenance_operation_id": row[3],
+            "status": row[4],
+            "reason": row[5],
+            "evidence_refs": json.loads(row[6]),
+            "claimed_task_uid": row[7],
+            "failure_reason": row[8],
+            "created_at": row[9],
+            "updated_at": row[10],
+        }
+
+    def create_credential_rotation_request(
+        self, request_operation_id: str, credential_id: str, reason: str, maintenance_operation_id: str
+    ) -> dict[str, Any]:
+        """Queue a user-requested rotation without accepting a replacement secret in the UI."""
+
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            raise ValueError("credential rotation reason is required")
+        record = self.get_credential(credential_id)
+        if record is None:
+            raise ValueError("credential is unavailable")
+        if record["management_policy"] != "operation":
+            raise ValueError("user-provided credentials can only be updated by the user")
+        if record["status"] in {"invalid", "revoked", "retired"}:
+            raise ValueError("credential is unavailable for rotation")
+        request_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            self._register_operation(conn, request_operation_id)
+            self._register_operation(conn, maintenance_operation_id)
+            conn.execute(
+                """
+                INSERT INTO credential_rotation_requests (
+                    request_id, credential_id, logical_target, request_operation_id, maintenance_operation_id, status,
+                    reason, evidence_refs, claimed_task_uid, failure_reason, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'queued', ?, '[]', NULL, NULL, ?, ?)
+                """,
+                (
+                    request_id, credential_id, self.logical_target, request_operation_id, maintenance_operation_id,
+                    normalized_reason, now, now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT request_id, credential_id, request_operation_id, maintenance_operation_id, status, reason,
+                       evidence_refs, claimed_task_uid, failure_reason, created_at, updated_at
+                FROM credential_rotation_requests WHERE request_id = ? AND logical_target = ?
+                """,
+                (request_id, self.logical_target),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("credential rotation request did not persist")
+        return self._rotation_request_row(row)
+
+    def list_credential_rotation_requests(self, credential_id: str | None = None) -> list[dict[str, Any]]:
+        """List request metadata scoped to this logical target."""
+
+        query = (
+            "SELECT request_id, credential_id, request_operation_id, maintenance_operation_id, status, reason, "
+            "evidence_refs, claimed_task_uid, failure_reason, created_at, updated_at "
+            "FROM credential_rotation_requests WHERE logical_target = ?"
+        )
+        params: list[Any] = [self.logical_target]
+        if credential_id:
+            query += " AND credential_id = ?"
+            params.append(credential_id)
+        query += " ORDER BY created_at DESC, request_id DESC"
+        with self._lock, closing(self._connect()) as conn, conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._rotation_request_row(row) for row in rows]
+
+    def cancel_credential_rotation_request(self, request_id: str, reason: str) -> dict[str, Any]:
+        """Cancel a queued rotation request while preserving its audit record."""
+
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            raise ValueError("credential rotation cancellation reason is required")
+        now = datetime.now().isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            result = conn.execute(
+                """
+                UPDATE credential_rotation_requests
+                SET status = 'cancelled', failure_reason = ?, updated_at = ?
+                WHERE request_id = ? AND logical_target = ? AND status = 'queued'
+                """,
+                (normalized_reason, now, request_id, self.logical_target),
+            )
+            if result.rowcount != 1:
+                raise ValueError("only queued credential rotation requests can be cancelled")
+            row = conn.execute(
+                """
+                SELECT request_id, credential_id, request_operation_id, maintenance_operation_id, status, reason,
+                       evidence_refs, claimed_task_uid, failure_reason, created_at, updated_at
+                FROM credential_rotation_requests WHERE request_id = ? AND logical_target = ?
+                """,
+                (request_id, self.logical_target),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("credential rotation cancellation did not return a request")
+        return self._rotation_request_row(row)
 
     def create_mfa_challenge(
         self,

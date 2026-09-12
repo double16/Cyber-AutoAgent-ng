@@ -91,6 +91,12 @@ describe('useModalManager', () => {
         expect(hook.current.activeModal).toBe(ModalType.NONE);
         expect(hook.current.modalContext).toEqual({});
 
+        act(() => {
+            hook.current.openCredentials('https://app.example.test');
+        });
+        expect(hook.current.activeModal).toBe(ModalType.CREDENTIALS);
+        expect(hook.current.modalContext.credentialTarget).toBe('https://app.example.test');
+
         hook.unmount();
     });
 
