@@ -4,6 +4,7 @@
 
 - Add target-scoped OAuth2 client-credentials exchange and API-key request-material tools that keep transient tokens
   and secrets out of persistent evidence.
+- Add credential-ID-backed IDOR specialist login replay for planned account, role, or tenant comparison pairs.
 - Add deterministic authenticated-coverage planning for each resolved target, including safe role/account/tenant
   comparison contexts and explicit coverage gaps.
 - Add a validated username/password form-material adapter for mapped authentication flows.
@@ -25,6 +26,8 @@
   the highest-priority selection candidates.
 - Preserve unauthenticated-baseline, authenticated-comparison, self-registration, and IDOR credential rules in every
   controller-appended executor contract and deterministic workflow prompt fallback.
+- Require store-backed IDOR specialist logins to use checked-out task-authentication credentials on the resolved
+  target origin, preventing raw credential JSON from the agent workflow.
 - Require active, target-scoped credential checkout before an agent can request an MFA code or read a configured
   email-MFA mailbox, preventing unrelated tasks from accessing MFA factors.
 - Reject credential imports and discovered credentials whose target is not an exact resolved operation target.

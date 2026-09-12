@@ -36,6 +36,8 @@ from strands import ToolContext, tool
 
 from modules.utils.proxy import resolve_request_proxies
 
+from modules.tools.credentials import build_checked_out_idor_login_contexts, record_checked_out_credential_usage
+
 module_path = Path(__file__).resolve().parent / "advanced_payload_coordinator.py"
 
 spec = importlib.util.spec_from_file_location("advanced_payload_coordinator", str(module_path))
@@ -131,6 +133,11 @@ def idor_specialist(
         test_values: str | None = None,
         login_url: str | None = None,
         credentials: str | None = None,
+        credential_ids: list[str] | None = None,
+        username_field: str = "username",
+        password_field: str = "password",
+        email_field: str | None = None,
+        extra_login_fields: dict[str, str] | None = None,
         login_method: Literal["GET", "POST"] | None = None,
         num_range: str | None = None,
         multi_credentials: str | None = None,
@@ -159,6 +166,9 @@ def idor_specialist(
     - test_values: JSON list of custom values to test as payloads (optional)
     - login_url: URL for the login page (optional)
     - credentials: Login credentials in JSON format (e.g., '{"username": "admin", "password": "password"}') (optional)
+    - credential_ids: two checked-out credential-store IDs for authenticated IDOR replay (optional)
+    - username_field/password_field/email_field: observed login form field names for credential_ids (optional)
+    - extra_login_fields: non-secret login form fields such as CSRF tokens for credential_ids (optional)
     - login_method: HTTP method to use for login (default: POST) (optional)
     - num_range: "start-end" to seed numeric mutations, e.g. "1-1000" (optional)
     - multi_credentials: JSON list of multiple credentials for multi-user testing (optional)
@@ -207,6 +217,7 @@ def idor_specialist(
         "evidence": {
             "fallback_notes": [],
         },
+        "credential_contexts": [],
     }
 
     try:
@@ -223,7 +234,56 @@ def idor_specialist(
             except Exception as e:
                 raise ValueError(f"multi_credentials expected to be JSON: {e}")
 
+        normalized_credential_ids = [
+            str(credential_id).strip() for credential_id in credential_ids or [] if str(credential_id).strip()
+        ]
+        if normalized_credential_ids and (credentials or multi_credentials):
+            raise ValueError("credential_ids cannot be combined with raw credentials or multi_credentials")
+        if normalized_credential_ids and not login_url:
+            raise ValueError("credential_ids require login_url")
+
         if login_url:
+            if normalized_credential_ids:
+                login_contexts = build_checked_out_idor_login_contexts(
+                    credential_ids=normalized_credential_ids,
+                    target_url=target_url,
+                    login_url=login_url,
+                    username_field=username_field,
+                    password_field=password_field,
+                    email_field=email_field,
+                    extra_form_fields=extra_login_fields,
+                )
+                login_results: list[tuple[dict[str, str] | None, dict[str, str] | None]] = []
+                for login_context in login_contexts:
+                    if verbose:
+                        print("[*] Attempting credential-backed IDOR login", file=sys.stderr)
+                    login_results.append(
+                        _perform_login(
+                            login_url=login_url,
+                            credentials=login_context["form_fields"],
+                            method=login_method or "POST",
+                            auth_type=auth_type or "basic",
+                            base_headers=headers,
+                            verbose=verbose,
+                        )
+                    )
+                credential_login_ids = [str(login_context["credential_id"]) for login_context in login_contexts]
+                if any(cookies_result is None and headers_result is None for cookies_result, headers_result in login_results):
+                    record_checked_out_credential_usage(credential_login_ids, "failed")
+                    raise ValueError("credential-backed IDOR login failed")
+                record_checked_out_credential_usage(credential_login_ids, "succeeded")
+                primary_cookies, primary_headers = login_results[0]
+                alternate_cookies, alternate_headers = login_results[1]
+                if primary_cookies is not None:
+                    final_cookies.update(primary_cookies)
+                if primary_headers is not None:
+                    final_headers.update(primary_headers)
+                if alternate_cookies is not None:
+                    final_alt_cookies.update(alternate_cookies)
+                if alternate_headers is not None:
+                    final_alt_headers.update(alternate_headers)
+                results["credential_contexts"] = [{"credential_id": credential_id} for credential_id in credential_login_ids]
+
             # Use single credentials for main auth context if provided
             if credentials:
                 try:
@@ -1260,6 +1320,13 @@ def main() -> int:
     parser.add_argument("--login-url", default=None, help="URL for login page")
     parser.add_argument("--credentials", default=None,
                         help='Login credentials JSON string, e.g. \"{\\"username\\":\\"admin\\",\\"password\\":\\"password\\"}\"')
+    parser.add_argument("--credential-id", dest="credential_ids", action="append", default=None,
+                        help="Checked-out credential-store ID for authenticated IDOR replay; pass twice")
+    parser.add_argument("--username-field", default="username", help="Observed username field name for credential IDs")
+    parser.add_argument("--password-field", default="password", help="Observed password field name for credential IDs")
+    parser.add_argument("--email-field", default=None, help="Observed email field name for credential IDs")
+    parser.add_argument("--extra-login-field", dest="extra_login_fields", action="append", default=None,
+                        help="Non-secret login form field as name=value; repeat for CSRF/session fields")
     parser.add_argument("--login-method", default=None, help="HTTP method for login")
     parser.add_argument("--num-range", default=None, help='Numeric range "start-end", e.g. "1-1000"')
     parser.add_argument("--multi-credentials", default=None, help="JSON list of multiple credentials")
@@ -1302,6 +1369,7 @@ def main() -> int:
     cookies = _parse_cookies(args.cookies)
     alt_headers = _parse_headers(args.alt_headers)
     alt_cookies = _parse_cookies(args.alt_cookies)
+    extra_login_fields = _parse_cookies(args.extra_login_fields)
 
     print(
         idor_specialist(
@@ -1316,6 +1384,11 @@ def main() -> int:
             test_values=args.test_values,
             login_url=args.login_url,
             credentials=args.credentials,
+            credential_ids=args.credential_ids,
+            username_field=args.username_field,
+            password_field=args.password_field,
+            email_field=args.email_field,
+            extra_login_fields=extra_login_fields,
             login_method=args.login_method,
             num_range=args.num_range,
             multi_credentials=args.multi_credentials,

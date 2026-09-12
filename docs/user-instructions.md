@@ -288,6 +288,10 @@ accounts.
 For username/password authentication, agents first map the login flow and CSRF/session requirements, then request a
 task-local form-field mapping using the observed field names. The adapter does not submit a form or persist the
 returned values, which keeps authentication secrets out of artifacts and reports.
+For IDOR specialist replay that needs two authenticated sessions, agents use the planned comparison pair's checked-out
+credential IDs directly with the observed login field names. The specialist builds only task-local login contexts,
+requires the login endpoint to share the resolved target origin, and records credential use by ID instead of accepting
+raw credential JSON from the agent workflow.
 The workflow's controller-appended task contract, including deterministic prompt fallbacks, retains the same
 unauthenticated-baseline, authenticated-comparison, self-registration, and IDOR-comparison rules for every module.
 Every reported finding labels its authentication context. Authenticated findings include only opaque credential IDs;

@@ -11529,7 +11529,9 @@ while planning.
 - When the task auth_context is authenticated, use only its declared credential IDs. When access-control or IDOR work
   requires a comparison, call `plan_access_control_comparisons` before checkout. Use only its distinct account, role,
   or tenant credential contexts and record any unavailable comparison as a coverage gap rather than inventing an
-  identity.
+  identity. For IDOR specialist login replay, check out both planned credential IDs, bind both with
+  `set_task_auth_context`, and pass those IDs through `credential_ids` with the observed login field names. Do not
+  pass raw `credentials` or `multi_credentials` values to IDOR specialist calls.
 """
 
     def _task_prompt_builder_prompt(

@@ -6,6 +6,7 @@ from email.message import EmailMessage
 import pytest
 
 from modules.tools.credentials import (
+    build_checked_out_idor_login_contexts,
     canonicalize_credential_target,
     checkout_credential,
     exchange_oauth2_client_credentials,
@@ -19,6 +20,7 @@ from modules.tools.credentials import (
     prepare_api_key_authentication,
     prepare_login_form_authentication,
     query_credentials,
+    record_checked_out_credential_usage,
     request_mfa_code,
     resolve_credential_target_for_operation,
     retrieve_email_mfa_code,
@@ -1199,6 +1201,131 @@ def test_checkout_and_auth_context_bind_credentials_to_the_active_task_target(tm
         "tenant_labels": ["tenant-a"],
     }
     assert "must-not-leak" not in json.dumps(result)
+
+
+def test_idor_login_contexts_use_checked_out_task_bound_comparison_pair(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store)
+    alice = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        account_label="alice",
+        values={"username": "alice", "password": "alice-secret", "email": "alice@example.test"},
+    )
+    bob = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        account_label="bob",
+        values={"username": "bob", "password": "bob-secret", "email": "bob@example.test"},
+    )
+    checkout_credential(alice["credential_id"], "authenticated IDOR comparison")
+    checkout_credential(bob["credential_id"], "authenticated IDOR comparison")
+    set_task_auth_context([alice["credential_id"], bob["credential_id"]])
+
+    contexts = build_checked_out_idor_login_contexts(
+        [alice["credential_id"], bob["credential_id"]],
+        "https://app.example.test/api/accounts/1",
+        "https://app.example.test/login",
+        username_field="user[name]",
+        password_field="pass",
+        email_field="email",
+        extra_form_fields={"csrf_token": "abc"},
+    )
+
+    assert [context["credential_id"] for context in contexts] == [alice["credential_id"], bob["credential_id"]]
+    assert contexts[0]["form_fields"] == {
+        "csrf_token": "abc",
+        "user[name]": "alice",
+        "pass": "alice-secret",
+        "email": "alice@example.test",
+    }
+    assert "alice-secret" not in json.dumps(
+        {"credential_id": contexts[0]["credential_id"], "credential_id_2": contexts[1]["credential_id"]}
+    )
+
+
+def test_idor_login_contexts_reject_unplanned_unbound_and_cross_origin_pairs(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store)
+    left = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        values={"username": "left", "password": "secret"},
+    )
+    right = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        values={"username": "right", "password": "secret"},
+    )
+    checkout_credential(left["credential_id"], "authenticated IDOR comparison")
+    checkout_credential(right["credential_id"], "authenticated IDOR comparison")
+    with pytest.raises(ValueError, match="authenticated task context"):
+        build_checked_out_idor_login_contexts(
+            [left["credential_id"], right["credential_id"]],
+            "https://app.example.test/api",
+            "https://app.example.test/login",
+        )
+
+    set_task_auth_context([left["credential_id"], right["credential_id"]])
+    with pytest.raises(ValueError, match="planned account, role, or tenant"):
+        build_checked_out_idor_login_contexts(
+            [left["credential_id"], right["credential_id"]],
+            "https://app.example.test/api",
+            "https://app.example.test/login",
+        )
+    with pytest.raises(ValueError, match="login_url must share"):
+        build_checked_out_idor_login_contexts(
+            [left["credential_id"], right["credential_id"]],
+            "https://app.example.test/api",
+            "https://other.example.test/login",
+        )
+    with pytest.raises(ValueError, match="must not override"):
+        build_checked_out_idor_login_contexts(
+            [left["credential_id"], right["credential_id"]],
+            "https://app.example.test/api",
+            "https://app.example.test/login",
+            extra_form_fields={"username": "override"},
+        )
+
+
+def test_record_checked_out_credential_usage_records_idor_outcomes(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store)
+    credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        account_label="alice",
+        values={"username": "alice", "password": "secret"},
+    )
+    checkout_credential(credential["credential_id"], "authenticated IDOR comparison")
+
+    record_checked_out_credential_usage([credential["credential_id"]], "succeeded")
+
+    with sqlite3.connect(tmp_path / "credentials.db") as connection:
+        usage = connection.execute(
+            "SELECT credential_id, task_uid, authentication_mode, outcome FROM credential_usage_records "
+            "WHERE outcome = 'succeeded'"
+        ).fetchall()
+
+    assert usage == [(credential["credential_id"], "task-1", "authenticated", "succeeded")]
+    with pytest.raises(ValueError, match="outcome"):
+        record_checked_out_credential_usage([credential["credential_id"]], "unknown")
 
 
 def test_checkout_rejects_a_credential_outside_the_active_task_target(tmp_path, monkeypatch):

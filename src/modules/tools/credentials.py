@@ -730,18 +730,116 @@ def prepare_login_form_authentication(
     return json.dumps({"credential_id": record["credential_id"], "form_fields": fields})
 
 
-def _credential_target_origin(target: str) -> tuple[str, str, int]:
-    """Return one canonical URL origin for secret-safe OAuth token exchange."""
+def build_checked_out_idor_login_contexts(
+    credential_ids: list[str],
+    target_url: str,
+    login_url: str,
+    username_field: str = "username",
+    password_field: str = "password",
+    email_field: str | None = None,
+    extra_form_fields: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Build two task-local login form contexts for an IDOR comparison."""
+
+    normalized_ids = list(dict.fromkeys(str(item).strip() for item in credential_ids if str(item).strip()))
+    if len(normalized_ids) != 2:
+        raise ValueError("IDOR credential-backed login requires exactly two distinct credential IDs")
+    normalized_username_field = _validated_form_field_name(username_field, "username_field", required=True)
+    normalized_password_field = _validated_form_field_name(password_field, "password_field", required=True)
+    normalized_email_field = _validated_form_field_name(email_field, "email_field", required=False)
+    credential_field_names = {normalized_username_field, normalized_password_field}
+    if normalized_username_field == normalized_password_field:
+        raise ValueError("username_field and password_field must differ")
+    if normalized_email_field:
+        if normalized_email_field in credential_field_names:
+            raise ValueError("email_field must differ from username_field and password_field")
+        credential_field_names.add(normalized_email_field)
+
+    normalized_extra_fields: dict[str, str] = {}
+    for key, value in (extra_form_fields or {}).items():
+        normalized_key = _validated_form_field_name(key, "extra_form_fields key", required=True)
+        if normalized_key in credential_field_names:
+            raise ValueError("extra_form_fields must not override credential fields")
+        normalized_extra_fields[normalized_key] = str(value)
+
+    store = _get_database_store()
+    operation_id = _operation_id()
+    active_task, _target_values = _active_task_target_values(store, operation_id)
+    auth_context = active_task.auth_context if isinstance(active_task.auth_context, dict) else {}
+    if auth_context.get("mode") != "authenticated":
+        raise ValueError("IDOR credential-backed login requires an authenticated task context")
+    context_ids = {str(item) for item in auth_context.get("credential_ids", [])}
+    if not set(normalized_ids).issubset(context_ids):
+        raise ValueError("IDOR credential IDs must be bound to the active task authentication context")
+
+    target_origin = _credential_target_origin(target_url, "target_url")
+    login_origin = _credential_target_origin(login_url, "login_url")
+    if login_origin != target_origin:
+        raise ValueError("login_url must share the target_url origin for credential-backed IDOR login")
+
+    contexts: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
+    for credential_id in normalized_ids:
+        _selected_task, record = _active_checked_out_credential(store, operation_id, credential_id)
+        if record["credential_type"] != "username_password":
+            raise ValueError("IDOR credential-backed login requires username_password credentials")
+        if _credential_target_origin(str(record["target"]), "credential target") != target_origin:
+            raise ValueError("IDOR credential target must share the requested target origin")
+        records.append(record)
+
+    eligible_records = store.list_credentials(operation_id, target=str(records[0]["target"]))
+    comparison_pairs = _credential_comparison_pairs(eligible_records)
+    requested_pair = {normalized_ids[0], normalized_ids[1]}
+    if not any(
+        {pair["left_credential_id"], pair["right_credential_id"]} == requested_pair for pair in comparison_pairs
+    ):
+        raise ValueError("IDOR credentials must match a planned account, role, or tenant comparison pair")
+
+    for credential_id, record in zip(normalized_ids, records, strict=True):
+        payload = record["payload"]
+        fields = dict(normalized_extra_fields)
+        fields[normalized_username_field] = str(payload["username"])
+        fields[normalized_password_field] = str(payload["password"])
+        if normalized_email_field:
+            if not payload.get("email"):
+                raise ValueError("credential does not include an email value")
+            fields[normalized_email_field] = str(payload["email"])
+        contexts.append({"credential_id": credential_id, "form_fields": fields})
+    return contexts
+
+
+def record_checked_out_credential_usage(credential_ids: list[str], outcome: str) -> None:
+    """Record IDOR specialist use of selected credentials without exposing payloads."""
+
+    normalized_outcome = str(outcome or "").strip()
+    if normalized_outcome not in {"succeeded", "failed"}:
+        raise ValueError("credential usage outcome must be succeeded or failed")
+    store = _get_database_store()
+    operation_id = _operation_id()
+    active_task, _target_values = _active_task_target_values(store, operation_id)
+    for credential_id in list(dict.fromkeys(str(item).strip() for item in credential_ids if str(item).strip())):
+        _selected_task, record = _active_checked_out_credential(store, operation_id, credential_id)
+        store.record_credential_usage(
+            operation_id,
+            str(record["credential_id"]),
+            task_uid=active_task.task_uid,
+            authentication_mode="authenticated",
+            outcome=normalized_outcome,
+        )
+
+
+def _credential_target_origin(target: str, label: str = "OAuth token URL") -> tuple[str, str, int]:
+    """Return one canonical URL origin for secret-safe credential exchanges."""
 
     parsed = urlparse.urlsplit(canonicalize_credential_target(target))
     scheme = parsed.scheme.lower()
     host = (parsed.hostname or "").lower()
     if not scheme or not host:
-        raise ValueError("OAuth token URL must have a target origin")
+        raise ValueError(f"{label} must have a target origin")
     try:
         port = parsed.port or (443 if scheme == "https" else 80)
     except ValueError as error:
-        raise ValueError("OAuth token URL has an invalid port") from error
+        raise ValueError(f"{label} has an invalid port") from error
     return scheme, host, port
 
 
