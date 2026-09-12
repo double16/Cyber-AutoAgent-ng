@@ -11,6 +11,7 @@ from strands import ToolContext
 
 from modules.storage.credential_encryption import CredentialEncryptionError, CredentialPayloadCipher
 from modules.tools.credentials import (
+    begin_email_mfa_retrieval,
     build_checked_out_idor_login_contexts,
     canonicalize_credential_target,
     checkout_credential,
@@ -658,8 +659,17 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
         def search(self, _charset, _query):
             return "OK", [b"1"]
 
+        def uid(self, command, _charset, query):
+            assert command == "search"
+            assert query in {"ALL", "2:*"}
+            return "OK", [b"1"] if query == "ALL" else [b"2"]
+
+        def response(self, name):
+            assert name == "UIDVALIDITY"
+            return "UIDVALIDITY", [b"42"]
+
         def fetch(self, message_id, _query):
-            assert message_id == b"1"
+            assert message_id in {b"1", b"2"}
             assert _query == "(RFC822 INTERNALDATE)"
             metadata = f'1 (INTERNALDATE "{self.internaldate}" RFC822'.encode("ascii")
             return "OK", [(metadata, message.as_bytes())]
@@ -670,7 +680,8 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
     fake_client = FakeImapClient("mail.example.test", 993)
     monkeypatch.setattr("modules.tools.credentials.imaplib.IMAP4_SSL", lambda *_args: fake_client)
 
-    assert retrieve_email_mfa_code(mailbox_credential["credential_id"], sender_contains="noreply") == "654321"
+    snapshot = begin_email_mfa_retrieval(mailbox_credential["credential_id"], sender_contains="noreply")
+    assert retrieve_email_mfa_code(mailbox_credential["credential_id"], challenge_id=snapshot["challenge_id"]) == "654321"
     assert fake_client.logged_out is True
     with sqlite3.connect(tmp_path / "credentials.db") as connection:
         challenge = connection.execute(
@@ -775,6 +786,16 @@ def test_operation_managed_credential_rotation_preserves_retired_history(tmp_pat
         },
     )
     checkout_credential(original["credential_id"], "rotate expired API key")
+
+    monkeypatch.setenv("CYBER_CREDENTIAL_ROTATION_REQUEST", "queued-request")
+    with pytest.raises(ValueError, match="stage and complete"):
+        rotate_credential(
+            original["credential_id"],
+            {"api_key": "new-key", "placement": "header", "name": "X-API-Key"},
+            "rotated after expiry",
+            evidence_refs=["artifact:artifacts/credential-rotation.txt"],
+        )
+    monkeypatch.delenv("CYBER_CREDENTIAL_ROTATION_REQUEST")
 
     with pytest.raises(ValueError, match="durable evidence"):
         rotate_credential(

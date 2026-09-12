@@ -1,4 +1,4 @@
-from modules.utils.redaction import REDACTED, bounded_redacted_text, redact, redact_text
+from modules.utils.redaction import REDACTED, bounded_redacted_text, redact, redact_text, register_runtime_secret
 
 
 def test_redact_text_removes_credential_forms_without_losing_context():
@@ -45,3 +45,8 @@ def test_redaction_masks_mfa_codes_and_provisioning_secrets():
 
     assert "123456" not in result
     assert "JBSWY3DPEHPK3PXP" not in result
+
+
+def test_redact_text_masks_registered_bare_runtime_secret():
+    register_runtime_secret("bare-one-time-value")
+    assert redact_text("tool returned bare-one-time-value") == f"tool returned {REDACTED}"

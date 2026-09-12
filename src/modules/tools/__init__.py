@@ -22,7 +22,10 @@ from modules.tools.channels import (
     channel_status,
 )
 from modules.tools.credentials import (
+    begin_email_mfa_retrieval,
     checkout_credential,
+    complete_credential_rotation,
+    fail_credential_rotation,
     generate_mfa_code,
     generate_password,
     mark_credential_status,
@@ -32,6 +35,7 @@ from modules.tools.credentials import (
     retrieve_email_mfa_code,
     rotate_credential,
     set_task_auth_context,
+    stage_credential_rotation,
     store_credential,
     store_user_credential,
 )
@@ -67,6 +71,7 @@ from modules.tools.recon_inventory_manifest import (
 
 __all__ = [
     "QdrantMemoryClient",
+    "begin_email_mfa_retrieval",
     "browser_evaluate_js",
     "browser_get_cookies",
     "browser_get_page_html",
@@ -83,10 +88,12 @@ __all__ = [
     "channel_status",
     "checkout_credential",
     "close_oast_providers",
+    "complete_credential_rotation",
     "consolidate_recon_artifacts",
     "create_artifact_reader",
     "create_tasks",
     "discover_mcp_tools",
+    "fail_credential_rotation",
     "generate_mfa_code",
     "generate_password",
     "get_memory_client",
@@ -110,6 +117,7 @@ __all__ = [
     "retrieve_email_mfa_code",
     "rotate_credential",
     "set_task_auth_context",
+    "stage_credential_rotation",
     "store_credential",
     "store_finding",
     "store_knowledge",

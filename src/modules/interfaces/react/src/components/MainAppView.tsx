@@ -40,6 +40,7 @@ interface MainAppViewProps {
   onModalClose: () => void;
   addOperationHistoryEntry: (type: string, content: string) => void;
   onSafetyConfirm?: () => void;
+  onStartCredentialRotation?: (request: any, objective: string, target: string) => void;
   hideFooter?: boolean;
   hideInput?: boolean;
   hideHistory?: boolean;
@@ -70,6 +71,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
   onModalClose,
   addOperationHistoryEntry,
   onSafetyConfirm,
+  onStartCredentialRotation,
   hideFooter = false,
   hideInput = false,
   hideHistory = false,
@@ -271,6 +273,7 @@ export const MainAppView: React.FC<MainAppViewProps> = ({
           modalContext={modalContext}
           onClose={onModalClose}
           onSafetyConfirm={onSafetyConfirm}
+          onStartCredentialRotation={onStartCredentialRotation}
           addOperationHistoryEntry={addOperationHistoryEntry}
           terminalWidth={appState.terminalDisplayWidth}
         />

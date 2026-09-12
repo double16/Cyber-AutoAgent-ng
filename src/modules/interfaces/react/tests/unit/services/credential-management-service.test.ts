@@ -22,12 +22,12 @@ describe('CredentialManagementService', () => {
     execFile.mockImplementationOnce((...args: any[]) => args.at(-1)(null, '', ''));
     const { CredentialManagementService } = await import('../../../src/services/CredentialManagementService.js');
     const service = new CredentialManagementService();
-    const config = { outputDir: './outputs', executionMode: 'docker-single', dockerImage: 'fixture-image' } as any;
+    const config = { outputDir: './outputs', deploymentMode: 'single-container', dockerImage: 'fixture-image' } as any;
 
     await expect(service.list('https://app.example.test', config)).rejects.toThrow('returned no data');
     expect(execFile).toHaveBeenCalledWith(
       'docker',
-      expect.arrayContaining(['run', '--rm', 'fixture-image', 'python', '-m', 'modules.tools.credential_management']),
+      expect.arrayContaining(['run', '--rm', '--entrypoint', 'python', '--workdir', '/app', 'fixture-image', '-m', 'modules.tools.credential_management']),
       expect.any(Function),
     );
   });
@@ -60,5 +60,16 @@ describe('CredentialManagementService', () => {
       expect.arrayContaining(['cyber-autoagent:latest']),
       expect.any(Function),
     );
+  });
+
+  it('honors canonical local deployment mode over a legacy Docker execution mode and rejects invalid JSON', async () => {
+    execFile.mockImplementationOnce((...args: any[]) => args.at(-1)(null, 'not-json', ''));
+    const { CredentialManagementService } = await import('../../../src/services/CredentialManagementService.js');
+    const service = new CredentialManagementService();
+
+    await expect(service.list('https://app.example.test', {
+      deploymentMode: 'local-cli', executionMode: 'docker-stack', outputDir: './outputs',
+    } as any)).rejects.toThrow('invalid JSON');
+    expect(execFile).toHaveBeenLastCalledWith(expect.stringContaining('.venv'), expect.any(Array), expect.anything(), expect.any(Function));
   });
 });

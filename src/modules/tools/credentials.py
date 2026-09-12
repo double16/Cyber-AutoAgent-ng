@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import imaplib
 import json
+import os
 import re
 import secrets
 import string
@@ -34,6 +35,7 @@ from modules.tools.memory import (
     active_credential_task,
     emit_memory_event,
 )
+from modules.utils.redaction import register_runtime_secret
 
 _CREDENTIAL_TYPES = frozenset({"username_password", "email_login", "api_key", "oauth2_client"})
 _STATUSES = frozenset({"unknown", "pending", "valid", "invalid", "expired", "revoked", "retired"})
@@ -971,6 +973,8 @@ def rotate_credential(
     record is retained with status `retired`.
     """
 
+    if os.getenv("CYBER_CREDENTIAL_ROTATION_REQUEST", "").strip():
+        raise ValueError("maintenance rotations must stage and complete the queued request")
     if not str(reason or "").strip():
         raise ValueError("credential rotation reason is required")
     normalized_evidence_refs = _normalize_credential_evidence_refs(evidence_refs)
@@ -1026,7 +1030,51 @@ def generate_password(length: int = 20) -> str:
     remaining = [secrets.choice(alphabet) for _ in range(length - len(required))]
     characters = required + remaining
     secrets.SystemRandom().shuffle(characters)
-    return "".join(characters)
+    return register_runtime_secret("".join(characters))
+
+
+def _require_rotation_request(store: Any, request_id: str) -> str:
+    """Restrict maintenance mutations to the request supplied by the launcher."""
+
+    normalized = str(request_id or "").strip()
+    if not normalized or normalized != os.getenv("CYBER_CREDENTIAL_ROTATION_REQUEST", "").strip():
+        raise ValueError("credential rotation request is unavailable to this operation")
+    request = store.get_credential_rotation_request(normalized)
+    if request is None or request["status"] != "claimed" or request["maintenance_operation_id"] != _operation_id():
+        raise ValueError("credential rotation request does not match this maintenance operation")
+    active_task = active_credential_task(store, _operation_id())
+    if active_task is None or active_task.task_uid != request["claimed_task_uid"]:
+        raise ValueError("credential rotation request is unavailable to this task")
+    return normalized
+
+
+@tool(name="stage_credential_rotation")
+def stage_credential_rotation(request_id: str, replacement_credential_id: str) -> str:
+    """Stage a replacement credential for the active maintenance request without retiring the predecessor."""
+
+    store = _get_database_store()
+    request = store.stage_credential_rotation_request(
+        _require_rotation_request(store, request_id), str(replacement_credential_id or "").strip()
+    )
+    return json.dumps(request, sort_keys=True)
+
+
+@tool(name="complete_credential_rotation")
+def complete_credential_rotation(request_id: str, evidence_refs: list[str]) -> str:
+    """Complete a staged credential rotation only after durable target verification evidence exists."""
+
+    store = _get_database_store()
+    request = store.complete_credential_rotation_request(_require_rotation_request(store, request_id), evidence_refs)
+    return json.dumps(request, sort_keys=True)
+
+
+@tool(name="fail_credential_rotation")
+def fail_credential_rotation(request_id: str, reason: str) -> str:
+    """Record a terminal maintenance failure while retaining the predecessor and staged replacement for audit."""
+
+    store = _get_database_store()
+    request = store.fail_credential_rotation_request(_require_rotation_request(store, request_id), reason)
+    return json.dumps(request, sort_keys=True)
 
 
 @tool(name="generate_mfa_code", context=True)
@@ -1069,12 +1117,12 @@ def generate_mfa_code(
             authentication_mode="mfa",
             outcome="used",
         )
-        return code
+        return register_runtime_secret(code)
 
     if not provisioning_secret:
         raise ValueError("provisioning_secret or credential_id is required")
 
-    return _generate_totp_code(provisioning_secret, digits, period, algorithm)
+    return register_runtime_secret(_generate_totp_code(provisioning_secret, digits, period, algorithm))
 
 
 def _generate_totp_code(provisioning_secret: str, digits: int = 6, period: int = 30, algorithm: str = "SHA1") -> str:
@@ -1230,12 +1278,76 @@ def request_mfa_code(
         authentication_mode="mfa",
         outcome="used",
     )
-    return code
+    return register_runtime_secret(code)
+
+
+@tool(name="begin_email_mfa_retrieval")
+def begin_email_mfa_retrieval(
+    mailbox_credential_id: str,
+    sender_contains: str = "",
+    subject_contains: str = "",
+    code_pattern: str = r"\b\d{6}\b",
+    ttl_seconds: int = 300,
+) -> dict[str, str]:
+    """Snapshot a mailbox before the target triggers email MFA and return an opaque challenge ID."""
+
+    if ttl_seconds < 30 or ttl_seconds > 900:
+        raise ValueError("MFA challenge TTL must be between 30 and 900 seconds")
+    store = _get_database_store()
+    operation_id = _operation_id()
+    active_task, target_record = _active_mfa_mailbox_task(store, operation_id, str(mailbox_credential_id))
+    record = store.get_credential(str(mailbox_credential_id), include_payload=True)
+    if record is None or record["credential_type"] != "email_login" or record["status"] not in {"unknown", "valid"}:
+        raise ValueError("eligible email_login credential is required")
+    try:
+        pattern = re.compile(code_pattern)
+    except re.error as error:
+        raise ValueError("invalid email MFA code pattern") from error
+    if pattern.groups:
+        raise ValueError("email MFA code pattern must not contain capture groups")
+    payload = record["payload"]
+    mailbox = payload["mailbox"]
+    client = None
+    try:
+        client = imaplib.IMAP4_SSL(mailbox["host"], int(mailbox["port"]))
+        client.login(payload["email"], payload["password"])
+        status, _ = client.select(mailbox.get("folder") or "INBOX", readonly=True)
+        if status != "OK":
+            raise ValueError("email MFA mailbox folder is unavailable")
+        status, message_ids = client.uid("search", None, "ALL")
+        if status != "OK":
+            raise ValueError("email MFA mailbox search failed")
+        uids = [int(value) for value in message_ids[0].split() if value.isdigit()]
+        uidvalidity = (client.response("UIDVALIDITY")[1] or [b""])[0].decode("ascii", errors="ignore")
+        challenge = store.create_mfa_challenge(
+            operation_id,
+            target_record["credential_id"],
+            "email",
+            (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat(),
+            {
+                "code_pattern": code_pattern,
+                "source": "imap",
+                "mailbox_credential_id": record["credential_id"],
+                "sender_contains": str(sender_contains or "")[:240],
+                "subject_contains": str(subject_contains or "")[:240],
+                "uidvalidity": uidvalidity,
+                "highest_uid": max(uids, default=0),
+            },
+            task_uid=active_task.task_uid,
+        )
+        return {"challenge_id": challenge["challenge_id"], "expires_at": challenge["expires_at"]}
+    finally:
+        if client is not None:
+            try:
+                client.logout()
+            except (imaplib.IMAP4.error, OSError):
+                pass
 
 
 @tool(name="retrieve_email_mfa_code")
 def retrieve_email_mfa_code(
     mailbox_credential_id: str,
+    challenge_id: str = "",
     sender_contains: str = "",
     subject_contains: str = "",
     code_pattern: str = r"\b\d{6}\b",
@@ -1264,23 +1376,24 @@ def retrieve_email_mfa_code(
         raise ValueError("invalid email MFA code pattern") from error
     if pattern.groups:
         raise ValueError("email MFA code pattern must not contain capture groups")
-    expires_at = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat()
-    challenge = store.create_mfa_challenge(
-        operation_id,
-        target_record["credential_id"],
-        "email",
-        expires_at,
-        {
-            "code_pattern": code_pattern,
-            "source": "imap",
-            "mailbox_credential_id": record["credential_id"],
-            "sender_contains": str(sender_contains or "")[:240],
-            "subject_contains": str(subject_contains or "")[:240],
-        },
-        task_uid=active_task.task_uid,
-    )
-    challenge_started_at = datetime.fromisoformat(challenge["created_at"]).astimezone(UTC)
-    received_after = challenge_started_at - timedelta(seconds=60)
+    if challenge_id:
+        challenge = store.get_mfa_challenge(operation_id, challenge_id, task_uid=active_task.task_uid)
+        metadata = challenge["metadata"]
+        if challenge["method"] != "email" or metadata.get("mailbox_credential_id") != record["credential_id"]:
+            raise ValueError("email MFA challenge does not match this mailbox")
+        sender_contains = str(metadata.get("sender_contains") or "")
+        subject_contains = str(metadata.get("subject_contains") or "")
+        code_pattern = str(metadata.get("code_pattern") or code_pattern)
+        pattern = re.compile(code_pattern)
+    else:
+        # Standalone compatibility: workflow callers must snapshot with begin_email_mfa_retrieval first.
+        challenge = store.create_mfa_challenge(
+            operation_id, target_record["credential_id"], "email", (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat(),
+            {"code_pattern": code_pattern, "source": "imap", "mailbox_credential_id": record["credential_id"],
+             "sender_contains": str(sender_contains or "")[:240], "subject_contains": str(subject_contains or "")[:240]},
+            task_uid=active_task.task_uid,
+        )
+        metadata = challenge["metadata"]
     client = None
     mailbox_login_attempted = False
     try:
@@ -1290,7 +1403,13 @@ def retrieve_email_mfa_code(
         status, _ = client.select(mailbox.get("folder") or "INBOX", readonly=True)
         if status != "OK":
             raise ValueError("email MFA mailbox folder is unavailable")
-        status, message_ids = client.search(None, "ALL")
+        if challenge_id:
+            current_uidvalidity = (client.response("UIDVALIDITY")[1] or [b""])[0].decode("ascii", errors="ignore")
+            if current_uidvalidity != str(metadata.get("uidvalidity") or ""):
+                raise ValueError("email MFA mailbox UIDVALIDITY changed")
+            status, message_ids = client.uid("search", None, f"{int(metadata.get('highest_uid') or 0) + 1}:*")
+        else:
+            status, message_ids = client.search(None, "ALL")
         if status != "OK":
             raise ValueError("email MFA mailbox search failed")
         matches: set[str] = set()
@@ -1298,9 +1417,11 @@ def retrieve_email_mfa_code(
             status, data = client.fetch(message_id, "(RFC822 INTERNALDATE)")
             if status != "OK" or not data or not isinstance(data[0], tuple):
                 continue
-            received_at = _imap_internal_date(data[0][0])
-            if received_at is None or received_at < received_after:
-                continue
+            if not challenge_id:
+                received_at = _imap_internal_date(data[0][0])
+                # Legacy standalone callers have no pre-trigger snapshot. Workflow callers must use challenge_id.
+                if received_at is None or received_at < datetime.fromisoformat(challenge["created_at"]).astimezone(UTC) - timedelta(seconds=60):
+                    continue
             message = email.message_from_bytes(data[0][1])
             sender = str(message.get("From") or "")
             subject = str(message.get("Subject") or "")
@@ -1336,7 +1457,7 @@ def retrieve_email_mfa_code(
             authentication_mode="mfa",
             outcome="used",
         )
-        return code
+        return register_runtime_secret(code)
     except Exception:
         store.block_mfa_challenge(operation_id, challenge["challenge_id"], task_uid=active_task.task_uid)
         store.record_credential_usage(

@@ -65,13 +65,14 @@ describe('useSlashCommands', () => {
             '/docs',
             '/modules',
             '/config',
+            '/credentials',
             '/setup',
             '/region',
             '/clear',
             '/exit',
         ]);
         expect(commands.find(command => command.command === '/docs')?.args).toEqual(['document_number']);
-        expect(hook.current.getCommandSuggestions('/c').map(command => command.command)).toEqual(['/config', '/clear']);
+        expect(hook.current.getCommandSuggestions('/c').map(command => command.command)).toEqual(['/config', '/credentials', '/clear']);
         expect(hook.current.getCommandSuggestions('/DOC')).toEqual([
             expect.objectContaining({command: '/docs'}),
         ]);

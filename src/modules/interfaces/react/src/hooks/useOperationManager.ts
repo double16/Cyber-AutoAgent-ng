@@ -17,6 +17,8 @@ import { ExecutionServiceFactory, ExecutionServiceSelectionError, ServiceSelecti
 import { ExecutionService, DEFAULT_EXECUTION_CONFIG } from '../services/ExecutionService.js';
 import {stopExecution} from '../services/executionLifecycle.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { AssessmentParams } from '../types/Assessment.js';
+import { CredentialManagementService } from '../services/CredentialManagementService.js';
 
 export interface OperationHistoryEntry {
   id: string;
@@ -320,8 +322,8 @@ export function useOperationManager({
   }, [setDebouncedHistoryEntries]);
 
   // Start assessment execution using unified execution service architecture
-  const startAssessmentExecution = useCallback(async () => {
-    const assessmentParams = assessmentFlowManager.getValidatedAssessmentParameters();
+  const startAssessmentExecution = useCallback(async (requestedParams?: AssessmentParams) => {
+    const assessmentParams = requestedParams || assessmentFlowManager.getValidatedAssessmentParameters();
     if (!assessmentParams) {
       addOperationHistoryEntry('error', 'Assessment parameters not properly configured');
       return;
@@ -563,6 +565,14 @@ export function useOperationManager({
       };
       
       const handleExecutionError = (error: any) => {
+        if (assessmentParams.credentialRotationRequestId) {
+          void new CredentialManagementService().failRotation(
+            assessmentParams.target,
+            assessmentParams.credentialRotationRequestId,
+            "maintenance execution failed",
+            config,
+          ).catch(() => undefined);
+        }
         addOperationHistoryEntry('error', `Execution error (${serviceSelection.mode}): ${error.message}`);
         operationManager.updateOperation(operation.id, {
           status: 'error',
@@ -574,6 +584,14 @@ export function useOperationManager({
       };
       
       const handleExecutionStopped = () => {
+        if (assessmentParams.credentialRotationRequestId) {
+          void new CredentialManagementService().failRotation(
+            assessmentParams.target,
+            assessmentParams.credentialRotationRequestId,
+            "maintenance execution stopped before completion",
+            config,
+          ).catch(() => undefined);
+        }
         // Just update the operation status, don't add duplicate messages
         // The ESC handler in handleAssessmentCancel already adds the user-facing messages
         operationManager.updateOperation(operation.id, {
@@ -654,6 +672,19 @@ export function useOperationManager({
     }
   }, [assessmentFlowManager, operationManager, applicationConfig, actions, addOperationHistoryEntry, config]);
 
+  const startCredentialRotationExecution = useCallback(async (request: {
+    request_id: string;
+    maintenance_operation_id: string;
+  }, objective: string, target: string) => {
+    await startAssessmentExecution({
+      module: currentModule || "web",
+      target,
+      objective,
+      operationId: request.maintenance_operation_id,
+      credentialRotationRequestId: request.request_id,
+    });
+  }, [currentModule, startAssessmentExecution]);
+
   // Cleanup timeout on unmount
   React.useEffect(() => {
     return () => {
@@ -683,6 +714,7 @@ export function useOperationManager({
     handleAssessmentPause,
     handleAssessmentCancel,
     clearOperationHistory,
-    startAssessmentExecution
+    startAssessmentExecution,
+    startCredentialRotationExecution
   };
 }

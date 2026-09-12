@@ -2,6 +2,15 @@
 
 ### Features
 
+- Add credential rotation lifecycle records that atomically claim, stage, complete, fail, or cancel operation-managed
+  rotations, retaining audit evidence until the replacement succeeds.
+- Allow a queued rotation to be explicitly claimed and launched as a standard, constrained maintenance operation from
+  the credential manager.
+- Bind each launched rotation to one controller-created maintenance task and prevent maintenance operations from
+  creating unrelated task fan-out.
+- Add an explicit mailbox-snapshot step for email MFA so workflow retrieval can accept only IMAP messages that arrived
+  after the target was asked to send a code.
+- Document the credential-rotation state machine and the two-step email-MFA mailbox snapshot flow.
 - Add a secret-safe React credential-management workflow with lifecycle history and queued operation-managed
   credential rotations.
 - Add target-scoped OAuth2 client-credentials exchange and API-key request-material tools that keep transient tokens
@@ -32,6 +41,13 @@
 
 ### Fixes
 
+- Run the React credential manager from the repository virtual environment or a Docker Python entrypoint, using the
+  selected deployment mode and forwarding credential-store encryption keys to containers.
+- Show credential scope, account and tenant labels, invalidation, lineage, status history, and queued rotation details
+  in the credential manager without rendering secret payloads.
+- Require exact secret material in recognized target-facing tool inputs for credential-use provenance, and require a
+  successful use before authenticated findings can cite a credential.
+- Redact bare generated password, TOTP, and email-MFA values at UI and trace-export boundaries.
 - Restrict task-bound MFA challenge completion and blocking to the task that initiated the handoff.
 - Require durable discovery, registration, or rotation evidence for operation-created credentials, and retain that
   evidence with their initial credential status events.

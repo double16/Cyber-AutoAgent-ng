@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from strands.hooks import AfterToolCallEvent, HookProvider, HookRegistry
@@ -24,6 +23,13 @@ _CREDENTIAL_BOOKKEEPING_TOOLS = {
     "store_credential",
 }
 _SECRET_PAYLOAD_KEYS = {"api_key", "client_secret", "password", "secret"}
+_TARGET_FACING_TOOLS = frozenset({
+    "http_request",
+    "browser_action",
+    "execute_shell_command",
+    "run_command",
+    "curl_request",
+})
 
 
 def _credential_secret_values(payload: dict[str, Any]) -> set[str]:
@@ -45,6 +51,18 @@ def _credential_secret_values(payload: dict[str, Any]) -> set[str]:
     return values
 
 
+def _input_values(value: Any) -> set[str]:
+    """Return exact string leaves from one tool input, never a serialized substring haystack."""
+
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, dict):
+        return set().union(*(_input_values(item) for item in value.values())) if value else set()
+    if isinstance(value, (list, tuple)):
+        return set().union(*(_input_values(item) for item in value)) if value else set()
+    return set()
+
+
 class CredentialUsageHook(HookProvider):
     """Record actual checked-out-secret use after a target-facing tool outcome.
 
@@ -57,7 +75,7 @@ class CredentialUsageHook(HookProvider):
 
     def _after_tool(self, event: AfterToolCallEvent) -> None:
         tool_name = str(event.tool_use.get("name") or "")
-        if tool_name in _CREDENTIAL_BOOKKEEPING_TOOLS:
+        if tool_name in _CREDENTIAL_BOOKKEEPING_TOOLS or tool_name not in _TARGET_FACING_TOOLS:
             return
         store = _get_database_store()
         operation_id = _operation_id()
@@ -67,16 +85,13 @@ class CredentialUsageHook(HookProvider):
         selected_ids = store.credential_ids_selected_by_task(operation_id, active_task.task_uid)
         if not selected_ids:
             return
-        try:
-            tool_input = json.dumps(event.tool_use.get("input", {}), ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            return
+        tool_values = _input_values(event.tool_use.get("input", {}))
         outcome = "succeeded" if _result_success(event.result, event.exception) else "failed"
         for credential_id in selected_ids:
             record = store.get_credential(credential_id, include_payload=True)
             if record is None:
                 continue
-            if any(secret in tool_input for secret in _credential_secret_values(record["payload"])):
+            if _credential_secret_values(record["payload"]) & tool_values:
                 store.record_credential_usage(
                     operation_id,
                     credential_id,

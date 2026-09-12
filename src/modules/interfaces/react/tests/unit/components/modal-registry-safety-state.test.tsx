@@ -9,6 +9,7 @@ jest.unstable_mockModule("../../../src/components/LazyComponents.js", () => ({
   ConfigEditorLazy: ({ onClose }: any) => <button onClick={onClose}>config</button>,
   ModuleSelectorLazy: ({ onClose }: any) => <button onClick={onClose}>module</button>,
   DocumentationViewerLazy: ({ onClose, selectedDoc }: any) => <button onClick={onClose}>doc:{selectedDoc}</button>,
+  CredentialManagerLazy: ({ onClose }: any) => <button onClick={onClose}>credentials</button>,
 }));
 
 jest.unstable_mockModule("../../../src/components/InitializationFlow.js", () => ({

@@ -1629,6 +1629,16 @@ def main():
         help="Base directory for output artifacts (default: ./outputs)",
     )
     parser.add_argument(
+        "--operation-id",
+        type=str,
+        help="Use a caller-assigned operation ID for an authorized maintenance operation",
+    )
+    parser.add_argument(
+        "--credential-rotation-request",
+        type=str,
+        help="Opaque claimed credential rotation request ID for a constrained maintenance operation",
+    )
+    parser.add_argument(
         "--continue",
         dest="cont",
         nargs="?",
@@ -1694,6 +1704,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.credential_rotation_request and not args.operation_id:
+        parser.error("--credential-rotation-request requires --operation-id")
     if args.reset_failed and not bool(args.cont):
         parser.error("--reset-failed requires --continue")
     if args.reset_failed and bool(args.report):
@@ -1851,7 +1863,9 @@ def main():
     # Operation ID
     target_sanitized = sanitize_target_name(args.target)
     operation_id = None
-    if isinstance(args.cont, str) and args.cont:
+    if args.operation_id:
+        operation_id = args.operation_id
+    elif isinstance(args.cont, str) and args.cont:
         operation_id = args.cont
     elif isinstance(args.report, str) and args.report:
         operation_id = args.report
@@ -1884,6 +1898,8 @@ def main():
     # Expose operation ID to tools via environment for consistent evidence tagging
     os.environ["CYBER_OPERATION_ID"] = operation_id
     os.environ["CYBER_LOGICAL_TARGET"] = args.target
+    if args.credential_rotation_request:
+        os.environ["CYBER_CREDENTIAL_ROTATION_REQUEST"] = args.credential_rotation_request
 
     server_config = config_manager.get_server_config(args.provider, **config_overrides)
 

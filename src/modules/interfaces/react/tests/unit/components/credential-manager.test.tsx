@@ -115,4 +115,58 @@ describe('CredentialManager', () => {
     expect(text(view.toJSON())).toContain('User-provided credentials must be changed');
     expect(service.queueRotation).not.toHaveBeenCalled();
   });
+
+  it('renders safe lifecycle details and cancels a queued rotation with an audit reason', async () => {
+    const { CredentialManager } = await import('../../../src/components/CredentialManager.js');
+    const service = {
+      list: jest.fn().mockResolvedValue({ credentials: [{
+        credential_id: 'cred-1', credential_type: 'api_key', role: 'reader', status: 'valid',
+        origin: 'registered', management_policy: 'operation', target: 'https://app.example.test',
+        account_label: 'account-a', tenant_label: 'tenant-a', invalidated_at: undefined,
+        supersedes_credential_id: 'cred-old', history: [{ status: 'valid', reason: 'verified' }],
+        rotation_requests: [{ request_id: 'request-1', status: 'queued', reason: 'scheduled' }],
+      }] }),
+      queueRotation: jest.fn(),
+      cancelRotation: jest.fn().mockResolvedValue({ request: { request_id: 'request-1' } }),
+    };
+    let view!: ReactTestRenderer;
+    await act(async () => {
+      view = TestRenderer.create(<CredentialManager initialTarget="https://app.example.test" service={service as any} onClose={jest.fn()} />);
+    });
+    expect(text(view.toJSON())).toContain('account: account-a');
+    expect(text(view.toJSON())).toContain('rotations: queued request-1 (scheduled)');
+    act(() => inputHandler?.('c', {}));
+    expect(text(view.toJSON())).toContain('Cancellation reason:');
+    act(() => view.root.findByType('input').props.onChange({ target: { value: 'deferred' } }));
+    await act(async () => {
+      inputHandler?.('', { return: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(service.cancelRotation).toHaveBeenCalledWith('https://app.example.test', 'request-1', 'deferred', expect.anything());
+    expect(text(view.toJSON())).toContain('Cancelled rotation request request-1.');
+  });
+
+  it('starts a queued rotation through the provided standard-operation launcher', async () => {
+    const { CredentialManager } = await import('../../../src/components/CredentialManager.js');
+    const request = { request_id: 'request-1', maintenance_operation_id: 'OP_ROTATE', status: 'queued', reason: 'expiry' };
+    const service = {
+      list: jest.fn().mockResolvedValue({ credentials: [{
+        credential_id: 'cred-1', credential_type: 'api_key', role: 'reader', status: 'valid',
+        origin: 'registered', management_policy: 'operation', history: [], rotation_requests: [request],
+      }] }),
+      queueRotation: jest.fn(), cancelRotation: jest.fn(),
+      startRotation: jest.fn().mockResolvedValue({ request, maintenance_objective: 'Rotate only request-1' }),
+    };
+    const onStartRotation = jest.fn();
+    await act(async () => {
+      TestRenderer.create(<CredentialManager initialTarget="https://app.example.test" service={service as any} onClose={jest.fn()} onStartRotation={onStartRotation} />);
+    });
+    await act(async () => {
+      inputHandler?.('s', {});
+      await Promise.resolve();
+    });
+    expect(service.startRotation).toHaveBeenCalledWith('https://app.example.test', 'request-1', expect.anything());
+    expect(onStartRotation).toHaveBeenCalledWith(request, 'Rotate only request-1', 'https://app.example.test');
+  });
 });

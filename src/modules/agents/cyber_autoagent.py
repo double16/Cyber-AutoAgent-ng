@@ -110,8 +110,11 @@ from modules.tools.channels import (
 )
 from modules.tools.client_bundle_inventory import client_bundle_inventory
 from modules.tools.credentials import (
+    begin_email_mfa_retrieval,
     checkout_credential,
+    complete_credential_rotation,
     exchange_oauth2_client_credentials,
+    fail_credential_rotation,
     generate_mfa_code,
     generate_password,
     mark_credential_status,
@@ -124,6 +127,7 @@ from modules.tools.credentials import (
     retrieve_email_mfa_code,
     rotate_credential,
     set_task_auth_context,
+    stage_credential_rotation,
     store_credential,
 )
 from modules.tools.editor import create_absolute_path_editor
@@ -640,8 +644,12 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         prepare_login_form_authentication,
         generate_password,
         generate_mfa_code,
+        begin_email_mfa_retrieval,
         request_mfa_code,
         retrieve_email_mfa_code,
+        stage_credential_rotation,
+        complete_credential_rotation,
+        fail_credential_rotation,
         rotate_credential,
         create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
         create_tasks,

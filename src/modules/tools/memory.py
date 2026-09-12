@@ -1553,6 +1553,8 @@ class ApplicationStore(Protocol):
 
     def expire_mfa_challenges(self, operation_id: str) -> int: ...
 
+    def get_mfa_challenge(self, operation_id: str, challenge_id: str, task_uid: str | None = None) -> dict[str, Any]: ...
+
     def credential_ids_used_by_task(
         self, operation_id: str, task_uid: str, credential_ids: Iterable[str]
     ) -> set[str]: ...
@@ -1570,6 +1572,16 @@ class ApplicationStore(Protocol):
     def list_credential_rotation_requests(self, credential_id: str | None = None) -> list[dict[str, Any]]: ...
 
     def cancel_credential_rotation_request(self, request_id: str, reason: str) -> dict[str, Any]: ...
+
+    def get_credential_rotation_request(self, request_id: str) -> dict[str, Any] | None: ...
+
+    def claim_credential_rotation_request(self, request_id: str, task_uid: str) -> dict[str, Any]: ...
+
+    def stage_credential_rotation_request(self, request_id: str, staged_credential_id: str) -> dict[str, Any]: ...
+
+    def complete_credential_rotation_request(self, request_id: str, evidence_refs: list[str]) -> dict[str, Any]: ...
+
+    def fail_credential_rotation_request(self, request_id: str, reason: str) -> dict[str, Any]: ...
 
 
 class SQLiteApplicationStore:
@@ -2237,7 +2249,23 @@ class SQLiteApplicationStore:
             "failure_reason": row[8],
             "created_at": row[9],
             "updated_at": row[10],
+            "staged_credential_id": row[11] if len(row) > 11 else None,
+            "completed_at": row[12] if len(row) > 12 else None,
         }
+
+    @staticmethod
+    def _rotation_request_columns() -> str:
+        return (
+            "request_id, credential_id, request_operation_id, maintenance_operation_id, status, reason, "
+            "evidence_refs, claimed_task_uid, failure_reason, created_at, updated_at, staged_credential_id, completed_at"
+        )
+
+    def _rotation_request(self, conn: sqlite3.Connection, request_id: str) -> sqlite3.Row | None:
+        return conn.execute(
+            f"SELECT {self._rotation_request_columns()} FROM credential_rotation_requests "
+            "WHERE request_id = ? AND logical_target = ?",
+            (request_id, self.logical_target),
+        ).fetchone()
 
     def create_credential_rotation_request(
         self, request_operation_id: str, credential_id: str, reason: str, maintenance_operation_id: str
@@ -2272,11 +2300,8 @@ class SQLiteApplicationStore:
                 ),
             )
             row = conn.execute(
-                """
-                SELECT request_id, credential_id, request_operation_id, maintenance_operation_id, status, reason,
-                       evidence_refs, claimed_task_uid, failure_reason, created_at, updated_at
-                FROM credential_rotation_requests WHERE request_id = ? AND logical_target = ?
-                """,
+                f"SELECT {self._rotation_request_columns()} FROM credential_rotation_requests "
+                "WHERE request_id = ? AND logical_target = ?",
                 (request_id, self.logical_target),
             ).fetchone()
         if row is None:
@@ -2287,8 +2312,7 @@ class SQLiteApplicationStore:
         """List request metadata scoped to this logical target."""
 
         query = (
-            "SELECT request_id, credential_id, request_operation_id, maintenance_operation_id, status, reason, "
-            "evidence_refs, claimed_task_uid, failure_reason, created_at, updated_at "
+            f"SELECT {self._rotation_request_columns()} "
             "FROM credential_rotation_requests WHERE logical_target = ?"
         )
         params: list[Any] = [self.logical_target]
@@ -2319,15 +2343,121 @@ class SQLiteApplicationStore:
             if result.rowcount != 1:
                 raise ValueError("only queued credential rotation requests can be cancelled")
             row = conn.execute(
-                """
-                SELECT request_id, credential_id, request_operation_id, maintenance_operation_id, status, reason,
-                       evidence_refs, claimed_task_uid, failure_reason, created_at, updated_at
-                FROM credential_rotation_requests WHERE request_id = ? AND logical_target = ?
-                """,
+                f"SELECT {self._rotation_request_columns()} FROM credential_rotation_requests "
+                "WHERE request_id = ? AND logical_target = ?",
                 (request_id, self.logical_target),
             ).fetchone()
         if row is None:
             raise RuntimeError("credential rotation cancellation did not return a request")
+        return self._rotation_request_row(row)
+
+    def get_credential_rotation_request(self, request_id: str) -> dict[str, Any] | None:
+        """Return one rotation request for this target without exposing credential payloads."""
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            row = self._rotation_request(conn, request_id)
+        return self._rotation_request_row(row) if row is not None else None
+
+    def claim_credential_rotation_request(self, request_id: str, task_uid: str) -> dict[str, Any]:
+        """Atomically bind a queued request to the sole maintenance task that will service it."""
+
+        normalized_task_uid = str(task_uid or "").strip()
+        if not normalized_task_uid:
+            raise ValueError("credential rotation task UID is required")
+        now = datetime.now().isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            result = conn.execute(
+                """
+                UPDATE credential_rotation_requests SET status = 'claimed', claimed_task_uid = ?, updated_at = ?
+                WHERE request_id = ? AND logical_target = ? AND status = 'queued'
+                """,
+                (normalized_task_uid, now, request_id, self.logical_target),
+            )
+            if result.rowcount != 1:
+                raise ValueError("only queued credential rotation requests can be claimed")
+            row = self._rotation_request(conn, request_id)
+        if row is None:
+            raise RuntimeError("credential rotation claim did not return a request")
+        return self._rotation_request_row(row)
+
+    def stage_credential_rotation_request(self, request_id: str, staged_credential_id: str) -> dict[str, Any]:
+        """Record a replacement credential before retiring the old credential."""
+
+        normalized_credential_id = str(staged_credential_id or "").strip()
+        if not normalized_credential_id:
+            raise ValueError("staged credential ID is required")
+        replacement = self.get_credential(normalized_credential_id)
+        if replacement is None:
+            raise ValueError("staged credential is unavailable")
+        now = datetime.now().isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            result = conn.execute(
+                """
+                UPDATE credential_rotation_requests SET staged_credential_id = ?, updated_at = ?
+                WHERE request_id = ? AND logical_target = ? AND status = 'claimed' AND staged_credential_id IS NULL
+                """,
+                (normalized_credential_id, now, request_id, self.logical_target),
+            )
+            if result.rowcount != 1:
+                raise ValueError("only an unstaged claimed rotation request can be staged")
+            row = self._rotation_request(conn, request_id)
+        if row is None:
+            raise RuntimeError("credential rotation staging did not return a request")
+        return self._rotation_request_row(row)
+
+    def complete_credential_rotation_request(self, request_id: str, evidence_refs: list[str]) -> dict[str, Any]:
+        """Finalize a staged replacement and retire its predecessor only after success evidence exists."""
+
+        normalized_refs = sorted({str(reference).strip() for reference in evidence_refs if str(reference).strip()})
+        if not normalized_refs:
+            raise ValueError("credential rotation completion requires evidence references")
+        now = datetime.now().isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            row = self._rotation_request(conn, request_id)
+            if row is None or row[4] != "claimed" or not row[11]:
+                raise ValueError("only a staged claimed credential rotation request can be completed")
+            staged_credential_id = str(row[11])
+            conn.execute(
+                "UPDATE credential_records SET status = 'retired', updated_at = ? WHERE credential_id = ? AND logical_target = ?",
+                (now, row[1], self.logical_target),
+            )
+            conn.execute(
+                "UPDATE credential_records SET status = 'valid', updated_at = ? WHERE credential_id = ? AND logical_target = ?",
+                (now, staged_credential_id, self.logical_target),
+            )
+            conn.execute(
+                """
+                UPDATE credential_rotation_requests
+                SET status = 'succeeded', evidence_refs = ?, completed_at = ?, updated_at = ?
+                WHERE request_id = ? AND logical_target = ?
+                """,
+                (json.dumps(normalized_refs), now, now, request_id, self.logical_target),
+            )
+            updated = self._rotation_request(conn, request_id)
+        if updated is None:
+            raise RuntimeError("credential rotation completion did not return a request")
+        return self._rotation_request_row(updated)
+
+    def fail_credential_rotation_request(self, request_id: str, reason: str) -> dict[str, Any]:
+        """Preserve a failed rotation audit record without deleting either credential."""
+
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            raise ValueError("credential rotation failure reason is required")
+        now = datetime.now().isoformat()
+        with self._lock, closing(self._connect()) as conn, conn:
+            result = conn.execute(
+                """
+                UPDATE credential_rotation_requests SET status = 'failed', failure_reason = ?, updated_at = ?
+                WHERE request_id = ? AND logical_target = ? AND status = 'claimed'
+                """,
+                (normalized_reason, now, request_id, self.logical_target),
+            )
+            if result.rowcount != 1:
+                raise ValueError("only claimed credential rotation requests can fail")
+            row = self._rotation_request(conn, request_id)
+        if row is None:
+            raise RuntimeError("credential rotation failure did not return a request")
         return self._rotation_request_row(row)
 
     def create_mfa_challenge(
@@ -2438,6 +2568,35 @@ class SQLiteApplicationStore:
             )
         return max(0, int(cursor.rowcount))
 
+    def get_mfa_challenge(
+        self, operation_id: str, challenge_id: str, task_uid: str | None = None
+    ) -> dict[str, Any]:
+        """Read a pending MFA challenge only from its creating task."""
+
+        self.expire_mfa_challenges(operation_id)
+        normalized_task_uid = str(task_uid or "").strip() or None
+        with self._lock, closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                """
+                SELECT credential_id, method, status, expires_at, metadata, task_uid, created_at, updated_at
+                FROM mfa_challenges WHERE challenge_id = ? AND logical_target = ? AND operation_id = ?
+                """,
+                (challenge_id, self.logical_target, operation_id),
+            ).fetchone()
+        if row is None or row[2] != "pending" or (row[5] is not None and row[5] != normalized_task_uid):
+            raise ValueError("MFA challenge is unavailable to this task")
+        return {
+            "challenge_id": challenge_id,
+            "credential_id": row[0],
+            "method": row[1],
+            "status": row[2],
+            "expires_at": row[3],
+            "metadata": json.loads(row[4]),
+            "task_uid": row[5],
+            "created_at": row[6],
+            "updated_at": row[7],
+        }
+
     def block_mfa_challenge(self, operation_id: str, challenge_id: str, task_uid: str | None = None) -> bool:
         """Mark an abandoned or failed pending MFA handoff blocked without retaining its code."""
 
@@ -2471,7 +2630,7 @@ class SQLiteApplicationStore:
                 f"""
                 SELECT DISTINCT credential_id FROM credential_usage_records
                 WHERE logical_target = ? AND operation_id = ? AND task_uid = ?
-                    AND credential_id IN ({placeholders}) AND outcome IN ('used', 'succeeded', 'failed', 'blocked')
+                    AND credential_id IN ({placeholders}) AND outcome IN ('used', 'succeeded')
                 """,
                 [self.logical_target, operation_id, task_uid, *requested_ids],
             ).fetchall()
@@ -8913,6 +9072,8 @@ def create_tasks(tasks: TaskProposalList) -> str:
     Snapshot limits and output_kind are ignored because they do not apply.
     """
 
+    if os.getenv("CYBER_CREDENTIAL_ROTATION_REQUEST", "").strip():
+        raise ValueError("credential maintenance operations use the controller-created rotation task")
     prompt_token_limit = int((_MEMORY_CONFIG or {}).get("prompt_token_limit") or 48_000)
     return _create_tasks_from_proposals(tasks, prompt_token_limit=prompt_token_limit)
 

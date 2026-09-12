@@ -23,12 +23,24 @@ TEXT_REDACTION_PATTERNS = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@"),
 )
+_RUNTIME_SECRETS: set[str] = set()
+
+
+def register_runtime_secret(value: str) -> str:
+    """Register a generated value so bare tool output is redacted at UI and trace boundaries."""
+
+    normalized = str(value or "")
+    if normalized:
+        _RUNTIME_SECRETS.add(normalized)
+    return normalized
 
 
 def redact_text(value: Any) -> str:
     """Remove common credentials from text while retaining diagnostic context."""
 
     redacted = str(value or "")
+    for secret in sorted(_RUNTIME_SECRETS, key=len, reverse=True):
+        redacted = redacted.replace(secret, REDACTED)
     for pattern in TEXT_REDACTION_PATTERNS:
         if pattern.groups >= 1:
             redacted = pattern.sub(lambda match: f"{match.group(1)}{REDACTED}", redacted)
