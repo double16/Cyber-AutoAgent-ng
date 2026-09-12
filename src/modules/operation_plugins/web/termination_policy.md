@@ -16,23 +16,36 @@ Create separate artifact-producing tasks for at least three applicable workstrea
 bounded crawl and route discovery, client-side/API extraction, and authentication/workflow mapping. Create one final
 inventory-synthesis task only after those mapping tasks are queued; it is the sole task that produces the canonical
 inventory manifest.
-2. **Generate Attack Hypotheses from the Mapped Attack Surface** — Derive detailed, testable attack paths from
+2. **Authentication Coverage and Authorization Controls** — Preserve an unauthenticated baseline for each applicable
+   mapped authentication workflow, then use eligible target-scoped credentials through the credential store for each
+   applicable account and role. Authenticate with the observed login, API-key, OAuth2, or MFA flow, bind the task
+   authentication context, and document durable evidence for each result. Use credential-ID-backed account, role, or
+   tenant comparisons for authorized access-control testing; when an identity, MFA factor, or comparison pair is
+   unavailable, record the specific coverage gap. A normal public sign-up flow may create a reusable registered test
+   identity unless an operation constraint prohibits that state change.
+
+### Phase-2 task fan-out
+
+Create separate artifact-producing tasks for unauthenticated baseline, authenticated credential coverage, and
+authorization comparison. Each task must document a bounded result or an evidence-backed inapplicability/coverage gap;
+do not use raw credential values in task descriptions, artifacts, or IDOR specialist calls.
+3. **Generate Attack Hypotheses from the Mapped Attack Surface** — Derive detailed, testable attack paths from
    technology, input, trust-boundary, and workflow observations. For each path, record preconditions, the suspected
    mechanism and attacker-controlled flow, safe future test steps, expected positive and negative/control results,
    and required evidence. Research relevant technologies, versions, components, advisories, CVEs, and published PoC
    preconditions when they provide a lead; they are not applicability evidence or findings. Do not treat a hypothesis
    as a finding or consider a prior hypothesis alone complete.
-3. **Vulnerability Discovery and Exploitability Testing** — Test prioritized hypotheses and record expected and actual
+4. **Vulnerability Discovery and Exploitability Testing** — Test prioritized hypotheses and record expected and actual
    behavior, negative controls, reproducibility, and evidence-backed vulnerability candidates.
-4. **Finding Validation** — Confirm or reject each vulnerability candidate using reproducible evidence,
+5. **Finding Validation** — Confirm or reject each vulnerability candidate using reproducible evidence,
 expected-versus-actual behavior, negative controls, scope, confidence, and artifact paths. This phase must complete
 before any phase that consumes verified findings.
-5. **Exploit Chain Analysis** — Determine whether multiple verified weaknesses combine into a higher-impact attack path. Record
+6. **Exploit Chain Analysis** — Determine whether multiple verified weaknesses combine into a higher-impact attack path. Record
    prerequisites, transitions, failed links, alternative branches, and evidence for each link. Mark this phase
    `not_applicable` when no verified candidates can compose into a meaningful relationship. Analyze existing candidates
    rather than repeating vulnerability discovery or introducing unrelated pivots. Create follow-on execution work only
    for a concrete, evidence-backed chain link that still requires validation.
-6. **Impact Demonstration** — Safely demonstrate the minimum necessary security consequence required by the objective,
+7. **Impact Demonstration** — Safely demonstrate the minimum necessary security consequence required by the objective,
    without destructive action or unnecessary data access.
 
 Classify the phase against its own criteria and the following operation-level outcomes:

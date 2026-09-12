@@ -36,3 +36,10 @@ planning:
         - access_context_session
         - workflow_high_value_areas
         - safe_read_only_verification
+    - phase_id: 2
+      mode: fanout
+      min_mapping_tasks: 3
+      mapping_workstreams:
+        - unauthenticated_posture
+        - authenticated_access_coverage
+        - read_only_authorization_comparison

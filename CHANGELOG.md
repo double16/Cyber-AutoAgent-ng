@@ -2,12 +2,17 @@
 
 ### Features
 
+- Add credential-aware web assessment phases for unauthenticated baselines, authenticated role/account coverage, and
+  store-backed authorization comparisons; allow read-only, bounded IDOR comparisons with existing credentials in
+  web-recon and strengthen the CTF access-context workflow.
 - Add credential rotation lifecycle records that atomically claim, stage, complete, fail, or cancel operation-managed
   rotations, retaining audit evidence until the replacement succeeds.
 - Allow a queued rotation to be explicitly claimed and launched as a standard, constrained maintenance operation from
   the credential manager.
 - Bind each launched rotation to one controller-created maintenance task and prevent maintenance operations from
   creating unrelated task fan-out.
+- Exercise registration reuse, store-backed multi-tenant IDOR, mailbox-snapshot email MFA, OAuth protected-resource
+  use, and API-key authentication against the deterministic loopback authentication fixture.
 - Add an explicit mailbox-snapshot step for email MFA so workflow retrieval can accept only IMAP messages that arrived
   after the target was asked to send a code.
 - Document the credential-rotation state machine and the two-step email-MFA mailbox snapshot flow.

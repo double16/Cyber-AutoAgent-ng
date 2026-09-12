@@ -41,3 +41,10 @@ planning:
       synthesis_workstream: inventory_synthesis
       synthesis_output_kind: inventory_manifest
       synthesis_execution: controller
+    - phase_id: 2
+      mode: fanout
+      min_mapping_tasks: 3
+      mapping_workstreams:
+        - unauthenticated_baseline
+        - authenticated_credential_coverage
+        - authorization_comparison

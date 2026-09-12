@@ -27,10 +27,13 @@ def _proposal(workstream, role="mapping", depends=(), reason=None, output_kind="
     )
 
 
-def test_only_enabled_modules_declare_phase_one_fanout_contracts():
+def test_enabled_web_modules_declare_credential_coverage_phase_contracts():
     assert load_phase_task_contract("web", 1) is not None
     assert load_phase_task_contract("web_recon", 1) is not None
     assert load_phase_task_contract("ctf", 1) is not None
+    assert load_phase_task_contract("web", 2) is not None
+    assert load_phase_task_contract("web_recon", 2) is not None
+    assert load_phase_task_contract("ctf", 2) is None
     assert load_phase_task_contract("code_security", 1) is None
     assert load_phase_task_contract("context_navigator", 1) is None
     assert load_phase_task_contract("threat_emulation", 1) is None
@@ -249,6 +252,35 @@ def test_web_recon_contract_accepts_distinct_read_only_mapping_workstreams():
             _proposal("safe_read_only_verification"),
         ],
     )
+
+
+@pytest.mark.parametrize(
+    ("module", "workstreams"),
+    [
+        (
+            "web",
+            ("unauthenticated_baseline", "authenticated_credential_coverage", "authorization_comparison"),
+        ),
+        (
+            "web_recon",
+            ("unauthenticated_posture", "authenticated_access_coverage", "read_only_authorization_comparison"),
+        ),
+    ],
+)
+def test_credential_coverage_phase_contracts_accept_their_declared_workstreams(module, workstreams):
+    validate_phase_task_proposals(load_phase_task_contract(module, 2), [_proposal(workstream) for workstream in workstreams])
+
+
+@pytest.mark.parametrize("module", ("web", "web_recon"))
+def test_credential_coverage_phase_contracts_reject_missing_or_unknown_workstreams(module):
+    contract = load_phase_task_contract(module, 2)
+    with pytest.raises(ValueError, match="at least 3"):
+        validate_phase_task_proposals(contract, [_proposal("unauthenticated_baseline")])
+    with pytest.raises(ValueError, match="not declared"):
+        validate_phase_task_proposals(
+            contract,
+            [_proposal("unauthenticated_baseline"), _proposal("authenticated_credential_coverage"), _proposal("raw_credentials")],
+        )
 
 
 def test_ctf_contract_accepts_documented_direct_single_step_exception():

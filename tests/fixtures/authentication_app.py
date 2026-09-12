@@ -21,6 +21,7 @@ class AuthenticationFixtureState:
     })
     mailboxes: dict[str, list[str]] = field(default_factory=dict)
     sessions: dict[str, str] = field(default_factory=dict)
+    uidvalidity: str = "1"
 
 
 class Registration(BaseModel):
@@ -62,6 +63,18 @@ class FixtureImapClient:
     def search(self, *_args):
         messages = self.state.mailboxes.get(self.email, [])
         return "OK", [b" ".join(str(index + 1).encode("ascii") for index in range(len(messages)))]
+
+    def uid(self, command: str, _charset, query: str):
+        if command != "search":
+            return "NO", []
+        messages = self.state.mailboxes.get(self.email, [])
+        if query == "ALL":
+            return "OK", [b" ".join(str(index + 1).encode("ascii") for index in range(len(messages)))]
+        first = int(query.split(":", 1)[0])
+        return "OK", [b" ".join(str(index + 1).encode("ascii") for index in range(first - 1, len(messages)))]
+
+    def response(self, name: str):
+        return ("UIDVALIDITY", [self.state.uidvalidity.encode("ascii")]) if name == "UIDVALIDITY" else (name, [b""])
 
     def fetch(self, message_id: bytes, _query: str):
         index = int(message_id) - 1
@@ -120,6 +133,12 @@ def create_authentication_app(state: AuthenticationFixtureState) -> FastAPI:
     def api_key(x_api_key: str | None = Header(default=None)):
         if x_api_key != "fixture-api-key":
             raise HTTPException(status_code=401, detail="invalid api key")
+        return {"authorized": True}
+
+    @app.get("/oauth-protected")
+    def oauth_protected(authorization: str | None = Header(default=None)):
+        if authorization != "Bearer fixture-access-token":
+            raise HTTPException(status_code=401, detail="invalid bearer token")
         return {"authorized": True}
 
     @app.get("/tenants/{tenant}/records/{record_id}")
