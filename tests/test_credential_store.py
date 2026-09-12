@@ -2,6 +2,7 @@ import base64
 import json
 import sqlite3
 import stat
+from datetime import UTC, datetime
 from email.message import EmailMessage
 from unittest.mock import MagicMock
 
@@ -602,6 +603,10 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
     monkeypatch.setattr("builtins.input", lambda: "not-a-code")
     with pytest.raises(ValueError, match="did not match"):
         request_mfa_code(email_mfa_credential["credential_id"])
+    with sqlite3.connect(tmp_path / "credentials.db") as connection:
+        assert connection.execute(
+            "SELECT status FROM mfa_challenges ORDER BY created_at DESC LIMIT 1"
+        ).fetchone() == ("blocked",)
 
     mailbox_credential = store_user_credential(
         operation_id="op-1",
@@ -637,6 +642,7 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
 
     class FakeImapClient:
         logged_out = False
+        internaldate = datetime.now(UTC).strftime("%d-%b-%Y %H:%M:%S +0000")
 
         def __init__(self, host, port):
             assert (host, port) == ("mail.example.test", 993)
@@ -653,7 +659,9 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
 
         def fetch(self, message_id, _query):
             assert message_id == b"1"
-            return "OK", [(b"RFC822", message.as_bytes())]
+            assert _query == "(RFC822 INTERNALDATE)"
+            metadata = f'1 (INTERNALDATE "{self.internaldate}" RFC822'.encode("ascii")
+            return "OK", [(metadata, message.as_bytes())]
 
         def logout(self):
             self.logged_out = True
@@ -681,6 +689,18 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
         mailbox_bound_credential["credential_id"],
         mailbox_credential["credential_id"],
     }
+    monkeypatch.setattr(fake_client, "search", lambda *_args: ("NO", []))
+    with pytest.raises(ValueError, match="search failed"):
+        retrieve_email_mfa_code(mailbox_credential["credential_id"])
+    with sqlite3.connect(tmp_path / "credentials.db") as connection:
+        assert connection.execute(
+            "SELECT status FROM mfa_challenges WHERE credential_id = ? ORDER BY created_at DESC LIMIT 1",
+            (mailbox_bound_credential["credential_id"],),
+        ).fetchone() == ("blocked",)
+    monkeypatch.setattr(fake_client, "search", lambda *_args: ("OK", [b"1"]))
+    fake_client.internaldate = "01-Jan-2000 00:00:00 +0000"
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        retrieve_email_mfa_code(mailbox_credential["credential_id"])
     with pytest.raises(ValueError, match="capture"):
         retrieve_email_mfa_code(mailbox_credential["credential_id"], code_pattern=r"(\\d+)")
     with pytest.raises(ValueError, match="TTL"):
@@ -707,6 +727,14 @@ def test_mfa_challenge_cannot_be_completed_after_expiry(tmp_path):
     assert store.expire_mfa_challenges("op-1") == 1
     with pytest.raises(ValueError, match="not pending"):
         store.complete_mfa_challenge("op-1", challenge["challenge_id"])
+    assert store.block_mfa_challenge("op-1", challenge["challenge_id"]) is False
+
+    current = store.create_mfa_challenge(
+        "op-1", credential["credential_id"], "email", "2099-01-01T00:00:00+00:00", {"code_pattern": "\\d{6}"}
+    )
+    assert store.block_mfa_challenge("op-1", current["challenge_id"]) is True
+    with pytest.raises(ValueError, match="not pending"):
+        store.complete_mfa_challenge("op-1", current["challenge_id"])
 
 
 def test_operation_managed_credential_rotation_preserves_retired_history(tmp_path, monkeypatch):

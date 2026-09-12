@@ -21,6 +21,9 @@
   authenticated re-encryption under the new primary key.
 - Record completed email-MFA mailbox challenges against the checked-out target credential without retaining the
   one-time code, and report both the target and mailbox credentials used in that flow.
+- Mark failed or abandoned interactive and mailbox MFA handoffs as blocked instead of leaving their challenges pending.
+- Reject stale email-MFA messages using the IMAP server-assigned delivery timestamp, preventing old mailbox codes
+  from satisfying a new authentication challenge.
 
 ### Fixes
 

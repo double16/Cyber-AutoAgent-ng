@@ -1,9 +1,9 @@
 """Typed credential-store tools backed by the application SQLite database.
 
 Credential payloads are intentionally retained only in the application database
-and are never included in list or status responses.  The database is currently
-plaintext by product choice, so callers must not write returned secret values to
-artifacts, logs, reports, or tool descriptions.
+and are never included in list or status responses. When configured, database
+encryption protects those payloads at rest; callers must never write returned
+secret values to artifacts, logs, reports, or tool descriptions.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ _STATUSES = frozenset({"unknown", "pending", "valid", "invalid", "expired", "rev
 _DURABLE_EVIDENCE_REF_PREFIXES = ("artifact:", "artifact_id:", "memory:", "finding:")
 _OAUTH_CLIENT_AUTH_METHODS = frozenset({"client_secret_basic", "client_secret_post"})
 _FORM_FIELD_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.\-\[\]]{0,127}")
+_IMAP_INTERNALDATE_PATTERN = re.compile(r'INTERNALDATE "(?P<timestamp>[^"]+)"')
 _OBJECTIVE_LOGIN_PATTERN = re.compile(
     r"(?is)\b(?:username|user)\s*[:=]\s*(?P<username>[^\s,;]+).*?\b(?:password|pass)\s*[:=]\s*(?P<password>[^\s,;]+)"
 )
@@ -1135,6 +1136,19 @@ def _active_mfa_mailbox_task(store: Any, operation_id: str, mailbox_credential_i
     raise ValueError("email MFA mailbox is not configured by an active checked-out credential")
 
 
+def _imap_internal_date(value: Any) -> datetime | None:
+    """Parse IMAP's server-assigned INTERNALDATE, not an untrusted message Date header."""
+
+    metadata = value.decode("ascii", errors="replace") if isinstance(value, bytes) else str(value or "")
+    match = _IMAP_INTERNALDATE_PATTERN.search(metadata)
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group("timestamp"), "%d-%b-%Y %H:%M:%S %z").astimezone(UTC)
+    except ValueError:
+        return None
+
+
 @tool(name="request_mfa_code")
 def request_mfa_code(
     credential_id: str,
@@ -1188,8 +1202,24 @@ def request_mfa_code(
     try:
         code = input().strip()
     except (EOFError, OSError) as error:
+        store.block_mfa_challenge(operation_id, challenge["challenge_id"])
+        store.record_credential_usage(
+            operation_id,
+            record["credential_id"],
+            task_uid=active_task.task_uid,
+            authentication_mode="mfa",
+            outcome="blocked",
+        )
         raise ValueError("MFA code handoff is unavailable") from error
     if not pattern.fullmatch(code):
+        store.block_mfa_challenge(operation_id, challenge["challenge_id"])
+        store.record_credential_usage(
+            operation_id,
+            record["credential_id"],
+            task_uid=active_task.task_uid,
+            authentication_mode="mfa",
+            outcome="blocked",
+        )
         raise ValueError("MFA code did not match the requested format")
     store.complete_mfa_challenge(operation_id, challenge["challenge_id"])
     store.record_credential_usage(
@@ -1247,8 +1277,13 @@ def retrieve_email_mfa_code(
             "subject_contains": str(subject_contains or "")[:240],
         },
     )
-    client = imaplib.IMAP4_SSL(mailbox["host"], int(mailbox["port"]))
+    challenge_started_at = datetime.fromisoformat(challenge["created_at"]).astimezone(UTC)
+    received_after = challenge_started_at - timedelta(seconds=60)
+    client = None
+    mailbox_login_attempted = False
     try:
+        client = imaplib.IMAP4_SSL(mailbox["host"], int(mailbox["port"]))
+        mailbox_login_attempted = True
         client.login(payload["email"], payload["password"])
         status, _ = client.select(mailbox.get("folder") or "INBOX", readonly=True)
         if status != "OK":
@@ -1258,8 +1293,11 @@ def retrieve_email_mfa_code(
             raise ValueError("email MFA mailbox search failed")
         matches: set[str] = set()
         for message_id in list(message_ids[0].split())[-20:]:
-            status, data = client.fetch(message_id, "(RFC822)")
+            status, data = client.fetch(message_id, "(RFC822 INTERNALDATE)")
             if status != "OK" or not data or not isinstance(data[0], tuple):
+                continue
+            received_at = _imap_internal_date(data[0][0])
+            if received_at is None or received_at < received_after:
                 continue
             message = email.message_from_bytes(data[0][1])
             sender = str(message.get("From") or "")
@@ -1297,8 +1335,27 @@ def retrieve_email_mfa_code(
             outcome="used",
         )
         return code
+    except Exception:
+        store.block_mfa_challenge(operation_id, challenge["challenge_id"])
+        store.record_credential_usage(
+            operation_id,
+            target_record["credential_id"],
+            task_uid=active_task.task_uid,
+            authentication_mode="mfa",
+            outcome="blocked",
+        )
+        if mailbox_login_attempted:
+            store.record_credential_usage(
+                operation_id,
+                record["credential_id"],
+                task_uid=active_task.task_uid,
+                authentication_mode="mfa",
+                outcome="blocked",
+            )
+        raise
     finally:
-        try:
-            client.logout()
-        except Exception:
-            pass
+        if client is not None:
+            try:
+                client.logout()
+            except Exception:
+                pass

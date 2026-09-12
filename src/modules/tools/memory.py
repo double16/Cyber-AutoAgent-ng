@@ -1546,6 +1546,8 @@ class ApplicationStore(Protocol):
 
     def complete_mfa_challenge(self, operation_id: str, challenge_id: str) -> dict[str, Any]: ...
 
+    def block_mfa_challenge(self, operation_id: str, challenge_id: str) -> bool: ...
+
     def expire_mfa_challenges(self, operation_id: str) -> int: ...
 
     def credential_ids_used_by_task(
@@ -1607,6 +1609,7 @@ class SQLiteApplicationStore:
         "list_credential_usage",
         "create_mfa_challenge",
         "complete_mfa_challenge",
+        "block_mfa_challenge",
         "expire_mfa_challenges",
         "credential_ids_used_by_task",
         "credential_ids_selected_by_task",
@@ -2254,6 +2257,20 @@ class SQLiteApplicationStore:
                 (now, self.logical_target, operation_id, now),
             )
         return max(0, int(cursor.rowcount))
+
+    def block_mfa_challenge(self, operation_id: str, challenge_id: str) -> bool:
+        """Mark an abandoned or failed pending MFA handoff blocked without retaining its code."""
+
+        self.expire_mfa_challenges(operation_id)
+        with self._lock, closing(self._connect()) as conn, conn:
+            cursor = conn.execute(
+                """
+                UPDATE mfa_challenges SET status = 'blocked', updated_at = ?
+                WHERE challenge_id = ? AND logical_target = ? AND operation_id = ? AND status = 'pending'
+                """,
+                (datetime.now().isoformat(), challenge_id, self.logical_target, operation_id),
+            )
+        return cursor.rowcount == 1
 
     def credential_ids_used_by_task(
         self,
