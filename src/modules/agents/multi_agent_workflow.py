@@ -11504,10 +11504,10 @@ while planning.
         """Return credential rules required in both generated and fallback task prompts."""
 
         return """- For authentication-capable work, establish the unauthenticated baseline before using credentials.
-  Query credential metadata by the resolved target and role. When eligible credentials exist for the assigned target,
-  perform an authenticated comparison with only checked-out credentials. Call `set_task_auth_context` with the
-  checked-out credential IDs before authenticated requests or findings. Do not copy secret values into artifacts,
-  acceptance summaries, findings, or prose.
+  Call `plan_authenticated_coverage` for each resolved target to obtain safe, deterministic credential contexts and
+  comparison pairs. When eligible credentials exist for the assigned target, perform an authenticated comparison with
+  each applicable context. Call `set_task_auth_context` with the checked-out credential IDs before authenticated
+  requests or findings. Do not copy secret values into artifacts, acceptance summaries, findings, or prose.
 - If no eligible credential is available and the assigned target exposes an authorized self-registration path, create
   a strong password with `generate_password`, complete only that registration flow, and store the result with
   `store_credential(origin="registered", evidence_refs=[...])` without operation_scope so later authorized
@@ -11518,6 +11518,14 @@ while planning.
 - Mark a checked-out credential valid, invalid, or otherwise unavailable only after a definitive authentication
   outcome, with a durable evidence reference and a specific reason. A generic request failure or authorization denial
   does not by itself prove that a credential is invalid.
+- For a checked-out OAuth2 client credential with a configured same-origin token URL, use
+  `exchange_oauth2_client_credentials` to obtain a transient token. Bind the source credential to the task context;
+  never store the returned access token in an artifact, finding, report, or a credential record.
+- For a checked-out API key, use `prepare_api_key_authentication` and apply exactly the returned header or query
+  parameter material to the next in-scope target request; do not infer placement or write the key to evidence.
+- After mapping a username/password form and its CSRF/session requirements, use
+  `prepare_login_form_authentication` with the observed field names. Submit only the task-local returned fields to
+  the assigned login endpoint; never write them to evidence.
 - When the task auth_context is authenticated, use only its declared credential IDs. When access-control or IDOR work
   requires a comparison, call `plan_access_control_comparisons` before checkout. Use only its distinct account, role,
   or tenant credential contexts and record any unavailable comparison as a coverage gap rather than inventing an

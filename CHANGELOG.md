@@ -2,6 +2,11 @@
 
 ### Features
 
+- Add target-scoped OAuth2 client-credentials exchange and API-key request-material tools that keep transient tokens
+  and secrets out of persistent evidence.
+- Add deterministic authenticated-coverage planning for each resolved target, including safe role/account/tenant
+  comparison contexts and explicit coverage gaps.
+- Add a validated username/password form-material adapter for mapped authentication flows.
 - Add a SQLite-backed credential store with typed login/API/OAuth credentials, lifecycle status history, exact
   resolved-target scoping, explicit aliases, agent checkout tools, password/TOTP generation, objective sanitization,
   authentication context for tasks/findings, interactive email-MFA handoff, operation-managed credential rotation,

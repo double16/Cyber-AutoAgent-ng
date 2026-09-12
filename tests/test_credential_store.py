@@ -8,12 +8,16 @@ import pytest
 from modules.tools.credentials import (
     canonicalize_credential_target,
     checkout_credential,
+    exchange_oauth2_client_credentials,
     extract_config_credentials,
     extract_objective_credentials,
     generate_mfa_code,
     generate_password,
     mark_credential_status,
     plan_access_control_comparisons,
+    plan_authenticated_coverage,
+    prepare_api_key_authentication,
+    prepare_login_form_authentication,
     query_credentials,
     request_mfa_code,
     resolve_credential_target_for_operation,
@@ -346,12 +350,22 @@ def test_access_control_comparisons_only_offer_distinct_account_role_or_tenant_p
     )
 
     result = json.loads(plan_access_control_comparisons("https://app.example.test"))
+    coverage = json.loads(plan_authenticated_coverage("https://app.example.test"))
 
     assert {item["kind"] for item in result["comparisons"]} == {"account", "role", "tenant"}
     assert {member["credential_id"], admin["credential_id"]} == {
         result["comparisons"][0]["left_credential_id"], result["comparisons"][0]["right_credential_id"]
     }
     assert "must-not-leak" not in json.dumps(result)
+    assert coverage["unauthenticated_required"] is True
+    assert {item["credential_id"] for item in coverage["authenticated_contexts"]} == {
+        member["credential_id"],
+        admin["credential_id"],
+    }
+    assert {item["kind"] for item in coverage["comparisons"]} == {"account", "role", "tenant"}
+    assert coverage["authenticated_coverage_gap"] is None
+    assert coverage["comparison_coverage_gap"] is None
+    assert "must-not-leak" not in json.dumps(coverage)
 
 
 def test_interactive_email_mfa_handoff_persists_only_challenge_metadata(tmp_path, monkeypatch):
@@ -685,6 +699,218 @@ def test_credential_payload_validation_supports_all_types_and_mfa_variants():
         )
     with pytest.raises(ValueError, match="values must be an object"):
         validate_credential_payload("api_key", None)
+    with pytest.raises(ValueError, match="client_auth_method"):
+        validate_credential_payload(
+            "oauth2_client",
+            {"client_id": "client", "client_secret": "secret", "client_auth_method": "private_key_jwt"},
+        )
+
+
+def test_oauth2_client_credentials_exchange_is_target_scoped_and_transient(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store, target="https://api.example.test")
+    credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="oauth2_client",
+        target="https://api.example.test",
+        role="api_user",
+        values={
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "token_url": "https://api.example.test/oauth/token",
+            "scopes": ["read", "write"],
+            "audience": "api",
+        },
+    )
+    checkout_credential(credential["credential_id"], "exchange OAuth client credentials")
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"access_token":"transient-token","token_type":"Bearer","expires_in":300}'
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr("modules.tools.credentials.urlrequest.urlopen", fake_urlopen)
+    result = json.loads(exchange_oauth2_client_credentials(credential["credential_id"]))
+
+    request, timeout = requests[0]
+    assert timeout == 15
+    assert request.full_url == "https://api.example.test/oauth/token"
+    assert request.get_header("Authorization").startswith("Basic ")
+    assert request.data == b"grant_type=client_credentials&scope=read+write&audience=api"
+    assert result == {
+        "credential_id": credential["credential_id"],
+        "access_token": "transient-token",
+        "token_type": "Bearer",
+        "expires_in": 300,
+    }
+    usage = store.list_credential_usage("op-1")
+    assert [entry["outcome"] for entry in usage] == ["selected", "succeeded"]
+    assert "client-secret" not in json.dumps(usage)
+
+
+def test_oauth2_client_credentials_exchange_rejects_unsafe_or_invalid_responses(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store, target="https://api.example.test")
+    unsafe_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="oauth2_client",
+        target="https://api.example.test",
+        role="api_user",
+        values={
+            "client_id": "client-id",
+            "client_secret": "client-secret",
+            "token_url": "https://identity.example.test/oauth/token",
+        },
+    )
+    checkout_credential(unsafe_credential["credential_id"], "reject unsafe token endpoint")
+    with pytest.raises(ValueError, match="target origin"):
+        exchange_oauth2_client_credentials(unsafe_credential["credential_id"])
+    with pytest.raises(ValueError, match="timeout"):
+        exchange_oauth2_client_credentials(unsafe_credential["credential_id"], timeout_seconds=0)
+
+    credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="oauth2_client",
+        target="https://api.example.test",
+        role="api_user",
+        values={
+            "client_id": "second-client",
+            "client_secret": "second-secret",
+            "token_url": "https://api.example.test/oauth/token",
+            "client_auth_method": "client_secret_post",
+        },
+    )
+    checkout_credential(credential["credential_id"], "validate OAuth response")
+
+    class MissingTokenResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    monkeypatch.setattr(
+        "modules.tools.credentials.urlrequest.urlopen", lambda *_args, **_kwargs: MissingTokenResponse()
+    )
+    with pytest.raises(ValueError, match="access_token"):
+        exchange_oauth2_client_credentials(credential["credential_id"])
+    assert store.get_credential(credential["credential_id"])["status"] == "unknown"
+    assert [entry["outcome"] for entry in store.list_credential_usage("op-1")] == [
+        "selected",
+        "selected",
+        "failed",
+    ]
+
+
+def test_api_key_request_material_uses_configured_target_placement(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store)
+    header_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="api_key",
+        target="https://app.example.test",
+        role="reader",
+        values={"api_key": "header-key", "name": "X-API-Key", "prefix": "Bearer "},
+    )
+    query_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="api_key",
+        target="https://app.example.test",
+        role="member",
+        values={"api_key": "query-key", "placement": "query", "name": "api_key"},
+    )
+    password_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="admin",
+        values={"username": "alice", "password": "password"},
+    )
+    checkout_credential(header_credential["credential_id"], "prepare header API key")
+    checkout_credential(query_credential["credential_id"], "prepare query API key")
+    checkout_credential(password_credential["credential_id"], "reject non-API credential")
+
+    header = json.loads(prepare_api_key_authentication(header_credential["credential_id"]))
+    query = json.loads(prepare_api_key_authentication(query_credential["credential_id"]))
+
+    assert header == {
+        "credential_id": header_credential["credential_id"],
+        "headers": {"X-API-Key": "Bearer header-key"},
+        "query_params": {},
+    }
+    assert query == {
+        "credential_id": query_credential["credential_id"],
+        "headers": {},
+        "query_params": {"api_key": "query-key"},
+    }
+    with pytest.raises(ValueError, match="api_key"):
+        prepare_api_key_authentication(password_credential["credential_id"])
+
+
+def test_login_form_material_requires_observed_distinct_fields_and_a_checked_out_login(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store)
+    credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        values={"username": "alice", "password": "password", "email": "alice@example.test"},
+    )
+    api_credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="api_key",
+        target="https://app.example.test",
+        role="reader",
+        values={"api_key": "key", "name": "X-API-Key"},
+    )
+    checkout_credential(credential["credential_id"], "prepare login form")
+    checkout_credential(api_credential["credential_id"], "reject non-login credential")
+
+    result = json.loads(
+        prepare_login_form_authentication(
+            credential["credential_id"],
+            username_field="user[email]",
+            password_field="password",
+            email_field="contact_email",
+        )
+    )
+
+    assert result == {
+        "credential_id": credential["credential_id"],
+        "form_fields": {
+            "user[email]": "alice",
+            "password": "password",
+            "contact_email": "alice@example.test",
+        },
+    }
+    with pytest.raises(ValueError, match="must differ"):
+        prepare_login_form_authentication(credential["credential_id"], username_field="login", password_field="login")
+    with pytest.raises(ValueError, match="invalid"):
+        prepare_login_form_authentication(credential["credential_id"], username_field="[name*=user]")
+    with pytest.raises(ValueError, match="username_password"):
+        prepare_login_form_authentication(api_credential["credential_id"])
 
 
 def test_credential_target_and_store_boundaries_cover_invalid_inputs_and_labels(tmp_path, monkeypatch):
@@ -842,6 +1068,10 @@ def test_agent_credential_tools_reject_access_outside_the_active_task_scope(tmp_
     with pytest.raises(ValueError, match="active task"):
         query_credentials()
     _store_active_target_task(store)
+    empty_coverage = json.loads(plan_authenticated_coverage("https://app.example.test"))
+    assert empty_coverage["authenticated_contexts"] == []
+    assert empty_coverage["authenticated_coverage_gap"] == "No eligible credentials for authenticated testing."
+    assert empty_coverage["comparison_coverage_gap"] == "No distinct eligible account, role, or tenant credential pair."
     credential = store_user_credential(
         operation_id="op-1",
         credential_type="api_key",
@@ -853,6 +1083,8 @@ def test_agent_credential_tools_reject_access_outside_the_active_task_scope(tmp_
         query_credentials("https://other.example.test")
     with pytest.raises(ValueError, match="outside the active task"):
         plan_access_control_comparisons("https://other.example.test")
+    with pytest.raises(ValueError, match="outside the active task"):
+        plan_authenticated_coverage("https://other.example.test")
     with pytest.raises(ValueError, match="checked out"):
         mark_credential_status(
             credential["credential_id"],

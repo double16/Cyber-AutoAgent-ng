@@ -275,6 +275,19 @@ are never replaced by an operation.
 An operation records a credential's validity only after a definitive authentication outcome and must provide both a
 specific reason and a durable reference. A generic request failure or an authorization denial does not alone mark a
 credential invalid.
+For OAuth2 client credentials, configure a same-origin `token_url`. After checkout, an agent can exchange it using
+the client-credentials grant; the returned access token is transient and is never stored in SQLite, artifacts, or
+reports. This restriction prevents an operation from sending a client secret to an arbitrary discovered endpoint.
+For API keys, the agent receives a deterministic header or query-parameter mapping from the configured placement,
+rather than guessing how to apply the key. That request material is transient and is likewise excluded from evidence
+and reports.
+Before authentication testing, agents receive a deterministic coverage plan for each resolved target: an
+unauthenticated baseline, every eligible credential context, and only the real account, role, or tenant pairs available
+for IDOR comparison. Missing credentials or pairs are preserved as coverage gaps rather than filled with invented
+accounts.
+For username/password authentication, agents first map the login flow and CSRF/session requirements, then request a
+task-local form-field mapping using the observed field names. The adapter does not submit a form or persist the
+returned values, which keeps authentication secrets out of artifacts and reports.
 The workflow's controller-appended task contract, including deterministic prompt fallbacks, retains the same
 unauthenticated-baseline, authenticated-comparison, self-registration, and IDOR-comparison rules for every module.
 Every reported finding labels its authentication context. Authenticated findings include only opaque credential IDs;

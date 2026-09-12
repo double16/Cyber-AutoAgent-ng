@@ -21,6 +21,9 @@ import struct
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib import error as urlerror
+from urllib import parse as urlparse
+from urllib import request as urlrequest
 from urllib.parse import urlsplit, urlunsplit
 
 from strands import tool
@@ -35,6 +38,8 @@ from modules.tools.memory import (
 _CREDENTIAL_TYPES = frozenset({"username_password", "email_login", "api_key", "oauth2_client"})
 _STATUSES = frozenset({"unknown", "pending", "valid", "invalid", "expired", "revoked", "retired"})
 _DURABLE_EVIDENCE_REF_PREFIXES = ("artifact:", "artifact_id:", "memory:", "finding:")
+_OAUTH_CLIENT_AUTH_METHODS = frozenset({"client_secret_basic", "client_secret_post"})
+_FORM_FIELD_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.\-\[\]]{0,127}")
 _OBJECTIVE_LOGIN_PATTERN = re.compile(
     r"(?is)\b(?:username|user)\s*[:=]\s*(?P<username>[^\s,;]+).*?\b(?:password|pass)\s*[:=]\s*(?P<password>[^\s,;]+)"
 )
@@ -239,12 +244,15 @@ def validate_credential_payload(credential_type: str, values: dict[str, Any]) ->
             "name": _require_string(values, "name"),
             "prefix": str(values.get("prefix") or ""),
         }
+    client_auth_method = str(values.get("client_auth_method") or "client_secret_basic").strip()
+    if client_auth_method not in _OAUTH_CLIENT_AUTH_METHODS:
+        raise ValueError("OAuth client_auth_method must be client_secret_basic or client_secret_post")
     payload = {
         "client_id": _require_string(values, "client_id"),
         "client_secret": _require_string(values, "client_secret"),
         "scopes": [str(scope).strip() for scope in values.get("scopes", []) if str(scope).strip()],
         "audience": str(values.get("audience") or "").strip(),
-        "client_auth_method": str(values.get("client_auth_method") or "client_secret_basic").strip(),
+        "client_auth_method": client_auth_method,
     }
     if values.get("token_url"):
         payload["token_url"] = canonicalize_credential_target(_require_string(values, "token_url"))
@@ -461,6 +469,20 @@ def plan_access_control_comparisons(target: str) -> str:
     if normalized_target not in target_values:
         raise ValueError("comparison target is outside the active task target scope")
     records = store.list_credentials(operation_id, target=normalized_target)
+    comparisons = _credential_comparison_pairs(records)
+    return json.dumps(
+        {
+            "target": normalized_target,
+            "comparisons": comparisons,
+            "coverage_gap": None if comparisons else "No distinct eligible account, role, or tenant credential pair.",
+        },
+        sort_keys=True,
+    )
+
+
+def _credential_comparison_pairs(records: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Return stable, credential-ID-only access-control comparisons from safe metadata."""
+
     comparisons: list[dict[str, str]] = []
     for index, left in enumerate(records):
         for right in records[index + 1 :]:
@@ -476,12 +498,49 @@ def plan_access_control_comparisons(target: str) -> str:
                 comparisons.append({"kind": "role", "left_credential_id": left_id, "right_credential_id": right_id})
             if left_tenant and right_tenant and left_tenant != right_tenant:
                 comparisons.append({"kind": "tenant", "left_credential_id": left_id, "right_credential_id": right_id})
-    unique_comparisons = list({(item["kind"], item["left_credential_id"], item["right_credential_id"]): item for item in comparisons}.values())
+    unique_comparisons = {
+        (item["kind"], item["left_credential_id"], item["right_credential_id"]): item for item in comparisons
+    }
+    return [unique_comparisons[key] for key in sorted(unique_comparisons)]
+
+
+@tool(name="plan_authenticated_coverage")
+def plan_authenticated_coverage(target: str) -> str:
+    """Return deterministic safe contexts for unauthenticated, authenticated, and IDOR coverage.
+
+    Call this before authenticated testing. It never invents an account: empty credential contexts or comparison pairs
+    are explicit coverage gaps that must be reported. Check out only the returned credential IDs for the assigned
+    target, establish the unauthenticated baseline first, and use one authenticated context at a time.
+    """
+
+    normalized_target = canonicalize_credential_target(target)
+    store = _get_database_store()
+    operation_id = _operation_id()
+    _, target_values = _active_task_target_values(store, operation_id)
+    if normalized_target not in target_values:
+        raise ValueError("coverage target is outside the active task target scope")
+    records = store.list_credentials(operation_id, target=normalized_target)
+    contexts = [
+        {
+            "credential_id": str(record["credential_id"]),
+            "credential_type": str(record["credential_type"]),
+            "role": str(record.get("role") or ""),
+            "account_label": str(record.get("account_label") or ""),
+            "tenant_label": str(record.get("tenant_label") or ""),
+        }
+        for record in records
+    ]
+    comparisons = _credential_comparison_pairs(records)
     return json.dumps(
         {
             "target": normalized_target,
-            "comparisons": unique_comparisons,
-            "coverage_gap": None if unique_comparisons else "No distinct eligible account, role, or tenant credential pair.",
+            "unauthenticated_required": True,
+            "authenticated_contexts": contexts,
+            "authenticated_coverage_gap": None if contexts else "No eligible credentials for authenticated testing.",
+            "comparisons": comparisons,
+            "comparison_coverage_gap": (
+                None if comparisons else "No distinct eligible account, role, or tenant credential pair."
+            ),
         },
         sort_keys=True,
     )
@@ -596,6 +655,175 @@ def checkout_credential(credential_id: str, purpose: str) -> str:
         outcome="selected",
     )
     return json.dumps({"credential_id": record["credential_id"], "credential_type": record["credential_type"], "values": record["payload"]})
+
+
+@tool(name="prepare_api_key_authentication")
+def prepare_api_key_authentication(credential_id: str) -> str:
+    """Build the configured header or query material for a checked-out API key.
+
+    Use exactly one returned mapping in the next in-scope target request. The API key remains task-local and must not
+    be copied to an artifact, finding, report, or credential record.
+    """
+
+    store = _get_database_store()
+    operation_id = _operation_id()
+    _active_task, record = _active_checked_out_credential(store, operation_id, str(credential_id))
+    if record["credential_type"] != "api_key":
+        raise ValueError("credential must be an api_key credential")
+    payload = record["payload"]
+    value = f"{payload['prefix']}{payload['api_key']}"
+    if payload["placement"] == "header":
+        return json.dumps(
+            {"credential_id": record["credential_id"], "headers": {payload["name"]: value}, "query_params": {}}
+        )
+    return json.dumps(
+        {"credential_id": record["credential_id"], "headers": {}, "query_params": {payload["name"]: value}}
+    )
+
+
+def _validated_form_field_name(value: str | None, label: str, *, required: bool) -> str:
+    """Normalize one detected login form field name without accepting selector syntax."""
+
+    normalized = str(value or "").strip()
+    if not normalized and required:
+        raise ValueError(f"{label} is required")
+    if normalized and not _FORM_FIELD_NAME_PATTERN.fullmatch(normalized):
+        raise ValueError(f"{label} is invalid")
+    return normalized
+
+
+@tool(name="prepare_login_form_authentication")
+def prepare_login_form_authentication(
+    credential_id: str,
+    username_field: str = "username",
+    password_field: str = "password",
+    email_field: str | None = None,
+) -> str:
+    """Build task-local fields for a checked-out username/password login form.
+
+    Map the form and its CSRF/session requirements first with the authentication-chain and browser tools. Supply only
+    detected field names; this tool does not submit the form or persist the returned values. Do not write the fields
+    to artifacts, findings, reports, or credential records.
+    """
+
+    normalized_username_field = _validated_form_field_name(username_field, "username_field", required=True)
+    normalized_password_field = _validated_form_field_name(password_field, "password_field", required=True)
+    normalized_email_field = _validated_form_field_name(email_field, "email_field", required=False)
+    if normalized_username_field == normalized_password_field:
+        raise ValueError("username_field and password_field must differ")
+    if normalized_email_field in {normalized_username_field, normalized_password_field}:
+        raise ValueError("email_field must differ from username_field and password_field")
+    store = _get_database_store()
+    operation_id = _operation_id()
+    _active_task, record = _active_checked_out_credential(store, operation_id, str(credential_id))
+    if record["credential_type"] != "username_password":
+        raise ValueError("credential must be a username_password credential")
+    payload = record["payload"]
+    fields = {
+        normalized_username_field: str(payload["username"]),
+        normalized_password_field: str(payload["password"]),
+    }
+    if normalized_email_field:
+        if not payload.get("email"):
+            raise ValueError("credential does not include an email value")
+        fields[normalized_email_field] = str(payload["email"])
+    return json.dumps({"credential_id": record["credential_id"], "form_fields": fields})
+
+
+def _credential_target_origin(target: str) -> tuple[str, str, int]:
+    """Return one canonical URL origin for secret-safe OAuth token exchange."""
+
+    parsed = urlparse.urlsplit(canonicalize_credential_target(target))
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if not scheme or not host:
+        raise ValueError("OAuth token URL must have a target origin")
+    try:
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError as error:
+        raise ValueError("OAuth token URL has an invalid port") from error
+    return scheme, host, port
+
+
+@tool(name="exchange_oauth2_client_credentials")
+def exchange_oauth2_client_credentials(credential_id: str, timeout_seconds: int = 15) -> str:
+    """Exchange a checked-out, same-origin OAuth2 client credential for a short-lived access token.
+
+    The credential must configure `token_url` on the resolved target's origin. The returned token is transient: it is
+    not stored in SQLite, artifacts, findings, or reports. Bind the checked-out credential to the task authentication
+    context before using the token for authenticated target requests.
+    """
+
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("OAuth token timeout must be between 1 and 60 seconds")
+    store = _get_database_store()
+    operation_id = _operation_id()
+    active_task, record = _active_checked_out_credential(store, operation_id, str(credential_id))
+    if record["credential_type"] != "oauth2_client":
+        raise ValueError("credential must be an oauth2_client credential")
+    payload = record["payload"]
+    token_url = str(payload.get("token_url") or "").strip()
+    if not token_url:
+        raise ValueError("OAuth credential requires token_url")
+    if _credential_target_origin(token_url) != _credential_target_origin(str(record["target"])):
+        raise ValueError("OAuth token URL must use the checked-out credential target origin")
+
+    form_values = {"grant_type": "client_credentials"}
+    if payload.get("scopes"):
+        form_values["scope"] = " ".join(str(scope) for scope in payload["scopes"])
+    if payload.get("audience"):
+        form_values["audience"] = str(payload["audience"])
+    headers = {"Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"}
+    if payload["client_auth_method"] == "client_secret_basic":
+        basic_value = base64.b64encode(
+            f"{payload['client_id']}:{payload['client_secret']}".encode()
+        ).decode("ascii")
+        headers["Authorization"] = f"Basic {basic_value}"
+    else:
+        form_values["client_id"] = str(payload["client_id"])
+        form_values["client_secret"] = str(payload["client_secret"])
+    request = urlrequest.Request(
+        token_url,
+        data=urlparse.urlencode(form_values).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(request, timeout=timeout_seconds) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, TimeoutError, urlerror.HTTPError, ValueError, json.JSONDecodeError) as error:
+        store.record_credential_usage(
+            operation_id,
+            record["credential_id"],
+            task_uid=active_task.task_uid,
+            outcome="failed",
+        )
+        raise ValueError("OAuth client-credentials exchange failed") from error
+    access_token = response_payload.get("access_token") if isinstance(response_payload, dict) else None
+    if not isinstance(access_token, str) or not access_token.strip():
+        store.record_credential_usage(
+            operation_id,
+            record["credential_id"],
+            task_uid=active_task.task_uid,
+            outcome="failed",
+        )
+        raise ValueError("OAuth token response did not include an access_token")
+    expires_in = response_payload.get("expires_in") if isinstance(response_payload, dict) else None
+    safe_expires_in = expires_in if isinstance(expires_in, (int, float)) and not isinstance(expires_in, bool) else None
+    store.record_credential_usage(
+        operation_id,
+        record["credential_id"],
+        task_uid=active_task.task_uid,
+        outcome="succeeded",
+    )
+    return json.dumps(
+        {
+            "credential_id": record["credential_id"],
+            "access_token": access_token,
+            "token_type": str(response_payload.get("token_type") or "Bearer"),
+            "expires_in": safe_expires_in,
+        }
+    )
 
 
 @tool(name="mark_credential_status")

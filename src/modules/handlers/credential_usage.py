@@ -12,8 +12,11 @@ from modules.tools.memory import _get_database_store, _operation_id, active_cred
 
 _CREDENTIAL_BOOKKEEPING_TOOLS = {
     "checkout_credential",
+    "exchange_oauth2_client_credentials",
     "generate_mfa_code",
     "mark_credential_status",
+    "prepare_api_key_authentication",
+    "prepare_login_form_authentication",
     "query_credentials",
     "request_mfa_code",
     "retrieve_email_mfa_code",
