@@ -1545,9 +1545,11 @@ class ApplicationStore(Protocol):
         task_uid: str | None = None,
     ) -> dict[str, Any]: ...
 
-    def complete_mfa_challenge(self, operation_id: str, challenge_id: str) -> dict[str, Any]: ...
+    def complete_mfa_challenge(
+        self, operation_id: str, challenge_id: str, task_uid: str | None = None
+    ) -> dict[str, Any]: ...
 
-    def block_mfa_challenge(self, operation_id: str, challenge_id: str) -> bool: ...
+    def block_mfa_challenge(self, operation_id: str, challenge_id: str, task_uid: str | None = None) -> bool: ...
 
     def expire_mfa_challenges(self, operation_id: str) -> int: ...
 
@@ -2216,10 +2218,13 @@ class SQLiteApplicationStore:
             "created_at": now,
         }
 
-    def complete_mfa_challenge(self, operation_id: str, challenge_id: str) -> dict[str, Any]:
+    def complete_mfa_challenge(
+        self, operation_id: str, challenge_id: str, task_uid: str | None = None
+    ) -> dict[str, Any]:
         """Mark one pending MFA challenge completed without storing its one-time code."""
 
         self.expire_mfa_challenges(operation_id)
+        normalized_task_uid = str(task_uid or "").strip() or None
         now = datetime.now().isoformat()
         with self._lock, closing(self._connect()) as conn, conn:
             row = conn.execute(
@@ -2234,6 +2239,8 @@ class SQLiteApplicationStore:
                 raise ValueError("MFA challenge is unavailable")
             if row[2] != "pending":
                 raise ValueError(f"MFA challenge is not pending: {row[2]}")
+            if row[5] is not None and row[5] != normalized_task_uid:
+                raise ValueError("MFA challenge is unavailable to this task")
             conn.execute(
                 "UPDATE mfa_challenges SET status = 'completed', updated_at = ? WHERE challenge_id = ?",
                 (now, challenge_id),
@@ -2264,17 +2271,19 @@ class SQLiteApplicationStore:
             )
         return max(0, int(cursor.rowcount))
 
-    def block_mfa_challenge(self, operation_id: str, challenge_id: str) -> bool:
+    def block_mfa_challenge(self, operation_id: str, challenge_id: str, task_uid: str | None = None) -> bool:
         """Mark an abandoned or failed pending MFA handoff blocked without retaining its code."""
 
         self.expire_mfa_challenges(operation_id)
+        normalized_task_uid = str(task_uid or "").strip() or None
         with self._lock, closing(self._connect()) as conn, conn:
             cursor = conn.execute(
                 """
                 UPDATE mfa_challenges SET status = 'blocked', updated_at = ?
                 WHERE challenge_id = ? AND logical_target = ? AND operation_id = ? AND status = 'pending'
+                  AND (task_uid IS NULL OR task_uid = ?)
                 """,
-                (datetime.now().isoformat(), challenge_id, self.logical_target, operation_id),
+                (datetime.now().isoformat(), challenge_id, self.logical_target, operation_id, normalized_task_uid),
             )
         return cursor.rowcount == 1
 

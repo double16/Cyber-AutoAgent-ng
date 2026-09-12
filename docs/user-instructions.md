@@ -265,6 +265,8 @@ Generated one-time codes are not persisted. For email MFA, an agent can retrieve
 mailbox or request one through the React terminal or interactive CLI. The prompt is marked sensitive, the response is
 not kept in terminal history, and only non-secret challenge metadata (never the code) is retained in the database.
 That metadata includes the initiating task ID so MFA handoffs can be audited without retaining the one-time code.
+Task-bound MFA challenges can be completed or blocked only by that same active task; legacy unbound records remain
+compatible with existing integrations.
 Expired challenges are marked expired; malformed, unavailable, or ambiguous handoffs are marked blocked rather than
 left pending.
 Mailbox retrieval accepts only IMAP server timestamps from immediately after the challenge begins (with a 60-second

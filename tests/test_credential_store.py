@@ -740,9 +740,10 @@ def test_mfa_challenge_cannot_be_completed_after_expiry(tmp_path):
         task_uid="task-9",
     )
     assert current["task_uid"] == "task-9"
-    assert store.block_mfa_challenge("op-1", current["challenge_id"]) is True
+    assert store.block_mfa_challenge("op-1", current["challenge_id"], task_uid="task-other") is False
+    assert store.block_mfa_challenge("op-1", current["challenge_id"], task_uid="task-9") is True
     with pytest.raises(ValueError, match="not pending"):
-        store.complete_mfa_challenge("op-1", current["challenge_id"])
+        store.complete_mfa_challenge("op-1", current["challenge_id"], task_uid="task-9")
 
     completed = store.create_mfa_challenge(
         "op-1",
@@ -752,7 +753,9 @@ def test_mfa_challenge_cannot_be_completed_after_expiry(tmp_path):
         {"code_pattern": "\\d{6}"},
         task_uid="task-10",
     )
-    assert store.complete_mfa_challenge("op-1", completed["challenge_id"])["task_uid"] == "task-10"
+    with pytest.raises(ValueError, match="unavailable to this task"):
+        store.complete_mfa_challenge("op-1", completed["challenge_id"], task_uid="task-other")
+    assert store.complete_mfa_challenge("op-1", completed["challenge_id"], task_uid="task-10")["task_uid"] == "task-10"
 
 
 def test_operation_managed_credential_rotation_preserves_retired_history(tmp_path, monkeypatch):

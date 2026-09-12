@@ -30,6 +30,7 @@
 
 ### Fixes
 
+- Restrict task-bound MFA challenge completion and blocking to the task that initiated the handoff.
 - Require durable discovery, registration, or rotation evidence for operation-created credentials, and retain that
   evidence with their initial credential status events.
 - Require durable, definitive authentication evidence before agents update credential validity, preventing generic

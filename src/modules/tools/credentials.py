@@ -1203,7 +1203,7 @@ def request_mfa_code(
     try:
         code = input().strip()
     except (EOFError, OSError) as error:
-        store.block_mfa_challenge(operation_id, challenge["challenge_id"])
+        store.block_mfa_challenge(operation_id, challenge["challenge_id"], task_uid=active_task.task_uid)
         store.record_credential_usage(
             operation_id,
             record["credential_id"],
@@ -1213,7 +1213,7 @@ def request_mfa_code(
         )
         raise ValueError("MFA code handoff is unavailable") from error
     if not pattern.fullmatch(code):
-        store.block_mfa_challenge(operation_id, challenge["challenge_id"])
+        store.block_mfa_challenge(operation_id, challenge["challenge_id"], task_uid=active_task.task_uid)
         store.record_credential_usage(
             operation_id,
             record["credential_id"],
@@ -1222,7 +1222,7 @@ def request_mfa_code(
             outcome="blocked",
         )
         raise ValueError("MFA code did not match the requested format")
-    store.complete_mfa_challenge(operation_id, challenge["challenge_id"])
+    store.complete_mfa_challenge(operation_id, challenge["challenge_id"], task_uid=active_task.task_uid)
     store.record_credential_usage(
         operation_id,
         record["credential_id"],
@@ -1321,7 +1321,7 @@ def retrieve_email_mfa_code(
         if len(matches) != 1:
             raise ValueError("email MFA code is missing or ambiguous")
         code = next(iter(matches))
-        store.complete_mfa_challenge(operation_id, challenge["challenge_id"])
+        store.complete_mfa_challenge(operation_id, challenge["challenge_id"], task_uid=active_task.task_uid)
         store.record_credential_usage(
             operation_id,
             target_record["credential_id"],
@@ -1338,7 +1338,7 @@ def retrieve_email_mfa_code(
         )
         return code
     except Exception:
-        store.block_mfa_challenge(operation_id, challenge["challenge_id"])
+        store.block_mfa_challenge(operation_id, challenge["challenge_id"], task_uid=active_task.task_uid)
         store.record_credential_usage(
             operation_id,
             target_record["credential_id"],
