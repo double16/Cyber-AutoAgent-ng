@@ -263,7 +263,7 @@ from a checked-out credential ID so the provisioning secret does not need to be 
 provisioning-secret generation remains available only for standalone compatibility.
 Generated one-time codes are not persisted. For email MFA, an agent can retrieve a code from a configured TLS IMAP
 mailbox or request one through the React terminal or interactive CLI. The prompt is marked sensitive, the response is
-not kept in terminal history, and only challenge metadata (never the code) is retained in the database.
+not kept in terminal history, and only non-secret challenge metadata (never the code) is retained in the database.
 Both MFA handoff methods require the active task to have checked out the target credential. Email mailbox retrieval
 also requires that selected target credential to explicitly reference the mailbox; a mailbox credential cannot be
 read independently by an unrelated task.

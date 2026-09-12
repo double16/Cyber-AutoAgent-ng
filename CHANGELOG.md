@@ -19,6 +19,8 @@
   in-place migration of existing plaintext credential records.
 - Support safe credential-store encryption-key rotation through temporary prior-key configuration and automatic
   authenticated re-encryption under the new primary key.
+- Record completed email-MFA mailbox challenges against the checked-out target credential without retaining the
+  one-time code, and report both the target and mailbox credentials used in that flow.
 
 ### Fixes
 

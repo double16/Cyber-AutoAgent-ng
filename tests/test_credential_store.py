@@ -663,8 +663,28 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
 
     assert retrieve_email_mfa_code(mailbox_credential["credential_id"], sender_contains="noreply") == "654321"
     assert fake_client.logged_out is True
+    with sqlite3.connect(tmp_path / "credentials.db") as connection:
+        challenge = connection.execute(
+            "SELECT credential_id, status, metadata FROM mfa_challenges "
+            "WHERE credential_id = ? ORDER BY created_at DESC LIMIT 1",
+            (mailbox_bound_credential["credential_id"],),
+        ).fetchone()
+    assert challenge is not None
+    assert challenge[:2] == (mailbox_bound_credential["credential_id"], "completed")
+    assert "654321" not in challenge[2]
+    mfa_usage = [
+        entry
+        for entry in store.list_credential_usage("op-1")
+        if entry["authentication_mode"] == "mfa" and entry["outcome"] == "used"
+    ]
+    assert {entry["credential_id"] for entry in mfa_usage} >= {
+        mailbox_bound_credential["credential_id"],
+        mailbox_credential["credential_id"],
+    }
     with pytest.raises(ValueError, match="capture"):
         retrieve_email_mfa_code(mailbox_credential["credential_id"], code_pattern=r"(\\d+)")
+    with pytest.raises(ValueError, match="TTL"):
+        retrieve_email_mfa_code(mailbox_credential["credential_id"], ttl_seconds=29)
 
 
 def test_mfa_challenge_cannot_be_completed_after_expiry(tmp_path):

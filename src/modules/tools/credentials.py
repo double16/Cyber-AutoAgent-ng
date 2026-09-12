@@ -1113,7 +1113,7 @@ def _active_checked_out_credential(store: Any, operation_id: str, credential_id:
     return active_task, record
 
 
-def _active_mfa_mailbox_task(store: Any, operation_id: str, mailbox_credential_id: str) -> Any:
+def _active_mfa_mailbox_task(store: Any, operation_id: str, mailbox_credential_id: str) -> tuple[Any, dict[str, Any]]:
     """Require an active selected target credential that explicitly references a mailbox."""
 
     active_task = active_credential_task(store, operation_id)
@@ -1131,7 +1131,7 @@ def _active_mfa_mailbox_task(store: Any, operation_id: str, mailbox_credential_i
             str(mfa.get("type") or "").lower() == "email"
             and str(mfa.get("mailbox_credential_id") or "") == mailbox_credential_id
         ):
-            return active_task
+            return active_task, record
     raise ValueError("email MFA mailbox is not configured by an active checked-out credential")
 
 
@@ -1208,16 +1208,20 @@ def retrieve_email_mfa_code(
     sender_contains: str = "",
     subject_contains: str = "",
     code_pattern: str = r"\b\d{6}\b",
+    ttl_seconds: int = 300,
 ) -> str:
     """Retrieve one unique email MFA code through the configured TLS IMAP mailbox.
 
     The code is returned only to the active agent and is never persisted. A missing or ambiguous code is an error so
-    callers can request an interactive MFA handoff instead of submitting an unrelated email code.
+    callers can request an interactive MFA handoff instead of submitting an unrelated email code. The controller
+    retains the resulting challenge metadata, but never the retrieved code.
     """
 
+    if ttl_seconds < 30 or ttl_seconds > 900:
+        raise ValueError("MFA challenge TTL must be between 30 and 900 seconds")
     store = _get_database_store()
     operation_id = _operation_id()
-    active_task = _active_mfa_mailbox_task(store, operation_id, str(mailbox_credential_id))
+    active_task, target_record = _active_mfa_mailbox_task(store, operation_id, str(mailbox_credential_id))
     record = store.get_credential(str(mailbox_credential_id), include_payload=True)
     if record is None or record["credential_type"] != "email_login" or record["status"] not in {"unknown", "valid"}:
         raise ValueError("eligible email_login credential is required")
@@ -1229,6 +1233,20 @@ def retrieve_email_mfa_code(
         raise ValueError("invalid email MFA code pattern") from error
     if pattern.groups:
         raise ValueError("email MFA code pattern must not contain capture groups")
+    expires_at = (datetime.now(UTC) + timedelta(seconds=ttl_seconds)).isoformat()
+    challenge = store.create_mfa_challenge(
+        operation_id,
+        target_record["credential_id"],
+        "email",
+        expires_at,
+        {
+            "code_pattern": code_pattern,
+            "source": "imap",
+            "mailbox_credential_id": record["credential_id"],
+            "sender_contains": str(sender_contains or "")[:240],
+            "subject_contains": str(subject_contains or "")[:240],
+        },
+    )
     client = imaplib.IMAP4_SSL(mailbox["host"], int(mailbox["port"]))
     try:
         client.login(payload["email"], payload["password"])
@@ -1263,6 +1281,14 @@ def retrieve_email_mfa_code(
         if len(matches) != 1:
             raise ValueError("email MFA code is missing or ambiguous")
         code = next(iter(matches))
+        store.complete_mfa_challenge(operation_id, challenge["challenge_id"])
+        store.record_credential_usage(
+            operation_id,
+            target_record["credential_id"],
+            task_uid=active_task.task_uid,
+            authentication_mode="mfa",
+            outcome="used",
+        )
         store.record_credential_usage(
             operation_id,
             record["credential_id"],
