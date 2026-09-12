@@ -558,10 +558,11 @@ def test_interactive_email_mfa_handoff_persists_only_challenge_metadata(tmp_path
     assert events[0]["handoff_kind"] == "mfa_code"
 
     with sqlite3.connect(tmp_path / "credentials.db") as connection:
-        row = connection.execute("SELECT status, metadata FROM mfa_challenges").fetchone()
+        row = connection.execute("SELECT status, metadata, task_uid FROM mfa_challenges").fetchone()
     assert row is not None
     assert row[0] == "completed"
     assert "123456" not in row[1]
+    assert row[2] == "task-1"
     assert "123456" not in json.dumps(store.list_credential_usage("op-1"))
 
 
@@ -723,6 +724,7 @@ def test_mfa_challenge_cannot_be_completed_after_expiry(tmp_path):
     challenge = store.create_mfa_challenge(
         "op-1", credential["credential_id"], "email", "2000-01-01T00:00:00+00:00", {"code_pattern": "\\d{6}"}
     )
+    assert challenge["task_uid"] is None
 
     assert store.expire_mfa_challenges("op-1") == 1
     with pytest.raises(ValueError, match="not pending"):
@@ -730,11 +732,27 @@ def test_mfa_challenge_cannot_be_completed_after_expiry(tmp_path):
     assert store.block_mfa_challenge("op-1", challenge["challenge_id"]) is False
 
     current = store.create_mfa_challenge(
-        "op-1", credential["credential_id"], "email", "2099-01-01T00:00:00+00:00", {"code_pattern": "\\d{6}"}
+        "op-1",
+        credential["credential_id"],
+        "email",
+        "2099-01-01T00:00:00+00:00",
+        {"code_pattern": "\\d{6}"},
+        task_uid="task-9",
     )
+    assert current["task_uid"] == "task-9"
     assert store.block_mfa_challenge("op-1", current["challenge_id"]) is True
     with pytest.raises(ValueError, match="not pending"):
         store.complete_mfa_challenge("op-1", current["challenge_id"])
+
+    completed = store.create_mfa_challenge(
+        "op-1",
+        credential["credential_id"],
+        "email",
+        "2099-01-01T00:00:00+00:00",
+        {"code_pattern": "\\d{6}"},
+        task_uid="task-10",
+    )
+    assert store.complete_mfa_challenge("op-1", completed["challenge_id"])["task_uid"] == "task-10"
 
 
 def test_operation_managed_credential_rotation_preserves_retired_history(tmp_path, monkeypatch):

@@ -1187,6 +1187,7 @@ def request_mfa_code(
         "email",
         expires_at,
         {"code_pattern": code_pattern, "prompt": str(prompt or "")[:240]},
+        task_uid=active_task.task_uid,
     )
     emit_memory_event(
         {
@@ -1276,6 +1277,7 @@ def retrieve_email_mfa_code(
             "sender_contains": str(sender_contains or "")[:240],
             "subject_contains": str(subject_contains or "")[:240],
         },
+        task_uid=active_task.task_uid,
     )
     challenge_started_at = datetime.fromisoformat(challenge["created_at"]).astimezone(UTC)
     received_after = challenge_started_at - timedelta(seconds=60)

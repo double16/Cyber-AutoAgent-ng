@@ -30,6 +30,7 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         }
         metric_columns = {row[1] for row in conn.execute("PRAGMA table_info(operation_model_metrics)")}
         task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+        mfa_challenge_columns = {row[1] for row in conn.execute("PRAGMA table_info(mfa_challenges)")}
     assert applied == [
         (1, "0001_initial_schema.sql"),
         (2, "0002_operation_model_metrics.sql"),
@@ -38,6 +39,7 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         (5, "0005_task_replacement_lineage.sql"),
         (6, "0006_task_recovery_context.sql"),
         (7, "0007_credential_store.sql"),
+        (8, "0008_mfa_challenge_task_scope.sql"),
     ]
     assert {
         "operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts",
@@ -45,6 +47,7 @@ def test_packaged_migrations_create_schema_once(tmp_path):
     }.issubset(tables)
     assert "correction_categories" in metric_columns
     assert "auth_context" in task_columns
+    assert "task_uid" in mfa_challenge_columns
 
 
 def test_task_replacement_lineage_migrates_existing_database(tmp_path, monkeypatch):
@@ -70,7 +73,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with closing(sqlite3.connect(db_path)) as conn, conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 7
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 8
 
 
 def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):

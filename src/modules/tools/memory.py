@@ -1542,6 +1542,7 @@ class ApplicationStore(Protocol):
         method: str,
         expires_at: str,
         metadata: dict[str, Any],
+        task_uid: str | None = None,
     ) -> dict[str, Any]: ...
 
     def complete_mfa_challenge(self, operation_id: str, challenge_id: str) -> dict[str, Any]: ...
@@ -2167,11 +2168,13 @@ class SQLiteApplicationStore:
         method: str,
         expires_at: str,
         metadata: dict[str, Any],
+        task_uid: str | None = None,
     ) -> dict[str, Any]:
         """Persist a non-secret MFA challenge for an interactive or mailbox flow."""
 
         if method not in {"totp", "email"}:
             raise ValueError("MFA challenge method must be totp or email")
+        normalized_task_uid = str(task_uid or "").strip() or None
         now = datetime.now().isoformat()
         challenge_id = str(uuid.uuid4())
         with self._lock, closing(self._connect()) as conn, conn:
@@ -2186,8 +2189,8 @@ class SQLiteApplicationStore:
                 """
                 INSERT INTO mfa_challenges (
                     challenge_id, credential_id, logical_target, operation_id, method, status, expires_at, metadata,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                    task_uid, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
                 """,
                 (
                     challenge_id,
@@ -2197,6 +2200,7 @@ class SQLiteApplicationStore:
                     method,
                     expires_at,
                     json.dumps(metadata, sort_keys=True),
+                    normalized_task_uid,
                     now,
                     now,
                 ),
@@ -2208,6 +2212,7 @@ class SQLiteApplicationStore:
             "status": "pending",
             "expires_at": expires_at,
             "metadata": dict(metadata),
+            "task_uid": normalized_task_uid,
             "created_at": now,
         }
 
@@ -2219,7 +2224,7 @@ class SQLiteApplicationStore:
         with self._lock, closing(self._connect()) as conn, conn:
             row = conn.execute(
                 """
-                SELECT credential_id, method, status, expires_at, metadata, created_at
+                SELECT credential_id, method, status, expires_at, metadata, task_uid, created_at
                 FROM mfa_challenges
                 WHERE challenge_id = ? AND logical_target = ? AND operation_id = ?
                 """,
@@ -2240,7 +2245,8 @@ class SQLiteApplicationStore:
             "status": "completed",
             "expires_at": row[3],
             "metadata": json.loads(row[4]),
-            "created_at": row[5],
+            "task_uid": row[5],
+            "created_at": row[6],
             "updated_at": now,
         }
 

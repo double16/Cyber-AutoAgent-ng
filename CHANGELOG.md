@@ -26,6 +26,7 @@
   from satisfying a new authentication challenge.
 - Distinguish MFA credential use from authenticated request use in report provenance without exposing credential
   payloads.
+- Bind retained MFA challenge metadata to its initiating task for credential-flow provenance.
 
 ### Fixes
 
