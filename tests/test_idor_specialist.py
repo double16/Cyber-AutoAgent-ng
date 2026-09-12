@@ -580,6 +580,23 @@ def test_idor_specialist_rejects_mixed_raw_and_store_credentials(monkeypatch):
     assert "secret" not in json.dumps(result)
 
 
+def test_idor_specialist_rejects_raw_login_credentials_for_workflow_agents(monkeypatch):
+    monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ids, "_python_idor_engine", lambda *args, **kwargs: [])
+
+    result = json.loads(
+        ids.idor_specialist(
+            target_url="https://app.example.test/api?id=1",
+            login_url="https://app.example.test/login",
+            credentials='{"username": "admin", "password": "secret"}',
+            tool_context=MagicMock(spec=ids.ToolContext),
+        )
+    )
+
+    assert "workflow agent login credentials must use checked-out credential_ids" in result["errors"][0]
+    assert "secret" not in json.dumps(result)
+
+
 def test_idor_specialist_requires_login_url_for_credential_ids(monkeypatch):
     monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: [])
     monkeypatch.setattr(ids, "_python_idor_engine", lambda *args, **kwargs: [])

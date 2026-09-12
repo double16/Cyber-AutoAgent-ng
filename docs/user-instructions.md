@@ -251,8 +251,10 @@ be committed to source control or copied into task artifacts.
 For a concise objective, common `username=... password=...`, `email=... password=...`, `api_key=...`, and
 `oauth2_client_id=... oauth2_client_secret=...` forms are moved into the credential store before the objective is
 logged or sent to a model. Use a dedicated credential source for complex or MFA-backed credentials. TOTP provisioning
-secrets support SHA-1/SHA-256/SHA-512, six to ten digits, and a 30-second default;
-generated one-time codes are not persisted. For email MFA, an agent can retrieve a code from a configured TLS IMAP
+secrets support SHA-1/SHA-256/SHA-512, six to ten digits, and a 30-second default. Workflow agents generate TOTP codes
+from a checked-out credential ID so the provisioning secret does not need to be copied into another tool call; direct
+provisioning-secret generation remains available only for standalone compatibility.
+Generated one-time codes are not persisted. For email MFA, an agent can retrieve a code from a configured TLS IMAP
 mailbox or request one through the React terminal or interactive CLI. The prompt is marked sensitive, the response is
 not kept in terminal history, and only challenge metadata (never the code) is retained in the database.
 Both MFA handoff methods require the active task to have checked out the target credential. Email mailbox retrieval
@@ -291,7 +293,8 @@ returned values, which keeps authentication secrets out of artifacts and reports
 For IDOR specialist replay that needs two authenticated sessions, agents use the planned comparison pair's checked-out
 credential IDs directly with the observed login field names. The specialist builds only task-local login contexts,
 requires the login endpoint to share the resolved target origin, and records credential use by ID instead of accepting
-raw credential JSON from the agent workflow.
+raw credential JSON from the agent workflow. Its legacy raw credential JSON arguments remain available only to
+standalone and CLI callers for backwards compatibility; workflow agents are required to use credential IDs.
 The workflow's controller-appended task contract, including deterministic prompt fallbacks, retains the same
 unauthenticated-baseline, authenticated-comparison, self-registration, and IDOR-comparison rules for every module.
 Every reported finding labels its authentication context. Authenticated findings include only opaque credential IDs;

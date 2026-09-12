@@ -13,6 +13,8 @@
   authentication context for tasks/findings, interactive email-MFA handoff, operation-managed credential rotation,
   target-scoped authenticated-task binding, and masked credential-use reporting.
 - Sanitize email-login and OAuth client secrets supplied in an operation objective before task planning or model use.
+- Generate configured TOTP MFA codes from checked-out credential IDs while keeping the provisioning secret inside the
+  credential store, and reserve direct provisioning-secret generation for standalone callers.
 
 ### Fixes
 
@@ -28,6 +30,7 @@
   controller-appended executor contract and deterministic workflow prompt fallback.
 - Require store-backed IDOR specialist logins to use checked-out task-authentication credentials on the resolved
   target origin, preventing raw credential JSON from the agent workflow.
+- Prevent workflow-agent IDOR calls from using legacy raw credential JSON; standalone and CLI compatibility remains.
 - Require active, target-scoped credential checkout before an agent can request an MFA code or read a configured
   email-MFA mailbox, preventing unrelated tasks from accessing MFA factors.
 - Reject credential imports and discovered credentials whose target is not an exact resolved operation target.

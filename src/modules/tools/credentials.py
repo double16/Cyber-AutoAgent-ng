@@ -26,7 +26,7 @@ from urllib import parse as urlparse
 from urllib import request as urlrequest
 from urllib.parse import urlsplit, urlunsplit
 
-from strands import tool
+from strands import ToolContext, tool
 
 from modules.tools.memory import (
     _get_database_store,
@@ -1028,17 +1028,65 @@ def generate_password(length: int = 20) -> str:
     return "".join(characters)
 
 
-@tool(name="generate_mfa_code")
-def generate_mfa_code(provisioning_secret: str, digits: int = 6, period: int = 30, algorithm: str = "SHA1") -> str:
-    """Generate a current TOTP code. The code is never persisted by this tool."""
+@tool(name="generate_mfa_code", context=True)
+def generate_mfa_code(
+    provisioning_secret: str | None = None,
+    digits: int = 6,
+    period: int = 30,
+    algorithm: str = "SHA1",
+    credential_id: str | None = None,
+    tool_context: ToolContext | None = None,
+) -> str:
+    """Generate a current TOTP code. The code and provisioning secret are never persisted by this tool.
+
+    Workflow agents must pass a checked-out `credential_id` for configured TOTP MFA. The direct
+    `provisioning_secret` argument remains available only for standalone compatibility.
+    """
+
+    if tool_context is not None and provisioning_secret:
+        raise ValueError("workflow agent TOTP generation must use a checked-out credential_id")
+    if credential_id:
+        if provisioning_secret:
+            raise ValueError("credential_id cannot be combined with a provisioning_secret")
+        store = _get_database_store()
+        operation_id = _operation_id()
+        active_task, record = _active_checked_out_credential(store, operation_id, str(credential_id))
+        payload = record["payload"]
+        mfa = payload.get("mfa") if isinstance(payload, dict) else None
+        if not isinstance(mfa, dict) or str(mfa.get("type") or "").lower() != "totp":
+            raise ValueError("credential does not have configured TOTP MFA")
+        code = _generate_totp_code(
+            str(mfa["secret"]),
+            int(mfa.get("digits", 6)),
+            int(mfa.get("period", 30)),
+            str(mfa.get("algorithm", "SHA1")),
+        )
+        store.record_credential_usage(
+            operation_id,
+            record["credential_id"],
+            task_uid=active_task.task_uid,
+            authentication_mode="mfa",
+            outcome="used",
+        )
+        return code
+
+    if not provisioning_secret:
+        raise ValueError("provisioning_secret or credential_id is required")
+
+    return _generate_totp_code(provisioning_secret, digits, period, algorithm)
+
+
+def _generate_totp_code(provisioning_secret: str, digits: int = 6, period: int = 30, algorithm: str = "SHA1") -> str:
+    """Generate a TOTP value from validated direct or credential-backed inputs."""
 
     if digits < 6 or digits > 10 or period <= 0:
         raise ValueError("invalid TOTP digits or period")
     normalized_algorithm = str(algorithm or "").upper()
     if normalized_algorithm not in {"SHA1", "SHA256", "SHA512"}:
         raise ValueError("invalid TOTP algorithm")
+    normalized_secret = provisioning_secret.strip().replace(" ", "")
     try:
-        secret = base64.b32decode(provisioning_secret.strip().replace(" ", "").upper() + "=" * (-len(provisioning_secret.strip().replace(" ", "")) % 8))
+        secret = base64.b32decode(normalized_secret.upper() + "=" * (-len(normalized_secret) % 8))
     except Exception as error:
         raise ValueError("invalid TOTP provisioning secret") from error
     counter = int(time.time() // period)

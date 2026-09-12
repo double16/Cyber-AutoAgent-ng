@@ -165,13 +165,15 @@ def idor_specialist(
     - alt_cookies/alt_headers: alternate low-priv or unauth context for replay comparisons (optional)
     - test_values: JSON list of custom values to test as payloads (optional)
     - login_url: URL for the login page (optional)
-    - credentials: Login credentials in JSON format (e.g., '{"username": "admin", "password": "password"}') (optional)
+    - credentials: Legacy standalone/CLI login credentials in JSON format (optional; workflow agents must use
+      credential_ids)
     - credential_ids: two checked-out credential-store IDs for authenticated IDOR replay (optional)
     - username_field/password_field/email_field: observed login form field names for credential_ids (optional)
     - extra_login_fields: non-secret login form fields such as CSRF tokens for credential_ids (optional)
     - login_method: HTTP method to use for login (default: POST) (optional)
     - num_range: "start-end" to seed numeric mutations, e.g. "1-1000" (optional)
-    - multi_credentials: JSON list of multiple credentials for multi-user testing (optional)
+    - multi_credentials: Legacy standalone/CLI JSON list for multi-user testing (optional; workflow agents must use
+      credential_ids)
     - evasion: Enable evasion techniques (e.g., jitter, UA rotation) (optional)
     - request_type: "query", "json", or "graphql" (optional)
     - auth_type: "basic", "oauth", or "jwt" (optional)
@@ -239,6 +241,11 @@ def idor_specialist(
         ]
         if normalized_credential_ids and (credentials or multi_credentials):
             raise ValueError("credential_ids cannot be combined with raw credentials or multi_credentials")
+        if tool_context is not None and (credentials or multi_credentials):
+            raise ValueError(
+                "workflow agent login credentials must use checked-out credential_ids; "
+                "raw credentials and multi_credentials are only supported by standalone or CLI calls"
+            )
         if normalized_credential_ids and not login_url:
             raise ValueError("credential_ids require login_url")
 

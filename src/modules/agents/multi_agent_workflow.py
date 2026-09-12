@@ -11518,6 +11518,9 @@ while planning.
 - Mark a checked-out credential valid, invalid, or otherwise unavailable only after a definitive authentication
   outcome, with a durable evidence reference and a specific reason. A generic request failure or authorization denial
   does not by itself prove that a credential is invalid.
+- For a checked-out username/password credential with configured TOTP MFA, call
+  `generate_mfa_code(credential_id="...")`. Do not pass the provisioning secret directly in workflow-agent tool
+  calls; the direct secret form is for standalone compatibility.
 - For a checked-out OAuth2 client credential with a configured same-origin token URL, use
   `exchange_oauth2_client_credentials` to obtain a transient token. Bind the source credential to the task context;
   never store the returned access token in an artifact, finding, report, or a credential record.

@@ -2,8 +2,10 @@ import json
 import sqlite3
 import stat
 from email.message import EmailMessage
+from unittest.mock import MagicMock
 
 import pytest
+from strands import ToolContext
 
 from modules.tools.credentials import (
     build_checked_out_idor_login_contexts,
@@ -290,6 +292,42 @@ def test_totp_generation_matches_rfc6238_vector(monkeypatch):
     assert code == "94287082"
 
 
+def test_totp_generation_uses_checked_out_credential_without_persisting_secret(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    monkeypatch.setattr("modules.tools.credentials.time.time", lambda: 59)
+    credential = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        values={
+            "username": "alice",
+            "password": "secret",
+            "mfa": {
+                "type": "totp",
+                "secret": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+                "digits": 8,
+                "period": 30,
+                "algorithm": "SHA1",
+            },
+        },
+    )
+    _store_active_target_task(store)
+    checkout_credential(credential["credential_id"], "complete TOTP MFA")
+
+    assert generate_mfa_code(credential_id=credential["credential_id"]) == "94287082"
+    usage = store.list_credential_usage("op-1")
+
+    assert any(record["authentication_mode"] == "mfa" and record["outcome"] == "used" for record in usage)
+    assert "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" not in json.dumps(usage)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        generate_mfa_code("GEZDGNBV", credential_id=credential["credential_id"])
+    with pytest.raises(ValueError, match="checked-out credential_id"):
+        generate_mfa_code("GEZDGNBV", tool_context=MagicMock(spec=ToolContext))
+
+
 def test_credential_usage_is_report_safe(tmp_path, monkeypatch):
     store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
     monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
@@ -428,7 +466,11 @@ def test_mfa_tools_reject_invalid_handoff_states_and_retrieve_unique_mail_code(t
     )
     _store_active_target_task(store)
     checkout_credential(email_mfa_credential["credential_id"], "complete email MFA")
+    with pytest.raises(ValueError, match="checked out"):
+        generate_mfa_code(credential_id=totp_credential["credential_id"])
     checkout_credential(totp_credential["credential_id"], "complete TOTP MFA")
+    with pytest.raises(ValueError, match="configured TOTP"):
+        generate_mfa_code(credential_id=email_mfa_credential["credential_id"])
     with pytest.raises(ValueError, match="TTL"):
         request_mfa_code(email_mfa_credential["credential_id"], ttl_seconds=29)
     with pytest.raises(ValueError, match="capture"):
@@ -1112,6 +1154,8 @@ def test_password_and_totp_tools_reject_bad_inputs_and_generate_compliant_passwo
         generate_mfa_code("GEZDGNBV", algorithm="MD5")
     with pytest.raises(ValueError, match="provisioning"):
         generate_mfa_code("not base32!")
+    with pytest.raises(ValueError, match="required"):
+        generate_mfa_code()
 
 
 def test_checkout_and_auth_context_reject_missing_task_scope_and_unavailable_credentials(tmp_path, monkeypatch):
@@ -1384,6 +1428,8 @@ def test_mfa_tools_reject_missing_configuration_and_mailbox_errors(tmp_path, mon
     checkout_credential(plain_credential["credential_id"], "test MFA configuration")
     with pytest.raises(ValueError, match="configured MFA"):
         request_mfa_code(plain_credential["credential_id"])
+    with pytest.raises(ValueError, match="configured TOTP"):
+        generate_mfa_code(credential_id=plain_credential["credential_id"])
     with pytest.raises(ValueError, match="invalid MFA code pattern"):
         request_mfa_code(plain_credential["credential_id"], code_pattern="[")
     with pytest.raises(ValueError, match="not configured by an active"):
