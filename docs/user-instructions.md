@@ -310,6 +310,8 @@ The workflow's controller-appended task contract, including deterministic prompt
 unauthenticated-baseline, authenticated-comparison, self-registration, and IDOR-comparison rules for every module.
 Every reported finding labels its authentication context. Authenticated findings include only opaque credential IDs;
 unexpected identifier values and all credential payload values are redacted from report Markdown and JSON.
+The credential-use section separately records authentication and MFA use so mailbox-assisted MFA is distinguishable
+from the authenticated request that follows, while retaining only credential IDs and masked metadata.
 
 The **Operations → Assessment Credentials (JSON)** field in the React configuration editor accepts either a JSON
 array or `{"credentials": [...]}`. Each item has `credential_type`, `role`, `values`, and optional `target`,

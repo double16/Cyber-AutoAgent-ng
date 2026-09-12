@@ -929,9 +929,19 @@ def test_report_credential_provenance_and_finding_auth_context_never_render_secr
                 "credential_type": "username_password",
                 "role": "member",
                 "origin": "registered",
+                "authentication_mode": "mfa",
                 "outcome": "succeeded",
                 "payload": {"password": secret},
-            }
+            },
+            {
+                "credential_id": credential_id,
+                "target": "https://app.example.test",
+                "credential_type": "username_password",
+                "role": "member",
+                "origin": "registered",
+                "authentication_mode": "authenticated",
+                "outcome": "succeeded",
+            },
         ]
     }
     finding = {
@@ -951,6 +961,10 @@ def test_report_credential_provenance_and_finding_auth_context_never_render_secr
     assert "Credentials Used" in credentials
     assert "registered" in credentials
     assert credential_id in credentials
+    assert "Authentication Mode" in credentials
+    assert "mfa" in credentials
+    assert "authenticated" in credentials
+    assert credentials.count(credential_id) == 2
     assert secret not in credentials
     assert "Authentication context:** authenticated" in narrated
     assert credential_id in narrated

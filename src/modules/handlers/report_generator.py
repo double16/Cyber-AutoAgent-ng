@@ -1543,24 +1543,33 @@ def _format_credentials_used(sections: dict[str, Any]) -> str:
     if not isinstance(rows, list) or not rows:
         return '<a name="credentials-used"></a>\n### Credentials Used\n\nNo stored credentials were used in this operation.\n'
     lines = [
-        '<a name="credentials-used"></a>\n### Credentials Used', "", "| Credential | Target | Type | Role | Origin | Outcome |",
-        "|---|---|---|---|---|---|",
+        '<a name="credentials-used"></a>\n### Credentials Used', "",
+        "| Credential | Target | Type | Role | Origin | Authentication Mode | Outcome |",
+        "|---|---|---|---|---|---|---|",
     ]
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
-        identity = (str(row.get("credential_id") or ""), str(row.get("outcome") or ""))
+        authentication_mode = str(row.get("authentication_mode") or "authenticated").lower()
+        if authentication_mode not in {"authenticated", "mfa"}:
+            authentication_mode = "unknown"
+        identity = (
+            str(row.get("credential_id") or ""),
+            authentication_mode,
+            str(row.get("outcome") or ""),
+        )
         if identity in seen:
             continue
         seen.add(identity)
         lines.append(
-            "| {credential_id} | {target} | {credential_type} | {role} | {origin} | {outcome} |".format(
+            "| {credential_id} | {target} | {credential_type} | {role} | {origin} | {authentication_mode} | {outcome} |".format(
                 credential_id=_markdown_table_cell(_safe_report_credential_id(row.get("credential_id"))),
                 target=_markdown_table_cell(row.get("target") or "Mailbox"),
                 credential_type=_markdown_table_cell(row.get("credential_type") or "Unknown"),
                 role=_markdown_table_cell(row.get("role") or "—"),
                 origin=_markdown_table_cell(row.get("origin") or "Unknown"),
+                authentication_mode=_markdown_table_cell(authentication_mode),
                 outcome=_markdown_table_cell(row.get("outcome") or "selected"),
             )
         )

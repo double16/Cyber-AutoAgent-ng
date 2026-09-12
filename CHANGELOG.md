@@ -24,6 +24,8 @@
 - Mark failed or abandoned interactive and mailbox MFA handoffs as blocked instead of leaving their challenges pending.
 - Reject stale email-MFA messages using the IMAP server-assigned delivery timestamp, preventing old mailbox codes
   from satisfying a new authentication challenge.
+- Distinguish MFA credential use from authenticated request use in report provenance without exposing credential
+  payloads.
 
 ### Fixes
 
