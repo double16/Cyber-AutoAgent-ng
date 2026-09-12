@@ -95,6 +95,7 @@ from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
 from modules.storage import SQLiteMigrationRunner
+from modules.storage.credential_encryption import CredentialEncryptionError, CredentialPayloadCipher
 from modules.tools.artifact_references import (
     normalize_artifact_reference_token,
     split_delimited_reference_values,
@@ -1630,6 +1631,7 @@ class SQLiteApplicationStore:
         self.db_path = db_path
         self.logical_target = logical_target
         self.read_only = read_only
+        self._credential_cipher = CredentialPayloadCipher.from_environment()
         self._lock = threading.RLock()
         self._runtime_recovery_in_progress = False
         if self.read_only:
@@ -1772,6 +1774,7 @@ class SQLiteApplicationStore:
                 os.chmod(self.db_path, 0o600)
             except OSError:
                 logger.warning("Unable to restrict application database permissions: %s", self.db_path)
+            self._encrypt_legacy_credential_payloads()
             integrity = self._sqlite_integrity_check(self.db_path)
             if integrity.lower() == "ok":
                 return
@@ -1807,6 +1810,47 @@ class SQLiteApplicationStore:
             raise
         return conn
 
+    def _encrypt_legacy_credential_payloads(self) -> None:
+        """Encrypt legacy plaintext credentials and validate encrypted records at startup.
+
+        Encryption is deliberately opt-in so existing deployments remain compatible. Once a key is configured,
+        every payload must either decrypt with that key or be migrated from the prior JSON representation.
+        """
+
+        if self._credential_cipher is None:
+            return
+        with self._lock, closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                "SELECT credential_id, logical_target, payload FROM credential_records"
+            ).fetchall()
+            for credential_id, logical_target, payload_value in rows:
+                payload = str(payload_value)
+                if self._credential_cipher.is_encrypted(payload):
+                    self._credential_cipher.decrypt(
+                        payload,
+                        logical_target=str(logical_target),
+                        credential_id=str(credential_id),
+                    )
+                    continue
+                try:
+                    legacy_payload = json.loads(payload)
+                except json.JSONDecodeError as error:
+                    raise ValueError("legacy credential payload is not valid JSON") from error
+                if not isinstance(legacy_payload, dict):
+                    raise ValueError("legacy credential payload must be an object")
+                conn.execute(
+                    "UPDATE credential_records SET payload = ? WHERE credential_id = ? AND logical_target = ?",
+                    (
+                        self._credential_cipher.encrypt(
+                            legacy_payload,
+                            logical_target=str(logical_target),
+                            credential_id=str(credential_id),
+                        ),
+                        credential_id,
+                        logical_target,
+                    ),
+                )
+
     def ensure_operation(self, operation_id: str) -> None:
         """Register an operation in this logical-target scope."""
         with self._lock, closing(self._connect()) as conn, conn:
@@ -1832,11 +1876,20 @@ class SQLiteApplicationStore:
             (self.logical_target, operation_id, datetime.now().isoformat()),
         )
 
-    @staticmethod
-    def _credential_row(row: sqlite3.Row | tuple[Any, ...], include_payload: bool = False) -> dict[str, Any]:
+    def _credential_row(self, row: sqlite3.Row | tuple[Any, ...], include_payload: bool = False) -> dict[str, Any]:
         """Convert one credential row without exposing its payload by default."""
 
-        payload = json.loads(row[5])
+        payload_value = str(row[5])
+        if self._credential_cipher is not None:
+            payload = self._credential_cipher.decrypt(
+                payload_value,
+                logical_target=self.logical_target,
+                credential_id=str(row[0]),
+            )
+        elif CredentialPayloadCipher.is_encrypted(payload_value):
+            raise CredentialEncryptionError("credential payload is encrypted; set CYBER_CREDENTIAL_STORE_KEY")
+        else:
+            payload = json.loads(payload_value)
         result = {
             "credential_id": row[0],
             "target": row[1],
@@ -1883,7 +1936,13 @@ class SQLiteApplicationStore:
                     str(record.get("role") or "").strip() or None,
                     str(record.get("operation_id") or "").strip() or None,
                     str(record["credential_type"]),
-                    json.dumps(record["payload"], sort_keys=True),
+                    (
+                        self._credential_cipher.encrypt(
+                            record["payload"], logical_target=self.logical_target, credential_id=credential_id
+                        )
+                        if self._credential_cipher is not None
+                        else json.dumps(record["payload"], sort_keys=True)
+                    ),
                     origin,
                     str(record["management_policy"]),
                     status,

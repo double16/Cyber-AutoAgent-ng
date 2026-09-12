@@ -1,3 +1,4 @@
+import base64
 import json
 import sqlite3
 import stat
@@ -7,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from strands import ToolContext
 
+from modules.storage.credential_encryption import CredentialEncryptionError, CredentialPayloadCipher
 from modules.tools.credentials import (
     build_checked_out_idor_login_contexts,
     canonicalize_credential_target,
@@ -96,6 +98,90 @@ def test_credential_storage_creates_an_initial_provenance_status_event(tmp_path)
             (registered["credential_id"], "unknown", "operation", "Credential stored", "[]"),
         ]
     )
+
+
+def test_credential_payload_encryption_migrates_legacy_rows_and_fails_closed(tmp_path, monkeypatch):
+    database_path = tmp_path / "credentials.db"
+    plaintext_store = SQLiteApplicationStore(str(database_path), "logical-target")
+    credential = plaintext_store.store_credential(
+        "op-1",
+        {
+            "credential_type": "api_key",
+            "target": "https://api.example.test",
+            "role": "reader",
+            "payload": {"api_key": "legacy-secret", "placement": "header", "name": "X-API-Key"},
+            "origin": "provided",
+            "management_policy": "user",
+        },
+    )
+    with sqlite3.connect(database_path) as connection:
+        assert "legacy-secret" in connection.execute("SELECT payload FROM credential_records").fetchone()[0]
+
+    key = base64.urlsafe_b64encode(b"a" * 32).decode("ascii")
+    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_KEY", key)
+    encrypted_store = SQLiteApplicationStore(str(database_path), "logical-target")
+    encrypted = encrypted_store.get_credential(credential["credential_id"], include_payload=True)
+    assert encrypted is not None
+    assert encrypted["payload"]["api_key"] == "legacy-secret"
+    with sqlite3.connect(database_path) as connection:
+        stored_payload = connection.execute("SELECT payload FROM credential_records").fetchone()[0]
+    assert stored_payload.startswith("enc:v1:")
+    assert "legacy-secret" not in stored_payload
+
+    newly_stored = encrypted_store.store_credential(
+        "op-1",
+        {
+            "credential_type": "api_key",
+            "target": "https://api.example.test",
+            "role": "writer",
+            "payload": {"api_key": "new-secret", "placement": "header", "name": "X-API-Key"},
+            "origin": "provided",
+            "management_policy": "user",
+        },
+    )
+    assert encrypted_store.get_credential(newly_stored["credential_id"], include_payload=True) is not None
+
+    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_KEY", base64.urlsafe_b64encode(b"b" * 32).decode("ascii"))
+    with pytest.raises(CredentialEncryptionError, match="cannot be decrypted"):
+        SQLiteApplicationStore(str(database_path), "logical-target")
+
+    monkeypatch.delenv("CYBER_CREDENTIAL_STORE_KEY")
+    unkeyed_store = SQLiteApplicationStore(str(database_path), "logical-target")
+    with pytest.raises(CredentialEncryptionError, match="set CYBER_CREDENTIAL_STORE_KEY"):
+        unkeyed_store.get_credential(credential["credential_id"], include_payload=True)
+
+
+def test_credential_payload_encryption_rejects_invalid_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_KEY", "not a base64 key")
+    with pytest.raises(CredentialEncryptionError, match="base64"):
+        SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+
+    monkeypatch.setenv("CYBER_CREDENTIAL_STORE_KEY", base64.urlsafe_b64encode(b"short").decode("ascii"))
+    with pytest.raises(CredentialEncryptionError, match="exactly 32 bytes"):
+        SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+
+
+def test_credential_payload_cipher_rejects_malformed_tampered_and_non_object_payloads():
+    cipher = CredentialPayloadCipher(b"a" * 32)
+    encrypted = cipher.encrypt({"api_key": "secret"}, logical_target="logical-target", credential_id="credential-1")
+
+    assert cipher.decrypt(encrypted, logical_target="logical-target", credential_id="credential-1") == {"api_key": "secret"}
+    with pytest.raises(CredentialEncryptionError, match="not encrypted"):
+        cipher.decrypt("{}", logical_target="logical-target", credential_id="credential-1")
+    with pytest.raises(CredentialEncryptionError, match="cannot be decrypted"):
+        cipher.decrypt("enc:v1:", logical_target="logical-target", credential_id="credential-1")
+    with pytest.raises(CredentialEncryptionError, match="cannot be decrypted"):
+        cipher.decrypt(encrypted, logical_target="logical-target", credential_id="credential-2")
+
+    nonce = b"0" * 12
+    list_payload = cipher._cipher.encrypt(
+        nonce,
+        b"[]",
+        cipher._associated_data("logical-target", "credential-1"),
+    )
+    non_object_envelope = "enc:v1:" + base64.urlsafe_b64encode(nonce + list_payload).decode("ascii")
+    with pytest.raises(CredentialEncryptionError, match="must decode to an object"):
+        cipher.decrypt(non_object_envelope, logical_target="logical-target", credential_id="credential-1")
 
 
 def test_credential_listing_prefers_operation_scope_then_reusable_registered_accounts(tmp_path):

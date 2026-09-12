@@ -15,6 +15,8 @@
 - Sanitize email-login and OAuth client secrets supplied in an operation objective before task planning or model use.
 - Generate configured TOTP MFA codes from checked-out credential IDs while keeping the provisioning secret inside the
   credential store, and reserve direct provisioning-secret generation for standalone callers.
+- Add optional AES-256-GCM encryption at rest for credential payloads, including fail-closed key validation and
+  in-place migration of existing plaintext credential records.
 
 ### Fixes
 

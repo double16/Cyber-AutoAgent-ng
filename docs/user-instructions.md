@@ -244,9 +244,13 @@ retired credentials are not selected. Registered accounts are target-scoped so l
 Credential queries, IDOR comparison planning, status updates, and operation-managed rotation use that same active
 task's resolved target scope. An agent cannot enumerate, modify, or compare credentials belonging to another target.
 
-The database currently stores credential payloads in plaintext. Restrict access to the output directory and its
-backups to the assessment user. Secret values are masked in reports, logs, UI events, and trace exports, but must not
-be committed to source control or copied into task artifacts.
+Credential payload encryption at rest is optional for backwards compatibility. Set
+`CYBER_CREDENTIAL_STORE_KEY` to a unique URL-safe base64-encoded 32-byte key to encrypt payloads with AES-256-GCM;
+existing plaintext credential rows are migrated when that key is first configured. Keep the key available for every
+future operation that needs those credentials: a missing or different key fails closed rather than exposing or
+silently replacing the payload. When no key is configured, restrict access to the output directory and its backups to
+the assessment user. Secret values are masked in reports, logs, UI events, and trace exports, but must not be committed
+to source control or copied into task artifacts.
 
 For a concise objective, common `username=... password=...`, `email=... password=...`, `api_key=...`, and
 `oauth2_client_id=... oauth2_client_secret=...` forms are moved into the credential store before the objective is
@@ -310,6 +314,7 @@ generated ID during import.
 | Variable | Purpose |
 |---|---|
 | `CYBER_ASSESSMENT_CREDENTIALS` | Sensitive JSON in the same format as the React field. It is imported into the SQLite credential store at operation start and is forwarded by Docker Compose. |
+| `CYBER_CREDENTIAL_STORE_KEY` | Optional URL-safe base64-encoded 32-byte key for AES-256-GCM encryption of credential payloads in SQLite. It is forwarded by Docker Compose. |
 
 ## MCP configuration
 
