@@ -130,8 +130,11 @@ sqlite3 -readonly \
 ```
 
 The current workflow schema includes `operations`, `plans`, `tasks`, `task_acceptance_results`,
-`operation_preflight_results`, `finding_records`, `finding_evidence_receipts`, and
-`operation_model_metrics`. Schema discovery is authoritative if a database has a different migration level.
+`operation_preflight_results`, `finding_records`, `objective_validation_records`,
+`finding_evidence_receipts`, `operation_model_metrics`, `credential_records`,
+`credential_target_aliases`, `credential_status_events`, `credential_usage_records`, `mfa_challenges`,
+and `credential_rotation_requests`. Schema discovery is authoritative if a database has a different migration
+level.
 
 **Step 4: Query structured operation data**
 
@@ -178,6 +181,18 @@ sqlite3 -readonly -header -column outputs/cyber_autoagent.db \
       AND operation_id = 'OPERATION_ID'
     ORDER BY created_at, finding_uid;
 
+   SELECT candidate_uid, fingerprint, verification_task_uid, resolution, created_at, updated_at
+     FROM objective_validation_records
+    WHERE logical_target = 'TARGET'
+      AND operation_id = 'OPERATION_ID'
+    ORDER BY created_at, candidate_uid;
+
+   SELECT receipt_uid, source_task_uid, artifact_ref, marker, artifact_fingerprint, created_at
+     FROM finding_evidence_receipts
+    WHERE logical_target = 'TARGET'
+      AND operation_id = 'OPERATION_ID'
+    ORDER BY created_at, receipt_uid;
+
    SELECT target_id, target, target_type, status, reason, resolved_addresses, recorded_at
      FROM operation_preflight_results
     WHERE logical_target = 'TARGET'
@@ -188,13 +203,54 @@ sqlite3 -readonly -header -column outputs/cyber_autoagent.db \
           model_calls, correction_loops, efficiency
      FROM operation_model_metrics
     WHERE logical_target = 'TARGET'
-      AND operation_id = 'OPERATION_ID'
+     AND operation_id = 'OPERATION_ID'
     ORDER BY captured_at, provider, model;"
 ```
 
-Use `finding_evidence_receipts` to locate artifact references and their source tasks. Treat database rows as
-structured workflow records, not as independent proof: readable or successful records establish availability,
-while semantic support or contradiction still requires inspection of the cited artifacts and other evidence.
+For credential and authentication provenance, query metadata and lifecycle records only; never select the
+`credential_records.payload` column:
+
+```bash
+sqlite3 -readonly -header -column outputs/cyber_autoagent.db \
+  "SELECT credential_id, target, role, operation_id, credential_type, origin, management_policy,
+          status, invalid_at, supersedes_credential_id, created_at, updated_at
+     FROM credential_records
+    WHERE logical_target = 'TARGET'
+      AND (operation_id = 'OPERATION_ID' OR operation_id IS NULL)
+    ORDER BY created_at, credential_id;
+
+   SELECT event_id, credential_id, operation_id, status, actor, reason, evidence_refs, created_at
+     FROM credential_status_events
+    WHERE logical_target = 'TARGET'
+      AND (operation_id = 'OPERATION_ID' OR operation_id IS NULL)
+    ORDER BY created_at, event_id;
+
+   SELECT usage_id, credential_id, task_uid, authentication_mode, outcome, evidence_refs, created_at
+     FROM credential_usage_records
+    WHERE logical_target = 'TARGET'
+      AND operation_id = 'OPERATION_ID'
+    ORDER BY created_at, usage_id;
+
+   SELECT challenge_id, credential_id, task_uid, method, status, expires_at, metadata, created_at, updated_at
+     FROM mfa_challenges
+    WHERE logical_target = 'TARGET'
+      AND operation_id = 'OPERATION_ID'
+    ORDER BY created_at, challenge_id;
+
+   SELECT request_id, credential_id, request_operation_id, maintenance_operation_id, status, reason,
+          evidence_refs, claimed_task_uid, failure_reason, staged_credential_id, created_at, updated_at,
+          completed_at
+     FROM credential_rotation_requests
+    WHERE logical_target = 'TARGET'
+      AND (request_operation_id = 'OPERATION_ID' OR maintenance_operation_id = 'OPERATION_ID')
+    ORDER BY created_at, request_id;"
+```
+
+Use `credential_target_aliases` when checking user-declared target aliases. Treat database rows as structured
+workflow records, not as independent proof: readable or successful records establish availability, while
+semantic support or contradiction still requires inspection of the cited artifacts and other evidence. In
+particular, credential metadata establishes provenance and lifecycle state, not credential validity or finding
+support.
 
 Never use `.output`, `.dump` into a file, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, or other write-capable
 SQLite commands during forensic review. If any query returns an error, record the failed database lookup and
