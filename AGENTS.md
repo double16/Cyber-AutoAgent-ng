@@ -123,3 +123,6 @@
 
 ## User Interface
 - When considering user interface changes, there is a React Terminal UI and a headless/console UI in index.tsx.
+
+## SQL Schema Updates
+- When the SQL schema is changed, make sure the existing SELECT statements in the skill `.agents/skills/forensics/SKILL.md` are updated accordingly.

@@ -3128,6 +3128,73 @@ def test_task_evaluator_execution_feedback_remains_when_controller_receipt_is_mi
     )
 
 
+def test_task_evaluator_execution_feedback_remains_when_acceptance_is_inaccessible():
+    plan = _plan()
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Store a technology inventory artifact",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Produce execution evidence for request against target:target-1.",
+            "target:target-1",
+        )],
+    )
+    task = TaskModel(
+        task_uid="inaccessible-acceptance",
+        title="Map technology",
+        objective="Map technology",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        recovery_context={
+            "execution_evidence_receipts": {
+                "criterion-1-execution-1": ["artifact:artifacts/request.json"],
+            },
+        },
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Map technology",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["request"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    state = FakeState(plan, tasks=[task])
+    state.acceptance_results[task.task_uid] = [AcceptanceResult(
+        criterion_id="criterion-1",
+        status="inaccessible",
+        disposition="observation",
+        summary="Technology artifact was not recorded in acceptance evidence.",
+        evidence_refs=("artifact:artifacts/request.json",),
+    )]
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    decision = workflow_mod.WorkflowDecision(
+        status="partial_failure",
+        reason="Technology acceptance evidence is missing.",
+        repair_kind="execution",
+    )
+
+    assert not controller._evaluator_reopens_resolved_execution_gate(
+        task,
+        state.list_task_acceptance_results(task.task_uid),
+        decision,
+    )
+
+
 def test_incomplete_execution_gate_forces_controller_owned_execution_repair():
     plan = _plan()
     criterion = AcceptanceCriterion(
@@ -4763,6 +4830,10 @@ def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(m
         return {
             "artifact_ref": "artifact:artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
             "item_count": 2,
+            "processed_artifacts": [{
+                "source_artifact": "artifact:artifacts/katana.json",
+                "source_format": "katana",
+            }],
             "skipped_artifacts": [{"source_artifact": "artifact:artifacts/notes.txt", "reason": "unsupported"}],
         }
 
@@ -4791,9 +4862,84 @@ def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(m
         "outcome": "completed",
         "input_reference_count": 1,
         "skipped_artifact_count": 1,
+        "processed_artifacts": [{
+            "source_artifact": "artifact:artifacts/katana.json",
+            "source_format": "katana",
+        }],
+        "skipped_artifacts": [{"source_artifact": "artifact:artifacts/notes.txt", "reason": "unsupported"}],
         "manifest_ref": "artifact:artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
         "item_count": 2,
     } in runtime.callback_handler.events
+
+
+def test_web_inventory_synthesis_does_not_retry_unchanged_failed_inputs(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Attack Surface Mapping", status="active")],
+        targets=[OperationTarget("target-1", "https://target.test", "network")],
+    )
+    contract_context = {"module": "web", "phase_id": 1}
+    mapping = Task(
+        task_uid="crawl",
+        title="Crawl routes",
+        objective="Crawl routes",
+        phase=1,
+        status="done",
+        evidence=["artifact:artifacts/katana.json"],
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "bounded_crawl",
+                "task_role": "mapping",
+            }
+        },
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[mapping], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    fingerprint = controller._inventory_synthesis_input_fingerprint(mapping.evidence)
+    synthesis = Task(
+        task_uid="synthesis",
+        title="Synthesize inventory",
+        objective="Consolidate mapping workstreams",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=_acceptance("criterion-1"),
+        recovery_context={
+            "phase_task_contract": {
+                **contract_context,
+                "workstream": "inventory_synthesis",
+                "task_role": "synthesis",
+                "depends_on_workstreams": ["bounded_crawl"],
+            },
+            "controller_inventory_synthesis": {
+                "outcome": "failed",
+                "input_fingerprint": fingerprint,
+                "error": "invalid inventory source",
+            },
+        },
+    )
+    state.tasks.append(synthesis)
+    monkeypatch.setattr(
+        workflow_mod,
+        "consolidate_recon_artifacts",
+        lambda *_args, **_kwargs: pytest.fail("unchanged inputs must not be consolidated again"),
+    )
+
+    assert controller._run_controller_inventory_synthesis(plan, plan.phases[0], synthesis) is True
+    assert next(task for task in state.tasks if task.task_uid == "synthesis").status == "partial_failure"
+    assert any(
+        event["type"] == "controller_inventory_synthesis" and event["outcome"] == "unchanged_inputs"
+        for event in runtime.callback_handler.events
+    )
 
 
 def test_contract_prerequisite_does_not_replace_failed_synthesis_when_conversion_is_unavailable(monkeypatch):

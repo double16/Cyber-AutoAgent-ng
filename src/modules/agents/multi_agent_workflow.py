@@ -2611,6 +2611,21 @@ class MultiAgentWorkflowController:
             if isinstance(reference, str) and reference.startswith("artifact:")
         ]
 
+    @staticmethod
+    def _inventory_synthesis_input_fingerprint(evidence_refs: list[str]) -> str:
+        """Return a content-sensitive identity for one controller synthesis input set."""
+
+        inputs = []
+        for reference in sorted(dict.fromkeys(evidence_refs)):
+            try:
+                canonical = canonical_artifact_reference(reference)
+                digest = hashlib.sha256(Path(_artifact_path_from_ref(canonical)).read_bytes()).hexdigest()
+                inputs.append({"reference": canonical, "sha256": digest})
+            except (OSError, TypeError, ValueError):
+                inputs.append({"reference": str(reference), "sha256": "unavailable"})
+        payload = json.dumps(inputs, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     def _run_controller_inventory_synthesis(
         self,
         plan: OperationPlan,
@@ -2668,6 +2683,30 @@ class MultiAgentWorkflowController:
         target_id = task.target_ids[0]
         target = next((item.value for item in plan.targets if item.target_id == target_id), "")
         evidence_refs = self._contract_inventory_evidence_refs(mapping_tasks)
+        input_fingerprint = self._inventory_synthesis_input_fingerprint(evidence_refs)
+        previous_attempt = task.recovery_context.get("controller_inventory_synthesis")
+        if (
+            isinstance(previous_attempt, dict)
+            and previous_attempt.get("outcome") == "failed"
+            and previous_attempt.get("input_fingerprint") == input_fingerprint
+        ):
+            updated = self.state.mark_task(
+                task,
+                "partial_failure",
+                "Controller inventory synthesis inputs are unchanged since the prior failed attempt; "
+                "correct the reported source artifact or provide new mapping evidence.",
+            )
+            self._emit_task_done(updated)
+            self._emit_workflow_event(
+                {
+                    "type": "controller_inventory_synthesis",
+                    "task_uid": task.task_uid,
+                    "phase": phase.id,
+                    "outcome": "unchanged_inputs",
+                    "input_fingerprint": input_fingerprint,
+                }
+            )
+            return True
         output_file = f"artifacts/inventory_synthesis/{task.task_uid}-inventory_manifest.json"
         try:
             result = consolidate_recon_artifacts(
@@ -2688,6 +2727,16 @@ class MultiAgentWorkflowController:
                 },
             )
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+            self.state.patch_task(
+                task.task_uid,
+                recovery_context_updates={
+                    "controller_inventory_synthesis": {
+                        "outcome": "failed",
+                        "input_fingerprint": input_fingerprint,
+                        "error": self._short(error, 500),
+                    }
+                },
+            )
             updated = self.state.mark_task(
                 task,
                 "partial_failure",
@@ -2700,6 +2749,7 @@ class MultiAgentWorkflowController:
                     "task_uid": task.task_uid,
                     "phase": phase.id,
                     "outcome": "failed",
+                    "input_fingerprint": input_fingerprint,
                     "reason": self._short(error, 500),
                 }
             )
@@ -2719,6 +2769,8 @@ class MultiAgentWorkflowController:
                 "outcome": "completed",
                 "input_reference_count": len(evidence_refs),
                 "skipped_artifact_count": len(result["skipped_artifacts"]),
+                "processed_artifacts": result["processed_artifacts"],
+                "skipped_artifacts": result["skipped_artifacts"],
                 "manifest_ref": result["artifact_ref"],
                 "item_count": result["item_count"],
             }
@@ -7989,7 +8041,7 @@ applicability or a finding, and published proof of concepts must not be executed
                 status="done",
                 reason=(
                     "Controller acceptance is authoritative: every frozen execution requirement has a "
-                    "current-task receipt and every frozen criterion has a recorded terminal result."
+                    "current-task receipt and every material frozen criterion is resolved."
                 ),
             )
         recommendation = self._finding_recommendation_from_evaluator(data)
@@ -8143,8 +8195,18 @@ applicability or a finding, and published proof of concepts must not be executed
         """Reject a stale evaluator execution repair after controller acceptance replay."""
 
         gate_satisfied, _required_ids = self._controller_execution_gate_status(task, acceptance_results)
+        resolved_criterion_ids = {
+            str(result.criterion_id)
+            for result in acceptance_results
+            if str(getattr(result, "status", ""))
+            in {"satisfied", "assessed_negative", "excluded", "duplicate"}
+        }
+        all_material_criteria_resolved = all(
+            criterion.id in resolved_criterion_ids for criterion in task.acceptance.criteria
+        )
         return (
             gate_satisfied
+            and all_material_criteria_resolved
             and decision.status == "partial_failure"
             and decision.repair_kind == "execution"
         )

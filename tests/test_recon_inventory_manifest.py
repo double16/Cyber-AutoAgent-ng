@@ -403,6 +403,110 @@ def test_consolidation_merges_case_variant_technologies_with_one_stable_id(tmp_p
     }
 
 
+def test_consolidation_normalizes_document_target_id_and_technology_inventory(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    auth = artifact_dir / "auth-inventory.json"
+    auth.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target_id": "target-1",
+                "items": [
+                    {
+                        "id": "endpoint-login",
+                        "kind": "endpoint",
+                        "value": "https://target.test/login",
+                        "attributes": {},
+                    }
+                ],
+                "unassessed_gaps": [{"reason": "post_not_tested"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    technology = artifact_dir / "technology-inventory.json"
+    technology.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "url": "https://target.test/login",
+                        "method": "GET",
+                        "response_status": 200,
+                        "technology_clues": ["Example Server"],
+                        "version_strings": ["1.2.3"],
+                        "research_notes": ["Observed in response headers."],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = artifact_dir / "consolidated.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = manifest_tool.consolidate_recon_artifacts(
+        ["artifact:artifacts/auth-inventory.json", "artifact:artifacts/technology-inventory.json"],
+        str(output),
+        target_id="target-1",
+        target="https://target.test",
+    )
+
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    login = next(item for item in manifest["items"] if item["kind"] == "endpoint" and item["value"].endswith("/login"))
+    technology_item = next(item for item in manifest["items"] if item["kind"] == "technology")
+    assert result["validation_status"] == "valid"
+    assert not result["skipped_artifacts"]
+    assert all(item["target_id"] == "target-1" for item in manifest["items"])
+    assert login["attributes"]["technology"] == {
+        "clues": ["Example Server"],
+        "version_strings": ["1.2.3"],
+        "research_notes": ["Observed in response headers."],
+    }
+    assert technology_item["attributes"]["entrypoints"] == ["https://target.test/login"]
+
+
+def test_consolidation_skips_inventory_fragment_with_a_conflicting_target_id(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    valid = artifact_dir / "valid.json"
+    valid.write_text("https://target.test/", encoding="utf-8")
+    invalid = artifact_dir / "invalid.json"
+    invalid.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target_id": "target-2",
+                "items": [{"id": "endpoint-admin", "kind": "endpoint", "value": "https://target.test/admin"}],
+                "unassessed_gaps": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = artifact_dir / "consolidated.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = manifest_tool.consolidate_recon_artifacts(
+        ["artifact:artifacts/valid.json", "artifact:artifacts/invalid.json"],
+        str(output),
+        target_id="target-1",
+        target="https://target.test",
+    )
+
+    assert result["validation_status"] == "valid"
+    assert result["skipped_artifacts"] == [{
+        "source_artifact": "artifact:artifacts/invalid.json",
+        "reason": "inventory_manifest source target_id does not match the resolved synthesis target",
+    }]
+
+
 def test_consolidation_rejects_when_every_source_is_unsupported(tmp_path, monkeypatch):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()

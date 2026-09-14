@@ -27,6 +27,7 @@ SUPPORTED_RECON_FORMATS = (
     "specialized_recon",
     "auth_chain",
     "client_bundle_inventory",
+    "technology_inventory",
     "inventory_manifest",
 )
 RECON_FORMAT_ALIASES = {
@@ -38,6 +39,8 @@ RECON_FORMAT_ALIASES = {
     "katana_jsonl": "katana",
     "specialized_recon_orchestrator": "specialized_recon",
     "auth_chain_analyzer": "auth_chain",
+    "technology_research": "technology_inventory",
+    "technology_clues": "technology_inventory",
     "inventory": "inventory_manifest",
     "manifest": "inventory_manifest",
 }
@@ -114,6 +117,8 @@ def _record(
     response_length: Any = None,
     words: Any = None,
     lines: Any = None,
+    version_strings: Any = None,
+    research_notes: Any = None,
 ) -> dict[str, Any]:
     record = {
         "url": url,
@@ -124,6 +129,9 @@ def _record(
     for key, value in (("response_length", response_length), ("words", words), ("lines", lines)):
         if str(value or "").isdigit():
             record[key] = int(value)
+    for key, value in (("version_strings", version_strings), ("research_notes", research_notes)):
+        if isinstance(value, list):
+            record[key] = [str(item).strip() for item in value if str(item).strip()]
     return record
 
 
@@ -339,6 +347,33 @@ def _parse_client_bundle_inventory(text: str) -> list[dict[str, Any]]:
     return records
 
 
+def _parse_technology_inventory(text: str) -> list[dict[str, Any]]:
+    """Convert legacy per-entrypoint technology research into canonical recon records."""
+
+    values = _json_values(text)
+    if len(values) != 1 or not isinstance(values[0], dict):
+        return []
+    payload = values[0]
+    entries = payload.get("entrypoints", payload.get("items"))
+    if not isinstance(entries, list):
+        return []
+    records = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("url"):
+            continue
+        records.append(
+            _record(
+                str(entry["url"]),
+                method=entry.get("method", "GET"),
+                status=entry.get("response_status", entry.get("status")),
+                technologies=entry.get("technology_clues", entry.get("technologies")),
+                version_strings=entry.get("version_strings"),
+                research_notes=entry.get("research_notes"),
+            )
+        )
+    return records
+
+
 def _is_complete_http_url(value: str) -> bool:
     """Return whether one stripped line contains only a parseable HTTP(S) URL."""
 
@@ -367,6 +402,7 @@ PARSERS = {
     "specialized_recon": _parse_specialized_recon,
     "auth_chain": _parse_auth_chain,
     "client_bundle_inventory": _parse_client_bundle_inventory,
+    "technology_inventory": _parse_technology_inventory,
 }
 
 
@@ -385,6 +421,18 @@ def _infer_format(text: str) -> str:
         and values[0].get("schema_version") == "client_bundle_inventory_v2"
     ):
         return "client_bundle_inventory"
+    if (
+        len(values) == 1
+        and isinstance(values[0], dict)
+        and isinstance(values[0].get("entrypoints", values[0].get("items")), list)
+        and any(
+            isinstance(item, dict)
+            and item.get("url")
+            and ("technology_clues" in item or "version_strings" in item or "research_notes" in item)
+            for item in values[0].get("entrypoints", values[0].get("items"))
+        )
+    ):
+        return "technology_inventory"
     if '"format": "recon_result_v1"' in text or '"format":"recon_result_v1"' in text:
         return "specialized_recon"
     if '"auth_endpoints"' in text and '"flow_analysis"' in text:
@@ -498,13 +546,25 @@ def records_to_inventory_manifest(
                 "failure_signals": [],
                 "evidence_refs": ([source_ref] if source_ref else []),
             }
+            endpoint_attributes: dict[str, Any] = {"interaction": interaction}
+            technology_attributes = {
+                "clues": [str(value).strip() for value in record.get("technologies") or [] if str(value).strip()],
+                "version_strings": [
+                    str(value).strip() for value in record.get("version_strings") or [] if str(value).strip()
+                ],
+                "research_notes": [
+                    str(value).strip() for value in record.get("research_notes") or [] if str(value).strip()
+                ],
+            }
+            if any(technology_attributes.values()):
+                endpoint_attributes["technology"] = technology_attributes
             items.append(
                 {
                     "id": endpoint_id,
                     "target_id": target_id,
                     "kind": "endpoint",
                     "value": url,
-                    "attributes": {"interaction": interaction},
+                    "attributes": endpoint_attributes,
                 }
             )
             seen.add(endpoint_key)
@@ -542,7 +602,12 @@ def records_to_inventory_manifest(
                         "target_id": target_id,
                         "kind": "technology",
                         "value": technology,
-                        "attributes": {"evidence_refs": ([source_ref] if source_ref else [])},
+                        "attributes": {
+                            "evidence_refs": ([source_ref] if source_ref else []),
+                            "version_strings": list(record.get("version_strings") or []),
+                            "research_notes": list(record.get("research_notes") or []),
+                            "entrypoints": [url],
+                        },
                     }
                 )
                 seen.add(key)
@@ -675,6 +740,63 @@ def _inventory_manifest_output_path(path: str) -> str:
     return absolute_path
 
 
+def _canonicalize_inventory_manifest_source(
+    manifest: dict[str, Any],
+    *,
+    target_id: str,
+) -> dict[str, Any]:
+    """Normalize a compatible inventory fragment without changing its source artifact.
+
+    Earlier mapping agents sometimes placed a single resolved target ID at the
+    document level. That is unambiguous only when it is the target requested by
+    the controller, so expand it to missing item-level target IDs at this
+    boundary. Every source must otherwise already have canonical item identity
+    fields before consolidation; merging arbitrary ``items`` JSON is unsafe.
+    """
+
+    from modules.tools.memory import INVENTORY_MANIFEST_ITEM_KINDS
+
+    normalized = json.loads(json.dumps(manifest))
+    schema_version = normalized.get("schema_version")
+    if schema_version not in {None, 1}:
+        raise ValueError("inventory_manifest source schema_version must be 1")
+    items = normalized.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("inventory_manifest source items must be a non-empty list")
+    gaps = normalized.get("unassessed_gaps")
+    if not isinstance(gaps, list):
+        raise ValueError("inventory_manifest source unassessed_gaps must be a list")
+    document_target_id = str(normalized.get("target_id") or "").strip()
+    if document_target_id and document_target_id != target_id:
+        raise ValueError("inventory_manifest source target_id does not match the resolved synthesis target")
+
+    item_ids = set()
+    allowed_kinds = set(INVENTORY_MANIFEST_ITEM_KINDS)
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"inventory_manifest source item {index} must be an object")
+        if not str(item.get("target_id") or "").strip() and document_target_id:
+            item["target_id"] = document_target_id
+        item_id = str(item.get("id") or "").strip()
+        item_target_id = str(item.get("target_id") or "").strip()
+        kind = str(item.get("kind") or "").strip()
+        value = str(item.get("value") or "").strip()
+        if not item_id or not item_target_id or kind not in allowed_kinds or not value:
+            raise ValueError(
+                f"inventory_manifest source item {index} requires id, target_id, supported kind, and value"
+            )
+        if item_target_id != target_id:
+            raise ValueError(f"inventory_manifest source item {index} target_id does not match the resolved target")
+        if item_id in item_ids:
+            raise ValueError("inventory_manifest source item ids must be unique")
+        item_ids.add(item_id)
+        if "attributes" in item and not isinstance(item["attributes"], dict):
+            raise ValueError(f"inventory_manifest source item {item_id} attributes must be an object")
+        item.setdefault("attributes", {})
+    normalized["schema_version"] = 1
+    return normalized
+
+
 def _read_inventory_source(
     source_artifact: str,
     *,
@@ -697,6 +819,7 @@ def _read_inventory_source(
         normalized_format = _infer_format(text)
     if normalized_format not in {*PARSERS, "inventory_manifest"}:
         raise ValueError(f"source_format must be auto or one of: {', '.join(SUPPORTED_RECON_FORMATS)}")
+    bound_target, resolved_target_id = resolve_inventory_target(target or target_id, target_id)
     if normalized_format == "inventory_manifest":
         try:
             manifest = json.loads(text)
@@ -704,9 +827,11 @@ def _read_inventory_source(
             raise ValueError("inventory_manifest source must be a JSON object") from error
         if not isinstance(manifest, dict):
             raise ValueError("inventory_manifest source must be a JSON object")
-        return source_ref, normalized_format, manifest
+        return source_ref, normalized_format, _canonicalize_inventory_manifest_source(
+            manifest,
+            target_id=resolved_target_id,
+        )
 
-    bound_target, resolved_target_id = resolve_inventory_target(target or target_id, target_id)
     records = PARSERS[normalized_format](text)
     if normalized_format == "ffuf":
         _mark_ffuf_wildcard_records(records)

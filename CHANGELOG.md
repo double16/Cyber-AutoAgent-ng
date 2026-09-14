@@ -50,6 +50,9 @@
 
 ### Fixes
 
+- Normalize legacy document-scoped inventory target IDs before web inventory consolidation, convert compatible
+  technology-inventory artifacts into canonical technology items, and prevent execution receipts from overriding
+  inaccessible acceptance evidence.
 - Run the React credential manager from the repository virtual environment or a Docker Python entrypoint, using the
   selected deployment mode and forwarding credential-store encryption keys to containers.
 - Show credential scope, account and tenant labels, invalidation, lineage, status history, and queued rotation details
