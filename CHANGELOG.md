@@ -2,6 +2,10 @@
 
 ### Features
 
+- Make web authentication coverage and hypothesis phases deterministically consume the latest completed inventory
+  snapshot, rejecting task creation when that snapshot is unavailable.
+- Make web-recon produce a controller-owned phase-1 inventory manifest and keep phases 2 through 5 within that frozen
+  inventory scope.
 - Add credential-aware web assessment phases for unauthenticated baselines, authenticated role/account coverage, and
   store-backed authorization comparisons; allow read-only, bounded IDOR comparisons with existing credentials in
   web-recon and strengthen the CTF access-context workflow.

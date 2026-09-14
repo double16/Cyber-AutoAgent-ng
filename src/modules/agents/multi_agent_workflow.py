@@ -2341,7 +2341,7 @@ class MultiAgentWorkflowController:
         if plan is None:
             self._can_reopen_completed_plan = False
             self._log_workflow("no plan found; creating plan")
-            plan_data = self._create_plan_data()
+            plan_data = self._normalize_module_phase_metadata(self._create_plan_data())
             created_plan = self.state.create_plan_from_dict(plan_data)
             self._log_workflow(
                 "plan created current_phase=%s phase_count=%s",
@@ -2368,6 +2368,38 @@ class MultiAgentWorkflowController:
         )
         self._emit_plan_output("updated", ensured_plan, previous_signature)
         return ensured_plan
+
+    def _normalize_module_phase_metadata(self, plan_data: dict[str, Any]) -> dict[str, Any]:
+        """Apply declarative module phase metadata to a newly generated plan."""
+
+        from modules.operation_plugins.planning_contracts import load_phase_metadata_contracts
+
+        module = str(getattr(self.runtime.config, "module", "") or "")
+        contracts = load_phase_metadata_contracts(module)
+        raw_phases = plan_data.get("phases")
+        if not contracts or not isinstance(raw_phases, list):
+            return plan_data
+        normalized = dict(plan_data)
+        normalized_phases = [dict(phase) if isinstance(phase, dict) else phase for phase in raw_phases]
+        changed_phase_ids = []
+        for phase in normalized_phases:
+            if not isinstance(phase, dict):
+                continue
+            contract = contracts.get(phase.get("id"))
+            if contract is None or phase.get("task_creation_mode") == contract.task_creation_mode:
+                continue
+            phase["task_creation_mode"] = contract.task_creation_mode
+            changed_phase_ids.append(contract.phase_id)
+        normalized["phases"] = normalized_phases
+        if changed_phase_ids:
+            self._emit_workflow_event(
+                {
+                    "type": "phase_metadata_normalized",
+                    "module": module,
+                    "phase_ids": sorted(changed_phase_ids),
+                }
+            )
+        return normalized
 
     def _get_or_activate_task(self, phase_id: int) -> Task | None:
         active_task = self._active_task_for_phase(phase_id)
@@ -9112,59 +9144,70 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
                 raise ValueError("hypothesis-dependent phase has no preceding hypothesis producer phase")
             source_phase = max(item.id for item in hypothesis_phases)
 
+        source_phase_ids = [source_phase]
+        if phase.task_creation_mode == "snapshot_dependent":
+            source_phase_ids = sorted(prior_phase_ids, reverse=True)
         snapshot_refs = []
-        for task in self.state.list_tasks(phase=source_phase):
-            if task.status != "done":
-                continue
-            if phase.task_creation_mode == "hypothesis_dependent":
-                basis = task.acceptance.basis
-                if basis.kind != "snapshot" or not basis.snapshot_hash or not basis.item_ids:
+        for candidate_source_phase in source_phase_ids:
+            candidate_snapshot_refs = []
+            for task in self.state.list_tasks(phase=candidate_source_phase):
+                if task.status != "done":
                     continue
-                for candidate in basis.source_refs:
+                if phase.task_creation_mode == "hypothesis_dependent":
+                    basis = task.acceptance.basis
+                    if basis.kind != "snapshot" or not basis.snapshot_hash or not basis.item_ids:
+                        continue
+                    for candidate in basis.source_refs:
+                        try:
+                            reference = canonical_artifact_reference(candidate)
+                            _manifest, snapshot_hash = self._load_controller_inventory_manifest(plan, reference)
+                        except ValueError:
+                            continue
+                        if snapshot_hash != basis.snapshot_hash:
+                            continue
+                        if reference not in candidate_snapshot_refs:
+                            candidate_snapshot_refs.append(reference)
+                        for item_id in basis.item_ids:
+                            prior = hypothesis_sources.get(item_id, ())
+                            hypothesis_sources[item_id] = tuple(sorted({*prior, task.task_uid}))
+                            evidence_refs = list(task.evidence)
+                            for result in self.state.list_task_acceptance_results(task.task_uid):
+                                evidence_refs.extend(result.evidence_refs)
+                            artifact_refs = []
+                            for evidence_ref in evidence_refs:
+                                try:
+                                    artifact_ref = canonical_artifact_reference(evidence_ref)
+                                except ValueError:
+                                    continue
+                                if artifact_ref.startswith("artifact:"):
+                                    artifact_refs.append(artifact_ref)
+                            previous_artifacts = hypothesis_artifact_refs.get(item_id, ())
+                            hypothesis_artifact_refs[item_id] = tuple(
+                                sorted({*previous_artifacts, *artifact_refs})
+                            )
+                    continue
+
+                procedure = task.acceptance.basis.procedure
+                if procedure is None or procedure.output_kind != "inventory_manifest":
+                    continue
+                candidates = list(task.evidence)
+                for result in self.state.list_task_acceptance_results(task.task_uid):
+                    candidates.extend(result.evidence_refs)
+                for candidate in candidates:
                     try:
                         reference = canonical_artifact_reference(candidate)
-                        _manifest, snapshot_hash = self._load_controller_inventory_manifest(plan, reference)
+                        self._load_controller_inventory_manifest(plan, reference)
                     except ValueError:
                         continue
-                    if snapshot_hash != basis.snapshot_hash:
-                        continue
-                    if reference not in snapshot_refs:
-                        snapshot_refs.append(reference)
-                    for item_id in basis.item_ids:
-                        prior = hypothesis_sources.get(item_id, ())
-                        hypothesis_sources[item_id] = tuple(sorted({*prior, task.task_uid}))
-                        evidence_refs = list(task.evidence)
-                        for result in self.state.list_task_acceptance_results(task.task_uid):
-                            evidence_refs.extend(result.evidence_refs)
-                        artifact_refs = []
-                        for evidence_ref in evidence_refs:
-                            try:
-                                artifact_ref = canonical_artifact_reference(evidence_ref)
-                            except ValueError:
-                                continue
-                            if artifact_ref.startswith("artifact:"):
-                                artifact_refs.append(artifact_ref)
-                        previous_artifacts = hypothesis_artifact_refs.get(item_id, ())
-                        hypothesis_artifact_refs[item_id] = tuple(
-                            sorted({*previous_artifacts, *artifact_refs})
-                        )
-                continue
-
-            procedure = task.acceptance.basis.procedure
-            if procedure is None or procedure.output_kind != "inventory_manifest":
-                continue
-            candidates = list(task.evidence)
-            for result in self.state.list_task_acceptance_results(task.task_uid):
-                candidates.extend(result.evidence_refs)
-            for candidate in candidates:
-                try:
-                    reference = canonical_artifact_reference(candidate)
-                    self._load_controller_inventory_manifest(plan, reference)
-                except ValueError:
-                    continue
-                if reference not in snapshot_refs:
-                    snapshot_refs.append(reference)
+                    if reference not in candidate_snapshot_refs:
+                        candidate_snapshot_refs.append(reference)
+            if candidate_snapshot_refs:
+                source_phase = candidate_source_phase
+                snapshot_refs = candidate_snapshot_refs
+                break
         if not snapshot_refs:
+            if phase.task_creation_mode == "snapshot_dependent":
+                raise ValueError("snapshot-dependent phase requires a completed prior inventory manifest")
             return [self._default_task_creation_batch(plan, phase, system_prompt)]
 
         if len(snapshot_refs) > 1:

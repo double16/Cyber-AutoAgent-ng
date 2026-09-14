@@ -4,6 +4,7 @@ import pytest
 
 from modules.operation_plugins import planning_contracts as contracts
 from modules.operation_plugins.planning_contracts import (
+    load_phase_metadata_contracts,
     load_phase_task_contract,
     validate_phase_task_proposals,
 )
@@ -37,6 +38,20 @@ def test_enabled_web_modules_declare_credential_coverage_phase_contracts():
     assert load_phase_task_contract("code_security", 1) is None
     assert load_phase_task_contract("context_navigator", 1) is None
     assert load_phase_task_contract("threat_emulation", 1) is None
+
+
+def test_web_phase_metadata_requires_inventory_snapshot_task_creation():
+    contracts_by_phase = load_phase_metadata_contracts("web")
+    recon_contracts_by_phase = load_phase_metadata_contracts("web_recon")
+
+    assert contracts_by_phase[2].task_creation_mode == "snapshot_dependent"
+    assert contracts_by_phase[3].task_creation_mode == "snapshot_dependent"
+    assert [recon_contracts_by_phase[phase_id].task_creation_mode for phase_id in range(2, 6)] == [
+        "snapshot_dependent",
+        "snapshot_dependent",
+        "snapshot_dependent",
+        "snapshot_dependent",
+    ]
 
 
 def test_web_contract_accepts_distinct_mapping_tasks_and_inventory_synthesis():
@@ -230,17 +245,21 @@ def test_web_contract_rejects_incomplete_or_overlapping_fanout(proposals, messag
         validate_phase_task_proposals(load_phase_task_contract("web", 1), proposals)
 
 
-def test_web_recon_contract_rejects_synthesis_task():
-    with pytest.raises(ValueError, match="does not allow a synthesis"):
-        validate_phase_task_proposals(
-            load_phase_task_contract("web_recon", 1),
-            [
-                _proposal("service_entrypoints"),
-                _proposal("technology_trust_boundary"),
-                _proposal("access_context_session"),
-                _proposal("coverage", role="synthesis"),
-            ],
-        )
+def test_web_recon_contract_requires_controller_owned_inventory_synthesis():
+    validate_phase_task_proposals(
+        load_phase_task_contract("web_recon", 1),
+        [
+            _proposal("service_entrypoints"),
+            _proposal("technology_trust_boundary"),
+            _proposal("access_context_session"),
+            _proposal(
+                "inventory_synthesis",
+                role="synthesis",
+                depends=("service_entrypoints", "technology_trust_boundary", "access_context_session"),
+                output_kind="inventory_manifest",
+            ),
+        ],
+    )
 
 
 def test_web_recon_contract_accepts_distinct_read_only_mapping_workstreams():
@@ -250,6 +269,12 @@ def test_web_recon_contract_accepts_distinct_read_only_mapping_workstreams():
             _proposal("service_entrypoints"),
             _proposal("technology_trust_boundary"),
             _proposal("safe_read_only_verification"),
+            _proposal(
+                "inventory_synthesis",
+                role="synthesis",
+                depends=("service_entrypoints", "technology_trust_boundary", "safe_read_only_verification"),
+                output_kind="inventory_manifest",
+            ),
         ],
     )
 

@@ -122,6 +122,8 @@ def test_web_modules_define_credential_coverage_phases_with_different_state_chan
     assert "Use GET requests only" in recon_prompt
     assert "credential-ID-backed IDOR comparison" in recon_policy
     assert "Do not automatically self-register, enumerate identifiers, or alter target state" in recon_policy
+    assert "controller-owned inventory-synthesis task" in recon_policy
+    assert "Phases 2 through 5 use the frozen phase-1 inventory manifest" in recon_policy
 
 
 def test_ctf_access_context_uses_credential_store_without_adding_an_assessment_phase():

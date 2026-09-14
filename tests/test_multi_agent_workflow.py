@@ -11729,6 +11729,80 @@ def test_task_creation_batches_use_resolved_context_and_preserve_atomic_groups(m
     }
 
 
+def test_snapshot_dependent_batches_use_an_earlier_inventory_manifest(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Authentication coverage", status="done"),
+            PlanPhase(id=3, title="Hypotheses", status="active", task_creation_mode="snapshot_dependent"),
+        ],
+    )
+    inventory = Task(
+        task_uid="inventory",
+        title="Inventory",
+        objective="Produce inventory",
+        acceptance=_acceptance("inventory"),
+        evidence=["artifact:artifacts/inventory.json"],
+        phase=1,
+        status="done",
+    )
+    authentication = Task(
+        task_uid="authentication",
+        title="Authenticate",
+        objective="Assess authentication coverage",
+        acceptance=_acceptance("authentication"),
+        phase=2,
+        status="done",
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, [inventory, authentication]),
+        text_runner=lambda *_args: "{}",
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda _plan, reference: ({"items": []}, "snapshot-hash") if reference.endswith("inventory.json") else (_ for _ in ()).throw(ValueError()),
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "_coverage_route_groups",
+        lambda *_args, **_kwargs: [("target-1", "endpoint", "http://target.test/one", ["endpoint-1"])],
+    )
+
+    batches = controller._task_creation_batches(plan, plan.phases[2], "system")
+
+    assert len(batches) == 1
+    assert batches[0].snapshot_ref == "artifact:artifacts/inventory.json"
+    assert batches[0].item_ids == {"endpoint-1"}
+
+
+def test_snapshot_dependent_batches_require_a_completed_inventory_manifest():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Authentication coverage", status="done"),
+            PlanPhase(id=2, title="Hypotheses", status="active", task_creation_mode="snapshot_dependent"),
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=lambda *_args: "{}",
+    )
+
+    with pytest.raises(ValueError, match="requires a completed prior inventory manifest"):
+        controller._task_creation_batches(plan, plan.phases[1], "system")
+
+
 def test_hypothesis_dependent_batches_cover_every_completed_hypothesis(monkeypatch):
     plan = OperationPlan(
         objective="assess",
@@ -11875,6 +11949,45 @@ def test_plan_creation_normalizes_following_standard_phase_to_hypothesis_depende
     })
 
     assert plan.phases[2].task_creation_mode == "hypothesis_dependent"
+
+
+@pytest.mark.parametrize(
+    ("module", "phase_modes", "expected"),
+    [
+        ("web", ["standard", "standard", "standard"], ["standard", "snapshot_dependent", "snapshot_dependent"]),
+        (
+            "web_recon",
+            ["standard", "standard", "standard", "standard", "standard"],
+            ["standard", "snapshot_dependent", "snapshot_dependent", "snapshot_dependent", "snapshot_dependent"],
+        ),
+    ],
+)
+def test_web_plan_metadata_normalizes_snapshot_dependent_phase_modes(module, phase_modes, expected):
+    runtime = _runtime()
+    runtime.config.module = module
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(None),
+        text_runner=lambda *_args: "{}",
+    )
+
+    normalized = controller._normalize_module_phase_metadata(
+        {
+            "objective": "assess",
+            "phases": [
+                {"id": index, "task_creation_mode": mode}
+                for index, mode in enumerate(phase_modes, start=1)
+            ],
+        }
+    )
+
+    assert [phase["task_creation_mode"] for phase in normalized["phases"]] == expected
+    assert {
+        "type": "phase_metadata_normalized",
+        "module": module,
+        "phase_ids": list(range(2, len(phase_modes) + 1)),
+    } in runtime.callback_handler.events
 
 
 def test_controller_inventory_filter_retains_unusual_in_scope_routes_and_removes_boundary_mismatch(

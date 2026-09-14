@@ -16,6 +16,13 @@ import yaml
 _VALID_MODES = frozenset({"fanout", "fanout_with_synthesis"})
 _VALID_ROLES = frozenset({"mapping", "synthesis", "direct_single_step"})
 _VALID_SYNTHESIS_EXECUTIONS = frozenset({"controller", "executor"})
+_VALID_TASK_CREATION_MODES = frozenset({
+    "standard",
+    "snapshot_dependent",
+    "hypothesis_dependent",
+    "finding_dependent",
+    "finding_validation",
+})
 
 
 @dataclass(frozen=True)
@@ -32,6 +39,40 @@ class PhaseTaskContract:
     synthesis_execution: str | None = None
     allow_direct_single_step: bool = False
     direct_single_step_workstreams: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class PhaseMetadataContract:
+    """Module-owned workflow metadata required for a numbered phase."""
+
+    module: str
+    phase_id: int
+    task_creation_mode: str
+
+
+def load_phase_metadata_contracts(module: str) -> dict[int, PhaseMetadataContract]:
+    """Load optional phase metadata rules without inheriting parent policy."""
+
+    normalized_module = str(module or "").strip()
+    if not normalized_module:
+        return {}
+    manifest_path = Path(__file__).resolve().parent / normalized_module / "module.yaml"
+    if not manifest_path.is_file():
+        return {}
+    try:
+        payload = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as error:
+        raise ValueError(f"Invalid module planning contract for {normalized_module}") from error
+    planning = payload.get("planning")
+    if not isinstance(planning, dict):
+        return {}
+    raw_contracts = planning.get("phase_metadata_contracts", [])
+    if not isinstance(raw_contracts, list):
+        raise ValueError(f"planning.phase_metadata_contracts must be a list for {normalized_module}")
+    contracts = [_parse_metadata_contract(normalized_module, item) for item in raw_contracts]
+    if len({contract.phase_id for contract in contracts}) != len(contracts):
+        raise ValueError(f"Duplicate phase metadata contract for module={normalized_module}")
+    return {contract.phase_id: contract for contract in contracts}
 
 
 def load_phase_task_contract(module: str, phase_id: int) -> PhaseTaskContract | None:
@@ -166,4 +207,20 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         synthesis_execution=synthesis_execution,
         allow_direct_single_step=allow_direct,
         direct_single_step_workstreams=normalized_direct_workstreams,
+    )
+
+
+def _parse_metadata_contract(module: str, raw: Any) -> PhaseMetadataContract:
+    if not isinstance(raw, dict):
+        raise ValueError(f"phase metadata contract must be an object for {module}")
+    phase_id = raw.get("phase_id")
+    task_creation_mode = raw.get("task_creation_mode")
+    if not isinstance(phase_id, int) or phase_id <= 0:
+        raise ValueError(f"phase metadata contract phase_id must be a positive integer for {module}")
+    if task_creation_mode not in _VALID_TASK_CREATION_MODES:
+        raise ValueError(f"phase metadata contract task_creation_mode is invalid for {module}")
+    return PhaseMetadataContract(
+        module=module,
+        phase_id=phase_id,
+        task_creation_mode=task_creation_mode,
     )
