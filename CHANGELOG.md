@@ -2,6 +2,8 @@
 
 ### Features
 
+- Allow snapshot-dependent task batches to fan out independent, workstream-scoped task families across the same
+  frozen route groups, preserving separate coverage for goals such as XSS, LFI, and SSRF.
 - Make web authentication coverage and hypothesis phases deterministically consume the latest completed inventory
   snapshot, rejecting task creation when that snapshot is unavailable.
 - Make web-recon produce a controller-owned phase-1 inventory manifest and keep phases 2 through 5 within that frozen

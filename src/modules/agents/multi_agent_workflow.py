@@ -3882,12 +3882,7 @@ class MultiAgentWorkflowController:
                         if get_tool_name(tool) in current_policy.recovery_allowed_tool_names
                     ]
                 if execution_prerequisite_recovery_active or output_prerequisite_recovery_active:
-                    closure_tools = [
-                        tool
-                        for tool in tools
-                        if get_tool_name(tool) != "record_task_acceptance"
-                        and get_tool_name(tool) not in _NON_EVIDENCE_RECOVERY_TOOLS
-                    ]
+                    closure_tools = self._execution_recovery_tools(plan, task, tools)
                 if max_token_synthesis_recovery_active:
                     closure_tools = [
                         tool
@@ -9638,6 +9633,9 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
   parameter/query entries with it. Each expanded task is bound to the active phase title and objective; the proposal
   must describe that phase-specific work rather than generic endpoint assessment. Referenced producer tasks must be
   done.
+- For a controller-owned snapshot batch, submit one proposal per independent goal or coverage family. Every proposal
+  covers every assigned atomic route group. Set a distinct non-empty `workstream` for each proposal, such as `xss`,
+  `lfi`, or `ssrf`; do not combine unrelated goals in one proposal or create one proposal per route.
 - Never mix procedure fields with snapshot fields. Python infers the basis kind.
 - Python requires generic durable evidence for snapshot work, including negative coverage dispositions; findings are
   optional outputs and are never required to prove that an item was assessed.
@@ -9753,13 +9751,6 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
             else "Submit one complete proposal list that addresses the validation result."
         )
         finding_context = self._task_creator_finding_context(phase)
-        batch_repair = (
-            "Consolidate every prior snapshot proposal into exactly one snapshot proposal; Python performs the "
-            "route fan-out.\n"
-            if "requires exactly one snapshot proposal" in failure_reason
-            else ""
-        )
-
         common_fixes = ""
         lower_reason = failure_reason.lower()
         if "limits" in lower_reason and "dict" in lower_reason:
@@ -9772,6 +9763,16 @@ inventory-wide scope is used only with a snapshot reference. For a replacement, 
             common_fixes += (
                 "- FIX: For every procedure proposal add a non-empty `methods` array and positive integer "
                 "`limits`; use `snapshot_refs` only for an existing frozen artifact.\n"
+            )
+        if "distinct snapshot proposal workstreams" in lower_reason:
+            common_fixes += (
+                "- FIX: Keep one snapshot proposal per independent goal and assign each a distinct non-empty "
+                "workstream. Do not merge independent goals or rename every proposal to the same workstream.\n"
+            )
+        if "every snapshot proposal to declare a non-empty workstream" in lower_reason:
+            common_fixes += (
+                "- FIX: Add a non-empty workstream to every snapshot proposal. Use a stable goal name such as "
+                "`xss`, `lfi`, or `ssrf`; module-contracted phases must use their declared workstreams.\n"
             )
         if "task_preflight:execution_capability" in lower_reason:
             available_capabilities = sorted(self._available_task_execution_capabilities())
@@ -9846,7 +9847,6 @@ work. Do not spend this correction turn reconstructing parent contracts from pri
 ## Current Finding References
 {finding_context}
 Use a listed canonical `finding:<uid>` reference only when the failed proposal is finding-dependent.
-{batch_repair}
 {proposal_context}"""
 
     def _task_creator_max_token_recovery_prompt(self, phase: PlanPhase) -> str:
@@ -11961,8 +11961,9 @@ Snapshot: {batch.snapshot_ref}
 Estimated input tokens: {batch.estimated_input_tokens}
 Resolved context window: {int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)}
 Create the active phase's work for every listed atomic route group and no work outside this batch.
-{hypothesis_batch_rule}Submit exactly one snapshot proposal. Do not divide this batch into endpoint-category or vulnerability-class proposals;
-Python expands the single proposal into one route-scoped task for every listed group.
+{hypothesis_batch_rule}Submit one snapshot proposal for each independent goal or declared workstream. Do not combine
+unrelated goals, and do not divide a goal into endpoint-category or vulnerability-class proposals. Python expands
+every submitted proposal into one route-scoped task for every listed group.
 The proposal objective and criterion must describe the active phase's distinct work. Do not use generic "assess
 endpoint" or "assess frozen inventory" wording.
 {self._task_creation_batch_toon(batch.groups)}
@@ -13669,6 +13670,7 @@ tools and durable evidence before relying on it."""
         if procedure is None:
             return []
         references = []
+        matching_outcomes = []
         for outcome in tool_outcomes:
             if not outcome.success or outcome.tool_name in _NON_EXECUTION_RECEIPT_TOOLS:
                 continue
@@ -13676,6 +13678,7 @@ tools and durable evidence before relying on it."""
                 plan, task, requirement.subject_ref, outcome
             ):
                 continue
+            matching_outcomes.append(outcome)
             for reference in self._artifact_refs_from_tool_outcomes([outcome]):
                 if not self._execution_artifact_is_current_operation(reference):
                     continue
@@ -13686,7 +13689,60 @@ tools and durable evidence before relying on it."""
                         continue
                 if reference not in references:
                     references.append(reference)
+        if references or not matching_outcomes:
+            return references
+
+        # Some network tools return response data but do not themselves expose an
+        # artifact reference.  A following editor call can persist that response
+        # as task-local evidence.  Bind that artifact only after a successful
+        # subject-matched execution in the same task; do not let an artifact alone
+        # stand in for execution provenance.
+        first_execution_sequence = min(outcome.sequence for outcome in matching_outcomes)
+        for outcome in tool_outcomes:
+            if (
+                not outcome.success
+                or outcome.sequence < first_execution_sequence
+                or outcome.tool_name not in {"editor", "file_editor"}
+            ):
+                continue
+            for reference in self._artifact_refs_from_tool_outcomes([outcome]):
+                if not self._execution_artifact_is_current_operation(reference):
+                    continue
+                if reference not in references:
+                    references.append(reference)
         return references
+
+    def _execution_recovery_tools(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        tools: list[Any],
+    ) -> list[Any]:
+        """Return evidence-producing recovery tools within the frozen method contract."""
+
+        procedure = task.acceptance.basis.procedure
+        expected_capabilities = set(
+            canonical_procedure_methods(
+                procedure.methods if procedure is not None else ("analyze",),
+                self._task_execution_targets(plan, task),
+            )
+        )
+        allowed = []
+        for tool in tools:
+            tool_name = get_tool_name(tool)
+            if tool_name in {"editor", "file_editor"}:
+                allowed.append(tool)
+                continue
+            if (
+                tool_name == "shell"
+                or tool_name in _NON_EVIDENCE_RECOVERY_TOOLS
+                or tool_name in _NON_EXECUTION_RECEIPT_TOOLS
+            ):
+                continue
+            capabilities = _TOOL_EXECUTION_CAPABILITIES.get(tool_name, frozenset())
+            if not capabilities or capabilities.intersection(expected_capabilities):
+                allowed.append(tool)
+        return allowed
 
     def _has_valid_required_output(
         self,

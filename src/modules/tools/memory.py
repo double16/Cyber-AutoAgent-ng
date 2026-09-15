@@ -6412,7 +6412,9 @@ class TaskProposal(_StrictTaskWireModel):
     )
     workstream: str | None = Field(
         default=None,
-        description="Module-declared planning workstream when the active phase has a task contract",
+        description=(
+            "Structured planning workstream and coverage family; module contracts may restrict its allowed values"
+        ),
     )
     task_role: str = Field(default="mapping", description="Planning role: mapping, synthesis, or direct_single_step")
     depends_on_workstreams: list[str] = Field(
@@ -6616,7 +6618,7 @@ _TASK_PROPOSAL_FIELD_CORRECTIONS = {
         'array of parent acceptance criterion IDs when replacing work',
         '"supersedes_criteria":["criterion-1"]',
     ),
-    "workstream": ('module-declared non-empty workstream', '"workstream":"bounded_crawl"'),
+    "workstream": ('non-empty planning workstream or coverage family', '"workstream":"bounded_crawl"'),
     "task_role": ('mapping, synthesis, or direct_single_step', '"task_role":"mapping"'),
     "depends_on_workstreams": ('array of declared prerequisite workstreams', '"depends_on_workstreams":["bounded_crawl"]'),
     "inapplicability_reason": ('non-empty reason for direct_single_step only', '"inapplicability_reason":"flag is exposed by the root response"'),
@@ -8541,7 +8543,27 @@ def _coverage_route_groups(
     ]
 
 
-def _completed_coverage_item_ids(existing_tasks: list[Task], snapshot_hash: str, phase: int) -> set[str]:
+def _task_coverage_family(task: Task) -> str:
+    """Return the controller-owned coverage family for a snapshot task."""
+
+    context = task.recovery_context if isinstance(task.recovery_context, dict) else {}
+    family = str(context.get("coverage_family") or "").strip()
+    return family or "default"
+
+
+def _proposal_coverage_family(proposal: TaskProposal) -> str:
+    """Return a proposal's structured coverage family, preserving legacy defaults."""
+
+    family = str(proposal.workstream or "").strip()
+    return family or "default"
+
+
+def _completed_coverage_item_ids(
+    existing_tasks: list[Task],
+    snapshot_hash: str,
+    phase: int,
+    coverage_family: str,
+) -> set[str]:
     completed: set[str] = set()
     store = _get_database_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
@@ -8550,6 +8572,7 @@ def _completed_coverage_item_ids(existing_tasks: list[Task], snapshot_hash: str,
             task.phase != phase
             or task.acceptance.mode != "coverage"
             or task.acceptance.basis.snapshot_hash != snapshot_hash
+            or _task_coverage_family(task) != coverage_family
         ):
             continue
         results = list_results(task.task_uid) if callable(list_results) else store.get_acceptance_results(
@@ -8567,6 +8590,7 @@ def _frozen_task_identity(
     target_scope: TargetScope,
     target_ids: list[str],
     phase: int,
+    coverage_family: str = "default",
 ) -> str:
     """Return the deterministic work identity used to deduplicate compiled tasks."""
 
@@ -8579,6 +8603,7 @@ def _frozen_task_identity(
             "source_refs": sorted(acceptance.basis.source_refs),
             "criteria": [criterion.to_dict() for criterion in acceptance.criteria],
             "objective": objective.strip(),
+            "coverage_family": coverage_family,
         }
     else:
         acceptance_identity = {
@@ -8606,6 +8631,7 @@ def _semantic_cross_phase_task_identity(
     acceptance: AcceptanceContract,
     target_scope: TargetScope,
     target_ids: list[str],
+    coverage_family: str = "default",
 ) -> str:
     """Return an exact work identity while ignoring controller-owned phase references."""
 
@@ -8625,6 +8651,7 @@ def _semantic_cross_phase_task_identity(
             "acceptance": acceptance_identity,
             "target_ids": sorted(target_ids),
             "target_scope": target_scope,
+            "coverage_family": coverage_family if acceptance.mode == "coverage" else "default",
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -8675,11 +8702,16 @@ def _create_tasks_from_proposals(
         validate_phase_task_proposals(phase_task_contract, proposals)
     if proposal_preflight_validator is not None:
         proposal_preflight_validator(proposals)
-    if coverage_item_ids is not None and len(proposals) != 1:
-        raise ValueError(
-            "controller-bound inventory batch requires exactly one snapshot proposal; "
-            "Python expands that proposal across every assigned route group"
-        )
+    if coverage_item_ids is not None:
+        coverage_families = [_proposal_coverage_family(proposal) for proposal in proposals]
+        if any(family == "default" for family in coverage_families):
+            raise ValueError(
+                "controller-bound inventory batch requires every snapshot proposal to declare a non-empty workstream"
+            )
+        if len(set(coverage_families)) != len(coverage_families):
+            raise ValueError(
+                "controller-bound inventory batch requires distinct snapshot proposal workstreams"
+            )
 
     client = _ensure_memory_client()
     user_id = _user_id()
@@ -8786,6 +8818,7 @@ def _create_tasks_from_proposals(
 
         acceptance_groups = [(title, objective, acceptance, target_scope, target_ids)]
         if acceptance.mode == "coverage":
+            coverage_family = _proposal_coverage_family(proposal)
             artifact_ref = next(ref for ref in acceptance.basis.source_refs if ref.startswith("artifact:"))
             if expected_snapshot_ref is not None and artifact_ref != expected_snapshot_ref:
                 raise ValueError(
@@ -8793,7 +8826,12 @@ def _create_tasks_from_proposals(
                     f"{expected_snapshot_ref}; received {artifact_ref}"
                 )
             manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
-            completed_ids = _completed_coverage_item_ids(existing_tasks, snapshot_hash, current_phase)
+            completed_ids = _completed_coverage_item_ids(
+                existing_tasks,
+                snapshot_hash,
+                current_phase,
+                coverage_family,
+            )
             route_groups = []
             title_prefixes = {
                 "endpoint": "Assess endpoint",
@@ -8942,6 +8980,9 @@ def _create_tasks_from_proposals(
         proposal_expanded_count = len(acceptance_groups)
         for group_title, group_objective, group_acceptance, group_target_scope, group_target_ids in acceptance_groups:
             group_planning_context = dict(planning_context)
+            coverage_family = _proposal_coverage_family(proposal)
+            if group_acceptance.mode == "coverage":
+                group_planning_context["coverage_family"] = coverage_family
             if required_finding_refs is not None:
                 group_planning_context["upstream_finding_refs"] = list(finding_refs)
             if hypothesis_source_task_uids_by_item_id and group_acceptance.mode == "coverage":
@@ -8967,6 +9008,7 @@ def _create_tasks_from_proposals(
                 group_target_scope,
                 group_target_ids,
                 current_phase,
+                coverage_family,
             )
             if any(
                 _frozen_task_identity(
@@ -8976,6 +9018,7 @@ def _create_tasks_from_proposals(
                     task.target_scope,
                     task.target_ids,
                     task.phase,
+                    _task_coverage_family(task),
                 ) == group_identity
                 for task in [*existing_tasks, *staged_tasks]
                 if task.status in {"active", "pending", "done"}
@@ -8990,6 +9033,7 @@ def _create_tasks_from_proposals(
                 group_acceptance,
                 group_target_scope,
                 group_target_ids,
+                coverage_family,
             )
             if any(
                 _semantic_cross_phase_task_identity(
@@ -8998,6 +9042,7 @@ def _create_tasks_from_proposals(
                     task.acceptance,
                     task.target_scope,
                     task.target_ids,
+                    _task_coverage_family(task),
                 ) == cross_phase_identity
                 for task in [*existing_tasks, *staged_tasks]
                 if task.status in {"active", "pending", "done"}

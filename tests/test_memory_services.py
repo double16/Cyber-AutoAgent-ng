@@ -3022,6 +3022,7 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
         "limits": {},
         "snapshot_refs": [canonical_manifest],
         "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+        "workstream": "trust_boundary_mapping",
     }])
 
     assert json.loads(result)["created_count"] == 2
@@ -3095,7 +3096,7 @@ def test_bound_create_tasks_tool_rejects_duplicate_preflight_batch(fake_memory_c
     assert all("key workflows" not in task.acceptance.criteria[0].description.lower() for task in store.tasks)
 
 
-def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(fake_memory_client):
+def test_bound_create_tasks_tool_fans_out_distinct_snapshot_workstreams_atomically(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(
         objective="Assess inventory",
@@ -3134,6 +3135,7 @@ def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(
         "limits": {},
         "snapshot_refs": [canonical_manifest],
         "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+        "workstream": "unauthenticated_baseline",
     }
     create_tool = mod.build_create_tasks_tool(
         coverage_item_ids={"endpoint-0", "endpoint-1"},
@@ -3150,10 +3152,28 @@ def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(
     with pytest.raises(ValueError, match="generic endpoint assessment"):
         create_tool(tasks=[generic_proposal])
 
-    with pytest.raises(ValueError, match="requires exactly one snapshot proposal"):
-        create_tool(tasks=[proposal, {**proposal, "title": "Second category"}])
+    with pytest.raises(ValueError, match="declare a non-empty workstream"):
+        create_tool(tasks=[{key: value for key, value in proposal.items() if key != "workstream"}])
 
-    assert store.tasks == []
+    with pytest.raises(ValueError, match="distinct snapshot proposal workstreams"):
+        create_tool(tasks=[proposal, {**proposal, "title": "Duplicate workstream"}])
+
+    authorization = {
+        **proposal,
+        "title": "Assess authorization controls",
+        "objective": "Assess authorization boundaries for every assigned frozen inventory item",
+        "criteria": [{"description": "Record authorization-boundary dispositions for every assigned item"}],
+        "workstream": "authorization_comparison",
+    }
+
+    result = json.loads(create_tool(tasks=[proposal, authorization]))
+
+    assert result == {"complete": True, "created_count": 4, "duplicate_count": 0}
+    assert {task.recovery_context["coverage_family"] for task in store.tasks} == {
+        "unauthenticated_baseline",
+        "authorization_comparison",
+    }
+    assert {task.acceptance.basis.item_ids for task in store.tasks} == {("endpoint-0",), ("endpoint-1",)}
 
 
 def test_bound_create_tasks_tool_rejects_wrong_snapshot_and_split_route(fake_memory_client):
@@ -3195,6 +3215,7 @@ def test_bound_create_tasks_tool_rejects_wrong_snapshot_and_split_route(fake_mem
         "limits": {},
         "snapshot_refs": [canonical_manifest],
         "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+        "workstream": "route_validation",
     }
 
     wrong_snapshot_tool = mod.build_create_tasks_tool(
@@ -3270,6 +3291,85 @@ def test_create_tasks_coverage_retry_excludes_previously_dispositioned_items(fak
         ("endpoint-1",),
         ("endpoint-2",),
     ]
+
+
+def test_bound_snapshot_coverage_families_remain_independently_eligible(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess inventory",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Coverage", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "coverage-family-inventory.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [
+            {
+                "id": f"endpoint-{index}",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": f"http://target.test/{index}",
+                "attributes": {},
+            }
+            for index in range(2)
+        ],
+        "unassessed_gaps": [],
+    }))
+    canonical_manifest = mod.canonical_artifact_reference(str(manifest))
+    create_tool = mod.build_create_tasks_tool(
+        coverage_item_ids={"endpoint-0", "endpoint-1"},
+        expected_snapshot_ref=canonical_manifest,
+        phase_title="Attack Hypotheses",
+        phase_objective="Develop independently testable attack hypotheses for the frozen inventory.",
+    )
+    xss = {
+        "title": "Develop XSS hypotheses",
+        "objective": "Develop XSS hypotheses for every assigned frozen inventory item",
+        "methods": [],
+        "limits": {},
+        "snapshot_refs": [canonical_manifest],
+        "criteria": [{"description": "Record XSS hypotheses for every assigned item"}],
+        "workstream": "xss",
+    }
+    lfi = {
+        **xss,
+        "title": "Develop LFI hypotheses",
+        "objective": "Develop LFI hypotheses for every assigned frozen inventory item",
+        "criteria": [{"description": "Record LFI hypotheses for every assigned item"}],
+        "workstream": "lfi",
+    }
+
+    assert json.loads(create_tool(tasks=[xss]))["created_count"] == 2
+    for task in store.tasks:
+        store.acceptance_results[task.task_uid] = [mod.AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status="satisfied",
+            disposition="observation",
+            summary="XSS hypothesis coverage recorded",
+            evidence_refs=(canonical_manifest,),
+            coverage=tuple(
+                mod.CoverageResult(
+                    item_id=item_id,
+                    status="assessed_negative",
+                    evidence_refs=(canonical_manifest,),
+                )
+                for item_id in task.acceptance.basis.item_ids
+            ),
+        )]
+
+    later_create_tool = mod.build_create_tasks_tool(
+        coverage_item_ids={"endpoint-0", "endpoint-1"},
+        expected_snapshot_ref=canonical_manifest,
+        phase_title="Attack Hypotheses",
+        phase_objective="Develop independently testable attack hypotheses for the frozen inventory.",
+    )
+    result = json.loads(later_create_tool(tasks=[lfi]))
+
+    assert result == {"complete": True, "created_count": 2, "duplicate_count": 0}
+    assert [task.recovery_context["coverage_family"] for task in store.tasks[-2:]] == ["lfi", "lfi"]
 
 
 def test_create_tasks_rejects_semantic_cross_phase_duplicate(fake_memory_client):

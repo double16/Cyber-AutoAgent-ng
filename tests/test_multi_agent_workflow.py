@@ -1555,6 +1555,138 @@ def test_controller_resolves_task_local_request_artifact_as_execution_evidence(m
     }]
 
 
+def test_controller_binds_later_editor_artifact_to_subject_matched_request(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    criterion = AcceptanceCriterion(
+        id="criterion-1",
+        description="Assess the application root",
+        evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        execution_requirements=[ExecutionRequirement(
+            "criterion-1-execution-1",
+            "Request the application root",
+            "/",
+        )],
+    )
+    task = TaskModel(
+        task_uid="request-editor-proof",
+        title="Map entry point",
+        objective="Request the application root",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded request",
+                source_refs=["target:target-1", "plan:phase-1"],
+                procedure={
+                    "methods": ["http_request"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[criterion],
+        ),
+    )
+    artifact = tmp_path / "artifacts" / "root-response.txt"
+    artifact.parent.mkdir()
+    artifact.write_text("HTTP/1.1 200 OK\n", encoding="utf-8")
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(artifact))
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=[task]),
+    )
+    request = ToolOutcome(
+        sequence=1,
+        tool_use_id="request-1",
+        tool_name="http_request",
+        success=True,
+        correctable=False,
+        input_summary='{"method":"GET","url":"http://target.test/"}',
+        output_summary="Status Code: 200",
+    )
+    editor = ToolOutcome(
+        sequence=2,
+        tool_use_id="editor-1",
+        tool_name="editor",
+        success=True,
+        correctable=False,
+        input_summary="create root response evidence",
+        output_summary="artifact:artifacts/root-response.txt",
+        artifact_refs=("artifact:artifacts/root-response.txt",),
+    )
+
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [request, editor]) == {
+        "criterion-1-execution-1": ["artifact:artifacts/root-response.txt"]
+    }
+    assert controller._valid_required_output_artifact_refs(
+        plan,
+        task,
+        [replace(request, input_summary='{"method":"GET","url":"http://target.test/api/config"}'), editor],
+        criterion.execution_requirements[0],
+    ) == []
+
+
+def test_execution_recovery_tools_exclude_shell_when_contract_is_request_only():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=1,
+        total_phases=1,
+        phases=[PlanPhase(id=1, title="Test", status="active")],
+        targets=[OperationTarget("target-1", "http://target.test", "network")],
+    )
+    task = TaskModel(
+        task_uid="request-recovery-tools",
+        title="Request root",
+        objective="Request root",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(
+                kind="procedure",
+                description="Bounded request",
+                source_refs=["target:target-1"],
+                procedure={
+                    "methods": ["http_request"],
+                    "limits": {"max_requests": 1},
+                    "stop_condition": "first_limit_reached",
+                    "gap_policy": "record_unassessed",
+                    "output_kind": "artifact",
+                },
+            ),
+            criteria=[AcceptanceCriterion(
+                id="criterion-1",
+                description="Request root",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, tasks=[task])
+    )
+
+    tools = controller._execution_recovery_tools(
+        plan,
+        task,
+        [_tool("http_request"), _tool("shell"), _tool("editor"), _tool("runtime_request_tool")],
+    )
+
+    assert [tool.__name__ for tool in tools] == ["http_request", "editor", "runtime_request_tool"]
+
+
 def test_same_cycle_acceptance_resolves_live_http_request_evidence(monkeypatch, tmp_path):
     artifact = tmp_path / "artifacts" / "root-response.log"
     artifact.parent.mkdir()
@@ -12291,6 +12423,29 @@ def test_default_task_creation_batch_estimates_compact_fallback_prompt():
     assert "Never emit `work_type`" in prompt
 
 
+def test_snapshot_batch_prompt_requires_separate_coverage_families():
+    plan = _plan()
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=lambda *_args: "{}",
+    )
+    batch = TaskCreationBatch(
+        1,
+        1,
+        "artifact:artifacts/inventory.json",
+        (("target-1", "endpoint", "http://target.test/one", ("endpoint-1",)),),
+        500,
+    )
+
+    prompt = controller._task_creator_prompt(plan, plan.phases[0], batch)
+
+    assert "Submit one snapshot proposal for each independent goal or declared workstream" in prompt
+    assert "every submitted proposal into one route-scoped task" in prompt
+    assert "distinct non-empty `workstream`" in prompt
+
+
 @pytest.mark.skip(reason="task creators now return structured proposals without tool sessions")
 def test_task_creator_uses_fresh_session_for_each_batch_and_retains_batch_corrections(monkeypatch):
     state = FakeState(_plan())
@@ -12349,7 +12504,7 @@ def test_task_creator_uses_fresh_session_for_each_batch_and_retains_batch_correc
     assert lifecycle == [("open", 1), ("close", 1), ("open", 2), ("close", 2)]
     assert [session_id for session_id, _prompt in prompts] == [1, 1, 2]
     assert "Batch 1 of 2" in prompts[0][1]
-    assert "Submit exactly one snapshot proposal" in prompts[0][1]
+    assert "Submit one snapshot proposal for each independent goal or declared workstream" in prompts[0][1]
     assert "Validation result" in prompts[1][1]
     assert "Batch 2 of 2" in prompts[2][1]
     assert outcome.created_count == 2
@@ -12424,6 +12579,22 @@ def test_task_creator_repair_prompt_explains_missing_procedure_limits():
 
     assert "omit `limits` to use the bounded defaults" in repair
     assert '"limits": {"max_requests": 50}' in repair
+
+
+def test_task_creator_repair_prompt_explains_snapshot_workstream_requirements():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+
+    repair = controller._task_creator_repair_prompt(
+        "controller-bound inventory batch requires distinct snapshot proposal workstreams",
+        "",
+    )
+
+    assert "one snapshot proposal per independent goal" in repair
+    assert "distinct non-empty workstream" in repair
 
 
 def test_task_creator_repair_prompt_explains_unavailable_execution_capability():
