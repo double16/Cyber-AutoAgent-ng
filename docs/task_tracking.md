@@ -336,8 +336,10 @@ agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent in
 only controller-authorized task evidence and frozen acceptance artifacts. It receives up to
 `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE` pages per artifact (default four), with its total derived from the
 number of distinct authorized artifacts; each evaluator page is limited to 200 lines and 5% of the resolved input
-context window at four UTF-8 bytes per token, clamped from 8 KiB through 64 KiB. Oversized pages are rejected without
-materializing their content. Reaching a page limit directs the evaluator to another authorized artifact; only total
+context window at four UTF-8 bytes per token, clamped from 8 KiB through 64 KiB. When a line read reaches its byte
+ limit, `read_artifact` returns the bounded content as a successful partial page with `truncated: true`,
+ `next_start_byte`, and a `pagination` object containing the exact `path`, `start_byte`, and `max_bytes` for the next
+ non-overlapping byte page. Reaching a page limit directs the evaluator to another authorized artifact; only total
 exhaustion or a repeated denied read stops evaluation.
 
 Finding-dependent task creation consumes only verified findings. The controller advertises and validates canonical

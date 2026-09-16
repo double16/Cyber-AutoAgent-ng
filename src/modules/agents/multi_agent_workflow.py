@@ -9620,8 +9620,10 @@ applicability or a finding, and published proof of concepts must not be executed
             ("- Distinct pages must not overlap an already returned page. A duplicate, overlap, or exhausted budget returns "
             "guidance without artifact content. You may consider another listed artifact for a different material gap, "
             "but never retry that unavailable page or artifact."),
-            ("- A larger artifact requires explicit byte paging. Use it only for an unresolved material gap, not routine "
-            "review; max_lines may further narrow a byte page, and next_start_byte continues after returned content. "
+            ("- A byte-limited response is a successful partial page: it sets truncated=true and provides a pagination "
+            "object. Continue only with its next_start_byte and max_bytes; do not retry the original line request. "
+            "Use larger artifacts only for an unresolved material gap, not routine review; max_lines may further "
+            "narrow a byte page, and next_start_byte continues after returned content. "
             "If the controller closes artifact access at its hard stop, synthesize immediately from the supplied "
             "summaries and receipts."),
             "- Return the required JSON decision once you have the needed evidence.",

@@ -190,7 +190,7 @@ def _read_artifact_with_limit(
     max_bytes: int,
     max_output_chars: int | None = None,
 ) -> str:
-    """Read a bounded artifact excerpt without materializing more than ``max_bytes``."""
+    """Read a bounded artifact excerpt, returning a byte page when line mode overflows."""
 
     root = os.path.realpath(_operation_output_root())
     resolved = resolve_operation_artifact_path(path)
@@ -204,20 +204,27 @@ def _read_artifact_with_limit(
         content_size = 0
         total_lines = 0
         end_line = start_line + max_lines - 1
+        selected_start_byte: int | None = None
         while True:
+            line_start_byte = artifact_file.tell()
             raw_line = artifact_file.readline(max_bytes + 1)
             if not raw_line:
                 break
             total_lines += 1
             line_exceeds_limit = len(raw_line) > max_bytes and not raw_line.endswith(b"\n")
             if start_line <= total_lines <= end_line:
+                if selected_start_byte is None:
+                    selected_start_byte = line_start_byte
                 normalized_line = raw_line.rstrip(b"\n")
                 additional_size = len(normalized_line) + (1 if lines else 0)
                 if line_exceeds_limit or content_size + additional_size > max_bytes:
-                    raise ValueError(
-                        f"{ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER}: Requested artifact page exceeds "
-                        f"the {max_bytes}-byte limit. Retry with a smaller max_lines value or use "
-                        "byte paging with start_byte and max_bytes"
+                    return _read_artifact_bytes(
+                        resolved,
+                        selected_start_byte,
+                        max_bytes,
+                        max_output_chars=max_output_chars,
+                        page_start_line=start_line,
+                        page_max_lines=max_lines,
                     )
                 decoded_line = normalized_line.decode("utf-8", errors="replace")
                 lines.append(decoded_line)
@@ -254,6 +261,9 @@ def _read_artifact_bytes(
     start_line: int | None = None,
     max_lines: int | None = None,
     max_output_chars: int | None = None,
+    *,
+    page_start_line: int | None = None,
+    page_max_lines: int | None = None,
 ) -> str:
     """Read one byte page, optionally narrowed to a bounded line range."""
 
@@ -263,6 +273,10 @@ def _read_artifact_bytes(
         raise ValueError("start_line must be at least 1")
     if max_lines is not None and not 1 <= max_lines <= 500:
         raise ValueError("max_lines must be between 1 and 500")
+    if page_start_line is not None and page_start_line < 1:
+        raise ValueError("page_start_line must be at least 1")
+    if page_max_lines is not None and not 1 <= page_max_lines <= 500:
+        raise ValueError("page_max_lines must be between 1 and 500")
     root = os.path.realpath(_operation_output_root())
     resolved = resolve_operation_artifact_path(path)
     byte_size = os.path.getsize(resolved)
@@ -273,7 +287,7 @@ def _read_artifact_bytes(
         byte_page = artifact_file.read(max_bytes)
 
     content_start = 0
-    current_line = 1
+    current_line = page_start_line if page_start_line is not None else 1
     if start_line is not None:
         while current_line < start_line and content_start < len(byte_page):
             newline = byte_page.find(b"\n", content_start)
@@ -284,9 +298,10 @@ def _read_artifact_bytes(
             current_line += 1
 
     content_end = len(byte_page)
-    if max_lines is not None and content_start < len(byte_page):
+    content_line_limit = page_max_lines if page_max_lines is not None else max_lines
+    if content_line_limit is not None and content_start < len(byte_page):
         line_end = content_start
-        for _ in range(max_lines):
+        for _ in range(content_line_limit):
             newline = byte_page.find(b"\n", line_end)
             if newline < 0:
                 line_end = len(byte_page)
@@ -299,21 +314,36 @@ def _read_artifact_bytes(
     def payload_for(page_content: bytes) -> dict[str, Any]:
         page_end = content_start + len(page_content)
         end_byte = start_byte + page_end
+        next_start_byte = end_byte if end_byte < byte_size else None
         payload: dict[str, Any] = {
             "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
             "start_byte": start_byte,
             "end_byte": end_byte,
-            "next_start_byte": end_byte if end_byte < byte_size else None,
+            "next_start_byte": next_start_byte,
             "eof": end_byte >= byte_size,
             "byte_size": byte_size,
             "content": page_content.decode("utf-8", errors="replace"),
         }
-        if max_lines is not None:
+        if content_line_limit is not None:
             returned_line_count = page_content.count(b"\n") + int(
                 bool(page_content) and not page_content.endswith(b"\n")
             )
             payload["start_line"] = current_line
             payload["end_line"] = current_line + returned_line_count - 1
+        if next_start_byte is not None:
+            reached_byte_limit = len(page_content) == max_bytes
+            payload["truncated"] = True
+            payload["truncation_reason"] = (
+                "byte_limit_reached" if reached_byte_limit else "line_limit_reached"
+            )
+            payload["pagination"] = {
+                "path": payload["artifact_ref"],
+                "start_byte": next_start_byte,
+                "max_bytes": max_bytes,
+                "message": "Continue with start_byte=next_start_byte and the same max_bytes.",
+            }
+        else:
+            payload["truncated"] = False
         return payload
 
     payload = payload_for(content)
@@ -328,6 +358,14 @@ def _read_artifact_bytes(
                 upper = midpoint - 1
         content = content[:lower]
         payload = payload_for(content)
+        if content and payload["next_start_byte"] is not None:
+            payload["truncated"] = True
+            payload["truncation_reason"] = "output_limit_reached"
+            while content and len(str(payload)) > max_output_chars:
+                content = content[:-1]
+                payload = payload_for(content)
+                payload["truncated"] = True
+                payload["truncation_reason"] = "output_limit_reached"
     if max_output_chars is not None and len(str(payload)) > max_output_chars:
         raise ValueError("artifact reader output limit is too small for result metadata")
     return str(payload)

@@ -16151,6 +16151,8 @@ def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(m
     assert "Acceptance summaries, review digest, and controller-observed outcomes are the default evidence" in prompt
     assert "Controller execution receipts are authoritative" in prompt
     assert "never reread artifacts to prove a receipt or tool invocation" in prompt
+    assert "A byte-limited response is a successful partial page" in prompt
+    assert "Continue only with its next_start_byte and max_bytes" in prompt
     assert artifact_refs[0] in prompt
     assert artifact_refs[-1] in prompt
 

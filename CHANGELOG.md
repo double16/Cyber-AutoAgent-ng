@@ -62,6 +62,9 @@
 
 ### Fixes
 
+- Return byte-bounded artifact excerpts with explicit truncation and pagination instructions, preventing a normal
+  oversized read from entering artifact-failure recovery before its required continuation page can be read.
+- Trim console log messages and suppress whitespace-only entries to prevent blank timestamped log lines.
 - Wait for and report rendered-page changes after authentication-form submissions, generate collision-resistant
   registration emails, and classify incomplete credential-role quotas as partial phase failures while carrying their
   coverage gaps into later work.

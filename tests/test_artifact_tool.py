@@ -14,7 +14,6 @@ from modules.tools.artifact import (
     ARTIFACT_READ_OVERLAP_GUARD_MARKER,
     ARTIFACT_READ_POLICY_VIOLATION_MARKER,
     ARTIFACT_READ_REPEAT_GUARD_MARKER,
-    ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER,
     artifact_max_bytes_for_context_window,
     artifact_review_metadata,
     create_artifact_reader,
@@ -148,7 +147,7 @@ def test_artifact_reader_rejects_invalid_output_and_byte_page_parameters(tmp_pat
     with pytest.raises(ValueError, match="max_bytes"):
         artifact_review_metadata("evidence.txt", 0)
 
-def test_read_artifact_rejects_oversized_minified_page_without_returning_content(tmp_path: Path):
+def test_read_artifact_returns_paginated_content_when_line_page_reaches_byte_limit(tmp_path: Path):
     artifact = tmp_path / "minified.js"
     oversized_content = "x" * 19_201
     artifact.write_text(oversized_content, encoding="utf-8")
@@ -156,14 +155,25 @@ def test_read_artifact_rejects_oversized_minified_page_without_returning_content
     with (
         patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
-        pytest.raises(ValueError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER) as error,
     ):
-        READ_ARTIFACT("minified.js")
+        first = ast.literal_eval(READ_ARTIFACT("minified.js"))
+        second = ast.literal_eval(
+            READ_ARTIFACT(
+                first["pagination"]["path"],
+                start_byte=first["pagination"]["start_byte"],
+                max_bytes=first["pagination"]["max_bytes"],
+            )
+        )
 
-    assert oversized_content not in str(error.value)
-    assert "max_lines" in str(error.value)
-    assert "start_byte" in str(error.value)
-    assert "max_bytes" in str(error.value)
+    assert first["content"] == oversized_content[:19_200]
+    assert first["truncated"] is True
+    assert first["truncation_reason"] == "byte_limit_reached"
+    assert first["next_start_byte"] == 19_200
+    assert first["pagination"]["start_byte"] == first["next_start_byte"]
+    assert first["pagination"]["max_bytes"] == 19_200
+    assert second["content"] == "x"
+    assert second["eof"] is True
+    assert second["truncated"] is False
 
 
 def test_read_artifact_reads_oversized_minified_content_by_byte_page(tmp_path: Path):
@@ -233,16 +243,19 @@ def test_read_artifact_allows_start_line_only_at_zero_byte_offset(tmp_path: Path
     assert result["next_start_byte"] == len(b"one\ntwo\n")
 
 
-def test_read_artifact_counts_utf8_bytes_not_characters(tmp_path: Path):
+def test_read_artifact_paginates_utf8_content_by_bytes(tmp_path: Path):
     artifact = tmp_path / "unicode.txt"
     artifact.write_text("é" * 9_601, encoding="utf-8")
 
     with (
         patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
-        pytest.raises(ValueError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER),
     ):
-        READ_ARTIFACT("unicode.txt")
+        result = ast.literal_eval(READ_ARTIFACT("unicode.txt"))
+
+    assert result["end_byte"] == 19_200
+    assert result["next_start_byte"] == 19_200
+    assert result["truncation_reason"] == "byte_limit_reached"
 
 
 def test_read_artifact_prefers_artifact_directory_for_relative_paths(tmp_path: Path):
@@ -637,7 +650,7 @@ def test_bounded_reader_terminally_guards_nearby_byte_pages(tmp_path: Path):
             reader("artifact:artifacts/bytes.txt", start_byte=100, max_bytes=100)
 
 
-def test_bounded_reader_rejects_oversized_page_without_consuming_successful_read_budget(tmp_path: Path):
+def test_bounded_reader_accepts_paginated_oversized_page_and_consumes_read_budget(tmp_path: Path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     oversized = artifacts / "minified.js"
@@ -650,14 +663,24 @@ def test_bounded_reader_rejects_oversized_page_without_consuming_successful_read
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         reader = create_bounded_artifact_reader(
-            max_reads=1,
+            max_reads=2,
             context_window_tokens=48_000,
             allowed_artifact_refs=["artifact:artifacts/minified.js", "artifact:artifacts/evidence.txt"],
         )
 
-        with pytest.raises(RuntimeError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER):
-            reader("artifact:artifacts/minified.js")
-        assert "proof" in reader("artifact:artifacts/evidence.txt")
+        result = ast.literal_eval(reader("artifact:artifacts/minified.js"))
+        assert result["truncation_reason"] == "byte_limit_reached"
+        continuation = ast.literal_eval(
+            reader(
+                result["pagination"]["path"],
+                start_byte=result["pagination"]["start_byte"],
+                max_bytes=result["pagination"]["max_bytes"],
+            )
+        )
+        assert continuation["content"] == "x"
+        assert continuation["eof"] is True
+        budget_guidance = ast.literal_eval(reader("artifact:artifacts/evidence.txt"))
+        assert budget_guidance["reason"] == "evaluator_read_budget_exhausted"
 
 
 def test_bounded_reader_requires_explicit_byte_page_for_large_artifact(tmp_path: Path):
