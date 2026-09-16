@@ -62,6 +62,8 @@
 
 ### Fixes
 
+- Run safe unauthenticated GET baselines for mapped SPA authentication routes in the controller, using their structured
+  client-route URL while retaining executor fallback for malformed or out-of-scope workflows.
 - Return byte-bounded artifact excerpts with explicit truncation and pagination instructions, preventing a normal
   oversized read from entering artifact-failure recovery before its required continuation page can be read.
 - Trim console log messages and suppress whitespace-only entries to prevent blank timestamped log lines.

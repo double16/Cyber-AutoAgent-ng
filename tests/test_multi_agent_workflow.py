@@ -5381,6 +5381,39 @@ def test_controller_baseline_request_installs_scoped_redirect_handler(monkeypatc
         ),
         (
             {
+                "id": "workflow-login",
+                "kind": "workflow",
+                "target_id": "target-1",
+                "value": "Authentication route: https://target.test/login",
+                "attributes": {"client_route": {"url": "https://target.test/login"}},
+            },
+            "https://target.test",
+            "controller",
+        ),
+        (
+            {
+                "id": "workflow-missing-route",
+                "kind": "workflow",
+                "target_id": "target-1",
+                "value": "Authentication route",
+                "attributes": {"client_route": {}},
+            },
+            "https://target.test",
+            "executor",
+        ),
+        (
+            {
+                "id": "workflow-external",
+                "kind": "workflow",
+                "target_id": "target-1",
+                "value": "Authentication route: https://external.test/login",
+                "attributes": {"client_route": {"url": "https://external.test/login"}},
+            },
+            "https://target.test",
+            "executor",
+        ),
+        (
+            {
                 "id": "endpoint-external",
                 "kind": "endpoint",
                 "target_id": "target-1",
@@ -5407,7 +5440,7 @@ def test_controller_web_baseline_ownership_requires_safe_executable_inventory(it
     assert owner == expected_owner
 
 
-def test_web_baseline_runs_in_controller_without_prompt_or_executor(monkeypatch, tmp_path):
+def test_web_workflow_baseline_runs_in_controller_without_prompt_or_executor(monkeypatch, tmp_path):
     plan = OperationPlan(
         objective="assess",
         current_phase=2,
@@ -5422,10 +5455,10 @@ def test_web_baseline_runs_in_controller_without_prompt_or_executor(monkeypatch,
         mode="coverage",
         basis=AcceptanceBasis(
             kind="snapshot",
-            description="Frozen endpoint inventory",
+            description="Frozen authentication workflow inventory",
             source_refs=["artifact:artifacts/inventory.json"],
             snapshot_hash="inventory-hash",
-            item_ids=["endpoint-root"],
+            item_ids=["workflow-login"],
         ),
         criteria=[AcceptanceCriterion(
             id="baseline",
@@ -5435,7 +5468,7 @@ def test_web_baseline_runs_in_controller_without_prompt_or_executor(monkeypatch,
     )
     task = TaskModel(
         task_uid="baseline",
-        title="Baseline root",
+        title="Baseline login workflow",
         objective="Capture baseline",
         phase=2,
         status="active",
@@ -5454,11 +5487,11 @@ def test_web_baseline_runs_in_controller_without_prompt_or_executor(monkeypatch,
     state = FakeState(plan, tasks=[task], acceptance_complete=False)
     controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=state)
     manifest = {"items": [{
-        "id": "endpoint-root",
-        "kind": "endpoint",
+        "id": "workflow-login",
+        "kind": "workflow",
         "target_id": "target-1",
-        "value": "https://target.test/",
-        "attributes": {"interaction": {"operations": ["GET"]}},
+        "value": "Authentication route: https://target.test/login",
+        "attributes": {"client_route": {"url": "https://target.test/login"}},
     }]}
 
     monkeypatch.setattr(workflow_mod, "_load_inventory_manifest", lambda *_args: (manifest, "inventory-hash"))
@@ -5475,6 +5508,7 @@ def test_web_baseline_runs_in_controller_without_prompt_or_executor(monkeypatch,
 
     completed = next(item for item in state.tasks if item.task_uid == "baseline")
     assert completed.status == "done"
+    assert completed.status_reason == "Controller captured 1 unauthenticated baseline response(s)."
     assert state.acceptance_results["baseline"][0].evidence_refs[0].startswith("artifact:artifacts/controller_baseline/")
 
 

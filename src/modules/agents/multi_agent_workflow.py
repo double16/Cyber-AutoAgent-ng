@@ -3260,10 +3260,16 @@ class MultiAgentWorkflowController:
         attributes = source.get("attributes", {}) if isinstance(source.get("attributes"), dict) else {}
         interaction = attributes.get("interaction", {}) if isinstance(attributes.get("interaction"), dict) else {}
         url = str(source.get("value") or "")
-        if source.get("kind") == "technology":
+        methods = [str(method).upper() for method in interaction.get("operations", []) if str(method).strip()]
+        if source.get("kind") == "workflow":
+            client_route = attributes.get("client_route", {})
+            if isinstance(client_route, dict):
+                url = str(client_route.get("url") or "")
+                if url:
+                    methods = ["GET"]
+        elif source.get("kind") == "technology":
             entrypoints = attributes.get("entrypoints", [])
             url = str(entrypoints[0]) if isinstance(entrypoints, list) and entrypoints else ""
-        methods = [str(method).upper() for method in interaction.get("operations", []) if str(method).strip()]
         return url, methods
 
     @classmethod
