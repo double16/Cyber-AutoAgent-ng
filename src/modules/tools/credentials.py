@@ -395,8 +395,9 @@ def store_credential(
     """Store a credential found in a target or created by authorized self-registration.
 
     Use `registered` for a successful self-registration and `found` for a credential recovered from target-owned
-    evidence. Give `evidence_refs` durable references for the discovery or successful registration. Never store
-    user-provided credentials with this tool. Passwords and other secret values are not echoed.
+    evidence. Give `evidence_refs` durable references for the discovery or successful registration. Target may be
+    the active task's target ID or its resolved target value. Never store user-provided credentials with this tool.
+    Passwords and other secret values are not echoed.
     """
 
     normalized_origin = str(origin or "").strip().lower()
@@ -407,14 +408,17 @@ def store_credential(
         raise ValueError("operation-created credentials require at least one durable evidence reference")
     store = _get_database_store()
     operation_id = _operation_id()
-    _, target_values = _active_task_target_values(store, operation_id)
+    _active_task_target_values(store, operation_id)
     normalized_type = str(credential_type or "").strip().lower()
-    if normalized_type != "email_login" and canonicalize_credential_target(str(target or "")) not in target_values:
-        raise ValueError("credential target is outside the active task target scope")
+    normalized_target = (
+        None
+        if normalized_type == "email_login"
+        else _resolve_active_task_target(store, operation_id, str(target or ""))
+    )
     record = store_user_credential(
         operation_id=operation_id,
         credential_type=credential_type,
-        target=target,
+        target=normalized_target,
         role=role,
         values=values,
         operation_scope=operation_scope,
@@ -433,7 +437,10 @@ def query_credentials(
     role: str | None = None,
     credential_type: str | None = None,
 ) -> str:
-    """List eligible credential metadata for the current operation without returning secret values."""
+    """List eligible credential metadata without returning secret values.
+
+    When supplied, target may be the active task's target ID or its resolved target value.
+    """
 
     normalized_type = str(credential_type or "").strip().lower() or None
     if normalized_type is not None and normalized_type not in _CREDENTIAL_TYPES:
@@ -441,9 +448,7 @@ def query_credentials(
     store = _get_database_store()
     operation_id = _operation_id()
     _, target_values = _active_task_target_values(store, operation_id)
-    requested_target = canonicalize_credential_target(target) if target else None
-    if requested_target and requested_target not in target_values:
-        raise ValueError("credential query target is outside the active task target scope")
+    requested_target = _resolve_active_task_target(store, operation_id, target) if target else None
     records = [
         record
         for target_value in ([requested_target] if requested_target else sorted(target_values))
@@ -461,16 +466,14 @@ def query_credentials(
 def plan_access_control_comparisons(target: str) -> str:
     """List safe, credential-ID-only account, role, and tenant comparison pairs for authorized IDOR testing.
 
-    Use the returned IDs to check out two distinct credentials and test only the assigned target. No pair is invented:
-    an empty comparison list is a coverage gap that must be reported rather than bypassed.
+    Target may be the active task's target ID or its resolved target value. Use the returned IDs to check out two
+    distinct credentials and test only the assigned target. No pair is invented: an empty comparison list is a
+    coverage gap that must be reported rather than bypassed.
     """
 
-    normalized_target = canonicalize_credential_target(target)
     store = _get_database_store()
     operation_id = _operation_id()
-    _, target_values = _active_task_target_values(store, operation_id)
-    if normalized_target not in target_values:
-        raise ValueError("comparison target is outside the active task target scope")
+    normalized_target = _resolve_active_task_target(store, operation_id, target)
     records = store.list_credentials(operation_id, target=normalized_target)
     comparisons = _credential_comparison_pairs(records)
     return json.dumps(
@@ -513,15 +516,13 @@ def plan_authenticated_coverage(target: str) -> str:
 
     Call this before authenticated testing. It never invents an account: empty credential contexts or comparison pairs
     are explicit coverage gaps that must be reported. Check out only the returned credential IDs for the assigned
-    target, establish the unauthenticated baseline first, and use one authenticated context at a time.
+    target, establish the unauthenticated baseline first, and use one authenticated context at a time. Target may
+    be the active task's target ID or its resolved target value.
     """
 
-    normalized_target = canonicalize_credential_target(target)
     store = _get_database_store()
     operation_id = _operation_id()
-    _, target_values = _active_task_target_values(store, operation_id)
-    if normalized_target not in target_values:
-        raise ValueError("coverage target is outside the active task target scope")
+    normalized_target = _resolve_active_task_target(store, operation_id, target)
     records = store.list_credentials(operation_id, target=normalized_target)
     contexts = [
         {
@@ -576,6 +577,47 @@ def _active_task_target_values(store: Any, operation_id: str) -> tuple[Any, set[
     return active_task, target_values
 
 
+def _frozen_validation_credential_ids(task: Any) -> set[str] | None:
+    """Return validation-bound credential IDs, preserving legacy tasks without a binding."""
+
+    if str(getattr(task, "kind", "")) not in {"finding_validation", "objective_validation"}:
+        return None
+    recovery_context = getattr(task, "recovery_context", {}) or {}
+    binding = recovery_context.get("validation_auth_context") if isinstance(recovery_context, dict) else None
+    if not isinstance(binding, dict):
+        return None
+    if str(binding.get("mode") or "").strip().lower() != "authenticated":
+        return set()
+    return {
+        str(credential_id).strip()
+        for credential_id in binding.get("credential_ids", [])
+        if str(credential_id).strip()
+    }
+
+
+def _resolve_active_task_target(store: Any, operation_id: str, target: str) -> str:
+    """Resolve an active task target ID or validate a canonical target value."""
+
+    active_task, target_values = _active_task_target_values(store, operation_id)
+    supplied_target = str(target or "").strip()
+    if not supplied_target:
+        raise ValueError("credential target is required")
+
+    plan = store.get_plan(operation_id)
+    selected_target_ids = set(active_task.target_ids) if active_task.target_scope == "subset" else None
+    if plan is not None:
+        for operation_target in plan.targets:
+            if selected_target_ids is not None and operation_target.target_id not in selected_target_ids:
+                continue
+            if operation_target.target_id == supplied_target:
+                return canonicalize_credential_target(str(operation_target.value))
+
+    normalized_target = canonicalize_credential_target(supplied_target)
+    if normalized_target not in target_values:
+        raise ValueError("credential target is outside the active task target scope")
+    return normalized_target
+
+
 @tool(name="set_task_auth_context")
 def set_task_auth_context(credential_ids: list[str]) -> str:
     """Bind checked-out, target-scoped credentials to the active task's authenticated context.
@@ -590,6 +632,9 @@ def set_task_auth_context(credential_ids: list[str]) -> str:
     store = _get_database_store()
     operation_id = _operation_id()
     active_task, target_values = _active_task_target_values(store, operation_id)
+    frozen_ids = _frozen_validation_credential_ids(active_task)
+    if frozen_ids is not None and set(normalized_ids) != frozen_ids:
+        raise ValueError("validation authentication context must use exactly the frozen credential IDs")
     selected_ids = store.credential_ids_selected_by_task(operation_id, active_task.task_uid)
     missing_selection = sorted(set(normalized_ids) - selected_ids)
     if missing_selection:
@@ -644,6 +689,9 @@ def checkout_credential(credential_id: str, purpose: str) -> str:
     if scoped_operation and scoped_operation != _operation_id():
         raise ValueError("credential is scoped to another operation")
     active_task, target_values = _active_task_target_values(store, _operation_id())
+    frozen_ids = _frozen_validation_credential_ids(active_task)
+    if frozen_ids is not None and str(credential_id) not in frozen_ids:
+        raise ValueError("credential is not authorized by the frozen validation authentication context")
     eligible_ids = {
         str(candidate["credential_id"])
         for target_value in target_values

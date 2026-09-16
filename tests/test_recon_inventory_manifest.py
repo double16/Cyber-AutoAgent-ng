@@ -539,7 +539,7 @@ def test_converter_recognizes_client_bundle_inventory_extraction(
                 "target": "https://target.test",
                 "target_id": "target-1",
                 "api_paths": ["/api/products"],
-                "spa_routes": ["/profile"],
+                "spa_routes": ["/usersignup", "/userlogin", "/newuserlogin"],
                 "auth_indicators": [],
                 "auth_storage_keys": [],
                 "external_origins": [],
@@ -571,8 +571,20 @@ def test_converter_recognizes_client_bundle_inventory_extraction(
     } == {
         "https://target.test/",
         "https://target.test/api/products",
-        "https://target.test/profile",
+        "https://target.test/usersignup",
+        "https://target.test/userlogin",
+        "https://target.test/newuserlogin",
     }
+    workflows = {item["value"]: item["attributes"] for item in manifest["items"] if item["kind"] == "workflow"}
+    assert workflows["Self-registration route: https://target.test/usersignup"]["registration"] == {
+        "enabled": True,
+        "target": "https://target.test",
+        "url": "https://target.test/usersignup",
+        "roles": ["user"],
+        "evidence_refs": ["artifact:artifacts/bundle-inventory.json"],
+    }
+    assert workflows["Authentication route: https://target.test/userlogin"]["client_route"]["classification"] == "authentication"
+    assert "registration" not in workflows["Authentication route: https://target.test/newuserlogin"]
 
 
 def test_converter_rejects_malformed_client_bundle_inventory_extraction(

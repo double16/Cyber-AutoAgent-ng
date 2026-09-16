@@ -48,7 +48,9 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
@@ -98,12 +100,14 @@ from modules.tools.artifact import (
     resolve_tool_result_max_chars,
 )
 from modules.tools.artifact_references import normalize_artifact_reference_token
+from modules.tools.credentials import canonicalize_credential_target
 from modules.tools.memory import (
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
     AcceptanceBasis,
     AcceptanceContract,
     AcceptanceCriterion,
+    DiscoveryProcedure,
     EvidenceRequirement,
     ExecutionRequirement,
     OperationPlan,
@@ -116,6 +120,7 @@ from modules.tools.memory import (
     _coverage_route_groups,
     _finding_validation_contradictions,
     _frozen_finding_confirmation_requirements,
+    _get_database_store,
     _load_inventory_manifest,
     _operation_output_root,
     _route_scoped_phase_objective,
@@ -143,7 +148,12 @@ from modules.tools.memory import (
     task_service_scope_validation_details,
     task_service_scope_violations,
 )
-from modules.tools.optional_tool_selection import required_optional_tool_names
+from modules.tools.optional_tool_selection import (
+    CREDENTIAL_OPTIONAL_TOOL_NAMES,
+    CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
+    credential_optional_tool_names,
+    required_optional_tool_names,
+)
 from modules.tools.recon_inventory_manifest import consolidate_recon_artifacts
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.tools.shell import scoped_shell_command_validator
@@ -265,6 +275,47 @@ class TaskPromptBuildError(WorkflowInvariantError):
         self.repairable = repairable
         self.feedback = list(feedback or [])
         self.failure_source = failure_source
+
+
+class _ScopedBaselineRedirectHandler(HTTPRedirectHandler):
+    """Follow redirects within one assessed service and one observed external identity provider."""
+
+    def __init__(self, service: str) -> None:
+        super().__init__()
+        self.service = service.rstrip("/")
+        self.identity_provider_service: str | None = None
+
+    def redirect_request(
+        self,
+        request: Request,
+        fp: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> Request | None:
+        current = urlparse(request.full_url)
+        current_service = f"{current.scheme}://{current.netloc}" if current.scheme and current.netloc else ""
+        parsed = urlparse(new_url)
+        redirected_service = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        redirected_service = redirected_service.rstrip("/")
+        if redirected_service == self.service:
+            return super().redirect_request(request, fp, code, message, headers, new_url)
+        if self.identity_provider_service is None and current_service.rstrip("/") == self.service:
+            self.identity_provider_service = redirected_service
+            return super().redirect_request(request, fp, code, message, headers, new_url)
+        if redirected_service != self.identity_provider_service:
+            raise HTTPError(
+                request.full_url,
+                code,
+                "Redirect target is outside the assigned service or observed identity-provider boundary",
+                headers,
+                fp,
+            )
+        return super().redirect_request(request, fp, code, message, headers, new_url)
+
+
+_SAFE_BASELINE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 @dataclass
@@ -824,6 +875,8 @@ class WorkflowStateStore:
                 produces_hypotheses=phase.produces_hypotheses,
                 requires_finding_candidates=phase.requires_finding_candidates,
                 task_creation_mode=phase.task_creation_mode,
+                dynamic_kind=phase.dynamic_kind,
+                provided_workstreams=phase.provided_workstreams,
             ))
         return self._persist_plan_progress(plan, OperationPlan(
             objective=plan.objective,
@@ -878,6 +931,8 @@ class WorkflowStateStore:
                 produces_hypotheses=phase.produces_hypotheses,
                 requires_finding_candidates=phase.requires_finding_candidates,
                 task_creation_mode=phase.task_creation_mode,
+                dynamic_kind=phase.dynamic_kind,
+                provided_workstreams=phase.provided_workstreams,
             ))
         return self._persist_plan_progress(plan, OperationPlan(
             objective=plan.objective,
@@ -955,6 +1010,8 @@ class WorkflowStateStore:
                 produces_hypotheses=phase.produces_hypotheses,
                 requires_finding_candidates=phase.requires_finding_candidates,
                 task_creation_mode=phase.task_creation_mode,
+                dynamic_kind=phase.dynamic_kind,
+                provided_workstreams=phase.provided_workstreams,
             )
             for phase in plan.phases
         ]
@@ -969,6 +1026,8 @@ class WorkflowStateStore:
                     produces_hypotheses=phase.produces_hypotheses,
                     requires_finding_candidates=phase.requires_finding_candidates,
                     task_creation_mode=phase.task_creation_mode,
+                    dynamic_kind=phase.dynamic_kind,
+                    provided_workstreams=phase.provided_workstreams,
                 )
                 for phase in phases
             ]
@@ -1020,6 +1079,8 @@ class WorkflowStateStore:
                 produces_hypotheses=phase.produces_hypotheses,
                 requires_finding_candidates=_phase_semantically_requires_finding_candidates(phase),
                 task_creation_mode=phase.task_creation_mode,
+                dynamic_kind=phase.dynamic_kind,
+                provided_workstreams=phase.provided_workstreams,
             )
             for phase in phases
         ]
@@ -1042,6 +1103,8 @@ class WorkflowStateStore:
                 produces_hypotheses=phases[0].produces_hypotheses,
                 requires_finding_candidates=phases[0].requires_finding_candidates,
                 task_creation_mode=phases[0].task_creation_mode,
+                dynamic_kind=phases[0].dynamic_kind,
+                provided_workstreams=phases[0].provided_workstreams,
             )
         plan = OperationPlan(
             objective=str(plan_data.get("objective") or ""),
@@ -1780,6 +1843,11 @@ class MultiAgentWorkflowController:
                     return
                 phase = next(item for item in plan.phases if item.status == "active")
 
+            conditional_plan = self._apply_conditional_credential_provisioning_phase(plan, phase)
+            if conditional_plan is not plan:
+                self._emit_plan_output("updated", conditional_plan, self._plan_signature(plan))
+                continue
+
             self._claim_finding_validation_tasks(phase)
             self._recover_missing_finding_validation_tasks(phase)
 
@@ -1796,7 +1864,7 @@ class MultiAgentWorkflowController:
             )
 
             phase_cap = self._phase_budget_cap(plan, phase)
-            if progress >= phase_cap:
+            if progress >= phase_cap and phase.dynamic_kind != "credential_provisioning":
                 cap_context = self._phase_budget_cap_context(plan, phase)
                 self._log_workflow(
                     "phase hard cap reached phase=%s progress=%.2f cap=%.2f base_cap=%.2f dependent_phase=%s",
@@ -2341,7 +2409,9 @@ class MultiAgentWorkflowController:
         if plan is None:
             self._can_reopen_completed_plan = False
             self._log_workflow("no plan found; creating plan")
-            plan_data = self._normalize_module_phase_metadata(self._create_plan_data())
+            plan_data = self._materialize_controller_owned_phases(
+                self._normalize_module_phase_metadata(self._create_plan_data())
+            )
             created_plan = self.state.create_plan_from_dict(plan_data)
             self._log_workflow(
                 "plan created current_phase=%s phase_count=%s",
@@ -2368,6 +2438,65 @@ class MultiAgentWorkflowController:
         )
         self._emit_plan_output("updated", ensured_plan, previous_signature)
         return ensured_plan
+
+    def _materialize_controller_owned_phases(self, plan_data: dict[str, Any]) -> dict[str, Any]:
+        """Materialize declared controller-owned phases into a newly generated plan."""
+
+        from modules.operation_plugins.planning_contracts import (
+            load_controller_owned_phase_contracts,
+        )
+
+        module = str(getattr(self.runtime.config, "module", "") or "")
+        contracts = load_controller_owned_phase_contracts(module)
+        raw_phases = plan_data.get("phases")
+        if not contracts or not isinstance(raw_phases, list):
+            return plan_data
+
+        normalized = dict(plan_data)
+        phases = [dict(phase) if isinstance(phase, dict) else phase for phase in raw_phases]
+        for contract in contracts:
+            phases = [
+                phase
+                for phase in phases
+                if not isinstance(phase, dict)
+                or phase.get("controller_owned_phase_kind") != contract.controller_owned_phase_kind
+            ]
+            provider_phase_ids = [
+                int(phase["id"])
+                for phase in phases
+                if isinstance(phase, dict)
+                and isinstance(phase.get("id"), int)
+                and set(phase.get("provided_workstreams", [])) & contract.prerequisite_workstreams
+            ]
+            phase_id = max(provider_phase_ids, default=contract.phase_id - 1) + 1
+            shifted = []
+            for phase in phases:
+                if not isinstance(phase, dict):
+                    shifted.append(phase)
+                    continue
+                copied = dict(phase)
+                if isinstance(copied.get("id"), int) and copied["id"] >= phase_id:
+                    copied["id"] += 1
+                shifted.append(copied)
+            phases = [
+                *[phase for phase in shifted if not isinstance(phase, dict) or phase.get("id") < phase_id],
+                {
+                    "id": phase_id,
+                    "title": "Credential Provisioning",
+                    "status": "pending",
+                    "criteria": (
+                        "Provision reusable test identities only for mapped authorized registration flows, or retain "
+                        "durable coverage gaps for every unavailable identity."
+                    ),
+                    "produces_hypotheses": False,
+                    "requires_finding_candidates": False,
+                    "task_creation_mode": "standard",
+                    "dynamic_kind": contract.controller_owned_phase_kind,
+                },
+                *[phase for phase in shifted if isinstance(phase, dict) and phase.get("id") >= phase_id],
+            ]
+        normalized["phases"] = phases
+        return normalized
 
     def _normalize_module_phase_metadata(self, plan_data: dict[str, Any]) -> dict[str, Any]:
         """Apply declarative module phase metadata to a newly generated plan."""
@@ -2447,6 +2576,270 @@ class MultiAgentWorkflowController:
 
         context = task.recovery_context.get("phase_task_contract")
         return str(context.get("workstream") or "") if isinstance(context, dict) else ""
+
+    def _completed_provider_workstreams(
+        self,
+        plan: OperationPlan,
+        before_phase_id: int,
+        required_workstreams: frozenset[str],
+    ) -> dict[str, set[int]]:
+        """Return canonical prerequisite workstreams from completed structured providers."""
+
+        completed_phases = {
+            phase.id: phase
+            for phase in plan.phases
+            if phase.id < before_phase_id and phase.status == "done"
+        }
+        providers = {workstream: set() for workstream in required_workstreams}
+        for phase in completed_phases.values():
+            for workstream in required_workstreams.intersection(phase.provided_workstreams):
+                providers[workstream].add(phase.id)
+        for task in self.state.list_tasks(status=["done"]):
+            if task.phase not in completed_phases:
+                continue
+            workstream = self._task_planning_workstream(task)
+            if workstream in providers:
+                providers[workstream].add(task.phase)
+        return providers
+
+    def _apply_conditional_credential_provisioning_phase(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+    ) -> OperationPlan:
+        """Resolve a planned credential-provisioning phase from structured state."""
+
+        from modules.operation_plugins.planning_contracts import load_controller_owned_phase_contracts
+
+        module = str(getattr(self.runtime.config, "module", "") or "")
+        if module != "web" or phase.dynamic_kind != "credential_provisioning":
+            return plan
+        contracts = load_controller_owned_phase_contracts(module)
+        if not contracts:
+            return plan
+        contract = next(
+            (item for item in contracts if item.controller_owned_phase_kind == phase.dynamic_kind),
+            None,
+        )
+        if contract is None:
+            return plan
+        phase_tasks = self.state.list_tasks(phase=phase.id)
+        if current_workflow_tasks(phase_tasks):
+            return plan
+        replanned_tasks = [task for task in phase_tasks if task.status == "replanned"]
+        provider_phase_ids = self._completed_provider_workstreams(
+            plan,
+            phase.id,
+            contract.prerequisite_workstreams,
+        )
+        completed_provider_workstreams = {
+            workstream for workstream, phase_ids in provider_phase_ids.items() if phase_ids
+        }
+        event_context = {
+            "resolved_prerequisite_workstreams": sorted(completed_provider_workstreams),
+            "provider_phase_ids": {
+                workstream: sorted(phase_ids)
+                for workstream, phase_ids in sorted(provider_phase_ids.items())
+            },
+        }
+        if not contract.prerequisite_workstreams.issubset(completed_provider_workstreams):
+            updated = self._mark_phase(plan, phase.id, "not_applicable")
+            self._emit_workflow_event({
+                "type": "conditional_phase_resolved",
+                "kind": contract.controller_owned_phase_kind,
+                "phase": phase.id,
+                "decision": "not_applicable",
+                "reason": "required_inventory_or_auth_workstream_unavailable",
+                **event_context,
+            })
+            return updated
+        flows = self._credential_registration_flows(
+            plan,
+            contract.registration_attribute,
+            provider_phase_ids["inventory_synthesis"],
+        )
+        missing_flows = [
+            flow
+            for flow in flows
+            if any(self._credential_flow_deficits(flow, contract.identities_per_role).values())
+        ]
+        if not missing_flows:
+            updated = self._mark_phase(plan, phase.id, "not_applicable")
+            self._emit_workflow_event({
+                "type": "conditional_phase_resolved",
+                "kind": contract.controller_owned_phase_kind,
+                "phase": phase.id,
+                "decision": "not_applicable",
+                "reason": "no_eligible_registration_flow_or_credential_deficit",
+                **event_context,
+            })
+            return updated
+        replacements = []
+        for flow in missing_flows:
+            task = self._credential_provisioning_task(
+                phase.id,
+                contract.controller_owned_phase_kind,
+                contract.identities_per_role,
+                flow,
+                self._credential_flow_deficits(flow, contract.identities_per_role),
+            )
+            predecessor_candidates = [
+                archived
+                for archived in replanned_tasks
+                if archived.task_uid == task.task_uid or archived.task_uid.startswith(f"{task.task_uid}:replan:")
+            ]
+            if predecessor_candidates:
+                predecessor = max(
+                    predecessor_candidates,
+                    key=lambda archived: (archived.updated_at or "", archived.created_at or "", archived.task_uid),
+                )
+                generation = len(predecessor_candidates) + 1
+                task = replace(
+                    task,
+                    task_uid=f"{task.task_uid}:replan:{generation}",
+                    replacement_of=predecessor.task_uid,
+                )
+                replacements.append({
+                    "predecessor_task_uid": predecessor.task_uid,
+                    "replacement_task_uid": task.task_uid,
+                })
+            self.state.store_task(task)
+        self._emit_workflow_event({
+            "type": "conditional_phase_resolved",
+            "kind": contract.controller_owned_phase_kind,
+            "phase": phase.id,
+            "decision": "applicable",
+            "flow_count": len(missing_flows),
+            "replan_replacements": replacements,
+            **event_context,
+        })
+        return plan
+
+    def _credential_registration_flows(
+        self,
+        plan: OperationPlan,
+        registration_attribute: str,
+        inventory_phase_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read registered flows only from the validated inventory's structured workflow attributes."""
+
+        flows: list[dict[str, Any]] = []
+        seen = set()
+        if inventory_phase_ids is None:
+            inventory_phase_ids = {
+                phase.id for phase in plan.phases if "inventory_synthesis" in phase.provided_workstreams
+            }
+        for task in self.state.list_tasks():
+            if task.status != "done" or task.phase not in inventory_phase_ids:
+                continue
+            for reference in [*task.evidence, *(
+                ref for result in self.state.list_task_acceptance_results(task.task_uid) for ref in result.evidence_refs
+            )]:
+                try:
+                    manifest, _digest = _load_inventory_manifest(reference)
+                except (OSError, TypeError, ValueError):
+                    continue
+                for item in manifest.get("items", []):
+                    if item.get("kind") != "workflow" or not isinstance(item.get("attributes"), dict):
+                        continue
+                    registration = item["attributes"].get(registration_attribute)
+                    if not isinstance(registration, dict) or registration.get("enabled") is not True:
+                        continue
+                    target = str(registration.get("target") or item.get("target") or "").strip()
+                    url = str(registration.get("url") or "").strip()
+                    if not target or not url:
+                        continue
+                    roles = tuple(sorted({str(role).strip() for role in registration.get("roles", ["user"]) if str(role).strip()}))
+                    key = (target, url, roles)
+                    if key not in seen:
+                        seen.add(key)
+                        flows.append({
+                            "target": target,
+                            "target_id": str(item.get("target_id") or ""),
+                            "url": url,
+                            "roles": roles,
+                        })
+        return flows
+
+    def _credential_flow_deficits(self, flow: dict[str, Any], identities_per_role: int) -> dict[str, int]:
+        """Return each registration role's missing usable credential count."""
+
+        try:
+            target = str(flow["target"])
+            normalized_target = canonicalize_credential_target(target)
+            records = _get_database_store().list_credentials(self.runtime.operation_id, target=normalized_target)
+        except (OSError, ValueError):
+            return {role: identities_per_role for role in flow["roles"]}
+        return {
+            role: max(
+                0,
+                identities_per_role - sum(
+                    record.get("status") in {"unknown", "valid"} and record.get("role") == role
+                    for record in records
+                ),
+            )
+            for role in flow["roles"]
+        }
+
+    @staticmethod
+    def _credential_provisioning_task(
+        phase_id: int,
+        phase_kind: str,
+        identities_per_role: int,
+        flow: dict[str, Any],
+        deficits: dict[str, int],
+    ) -> Task:
+        """Build one bounded executor task for a single structured registration flow."""
+
+        target = str(flow["target"])
+        url = str(flow["url"])
+        roles = tuple(role for role in flow["roles"] if deficits.get(role, 0))
+        task_key = hashlib.sha256(f"{target}|{url}|{'|'.join(roles)}".encode()).hexdigest()[:16]
+        return Task(
+            task_uid=f"credential-provisioning:{task_key}",
+            title="Provision registered test identities",
+            objective=(
+                f"For the mapped registration flow {url}, create only the missing test identities "
+                f"({', '.join(f'{role}: {deficits[role]}' for role in roles)}). Use only this flow, store every "
+                "successful identity as "
+                "registered credential with durable evidence, and record each unavailable identity as a coverage gap."
+            ),
+            acceptance=AcceptanceContract(
+                mode="outcome",
+                basis=AcceptanceBasis(
+                    kind="procedure",
+                    description="Mapped self-registration flow requiring bounded credential provisioning.",
+                    source_refs=(f"target:{target}",),
+                    procedure=DiscoveryProcedure(
+                        methods=("browser",),
+                        limits={"max_requests": max(2, sum(deficits.values()) * 4)},
+                        stop_condition="first_limit_reached",
+                        gap_policy="record_unassessed",
+                        output_kind="artifact",
+                    ),
+                ),
+                criteria=(AcceptanceCriterion(
+                    id="registered-identities-or-gaps",
+                    description="Persist every successfully registered identity or an evidence-backed coverage gap.",
+                    evidence_requirements=(
+                        EvidenceRequirement(kind="artifact"),
+                        EvidenceRequirement(kind="durable_evidence"),
+                    ),
+                ),),
+            ),
+            phase=phase_id,
+            status="pending",
+            target_scope="subset",
+            target_ids=[str(flow["target_id"])],
+            recovery_context={
+                "conditional_phase": {
+                    "kind": phase_kind,
+                    "registration_flow": {"target": target, "url": url, "roles": list(roles)},
+                    "identities_per_role": identities_per_role,
+                    "credential_deficits": deficits,
+                }
+            },
+        )
 
     def _contract_prerequisite_resume_candidate(
         self,
@@ -2775,6 +3168,178 @@ class MultiAgentWorkflowController:
                 "item_count": result["item_count"],
             }
         )
+        return True
+
+    @staticmethod
+    def _controller_baseline_request(url: str, method: str) -> dict[str, Any]:
+        """Capture one bounded controller-owned HTTP baseline within its initial service boundary."""
+
+        request = Request(url, method=method)
+        parsed = urlparse(url)
+        service = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        try:
+            opener = build_opener(_ScopedBaselineRedirectHandler(service))
+            with opener.open(request, timeout=15) as response:  # nosec B310 - redirects remain in the validated service
+                body = response.read(262_144).decode("utf-8", errors="replace")
+                return {
+                    "outcome": "response",
+                    "url": url,
+                    "method": method,
+                    "status": int(response.status),
+                    "headers": dict(response.headers.items()),
+                    "body": body,
+                }
+        except HTTPError as error:
+            return {
+                "outcome": "response",
+                "url": url,
+                "method": method,
+                "status": int(error.code),
+                "headers": dict(error.headers.items()) if error.headers else {},
+                "body": error.read(262_144).decode("utf-8", errors="replace"),
+            }
+        except (OSError, URLError, ValueError) as error:
+            return {
+                "outcome": "request_error",
+                "url": url,
+                "method": method,
+                "error": str(error)[:500],
+            }
+
+    @staticmethod
+    def _controller_baseline_input(
+        manifest: dict[str, Any],
+        item_ids: list[str],
+    ) -> tuple[str, list[str]]:
+        """Resolve the frozen URL and recorded methods used by a web baseline task."""
+
+        items = {str(item["id"]): item for item in manifest["items"]}
+        assigned = [items[item_id] for item_id in item_ids]
+        endpoint_by_id = {str(item["id"]): item for item in manifest["items"] if item.get("kind") == "endpoint"}
+        source = next((item for item in assigned if item.get("kind") in {"endpoint", "service"}), assigned[0])
+        if source.get("kind") == "parameter":
+            source = endpoint_by_id.get(str(source.get("attributes", {}).get("endpoint_id") or ""), source)
+        attributes = source.get("attributes", {}) if isinstance(source.get("attributes"), dict) else {}
+        interaction = attributes.get("interaction", {}) if isinstance(attributes.get("interaction"), dict) else {}
+        url = str(source.get("value") or "")
+        if source.get("kind") == "technology":
+            entrypoints = attributes.get("entrypoints", [])
+            url = str(entrypoints[0]) if isinstance(entrypoints, list) and entrypoints else ""
+        methods = [str(method).upper() for method in interaction.get("operations", []) if str(method).strip()]
+        return url, methods
+
+    @classmethod
+    def _controller_web_baseline_execution_owner(
+        cls,
+        phase_task_contract: Any,
+        proposal: Any,
+        manifest: dict[str, Any],
+        item_ids: list[str],
+        selected_targets: list[OperationTarget],
+    ) -> str:
+        """Return controller ownership only for safely executable frozen web baseline groups."""
+
+        if (
+            phase_task_contract is None
+            or phase_task_contract.module != "web"
+            or proposal.workstream != "unauthenticated_baseline"
+        ):
+            return "controller"
+        try:
+            url, methods = cls._controller_baseline_input(manifest, item_ids)
+        except (KeyError, TypeError, ValueError):
+            return "executor"
+        parsed = urlparse(url)
+        service = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        target_values = {target.value.rstrip("/") for target in selected_targets}
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not parsed.netloc
+            or service not in target_values
+            or not any(method in _SAFE_BASELINE_HTTP_METHODS for method in methods)
+        ):
+            return "executor"
+        return "controller"
+
+    def _run_controller_web_baseline(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> bool:
+        """Complete the declared web baseline mapping task from frozen interaction metadata."""
+
+        contract = self._phase_task_contract(phase)
+        context = task.recovery_context.get("phase_task_contract")
+        if (
+            contract is None
+            or contract.module != "web"
+            or not isinstance(context, dict)
+            or context.get("execution_owner") != "controller"
+            or context.get("workstream") != "unauthenticated_baseline"
+            or task.acceptance.basis.kind != "snapshot"
+        ):
+            return False
+        manifest_ref = next(
+            (reference for reference in task.acceptance.basis.source_refs if reference.startswith("artifact:")), ""
+        )
+        try:
+            manifest, _snapshot_hash = _load_inventory_manifest(manifest_ref)
+            url, methods = self._controller_baseline_input(manifest, task.acceptance.basis.item_ids)
+        except (KeyError, TypeError, ValueError) as error:
+            updated = self.state.mark_task(task, "partial_failure", f"Controller baseline inventory error: {error}")
+            self._emit_task_done(updated)
+            return True
+
+        target_values = {target.value.rstrip("/") for target in plan.targets if target.target_id in task.target_ids}
+        parsed = urlparse(url)
+        service = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        responses: list[dict[str, Any]] = []
+        coverage_gaps: list[str] = []
+        if not url or not methods:
+            coverage_gaps.append("Frozen inventory does not provide an executable URL and recorded HTTP method.")
+        elif not any(service == target.rstrip("/") for target in target_values):
+            coverage_gaps.append("Frozen inventory URL is outside the assigned target service boundary.")
+        else:
+            for method in methods:
+                if method not in _SAFE_BASELINE_HTTP_METHODS:
+                    coverage_gaps.append(f"Recorded {method} operation was not executed by the read-only baseline.")
+                    continue
+                result = self._controller_baseline_request(url, method)
+                if result["outcome"] == "response":
+                    responses.append(result)
+                else:
+                    coverage_gaps.append(
+                        f"{method} request did not produce an HTTP response: {result.get('error', 'unknown error')}"
+                    )
+
+        output_path = Path(_operation_output_root()) / "artifacts" / "controller_baseline" / f"{task.task_uid}.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(
+            json.dumps(
+                {"task_uid": task.task_uid, "responses": responses, "coverage_gaps": coverage_gaps},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        evidence_ref = canonical_artifact_reference(str(output_path))
+        task = self.state.patch_task(task.task_uid, evidence_additions=[evidence_ref])
+        if not responses:
+            summary = "Controller baseline produced no HTTP responses: " + "; ".join(coverage_gaps)
+            updated = self.state.mark_task(task, "partial_failure", summary)
+            self._emit_task_done(updated)
+            return True
+        summary = f"Controller captured {len(responses)} unauthenticated baseline response(s)."
+        if coverage_gaps:
+            summary += " Coverage gaps: " + "; ".join(coverage_gaps)
+        try:
+            self.state.record_task_acceptance(task, {
+                "status": "satisfied",
+                "disposition": "observation",
+                "summary": summary,
+                "evidence_refs": [evidence_ref],
+            })
+        except (TypeError, ValueError) as error:
+            updated = self.state.mark_task(task, "partial_failure", f"Controller baseline acceptance failed: {error}")
+            self._emit_task_done(updated)
+            return True
+        updated = self.state.mark_task(task, "done", summary)
+        self._emit_task_done(updated)
         return True
 
     def _valid_contract_inventory_manifest(
@@ -3187,6 +3752,8 @@ class MultiAgentWorkflowController:
         self._emit_task_started(task)
         self._log_workflow("running task=%s phase=%s", self._task_label(task), phase.id)
         if self._run_controller_inventory_synthesis(plan, phase, task):
+            return
+        if self._run_controller_web_baseline(plan, phase, task):
             return
         preflight_feedback = (
             self._task_pre_execution_feedback(task)
@@ -5856,6 +6423,22 @@ Do not add criteria, broaden scope, or pursue unrelated discoveries.
             for criterion in task.acceptance.criteria
             for requirement in criterion.execution_requirements
         ) or "none"
+        if self._is_credential_provisioning_task(task):
+            return f"""## Credential Provisioning Recovery
+Start fresh actor cycle {next_cycle} for the existing bounded registration task. Do not replay prior reasoning or
+broaden scope.
+
+Assigned objective: {task.objective}
+{self._executable_target_scope_text(plan, task)}
+Frozen execution bindings: {requirements}
+Retained task-local evidence:
+{evidence_ledger}
+
+Retry only the mapped self-registration action using the supplied browser tools. Persist each successful identity
+with `store_credential` and current-operation evidence. If an identity remains unavailable after this bounded retry,
+record the concrete coverage gap with `store_observation` and its durable evidence. Do not call or attempt to
+describe `record_task_acceptance`; the controller retained the prior submission and will validate and replay it.
+"""
         return f"""## Required Output Recovery
 Start fresh actor cycle {next_cycle} for the existing task. Do not replay prior reasoning or broaden scope.
 
@@ -7830,6 +8413,14 @@ Return JSON exactly: {response_schema}.
                 "task prompt tools contains unknown or unavailable selection(s): "
                 + ", ".join(unknown_tools)
             )
+        requested_credentials = set(selected_tools) & CREDENTIAL_OPTIONAL_TOOL_NAMES
+        allowed_credentials = set(self._required_optional_tool_names(task))
+        invalid_credentials = requested_credentials - allowed_credentials
+        if invalid_credentials:
+            raise TaskPromptBuildError(
+                "task prompt selects credential tools not authorized by task metadata: "
+                + ", ".join(sorted(invalid_credentials))
+            )
 
         unknown_commands = [
             name
@@ -7879,6 +8470,37 @@ Return JSON exactly: {response_schema}.
             name for name in required_optional_tool_names(task) if name in available_optional_tools
         ]
 
+    def _credential_execution_guidance_for_task(self, task: Task) -> str:
+        """Render credential directions only when task metadata injects credential tools."""
+
+        selected_names = set(self._required_optional_tool_names(task))
+        credential_names = selected_names & CREDENTIAL_OPTIONAL_TOOL_NAMES
+        if not credential_names:
+            return ""
+        guidance = self._credential_execution_guidance(credential_names)
+        if set(CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES).issubset(selected_names):
+            guidance += (
+                "\n- For this bounded self-registration task, use the supplied browser tools to navigate the mapped "
+                "registration flow, inspect client-side behavior, submit only the required form actions, and retain "
+                "durable registration evidence. Do not mutate global browser headers."
+            )
+        return guidance
+
+    def _client_bundle_execution_guidance_for_task(self, task: Task) -> str:
+        """Render deterministic bundle-inventory instructions for the declared SPA workstream."""
+
+        if self._task_planning_workstream(task) != "client_side_api":
+            return ""
+        if "client_bundle_inventory" not in self._required_optional_tool_names(task):
+            return ""
+        return (
+            "- Locate in-scope JavaScript bundles already exposed by the assigned target and call "
+            "`client_bundle_inventory` for each relevant bundle. Persist both its extraction artifact and its "
+            "validated inventory manifest as task evidence. Treat every extracted SPA route as an endpoint. "
+            "Preserve self-registration routes as inventory workflows; do not attempt account registration in this "
+            "mapping task."
+        )
+
     def _emit_task_memory_selection_filter(
         self,
         dropped_ids: list[str],
@@ -7912,7 +8534,8 @@ Return JSON exactly: {response_schema}.
                 "target scope. Create durable evidence before recording each acceptance result. Do not create new "
                 "tasks or change plan state.\n\n"
                 f"## Assigned target scope\n{self._task_target_scope_text(plan, task)}\n\n"
-                f"## Credential Execution Rules\n{self._credential_execution_guidance()}\n"
+                f"## Credential Execution Rules\n{self._credential_execution_guidance_for_task(task)}\n"
+                f"## Client Bundle Inventory Rules\n{self._client_bundle_execution_guidance_for_task(task)}\n"
                 f"## Active phase\n{json.dumps(phase.to_dict(), sort_keys=True)}\n\n"
                 f"## Assigned task\n{json.dumps(task.to_dict(), sort_keys=True)}\n\n"
                 f"{hypothesis_guidance}\n"
@@ -8981,6 +9604,12 @@ requested JSON decision, with at most three concrete evidence gaps and no analys
         return f"{system_prompt}\n\n## Module Termination Policy\n{termination_policy}"
 
     def _create_tasks(self, plan: OperationPlan, phase: PlanPhase) -> TaskCreationOutcome:
+        if phase.dynamic_kind:
+            return TaskCreationOutcome(
+                created_count=0,
+                attempts=0,
+                failure_reason="controller-owned phase tasks are created during phase resolution",
+            )
         if phase.task_creation_mode == "finding_validation":
             return TaskCreationOutcome(
                 created_count=0,
@@ -9946,12 +10575,17 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
 
         required_finding_refs = None
         finding_ref_aliases = None
+        finding_auth_bindings = None
         finding_dependent = phase.task_creation_mode == "finding_dependent" or (
             phase.task_creation_mode == "standard" and phase.requires_finding_candidates
         )
         if finding_dependent:
             eligible_records = self._eligible_finding_records(phase)
             required_finding_refs = {f"finding:{record['finding_uid']}" for record in eligible_records}
+            finding_auth_bindings = {
+                f"finding:{record['finding_uid']}": self._finding_validation_auth_binding(record)
+                for record in eligible_records
+            }
             finding_ref_aliases = {}
             for record in eligible_records:
                 canonical = f"finding:{record['finding_uid']}"
@@ -9981,22 +10615,74 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
             phase_objective=phase.criteria,
             required_finding_refs=required_finding_refs,
             finding_ref_aliases=finding_ref_aliases,
+            finding_auth_bindings=finding_auth_bindings,
             phase_task_contract=self._phase_task_contract(phase),
+            execution_owner_resolver=self._controller_web_baseline_execution_owner,
             proposal_preflight_validator=lambda proposals: self._validate_generated_task_proposals(phase, proposals),
             reject_duplicate_proposals=True,
             repair_guard=repair_guard,
             invocation_observer=observe_preflight,
         )
 
+    def _finding_validation_auth_binding(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Return immutable authenticated replay metadata for one verified finding."""
+
+        candidate = record.get("candidate_data") if isinstance(record.get("candidate_data"), dict) else {}
+        auth_context = candidate.get("auth_context") if isinstance(candidate.get("auth_context"), dict) else {}
+        if auth_context.get("mode") != "authenticated":
+            return {}
+        verification_task_uid = str(record.get("verification_task_uid") or "")
+        verification_task = next(
+            (task for task in self.state.list_tasks() if task.task_uid == verification_task_uid),
+            None,
+        )
+        packet = candidate.get("verification_packet") if isinstance(candidate.get("verification_packet"), dict) else {}
+        source_task = packet.get("source_task") if isinstance(packet.get("source_task"), dict) else {}
+        target_scope = verification_task.target_scope if verification_task is not None else packet.get("target_scope")
+        target_ids = verification_task.target_ids if verification_task is not None else packet.get("target_ids")
+        if target_scope not in {"all", "subset"} or not isinstance(target_ids, list):
+            raise ValueError("authenticated finding is missing its frozen verification target scope")
+        credential_ids = [str(value) for value in auth_context.get("credential_ids", []) if str(value).strip()]
+        if not credential_ids:
+            raise ValueError("authenticated finding is missing credential provenance")
+        frozen_auth_context = {
+            "mode": "authenticated",
+            "credential_ids": credential_ids,
+            "roles": [str(value) for value in auth_context.get("roles", []) if str(value).strip()],
+            "account_labels": [str(value) for value in auth_context.get("account_labels", []) if str(value).strip()],
+            "tenant_labels": [str(value) for value in auth_context.get("tenant_labels", []) if str(value).strip()],
+        }
+        return {
+            "auth_context": frozen_auth_context,
+            "validation_auth_context": {
+                "mode": "authenticated",
+                "credential_ids": credential_ids,
+                "target_scope": target_scope,
+                "target_ids": list(target_ids),
+                "source_task_uid": str(source_task.get("task_uid") or ""),
+            },
+        }
+
     def _phase_task_contract(self, phase: PlanPhase) -> Any:
         """Load the active module's opt-in, declarative planning contract."""
 
         from modules.operation_plugins.planning_contracts import (
+            load_controller_owned_phase_contracts,
             load_phase_task_contract,
         )
 
         module = str(getattr(self.runtime.config, "module", "") or "")
-        return load_phase_task_contract(module, phase.id)
+        if phase.dynamic_kind:
+            return next(
+                (
+                    contract
+                    for contract in load_controller_owned_phase_contracts(module)
+                    if contract.controller_owned_phase_kind == phase.dynamic_kind
+                ),
+                None,
+            )
+        contract = load_phase_task_contract(module, phase.id)
+        return None if contract is not None and contract.mode == "controller_owned" else contract
 
     def _validate_phase_task_contract_execution(self, phase: PlanPhase) -> None:
         """Fail fast when a module contract cannot be represented by task creation."""
@@ -10004,6 +10690,8 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
         try:
             contract = self._phase_task_contract(phase)
             if contract is None:
+                return
+            if contract.mode == "controller_owned":
                 return
             if contract.phase_id != phase.id:
                 raise ValueError("active phase contract does not match the active phase")
@@ -11445,6 +12133,10 @@ owns the candidate verification tasks. A finding_validation phase must not use g
 Every finding-dependent phase must follow a finding_validation phase that can verify its candidate inputs. Do not place
 exploit-chain, correlation, impact-composition, or other finding-dependent work before its required validation phase.
 
+Controller-owned module phases are materialized from the module task contract after this plan is returned. Do not
+author them as model phases. Set `controller_owned_phase_kind` to an empty string for every returned phase. Set
+`provided_workstreams` to the structured workstreams each ordinary phase produces; use an empty list when none apply.
+
 Use bounded criteria. Replace absolute claims such as "all publicly reachable services" with the discovery sources or
 inventory being assessed, the durable evidence expected, and how unassessed gaps will be documented.
 Every coverage phase must identify the bounded discovery procedure that produces its inventory. Dependent mapping work
@@ -11463,7 +12155,9 @@ Return JSON exactly:
   \"id\": int, \"title\": string, \"status\": \"pending\", \"criteria\": string,
   \"produces_hypotheses\": boolean,
   \"requires_finding_candidates\": boolean,
-  \"task_creation_mode\": \"standard|snapshot_dependent|hypothesis_dependent|finding_dependent|finding_validation\"
+  \"task_creation_mode\": \"standard|snapshot_dependent|hypothesis_dependent|finding_dependent|finding_validation\",
+  \"controller_owned_phase_kind\": \"\",
+  \"provided_workstreams\": [string]
 }}]}}.
 
 Now, create the plan and output only the plan:
@@ -11587,7 +12281,9 @@ Return JSON exactly:
   "id": int, "title": string, "status": "pending", "criteria": string,
   "produces_hypotheses": boolean,
   "requires_finding_candidates": boolean,
-  "task_creation_mode": "standard|snapshot_dependent|hypothesis_dependent|finding_dependent|finding_validation"
+  "task_creation_mode": "standard|snapshot_dependent|hypothesis_dependent|finding_dependent|finding_validation",
+  "controller_owned_phase_kind": "",
+  "provided_workstreams": [string]
 }}]}}.
 
 Output only the revised plan:
@@ -11605,42 +12301,74 @@ while planning.
 {policy}"""
 
     @staticmethod
-    def _credential_execution_guidance() -> str:
+    def _credential_execution_guidance(credential_names: Iterable[str]) -> str:
         """Return credential rules required in both generated and fallback task prompts."""
 
-        return """- For authentication-capable work, establish the unauthenticated baseline before using credentials.
-  Call `plan_authenticated_coverage` for each resolved target to obtain safe, deterministic credential contexts and
-  comparison pairs. When eligible credentials exist for the assigned target, perform an authenticated comparison with
-  each applicable context. Call `set_task_auth_context` with the checked-out credential IDs before authenticated
-  requests or findings. Do not copy secret values into artifacts, acceptance summaries, findings, or prose.
-- If no eligible credential is available and the assigned target exposes an authorized self-registration path, create
-  a strong password with `generate_password`, complete only that registration flow, and store the result with
-  `store_credential(origin="registered", evidence_refs=[...])` without operation_scope so later authorized
-  operations can reuse it. Store found credentials the same way with durable discovery evidence. Otherwise record
-  the missing identity as a coverage gap; never invent an account or bypass registration controls.
-- Rotate only operation-managed credentials and cite durable evidence for the completed rotation. Never replace a
-  user-provided credential; report it as invalid or unavailable when supported by the authentication evidence.
-- Mark a checked-out credential valid, invalid, or otherwise unavailable only after a definitive authentication
-  outcome, with a durable evidence reference and a specific reason. A generic request failure or authorization denial
-  does not by itself prove that a credential is invalid.
-- For a checked-out username/password credential with configured TOTP MFA, call
-  `generate_mfa_code(credential_id="...")`. Do not pass the provisioning secret directly in workflow-agent tool
-  calls; the direct secret form is for standalone compatibility.
-- For a checked-out OAuth2 client credential with a configured same-origin token URL, use
-  `exchange_oauth2_client_credentials` to obtain a transient token. Bind the source credential to the task context;
-  never store the returned access token in an artifact, finding, report, or a credential record.
-- For a checked-out API key, use `prepare_api_key_authentication` and apply exactly the returned header or query
-  parameter material to the next in-scope target request; do not infer placement or write the key to evidence.
-- After mapping a username/password form and its CSRF/session requirements, use
-  `prepare_login_form_authentication` with the observed field names. Submit only the task-local returned fields to
-  the assigned login endpoint; never write them to evidence.
-- When the task auth_context is authenticated, use only its declared credential IDs. When access-control or IDOR work
-  requires a comparison, call `plan_access_control_comparisons` before checkout. Use only its distinct account, role,
-  or tenant credential contexts and record any unavailable comparison as a coverage gap rather than inventing an
-  identity. For IDOR specialist login replay, check out both planned credential IDs, bind both with
-  `set_task_auth_context`, and pass those IDs through `credential_ids` with the observed login field names. Do not
-  pass raw `credentials` or `multi_credentials` values to IDOR specialist calls.
-"""
+        authorized = set(credential_names)
+        lines = [
+            (
+                "- Use only the credential tools supplied for this frozen task. Do not copy secret values into "
+                "artifacts, acceptance summaries, findings, or prose."
+            ),
+        ]
+        if "plan_authenticated_coverage" in authorized:
+            lines.append(
+                "- For authentication-capable work, establish the unauthenticated baseline before using credentials. "
+                "Call `plan_authenticated_coverage` for each resolved target to obtain safe, deterministic credential "
+                "contexts. When eligible credentials exist for the assigned target, perform an authenticated comparison "
+                "with each applicable context."
+            )
+        if {"checkout_credential", "set_task_auth_context"} <= authorized:
+            lines.append(
+                "- Before authenticated requests or findings, check out only task-authorized credential IDs and call "
+                "`set_task_auth_context` with the checked-out IDs."
+            )
+        if {"generate_password", "store_credential"} <= authorized:
+            lines.append(
+                "- If the assigned target exposes an authorized self-registration path, create a strong password with "
+                "`generate_password`, complete only that registration flow, and store the result with "
+                "`store_credential(origin=\"registered\", evidence_refs=[...])` without operation_scope. Otherwise "
+                "record the missing identity as a coverage gap; never invent an account or bypass registration controls."
+            )
+        if "mark_credential_status" in authorized:
+            lines.append(
+                "- Mark a checked-out credential valid, invalid, or otherwise unavailable only after a definitive "
+                "authentication outcome, with a durable evidence reference and a specific reason. A generic request "
+                "failure or authorization denial does not by itself prove that a credential is invalid."
+            )
+        if "generate_mfa_code" in authorized:
+            lines.append(
+                "- For a checked-out username/password credential with configured TOTP MFA, call "
+                "`generate_mfa_code(credential_id=\"...\")`. Do not pass the provisioning secret directly in "
+                "workflow-agent tool calls."
+            )
+        if "exchange_oauth2_client_credentials" in authorized:
+            lines.append(
+                "- For a checked-out OAuth2 client credential with a configured same-origin token URL, use "
+                "`exchange_oauth2_client_credentials` to obtain a transient token. Never store the returned access "
+                "token in an artifact, finding, report, or credential record."
+            )
+        if "prepare_api_key_authentication" in authorized:
+            lines.append(
+                "- For a checked-out API key, use `prepare_api_key_authentication` and apply exactly the returned header "
+                "or query parameter material to the next in-scope target request; do not infer placement or write the key "
+                "to evidence."
+            )
+        if "prepare_login_form_authentication" in authorized:
+            lines.append(
+                "- After mapping a username/password form and its CSRF/session requirements, use "
+                "`prepare_login_form_authentication` with the observed field names. Submit only the task-local returned "
+                "fields to the assigned login endpoint; never write them to evidence."
+            )
+        if "plan_access_control_comparisons" in authorized:
+            lines.append(
+                "- When access-control or IDOR work requires a comparison, call `plan_access_control_comparisons` before "
+                "checkout. Use only its distinct account, role, or tenant credential contexts and record any unavailable "
+                "comparison as a coverage gap rather than inventing an identity. For IDOR specialist login replay, pass "
+                "only checked-out planned credential IDs through `credential_ids`; never pass raw `credentials` or "
+                "`multi_credentials` values."
+            )
+        return "\n".join(lines)
 
     def _task_prompt_builder_prompt(
         self,
@@ -11688,6 +12416,8 @@ while planning.
             else ""
         )
         task_prompt_fields = "prompt, memory_ids, tools" if memory_catalog else "prompt, tools"
+        credential_guidance = self._credential_execution_guidance_for_task(task)
+        client_bundle_guidance = self._client_bundle_execution_guidance_for_task(task)
         return f"""Build a tailored task execution prompt as JSON with keys {task_prompt_fields},
 shell_commands. Select optional tool names and likely shell command names that are applicable to the task.
 
@@ -11695,7 +12425,8 @@ The generated prompt must instruct the task-executor agent:
 - Execute only the assigned task objective below.
 - Execute only against the assigned target scope. Do not scan, exploit, or validate unrelated targets.
 {finding_validation_guidance}- Preserve the exact assigned target boundary for every outgoing request.
-{self._credential_execution_guidance()}
+{credential_guidance}
+{client_bundle_guidance}
 - If an assigned target is an explicit `scheme://host:port` URL or `host:port` netloc, preserve that exact host and port boundary.
   Do not convert it to a host-only target or treat it as authorization to enumerate other ports on the same host.
 - Treat every plan constraint as a mandatory execution guardrail.
@@ -11779,7 +12510,7 @@ Shell command selection guidance:
 {self._core_tool_catalog()}
 
 ## Candidate optional tools
-{self._optional_tool_catalog()}
+{self._task_optional_tool_catalog(task)}
 
 ## Candidate shell commands
 {self._shell_command_catalog()}
@@ -11865,7 +12596,7 @@ When approved is false, provide concise, actionable feedback for every material 
 {self._core_tool_catalog()}
 
 ## Candidate optional tools
-{self._optional_tool_catalog()}
+{self._task_optional_tool_catalog(task)}
 
 ## Candidate shell commands
 {self._shell_command_catalog()}
@@ -11923,7 +12654,7 @@ recording. Remove vague or unnecessary swarm instructions.
 {self._core_tool_catalog()}
 
 ## Candidate optional tools
-{self._optional_tool_catalog()}
+{self._task_optional_tool_catalog(task)}
 
 ## Candidate shell commands
 {self._shell_command_catalog()}
@@ -11955,15 +12686,24 @@ Output only the revised task prompt:
                 if phase.task_creation_mode == "hypothesis_dependent"
                 else ""
             )
+            contract = self._phase_task_contract(phase)
+            grouping_rule = (
+                "This phase has a declared mapping-workstream contract. Submit only its declared workstreams; do not "
+                "invent vulnerability-family workstreams."
+                if contract is not None
+                else """Choose one stable non-empty workstream for each independently executable coverage family. You may
+combine vulnerability goals only when an available tool's current schema or description supports the combined work
+for one route. Create separate vulnerability-family proposals when a tool does not cover a goal or separate evidence
+would be more precise. Do not combine unrelated goals merely to reduce proposal count."""
+            )
             batch_context = f"""## Controller-Owned Creation Batch
 Batch {batch.index} of {batch.total}. The structured proposal is restricted to this exact snapshot and item set.
 Snapshot: {batch.snapshot_ref}
 Estimated input tokens: {batch.estimated_input_tokens}
 Resolved context window: {int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)}
 Create the active phase's work for every listed atomic route group and no work outside this batch.
-{hypothesis_batch_rule}Submit one snapshot proposal for each independent goal or declared workstream. Do not combine
-unrelated goals, and do not divide a goal into endpoint-category or vulnerability-class proposals. Python expands
-every submitted proposal into one route-scoped task for every listed group.
+{hypothesis_batch_rule}{grouping_rule}
+Python expands every submitted proposal into one route-scoped task for every listed group.
 The proposal objective and criterion must describe the active phase's distinct work. Do not use generic "assess
 endpoint" or "assess frozen inventory" wording.
 {self._task_creation_batch_toon(batch.groups)}
@@ -12017,6 +12757,9 @@ the task explicitly tests that difference.
 
 ## Existing Tasks Across All Phases
 {existing_task_context}
+
+## Live Tool Context
+{self._task_creator_live_tool_context()}
 
 {batch_context}
 
@@ -12209,7 +12952,39 @@ the task explicitly tests that difference.
             if set(task.acceptance.basis.item_ids) & batch.item_ids
         ]
         lines.append(Task.list_to_toon(matching))
+        lines.append(self._task_creator_snapshot_family_context(phase))
         lines.append(self._task_creator_prior_phase_context(phase))
+        return "\n".join(lines)
+
+    def _task_creator_snapshot_family_context(self, phase: PlanPhase) -> str:
+        """Render bounded current-phase family state for LLM overlap review only."""
+
+        families: dict[str, dict[str, Any]] = {}
+        for task in current_workflow_tasks(self.state.list_tasks(phase=phase.id)):
+            if task.acceptance.basis.kind != "snapshot":
+                continue
+            context = task.recovery_context.get("phase_task_contract")
+            workstream = str(context.get("workstream") or "default") if isinstance(context, dict) else "default"
+            family = families.setdefault(workstream, {
+                "statuses": Counter(), "objective": task.objective, "methods": set(), "item_ids": set(),
+            })
+            family["statuses"][str(task.status)] += 1
+            family["item_ids"].update(task.acceptance.basis.item_ids)
+            procedure = task.acceptance.basis.procedure
+            if procedure is not None:
+                family["methods"].update(procedure.methods)
+        lines = [f"snapshot_families[{len(families)}]{{workstream,statuses,methods,item_count,objective}}:"]
+        for workstream, family in sorted(families.items()):
+            statuses = "|".join(f"{key}:{value}" for key, value in sorted(family["statuses"].items()))
+            lines.append(
+                "  " + ",".join((
+                    sanitize_toon_value(workstream),
+                    sanitize_toon_value(statuses),
+                    sanitize_toon_value("|".join(sorted(family["methods"]))),
+                    sanitize_toon_value(len(family["item_ids"])),
+                    sanitize_toon_value(self._short(family["objective"], 280)),
+                ))
+            )
         return "\n".join(lines)
 
     def _eligible_snapshot_handles(self) -> str:
@@ -12476,11 +13251,41 @@ Do not return `continue` merely because work is incomplete when the task history
             )
         return toon
 
+    def _task_creator_live_tool_context(self) -> str:
+        """Return a bounded runtime tool view without assigning semantic capabilities in Python."""
+
+        tools_by_name = {}
+        for tool in build_role_tools(self.runtime, include_create_tasks=False):
+            tools_by_name.setdefault(get_tool_name(tool), tool)
+        lines = [f"live_tools[{len(tools_by_name)}]{{name,description}}:"]
+        for name, tool in sorted(tools_by_name.items()):
+            lines.append(
+                "  " + ",".join((
+                    sanitize_toon_value(name),
+                    sanitize_toon_value(get_tool_description(tool))[:500],
+                ))
+            )
+        return "\n".join(lines)
+
     def _core_tool_catalog(self) -> str:
         return self._tool_catalog("core_tools", self.runtime.core_tools_list)
 
     def _optional_tool_catalog(self) -> str:
         return self._tool_catalog("optional_tools", self.runtime.optional_tools_list)
+
+    def _task_optional_tool_catalog(self, task: Task) -> str:
+        """Render all non-credential tools plus only task-authorized credential tools."""
+
+        authorized_credentials = set(self._required_optional_tool_names(task)) & CREDENTIAL_OPTIONAL_TOOL_NAMES
+        return self._tool_catalog(
+            "optional_tools",
+            [
+                tool
+                for tool in self.runtime.optional_tools_list
+                if get_tool_name(tool) not in CREDENTIAL_OPTIONAL_TOOL_NAMES
+                or get_tool_name(tool) in authorized_credentials
+            ],
+        )
 
     def _available_shell_command_specs(self) -> list[dict[str, Any]]:
         core_tools = self.runtime.core_tools_list or self.runtime.tools_list
@@ -12604,7 +13409,17 @@ Do not return `continue` merely because work is incomplete when the task history
             if available_tool_names is None
             else available_tool_names
         )
-        credential_guidance = MultiAgentWorkflowController._credential_execution_guidance()
+        credential_guidance = ""
+        if task is not None:
+            authorized_credentials = (
+                set(available_tool_names or ())
+                & set(credential_optional_tool_names(task))
+                & CREDENTIAL_OPTIONAL_TOOL_NAMES
+            )
+            if authorized_credentials:
+                credential_guidance = MultiAgentWorkflowController._credential_execution_guidance(
+                    authorized_credentials
+                )
         persistence_guidance = MultiAgentWorkflowController._task_persistence_guidance(
             tool_names,
             audience="executor",
@@ -13720,6 +14535,23 @@ tools and durable evidence before relying on it."""
     ) -> list[Any]:
         """Return evidence-producing recovery tools within the frozen method contract."""
 
+        if self._is_credential_provisioning_task(task):
+            allowed_names = {
+                *CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
+                "generate_password",
+                "store_credential",
+                "store_observation",
+            }
+            selected = [tool for tool in tools if get_tool_name(tool) in allowed_names]
+            self._emit_workflow_event({
+                "type": "task_credential_provisioning_recovery",
+                "task_uid": task.task_uid,
+                "phase": task.phase,
+                "branch": "retry_registration",
+                "allowed_tool_names": sorted(get_tool_name(tool) for tool in selected),
+            })
+            return selected
+
         procedure = task.acceptance.basis.procedure
         expected_capabilities = set(
             canonical_procedure_methods(
@@ -13743,6 +14575,13 @@ tools and durable evidence before relying on it."""
             if not capabilities or capabilities.intersection(expected_capabilities):
                 allowed.append(tool)
         return allowed
+
+    @staticmethod
+    def _is_credential_provisioning_task(task: Task) -> bool:
+        """Whether controller-owned metadata identifies a self-registration task."""
+
+        conditional = task.recovery_context.get("conditional_phase", {})
+        return isinstance(conditional, dict) and conditional.get("kind") == "credential_provisioning"
 
     def _has_valid_required_output(
         self,

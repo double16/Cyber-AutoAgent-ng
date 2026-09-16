@@ -20,6 +20,77 @@ _SUPPORTED_EVIDENCE_KINDS = frozenset(
         "memory",
     }
 )
+CREDENTIAL_OPTIONAL_TOOL_NAMES = frozenset({
+    "store_credential", "query_credentials", "checkout_credential", "exchange_oauth2_client_credentials",
+    "set_task_auth_context", "mark_credential_status", "plan_access_control_comparisons",
+    "plan_authenticated_coverage", "prepare_api_key_authentication", "prepare_login_form_authentication",
+    "generate_password", "generate_mfa_code", "begin_email_mfa_retrieval", "request_mfa_code",
+    "retrieve_email_mfa_code", "stage_credential_rotation", "complete_credential_rotation",
+    "fail_credential_rotation", "rotate_credential",
+})
+CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES = (
+    "browser_goto_url",
+    "browser_observe_page",
+    "browser_get_page_html",
+    "browser_perform_action",
+    "browser_get_cookies",
+    "browser_evaluate_js",
+)
+VALIDATION_CREDENTIAL_OPTIONAL_TOOL_NAMES = (
+    "checkout_credential", "set_task_auth_context", "mark_credential_status",
+    "exchange_oauth2_client_credentials", "prepare_api_key_authentication",
+    "prepare_login_form_authentication", "generate_mfa_code", "begin_email_mfa_retrieval",
+    "request_mfa_code", "retrieve_email_mfa_code",
+)
+
+
+def workflow_optional_tool_names(task: Any) -> list[str]:
+    """Return mandatory workflow tools from controller-owned workstream metadata."""
+
+    context = getattr(task, "recovery_context", {}) or {}
+    contract = context.get("phase_task_contract", {}) if isinstance(context, dict) else {}
+    workstream = str(contract.get("workstream") or "") if isinstance(contract, dict) else ""
+    if workstream == "client_side_api":
+        return ["client_bundle_inventory"]
+    return []
+
+
+def credential_optional_tool_names(task: Any) -> list[str]:
+    """Return credential tools required by durable task metadata, never task prose."""
+
+    context = getattr(task, "recovery_context", {}) or {}
+    contract = context.get("phase_task_contract", {}) if isinstance(context, dict) else {}
+    conditional = context.get("conditional_phase", {}) if isinstance(context, dict) else {}
+    workstream = str(contract.get("workstream") or "") if isinstance(contract, dict) else ""
+    auth_context = getattr(task, "auth_context", {}) or {}
+    if (
+        str(getattr(task, "kind", "")) in {"finding_validation", "objective_validation"}
+        and auth_context.get("mode") == "authenticated"
+    ):
+        return list(VALIDATION_CREDENTIAL_OPTIONAL_TOOL_NAMES)
+    if str(getattr(task, "kind", "")) == "credential_rotation":
+        return [
+            "query_credentials", "checkout_credential", "stage_credential_rotation",
+            "complete_credential_rotation", "fail_credential_rotation", "rotate_credential",
+        ]
+    if isinstance(conditional, dict) and conditional.get("kind") == "credential_provisioning":
+        return [
+            "generate_password", "store_credential", "query_credentials", "checkout_credential",
+            "mark_credential_status", *CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
+        ]
+    if workstream == "authorization_comparison":
+        return [
+            "plan_authenticated_coverage", "plan_access_control_comparisons", "checkout_credential",
+            "set_task_auth_context", "mark_credential_status", "prepare_login_form_authentication",
+        ]
+    if workstream == "authenticated_credential_coverage" or auth_context.get("mode") == "authenticated":
+        return [
+            "plan_authenticated_coverage", "query_credentials", "checkout_credential", "set_task_auth_context",
+            "mark_credential_status", "exchange_oauth2_client_credentials", "prepare_api_key_authentication",
+            "prepare_login_form_authentication", "generate_mfa_code", "begin_email_mfa_retrieval",
+            "request_mfa_code", "retrieve_email_mfa_code",
+        ]
+    return []
 
 
 def load_optional_tool_selection_rules() -> list[dict[str, Any]]:
@@ -86,4 +157,8 @@ def required_optional_tool_names(task: Any) -> list[str]:
         matches_evidence = bool(evidence_kinds & rule["evidence_requirement_kinds"])
         if matches_output or matches_evidence:
             tool_names.extend(rule["tools"])
-    return list(dict.fromkeys(tool_names))
+    return list(
+        dict.fromkeys(
+            [*tool_names, *workflow_optional_tool_names(task), *credential_optional_tool_names(task)]
+        )
+    )

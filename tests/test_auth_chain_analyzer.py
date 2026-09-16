@@ -286,6 +286,42 @@ def test_auth_chain_inventory_manifest_is_additive(monkeypatch, tmp_path):
     }
 
 
+def test_auth_chain_inventory_marks_observed_registration_as_structured_flow(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        aca,
+        "_discover_auth_endpoints",
+        lambda url: [{"path": "/register", "full_url": f"{url}/register", "status": 200, "type": "Self-registration"}],
+    )
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda *_args: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda *_args: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda *_args: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    captured = {}
+    monkeypatch.setattr(manifest_tool, "resolve_inventory_target", lambda target, target_id="target-1": (target, target_id))
+    def write_manifest(_path, manifest):
+        captured["manifest"] = manifest
+        return {"validation_status": "valid"}
+
+    monkeypatch.setattr(manifest_tool, "write_inventory_manifest", write_manifest)
+
+    aca.auth_chain_analyzer("https://registration-flow.test", inventory_manifest=str(tmp_path / "inventory.json"))
+
+    registration = next(
+        item["attributes"]["registration"]
+        for item in captured["manifest"]["items"]
+        if item["kind"] == "workflow" and "registration" in item["attributes"]
+    )
+    assert registration == {
+        "enabled": True,
+        "target": "https://registration-flow.test",
+        "url": "https://registration-flow.test/register",
+        "roles": ["user"],
+    }
+
+
 def test_auth_chain_error_keeps_requested_manifest_metadata(monkeypatch, tmp_path):
     monkeypatch.setattr(aca, "_discover_auth_endpoints", Mock(side_effect=RuntimeError("analysis failed")))
 

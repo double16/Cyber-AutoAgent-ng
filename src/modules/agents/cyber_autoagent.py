@@ -632,25 +632,6 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         record_objective_validation,
         memory_retrieve,
         memory_list,
-        store_credential,
-        query_credentials,
-        checkout_credential,
-        exchange_oauth2_client_credentials,
-        set_task_auth_context,
-        mark_credential_status,
-        plan_access_control_comparisons,
-        plan_authenticated_coverage,
-        prepare_api_key_authentication,
-        prepare_login_form_authentication,
-        generate_password,
-        generate_mfa_code,
-        begin_email_mfa_retrieval,
-        request_mfa_code,
-        retrieve_email_mfa_code,
-        stage_credential_rotation,
-        complete_credential_rotation,
-        fail_credential_rotation,
-        rotate_credential,
         create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
         create_tasks,
         sleep,
@@ -658,7 +639,15 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         environment,  # environment is referenced by other strands tools
     ]
 
-    optional_tools_list = [recon_output_to_inventory_manifest]
+    optional_tools_list = [
+        recon_output_to_inventory_manifest,
+        store_credential, query_credentials, checkout_credential, exchange_oauth2_client_credentials,
+        set_task_auth_context, mark_credential_status, plan_access_control_comparisons,
+        plan_authenticated_coverage, prepare_api_key_authentication, prepare_login_form_authentication,
+        generate_password, generate_mfa_code, begin_email_mfa_retrieval, request_mfa_code,
+        retrieve_email_mfa_code, stage_credential_rotation, complete_credential_rotation,
+        fail_credential_rotation, rotate_credential,
+    ]
 
     if "module_tool_allowlist" in locals() and module_tool_allowlist is not None:
         for builtin_tool in builtin_tools_list:

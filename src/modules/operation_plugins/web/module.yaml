@@ -47,9 +47,19 @@ planning:
       synthesis_output_kind: inventory_manifest
       synthesis_execution: controller
     - phase_id: 2
+      mode: controller_owned
+      controller_owned_phase_kind: credential_provisioning
+      prerequisite_workstreams:
+        - inventory_synthesis
+        - auth_workflow
+      registration_attribute: registration
+      identities_per_role: 2
+    - phase_id: 3
       mode: fanout
       min_mapping_tasks: 3
       mapping_workstreams:
         - unauthenticated_baseline
         - authenticated_credential_coverage
         - authorization_comparison
+      controller_mapping_workstreams:
+        - unauthenticated_baseline

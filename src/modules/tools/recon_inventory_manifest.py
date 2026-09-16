@@ -347,6 +347,66 @@ def _parse_client_bundle_inventory(text: str) -> list[dict[str, Any]]:
     return records
 
 
+_REGISTRATION_ROUTE_TOKENS = ("register", "signup", "sign-up", "create-account")
+_AUTHENTICATION_ROUTE_TOKENS = ("login", "signin", "sign-in", "auth", "oauth", "oidc", "sso")
+
+
+def client_bundle_workflows(
+    payload: dict[str, Any],
+    *,
+    source_ref: str = "",
+) -> list[dict[str, Any]]:
+    """Return structured SPA workflow items from a validated bundle extraction payload.
+
+    Route classification is deliberately limited to deterministic route tokens. A
+    registration classification authorizes credential provisioning; authentication
+    classifications are retained as inventory context only.
+    """
+
+    target = _canonical_url(str(payload.get("target") or ""))
+    routes = payload.get("spa_routes")
+    if not target or not isinstance(routes, list):
+        return []
+
+    workflows = []
+    for route in routes:
+        if not isinstance(route, str) or not route.startswith("/"):
+            continue
+        normalized_route = route.split("?", 1)[0].casefold()
+        url = urljoin(target.rstrip("/") + "/", route.lstrip("/"))
+        route_attributes = {
+            "source": "client_bundle_inventory",
+            "url": url,
+            "evidence_refs": [source_ref] if source_ref else [],
+        }
+        if any(token in normalized_route for token in _REGISTRATION_ROUTE_TOKENS):
+            workflows.append(
+                {
+                    "value": f"Self-registration route: {url}",
+                    "attributes": {
+                        "client_route": {**route_attributes, "classification": "registration"},
+                        "registration": {
+                            "enabled": True,
+                            "target": target.rstrip("/"),
+                            "url": url,
+                            "roles": ["user"],
+                            "evidence_refs": [source_ref] if source_ref else [],
+                        },
+                    },
+                }
+            )
+        elif any(token in normalized_route for token in _AUTHENTICATION_ROUTE_TOKENS):
+            workflows.append(
+                {
+                    "value": f"Authentication route: {url}",
+                    "attributes": {
+                        "client_route": {**route_attributes, "classification": "authentication"},
+                    },
+                }
+            )
+    return workflows
+
+
 def _parse_technology_inventory(text: str) -> list[dict[str, Any]]:
     """Convert legacy per-entrypoint technology research into canonical recon records."""
 
@@ -458,7 +518,12 @@ def _infer_format(text: str) -> str:
     raise ValueError(f"Unable to infer recon source format; choose one of: {', '.join(SUPPORTED_RECON_FORMATS)}")
 
 
-def _structured_inventory_fields(text: str, source_format: str) -> tuple[list[dict[str, Any]], list[str], list[Any]]:
+def _structured_inventory_fields(
+    text: str,
+    source_format: str,
+    *,
+    source_ref: str = "",
+) -> tuple[list[dict[str, Any]], list[str], list[Any]]:
     """Return workflow, technology, and parameter supplements for native structured outputs."""
 
     values = _json_values(text)
@@ -469,6 +534,8 @@ def _structured_inventory_fields(text: str, source_format: str) -> tuple[list[di
             list(payload.get("technologies") or []) if isinstance(payload.get("technologies"), list) else [],
             list(payload.get("parameters") or []) if isinstance(payload.get("parameters"), list) else [],
         )
+    if source_format == "client_bundle_inventory":
+        return client_bundle_workflows(payload, source_ref=source_ref), [], []
     if source_format != "auth_chain":
         return [], [], []
     workflows = []
@@ -841,7 +908,11 @@ def _read_inventory_source(
         for record in records:
             if str(record.get("url") or "").startswith("/"):
                 record["url"] = urljoin(bound_target.rstrip("/") + "/", str(record["url"]).lstrip("/"))
-    workflows, technologies, parameters = _structured_inventory_fields(text, normalized_format)
+    workflows, technologies, parameters = _structured_inventory_fields(
+        text,
+        normalized_format,
+        source_ref=source_ref,
+    )
     manifest = records_to_inventory_manifest(
         records,
         target_id=resolved_target_id,

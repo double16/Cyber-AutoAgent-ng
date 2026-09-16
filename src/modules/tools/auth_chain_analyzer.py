@@ -427,6 +427,25 @@ def _write_auth_inventory_manifest(
             if isinstance(mechanism, dict) and mechanism.get("type")
         ]
         resolved_manifest_target, manifest_target_id = resolve_inventory_target(target_url)
+        for endpoint in auth_endpoints:
+            if not isinstance(endpoint, dict) or endpoint.get("type") != "Self-registration":
+                continue
+            registration_url = str(endpoint.get("url") or endpoint.get("full_url") or "").strip()
+            if not registration_url:
+                continue
+            workflows.append(
+                {
+                    "value": "Self-registration",
+                    "attributes": {
+                        "registration": {
+                            "enabled": True,
+                            "target": resolved_manifest_target,
+                            "url": registration_url,
+                            "roles": ["user"],
+                        }
+                    },
+                }
+            )
         manifest = records_to_inventory_manifest(
             records,
             target_id=manifest_target_id,
@@ -858,6 +877,9 @@ def _classify_auth_endpoint(path: str, headers: str) -> str:
     # Password recovery
     if any(keyword in path_lower for keyword in ["reset", "forgot", "recovery"]):
         return "Password Recovery"
+
+    if any(keyword in path_lower for keyword in ["register", "signup", "sign-up"]):
+        return "Self-registration"
 
     # Session-based
     if any(keyword in path_lower for keyword in ["login", "signin", "session", "logout", "signout"]):

@@ -111,6 +111,48 @@ def test_client_bundle_inventory_writes_target_service_for_empty_bundle(
     assert [item["kind"] for item in manifest["items"]] == ["service", "endpoint"]
 
 
+def test_client_bundle_inventory_preserves_spa_registration_and_authentication_workflows(
+    monkeypatch, tmp_path: Path
+):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "app.js").write_text(
+        'const routes = ["/usersignup", "/userlogin", "/newuserlogin"];',
+        encoding="utf-8",
+    )
+    _operation_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        bundle_tool,
+        "resolve_inventory_target",
+        lambda *_args: ("https://target.test", "target-1"),
+    )
+
+    result = json.loads(
+        bundle_tool.client_bundle_inventory(
+            "artifact:artifacts/app.js",
+            "artifacts/bundle-inventory.json",
+            "artifacts/inventory-manifest.json",
+        )
+    )
+    manifest = json.loads((artifacts / "inventory-manifest.json").read_text(encoding="utf-8"))
+    workflows = {item["value"]: item["attributes"] for item in manifest["items"] if item["kind"] == "workflow"}
+
+    assert result["registration_route_count"] == 1
+    assert set(workflows) == {
+        "Self-registration route: https://target.test/usersignup",
+        "Authentication route: https://target.test/userlogin",
+        "Authentication route: https://target.test/newuserlogin",
+    }
+    assert workflows["Self-registration route: https://target.test/usersignup"]["registration"] == {
+        "enabled": True,
+        "target": "https://target.test",
+        "url": "https://target.test/usersignup",
+        "roles": ["user"],
+        "evidence_refs": ["artifact:artifacts/bundle-inventory.json"],
+    }
+    assert "registration" not in workflows["Authentication route: https://target.test/userlogin"]
+
+
 def test_client_bundle_inventory_persists_webcrack_derivative_without_raw_reference(
     monkeypatch, tmp_path: Path
 ):

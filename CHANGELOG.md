@@ -2,6 +2,16 @@
 
 ### Features
 
+- Preserve deterministic self-registration and authentication workflow metadata from SPA JavaScript routes, and
+  require client-side API mapping tasks to run the scoped bundle-inventory tool before inventory synthesis.
+- Move credential-management tools from universal workflow core tools to deterministic, task-scoped optional bundles,
+  reducing prompt context for planning, evaluation, and unauthenticated work.
+- Insert a controller-managed credential-provisioning phase for web assessments when completed inventory and
+  authentication-workflow outputs identify an authorized self-registration flow without usable credentials.
+- Let unconstrained snapshot-dependent phases use live tool descriptions and prior workstream context to choose
+  route-scoped bundled or standalone task families without hard-coded tool or vulnerability metadata.
+- Run web phase-2 unauthenticated baseline mapping directly in the controller from frozen inventory interactions,
+  preserving durable evidence and route-scoped coverage while bypassing executor prompt construction.
 - Allow snapshot-dependent task batches to fan out independent, workstream-scoped task families across the same
   frozen route groups, preserving separate coverage for goals such as XSS, LFI, and SSRF.
 - Make web authentication coverage and hypothesis phases deterministically consume the latest completed inventory
@@ -52,6 +62,30 @@
 
 ### Fixes
 
+- Recreate reset controller-owned credential-provisioning tasks with preserved replacement lineage, preventing
+  archived phase work from incorrectly terminating continuations during generic task creation.
+- Preserve executable browser, credential, and coverage-gap observation tools during bounded self-registration
+  recovery, so unavailable artifact evidence triggers a scoped retry instead of an artifact-only dead end.
+- Route frozen unauthenticated-baseline groups without a safe, in-scope executable HTTP interaction to task executors
+  instead of failing them immediately in the controller.
+- Resolve credential-provisioning prerequisites from completed, contract-validated task workstreams when generated
+  plan metadata contains display labels, ensuring authorized registration manifests remain available for provisioning.
+- Preserve structured prerequisite providers through plan persistence, keep web snapshot metadata attached as
+  credential provisioning shifts later phases, and treat failed or unsafe controller baseline requests as gaps.
+- Materialize one controller-owned credential-provisioning phase from the web phase-task contract, place it after
+  the latest structured inventory or authentication-workflow provider, and prevent model-authored duplicates.
+- Give controller-managed credential-provisioning tasks the scoped interactive browser tools needed to complete
+  modern self-registration flows, while excluding global browser-header mutation.
+- Plan web credential provisioning after attack-surface mapping and before authenticated coverage, marking the phase
+  `not_applicable` when structured self-registration is absent or role credential quotas are already satisfied.
+- Preserve frozen authenticated identity and target scope for finding, objective, and finding-dependent validation
+  tasks, with replay-only credential tools that reject undeclared credentials.
+- Scope credential-tool catalogs and execution guidance in task prompt building, critique, revision, and execution to
+  the frozen task metadata, preventing unauthorized access-control comparison tools from being suggested.
+- Resolve active task target IDs to their canonical target values in credential tools while preserving task scope
+  enforcement, and document the accepted target forms for agent callers.
+- Follow controller-owned web baseline redirects within the assigned service and one observed external identity
+  provider origin, while rejecting additional external redirect destinations.
 - Normalize legacy document-scoped inventory target IDs before web inventory consolidation, convert compatible
   technology-inventory artifacts into canonical technology items, and prevent execution receipts from overriding
   inaccessible acceptance evidence.

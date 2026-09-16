@@ -29,6 +29,7 @@ inventory manifest.
 Create separate artifact-producing tasks for unauthenticated baseline, authenticated credential coverage, and
 authorization comparison. Each task must document a bounded result or an evidence-backed inapplicability/coverage gap;
 do not use raw credential values in task descriptions, artifacts, or IDOR specialist calls.
+
 3. **Generate Attack Hypotheses from the Mapped Attack Surface** — Derive detailed, testable attack paths from
    technology, input, trust-boundary, and workflow observations. For each path, record preconditions, the suspected
    mechanism and attacker-controlled flow, safe future test steps, expected positive and negative/control results,

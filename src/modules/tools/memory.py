@@ -1135,6 +1135,8 @@ class PlanPhase:
         "finding_dependent",
         "finding_validation",
     ] = "standard"
+    dynamic_kind: str = ""
+    provided_workstreams: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, int) or self.id < 0:
@@ -1164,6 +1166,12 @@ class PlanPhase:
         }
         if self.task_creation_mode not in valid_modes:
             raise ValueError(f"phase.task_creation_mode must be one of: {', '.join(sorted(valid_modes))}")
+        if not isinstance(self.dynamic_kind, str):
+            raise ValueError("phase.dynamic_kind must be a string")
+        if not isinstance(self.provided_workstreams, tuple) or not all(
+            isinstance(workstream, str) and workstream.strip() for workstream in self.provided_workstreams
+        ):
+            raise ValueError("phase.provided_workstreams must contain non-empty strings")
 
     @staticmethod
     def from_obj(obj: Any) -> "PlanPhase":
@@ -1171,6 +1179,11 @@ class PlanPhase:
             raise ValueError("phase must be an object/dict")
         if "produces_hypotheses" not in obj:
             raise ValueError("phase.produces_hypotheses is required")
+        raw_workstreams = obj.get("provided_workstreams", [])
+        if not isinstance(raw_workstreams, list) or not all(
+            isinstance(workstream, str) and workstream.strip() for workstream in raw_workstreams
+        ):
+            raise ValueError("phase.provided_workstreams must be a list of non-empty strings")
         return PlanPhase(
             id=int(obj.get("id")),
             title=str(obj.get("title", "")),
@@ -1182,6 +1195,8 @@ class PlanPhase:
                 obj.get("task_creation_mode")
                 or ("finding_dependent" if obj.get("requires_finding_candidates", False) else "standard")
             ),
+            dynamic_kind=str(obj.get("dynamic_kind") or ""),
+            provided_workstreams=tuple(workstream.strip() for workstream in raw_workstreams),
         )
 
     @staticmethod
@@ -1190,7 +1205,7 @@ class PlanPhase:
 
     @staticmethod
     def csv_format() -> str:
-        return "id,title,status,criteria,produces_hypotheses,requires_finding_candidates,task_creation_mode"
+        return "id,title,status,criteria,produces_hypotheses,requires_finding_candidates,task_creation_mode,dynamic_kind,provided_workstreams"
 
     def to_toon(self, include_format=True) -> str:
         title = sanitize_toon_value(self.title)
@@ -1202,7 +1217,8 @@ class PlanPhase:
         lines.append(
             f"  {self.id},{title},{status},{criteria},{str(self.produces_hypotheses).lower()},"
             f"{str(self.requires_finding_candidates).lower()},"
-            f"{self.task_creation_mode}"
+            f"{self.task_creation_mode},{sanitize_toon_value(self.dynamic_kind)},"
+            f"{sanitize_toon_value('|'.join(self.provided_workstreams))}"
         )
         return "\n".join(lines).strip()
 
@@ -1215,6 +1231,8 @@ class PlanPhase:
             "produces_hypotheses": self.produces_hypotheses,
             "requires_finding_candidates": self.requires_finding_candidates,
             "task_creation_mode": self.task_creation_mode,
+            "dynamic_kind": self.dynamic_kind or None,
+            "provided_workstreams": list(self.provided_workstreams),
         })
 
 
@@ -4685,6 +4703,22 @@ def _active_finding_source_task(store: Any, operation_id: str) -> Task | None:
     return active[0] if len(active) == 1 else None
 
 
+def _validation_auth_metadata(source_task: Task | None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Freeze authenticated source-task identity and target scope for a validation replay."""
+
+    if source_task is None or source_task.auth_context.get("mode") != "authenticated":
+        return {}, {}
+    auth_context = _normalize_auth_context(source_task.auth_context)
+    binding = {
+        "mode": "authenticated",
+        "credential_ids": list(auth_context["credential_ids"]),
+        "target_scope": source_task.target_scope,
+        "target_ids": list(source_task.target_ids),
+        "source_task_uid": source_task.task_uid,
+    }
+    return auth_context, binding
+
+
 def active_credential_task(store: Any, operation_id: str) -> Task | None:
     """Return the sole active task permitted to check out or use credentials."""
 
@@ -5128,6 +5162,18 @@ def store_finding(
     verification_phase = _finding_validation_task_phase(active_plan, current_phase)
     target_ids = bound_target_ids or _target_ids_for_literal(candidate["target"])
     target_scope: TargetScope = "subset" if target_ids else "all"
+    validation_auth_context = candidate["auth_context"]
+    validation_auth_binding = (
+        {
+            "mode": "authenticated",
+            "credential_ids": list(validation_auth_context["credential_ids"]),
+            "target_scope": target_scope,
+            "target_ids": list(target_ids),
+            "source_task_uid": source_task_uid,
+        }
+        if validation_auth_context.get("mode") == "authenticated"
+        else {}
+    )
     candidate["verification_packet"] = {
         "version": 1,
         "finding_uid": finding_uid,
@@ -5177,12 +5223,13 @@ def store_finding(
         ),
         evidence=candidate["artifacts"],
         phase=verification_phase,
-        auth_context=candidate["auth_context"],
+        auth_context=validation_auth_context,
         status="pending",
         kind="finding_validation",
         reference_id=finding_uid,
         target_scope=target_scope,
         target_ids=target_ids,
+        recovery_context={"validation_auth_context": validation_auth_binding} if validation_auth_binding else {},
     )
     store.store_finding_candidate(op_id, finding_uid, fingerprint, candidate, task_uid)
     _ensure_memory_client().store_task(task=task, user_id=_user_id())
@@ -6032,6 +6079,8 @@ def store_objective_candidate(
 
     candidate_uid = str(uuid.uuid4())
     task_uid = str(uuid.uuid4())
+    source_task = _active_finding_source_task(store, op_id)
+    validation_auth_context, validation_auth_binding = _validation_auth_metadata(source_task)
     candidate = {
         "candidate_uid": candidate_uid,
         "validation_type": "objective",
@@ -6042,6 +6091,8 @@ def store_objective_candidate(
         "artifacts": artifacts,
         "constraints": constraints,
         "validation_status": "pending",
+        "auth_context": validation_auth_context,
+        "source_task_uid": source_task.task_uid if source_task is not None else "",
     }
     _store_memory_entry(candidate["summary"], "objective_candidate", candidate)
     current_phase = _get_plan_current_phase()
@@ -6073,6 +6124,10 @@ def store_objective_candidate(
         status="pending",
         kind="objective_validation",
         reference_id=candidate_uid,
+        target_scope=source_task.target_scope if source_task is not None else "all",
+        target_ids=list(source_task.target_ids) if source_task is not None else [],
+        auth_context=validation_auth_context,
+        recovery_context={"validation_auth_context": validation_auth_binding} if validation_auth_binding else {},
     )
     store.store_objective_candidate(op_id, candidate_uid, fingerprint, candidate, task_uid)
     _ensure_memory_client().store_task(task=task, user_id=_user_id())
@@ -8670,7 +8725,11 @@ def _create_tasks_from_proposals(
     phase_objective: str = "",
     required_finding_refs: set[str] | None = None,
     finding_ref_aliases: dict[str, str] | None = None,
+    finding_auth_bindings: dict[str, dict[str, Any]] | None = None,
     phase_task_contract: Any = None,
+    execution_owner_resolver: Callable[
+        [Any, TaskProposal, dict[str, Any], list[str], list[OperationTarget]], str
+    ] | None = None,
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
     reject_duplicate_proposals: bool = False,
 ) -> str:
@@ -8754,6 +8813,32 @@ def _create_tasks_from_proposals(
                     "finding-dependent task proposal includes unavailable finding_refs: "
                     + ", ".join(invalid_finding_refs)
                 )
+        validation_auth_context: dict[str, Any] = {}
+        validation_auth_binding: dict[str, Any] = {}
+        if finding_auth_bindings and finding_refs:
+            bindings = [finding_auth_bindings.get(reference, {}) for reference in finding_refs]
+            binding_signatures = {
+                json.dumps(
+                    {
+                        "auth_context": binding.get("auth_context", {}),
+                        "target_scope": binding.get("validation_auth_context", {}).get("target_scope"),
+                        "target_ids": binding.get("validation_auth_context", {}).get("target_ids", []),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for binding in bindings
+            }
+            if len(binding_signatures) != 1:
+                raise ValueError(
+                    "finding-dependent task proposal mixes incompatible authentication contexts or target scopes"
+                )
+            binding = bindings[0]
+            auth_context = binding.get("auth_context") if isinstance(binding, dict) else None
+            frozen_binding = binding.get("validation_auth_context") if isinstance(binding, dict) else None
+            if isinstance(auth_context, dict) and auth_context.get("mode") == "authenticated":
+                validation_auth_context = _normalize_auth_context(auth_context)
+                validation_auth_binding = dict(frozen_binding or {})
         replacement_of = str(proposal.replacement_of or "").strip() or None
         supersedes_criteria = list(dict.fromkeys(
             str(criterion_id).strip() for criterion_id in proposal.supersedes_criteria if str(criterion_id).strip()
@@ -8794,6 +8879,11 @@ def _create_tasks_from_proposals(
                 "phase_id": phase_task_contract.phase_id,
                 "workstream": proposal.workstream,
                 "task_role": proposal.task_role,
+                "execution_owner": (
+                    "controller"
+                    if proposal.workstream in getattr(phase_task_contract, "controller_mapping_workstreams", frozenset())
+                    else "executor"
+                ),
                 "depends_on_workstreams": list(proposal.depends_on_workstreams),
                 "inapplicability_reason": proposal.inapplicability_reason,
             }
@@ -8980,6 +9070,33 @@ def _create_tasks_from_proposals(
         proposal_expanded_count = len(acceptance_groups)
         for group_title, group_objective, group_acceptance, group_target_scope, group_target_ids in acceptance_groups:
             group_planning_context = dict(planning_context)
+            phase_contract_context = group_planning_context.get("phase_task_contract")
+            if (
+                execution_owner_resolver is not None
+                and group_acceptance.mode == "coverage"
+                and isinstance(phase_contract_context, dict)
+                and phase_contract_context.get("execution_owner") == "controller"
+            ):
+                group_selected_targets = [
+                    target for target in selected_targets if target.target_id in set(group_target_ids)
+                ]
+                execution_owner = execution_owner_resolver(
+                    phase_task_contract,
+                    proposal,
+                    manifest,
+                    list(group_acceptance.basis.item_ids),
+                    group_selected_targets,
+                )
+                if execution_owner not in {"controller", "executor"}:
+                    raise ValueError("execution_owner_resolver must return controller or executor")
+                group_planning_context["phase_task_contract"] = {
+                    **phase_contract_context,
+                    "execution_owner": execution_owner,
+                }
+            if validation_auth_binding:
+                group_target_scope = str(validation_auth_binding["target_scope"])
+                group_target_ids = list(validation_auth_binding["target_ids"])
+                group_planning_context["validation_auth_context"] = validation_auth_binding
             coverage_family = _proposal_coverage_family(proposal)
             if group_acceptance.mode == "coverage":
                 group_planning_context["coverage_family"] = coverage_family
@@ -9064,6 +9181,7 @@ def _create_tasks_from_proposals(
                 replacement_of=replacement_of,
                 supersedes_criteria=supersedes_criteria,
                 recovery_context=group_planning_context,
+                auth_context=validation_auth_context,
             ))
             proposal_created_count += 1
         logger.info(
@@ -9134,7 +9252,11 @@ def build_create_tasks_submitter(
     phase_objective: str = "",
     required_finding_refs: set[str] | None = None,
     finding_ref_aliases: dict[str, str] | None = None,
+    finding_auth_bindings: dict[str, dict[str, Any]] | None = None,
     phase_task_contract: Any = None,
+    execution_owner_resolver: Callable[
+        [Any, TaskProposal, dict[str, Any], list[str], list[OperationTarget]], str
+    ] | None = None,
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
     reject_duplicate_proposals: bool = False,
     repair_guard: TaskProposalRepairGuard | None = None,
@@ -9164,7 +9286,9 @@ def build_create_tasks_submitter(
                 phase_objective=phase_objective,
                 required_finding_refs=required_finding_refs,
                 finding_ref_aliases=finding_ref_aliases,
+                finding_auth_bindings=finding_auth_bindings,
                 phase_task_contract=phase_task_contract,
+                execution_owner_resolver=execution_owner_resolver,
                 proposal_preflight_validator=proposal_preflight_validator,
                 reject_duplicate_proposals=reject_duplicate_proposals,
             )
@@ -9193,6 +9317,9 @@ def build_create_tasks_tool(
     required_finding_refs: set[str] | None = None,
     finding_ref_aliases: dict[str, str] | None = None,
     phase_task_contract: Any = None,
+    execution_owner_resolver: Callable[
+        [Any, TaskProposal, dict[str, Any], list[str], list[OperationTarget]], str
+    ] | None = None,
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
     reject_duplicate_proposals: bool = False,
     repair_guard: TaskProposalRepairGuard | None = None,
@@ -9211,6 +9338,7 @@ def build_create_tasks_tool(
         required_finding_refs=required_finding_refs,
         finding_ref_aliases=finding_ref_aliases,
         phase_task_contract=phase_task_contract,
+        execution_owner_resolver=execution_owner_resolver,
         proposal_preflight_validator=proposal_preflight_validator,
         reject_duplicate_proposals=reject_duplicate_proposals,
         repair_guard=repair_guard,

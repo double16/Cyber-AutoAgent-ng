@@ -1350,6 +1350,46 @@ def test_agent_credential_tools_reject_access_outside_the_active_task_scope(tmp_
         )
 
 
+def test_agent_credential_tools_resolve_active_target_ids(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store)
+
+    stored = json.loads(
+        store_credential(
+            "api_key",
+            {"api_key": "secret", "name": "X-Key"},
+            target="app",
+            role="reader",
+            evidence_refs=["artifact:discovery.txt"],
+        )
+    )
+    queried = json.loads(query_credentials("app"))
+    coverage = json.loads(plan_authenticated_coverage("app"))
+    comparisons = json.loads(plan_access_control_comparisons("app"))
+
+    assert stored["credential"]["target"] == "https://app.example.test"
+    assert queried["credentials"][0]["target"] == "https://app.example.test"
+    assert coverage["target"] == "https://app.example.test"
+    assert comparisons["target"] == "https://app.example.test"
+
+
+def test_agent_credential_tools_reject_unknown_target_id(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store)
+
+    for tool_call in (
+        lambda: query_credentials("missing-target"),
+        lambda: plan_authenticated_coverage("missing-target"),
+        lambda: plan_access_control_comparisons("missing-target"),
+    ):
+        with pytest.raises(ValueError, match="outside the active task"):
+            tool_call()
+
+
 def test_password_and_totp_tools_reject_bad_inputs_and_generate_compliant_password():
     password = generate_password(24)
 
@@ -1457,6 +1497,64 @@ def test_checkout_and_auth_context_bind_credentials_to_the_active_task_target(tm
         "tenant_labels": ["tenant-a"],
     }
     assert "must-not-leak" not in json.dumps(result)
+
+
+def test_validation_tasks_reject_credential_ids_outside_their_frozen_binding(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    store.store_plan(
+        "op-1",
+        OperationPlan(
+            objective="Assess application",
+            current_phase=1,
+            total_phases=1,
+            phases=[PlanPhase(id=1, title="Verification", status="active")],
+            targets=[OperationTarget(target_id="app", value="https://app.example.test", type="network")],
+        ),
+    )
+    allowed = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        values={"username": "alice", "password": "allowed-secret"},
+    )
+    other = store_user_credential(
+        operation_id="op-1",
+        credential_type="username_password",
+        target="https://app.example.test",
+        role="member",
+        values={"username": "bob", "password": "other-secret"},
+    )
+    task = Task(
+        "verification-1",
+        "Verify authenticated finding",
+        "Replay the finding",
+        make_acceptance("verification-1"),
+        1,
+        "active",
+        kind="finding_validation",
+        target_scope="subset",
+        target_ids=["app"],
+        auth_context={"mode": "authenticated", "credential_ids": [allowed["credential_id"]]},
+        recovery_context={"validation_auth_context": {
+            "mode": "authenticated",
+            "credential_ids": [allowed["credential_id"]],
+            "target_scope": "subset",
+            "target_ids": ["app"],
+            "source_task_uid": "source-1",
+        }},
+    )
+    store.store_task("op-1", task)
+
+    with pytest.raises(ValueError, match="frozen validation authentication context"):
+        checkout_credential(other["credential_id"], "attempt a different identity")
+
+    checkout_credential(allowed["credential_id"], "replay the finding")
+    result = json.loads(set_task_auth_context([allowed["credential_id"]]))
+
+    assert result["auth_context"]["credential_ids"] == [allowed["credential_id"]]
 
 
 def test_idor_login_contexts_use_checked_out_task_bound_comparison_pair(tmp_path, monkeypatch):
