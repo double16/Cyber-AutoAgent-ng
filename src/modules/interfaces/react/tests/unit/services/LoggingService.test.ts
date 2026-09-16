@@ -47,6 +47,13 @@ describe('LoggingService', () => {
         const service = (LoggingService as any).getInstance();
 
         service.clearBuffer();
+        service.info(' \n\t ');
+        expect(service.getRecentLogs()).toEqual([]);
+        service.info('  trimmed info  \n');
+        expect(service.getRecentLogs()).toEqual([
+            expect.objectContaining({level: 'INFO', message: 'trimmed info'}),
+        ]);
+        service.clearBuffer();
         service.debug('debug', {hidden: true});
         service.info('info');
         service.warn('warn', {visible: true});

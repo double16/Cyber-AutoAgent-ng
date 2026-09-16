@@ -1,6 +1,6 @@
-import {describe, expect, it} from '@jest/globals';
+import {describe, expect, it, jest} from '@jest/globals';
 
-import {formatDuration, sanitizeForLogging} from '../../../src/utils/logger.js';
+import {formatDuration, Logger, sanitizeForLogging} from '../../../src/utils/logger.js';
 
 describe('formatDuration', () => {
     it('formats sub-minute durations as pluralized seconds', () => {
@@ -59,5 +59,20 @@ describe('sanitizeForLogging', () => {
 
     it('preserves tabs and newlines', () => {
         expect(sanitizeForLogging('col1\tcol2\nnext line')).toBe('col1\tcol2\nnext line');
+    });
+});
+
+describe('Logger message normalization', () => {
+    it('trims messages and suppresses whitespace-only entries', () => {
+        const info = jest.spyOn(console, 'info').mockImplementation(() => undefined);
+        const logger = new Logger({level: 'debug', structured: false});
+
+        logger.info('  visible message  \n');
+        logger.info(' \n\t ');
+
+        expect(info).toHaveBeenCalledTimes(1);
+        expect(info.mock.calls[0][0]).toContain('visible message');
+        expect(info.mock.calls[0][0]).not.toContain('  visible message  ');
+        info.mockRestore();
     });
 });
