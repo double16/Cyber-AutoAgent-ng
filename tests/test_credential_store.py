@@ -20,6 +20,7 @@ from modules.tools.credentials import (
     extract_objective_credentials,
     generate_mfa_code,
     generate_password,
+    generate_registration_email,
     mark_credential_status,
     plan_access_control_comparisons,
     plan_authenticated_coverage,
@@ -1408,6 +1409,32 @@ def test_password_and_totp_tools_reject_bad_inputs_and_generate_compliant_passwo
         generate_mfa_code("not base32!")
     with pytest.raises(ValueError, match="required"):
         generate_mfa_code()
+
+
+def test_generate_registration_email_avoids_persisted_and_reserved_addresses(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    store.store_credential(
+        "op-1",
+        {
+            "credential_type": "username_password",
+            "target": "https://app.example.test",
+            "role": "user",
+            "payload": {"username": "testuser12345678@example.com", "password": "secret"},
+            "origin": "registered",
+            "management_policy": "operation",
+        },
+    )
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    suffixes = iter([2_345_678, 2_345_679, 2_345_679, 2_345_680])
+    monkeypatch.setattr("modules.tools.credentials.secrets.randbelow", lambda _upper: next(suffixes))
+    monkeypatch.setattr("modules.tools.credentials._REGISTRATION_EMAIL_RESERVATIONS", {"op-1": set()})
+
+    first = generate_registration_email()
+    second = generate_registration_email()
+
+    assert first == "testuser12345679@example.com"
+    assert second == "testuser12345680@example.com"
 
 
 def test_checkout_and_auth_context_reject_missing_task_scope_and_unavailable_credentials(tmp_path, monkeypatch):

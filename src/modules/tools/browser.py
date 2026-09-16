@@ -46,6 +46,31 @@ _BROWSER_RETRIABLE_ERRORS = (
     "browser has been closed",
     "Target closed",
 )
+_PAGE_CHANGE_POLL_INTERVAL_SECONDS = 0.25
+_MAX_PAGE_CHANGE_TIMEOUT_SECONDS = 60
+
+
+def _normalized_page_content(content: str) -> str:
+    """Return a stable, compact representation for rendered-page comparisons."""
+
+    without_noncontent = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", content)
+    without_tags = re.sub(r"(?s)<[^>]+>", " ", without_noncontent)
+    return re.sub(r"\s+", " ", without_tags).strip()
+
+
+def _page_change_summary(before: str, after: str) -> dict[str, Any]:
+    """Describe whether a rendered page changed without returning its full contents."""
+
+    normalized_before = _normalized_page_content(before)
+    normalized_after = _normalized_page_content(after)
+    changed = normalized_before != normalized_after
+    return {
+        "changed": changed,
+        "before_chars": len(normalized_before),
+        "after_chars": len(normalized_after),
+        "before_preview": normalized_before[:240],
+        "after_preview": normalized_after[:240],
+    }
 
 
 def _sanitize_toon_value(value: Any) -> str:
@@ -1609,7 +1634,11 @@ async def browser_get_cookies():
 
 
 @tool
-async def browser_perform_action(action: str):
+async def browser_perform_action(
+    action: str,
+    wait_for_page_change: bool = False,
+    page_change_timeout_seconds: int = 10,
+):
     """
     Perform one atomic interaction on the current page in the shared browser
     session.
@@ -1631,6 +1660,8 @@ async def browser_perform_action(action: str):
         - Treat browser interactions as sequential and stateful.
         - Relevant network traffic, console logs, dialogs, and downloads are
           captured automatically.
+        - Set `wait_for_page_change` for form submissions to retain a bounded
+          rendered-page comparison after the existing network-idle wait.
         - Large captured outputs may be saved as artifacts; inspect only the
           relevant portions.
 
@@ -1643,18 +1674,49 @@ async def browser_perform_action(action: str):
 
     Returns:
         Observations of page state after the action plus captured interaction
-        metadata.
+        metadata. When page-change checking is enabled, includes a compact
+        `page_change_result` section; this is evidence, not a success claim.
     """
+    if not 1 <= page_change_timeout_seconds <= _MAX_PAGE_CHANGE_TIMEOUT_SECONDS:
+        raise ValueError(
+            f"page_change_timeout_seconds must be between 1 and {_MAX_PAGE_CHANGE_TIMEOUT_SECONDS}"
+        )
     logger.info("browser_perform_action: %s", action)
     async with get_browser() as browser:
         async def _impl():
             async with browser.interaction_context_capture(
                     only_domains=[browser.page_domain]
             ) as interaction_context:
+                before_content = await browser.page.content() if wait_for_page_change else ""
                 async with browser.timeout():
                     await browser.page.act(action)
-                with contextlib.suppress(TimeoutError):
-                    await browser.page.wait_for_load_state("networkidle", timeout=60000)
+                page_change = None
+                if wait_for_page_change:
+                    async def _wait_for_page_change() -> dict[str, Any]:
+                        deadline = asyncio.get_running_loop().time() + page_change_timeout_seconds
+                        latest_content = before_content
+                        while True:
+                            latest_content = await browser.page.content()
+                            summary = _page_change_summary(before_content, latest_content)
+                            if summary["changed"]:
+                                summary["timed_out"] = False
+                                return summary
+                            if asyncio.get_running_loop().time() >= deadline:
+                                summary["timed_out"] = True
+                                return summary
+                            await asyncio.sleep(_PAGE_CHANGE_POLL_INTERVAL_SECONDS)
+
+                    page_change_task = asyncio.create_task(_wait_for_page_change())
+                    try:
+                        await browser.page.wait_for_load_state(
+                            "networkidle", timeout=page_change_timeout_seconds * 1000
+                        )
+                    except TimeoutError:
+                        pass
+                    page_change = await page_change_task
+                else:
+                    with contextlib.suppress(TimeoutError):
+                        await browser.page.wait_for_load_state("networkidle", timeout=60000)
 
                 # Eagerly returning relevant observations to reduce agent tool calls
                 async with browser.timeout():
@@ -1666,11 +1728,18 @@ async def browser_perform_action(action: str):
                             )
                     )
                 summary = await interaction_context.summarize()
-                return observations, summary
+                return observations, summary, page_change, str(browser.page.url)
 
-        observations, summary = await browser.run_in_browser_loop(_impl)
+        observations, summary, page_change, final_url = await browser.run_in_browser_loop(_impl)
         logger.info("browser_perform_action: %s done", action)
-        return f"<observations>\n{observations}\n</observations>\n{summary}"
+        page_change_result = ""
+        if page_change is not None:
+            page_change_result = (
+                "\n<page_change_result>\n"
+                f"{json.dumps({'final_url': final_url, **page_change}, sort_keys=True)}\n"
+                "</page_change_result>"
+            )
+        return f"<observations>\n{observations}\n</observations>\n{summary}{page_change_result}"
 
 
 @tool

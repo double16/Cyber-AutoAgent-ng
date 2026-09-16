@@ -62,6 +62,9 @@
 
 ### Fixes
 
+- Wait for and report rendered-page changes after authentication-form submissions, generate collision-resistant
+  registration emails, and classify incomplete credential-role quotas as partial phase failures while carrying their
+  coverage gaps into later work.
 - Recreate reset controller-owned credential-provisioning tasks with preserved replacement lineage, preventing
   archived phase work from incorrectly terminating continuations during generic task creation.
 - Preserve executable browser, credential, and coverage-gap observation tools during bounded self-registration

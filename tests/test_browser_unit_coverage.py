@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import AsyncMock
@@ -43,6 +44,81 @@ def test_extract_domain_handles_public_and_local_domains(monkeypatch):
 
     assert mod.extract_domain("https://www.example.co.uk/path") == "example.co.uk"
     assert mod.extract_domain("server.orb.local") == "orb"
+
+
+def test_page_change_summary_ignores_script_and_whitespace_but_reports_visible_changes():
+    unchanged = mod._page_change_summary(
+        "<main>Hello</main><script>loading = true</script>",
+        "<main>  Hello </main><script>loading = false</script>",
+    )
+    changed = mod._page_change_summary("<main>Register</main>", "<main>Welcome</main>")
+
+    assert unchanged["changed"] is False
+    assert changed["changed"] is True
+    assert changed["before_preview"] == "Register"
+    assert changed["after_preview"] == "Welcome"
+
+
+@pytest.mark.asyncio
+async def test_browser_action_waits_for_page_change_and_reports_result(monkeypatch):
+    class FakeTimeout:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    class FakePage:
+        url = "https://example.test/register"
+
+        def __init__(self):
+            self.content_value = "<main>Register</main>"
+            self.wait_timeout = None
+
+        async def content(self):
+            return self.content_value
+
+        async def act(self, action):
+            assert action == "Click register"
+            self.content_value = "<main>Registration complete</main>"
+
+        async def wait_for_load_state(self, state, timeout):
+            assert state == "networkidle"
+            self.wait_timeout = timeout
+
+        async def observe(self, _instruction):
+            return [SimpleNamespace(description="registration complete")]
+
+    class FakeBrowser:
+        def __init__(self):
+            self.page = FakePage()
+            self.page_domain = "example.test"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        def timeout(self):
+            return FakeTimeout()
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+        @asynccontextmanager
+        async def interaction_context_capture(self, **_kwargs):
+            yield SimpleNamespace(summarize=AsyncMock(return_value="network summary"))
+
+    fake_browser = FakeBrowser()
+    monkeypatch.setattr(mod, "get_browser", lambda: fake_browser)
+
+    result = await mod.browser_perform_action("Click register", wait_for_page_change=True)
+
+    assert fake_browser.page.wait_timeout == 10_000
+    assert '"changed": true' in result
+    assert '"timed_out": false' in result
+    assert "network summary" in result
 
 
 @pytest.mark.asyncio

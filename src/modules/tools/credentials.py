@@ -55,6 +55,7 @@ _OBJECTIVE_OAUTH_PATTERN = re.compile(
     r".*?\b(?:oauth2?[_ -]?)?(?:client[_ -]?secret|secret)\s*[:=]\s*(?P<client_secret>[^\s,;]+)"
     r"(?:.*?\b(?:oauth2?[_ -]?)?token[_ -]?url\s*[:=]\s*(?P<token_url>[^\s,;]+))?"
 )
+_REGISTRATION_EMAIL_RESERVATIONS: dict[str, set[str]] = {}
 
 
 def extract_objective_credentials(objective: str) -> tuple[str, list[dict[str, Any]]]:
@@ -1079,6 +1080,33 @@ def generate_password(length: int = 20) -> str:
     characters = required + remaining
     secrets.SystemRandom().shuffle(characters)
     return register_runtime_secret("".join(characters))
+
+
+@tool(name="generate_registration_email")
+def generate_registration_email() -> str:
+    """Generate a collision-resistant test email for an authorized self-registration flow."""
+
+    operation_id = _operation_id()
+    store = _get_database_store()
+    existing = set()
+    for record in store.list_credentials(
+        operation_id,
+        statuses=_STATUSES,
+        include_payload=True,
+    ):
+        payload = record.get("payload") or {}
+        if isinstance(payload, dict):
+            existing.update(
+                str(payload.get(field) or "").strip().lower()
+                for field in ("email", "username")
+            )
+    reservations = _REGISTRATION_EMAIL_RESERVATIONS.setdefault(operation_id, set())
+    for _ in range(100):
+        candidate = f"testuser{secrets.randbelow(90_000_000) + 10_000_000}@example.com"
+        if candidate not in existing and candidate not in reservations:
+            reservations.add(candidate)
+            return candidate
+    raise RuntimeError("unable to generate a unique registration email")
 
 
 def _require_rotation_request(store: Any, request_id: str) -> str:

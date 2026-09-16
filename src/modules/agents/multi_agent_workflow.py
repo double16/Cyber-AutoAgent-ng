@@ -2276,6 +2276,9 @@ class MultiAgentWorkflowController:
         """Reconcile resolved replacement tasks before applying phase completion rules."""
 
         reconciled = self._reconcile_superseded_tasks(phase_id)
+        phase = next(item for item in plan.phases if item.id == phase_id)
+        if phase.dynamic_kind == "credential_provisioning":
+            status = self._credential_provisioning_phase_status(phase, status)
         if status in {"partial_failure", "blocked"}:
             phase_tasks = current_workflow_tasks(self.state.list_tasks(phase=phase_id))
             remaining_failures = self.state.list_tasks(
@@ -2295,6 +2298,41 @@ class MultiAgentWorkflowController:
                 )
                 status = "done"
         return self.state.mark_phase(plan, phase_id, status)
+
+    def _credential_provisioning_phase_status(self, phase: PlanPhase, requested_status: str) -> str:
+        """Prevent successful credential-phase closure while required roles remain uncovered."""
+
+        deficits: list[dict[str, Any]] = []
+        for task in current_workflow_tasks(self.state.list_tasks(phase=phase.id)):
+            conditional = task.recovery_context.get("conditional_phase", {})
+            if not isinstance(conditional, dict) or conditional.get("kind") != "credential_provisioning":
+                continue
+            flow = conditional.get("registration_flow", {})
+            if not isinstance(flow, dict):
+                continue
+            required = int(conditional.get("identities_per_role") or 0)
+            missing = self._credential_flow_deficits(flow, required)
+            if any(missing.values()):
+                gap = {
+                    "target": str(flow.get("target") or ""),
+                    "url": str(flow.get("url") or ""),
+                    "missing_by_role": missing,
+                }
+                self.state.patch_task(
+                    task.task_uid,
+                    recovery_context_updates={"unresolved_credential_deficits": gap},
+                )
+                deficits.append(gap)
+        if deficits and requested_status in {"done", "not_applicable"}:
+            self._emit_workflow_event({
+                "type": "credential_provisioning_deficit",
+                "phase": phase.id,
+                "requested_status": requested_status,
+                "effective_status": "partial_failure",
+                "deficits": deficits,
+            })
+            return "partial_failure"
+        return requested_status
 
     def _reconcile_superseded_tasks(self, phase_id: int) -> list[Task]:
         """Mark failed tasks superseded when explicitly linked replacements resolve their intent."""
@@ -8484,7 +8522,25 @@ Return JSON exactly: {response_schema}.
                 "registration flow, inspect client-side behavior, submit only the required form actions, and retain "
                 "durable registration evidence. Do not mutate global browser headers."
             )
+        if "plan_authenticated_coverage" in selected_names:
+            gaps = self._unresolved_credential_provisioning_gaps()
+            if gaps:
+                guidance += (
+                    "\n- Earlier credential provisioning left these role-specific coverage gaps: "
+                    f"{json.dumps(gaps, sort_keys=True)}. Do not treat another role's credential as coverage for a "
+                    "missing role; record each unexercised role as a coverage gap in current-operation evidence."
+                )
         return guidance
+
+    def _unresolved_credential_provisioning_gaps(self) -> list[dict[str, Any]]:
+        """Return structured role deficits retained by prior credential-provisioning closure."""
+
+        gaps = []
+        for task in current_workflow_tasks(self.state.list_tasks()):
+            gap = task.recovery_context.get("unresolved_credential_deficits")
+            if isinstance(gap, dict) and any((gap.get("missing_by_role") or {}).values()):
+                gaps.append(gap)
+        return gaps
 
     def _client_bundle_execution_guidance_for_task(self, task: Task) -> str:
         """Render deterministic bundle-inventory instructions for the declared SPA workstream."""
@@ -12326,7 +12382,9 @@ while planning.
         if {"generate_password", "store_credential"} <= authorized:
             lines.append(
                 "- If the assigned target exposes an authorized self-registration path, create a strong password with "
-                "`generate_password`, complete only that registration flow, and store the result with "
+                "`generate_password` and a collision-resistant email with `generate_registration_email`, complete "
+                "only that registration flow, and call `browser_perform_action(..., wait_for_page_change=true)` for "
+                "the submit action. Store the result with "
                 "`store_credential(origin=\"registered\", evidence_refs=[...])` without operation_scope. Otherwise "
                 "record the missing identity as a coverage gap; never invent an account or bypass registration controls."
             )
@@ -14539,6 +14597,7 @@ tools and durable evidence before relying on it."""
             allowed_names = {
                 *CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
                 "generate_password",
+                "generate_registration_email",
                 "store_credential",
                 "store_observation",
             }

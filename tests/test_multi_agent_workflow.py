@@ -1717,6 +1717,7 @@ def test_credential_provisioning_recovery_preserves_registration_capabilities():
         [
             *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
             _tool("generate_password"),
+            _tool("generate_registration_email"),
             _tool("store_credential"),
             _tool("store_observation"),
             _tool("read_artifact"),
@@ -1728,6 +1729,7 @@ def test_credential_provisioning_recovery_preserves_registration_capabilities():
     assert {tool.__name__ for tool in tools} == {
         *CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
         "generate_password",
+        "generate_registration_email",
         "store_credential",
         "store_observation",
     }
@@ -4514,7 +4516,7 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
     runtime = _runtime()
     runtime.optional_tools_list = [
         *[_tool(name) for name in browser_names],
-        *[_tool(name) for name in ["generate_password", "store_credential", "query_credentials", "checkout_credential", "mark_credential_status"]],
+        *[_tool(name) for name in ["generate_password", "generate_registration_email", "store_credential", "query_credentials", "checkout_credential", "mark_credential_status"]],
     ]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -4540,6 +4542,81 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
     assert {name for name in browser_names if name != "browser_set_headers"}.issubset(executor_tools)
     assert "browser_set_headers" not in executor_tools
     assert "bounded self-registration task" in controller._credential_execution_guidance_for_task(task)
+
+
+def test_credential_provisioning_phase_closure_requires_all_role_quotas(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Mapping", status="done"),
+            PlanPhase(id=2, title="Credential Provisioning", status="active", dynamic_kind="credential_provisioning"),
+            PlanPhase(id=3, title="Coverage", status="pending"),
+        ],
+    )
+    task = Task(
+        task_uid="credential-provisioning:missing",
+        title="Provision identities",
+        objective="Register users",
+        phase=2,
+        status="done",
+        recovery_context={
+            "conditional_phase": {
+                "kind": "credential_provisioning",
+                "registration_flow": {"target": "https://target.test", "url": "https://target.test/register", "roles": ["user"]},
+                "identities_per_role": 2,
+            }
+        },
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, tasks=[task])
+    )
+    monkeypatch.setattr(controller, "_credential_flow_deficits", lambda *_args: {"user": 1})
+
+    updated = controller._mark_phase(plan, 2, "done")
+
+    assert updated.phases[1].status == "partial_failure"
+    persisted = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
+    assert persisted.recovery_context["unresolved_credential_deficits"]["missing_by_role"] == {"user": 1}
+    assert any(event["type"] == "credential_provisioning_deficit" for event in controller.runtime.callback_handler.events)
+
+
+def test_authenticated_coverage_guidance_includes_unresolved_credential_role_gaps():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Mapping", status="done"),
+            PlanPhase(id=2, title="Credential Provisioning", status="partial_failure"),
+            PlanPhase(id=3, title="Coverage", status="active"),
+        ],
+    )
+    provisioning = Task(
+        task_uid="credential-provisioning:missing",
+        title="Provision identities",
+        objective="Register users",
+        phase=2,
+        status="done",
+        recovery_context={
+            "unresolved_credential_deficits": {
+                "target": "https://target.test",
+                "url": "https://target.test/register",
+                "missing_by_role": {"user": 1},
+            }
+        },
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, tasks=[provisioning])
+    )
+    task = Task(task_uid="coverage", title="Coverage", objective="Test auth", phase=3, status="pending")
+    controller._required_optional_tool_names = lambda _task: ["plan_authenticated_coverage"]
+
+    guidance = controller._credential_execution_guidance_for_task(task)
+
+    assert "role-specific coverage gaps" in guidance
+    assert '"user": 1' in guidance
 
 
 def test_controller_runs_existing_active_task_before_pending_task():
