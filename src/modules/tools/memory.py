@@ -8755,9 +8755,11 @@ def _create_tasks_from_proposals(
         raise ValueError(_compact_task_proposal_validation_error(error)) from error
     if phase_task_contract is not None:
         from modules.operation_plugins.planning_contracts import (
+            normalize_contract_bound_task_proposals,
             validate_phase_task_proposals,
         )
 
+        proposals = normalize_contract_bound_task_proposals(proposals)
         validate_phase_task_proposals(phase_task_contract, proposals)
     if proposal_preflight_validator is not None:
         proposal_preflight_validator(proposals)

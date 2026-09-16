@@ -3216,7 +3216,7 @@ def test_bound_create_tasks_tool_resolves_controller_ownership_per_snapshot_grou
         "limits": {},
         "snapshot_refs": [canonical_manifest],
         "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
-        "workstream": "unauthenticated_baseline",
+        "workstream": "Unauthenticated Baseline",
     }
 
     def resolve_owner(_contract, _proposal, inventory, item_ids, _targets):
@@ -3247,6 +3247,9 @@ def test_bound_create_tasks_tool_resolves_controller_ownership_per_snapshot_grou
         for task in store.tasks
     }
     assert owners_by_item_id == {"endpoint-0": "controller", "technology-bootstrap": "executor"}
+    assert {task.recovery_context["phase_task_contract"]["workstream"] for task in store.tasks} == {
+        "unauthenticated_baseline"
+    }
 
 
 def test_bound_create_tasks_tool_rejects_wrong_snapshot_and_split_route(fake_memory_client):

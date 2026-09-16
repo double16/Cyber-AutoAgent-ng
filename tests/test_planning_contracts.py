@@ -373,6 +373,36 @@ def test_credential_coverage_phase_contracts_accept_their_declared_workstreams(m
     validate_phase_task_proposals(load_phase_task_contract(module, phase_id), [_proposal(workstream) for workstream in workstreams])
 
 
+def test_web_contract_accepts_case_and_separator_variants_of_declared_workstreams():
+    contract = load_phase_task_contract("web", 3)
+
+    validate_phase_task_proposals(
+        contract,
+        [
+            _proposal("Unauthenticated Baseline"),
+            _proposal("authenticated-credential coverage"),
+            _proposal("AUTHORIZATION__COMPARISON"),
+        ],
+    )
+
+
+def test_web_contract_normalizes_synthesis_workstream_dependencies():
+    validate_phase_task_proposals(
+        load_phase_task_contract("web", 1),
+        [
+            _proposal("Entrypoint Technology"),
+            _proposal("bounded-crawl"),
+            _proposal("CLIENT__SIDE API"),
+            _proposal(
+                "Inventory Synthesis",
+                role="synthesis",
+                depends=("entrypoint-technology", "BOUNDED CRAWL", "client_side-api"),
+                output_kind="inventory_manifest",
+            ),
+        ],
+    )
+
+
 @pytest.mark.parametrize("module", ("web", "web_recon"))
 def test_credential_coverage_phase_contracts_reject_missing_or_unknown_workstreams(module):
     contract = load_phase_task_contract(module, 3 if module == "web" else 2)
@@ -382,6 +412,34 @@ def test_credential_coverage_phase_contracts_reject_missing_or_unknown_workstrea
         validate_phase_task_proposals(
             contract,
             [_proposal("unauthenticated_baseline"), _proposal("authenticated_credential_coverage"), _proposal("raw_credentials")],
+        )
+
+
+@pytest.mark.parametrize("workstream", ("authorization/comparison", "raw credentials"))
+def test_web_contract_rejects_unknown_workstream_variants(workstream):
+    contract = load_phase_task_contract("web", 3)
+
+    with pytest.raises(ValueError, match="not declared"):
+        validate_phase_task_proposals(
+            contract,
+            [
+                _proposal("unauthenticated_baseline"),
+                _proposal("authenticated_credential_coverage"),
+                _proposal(workstream),
+            ],
+        )
+
+
+def test_contract_loader_rejects_normalization_collisions():
+    with pytest.raises(ValueError, match="normalization collisions"):
+        contracts._parse_contract(
+            "fixture",
+            {
+                "phase_id": 1,
+                "mode": "fanout",
+                "min_mapping_tasks": 1,
+                "mapping_workstreams": ["auth coverage", "auth_coverage"],
+            },
         )
 
 

@@ -7,6 +7,7 @@ model-authored titles or objectives.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,36 @@ class PhaseMetadataContract:
     module: str
     phase_id: int
     task_creation_mode: str
+
+
+def normalize_workstream_identifier(value: str) -> str:
+    """Return the canonical form for a contract-bound workstream identifier."""
+
+    return re.sub(r"[\s_-]+", "_", value.strip().lower()).strip("_")
+
+
+def normalize_contract_bound_task_proposals(proposals: list[Any]) -> list[Any]:
+    """Return proposals with contract-bound workstream values in canonical form."""
+
+    normalized_proposals = []
+    for proposal in proposals:
+        workstream = proposal.workstream
+        normalized_workstream = (
+            normalize_workstream_identifier(workstream) if isinstance(workstream, str) else workstream
+        )
+        dependencies = [
+            normalize_workstream_identifier(dependency) if isinstance(dependency, str) else dependency
+            for dependency in proposal.depends_on_workstreams
+        ]
+        normalized_proposals.append(
+            proposal.model_copy(
+                update={
+                    "workstream": normalized_workstream,
+                    "depends_on_workstreams": dependencies,
+                }
+            )
+        )
+    return normalized_proposals
 
 
 def load_phase_metadata_contracts(module: str) -> dict[int, PhaseMetadataContract]:
@@ -134,7 +165,7 @@ def validate_phase_task_proposals(contract: PhaseTaskContract, proposals: list[A
     if contract.allow_direct_single_step and len(proposals) == 1:
         proposal = proposals[0]
         if proposal.task_role == "direct_single_step":
-            if proposal.workstream not in contract.direct_single_step_workstreams:
+            if _normalized_proposal_workstream(proposal) not in contract.direct_single_step_workstreams:
                 raise ValueError("direct_single_step proposal uses an unsupported workstream")
             if not proposal.inapplicability_reason:
                 raise ValueError("direct_single_step proposal requires inapplicability_reason")
@@ -149,7 +180,7 @@ def validate_phase_task_proposals(contract: PhaseTaskContract, proposals: list[A
         raise ValueError(
             f"phase task contract requires at least {contract.min_mapping_tasks} distinct mapping tasks"
         )
-    workstreams = [proposal.workstream for proposal in mapping]
+    workstreams = [_normalized_proposal_workstream(proposal) for proposal in mapping]
     if any(workstream not in contract.mapping_workstreams for workstream in workstreams):
         raise ValueError("mapping proposal uses a workstream not declared by the active module contract")
     if len(set(workstreams)) != len(workstreams):
@@ -165,14 +196,25 @@ def validate_phase_task_proposals(contract: PhaseTaskContract, proposals: list[A
     if len(synthesis) != 1:
         raise ValueError("phase task contract requires exactly one synthesis task")
     synthesis_proposal = synthesis[0]
-    if synthesis_proposal.workstream != contract.synthesis_workstream:
+    if _normalized_proposal_workstream(synthesis_proposal) != contract.synthesis_workstream:
         raise ValueError("synthesis proposal uses the wrong workstream")
     if synthesis_proposal.output_kind != contract.synthesis_output_kind:
         raise ValueError(
             f"synthesis proposal requires output_kind={contract.synthesis_output_kind}"
         )
-    if set(synthesis_proposal.depends_on_workstreams) != set(workstreams):
+    if {
+        normalize_workstream_identifier(workstream)
+        for workstream in synthesis_proposal.depends_on_workstreams
+        if isinstance(workstream, str)
+    } != set(workstreams):
         raise ValueError("synthesis task must depend on every submitted mapping workstream")
+
+
+def _normalized_proposal_workstream(proposal: Any) -> Any:
+    """Normalize a proposal workstream for comparison without mutating the proposal."""
+
+    workstream = proposal.workstream
+    return normalize_workstream_identifier(workstream) if isinstance(workstream, str) else workstream
 
 
 def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
@@ -205,7 +247,11 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
             min_mapping_tasks=0,
             mapping_workstreams=frozenset(),
             controller_owned_phase_kind=controller_owned_phase_kind,
-            prerequisite_workstreams=frozenset(item.strip() for item in prerequisite_workstreams),
+            prerequisite_workstreams=_normalize_declared_workstreams(
+                prerequisite_workstreams,
+                module,
+                "prerequisite_workstreams",
+            ),
             registration_attribute=registration_attribute,
             identities_per_role=identities_per_role,
         )
@@ -218,7 +264,11 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         isinstance(item, str) and item.strip() for item in mapping_workstreams
     ):
         raise ValueError(f"planning contract mapping_workstreams is invalid for {module}")
-    normalized_workstreams = frozenset(item.strip() for item in mapping_workstreams)
+    normalized_workstreams = _normalize_declared_workstreams(
+        mapping_workstreams,
+        module,
+        "mapping_workstreams",
+    )
     if len(normalized_workstreams) < min_mapping_tasks:
         raise ValueError(f"planning contract has fewer workstreams than its minimum for {module}")
     controller_mapping_workstreams = raw.get("controller_mapping_workstreams", [])
@@ -226,7 +276,11 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         isinstance(item, str) and item.strip() for item in controller_mapping_workstreams
     ):
         raise ValueError(f"controller_mapping_workstreams is invalid for {module}")
-    normalized_controller_workstreams = frozenset(item.strip() for item in controller_mapping_workstreams)
+    normalized_controller_workstreams = _normalize_declared_workstreams(
+        controller_mapping_workstreams,
+        module,
+        "controller_mapping_workstreams",
+    )
     if not normalized_controller_workstreams.issubset(normalized_workstreams):
         raise ValueError(f"controller_mapping_workstreams must be declared mapping workstreams for {module}")
     synthesis_workstream = raw.get("synthesis_workstream")
@@ -234,6 +288,9 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
     synthesis_execution = raw.get("synthesis_execution")
     if mode == "fanout_with_synthesis":
         if not isinstance(synthesis_workstream, str) or not synthesis_workstream.strip():
+            raise ValueError(f"synthesis_workstream is required for {module}")
+        synthesis_workstream = normalize_workstream_identifier(synthesis_workstream)
+        if not synthesis_workstream:
             raise ValueError(f"synthesis_workstream is required for {module}")
         if synthesis_output_kind not in {"artifact", "inventory_manifest"}:
             raise ValueError(f"synthesis_output_kind is invalid for {module}")
@@ -251,7 +308,11 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         isinstance(item, str) and item.strip() for item in direct_workstreams
     ):
         raise ValueError(f"direct_single_step_workstreams is invalid for {module}")
-    normalized_direct_workstreams = frozenset(item.strip() for item in direct_workstreams)
+    normalized_direct_workstreams = _normalize_declared_workstreams(
+        direct_workstreams,
+        module,
+        "direct_single_step_workstreams",
+    )
     if allow_direct and not normalized_direct_workstreams:
         raise ValueError(f"direct_single_step_workstreams is required for {module}")
     return PhaseTaskContract(
@@ -261,12 +322,27 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         min_mapping_tasks=min_mapping_tasks,
         mapping_workstreams=normalized_workstreams,
         controller_mapping_workstreams=normalized_controller_workstreams,
-        synthesis_workstream=synthesis_workstream.strip() if synthesis_workstream else None,
+        synthesis_workstream=synthesis_workstream,
         synthesis_output_kind=synthesis_output_kind,
         synthesis_execution=synthesis_execution,
         allow_direct_single_step=allow_direct,
         direct_single_step_workstreams=normalized_direct_workstreams,
     )
+
+
+def _normalize_declared_workstreams(
+    workstreams: list[str],
+    module: str,
+    field_name: str,
+) -> frozenset[str]:
+    """Normalize declared workstreams and reject aliases that would collide."""
+
+    normalized = [normalize_workstream_identifier(workstream) for workstream in workstreams]
+    if not all(normalized):
+        raise ValueError(f"planning contract {field_name} is invalid for {module}")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError(f"planning contract {field_name} contains normalization collisions for {module}")
+    return frozenset(normalized)
 
 
 def _parse_metadata_contract(module: str, raw: Any) -> PhaseMetadataContract:
