@@ -62,6 +62,8 @@
 
 ### Fixes
 
+- Avoid generic inventory-fan-out health predictions for controller-owned dynamic phases, preventing deterministic
+  reset-phase replacements from appearing to have missing tasks.
 - Run safe unauthenticated GET baselines for mapped SPA authentication routes in the controller, using their structured
   client-route URL while retaining executor fallback for malformed or out-of-scope workflows.
 - Return byte-bounded artifact excerpts with explicit truncation and pagination instructions, preventing a normal

@@ -45,7 +45,7 @@ options include:
 | `--provider` / `--model` / `--region` | Model configuration |
 | `--continue` / `--report` / `--evaluate` | Continue, regenerate a report, or re-run evaluation for the latest operation, optionally by ID |
 | `--reset-failed` | With `--continue`, retry all partial-failure and blocked tasks and phases |
-| `--reset-phases` | With `--continue`, archive selected phase tasks and propose fresh work; accepts `3,5-` style selectors |
+| `--reset-phases` | With `--continue`, archive selected phase tasks and create fresh work; accepts `3,5-` style selectors |
 | `--deployment-mode` | `local-cli`, `single-container`, or `full-stack` |
 | `--mcp-enabled` / `--mcp-conns` | Enable and configure MCP servers |
 | `--headless` / `--recording` / `--debug, -d` | Output and diagnostic modes |
@@ -83,7 +83,7 @@ default is `web`; its provider choices are `bedrock`, `ollama`, `litellm`, and `
 | `--output-dir` | Output directory override |
 | `--continue` / `--report` / `--evaluate` | Continue, regenerate a report, or re-run evaluation for an operation |
 | `--reset-failed` | With `--continue`, reset partial-failure and blocked work before retrying the operation |
-| `--reset-phases SELECTOR` | With `--continue`, archive selected phase work and create fresh task proposals |
+| `--reset-phases SELECTOR` | With `--continue`, archive selected phase work and create fresh work |
 | `--eval-rubric` | Enable evaluation with the selected rubric |
 | `--mcp-enabled` / `--mcp-conns` | Enable and configure MCP servers |
 | `--bug-bounty-header NAME=VALUE` | Add an authorized request header; repeatable |
@@ -126,7 +126,7 @@ In the interactive React terminal, use `continue [operation_id] reset-failed`; t
 
 ### Replanning selected phases
 
-Use `--reset-phases` when an entire phase needs fresh task proposals rather than a retry of its existing tasks. The
+Use `--reset-phases` when an entire phase needs fresh work rather than a retry of its existing tasks. The
 selector accepts comma-separated phase IDs, inclusive ranges, and an open-ended range through the final phase:
 
 ```bash
@@ -147,7 +147,7 @@ flowchart LR
     A --> C[Return finding validation tasks to pending]
     B --> D[Reopen earliest selected phase]
     C --> D
-    D --> E[Resume validation, then create fresh task proposals]
+    D --> E[Resume validation, then create fresh work]
 ```
 
 ### Comprehensive hypothesis testing

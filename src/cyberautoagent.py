@@ -487,7 +487,7 @@ def reset_continuation_phases(
     phase_selector: str,
     logger: Any,
 ) -> tuple[int, tuple[int, ...]]:
-    """Archive selected phase work and reopen it for fresh task proposals."""
+    """Archive selected phase work and reopen it for fresh work."""
 
     store = create_application_store(
         get_application_database_path({"output_dir": output_dir}),
@@ -1654,7 +1654,7 @@ def main():
     parser.add_argument(
         "--reset-phases",
         type=str,
-        help="With --continue, archive selected phase tasks and propose fresh work (for example: 3,5- or 2-4)",
+        help="With --continue, archive selected phase tasks and create fresh work (for example: 3,5- or 2-4)",
     )
     parser.add_argument(
         "--report",
@@ -2040,7 +2040,7 @@ def main():
         )
         print_status(
             f"Reset phase(s) {', '.join(str(phase_id) for phase_id in selected_phase_ids)} "
-            f"and archived {task_count} task(s) for fresh proposals",
+            f"and archived {task_count} task(s) for fresh work",
             "SUCCESS",
         )
 

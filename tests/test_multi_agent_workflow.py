@@ -17339,6 +17339,60 @@ def test_operation_health_provider_predicts_current_phase_from_inventory_fanout(
     assert health["health_cap"] == 0.75
 
 
+def test_operation_health_provider_skips_inventory_fanout_for_dynamic_phase(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(
+                id=2,
+                title="Credential Provisioning",
+                status="active",
+                dynamic_kind="credential_provisioning",
+            ),
+        ],
+    )
+    inventory_task = Task(
+        task_uid="inventory",
+        title="Build inventory",
+        objective="Build a bounded inventory",
+        acceptance=_acceptance("inventory"),
+        phase=1,
+        status="done",
+        evidence=["artifact:artifacts/inventory.json"],
+    )
+    replacement_task = Task(
+        task_uid="credential-provisioning:replan:1",
+        title="Provision registered test identities",
+        objective="Provision identities for the mapped registration flow",
+        acceptance=_artifact_acceptance("credential-provisioning"),
+        phase=2,
+        status="active",
+    )
+    state = FakeState(plan, [inventory_task, replacement_task])
+    runtime = _runtime()
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    monkeypatch.setattr(
+        workflow_mod,
+        "_coverage_route_groups",
+        lambda *args, **kwargs: pytest.fail("dynamic phases must not calculate inventory fan-out"),
+    )
+
+    health = runtime.callback_handler.operation_health_provider()
+
+    assert controller._current_phase_task_prediction(plan) is None
+    assert health["prediction"] == {"available": False}
+    assert health["coverage_feasibility"]["remaining_work"] == 0
+
+
 def test_operation_health_provider_freezes_last_assessment_health_during_reporting():
     plan = OperationPlan(
         objective="assess",

@@ -1262,6 +1262,11 @@ class MultiAgentWorkflowController:
             self._health_prediction_cache[current_phase] = None
             return None
 
+        current_phase_record = ordered_phases[current_index]
+        if current_phase_record.dynamic_kind:
+            self._health_prediction_cache[current_phase] = None
+            return None
+
         source_phase = ordered_phases[current_index - 1]
         route_groups: set[tuple[str, str, str]] = set()
         seen_references: set[str] = set()

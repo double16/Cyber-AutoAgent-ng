@@ -3118,7 +3118,7 @@ class SQLiteApplicationStore:
         operation_id: str,
         phase_ids: Iterable[int],
     ) -> tuple[OperationPlan, int, tuple[int, ...]]:
-        """Replan selected phase tasks and reopen their phases for fresh task creation.
+        """Replan selected phase tasks and reopen their phases for fresh work.
 
         Archived tasks retain their evidence and immutable acceptance history. They are
         deliberately marked ``replanned`` rather than deleted so reports and operation
