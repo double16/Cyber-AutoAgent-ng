@@ -1543,6 +1543,37 @@ async def browser_get_page_html() -> str:
 
 
 @tool
+async def browser_take_screenshot() -> str:
+    """Save a full-page PNG screenshot of the current rendered browser page.
+
+    Use this to retain visual evidence of a registration success message,
+    validation error, or an unchanged form after submission. A screenshot is
+    supporting evidence only; pair it with HTML, network, or credential
+    evidence when a server-side outcome must be proven.
+
+    Returns:
+        The artifact path containing the full-page PNG screenshot.
+    """
+    logger.info("browser_take_screenshot")
+    async with get_browser() as browser:
+        screenshot_artifact_file = os.path.join(
+            browser.artifacts_dir, f"browser_screenshot_{time.time_ns()}.png"
+        )
+
+        async def _impl():
+            async with browser.timeout():
+                await browser.page.screenshot(path=screenshot_artifact_file, full_page=True)
+
+        await browser.run_in_browser_loop(_impl)
+        if not os.path.isfile(screenshot_artifact_file):
+            message = "Browser screenshot was not captured: no artifact file was produced."
+            logger.warning("browser_take_screenshot: %s", message)
+            return message
+        logger.info("browser_take_screenshot: %s", screenshot_artifact_file)
+        return f"Screenshot saved to artifact: {screenshot_artifact_file}"
+
+
+@tool
 async def browser_evaluate_js(expression: str):
     """
     Evaluate JavaScript in the current page context.

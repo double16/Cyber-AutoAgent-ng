@@ -9,6 +9,7 @@ from modules.tools.browser import (
     browser_observe_page,
     browser_perform_action,
     browser_set_headers,
+    browser_take_screenshot,
     initialize_browser,
     resolve_browser_proxy,
 )
@@ -80,6 +81,7 @@ __all__ = [
     "browser_observe_page",
     "browser_perform_action",
     "browser_set_headers",
+    "browser_take_screenshot",
     "channel_close",
     "channel_close_all",
     "channel_create_forward",

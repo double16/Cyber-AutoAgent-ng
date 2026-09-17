@@ -215,6 +215,11 @@ async def test_browser_tool_wrappers_use_fake_browser(monkeypatch, tmp_path):
         async def observe(self, instruction):
             return [SimpleNamespace(description=f"observed {instruction}")]
 
+        async def screenshot(self, *, path, full_page):
+            assert full_page is True
+            with open(path, "wb") as artifact:
+                artifact.write(b"png")
+
     class FakeBrowser:
         def __init__(self):
             self.context = FakeBrowserContext()
@@ -241,10 +246,50 @@ async def test_browser_tool_wrappers_use_fake_browser(monkeypatch, tmp_path):
     assert fake_browser.context.headers == {"x-test": "1"}
     assert "HTML content saved" in await mod.browser_get_page_html()
     assert list(tmp_path.glob("browser_page_*.html"))
+    assert "Screenshot saved" in await mod.browser_take_screenshot()
+    assert list(tmp_path.glob("browser_screenshot_*.png"))
     assert await mod.browser_evaluate_js("() => 1") == {"expression": "() => 1"}
     cookies_csv = await mod.browser_get_cookies()
     assert "sid,abc,example.com" in cookies_csv
     assert await mod.browser_observe_page("links") == ["observed links"]
+
+
+@pytest.mark.asyncio
+async def test_browser_take_screenshot_reports_missing_artifact_without_returning_reference(monkeypatch, tmp_path):
+    class FakeTimeout:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    class MissingArtifactPage:
+        async def screenshot(self, *, path, full_page):
+            return None
+
+    class FakeBrowser:
+        artifacts_dir = str(tmp_path)
+        page = MissingArtifactPage()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def run_in_browser_loop(self, fn):
+            return await fn()
+
+        def timeout(self):
+            return FakeTimeout()
+
+    monkeypatch.setattr(mod, "get_browser", lambda: FakeBrowser())
+
+    result = await mod.browser_take_screenshot()
+
+    assert result == "Browser screenshot was not captured: no artifact file was produced."
+    assert "artifact:" not in result
+    assert not list(tmp_path.glob("browser_screenshot_*.png"))
 
 
 class ElementsModel(BaseModel):

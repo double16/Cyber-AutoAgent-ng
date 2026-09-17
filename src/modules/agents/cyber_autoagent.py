@@ -98,6 +98,7 @@ from modules.tools.browser import (
     browser_observe_page,
     browser_perform_action,
     browser_set_headers,
+    browser_take_screenshot,
     initialize_browser,
 )
 from modules.tools.channels import (
@@ -579,6 +580,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         browser_set_headers,
         browser_goto_url,
         browser_get_page_html,
+        browser_take_screenshot,
         browser_perform_action,
         browser_observe_page,
         browser_evaluate_js,

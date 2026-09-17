@@ -8570,7 +8570,8 @@ Return JSON exactly: {response_schema}.
             guidance += (
                 "\n- For this bounded self-registration task, use the supplied browser tools to navigate the mapped "
                 "registration flow, inspect client-side behavior, submit only the required form actions, and retain "
-                "durable registration evidence. Do not mutate global browser headers."
+                "durable registration evidence, including the required post-submit screenshot. Do not mutate global "
+                "browser headers."
             )
         if "plan_authenticated_coverage" in selected_names:
             gaps = self._unresolved_credential_provisioning_gaps()
@@ -12436,7 +12437,8 @@ while planning.
                 "- If the assigned target exposes an authorized self-registration path, create a strong password with "
                 "`generate_password` and a collision-resistant email with `generate_registration_email`, complete "
                 "only that registration flow, and call `browser_perform_action(..., wait_for_page_change=true)` for "
-                "the submit action. Store the result with "
+                "the submit action. Immediately call `browser_take_screenshot()` to retain the post-submit UI state. "
+                "Store the result with "
                 "`store_credential(origin=\"registered\", evidence_refs=[...])` without operation_scope. Otherwise "
                 "record the missing identity as a coverage gap; never invent an account or bypass registration controls."
             )

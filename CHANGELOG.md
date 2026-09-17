@@ -2,6 +2,7 @@
 
 ### Features
 
+- Capture full-page browser screenshots as durable artifacts for visual workflow evidence, including self-registration outcomes.
 - Preserve deterministic self-registration and authentication workflow metadata from SPA JavaScript routes, and
   require client-side API mapping tasks to run the scoped bundle-inventory tool before inventory synthesis.
 - Move credential-management tools from universal workflow core tools to deterministic, task-scoped optional bundles,

@@ -32,6 +32,7 @@ CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES = (
     "browser_goto_url",
     "browser_observe_page",
     "browser_get_page_html",
+    "browser_take_screenshot",
     "browser_perform_action",
     "browser_get_cookies",
     "browser_evaluate_js",

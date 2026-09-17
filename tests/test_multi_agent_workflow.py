@@ -4513,7 +4513,8 @@ def test_controller_injects_bundle_inventory_for_client_side_api_workstream():
 
 def test_credential_provisioning_executor_receives_interactive_browser_tools_only():
     browser_names = [
-        "browser_goto_url", "browser_observe_page", "browser_get_page_html", "browser_perform_action",
+        "browser_goto_url", "browser_observe_page", "browser_get_page_html", "browser_take_screenshot",
+        "browser_perform_action",
         "browser_get_cookies", "browser_evaluate_js", "browser_set_headers",
     ]
     runtime = _runtime()
@@ -4546,6 +4547,7 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
     assert "browser_set_headers" not in executor_tools
     assert set(CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES).issubset(executor_tools)
     assert "bounded self-registration task" in controller._credential_execution_guidance_for_task(task)
+    assert "browser_take_screenshot" in controller._credential_execution_guidance_for_task(task)
 
 
 def test_credential_provisioning_prompt_accepts_registration_email_tool():
@@ -9141,8 +9143,10 @@ def test_durable_artifact_references_capture_operation_local_absolute_paths(monk
     artifacts.mkdir(parents=True)
     katana = artifacts / "katana_crawl.txt"
     browser = artifacts / "browser_page.html"
+    screenshot = artifacts / "browser_screenshot.png"
     katana.write_text("http://target.test/", encoding="utf-8")
     browser.write_text("<html></html>", encoding="utf-8")
+    screenshot.write_bytes(b"png")
     monkeypatch.setattr("modules.tools.memory._operation_output_root", lambda: str(operation_root))
     outcome = ToolOutcome(
         1,
@@ -9151,11 +9155,12 @@ def test_durable_artifact_references_capture_operation_local_absolute_paths(monk
         True,
         False,
         f'{{"command":"katana -o {katana}"}}',
-        f"HTML content saved to artifact: {browser}",
+        f"HTML content saved to artifact: {browser}; Screenshot saved to artifact: {screenshot}",
     )
 
     assert MultiAgentWorkflowController._artifact_refs_from_tool_outcomes([outcome]) == [
         "artifact:artifacts/browser_page.html",
+        "artifact:artifacts/browser_screenshot.png",
         "artifact:artifacts/katana_crawl.txt",
     ]
 
