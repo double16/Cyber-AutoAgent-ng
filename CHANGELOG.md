@@ -63,6 +63,8 @@
 
 ### Fixes
 
+- Give credential-provisioning tasks a dedicated browser and client-state inspection scope while excluding finding,
+  credential-lifecycle, and unrelated workflow directives from their prompts and executor tools.
 - Keep evaluator and recovery instructions task-local in prompt memory, preventing a prior credential slot's
   temporary authorization guidance from contradicting a later provisioning task.
 - Split credential provisioning into one bounded task per missing role-specific identity, isolating registration

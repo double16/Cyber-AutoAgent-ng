@@ -41,9 +41,6 @@ CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES = (
     "generate_password",
     "generate_registration_email",
     "store_credential",
-    "query_credentials",
-    "checkout_credential",
-    "mark_credential_status",
 )
 VALIDATION_CREDENTIAL_OPTIONAL_TOOL_NAMES = (
     "checkout_credential", "set_task_auth_context", "mark_credential_status",

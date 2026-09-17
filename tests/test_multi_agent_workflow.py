@@ -4518,6 +4518,7 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
         "browser_get_cookies", "browser_evaluate_js", "browser_set_headers",
     ]
     runtime = _runtime()
+    runtime.core_tools_list.append(_tool("store_observation"))
     runtime.optional_tools_list = [
         *[_tool(name) for name in browser_names],
         *[_tool(name) for name in ["generate_password", "generate_registration_email", "store_credential", "query_credentials", "checkout_credential", "mark_credential_status"]],
@@ -4546,8 +4547,20 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
     assert {name for name in browser_names if name != "browser_set_headers"}.issubset(executor_tools)
     assert "browser_set_headers" not in executor_tools
     assert set(CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES).issubset(executor_tools)
-    assert "bounded self-registration task" in controller._credential_execution_guidance_for_task(task)
-    assert "browser_take_screenshot" in controller._credential_execution_guidance_for_task(task)
+    assert not {"query_credentials", "checkout_credential", "mark_credential_status"}.intersection(executor_tools)
+    guidance = controller._credential_execution_guidance_for_task(task)
+    assert "Client-side inspection is authorized" in guidance
+    assert "browser_take_screenshot" in guidance
+    assert "store_finding" not in guidance
+    assert "credential tools supplied" not in guidance
+
+    executor_contract = controller._task_executor_contract(
+        task,
+        {"store_observation", *selected},
+    )
+    assert "store_finding" not in executor_contract
+    assert "JavaScript-visible state" in executor_contract
+    assert controller._task_executor_persistence_tool_names(task) == {"store_observation"}
 
 
 def test_credential_provisioning_prompt_accepts_registration_email_tool():
@@ -4580,6 +4593,103 @@ def test_credential_provisioning_prompt_accepts_registration_email_tool():
     )
 
     assert normalized["tools"] == ["generate_password", "generate_registration_email"]
+
+
+@pytest.mark.parametrize("tools", [["checkout_credential"]])
+def test_credential_provisioning_prompt_rejects_out_of_scope_tool_selection(
+    tools,
+):
+    runtime = _runtime()
+    runtime.optional_tools_list = [
+        *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
+        *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
+        _tool("checkout_credential"),
+    ]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    task = Task(
+        task_uid="credential-provisioning",
+        title="Provision identities",
+        objective="Register the missing test identities",
+        phase=1,
+        status="pending",
+        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+    )
+
+    with pytest.raises(TaskPromptBuildError, match="controller-authorized registration tools"):
+        controller._normalize_task_prompt_spec(
+            {
+                "prompt": "Register the missing identities",
+                "tools": tools,
+                "shell_commands": [],
+            },
+            task,
+        )
+
+
+def test_credential_provisioning_prompt_accepts_target_scoped_shell_selection():
+    runtime = _runtime()
+    runtime.config.available_tools = ["curl"]
+    runtime.optional_tools_list = [
+        *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
+        *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
+    ]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    task = Task(
+        task_uid="credential-provisioning",
+        title="Provision identities",
+        objective="Register the missing test identities",
+        phase=1,
+        status="pending",
+        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+    )
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "Use curl only for the mapped registration flow",
+            "tools": [],
+            "shell_commands": ["curl"],
+        },
+        task,
+    )
+
+    assert normalized["shell_commands"] == ["curl"]
+
+
+def test_credential_provisioning_prompt_builder_omits_generic_finding_and_swarm_guidance():
+    runtime = _runtime()
+    runtime.optional_tools_list = [
+        *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
+        *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
+    ]
+    plan = _plan()
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+    )
+    task = Task(
+        task_uid="credential-provisioning",
+        title="Provision identities",
+        objective="Register the missing test identities",
+        phase=1,
+        status="pending",
+        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+    )
+
+    prompt = controller._task_prompt_builder_prompt(plan, plan.phases[0], task)
+
+    assert "Client-side inspection is authorized" in prompt
+    assert "store_finding" not in prompt
+    assert "Use the core `swarm`" not in prompt
+    assert "Shell commands are permitted only when they directly support the mapped registration route" in prompt
 
 
 def test_non_provisioning_prompt_rejects_registration_email_tool():

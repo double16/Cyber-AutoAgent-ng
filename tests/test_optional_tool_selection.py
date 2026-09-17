@@ -132,6 +132,9 @@ def test_credential_provisioning_selects_interactive_browser_tools_only():
     assert "generate_password" in names
     assert "generate_registration_email" in names
     assert "store_credential" in names
+    assert "query_credentials" not in names
+    assert "checkout_credential" not in names
+    assert "mark_credential_status" not in names
     assert "browser_set_headers" not in names
 
 
