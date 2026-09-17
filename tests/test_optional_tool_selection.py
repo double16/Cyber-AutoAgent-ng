@@ -130,6 +130,7 @@ def test_credential_provisioning_selects_interactive_browser_tools_only():
 
     assert set(selection.CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES).issubset(names)
     assert "generate_password" in names
+    assert "generate_registration_email" in names
     assert "store_credential" in names
     assert "browser_set_headers" not in names
 

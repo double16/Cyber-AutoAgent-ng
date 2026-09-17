@@ -55,6 +55,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
 from pydantic import BaseModel, ValidationError
+from strands import tool as strands_tool
 from strands.types.exceptions import MaxTokensReachedException
 
 from modules.agents.cyber_autoagent import (
@@ -151,6 +152,7 @@ from modules.tools.memory import (
 from modules.tools.optional_tool_selection import (
     CREDENTIAL_OPTIONAL_TOOL_NAMES,
     CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
+    CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES,
     credential_optional_tool_names,
     required_optional_tool_names,
 )
@@ -206,6 +208,8 @@ _PROMPT_MEMORY_FETCH_LIMIT = 100
 _PROMPT_MEMORY_LIMIT = 20
 _PROMPT_MEMORY_CONTEXT_FRACTION = 0.20
 _PROMPT_MEMORY_CHARS_PER_TOKEN = 4
+_PROMPT_MEMORY_SCOPE_OPERATION_FACT = "operation_fact"
+_PROMPT_MEMORY_SCOPE_TASK_CONTROL = "task_control"
 TASK_PROMPT_IGNORED_SHELL_COMMANDS = frozenset(
     {
         "awk",
@@ -2308,6 +2312,7 @@ class MultiAgentWorkflowController:
         """Prevent successful credential-phase closure while required roles remain uncovered."""
 
         deficits: list[dict[str, Any]] = []
+        flows: dict[tuple[str, str], dict[str, Any]] = {}
         for task in current_workflow_tasks(self.state.list_tasks(phase=phase.id)):
             conditional = task.recovery_context.get("conditional_phase", {})
             if not isinstance(conditional, dict) or conditional.get("kind") != "credential_provisioning":
@@ -2315,16 +2320,36 @@ class MultiAgentWorkflowController:
             flow = conditional.get("registration_flow", {})
             if not isinstance(flow, dict):
                 continue
-            required = int(conditional.get("identities_per_role") or 0)
-            missing = self._credential_flow_deficits(flow, required)
+            target = str(flow.get("target") or "")
+            url = str(flow.get("url") or "")
+            key = (target, url)
+            grouped = flows.setdefault(
+                key,
+                {
+                    "target": target,
+                    "url": url,
+                    "roles": set(),
+                    "required": 0,
+                    "task": task,
+                },
+            )
+            grouped["roles"].update(str(role) for role in flow.get("roles", []) if str(role))
+            grouped["required"] = max(grouped["required"], int(conditional.get("identities_per_role") or 0))
+        for grouped in flows.values():
+            flow = {
+                "target": grouped["target"],
+                "url": grouped["url"],
+                "roles": tuple(sorted(grouped["roles"])),
+            }
+            missing = self._credential_flow_deficits(flow, grouped["required"])
             if any(missing.values()):
                 gap = {
-                    "target": str(flow.get("target") or ""),
-                    "url": str(flow.get("url") or ""),
+                    "target": grouped["target"],
+                    "url": grouped["url"],
                     "missing_by_role": missing,
                 }
                 self.state.patch_task(
-                    task.task_uid,
+                    grouped["task"].task_uid,
                     recovery_context_updates={"unresolved_credential_deficits": gap},
                 )
                 deficits.append(gap)
@@ -2718,41 +2743,45 @@ class MultiAgentWorkflowController:
             })
             return updated
         replacements = []
+        credential_task_count = 0
         for flow in missing_flows:
-            task = self._credential_provisioning_task(
+            deficits = self._credential_flow_deficits(flow, contract.identities_per_role)
+            for task in self._credential_provisioning_tasks(
                 phase.id,
                 contract.controller_owned_phase_kind,
                 contract.identities_per_role,
                 flow,
-                self._credential_flow_deficits(flow, contract.identities_per_role),
-            )
-            predecessor_candidates = [
-                archived
-                for archived in replanned_tasks
-                if archived.task_uid == task.task_uid or archived.task_uid.startswith(f"{task.task_uid}:replan:")
-            ]
-            if predecessor_candidates:
-                predecessor = max(
-                    predecessor_candidates,
-                    key=lambda archived: (archived.updated_at or "", archived.created_at or "", archived.task_uid),
-                )
-                generation = len(predecessor_candidates) + 1
-                task = replace(
-                    task,
-                    task_uid=f"{task.task_uid}:replan:{generation}",
-                    replacement_of=predecessor.task_uid,
-                )
-                replacements.append({
-                    "predecessor_task_uid": predecessor.task_uid,
-                    "replacement_task_uid": task.task_uid,
-                })
-            self.state.store_task(task)
+                deficits,
+            ):
+                predecessor_candidates = [
+                    archived
+                    for archived in replanned_tasks
+                    if archived.task_uid == task.task_uid or archived.task_uid.startswith(f"{task.task_uid}:replan:")
+                ]
+                if predecessor_candidates:
+                    predecessor = max(
+                        predecessor_candidates,
+                        key=lambda archived: (archived.updated_at or "", archived.created_at or "", archived.task_uid),
+                    )
+                    generation = len(predecessor_candidates) + 1
+                    task = replace(
+                        task,
+                        task_uid=f"{task.task_uid}:replan:{generation}",
+                        replacement_of=predecessor.task_uid,
+                    )
+                    replacements.append({
+                        "predecessor_task_uid": predecessor.task_uid,
+                        "replacement_task_uid": task.task_uid,
+                    })
+                self.state.store_task(task)
+                credential_task_count += 1
         self._emit_workflow_event({
             "type": "conditional_phase_resolved",
             "kind": contract.controller_owned_phase_kind,
             "phase": phase.id,
             "decision": "applicable",
             "flow_count": len(missing_flows),
+            "credential_task_count": credential_task_count,
             "replan_replacements": replacements,
             **event_context,
         })
@@ -2825,64 +2854,67 @@ class MultiAgentWorkflowController:
         }
 
     @staticmethod
-    def _credential_provisioning_task(
+    def _credential_provisioning_tasks(
         phase_id: int,
         phase_kind: str,
         identities_per_role: int,
         flow: dict[str, Any],
         deficits: dict[str, int],
-    ) -> Task:
-        """Build one bounded executor task for a single structured registration flow."""
+    ) -> list[Task]:
+        """Build one bounded executor task for every missing role-specific credential."""
 
         target = str(flow["target"])
         url = str(flow["url"])
-        roles = tuple(role for role in flow["roles"] if deficits.get(role, 0))
-        task_key = hashlib.sha256(f"{target}|{url}|{'|'.join(roles)}".encode()).hexdigest()[:16]
-        return Task(
-            task_uid=f"credential-provisioning:{task_key}",
-            title="Provision registered test identities",
-            objective=(
-                f"For the mapped registration flow {url}, create only the missing test identities "
-                f"({', '.join(f'{role}: {deficits[role]}' for role in roles)}). Use only this flow, store every "
-                "successful identity as "
-                "registered credential with durable evidence, and record each unavailable identity as a coverage gap."
-            ),
-            acceptance=AcceptanceContract(
-                mode="outcome",
-                basis=AcceptanceBasis(
-                    kind="procedure",
-                    description="Mapped self-registration flow requiring bounded credential provisioning.",
-                    source_refs=(f"target:{target}",),
-                    procedure=DiscoveryProcedure(
-                        methods=("browser",),
-                        limits={"max_requests": max(2, sum(deficits.values()) * 4)},
-                        stop_condition="first_limit_reached",
-                        gap_policy="record_unassessed",
-                        output_kind="artifact",
+        tasks = []
+        for role in sorted(role for role in flow["roles"] if deficits.get(role, 0)):
+            for slot in range(1, deficits[role] + 1):
+                task_key = hashlib.sha256(f"{target}|{url}|{role}|{slot}".encode()).hexdigest()[:16]
+                tasks.append(Task(
+                    task_uid=f"credential-provisioning:{task_key}",
+                    title=f"Provision registered {role} test identity {slot}",
+                    objective=(
+                        f"For the mapped registration flow {url}, create one missing test identity for role {role}. "
+                        "Use only this flow, store the successful identity as a registered credential with durable "
+                        "evidence, or record this unavailable identity as a coverage gap."
                     ),
-                ),
-                criteria=(AcceptanceCriterion(
-                    id="registered-identities-or-gaps",
-                    description="Persist every successfully registered identity or an evidence-backed coverage gap.",
-                    evidence_requirements=(
-                        EvidenceRequirement(kind="artifact"),
-                        EvidenceRequirement(kind="durable_evidence"),
+                    acceptance=AcceptanceContract(
+                        mode="outcome",
+                        basis=AcceptanceBasis(
+                            kind="procedure",
+                            description="Mapped self-registration flow requiring one credential provisioning attempt.",
+                            source_refs=(f"target:{target}",),
+                            procedure=DiscoveryProcedure(
+                                methods=("browser",),
+                                limits={"max_requests": 4},
+                                stop_condition="first_limit_reached",
+                                gap_policy="record_unassessed",
+                                output_kind="artifact",
+                            ),
+                        ),
+                        criteria=(AcceptanceCriterion(
+                            id="registered-identity-or-gap",
+                            description="Persist one registered identity or an evidence-backed coverage gap.",
+                            evidence_requirements=(
+                                EvidenceRequirement(kind="artifact"),
+                                EvidenceRequirement(kind="durable_evidence"),
+                            ),
+                        ),),
                     ),
-                ),),
-            ),
-            phase=phase_id,
-            status="pending",
-            target_scope="subset",
-            target_ids=[str(flow["target_id"])],
-            recovery_context={
-                "conditional_phase": {
-                    "kind": phase_kind,
-                    "registration_flow": {"target": target, "url": url, "roles": list(roles)},
-                    "identities_per_role": identities_per_role,
-                    "credential_deficits": deficits,
-                }
-            },
-        )
+                    phase=phase_id,
+                    status="pending",
+                    target_scope="subset",
+                    target_ids=[str(flow["target_id"])],
+                    recovery_context={
+                        "conditional_phase": {
+                            "kind": phase_kind,
+                            "registration_flow": {"target": target, "url": url, "roles": [role]},
+                            "identities_per_role": identities_per_role,
+                            "credential_deficits": {role: 1},
+                            "credential_slot": {"role": role, "ordinal": slot},
+                        }
+                    },
+                ))
+        return tasks
 
     def _contract_prerequisite_resume_candidate(
         self,
@@ -3831,7 +3863,7 @@ class MultiAgentWorkflowController:
             updated_task = self.state.mark_task(task, "partial_failure", reason)
             self._emit_task_done(updated_task)
             return
-        prompt_memory_records = self._prompt_memory_records()
+        prompt_memory_records = self._prompt_memory_records(task_uid=task.task_uid)
         try:
             prompt_spec = self._build_task_prompt(plan, phase, task, prompt_memory_records)
         except TaskPromptBuildError as error:
@@ -3962,6 +3994,7 @@ class MultiAgentWorkflowController:
         selected_memory_context = self._selected_memory_context(
             prompt_spec.get("memory_ids"),
             prompt_memory_records,
+            task_uid=task.task_uid,
             prompt_char_budget=self._selected_memory_prompt_char_budget(execution_prompt),
         )
         if selected_memory_context:
@@ -4523,6 +4556,12 @@ class MultiAgentWorkflowController:
                 )
                 max_token_synthesis_cycle = max_token_synthesis_recovery_active
                 cycle_tools = tools if closure_tools is None else closure_tools
+                observation_scope = (
+                    _PROMPT_MEMORY_SCOPE_OPERATION_FACT
+                    if cycle == 1 and current_policy is task_policy
+                    else _PROMPT_MEMORY_SCOPE_TASK_CONTROL
+                )
+                cycle_tools = self._task_scoped_observation_tools(task, cycle_tools, observation_scope)
                 cycle_tool_names = self._tool_names(cycle_tools)
                 cycle_shell_commands = selected_shell_commands if "shell" in cycle_tool_names else []
                 cycle_prompt_base = execution_prompt_context if actor_prompt == execution_prompt else actor_prompt
@@ -4538,7 +4577,7 @@ class MultiAgentWorkflowController:
                     + "\n\n"
                     + self._tool_selection_policy()
                 )
-                worker_result = run_executor(cycle_prompt, current_policy, closure_tools)
+                worker_result = run_executor(cycle_prompt, current_policy, cycle_tools)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
                 if synthesis_repair_cycle:
@@ -13426,11 +13465,14 @@ Do not return `continue` merely because work is incomplete when the task history
         lines: list[str] = []
         if "store_observation" in tool_names:
             text = (
-                "Use `store_observation` only for useful interim facts outside the acceptance ledger."
+                "Use `store_observation` only for useful interim facts outside the acceptance ledger; never store "
+                "controller, evaluator, or recovery instructions as observations."
                 if audience == "task_prompt"
-                else "require use of `store_observation` only for useful interim facts outside the acceptance ledger;"
+                else "require use of `store_observation` only for useful interim facts outside the acceptance ledger "
+                "and never for controller, evaluator, or recovery instructions;"
                 if audience == "critic"
-                else "Store useful interim facts outside the acceptance ledger with `store_observation`."
+                else "Store useful interim facts outside the acceptance ledger with `store_observation`; never store "
+                "controller, evaluator, or recovery instructions as observations."
             )
             lines.append(f"- {text}" if audience in {"task_prompt", "critic"} else text)
         if "store_finding" in tool_names:
@@ -13796,13 +13838,78 @@ unless a separate executable host or network target authorizes that scope."""
     def _memory_summary(self) -> str:
         return self._render_memories(self._prompt_memory_records())
 
-    def _prompt_memory_records(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _task_scoped_observation_tools(
+        task: Task,
+        tools: list[Any],
+        prompt_scope: str,
+    ) -> list[Any]:
+        """Bind controller-owned prompt provenance to task-executor observations."""
+
+        if prompt_scope not in {
+            _PROMPT_MEMORY_SCOPE_OPERATION_FACT,
+            _PROMPT_MEMORY_SCOPE_TASK_CONTROL,
+        }:
+            raise ValueError(f"unsupported task observation prompt scope: {prompt_scope}")
+
+        @strands_tool(
+            name="store_observation",
+            inputSchema={
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"},
+                        "artifacts": {"type": "array", "items": {"type": "string"}},
+                        "metadata": {"type": "object"},
+                    },
+                    "required": ["content"],
+                }
+            },
+        )
+        def task_scoped_store_observation(
+            content: str,
+            artifacts: list[str] | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> str:
+            """Store a task observation with controller-owned task and prompt provenance."""
+
+            return store_observation(
+                content,
+                artifacts=artifacts,
+                metadata=MultiAgentWorkflowController._task_scoped_observation_metadata(
+                    task.task_uid,
+                    prompt_scope,
+                    metadata,
+                ),
+            )
+
+        return [
+            task_scoped_store_observation if get_tool_name(item) == "store_observation" else item
+            for item in tools
+        ]
+
+    @staticmethod
+    def _task_scoped_observation_metadata(
+        task_uid: str,
+        prompt_scope: str,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Merge task-observation metadata without allowing task agents to set controller provenance."""
+
+        merged_metadata = dict(metadata or {})
+        merged_metadata["source_task_uid"] = task_uid
+        merged_metadata["prompt_scope"] = prompt_scope
+        return merged_metadata
+
+    def _prompt_memory_records(self, *, task_uid: str | None = None) -> list[dict[str, Any]]:
         try:
             records = list(self.state.client.list_memories(
                 run_id=self.runtime.operation_id,
                 limit=_PROMPT_MEMORY_FETCH_LIMIT,
             ) or [])
-            eligible = [record for record in records if self._is_prompt_memory_eligible(record)]
+            eligible = [
+                record for record in records if self._is_prompt_memory_eligible(record, task_uid=task_uid)
+            ]
             excluded_count = len(records) - len(eligible)
             if excluded_count:
                 self._log_workflow(
@@ -13817,7 +13924,7 @@ unless a separate executable host or network target authorizes that scope."""
             return []
 
     @staticmethod
-    def _is_prompt_memory_eligible(memory: Any) -> bool:
+    def _is_prompt_memory_eligible(memory: Any, *, task_uid: str | None = None) -> bool:
         """Exclude semantic copies of controller-owned workflow state from role prompts."""
 
         if not isinstance(memory, dict):
@@ -13827,10 +13934,16 @@ unless a separate executable host or network target authorizes that scope."""
         category = str(metadata.get("category") or "").strip().lower()
         source = str(metadata.get("source") or "").strip().lower()
         publication_key = str(metadata.get("publication_key") or "").strip().lower()
+        prompt_scope = str(metadata.get("prompt_scope") or "").strip().lower()
+        source_task_uid = str(metadata.get("source_task_uid") or "").strip()
         return (
             category not in _PROMPT_MEMORY_EXCLUDED_CATEGORIES
             and source not in _PROMPT_MEMORY_EXCLUDED_SOURCES
             and not publication_key.startswith("task_acceptance:")
+            and (
+                prompt_scope != _PROMPT_MEMORY_SCOPE_TASK_CONTROL
+                or bool(task_uid and source_task_uid == task_uid)
+            )
         )
 
     @staticmethod
@@ -13858,6 +13971,7 @@ tools and durable evidence before relying on it."""
         memory_ids: Any,
         memory_records: list[dict[str, Any]] | None = None,
         *,
+        task_uid: str | None = None,
         prompt_char_budget: int | None = None,
     ) -> str:
         ids = self._coerce_memory_ids(memory_ids)
@@ -13880,7 +13994,7 @@ tools and durable evidence before relying on it."""
                     logger.debug("Unable to load selected memory id=%s for task prompt", memory_id, exc_info=True)
                     missing.append(memory_id)
                     continue
-            if memory and self._is_prompt_memory_eligible(memory):
+            if memory and self._is_prompt_memory_eligible(memory, task_uid=task_uid):
                 memories.append(memory)
             elif memory:
                 filtered.append(memory_id)
@@ -14609,9 +14723,7 @@ tools and durable evidence before relying on it."""
         if self._is_credential_provisioning_task(task):
             allowed_names = {
                 *CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
-                "generate_password",
-                "generate_registration_email",
-                "store_credential",
+                *CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES,
                 "store_observation",
             }
             selected = [tool for tool in tools if get_tool_name(tool) in allowed_names]

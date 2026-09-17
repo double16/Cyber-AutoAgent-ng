@@ -36,6 +36,14 @@ CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES = (
     "browser_get_cookies",
     "browser_evaluate_js",
 )
+CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES = (
+    "generate_password",
+    "generate_registration_email",
+    "store_credential",
+    "query_credentials",
+    "checkout_credential",
+    "mark_credential_status",
+)
 VALIDATION_CREDENTIAL_OPTIONAL_TOOL_NAMES = (
     "checkout_credential", "set_task_auth_context", "mark_credential_status",
     "exchange_oauth2_client_credentials", "prepare_api_key_authentication",
@@ -75,8 +83,8 @@ def credential_optional_tool_names(task: Any) -> list[str]:
         ]
     if isinstance(conditional, dict) and conditional.get("kind") == "credential_provisioning":
         return [
-            "generate_password", "store_credential", "query_credentials", "checkout_credential",
-            "mark_credential_status", *CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
+            *CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES,
+            *CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
         ]
     if workstream == "authorization_comparison":
         return [

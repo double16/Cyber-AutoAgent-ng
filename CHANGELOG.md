@@ -62,6 +62,12 @@
 
 ### Fixes
 
+- Keep evaluator and recovery instructions task-local in prompt memory, preventing a prior credential slot's
+  temporary authorization guidance from contradicting a later provisioning task.
+- Split credential provisioning into one bounded task per missing role-specific identity, isolating registration
+  failures and retries from other credentials in the same flow.
+- Authorize `generate_registration_email` in credential-provisioning task metadata so valid self-registration
+  prompts no longer fall back with a misleading tool-authorization error.
 - Avoid generic inventory-fan-out health predictions for controller-owned dynamic phases, preventing deterministic
   reset-phase replacements from appearing to have missing tasks.
 - Run safe unauthenticated GET baselines for mapped SPA authentication routes in the controller, using their structured

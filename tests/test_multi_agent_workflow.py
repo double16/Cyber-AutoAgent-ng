@@ -45,7 +45,10 @@ from modules.tools.memory import (
     SQLiteApplicationStore,
 )
 from modules.tools.memory import Task as TaskModel
-from modules.tools.optional_tool_selection import CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES
+from modules.tools.optional_tool_selection import (
+    CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
+    CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES,
+)
 
 
 def _acceptance(criterion_id="task-outcome"):
@@ -4541,7 +4544,67 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
 
     assert {name for name in browser_names if name != "browser_set_headers"}.issubset(executor_tools)
     assert "browser_set_headers" not in executor_tools
+    assert set(CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES).issubset(executor_tools)
     assert "bounded self-registration task" in controller._credential_execution_guidance_for_task(task)
+
+
+def test_credential_provisioning_prompt_accepts_registration_email_tool():
+    runtime = _runtime()
+    runtime.optional_tools_list = [
+        *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
+        *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
+    ]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    task = Task(
+        task_uid="credential-provisioning",
+        title="Provision identities",
+        objective="Register the missing test identities",
+        phase=1,
+        status="pending",
+        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+    )
+
+    normalized = controller._normalize_task_prompt_spec(
+        {
+            "prompt": "Register the missing identities",
+            "tools": ["generate_password", "generate_registration_email"],
+            "shell_commands": [],
+        },
+        task,
+    )
+
+    assert normalized["tools"] == ["generate_password", "generate_registration_email"]
+
+
+def test_non_provisioning_prompt_rejects_registration_email_tool():
+    runtime = _runtime()
+    runtime.optional_tools_list = [_tool("generate_registration_email")]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    task = Task(
+        task_uid="standard-task",
+        title="Standard task",
+        objective="Run a standard task",
+        phase=1,
+        status="pending",
+    )
+
+    with pytest.raises(TaskPromptBuildError, match="generate_registration_email"):
+        controller._normalize_task_prompt_spec(
+            {
+                "prompt": "Run the standard task",
+                "tools": ["generate_registration_email"],
+                "shell_commands": [],
+            },
+            task,
+        )
 
 
 def test_credential_provisioning_phase_closure_requires_all_role_quotas(monkeypatch):
@@ -4580,6 +4643,53 @@ def test_credential_provisioning_phase_closure_requires_all_role_quotas(monkeypa
     persisted = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
     assert persisted.recovery_context["unresolved_credential_deficits"]["missing_by_role"] == {"user": 1}
     assert any(event["type"] == "credential_provisioning_deficit" for event in controller.runtime.callback_handler.events)
+
+
+def test_credential_provisioning_phase_closure_aggregates_slot_deficits(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Mapping", status="done"),
+            PlanPhase(id=2, title="Credential Provisioning", status="active", dynamic_kind="credential_provisioning"),
+            PlanPhase(id=3, title="Coverage", status="pending"),
+        ],
+    )
+    flow = {
+        "target": "https://target.test",
+        "target_id": "target-1",
+        "url": "https://target.test/register",
+        "roles": ("admin", "user"),
+    }
+    tasks = [
+        replace(task, status="done")
+        for task in MultiAgentWorkflowController._credential_provisioning_tasks(
+            2,
+            "credential_provisioning",
+            2,
+            flow,
+            {"admin": 1, "user": 2},
+        )
+    ]
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, tasks=tasks),
+    )
+    monkeypatch.setattr(controller, "_credential_flow_deficits", lambda *_args: {"admin": 1, "user": 2})
+
+    updated = controller._mark_phase(plan, 2, "done")
+
+    event = next(
+        event for event in controller.runtime.callback_handler.events if event["type"] == "credential_provisioning_deficit"
+    )
+    assert updated.phases[1].status == "partial_failure"
+    assert event["deficits"] == [{
+        "target": "https://target.test",
+        "url": "https://target.test/register",
+        "missing_by_role": {"admin": 1, "user": 2},
+    }]
 
 
 def test_authenticated_coverage_guidance_includes_unresolved_credential_role_gaps():
@@ -5642,11 +5752,45 @@ def test_controller_resolves_planned_credential_provisioning_phase(monkeypatch):
     assert controller._credential_registration_flows(plan, "registration")
     resolved = controller._apply_conditional_credential_provisioning_phase(plan, plan.phases[2])
 
-    provision_task = next(task for task in state.tasks if task.task_uid.startswith("credential-provisioning:"))
+    provision_tasks = [task for task in state.tasks if task.task_uid.startswith("credential-provisioning:")]
     assert resolved is plan
-    assert provision_task.phase == 3
-    assert provision_task.target_ids == ["target-1"]
-    assert "user: 2" in provision_task.objective
+    assert len(provision_tasks) == 2
+    assert all(task.phase == 3 for task in provision_tasks)
+    assert all(task.target_ids == ["target-1"] for task in provision_tasks)
+    assert all("one missing test identity for role user" in task.objective for task in provision_tasks)
+    assert {
+        task.recovery_context["conditional_phase"]["credential_slot"]["ordinal"]
+        for task in provision_tasks
+    } == {1, 2}
+
+
+def test_credential_provisioning_creates_one_task_per_missing_role_credential():
+    flow = {
+        "target": "https://target.test",
+        "target_id": "target-1",
+        "url": "https://target.test/register",
+        "roles": ("admin", "user"),
+    }
+
+    tasks = MultiAgentWorkflowController._credential_provisioning_tasks(
+        2,
+        "credential_provisioning",
+        2,
+        flow,
+        {"admin": 1, "user": 2},
+    )
+
+    assert len(tasks) == 3
+    assert [
+        (
+            task.recovery_context["conditional_phase"]["credential_slot"]["role"],
+            task.recovery_context["conditional_phase"]["credential_slot"]["ordinal"],
+        )
+        for task in tasks
+    ] == [("admin", 1), ("user", 1), ("user", 2)]
+    assert all(task.acceptance.criteria[0].id == "registered-identity-or-gap" for task in tasks)
+    assert all(task.acceptance.basis.procedure.limits["max_requests"] == 4 for task in tasks)
+    assert all(task.recovery_context["conditional_phase"]["registration_flow"]["roles"] for task in tasks)
 
 
 def test_credential_provisioning_uses_completed_task_workstreams_when_phase_labels_are_display_names(monkeypatch):
@@ -5704,9 +5848,10 @@ def test_credential_provisioning_uses_completed_task_workstreams_when_phase_labe
     monkeypatch.setattr(controller, "_credential_flow_deficits", lambda _flow, _count: {"user": 2})
 
     assert controller._apply_conditional_credential_provisioning_phase(plan, plan.phases[1]) is plan
-    provision_task = next(task for task in state.tasks if task.task_uid.startswith("credential-provisioning:"))
+    provision_tasks = [task for task in state.tasks if task.task_uid.startswith("credential-provisioning:")]
 
-    assert provision_task.phase == 2
+    assert len(provision_tasks) == 2
+    assert all(task.phase == 2 for task in provision_tasks)
 
 
 def test_credential_provisioning_replan_materializes_a_replacement_task(monkeypatch):
@@ -5733,13 +5878,13 @@ def test_credential_provisioning_replan_materializes_a_replacement_task(monkeypa
         "roles": ("user",),
     }
     archived = replace(
-        MultiAgentWorkflowController._credential_provisioning_task(
+        MultiAgentWorkflowController._credential_provisioning_tasks(
             2,
             "credential_provisioning",
             2,
             flow,
-            {"user": 2},
-        ),
+            {"user": 1},
+        )[0],
         status="replanned",
         updated_at="2026-09-15T23:00:00",
     )
@@ -5777,7 +5922,7 @@ def test_credential_provisioning_replan_materializes_a_replacement_task(monkeypa
         "attributes": {"registration": {"enabled": True, **flow}},
     }]}
     monkeypatch.setattr(workflow_mod, "_load_inventory_manifest", lambda *_args: (manifest, "inventory-hash"))
-    monkeypatch.setattr(controller, "_credential_flow_deficits", lambda _flow, _count: {"user": 2})
+    monkeypatch.setattr(controller, "_credential_flow_deficits", lambda _flow, _count: {"user": 1})
 
     assert controller._apply_conditional_credential_provisioning_phase(plan, plan.phases[1]) is plan
 
@@ -17270,6 +17415,83 @@ def test_prompt_memory_filter_excludes_bookkeeping_and_retains_evidence():
     selected = controller._selected_memory_context(["acceptance", "finding"])
     assert "Task acceptance says route mapping was complete" not in selected
     assert "Stored XSS candidate" in selected
+
+
+def test_prompt_memory_filter_isolates_task_control_from_other_tasks():
+    records = [
+        {
+            "id": "shared-fact",
+            "memory": "The registration page requires an email address.",
+            "metadata": {
+                "category": "observation",
+                "prompt_scope": "operation_fact",
+                "source_task_uid": "credential-slot-1",
+            },
+        },
+        {
+            "id": "task-control",
+            "memory": "Evaluator guidance says to await authorization in this cycle.",
+            "metadata": {
+                "category": "observation",
+                "prompt_scope": "task_control",
+                "source_task_uid": "credential-slot-1",
+            },
+        },
+    ]
+    state = FakeState(_plan())
+    state.client = SimpleNamespace(
+        list_memories=lambda **kwargs: records,
+        get_memory_by_id=lambda memory_id: next((item for item in records if item["id"] == memory_id), None),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    assert [record["id"] for record in controller._prompt_memory_records(task_uid="credential-slot-2")] == [
+        "shared-fact"
+    ]
+    assert [record["id"] for record in controller._prompt_memory_records(task_uid="credential-slot-1")] == [
+        "shared-fact",
+        "task-control",
+    ]
+    assert controller._selected_memory_context(["task-control"], records, task_uid="credential-slot-2") == ""
+    assert "await authorization" in controller._selected_memory_context(
+        ["task-control"], records, task_uid="credential-slot-1"
+    )
+
+
+def test_task_scoped_observation_metadata_forces_controller_provenance():
+    assert MultiAgentWorkflowController._task_scoped_observation_metadata(
+        "credential-slot-1",
+        "task_control",
+        {"prompt_scope": "operation_fact", "source_task_uid": "other-task"},
+    ) == {
+        "prompt_scope": "task_control",
+        "source_task_uid": "credential-slot-1",
+    }
+
+
+def test_task_scoped_observation_tool_rejects_unknown_prompt_scope():
+    task = Task(
+        task_uid="credential-slot-1",
+        title="Provision credential",
+        objective="Provision one credential",
+        phase=2,
+        status="active",
+    )
+
+    scoped_tools = MultiAgentWorkflowController._task_scoped_observation_tools(
+        task,
+        [_tool("store_observation")],
+        "operation_fact",
+    )
+
+    assert scoped_tools[0].tool_name == "store_observation"
+    with pytest.raises(ValueError, match="unsupported task observation prompt scope"):
+        MultiAgentWorkflowController._task_scoped_observation_tools(task, [], "untrusted")
 
 
 def test_operation_health_provider_predicts_current_phase_from_inventory_fanout(monkeypatch):
