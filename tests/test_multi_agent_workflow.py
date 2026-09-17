@@ -4551,6 +4551,8 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
     guidance = controller._credential_execution_guidance_for_task(task)
     assert "Client-side inspection is authorized" in guidance
     assert "browser_take_screenshot" in guidance
+    assert 'credential_type="username_password"' in guidance
+    assert "Do not use `email_login`" in guidance
     assert "store_finding" not in guidance
     assert "credential tools supplied" not in guidance
 
@@ -4690,6 +4692,7 @@ def test_credential_provisioning_prompt_builder_omits_generic_finding_and_swarm_
     assert "store_finding" not in prompt
     assert "Use the core `swarm`" not in prompt
     assert "Shell commands are permitted only when they directly support the mapped registration route" in prompt
+    assert "does not limit browser requests, tool calls, or reasoning turns" in prompt
 
 
 def test_non_provisioning_prompt_rejects_registration_email_tool():
@@ -5901,7 +5904,8 @@ def test_credential_provisioning_creates_one_task_per_missing_role_credential():
         for task in tasks
     ] == [("admin", 1), ("user", 1), ("user", 2)]
     assert all(task.acceptance.criteria[0].id == "registered-identity-or-gap" for task in tasks)
-    assert all(task.acceptance.basis.procedure.limits["max_requests"] == 4 for task in tasks)
+    assert all(task.acceptance.basis.procedure.limits == {"max_items": 1} for task in tasks)
+    assert all("one credential provisioning result" in task.acceptance.basis.description for task in tasks)
     assert all(task.recovery_context["conditional_phase"]["registration_flow"]["roles"] for task in tasks)
 
 

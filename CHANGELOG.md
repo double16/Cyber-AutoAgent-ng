@@ -63,6 +63,16 @@
 
 ### Fixes
 
+- Preserve non-secret `credential_id` metadata in diagnostic redaction while continuing to mask credential payloads.
+- Replace the misleading four-request credential-registration cap with a one-credential task-result bound, so browser
+  interactions and credential-storage corrections are not mistaken for request-budget exhaustion.
+- Preserve non-secret `credential_type` metadata in diagnostic tool events and give self-registration tasks the
+  canonical username/password credential contract, preventing repeated credential-storage corrections.
+- Retry Stagehand browser LLM requests with prompt-directed, locally normalized JSON when an LLM provider rejects
+  structured output, caching that compatibility mode per model for later browser actions.
+
+- Log secret-safe before-and-after form-control state and DOM-event diagnostics for browser actions, and validate
+  Stagehand-compatible action-result contracts without class-identity coupling to prevent successful no-ops.
 - Give credential-provisioning tasks a dedicated browser and client-state inspection scope while excluding finding,
   credential-lifecycle, and unrelated workflow directives from their prompts and executor tools.
 - Keep evaluator and recovery instructions task-local in prompt memory, preventing a prior credential slot's

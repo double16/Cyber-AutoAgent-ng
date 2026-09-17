@@ -11,7 +11,9 @@ import os
 import re
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from typing import Any, get_args, get_origin
 from urllib.parse import parse_qs, unquote, urlparse
@@ -48,6 +50,28 @@ _BROWSER_RETRIABLE_ERRORS = (
 )
 _PAGE_CHANGE_POLL_INTERVAL_SECONDS = 0.25
 _MAX_PAGE_CHANGE_TIMEOUT_SECONDS = 60
+_FORM_CONTROL_DIAGNOSTIC_LIMIT = 100
+_FORM_ACTION_EVENT_CAPTURE_KEY = "__cyber_autoagent_form_action_events__"
+_ACTION_RESULT_FIELD_MISSING = object()
+
+
+def _structured_output_is_unavailable(error: BaseException) -> bool:
+    """Return whether an LLM provider rejected a structured-output request."""
+
+    pending: list[BaseException | None] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        message = str(current).lower()
+        if "structured output" in message and (
+            "unavailable" in message or "not supported" in message
+        ):
+            return True
+        pending.extend((current.__cause__, current.__context__))
+    return False
 
 
 def _normalized_page_content(content: str) -> str:
@@ -71,6 +95,240 @@ def _page_change_summary(before: str, after: str) -> dict[str, Any]:
         "before_preview": normalized_before[:240],
         "after_preview": normalized_after[:240],
     }
+
+
+def _browser_action_category(action: str) -> str:
+    """Classify an action without retaining potentially sensitive action values."""
+
+    normalized_action = action.strip().lower()
+    if re.match(r"^(enter|type|fill)\b", normalized_action):
+        return "input"
+    if re.match(r"^select\b", normalized_action):
+        return "selection"
+    if re.match(r"^(click|press|submit)\b", normalized_action):
+        return "activation"
+    return "other"
+
+
+def _stagehand_action_failure_reason(message: str) -> str:
+    """Convert a Stagehand failure into a secret-safe diagnostic category."""
+
+    normalized_message = message.strip().lower()
+    if "no observe results" in normalized_message:
+        return "no_actionable_element"
+    if "failed to perform act" in normalized_message:
+        return "playwright_action_failed"
+    return "stagehand_action_failed"
+
+
+@dataclass(frozen=True)
+class _NormalizedActionResult:
+    """Secret-safe normalized representation of a Stagehand-compatible action result."""
+
+    recognized: bool
+    success: bool | None
+    failure_reason: str | None
+    type_name: str
+    module_name: str
+
+    def diagnostic(self) -> dict[str, Any]:
+        return {
+            "stagehand_result": self.recognized,
+            "stagehand_success": self.success,
+            "stagehand_failure_reason": self.failure_reason,
+            "act_result_type": self.type_name,
+            "act_result_module": self.module_name,
+        }
+
+
+def _action_result_field(result: Any, field_name: str) -> Any:
+    """Read a Stagehand-compatible result field without requiring class identity."""
+
+    if isinstance(result, Mapping):
+        return result.get(field_name, _ACTION_RESULT_FIELD_MISSING)
+    try:
+        return getattr(result, field_name)
+    except (AttributeError, TypeError):
+        return _ACTION_RESULT_FIELD_MISSING
+
+
+def _normalize_action_result(result: Any) -> _NormalizedActionResult:
+    """Normalize object or mapping action results while rejecting unknown contracts."""
+
+    result_type = type(result)
+    success = _action_result_field(result, "success")
+    if type(success) is not bool:
+        return _NormalizedActionResult(
+            recognized=False,
+            success=None,
+            failure_reason="unexpected_action_result",
+            type_name=result_type.__qualname__,
+            module_name=result_type.__module__,
+        )
+
+    message = _action_result_field(result, "message")
+    return _NormalizedActionResult(
+        recognized=True,
+        success=success,
+        failure_reason=_stagehand_action_failure_reason(message if isinstance(message, str) else "") if not success else None,
+        type_name=result_type.__qualname__,
+        module_name=result_type.__module__,
+    )
+
+
+def _form_control_change_summary(
+        before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Summarize safe control-state changes without exposing field values."""
+
+    before_by_index = {item["index"]: item for item in before}
+    after_by_index = {item["index"]: item for item in after}
+    changed_controls: list[dict[str, Any]] = []
+    value_changed_controls: list[dict[str, Any]] = []
+    for index in sorted(set(before_by_index) | set(after_by_index)):
+        before_control = before_by_index.get(index)
+        after_control = after_by_index.get(index)
+        if before_control != after_control:
+            changed_controls.append(
+                {
+                    "index": index,
+                    "before": before_control,
+                    "after": after_control,
+                }
+            )
+        if (
+                before_control is not None
+                and after_control is not None
+                and (
+                    before_control.get("value_present") != after_control.get("value_present")
+                    or before_control.get("value_length") != after_control.get("value_length")
+                )
+        ):
+            value_changed_controls.append(
+                {
+                    "index": index,
+                    "before": before_control,
+                    "after": after_control,
+                }
+            )
+    return {
+        "before_control_count": len(before),
+        "after_control_count": len(after),
+        "changed_control_count": len(changed_controls),
+        "changed_controls": changed_controls,
+        "value_changed_control_count": len(value_changed_controls),
+        "value_changed_controls": value_changed_controls,
+    }
+
+
+async def _safe_form_control_snapshot(page: StagehandPage) -> list[dict[str, Any]]:
+    """Return a value-redacted snapshot of visible form-control state."""
+
+    try:
+        snapshot = await page.evaluate(
+            """
+            () => Array.from(document.querySelectorAll("input, textarea, select, button"))
+                .slice(0, 100)
+                .map((element, index) => {
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    const rawValue = "value" in element ? String(element.value ?? "") : "";
+                    return {
+                        index,
+                        tag: element.tagName.toLowerCase(),
+                        type: element.getAttribute("type") || "",
+                        name: element.getAttribute("name") || "",
+                        id: element.id || "",
+                        placeholder: element.getAttribute("placeholder") || "",
+                        aria_label: element.getAttribute("aria-label") || "",
+                        disabled: Boolean(element.disabled),
+                        read_only: Boolean(element.readOnly),
+                        required: Boolean(element.required),
+                        visible: Boolean(
+                            rect.width > 0
+                            && rect.height > 0
+                            && style.visibility !== "hidden"
+                            && style.display !== "none"
+                        ),
+                        focused: document.activeElement === element,
+                        value_present: rawValue.length > 0,
+                        value_length: rawValue.length,
+                    };
+                })
+            """
+        )
+    except Exception as exc:
+        logger.warning("browser_perform_action diagnostics: form snapshot failed: %s", type(exc).__name__)
+        return []
+    if not isinstance(snapshot, list):
+        logger.warning("browser_perform_action diagnostics: form snapshot returned an invalid result")
+        return []
+    return [item for item in snapshot if isinstance(item, dict)][: _FORM_CONTROL_DIAGNOSTIC_LIMIT]
+
+
+async def _start_form_action_event_capture(page: StagehandPage) -> bool:
+    """Capture form events for one action without retaining event values."""
+
+    try:
+        await page.evaluate(
+            f"""
+            () => {{
+                const key = {_FORM_ACTION_EVENT_CAPTURE_KEY!r};
+                const existing = window[key];
+                if (existing) {{
+                    for (const [eventType, listener] of existing.listeners) {{
+                        document.removeEventListener(eventType, listener, true);
+                    }}
+                }}
+                const events = [];
+                const listeners = [];
+                for (const eventType of ["input", "change", "focus", "blur", "submit"]) {{
+                    const listener = (event) => {{
+                        const target = event.target;
+                        if (!(target instanceof Element)) return;
+                        events.push({{
+                            type: eventType,
+                            tag: target.tagName.toLowerCase(),
+                            name: target.getAttribute("name") || "",
+                            id: target.id || "",
+                            type_attribute: target.getAttribute("type") || "",
+                        }});
+                    }};
+                    document.addEventListener(eventType, listener, true);
+                    listeners.push([eventType, listener]);
+                }}
+                window[key] = {{events, listeners}};
+            }}
+            """
+        )
+        return True
+    except Exception as exc:
+        logger.warning("browser_perform_action diagnostics: event capture failed to start: %s", type(exc).__name__)
+        return False
+
+
+async def _stop_form_action_event_capture(page: StagehandPage) -> list[dict[str, Any]]:
+    """Stop temporary form-event capture and return safe event metadata."""
+
+    try:
+        events = await page.evaluate(
+            f"""
+            () => {{
+                const key = {_FORM_ACTION_EVENT_CAPTURE_KEY!r};
+                const state = window[key];
+                if (!state) return [];
+                for (const [eventType, listener] of state.listeners) {{
+                    document.removeEventListener(eventType, listener, true);
+                }}
+                delete window[key];
+                return state.events;
+            }}
+            """
+        )
+    except Exception as exc:
+        logger.warning("browser_perform_action diagnostics: event capture cleanup failed: %s", type(exc).__name__)
+        return []
+    return [item for item in events if isinstance(item, dict)] if isinstance(events, list) else []
 
 
 def _sanitize_toon_value(value: Any) -> str:
@@ -216,6 +474,7 @@ class LLMClientJSONResponsePatch(LLMClient):
 
     def __init__(self, inner_llm: LLMClient):
         self._inner_llm = inner_llm
+        self._structured_output_unsupported_models: set[str] = set()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner_llm, name)
@@ -283,6 +542,34 @@ class LLMClientJSONResponsePatch(LLMClient):
 
         return False
 
+    def _model_cache_key(self, model: str | None) -> str:
+        """Return a stable key for a model's structured-output capability."""
+
+        if model:
+            return model
+        default_model = getattr(self._inner_llm, "default_model", None)
+        return default_model if isinstance(default_model, str) and default_model else "<default>"
+
+    @staticmethod
+    def _messages_with_json_instruction(
+        messages: list[dict[str, str]], response_format: Any
+    ) -> list[dict[str, str]]:
+        """Request JSON explicitly when provider-level schema enforcement is unavailable."""
+
+        adjusted_messages = messages.copy() if messages else []
+        if hasattr(response_format, "model_json_schema"):
+            result_schema = json.dumps(response_format.model_json_schema())
+        else:
+            result_schema = str(response_format)
+        adjusted_messages.insert(
+            1,
+            {
+                "role": "system",
+                "content": f"Format results as valid JSON matching this schema:\n{result_schema}",
+            },
+        )
+        return adjusted_messages
+
     async def create_response(
             self,
             *,
@@ -291,23 +578,45 @@ class LLMClientJSONResponsePatch(LLMClient):
             function_name: str | None = None,
             **kwargs: Any,
     ) -> dict[str, Any]:
-        if "response_format" in kwargs:
-            messages = messages.copy() if messages else []
-            if hasattr(kwargs["response_format"], "model_json_schema"):
-                result_schema = json.dumps(kwargs["response_format"].model_json_schema())
-            else:
-                result_schema = str(kwargs["response_format"])
-            messages.insert(1, {"role": "system",
-                                "content": f"Format results as valid JSON matching this schema:\n{result_schema}"})
-
-        response = await self._inner_llm.create_response(
-            messages=messages,
-            model=model,
-            function_name=function_name,
-            **kwargs,
+        response_format = kwargs.get("response_format")
+        has_response_format = "response_format" in kwargs
+        request_messages = (
+            self._messages_with_json_instruction(messages, response_format)
+            if has_response_format
+            else messages
         )
+        model_key = self._model_cache_key(model)
+        request_kwargs = kwargs.copy()
+        using_prompt_fallback = has_response_format and model_key in self._structured_output_unsupported_models
+        if using_prompt_fallback:
+            request_kwargs.pop("response_format")
 
-        if "response_format" not in kwargs:
+        try:
+            response = await self._inner_llm.create_response(
+                messages=request_messages,
+                model=model,
+                function_name=function_name,
+                **request_kwargs,
+            )
+        except Exception as error:
+            if not has_response_format or using_prompt_fallback or not _structured_output_is_unavailable(error):
+                raise
+
+            self._structured_output_unsupported_models.add(model_key)
+            logger.warning(
+                "Browser LLM model %s rejected structured output; retrying with prompt-directed JSON.",
+                model_key,
+            )
+            fallback_kwargs = kwargs.copy()
+            fallback_kwargs.pop("response_format")
+            response = await self._inner_llm.create_response(
+                messages=request_messages,
+                model=model,
+                function_name=function_name,
+                **fallback_kwargs,
+            )
+
+        if not has_response_format:
             return response
         if "choices" not in response:
             return response
@@ -327,7 +636,7 @@ class LLMClientJSONResponsePatch(LLMClient):
             # If it's valid JSON, replace content with a normalized JSON string
             try:
                 obj = json.loads(cleaned)
-                if self.response_format_has_root_elements_model(kwargs["response_format"]) and isinstance(obj, list):
+                if self.response_format_has_root_elements_model(response_format) and isinstance(obj, list):
                     obj = {"elements": obj}
             except Exception:
                 # leave as-is if we can't safely make it valid JSON
@@ -1693,6 +2002,8 @@ async def browser_perform_action(
           captured automatically.
         - Set `wait_for_page_change` for form submissions to retain a bounded
           rendered-page comparison after the existing network-idle wait.
+        - A negative Stagehand action result is raised as a tool failure; a
+          returned result object alone is not evidence that the action ran.
         - Large captured outputs may be saved as artifacts; inspect only the
           relevant portions.
 
@@ -1712,15 +2023,73 @@ async def browser_perform_action(
         raise ValueError(
             f"page_change_timeout_seconds must be between 1 and {_MAX_PAGE_CHANGE_TIMEOUT_SECONDS}"
         )
-    logger.info("browser_perform_action: %s", action)
+    action_category = _browser_action_category(action)
+    logger.info("browser_perform_action: %s action", action_category)
     async with get_browser() as browser:
         async def _impl():
             async with browser.interaction_context_capture(
                     only_domains=[browser.page_domain]
             ) as interaction_context:
                 before_content = await browser.page.content() if wait_for_page_change else ""
-                async with browser.timeout():
-                    await browser.page.act(action)
+                before_controls = await _safe_form_control_snapshot(browser.page)
+                event_capture_started = await _start_form_action_event_capture(browser.page)
+                act_result: Any = None
+                normalized_action_result: _NormalizedActionResult | None = None
+                try:
+                    async with browser.timeout():
+                        act_result = await browser.page.act(action)
+                finally:
+                    after_controls = await _safe_form_control_snapshot(browser.page)
+                    action_events = (
+                        await _stop_form_action_event_capture(browser.page)
+                        if event_capture_started
+                        else []
+                    )
+                    control_changes = _form_control_change_summary(before_controls, after_controls)
+                    normalized_action_result = _normalize_action_result(act_result)
+                    diagnostic = {
+                        "action_category": action_category,
+                        "url": str(browser.page.url),
+                        "act_returned_value": act_result is not None,
+                        **normalized_action_result.diagnostic(),
+                        "form_controls": control_changes,
+                        "form_event_count": len(action_events),
+                        "form_events": action_events,
+                        "interaction_counts": {
+                            "same_origin_requests": len(interaction_context.requests),
+                            "console_errors": sum(
+                                1
+                                for log in interaction_context.logs
+                                if log.get("type") == "error"
+                            ),
+                            "dialogs": len(interaction_context.dialogs),
+                            "downloads": len(interaction_context.downloads),
+                        },
+                    }
+                    logger.info(
+                        "browser_perform_action diagnostics: %s",
+                        json.dumps(diagnostic, sort_keys=True),
+                    )
+                    value_events = [
+                        event for event in action_events if event.get("type") in {"input", "change"}
+                    ]
+                    if (
+                            action_category in {"input", "selection"}
+                            and control_changes["value_changed_control_count"] == 0
+                            and not value_events
+                    ):
+                        logger.warning(
+                            "browser_perform_action diagnostics: %s action completed without a form-value "
+                            "change or input/change event",
+                            action_category,
+                        )
+                if normalized_action_result is None or not normalized_action_result.success:
+                    failure_reason = (
+                        normalized_action_result.failure_reason
+                        if normalized_action_result is not None
+                        else "unexpected_action_result"
+                    )
+                    raise RuntimeError(f"Stagehand browser action failed: {failure_reason}")
                 page_change = None
                 if wait_for_page_change:
                     async def _wait_for_page_change() -> dict[str, Any]:
@@ -1762,7 +2131,7 @@ async def browser_perform_action(
                 return observations, summary, page_change, str(browser.page.url)
 
         observations, summary, page_change, final_url = await browser.run_in_browser_loop(_impl)
-        logger.info("browser_perform_action: %s done", action)
+        logger.info("browser_perform_action: %s action done", action_category)
         page_change_result = ""
         if page_change is not None:
             page_change_result = (

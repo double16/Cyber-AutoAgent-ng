@@ -30,6 +30,20 @@ def test_redact_recursively_handles_mappings_lists_tuples_and_scalar_values():
     }
 
 
+def test_redact_preserves_safe_credential_type_metadata_but_masks_payload_values():
+    assert redact(
+        {
+            "credential_id": "credential-123",
+            "credential_type": "username_password",
+            "credential_payload": {"password": "must-not-leak"},
+        }
+    ) == {
+        "credential_id": "credential-123",
+        "credential_type": "username_password",
+        "credential_payload": REDACTED,
+    }
+
+
 def test_bounded_redacted_text_returns_full_or_truncated_safe_text():
     assert bounded_redacted_text("token=secret", limit=30) == f"token={REDACTED}"
 

@@ -56,6 +56,45 @@ _OBJECTIVE_OAUTH_PATTERN = re.compile(
     r"(?:.*?\b(?:oauth2?[_ -]?)?token[_ -]?url\s*[:=]\s*(?P<token_url>[^\s,;]+))?"
 )
 _REGISTRATION_EMAIL_RESERVATIONS: dict[str, set[str]] = {}
+_STORE_CREDENTIAL_INPUT_SCHEMA = {
+    "json": {
+        "type": "object",
+        "properties": {
+            "credential_type": {
+                "type": "string",
+                "enum": ["username_password", "email_login", "api_key", "oauth2_client"],
+                "description": (
+                    "Credential kind. A registered web account is username_password; email_login is only for an "
+                    "IMAP mailbox credential."
+                ),
+            },
+            "values": {
+                "type": "object",
+                "description": (
+                    "Secret payload. username_password requires username and password and accepts optional email; "
+                    "email_login requires email, password, and mailbox {host, port?, tls?, folder?}; api_key "
+                    "requires api_key and name; oauth2_client requires client_id and client_secret."
+                ),
+            },
+            "target": {"type": "string", "description": "Exact active target for non-mailbox credentials."},
+            "role": {"type": "string", "description": "Role for non-mailbox credentials."},
+            "operation_scope": {"type": "string", "description": "Optional current-operation storage scope."},
+            "origin": {
+                "type": "string",
+                "enum": ["found", "registered"],
+                "description": "Use registered only after authorized self-registration succeeds.",
+            },
+            "account_label": {"type": "string", "description": "Safe account label."},
+            "tenant_label": {"type": "string", "description": "Safe tenant label."},
+            "evidence_refs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Required durable artifact, memory, or finding references.",
+            },
+        },
+        "required": ["credential_type", "values"],
+    }
+}
 
 
 def extract_objective_credentials(objective: str) -> tuple[str, list[dict[str, Any]]]:
@@ -381,7 +420,7 @@ def store_user_credential(
     )
 
 
-@tool(name="store_credential")
+@tool(name="store_credential", inputSchema=_STORE_CREDENTIAL_INPUT_SCHEMA)
 def store_credential(
     credential_type: str,
     values: dict[str, Any],
@@ -398,7 +437,10 @@ def store_credential(
     Use `registered` for a successful self-registration and `found` for a credential recovered from target-owned
     evidence. Give `evidence_refs` durable references for the discovery or successful registration. Target may be
     the active task's target ID or its resolved target value. Never store user-provided credentials with this tool.
-    Passwords and other secret values are not echoed.
+    Passwords and other secret values are not echoed. For a registered web account, use
+    `credential_type="username_password"` with `values.username` set to the registered login/email and
+    `values.password`; `values.email` is optional. `email_login` is an IMAP mailbox credential, not an email-based
+    website login, and requires `values.email`, `values.password`, and a `values.mailbox` object with an IMAP host.
     """
 
     normalized_origin = str(origin or "").strip().lower()

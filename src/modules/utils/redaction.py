@@ -24,6 +24,7 @@ TEXT_REDACTION_PATTERNS = (
     re.compile(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@"),
 )
 _RUNTIME_SECRETS: set[str] = set()
+_SAFE_METADATA_KEYS = frozenset({"credential_id", "credential_type"})
 
 
 def register_runtime_secret(value: str) -> str:
@@ -54,7 +55,11 @@ def redact(value: Any) -> Any:
 
     if isinstance(value, Mapping):
         return {
-            str(key): REDACTED if SENSITIVE_KEY_PATTERN.search(str(key)) else redact(item)
+            str(key): (
+                redact(item)
+                if str(key) in _SAFE_METADATA_KEYS
+                else REDACTED if SENSITIVE_KEY_PATTERN.search(str(key)) else redact(item)
+            )
             for key, item in value.items()
         }
     if isinstance(value, list):

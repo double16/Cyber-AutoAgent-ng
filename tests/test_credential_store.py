@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from strands import ToolContext
 
+from modules.handlers.utils import get_tool_spec
 from modules.storage.credential_encryption import CredentialEncryptionError, CredentialPayloadCipher
 from modules.tools.credentials import (
     begin_email_mfa_retrieval,
@@ -61,6 +62,49 @@ def test_credential_store_scopes_exact_targets_and_user_aliases(tmp_path, monkey
     store.add_credential_target_alias("https://example.test/app", "https://login.example.test/app")
     assert store.list_credentials("op-2", target="https://login.example.test/app")[0]["credential_id"] == credential["credential_id"]
     assert stat.S_IMODE((tmp_path / "credentials.db").stat().st_mode) == 0o600
+
+
+def test_store_credential_runtime_schema_advertises_canonical_credential_types():
+    schema = get_tool_spec(store_credential)["inputSchema"]["json"]
+
+    assert schema["properties"]["credential_type"]["enum"] == [
+        "username_password",
+        "email_login",
+        "api_key",
+        "oauth2_client",
+    ]
+    assert set(schema["required"]) == {"credential_type", "values"}
+    assert "IMAP mailbox" in schema["properties"]["credential_type"]["description"]
+
+
+def test_store_credential_persists_registered_web_identity_and_rejects_unknown_type(tmp_path, monkeypatch):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
+    monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "op-1")
+    _store_active_target_task(store)
+
+    stored = json.loads(
+        store_credential(
+            "username_password",
+            {"username": "member@example.test", "email": "member@example.test", "password": "secret"},
+            "https://app.example.test",
+            "member",
+            origin="registered",
+            evidence_refs=["artifact:registration-result.json"],
+        )
+    )
+
+    assert stored["credential"]["credential_type"] == "username_password"
+    assert stored["credential"]["origin"] == "registered"
+    with pytest.raises(ValueError, match="credential_type"):
+        store_credential(
+            "email_password",
+            {"username": "member@example.test", "password": "secret"},
+            "https://app.example.test",
+            "member",
+            origin="registered",
+            evidence_refs=["artifact:registration-result.json"],
+        )
 
 
 def test_credential_storage_creates_an_initial_provenance_status_event(tmp_path):

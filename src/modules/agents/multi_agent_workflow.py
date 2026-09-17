@@ -2881,11 +2881,11 @@ class MultiAgentWorkflowController:
                         mode="outcome",
                         basis=AcceptanceBasis(
                             kind="procedure",
-                            description="Mapped self-registration flow requiring one credential provisioning attempt.",
+                            description="Mapped self-registration flow producing one credential provisioning result.",
                             source_refs=(f"target:{target}",),
                             procedure=DiscoveryProcedure(
                                 methods=("browser",),
-                                limits={"max_requests": 4},
+                                limits={"max_items": 1},
                                 stop_condition="first_limit_reached",
                                 gap_policy="record_unassessed",
                                 output_kind="artifact",
@@ -12483,7 +12483,7 @@ while planning.
 
     @staticmethod
     def _credential_provisioning_execution_guidance() -> str:
-        """Return the controller-owned scope for a bounded self-registration task."""
+        """Return the controller-owned scope for a single-credential self-registration task."""
 
         return "\n".join([
             (
@@ -12497,6 +12497,11 @@ while planning.
                 "navigate unrelated routes, enumerate application behavior, or perform vulnerability testing."
             ),
             (
+                "- The task produces one credential or one evidence-backed coverage gap. Its one-item bound does not "
+                "limit browser requests, tool calls, or reasoning turns; use only the same-scope browser activity "
+                "needed to complete or diagnose this registration flow."
+            ),
+            (
                 "- Generate one password and one registration email, fill only the mapped registration form, "
                 "capture the pre-submit UI with `browser_take_screenshot()`, submit it "
                 "with `browser_perform_action(..., wait_for_page_change=true)`, and capture the post-submit UI with "
@@ -12504,10 +12509,12 @@ while planning.
                 "registration result or a concrete failure."
             ),
             (
-                "- On confirmed registration, call `store_credential(origin=\"registered\", evidence_refs=[...])` "
-                "without operation_scope. If the mapped flow is unavailable, blocked, or fails, record one "
-                "evidence-backed coverage gap with `store_observation`; never invent an account, bypass controls, "
-                "or create a finding."
+                "- On confirmed registration, call `store_credential` with `credential_type=\"username_password\"`, "
+                "`values={\"username\": generated_registration_email, \"password\": generated_password, "
+                "\"email\": generated_registration_email}`, `origin=\"registered\"`, and durable "
+                "`evidence_refs`; omit operation_scope. Do not use `email_login`: it is only for an IMAP mailbox "
+                "credential. If the mapped flow is unavailable, blocked, or fails, record one evidence-backed "
+                "coverage gap with `store_observation`; never invent an account, bypass controls, or create a finding."
             ),
         ])
 
