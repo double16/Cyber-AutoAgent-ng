@@ -11,6 +11,7 @@ SENSITIVE_KEY_PATTERN = re.compile(
     r"(?:api[_-]?key|secret|password|token|authorization|cookie|credential|private[_-]?key|access[_-]?key|otp|mfa)",
     re.IGNORECASE,
 )
+_URL_CREDENTIAL_PATTERN = re.compile(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@")
 TEXT_REDACTION_PATTERNS = (
     re.compile(r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s,;]+"),
     re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/-]+=*"),
@@ -21,17 +22,20 @@ TEXT_REDACTION_PATTERNS = (
         r'["\']?(?:bearer\s+)?)[^\s,;"\'}]+'
     ),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"(?i)(https?://)[^\s/@:]+:[^\s/@]+@"),
+    _URL_CREDENTIAL_PATTERN,
 )
 _RUNTIME_SECRETS: set[str] = set()
 _SAFE_METADATA_KEYS = frozenset({"credential_id", "credential_type"})
+_IGNORED_RUNTIME_SECRET_VALUES = frozenset(
+    {"api", "authorization", "bearer", "changeme", "cookie", "example", "key", "masked", "password", "secret", "token"}
+)
 
 
 def register_runtime_secret(value: str) -> str:
     """Register a generated value so bare tool output is redacted at UI and trace boundaries."""
 
     normalized = str(value or "")
-    if normalized:
+    if normalized and normalized.casefold() not in _IGNORED_RUNTIME_SECRET_VALUES:
         _RUNTIME_SECRETS.add(normalized)
     return normalized
 
@@ -43,6 +47,12 @@ def redact_text(value: Any) -> str:
     for secret in sorted(_RUNTIME_SECRETS, key=len, reverse=True):
         redacted = redacted.replace(secret, REDACTED)
     for pattern in TEXT_REDACTION_PATTERNS:
+        if pattern is _URL_CREDENTIAL_PATTERN:
+            redacted = pattern.sub(
+                lambda match: f"{match.group(1)}{REDACTED}:{REDACTED}@",
+                redacted,
+            )
+            continue
         if pattern.groups >= 1:
             redacted = pattern.sub(lambda match: f"{match.group(1)}{REDACTED}", redacted)
         else:

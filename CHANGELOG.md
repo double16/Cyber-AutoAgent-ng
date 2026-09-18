@@ -72,6 +72,8 @@
 
 ### Fixes
 
+- Redact URL-embedded usernames and passwords independently while preserving the surrounding URL context, and avoid
+  treating generic field labels such as `password` or `secret` as global runtime secrets in diagnostics and exports.
 - Make artifact byte-page validation errors identify the invalid parameter, supplied value, and applicable limit.
 - Preserve the secret-free browser storage-key metadata needed by browser authentication flows, so opaque contexts
   capture required bearer tokens alongside cookies and reject role-inaccessible validation routes before reuse.

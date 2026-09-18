@@ -14,6 +14,7 @@ def test_redact_text_removes_credential_forms_without_losing_context():
     assert "alice:password" not in result
     assert "AKIA1234567890ABCDEF" not in result
     assert result.count(REDACTED) == 5
+    assert f"https://{REDACTED}:{REDACTED}@example.test/path" in result
 
 
 def test_redact_recursively_handles_mappings_lists_tuples_and_scalar_values():
@@ -66,3 +67,11 @@ def test_redaction_masks_mfa_codes_and_provisioning_secrets():
 def test_redact_text_masks_registered_bare_runtime_secret():
     register_runtime_secret("bare-one-time-value")
     assert redact_text("tool returned bare-one-time-value") == f"tool returned {REDACTED}"
+
+
+def test_register_runtime_secret_ignores_generic_field_values():
+    register_runtime_secret("password")
+    register_runtime_secret("secret")
+    register_runtime_secret("key")
+
+    assert redact_text("password secret api_key") == "password secret api_key"
