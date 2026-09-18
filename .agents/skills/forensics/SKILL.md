@@ -133,8 +133,8 @@ The current workflow schema includes `operations`, `plans`, `tasks`, `task_accep
 `operation_preflight_results`, `finding_records`, `objective_validation_records`,
 `finding_evidence_receipts`, `operation_model_metrics`, `credential_records`,
 `credential_target_aliases`, `credential_status_events`, `credential_usage_records`, `mfa_challenges`,
-and `credential_rotation_requests`. Schema discovery is authoritative if a database has a different migration
-level.
+`credential_rotation_requests`, and `authentication_flow_records`. Schema discovery is authoritative if a database
+has a different migration level.
 
 **Step 4: Query structured operation data**
 
@@ -243,7 +243,14 @@ sqlite3 -readonly -header -column outputs/cyber_autoagent.db \
      FROM credential_rotation_requests
     WHERE logical_target = 'TARGET'
       AND (request_operation_id = 'OPERATION_ID' OR maintenance_operation_id = 'OPERATION_ID')
-    ORDER BY created_at, request_id;"
+    ORDER BY created_at, request_id;
+
+   SELECT flow_id, target, purpose, flow_kind, status, evidence_refs, discovered_operation_id,
+          created_at, updated_at, last_validated_at
+     FROM authentication_flow_records
+    WHERE logical_target = 'TARGET'
+      AND discovered_operation_id = 'OPERATION_ID'
+    ORDER BY updated_at DESC, flow_id;"
 ```
 
 Use `credential_target_aliases` when checking user-declared target aliases. Treat database rows as structured

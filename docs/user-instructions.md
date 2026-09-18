@@ -276,12 +276,17 @@ also requires that selected target credential to explicitly reference the mailbo
 read independently by an unrelated task.
 Credentials created by an operation can be rotated by the agent when the authorized flow supports it; rotation creates
 a new credential record and retires the old one instead of overwriting history. User-provided credential payloads are
-never changed by an agent. Before an authenticated request, an agent binds its checked-out credentials to the active
-task. The controller rejects credentials outside that task's resolved target scope and records the roles, accounts,
-and tenants from stored metadata for report provenance. Every stored credential also receives an initial `unknown`
-status-history event: user-supplied credentials are attributed to the user, while found and registered credentials are
-attributed to the operation. For a later operation, reusable registered credentials are listed before other reusable
-credentials; credentials explicitly scoped to that later operation still take precedence.
+never changed by an agent. Before an authenticated request, a controller-owned authentication worker checks out only
+the controller-selected credential, completes the mapped browser/API/MFA flow, and validates an opaque session or
+authorization context. The controller binds that context to the task only after validation succeeds; normal task
+executors receive the opaque authenticated-request tool, never credential lookup, raw session material, or a shell for
+authentication. Failed setup becomes an explicit coverage gap and cannot be retried by searching memory, files, or the
+environment. Durable flow descriptors contain only clean target-scoped login, validation, and observed registration
+success-redirect URLs; inventory flow observations are hints until the authentication worker validates and records
+them. Every stored credential also receives an initial `unknown` status-history event: user-supplied credentials are
+attributed to the user, while found and registered credentials are attributed to the operation. For a later operation,
+reusable registered credentials are listed before other reusable credentials; credentials explicitly scoped to that
+later operation still take precedence.
 
 ### Credential manager
 
@@ -313,9 +318,28 @@ Before authentication testing, agents receive a deterministic coverage plan for 
 unauthenticated baseline, every eligible credential context, and only the real account, role, or tenant pairs available
 for IDOR comparison. Missing credentials or pairs are preserved as coverage gaps rather than filled with invented
 accounts.
-For username/password authentication, agents first map the login flow and CSRF/session requirements, then request a
-task-local form-field mapping using the observed field names. The adapter does not submit a form or persist the
-returned values, which keeps authentication secrets out of artifacts and reports.
+For authenticated work, the controller first checks the operation-memory context and invokes a bounded authentication
+worker only when an eligible credential has no valid context. Registered credentials have no operation scope and are
+therefore reusable by later operations for the same exact canonical target. The worker receives a controller-built
+target, origin, and credential-ID contract from the SQLite credential store; it does not discover targets from
+artifacts or operation files. Direct browser navigation
+is limited to the target origin and any explicitly authorized identity-provider origins. If no eligible credential is
+available, the controller records an authenticated coverage gap without launching the worker. Cookies and
+authorization tokens remain only in an operation-memory context and are discarded on controller restart. The task
+executor receives no checkout, MFA, cookie-extraction, token-extraction, or token-preparation tools; it receives
+`authenticated_http_request` only after the controller has a valid context.
+Attack-surface mapping supplies secret-free authentication-flow hints, such as a likely login route or protected
+route. Hints are not executable authority: when no reusable descriptor is available, the authentication worker
+observes the hinted flow, records a target-scoped descriptor, and then validates it before use. Later operations for
+the same canonical target can reuse that descriptor. For username/password API forms, the worker can establish a
+context directly from the recorded mapped pair. Username/password browser, redirect, and MFA flows must complete in
+the shared browser and then capture cookies (or a named browser-storage token) internally; they cannot fall back to
+direct HTTP form login. The authentication worker also has scoped shell access for commands targeting only mapped
+authentication origins. No session material is persisted in SQLite, artifacts, reports, or task text. If a
+multi-credential setup is only partially successful, the executor is bound only to the credential IDs whose opaque
+contexts validated; the remaining IDs are reported as coverage gaps.
+OAuth2 client credentials and configured API keys use the same opaque context: the worker exchanges or applies the
+stored credential internally, validates the protected route, and exposes only the authenticated request wrapper.
 For IDOR specialist replay that needs two authenticated sessions, agents use the planned comparison pair's checked-out
 credential IDs directly with the observed login field names. The specialist builds only task-local login contexts,
 requires the login endpoint to share the resolved target origin, and records credential use by ID instead of accepting

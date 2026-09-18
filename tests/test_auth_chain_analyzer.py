@@ -53,6 +53,25 @@ def test_auth_chain_coerce_str_handles_none_bytes_text_and_other_values():
     assert aca._coerce_str(42) == "42"
 
 
+def test_auth_chain_flow_descriptors_keep_only_observed_login_and_validation_routes():
+    flows = aca._authentication_flow_descriptors(
+        "https://target.test",
+        [
+            {"path": "/login", "full_url": "https://target.test/login", "status": "200", "type": "Session-based"},
+            {"path": "/api/config", "full_url": "https://target.test/api/config", "status": "401", "type": "Generic Authentication"},
+        ],
+    )
+
+    assert flows == [{
+        "flow_id": "auth-flow-1",
+        "kind": "browser_form",
+        "login_url": "https://target.test/login",
+        "validation_url": "https://target.test/api/config",
+        "allowed_origins": ["https://target.test"],
+        "evidence": {"login_endpoint": "/login", "validation_endpoint": "/api/config"},
+    }]
+
+
 def test_auth_chain_reuses_cache_for_normalized_target(monkeypatch):
     calls = {"discover": 0}
 

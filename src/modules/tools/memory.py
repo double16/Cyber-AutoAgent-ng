@@ -1583,6 +1583,22 @@ class ApplicationStore(Protocol):
 
     def list_credential_inventory(self) -> list[dict[str, Any]]: ...
 
+    def list_authentication_flows(
+        self,
+        target: str,
+        *,
+        purpose: str = "authentication",
+        statuses: Iterable[str] = ("discovered", "validated"),
+    ) -> list[dict[str, Any]]: ...
+
+    def upsert_authentication_flow(
+        self,
+        operation_id: str,
+        descriptor: dict[str, Any],
+        *,
+        status: str = "discovered",
+    ) -> dict[str, Any]: ...
+
     def create_credential_rotation_request(
         self, request_operation_id: str, credential_id: str, reason: str, maintenance_operation_id: str
     ) -> dict[str, Any]: ...
@@ -1654,6 +1670,8 @@ class SQLiteApplicationStore:
         "list_credential_usage",
         "list_credential_history",
         "list_credential_inventory",
+        "list_authentication_flows",
+        "upsert_authentication_flow",
         "create_credential_rotation_request",
         "list_credential_rotation_requests",
         "cancel_credential_rotation_request",
@@ -2096,6 +2114,72 @@ class SQLiteApplicationStore:
         with self._lock, closing(self._connect()) as conn, conn:
             rows = conn.execute(query, params).fetchall()
         return [self._credential_row(row, include_payload=include_payload) for row in rows]
+
+    def list_authentication_flows(
+        self,
+        target: str,
+        *,
+        purpose: str = "authentication",
+        statuses: Iterable[str] = ("discovered", "validated"),
+    ) -> list[dict[str, Any]]:
+        """Return secret-free reusable flow descriptors for one exact target."""
+
+        allowed_statuses = tuple(str(status) for status in statuses)
+        if purpose not in {"authentication", "registration"} or not allowed_statuses:
+            return []
+        placeholders = ", ".join("?" for _ in allowed_statuses)
+        with self._lock, closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                "SELECT flow_id, target, purpose, flow_kind, descriptor, evidence_refs, discovered_operation_id, "
+                "status, created_at, updated_at, last_validated_at FROM authentication_flow_records "
+                "WHERE logical_target = ? AND target = ? AND purpose = ? AND status IN ("
+                + placeholders
+                + ") ORDER BY CASE WHEN status = 'validated' THEN 0 ELSE 1 END, updated_at DESC",
+                (self.logical_target, target, purpose, *allowed_statuses),
+            ).fetchall()
+        return [
+            {
+                "flow_id": row[0], "target": row[1], "purpose": row[2], "kind": row[3],
+                "descriptor": json.loads(row[4]), "evidence_refs": json.loads(row[5]),
+                "discovered_operation_id": row[6], "status": row[7], "created_at": row[8],
+                "updated_at": row[9], "last_validated_at": row[10],
+            }
+            for row in rows
+        ]
+
+    def upsert_authentication_flow(
+        self,
+        operation_id: str,
+        descriptor: dict[str, Any],
+        *,
+        status: str = "discovered",
+    ) -> dict[str, Any]:
+        """Persist one controller-validated, secret-free authentication or registration flow."""
+
+        purpose = str(descriptor.get("purpose") or "authentication")
+        target = str(descriptor.get("target") or "").strip()
+        flow_id = str(descriptor.get("flow_id") or uuid.uuid4())
+        if not target or purpose not in {"authentication", "registration"} or status not in {"discovered", "validated", "invalid"}:
+            raise ValueError("invalid authentication flow descriptor")
+        now = datetime.now().isoformat()
+        evidence_refs = descriptor.get("evidence_refs") if isinstance(descriptor.get("evidence_refs"), list) else []
+        payload = dict(descriptor)
+        payload["flow_id"] = flow_id
+        with self._lock, closing(self._connect()) as conn, conn:
+            self._register_operation(conn, operation_id)
+            conn.execute(
+                "INSERT INTO authentication_flow_records(flow_id, logical_target, target, purpose, flow_kind, descriptor, "
+                "evidence_refs, discovered_operation_id, status, created_at, updated_at, last_validated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(flow_id) DO UPDATE SET descriptor = excluded.descriptor, evidence_refs = excluded.evidence_refs, "
+                "status = excluded.status, updated_at = excluded.updated_at, last_validated_at = excluded.last_validated_at",
+                (
+                    flow_id, self.logical_target, target, purpose, str(payload.get("kind") or ""),
+                    json.dumps(payload, sort_keys=True), json.dumps(evidence_refs), operation_id, status, now, now,
+                    now if status == "validated" else None,
+                ),
+            )
+        return {"flow_id": flow_id, "target": target, "purpose": purpose, "status": status}
 
     def get_credential(self, credential_id: str, *, include_payload: bool = False) -> dict[str, Any] | None:
         """Return one credential only in this logical-target boundary."""

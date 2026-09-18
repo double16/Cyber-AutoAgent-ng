@@ -90,6 +90,13 @@ from modules.tools.advanced_payload_coordinator import advanced_payload_coordina
 from modules.tools.artifact import create_artifact_reader, resolve_tool_result_max_chars
 from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
 from modules.tools.auth_chain_analyzer import auth_chain_analyzer
+from modules.tools.authentication import (
+    authenticated_http_request,
+    capture_browser_authenticated_context,
+    ensure_authenticated_context,
+    establish_credential_authenticated_context,
+    record_authentication_flow,
+)
 from modules.tools.browser import (
     browser_evaluate_js,
     browser_get_cookies,
@@ -644,6 +651,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     optional_tools_list = [
         recon_output_to_inventory_manifest,
+        authenticated_http_request, capture_browser_authenticated_context, establish_credential_authenticated_context,
+        ensure_authenticated_context, record_authentication_flow,
         store_credential, query_credentials, checkout_credential, exchange_oauth2_client_credentials,
         set_task_auth_context, mark_credential_status, plan_access_control_comparisons,
         plan_authenticated_coverage, prepare_api_key_authentication, prepare_login_form_authentication,

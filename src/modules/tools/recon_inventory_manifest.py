@@ -545,6 +545,15 @@ def _structured_inventory_fields(
     flow = payload.get("flow_analysis") if isinstance(payload.get("flow_analysis"), dict) else {}
     for step in flow.get("authentication_steps", []) if isinstance(flow.get("authentication_steps"), list) else []:
         workflows.append({"description": str(step), "attributes": {"source": "authentication_steps"}})
+    for flow in payload.get("authentication_flows", []) if isinstance(payload.get("authentication_flows"), list) else []:
+        if not isinstance(flow, dict) or not str(flow.get("login_url") or "").strip():
+            continue
+        workflows.append(
+            {
+                "description": f"Authentication flow: {flow['login_url']}",
+                "attributes": {"authentication_flow_hint": dict(flow)},
+            }
+        )
     return workflows, [], []
 
 

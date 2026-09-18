@@ -242,6 +242,12 @@ def auth_chain_analyzer(
                 "items": flow_analysis.get("privilege_escalation", []) or [],
             },
         }
+        authentication_flows = _authentication_flow_descriptors(target_url, auth_endpoints)
+        report["evidence"]["authentication_flows"] = {
+            "count_total": len(authentication_flows),
+            "items": authentication_flows,
+        }
+        report["authentication_flows"] = authentication_flows
 
         bypass_results: list[dict[str, Any]] | list[Any] = []
         if analysis_mode == "validation":
@@ -420,6 +426,23 @@ def _write_auth_inventory_manifest(
                 workflows.append({"value": value, "attributes": {"auth_step": step}})
             else:
                 workflows.append({"value": str(step), "attributes": {}})
+        authentication_flows = (
+            report.get("authentication_flows", [])
+            if isinstance(report.get("authentication_flows"), list)
+            else (evidence.get("authentication_flows", {}) or {}).get("items", [])
+        )
+        for flow in authentication_flows:
+            if not isinstance(flow, dict):
+                continue
+            login_url = str(flow.get("login_url") or "").strip()
+            if not login_url:
+                continue
+            workflows.append(
+                {
+                    "value": f"Authentication flow: {login_url}",
+                    "attributes": {"authentication_flow_hint": flow},
+                }
+            )
         mechanisms = results.get("auth_mechanisms", []) if results else (evidence.get("auth_mechanisms", {}) or {}).get("items", [])
         technologies = [
             f"Authentication: {mechanism.get('type')}"
@@ -1348,6 +1371,72 @@ nbf = NotBefore
                 analysis["claims"][claim] = claim_match.group(1)
 
     return analysis
+
+
+def _authentication_flow_descriptors(
+        target_url: str,
+        auth_endpoints: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return executable, observed authentication-flow metadata for inventory consumers.
+
+    The descriptor is deliberately conservative: an authentication worker may only
+    use a flow when both the login and protected validation URLs were observed.
+    This prevents a later worker from inventing routes from descriptive auth steps.
+    """
+
+    target_origin = f"{urlparse(target_url).scheme}://{urlparse(target_url).netloc}".rstrip("/")
+    endpoint_records = [
+        endpoint for endpoint in auth_endpoints
+        if isinstance(endpoint, dict) and str(endpoint.get("full_url") or endpoint.get("url") or "").strip()
+    ]
+    protected = [
+        endpoint for endpoint in endpoint_records
+        if str(endpoint.get("status") or endpoint.get("status_code") or "") in {"401", "403"}
+        or str(endpoint.get("type") or "") == "Administrative"
+    ]
+    if not protected:
+        protected = [
+            endpoint for endpoint in endpoint_records
+            if any(token in str(endpoint.get("path") or "").lower() for token in ("profile", "account", "dashboard"))
+        ]
+
+    descriptors = []
+    for endpoint in endpoint_records:
+        endpoint_type = str(endpoint.get("type") or "")
+        login_url = str(endpoint.get("full_url") or endpoint.get("url") or "").strip()
+        if endpoint_type not in {"Session-based", "API Authentication", "OAuth", "SAML", "Multi-factor"}:
+            continue
+        path = str(endpoint.get("path") or urlparse(login_url).path).lower()
+        if endpoint_type == "API Authentication" or path.startswith("/api/"):
+            flow_kind = "api_form"
+        elif endpoint_type in {"OAuth", "SAML"}:
+            flow_kind = "browser_redirect"
+        elif endpoint_type == "Multi-factor":
+            flow_kind = "browser_mfa"
+        else:
+            flow_kind = "browser_form"
+        validation = next(
+            (
+                candidate for candidate in protected
+                if str(candidate.get("full_url") or candidate.get("url") or "").strip() != login_url
+            ),
+            None,
+        )
+        validation_url = str((validation or {}).get("full_url") or (validation or {}).get("url") or "").strip()
+        descriptors.append(
+            {
+                "flow_id": f"auth-flow-{len(descriptors) + 1}",
+                "kind": flow_kind,
+                "login_url": login_url,
+                "validation_url": validation_url,
+                "allowed_origins": [target_origin] if target_origin else [],
+                "evidence": {
+                    "login_endpoint": str(endpoint.get("path") or ""),
+                    "validation_endpoint": str((validation or {}).get("path") or ""),
+                },
+            }
+        )
+    return descriptors
 
 
 def _map_authentication_flows(target_url: str, results: dict) -> dict[str, Any]:

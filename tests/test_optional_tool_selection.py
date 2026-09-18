@@ -105,7 +105,7 @@ def test_other_workstreams_do_not_require_bundle_inventory_tool():
     assert selection.required_optional_tool_names(task) == []
 
 
-def test_authenticated_validation_tasks_receive_replay_tools_only():
+def test_authenticated_validation_tasks_receive_only_opaque_request_tool():
     task = _task(
         kind="finding_validation",
         auth_context={"mode": "authenticated", "credential_ids": ["credential-1"]},
@@ -113,11 +113,17 @@ def test_authenticated_validation_tasks_receive_replay_tools_only():
 
     names = selection.required_optional_tool_names(task)
 
-    assert "checkout_credential" in names
-    assert "set_task_auth_context" in names
-    assert "prepare_login_form_authentication" in names
-    assert "plan_authenticated_coverage" not in names
-    assert "plan_access_control_comparisons" not in names
+    assert names == ["authenticated_http_request"]
+    auth_agent_names = selection.authentication_agent_optional_tool_names(task)
+    assert "checkout_credential" in auth_agent_names
+    assert "set_task_auth_context" not in auth_agent_names
+    assert "prepare_login_form_authentication" not in auth_agent_names
+    assert "capture_browser_authenticated_context" in auth_agent_names
+    assert "authenticated_http_request" not in auth_agent_names
+    assert "query_credentials" not in auth_agent_names
+    assert "store_credential" not in auth_agent_names
+    assert "browser_get_cookies" not in auth_agent_names
+    assert "browser_evaluate_js" not in auth_agent_names
     assert "store_credential" not in names
 
 

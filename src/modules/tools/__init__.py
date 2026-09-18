@@ -1,6 +1,13 @@
 """Tools module for Cyber-AutoAgent."""
 
 from modules.tools.artifact import create_artifact_reader
+from modules.tools.authentication import (
+    authenticated_http_request,
+    capture_browser_authenticated_context,
+    ensure_authenticated_context,
+    establish_credential_authenticated_context,
+    record_authentication_flow,
+)
 from modules.tools.browser import (
     browser_evaluate_js,
     browser_get_cookies,
@@ -73,6 +80,7 @@ from modules.tools.recon_inventory_manifest import (
 
 __all__ = [
     "QdrantMemoryClient",
+    "authenticated_http_request",
     "begin_email_mfa_retrieval",
     "browser_evaluate_js",
     "browser_get_cookies",
@@ -82,6 +90,7 @@ __all__ = [
     "browser_perform_action",
     "browser_set_headers",
     "browser_take_screenshot",
+    "capture_browser_authenticated_context",
     "channel_close",
     "channel_close_all",
     "channel_create_forward",
@@ -96,6 +105,9 @@ __all__ = [
     "create_artifact_reader",
     "create_tasks",
     "discover_mcp_tools",
+    "ensure_authenticated_context",
+    "establish_credential_authenticated_context",
+    "record_authentication_flow",
     "fail_credential_rotation",
     "generate_mfa_code",
     "generate_password",

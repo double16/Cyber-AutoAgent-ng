@@ -21,6 +21,9 @@ _SUPPORTED_EVIDENCE_KINDS = frozenset(
     }
 )
 CREDENTIAL_OPTIONAL_TOOL_NAMES = frozenset({
+    "authenticated_http_request", "capture_browser_authenticated_context", "ensure_authenticated_context",
+    "record_authentication_flow",
+    "establish_credential_authenticated_context",
     "store_credential", "query_credentials", "checkout_credential", "exchange_oauth2_client_credentials",
     "set_task_auth_context", "mark_credential_status", "plan_access_control_comparisons",
     "plan_authenticated_coverage", "prepare_api_key_authentication", "prepare_login_form_authentication",
@@ -28,6 +31,34 @@ CREDENTIAL_OPTIONAL_TOOL_NAMES = frozenset({
     "retrieve_email_mfa_code", "stage_credential_rotation", "complete_credential_rotation",
     "fail_credential_rotation", "rotate_credential",
 })
+AUTHENTICATION_AGENT_BROWSER_TOOL_NAMES = (
+    "browser_goto_url",
+    "browser_observe_page",
+    "browser_get_page_html",
+    "browser_take_screenshot",
+    "browser_perform_action",
+)
+# The authentication worker is deliberately narrower than either a credential
+# provisioning task or an executor. It can use a controller-selected
+# credential, perform MFA, establish opaque state, and record a discovered
+# descriptor. It must not search for credentials, mutate task state, assess
+# endpoints, or rotate/store credentials.
+AUTHENTICATION_AGENT_CREDENTIAL_TOOL_NAMES = (
+    "checkout_credential",
+    "ensure_authenticated_context",
+    "capture_browser_authenticated_context",
+    "establish_credential_authenticated_context",
+    "record_authentication_flow",
+    "generate_mfa_code",
+    "begin_email_mfa_retrieval",
+    "request_mfa_code",
+    "retrieve_email_mfa_code",
+)
+AUTHENTICATION_AGENT_OPTIONAL_TOOL_NAMES = frozenset({
+    *AUTHENTICATION_AGENT_CREDENTIAL_TOOL_NAMES,
+    *AUTHENTICATION_AGENT_BROWSER_TOOL_NAMES,
+})
+EXECUTOR_AUTHENTICATION_TOOL_NAMES = frozenset({"authenticated_http_request"})
 CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES = (
     "browser_goto_url",
     "browser_observe_page",
@@ -40,6 +71,7 @@ CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES = (
 CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES = (
     "generate_password",
     "generate_registration_email",
+    "record_authentication_flow",
     "store_credential",
 )
 VALIDATION_CREDENTIAL_OPTIONAL_TOOL_NAMES = (
@@ -73,7 +105,7 @@ def credential_optional_tool_names(task: Any) -> list[str]:
         str(getattr(task, "kind", "")) in {"finding_validation", "objective_validation"}
         and auth_context.get("mode") == "authenticated"
     ):
-        return list(VALIDATION_CREDENTIAL_OPTIONAL_TOOL_NAMES)
+        return ["authenticated_http_request"]
     if str(getattr(task, "kind", "")) == "credential_rotation":
         return [
             "query_credentials", "checkout_credential", "stage_credential_rotation",
@@ -86,16 +118,28 @@ def credential_optional_tool_names(task: Any) -> list[str]:
         ]
     if workstream == "authorization_comparison":
         return [
-            "plan_authenticated_coverage", "plan_access_control_comparisons", "checkout_credential",
-            "set_task_auth_context", "mark_credential_status", "prepare_login_form_authentication",
+            "authenticated_http_request",
         ]
     if workstream == "authenticated_credential_coverage" or auth_context.get("mode") == "authenticated":
-        return [
-            "plan_authenticated_coverage", "query_credentials", "checkout_credential", "set_task_auth_context",
-            "mark_credential_status", "exchange_oauth2_client_credentials", "prepare_api_key_authentication",
-            "prepare_login_form_authentication", "generate_mfa_code", "begin_email_mfa_retrieval",
-            "request_mfa_code", "retrieve_email_mfa_code",
-        ]
+        return ["authenticated_http_request"]
+    return []
+
+
+def authentication_agent_optional_tool_names(task: Any) -> list[str]:
+    """Return the privileged, short-lived authentication-worker tool bundle.
+
+    Task executors deliberately receive only ``authenticated_http_request``.  This separate bundle contains checkout,
+    MFA, browser-login, and opaque-context capture capabilities for the controller-invoked authentication agent.
+    """
+
+    context = getattr(task, "recovery_context", {}) or {}
+    contract = context.get("phase_task_contract", {}) if isinstance(context, dict) else {}
+    workstream = str(contract.get("workstream") or "") if isinstance(contract, dict) else ""
+    auth_context = getattr(task, "auth_context", {}) or {}
+    if workstream in {"authenticated_credential_coverage", "authorization_comparison"} or (
+        isinstance(auth_context, dict) and auth_context.get("mode") == "authenticated"
+    ):
+        return sorted(AUTHENTICATION_AGENT_OPTIONAL_TOOL_NAMES)
     return []
 
 

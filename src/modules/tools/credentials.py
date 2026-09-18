@@ -748,6 +748,7 @@ def checkout_credential(credential_id: str, purpose: str) -> str:
         task_uid=active_task.task_uid,
         outcome="selected",
     )
+    _register_credential_payload_secrets(record)
     return json.dumps({"credential_id": record["credential_id"], "credential_type": record["credential_type"], "values": record["payload"]})
 
 
@@ -1277,7 +1278,20 @@ def _active_checked_out_credential(store: Any, operation_id: str, credential_id:
         raise ValueError("credential access requires a target credential, not a mailbox credential")
     if str(record.get("target") or "") not in target_values:
         raise ValueError("MFA credential is outside the active task target scope")
+    _register_credential_payload_secrets(record)
     return active_task, record
+
+
+def _register_credential_payload_secrets(record: dict[str, Any]) -> None:
+    """Register payload secret values before a worker can reuse them in generic tool input."""
+
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    for key in ("password", "api_key", "client_secret"):
+        if isinstance(payload.get(key), str):
+            register_runtime_secret(payload[key])
+    mfa = payload.get("mfa") if isinstance(payload.get("mfa"), dict) else {}
+    if isinstance(mfa.get("secret"), str):
+        register_runtime_secret(mfa["secret"])
 
 
 def _active_mfa_mailbox_task(store: Any, operation_id: str, mailbox_credential_id: str) -> tuple[Any, dict[str, Any]]:

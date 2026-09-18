@@ -101,6 +101,7 @@ from modules.tools.artifact import (
     resolve_tool_result_max_chars,
 )
 from modules.tools.artifact_references import normalize_artifact_reference_token
+from modules.tools.authentication import authentication_context_is_valid
 from modules.tools.credentials import canonicalize_credential_target
 from modules.tools.memory import (
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
@@ -153,6 +154,7 @@ from modules.tools.optional_tool_selection import (
     CREDENTIAL_OPTIONAL_TOOL_NAMES,
     CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
     CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES,
+    authentication_agent_optional_tool_names,
     credential_optional_tool_names,
     required_optional_tool_names,
 )
@@ -812,6 +814,7 @@ class WorkflowStateStore:
         evidence_additions: Iterable[str] = (),
         recovery_context_updates: dict[str, Any] | None = None,
         recovery_context_removals: Iterable[str] = (),
+        auth_context: dict[str, Any] | None = None,
     ) -> Task:
         """Update task-owned mutable state without replacing concurrent updates."""
 
@@ -825,6 +828,7 @@ class WorkflowStateStore:
                 evidence_additions=evidence_additions,
                 recovery_context_updates=recovery_context_updates,
                 recovery_context_removals=recovery_context_removals,
+                auth_context=auth_context,
             )
         current = next((item for item in self.list_tasks() if item.task_uid == task_uid), None)
         if current is None:
@@ -844,6 +848,7 @@ class WorkflowStateStore:
             phase=phase if phase is not None else current.phase,
             evidence=evidence,
             recovery_context=context,
+            auth_context=auth_context if auth_context is not None else current.auth_context,
         ))
 
     def reopen_plan(self, plan: OperationPlan) -> OperationPlan:
@@ -1122,6 +1127,72 @@ class WorkflowStateStore:
         return self.store_plan(plan)
 
 
+@dataclass(frozen=True)
+class AuthenticationSetupRequest:
+    """Controller-owned, secret-safe input for one bounded authentication worker."""
+
+    task_uid: str
+    workstream: str
+    targets: tuple[str, ...]
+    allowed_origins: tuple[str, ...]
+    credentials: tuple[dict[str, str], ...]
+    authentication_flows: tuple[dict[str, Any], ...] = ()
+    authentication_flow_hints: tuple[dict[str, Any], ...] = ()
+
+    def to_toon(self) -> str:
+        rows = "\n".join(
+            "  "
+            + ",".join(
+                sanitize_toon_value(credential.get(key, ""))
+                for key in ("credential_id", "credential_type", "role")
+            )
+            for credential in self.credentials
+        ) or "  <none>"
+        flow_rows = "\n".join(
+            "  "
+            + ",".join(
+                sanitize_toon_value(str(flow.get(field) or ""))
+                for field in ("flow_id", "kind", "login_url", "validation_url")
+            )
+            + ","
+            + sanitize_toon_value("|".join(flow.get("allowed_origins") or []))
+            for flow in self.authentication_flows
+        ) or "  <none>"
+        hint_rows = "\n".join(
+            "  " + ",".join(
+                sanitize_toon_value(str(hint.get(field) or ""))
+                for field in ("kind", "login_url", "validation_url")
+            )
+            for hint in self.authentication_flow_hints
+        ) or "  <none>"
+        return (
+            "authentication_setup{task_uid,workstream,targets,allowed_origins}:\n"
+            f"  {sanitize_toon_value(self.task_uid)},"
+            f"{sanitize_toon_value(self.workstream)},"
+            f"{sanitize_toon_value('|'.join(self.targets))},"
+            f"{sanitize_toon_value('|'.join(self.allowed_origins))}\n"
+            f"eligible_credentials[{len(self.credentials)}]{{credential_id,credential_type,role}}:\n{rows}\n"
+            f"authentication_flows[{len(self.authentication_flows)}]"
+            "{flow_id,kind,login_url,validation_url,allowed_origins}:\n"
+            f"{flow_rows}"
+            f"\nauthentication_flow_hints[{len(self.authentication_flow_hints)}]{{kind,login_url,validation_url}}:\n"
+            f"{hint_rows}"
+        )
+
+
+@dataclass(frozen=True)
+class AuthenticationSetupResult:
+    """Safe controller-visible state of opaque authentication setup."""
+
+    status: str
+    credential_ids: tuple[str, ...] = ()
+    reason: str = ""
+
+    @property
+    def ready(self) -> bool:
+        return self.status in {"reused", "established", "partial"}
+
+
 class MultiAgentWorkflowController:
     """Run the assessment as many short-lived role agents coordinated by Python."""
 
@@ -1177,6 +1248,7 @@ class MultiAgentWorkflowController:
         self._health_prediction_cache: dict[int, dict[str, Any] | None] = {}
         self._last_assessment_health: dict[str, Any] | None = None
         self._last_operation_state_snapshot: dict[str, Any] = {}
+        self._authentication_setup_results: dict[str, AuthenticationSetupResult] = {}
         set_health_provider = getattr(self.runtime.callback_handler, "set_operation_health_provider", None)
         if callable(set_health_provider):
             set_health_provider(self._operation_health_snapshot)
@@ -2793,10 +2865,39 @@ class MultiAgentWorkflowController:
         registration_attribute: str,
         inventory_phase_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
-        """Read registered flows only from the validated inventory's structured workflow attributes."""
+        """Load recorded registration flows first, then pass validated inventory observations as discovery hints."""
 
         flows: list[dict[str, Any]] = []
         seen = set()
+        target_ids = {
+            canonicalize_credential_target(str(target.value)): str(target.target_id)
+            for target in plan.targets
+        }
+        store = _get_database_store()
+        list_flows = getattr(store, "list_authentication_flows", None)
+        if callable(list_flows):
+            for target, target_id in target_ids.items():
+                for stored in list_flows(target, purpose="registration"):
+                    descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
+                    url = str(descriptor.get("url") or descriptor.get("login_url") or "").strip()
+                    roles = tuple(sorted({
+                        str(role).strip() for role in descriptor.get("roles", ["user"]) if str(role).strip()
+                    }))
+                    if not url or not roles:
+                        continue
+                    key = (target, url, roles)
+                    if key not in seen:
+                        seen.add(key)
+                        flow = {
+                            "target": target,
+                            "target_id": target_id,
+                            "url": url,
+                            "roles": roles,
+                        }
+                        success_redirect_url = str(descriptor.get("success_redirect_url") or "")
+                        if success_redirect_url:
+                            flow["success_redirect_url"] = success_redirect_url
+                        flows.append(flow)
         if inventory_phase_ids is None:
             inventory_phase_ids = {
                 phase.id for phase in plan.phases if "inventory_synthesis" in phase.provided_workstreams
@@ -2825,12 +2926,16 @@ class MultiAgentWorkflowController:
                     key = (target, url, roles)
                     if key not in seen:
                         seen.add(key)
-                        flows.append({
+                        flow = {
                             "target": target,
                             "target_id": str(item.get("target_id") or ""),
                             "url": url,
                             "roles": roles,
-                        })
+                        }
+                        success_redirect_url = str(registration.get("success_redirect_url") or "")
+                        if success_redirect_url:
+                            flow["success_redirect_url"] = success_redirect_url
+                        flows.append(flow)
         return flows
 
     def _credential_flow_deficits(self, flow: dict[str, Any], identities_per_role: int) -> dict[str, int]:
@@ -2907,7 +3012,12 @@ class MultiAgentWorkflowController:
                     recovery_context={
                         "conditional_phase": {
                             "kind": phase_kind,
-                            "registration_flow": {"target": target, "url": url, "roles": [role]},
+                            "registration_flow": {
+                                "target": target,
+                                "url": url,
+                                "roles": [role],
+                                "success_redirect_url": str(flow.get("success_redirect_url") or ""),
+                            },
                             "identities_per_role": identities_per_role,
                             "credential_deficits": {role: 1},
                             "credential_slot": {"role": role, "ordinal": slot},
@@ -3863,6 +3973,18 @@ class MultiAgentWorkflowController:
             updated_task = self.state.mark_task(task, "partial_failure", reason)
             self._emit_task_done(updated_task)
             return
+        # Authentication setup runs before prompt construction so the executor sees the actual safe context state,
+        # never raw credentials or a misleading promise that a session is available.
+        authentication_setup = self._run_authentication_agent(plan, task)
+        task = self._apply_authenticated_credential_subset(task, authentication_setup)
+        if self._authentication_agent_tool_names(task) and not authentication_setup.ready:
+            reason = (
+                "Authenticated coverage gap: controller could not establish a validated authentication context "
+                f"({authentication_setup.reason or authentication_setup.status})."
+            )
+            updated_task = self.state.mark_task(task, "partial_failure", reason)
+            self._emit_task_done(updated_task)
+            return
         prompt_memory_records = self._prompt_memory_records(task_uid=task.task_uid)
         try:
             prompt_spec = self._build_task_prompt(plan, phase, task, prompt_memory_records)
@@ -3929,6 +4051,8 @@ class MultiAgentWorkflowController:
             selected_optional_tool_names=selected_tools,
             include_create_tasks=False,
         )
+        if self._authentication_agent_tool_names(task):
+            tools = self._executor_tools_without_authentication_material(tools)
         finding_tool_names = {
             "record_finding_validation",
             "record_objective_validation",
@@ -8563,9 +8687,455 @@ Return JSON exactly: {response_schema}.
         """Return available built-in optional tools required by the frozen task contract."""
 
         available_optional_tools = {get_tool_name(tool) for tool in self.runtime.optional_tools_list}
-        return [
+        names = [
             name for name in required_optional_tool_names(task) if name in available_optional_tools
         ]
+        result = self._authentication_setup_results.get(task.task_uid)
+        if result is not None and not result.ready:
+            names = [name for name in names if name != "authenticated_http_request"]
+        return names
+
+    def _authentication_agent_tool_names(self, task: Task) -> list[str]:
+        """Return the privileged, non-executor tools for one authentication setup run."""
+
+        available_optional_tools = {get_tool_name(tool) for tool in self.runtime.optional_tools_list}
+        return [
+            name
+            for name in authentication_agent_optional_tool_names(task)
+            if name in available_optional_tools
+        ]
+
+    @staticmethod
+    def _authentication_origin(value: str) -> str:
+        """Return one explicit HTTP(S) origin or an empty value for non-browser targets."""
+
+        try:
+            parsed = urlparse(value)
+        except ValueError:
+            return ""
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return ""
+        return f"{parsed.scheme}://{parsed.netloc}"
+
+    def _authentication_flow_descriptors(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        targets: tuple[str, ...],
+    ) -> tuple[dict[str, Any], ...]:
+        """Load only typed, frozen inventory authentication flows for this task."""
+
+        flows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        target_origins = {self._authentication_origin(target) for target in targets}
+        store = _get_database_store()
+        list_flows = getattr(store, "list_authentication_flows", None)
+        if callable(list_flows):
+            for target in targets:
+                for stored in list_flows(canonicalize_credential_target(target)):
+                    raw_flow = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
+                    flow = self._normalized_authentication_flow(raw_flow, target_origins)
+                    if flow:
+                        key = json.dumps(flow, sort_keys=True)
+                        if key not in seen:
+                            seen.add(key)
+                            flows.append(flow)
+        return tuple(flows)
+
+    def _authentication_flow_hints(self, plan: OperationPlan, task: Task) -> tuple[dict[str, Any], ...]:
+        """Return untrusted inventory observations for on-demand flow discovery."""
+
+        references = [*task.evidence, *task.acceptance.basis.source_refs]
+        # Authentication coverage tasks commonly name a protected endpoint, not
+        # the inventory artifact that discovered its login flow. Include all
+        # completed inventory-synthesis evidence as discovery hints. These are
+        # still untrusted hints; the worker must validate before recording a
+        # reusable descriptor.
+        for candidate in self.state.list_tasks():
+            if candidate.status != "done" or self._task_planning_workstream(candidate) != "inventory_synthesis":
+                continue
+            references.extend(candidate.evidence)
+            for result in self.state.list_task_acceptance_results(candidate.task_uid):
+                references.extend(result.evidence_refs)
+        hints: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_reference in references:
+            try:
+                manifest, _snapshot_hash = self._load_controller_inventory_manifest(plan, str(raw_reference))
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            for item in manifest.get("items", []):
+                if not isinstance(item, dict) or item.get("kind") != "workflow":
+                    continue
+                attributes = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+                raw_flow = attributes.get("authentication_flow_hint") or attributes.get("authentication_flow")
+                if not isinstance(raw_flow, dict):
+                    continue
+                hint = {
+                    "kind": str(raw_flow.get("kind") or "").strip(),
+                    "login_url": str(raw_flow.get("login_url") or "").strip(),
+                    "validation_url": str(raw_flow.get("validation_url") or "").strip(),
+                }
+                key = json.dumps(hint, sort_keys=True)
+                if key not in seen:
+                    seen.add(key)
+                    hints.append(hint)
+        return tuple(hints)
+
+    def _normalized_authentication_flow(
+        self, raw_flow: dict[str, Any], target_origins: set[str]
+    ) -> dict[str, Any] | None:
+        login_url = str(raw_flow.get("login_url") or "").strip()
+        validation_url = str(raw_flow.get("validation_url") or "").strip()
+        kind = str(raw_flow.get("kind") or "").strip()
+        if not validation_url or kind not in {
+            "api_form", "browser_form", "browser_redirect", "browser_mfa", "api_key", "oauth2_client"
+        }:
+            return None
+        login_url = login_url or validation_url if kind in {"api_key", "oauth2_client"} else login_url
+        if (
+            not login_url
+            or self._authentication_origin(login_url) not in target_origins
+            or self._authentication_origin(validation_url) not in target_origins
+        ):
+            return None
+        raw_origins = raw_flow.get("allowed_origins")
+        allowed_origins = tuple(
+            origin
+            for origin in (
+                self._authentication_origin(str(value))
+                for value in (raw_origins if isinstance(raw_origins, list) else [])
+            )
+            if origin
+        )
+        return {
+            "flow_id": str(raw_flow.get("flow_id") or "").strip(),
+            "kind": kind,
+            "login_url": login_url,
+            "validation_url": validation_url,
+            "allowed_origins": list(dict.fromkeys((self._authentication_origin(login_url), *allowed_origins))),
+        }
+
+    def _authentication_setup_request(
+        self,
+        plan: OperationPlan,
+        task: Task,
+    ) -> AuthenticationSetupRequest:
+        """Build target and credential metadata without exposing payload values to the worker."""
+
+        targets = tuple(self._task_executable_target_values(plan, task))
+        authentication_flows = self._authentication_flow_descriptors(plan, task, targets)
+        authentication_flow_hints = self._authentication_flow_hints(plan, task)
+        allowed_origins = tuple(dict.fromkeys(filter(
+            None,
+            (
+                *(self._authentication_origin(target) for target in targets),
+                *(origin for flow in authentication_flows for origin in flow["allowed_origins"]),
+            ),
+        )))
+        requested_ids = {
+            str(credential_id).strip()
+            for credential_id in (task.auth_context.get("credential_ids", []) if task.auth_context else [])
+            if str(credential_id).strip()
+        }
+        store = _get_database_store()
+        records = [
+            record
+            for target in targets
+            for record in store.list_credentials(
+                self.runtime.operation_id,
+                target=canonicalize_credential_target(target),
+            )
+        ]
+        credentials = tuple(
+            {
+                "credential_id": str(record.get("credential_id") or ""),
+                "credential_type": str(record.get("credential_type") or ""),
+                "role": str(record.get("role") or ""),
+            }
+            for record in records
+            if str(record.get("credential_id") or "")
+            and (not requested_ids or str(record.get("credential_id")) in requested_ids)
+        )
+        return AuthenticationSetupRequest(
+            task_uid=task.task_uid,
+            workstream=self._task_planning_workstream(task),
+            targets=targets,
+            allowed_origins=allowed_origins,
+            credentials=credentials,
+            authentication_flows=authentication_flows,
+            authentication_flow_hints=authentication_flow_hints,
+        )
+
+    def _record_authentication_setup(
+        self,
+        task: Task,
+        result: AuthenticationSetupResult,
+        setup: AuthenticationSetupRequest | None = None,
+    ) -> AuthenticationSetupResult:
+        """Persist and emit a secret-safe authentication setup outcome before prompt construction."""
+
+        self._authentication_setup_results[task.task_uid] = result
+        eligible_ids = tuple(credential["credential_id"] for credential in (setup.credentials if setup else ()))
+        credential_ids = result.credential_ids or eligible_ids
+        # Keep continuation state explicit and secret-free. A credential
+        # checkout is never equivalent to an authenticated task context.
+        if result.status != "not_required":
+            try:
+                self.state.patch_task(
+                    task.task_uid,
+                    recovery_context_updates={
+                        "authentication_setup": {
+                            "status": result.status,
+                            "reason": result.reason or "",
+                            "credential_ids": list(credential_ids),
+                        }
+                    },
+                )
+            except (OSError, ValueError, StopIteration):
+                logger.warning("Unable to persist authentication setup state task=%s", self._task_label(task))
+        self._emit_workflow_event({
+            "type": "authentication_setup",
+            "task_uid": task.task_uid,
+            "phase": task.phase,
+            "status": result.status,
+            "reason": result.reason or None,
+            "target_ids": list(task.target_ids),
+            "targets": list(setup.targets) if setup else [],
+            "credential_ids": list(credential_ids),
+            "credential_count": len(credential_ids),
+        })
+        self._log_workflow(
+            "authentication setup task=%s status=%s credentials=%s reason=%s",
+            self._task_label(task),
+            result.status,
+            len(credential_ids),
+            result.reason or "none",
+        )
+        return result
+
+    def _apply_authenticated_credential_subset(
+        self,
+        task: Task,
+        result: AuthenticationSetupResult,
+    ) -> Task:
+        """Persist only credentials with a validated opaque context for executor use."""
+
+        if not result.ready or not result.credential_ids:
+            # A stale, model-written context must never survive a failed
+            # validation attempt or make an executor believe it is authenticated.
+            if isinstance(task.auth_context, dict) and task.auth_context:
+                return self.state.patch_task(task.task_uid, auth_context={})
+            return task
+        auth_context = dict(task.auth_context) if isinstance(task.auth_context, dict) else {}
+        auth_context["mode"] = "authenticated"
+        auth_context["credential_ids"] = list(result.credential_ids)
+        return self.state.patch_task(task.task_uid, auth_context=auth_context)
+
+    def _authentication_agent_tools(
+        self,
+        tools: list[Any],
+        allowed_origins: tuple[str, ...],
+        authentication_flows: tuple[dict[str, Any], ...],
+    ) -> list[Any]:
+        """Wrap direct auth-worker navigation so it cannot browse local or unrelated resources."""
+
+        flow_kinds = {str(flow.get("kind") or "") for flow in authentication_flows}
+        allowed_tool_names = {get_tool_name(item) for item in tools}
+        if flow_kinds and "api_form" not in flow_kinds:
+            allowed_tool_names.discard("ensure_authenticated_context")
+        if flow_kinds and not flow_kinds & {"browser_form", "browser_redirect", "browser_mfa"}:
+            allowed_tool_names -= {
+                "browser_goto_url", "browser_observe_page", "browser_get_page_html",
+                "browser_take_screenshot", "browser_perform_action", "capture_browser_authenticated_context",
+            }
+
+        def scoped_browser_tool(original: Any) -> Any:
+            @strands_tool(
+                name="browser_goto_url",
+                inputSchema={
+                    "json": {
+                        "type": "object",
+                        "properties": {"url": {"type": "string"}},
+                        "required": ["url"],
+                    }
+                },
+            )
+            async def scoped_browser_goto_url(url: str) -> Any:
+                origin = MultiAgentWorkflowController._authentication_origin(url)
+                if not origin or origin not in allowed_origins:
+                    raise ValueError("authentication browser navigation is outside the approved origin scope")
+                result = original(url)
+                if inspect.isawaitable(result):
+                    return await result
+                return result
+
+            return scoped_browser_goto_url
+
+        return [
+            scoped_browser_tool(item) if get_tool_name(item) == "browser_goto_url" else item
+            for item in tools if get_tool_name(item) in allowed_tool_names
+        ]
+
+    def _validate_authentication_shell_commands(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        allowed_origins: tuple[str, ...],
+        commands: list[Any],
+    ) -> str | None:
+        """Keep authentication-worker shell traffic within mapped origin scope."""
+
+        existing = self._validate_task_shell_commands(plan, task, commands)
+        if existing:
+            return existing
+        command_text = "\n".join(
+            str(command.get("command", "")) if isinstance(command, dict) else str(command)
+            for command in commands
+        )
+        for literal in _SHELL_URL_LITERAL_PATTERN.findall(command_text):
+            origin = self._authentication_origin(literal.rstrip(".,;:)]}"))
+            if not origin or origin not in allowed_origins:
+                return "The shell command was not executed because its URL is outside the mapped authentication origins."
+        return None
+
+    def _run_authentication_agent(self, plan: OperationPlan, task: Task) -> AuthenticationSetupResult:
+        """Establish or refresh opaque auth state before task-prompt construction."""
+
+        selected_names = self._authentication_agent_tool_names(task)
+        if not selected_names:
+            return self._record_authentication_setup(task, AuthenticationSetupResult("not_required"))
+        try:
+            setup = self._authentication_setup_request(plan, task)
+        except Exception as error:
+            self._log_workflow(
+                "authentication credential lookup failed task=%s reason=%s",
+                self._task_label(task),
+                self._short(error),
+            )
+            return self._record_authentication_setup(
+                task,
+                AuthenticationSetupResult("failed", reason="credential_lookup_failed"),
+            )
+        credential_ids = tuple(credential["credential_id"] for credential in setup.credentials)
+        if not credential_ids:
+            return self._record_authentication_setup(
+                task,
+                AuthenticationSetupResult("unavailable", reason="no_eligible_credentials"),
+                setup,
+            )
+        valid_ids = tuple(
+            credential_id
+            for credential_id in credential_ids
+            if any(
+                authentication_context_is_valid(self.runtime.operation_id, target, credential_id)
+                for target in setup.targets
+            )
+        )
+        if len(valid_ids) == len(credential_ids):
+            return self._record_authentication_setup(task, AuthenticationSetupResult("reused", valid_ids), setup)
+        tools = [
+            tool
+            for tool in self.runtime.optional_tools_list
+            if get_tool_name(tool) in set(selected_names)
+        ]
+        core_tools = self.runtime.core_tools_list or self.runtime.tools_list
+        tools.extend(tool for tool in core_tools if get_tool_name(tool) == "shell")
+        tools = self._authentication_agent_tools(tools, setup.allowed_origins, setup.authentication_flows)
+        prompt = f"""You are the controller-owned authentication worker. This is bounded setup work, not assessment work.
+
+{setup.to_toon()}
+
+Establish a reusable, operation-local authenticated context for the assigned target only. This is not assessment work:
+do not discover targets from files, artifacts, memories, or operation output; do not create artifacts, report findings,
+or explain secret values. Direct browser navigation is limited to the approved origins in the setup contract.
+
+The controller has selected the credential IDs in the setup contract. Check out only one of those IDs when required.
+Do not query credential stores, search memory/files/environment, or write task authentication state. Persisted
+authentication_flows are authoritative. If none applies, use only the supplied
+authentication_flow_hints to observe a flow, call `record_authentication_flow`, then use that recorded flow.
+Do not invent a login, validation, form-field, or redirect URL.
+For a same-origin `api_form`, call `ensure_authenticated_context` with its mapped login and protected validation URLs.
+For a `browser_form`, `browser_mfa`, or `browser_redirect` username/password flow, complete login using the browser;
+never use direct HTTP form login for that flow. Obtain any MFA code with the supplied MFA tools, then call
+`capture_browser_authenticated_context` using a protected validation URL. If a bearer token is in browser storage,
+provide its storage key name only; the capture tool retains the value without returning it.
+
+For an API key or OAuth2 client credential, discover a protected validation route when needed, record an `api_key` or
+`oauth2_client` flow, then call `establish_credential_authenticated_context`; it applies or exchanges the stored
+credential internally and validates the context without returning request material.
+
+Reuse a valid opaque context when one exists. Never call browser cookie extraction or JavaScript token extraction,
+never place session material in text, artifacts, observations, or task acceptance, and finish with a brief status.
+"""
+        policy = AgentRunPolicy(
+            min_tool_calls=1,
+            allow_text_final_after_tools=True,
+            actionless_mode="required_tool",
+            max_actionless_calls=1,
+            max_agent_calls=12,
+            max_model_turns=24,
+            terminal_reason="authentication_agent_done",
+            terminal_message="Authentication worker completed bounded context setup",
+            recovery_objective=task.objective,
+            recovery_next_action="Establish or refresh the opaque authenticated context.",
+        )
+        self._log_workflow(
+            "running authentication worker task=%s tools=%s",
+            self._task_label(task),
+            ",".join(selected_names),
+        )
+        try:
+            with scoped_shell_command_validator(
+                lambda commands: self._validate_authentication_shell_commands(
+                    plan, task, setup.allowed_origins, commands
+                )
+            ):
+                self._run_worker_agent(
+                    "authentication_agent",
+                    prompt,
+                    tools,
+                    "Perform only bounded authentication setup. Secret values must not appear in your response.",
+                    policy,
+                )
+        except Exception as error:
+            self._log_workflow(
+                "authentication worker failed task=%s reason=%s",
+                self._task_label(task),
+                self._short(error),
+            )
+            return self._record_authentication_setup(
+                task,
+                AuthenticationSetupResult("failed", reason="worker_error"),
+                setup,
+            )
+        refreshed_setup = self._authentication_setup_request(plan, task)
+        valid_ids = tuple(
+            credential_id
+            for credential_id in credential_ids
+            if any(
+                authentication_context_is_valid(self.runtime.operation_id, target, credential_id)
+                for target in setup.targets
+            )
+        )
+        result = (
+            AuthenticationSetupResult("established", valid_ids)
+            if len(valid_ids) == len(credential_ids)
+            else AuthenticationSetupResult(
+                "partial" if valid_ids else "failed", valid_ids, "context_validation_failed"
+            )
+        )
+        return self._record_authentication_setup(task, result, refreshed_setup)
+
+    @staticmethod
+    def _executor_tools_without_authentication_material(tools: list[Any]) -> list[Any]:
+        """Keep session extraction and credential checkout out of normal executor context."""
+
+        protected_names = CREDENTIAL_OPTIONAL_TOOL_NAMES - {"authenticated_http_request"}
+        protected_names |= {
+            "browser_get_cookies", "browser_evaluate_js", "browser_set_headers", "shell",
+        }
+        return [tool for tool in tools if get_tool_name(tool) not in protected_names]
 
     def _credential_execution_guidance_for_task(self, task: Task) -> str:
         """Render credential directions only when task metadata injects credential tools."""
@@ -8574,6 +9144,14 @@ Return JSON exactly: {response_schema}.
             return self._credential_provisioning_execution_guidance()
         selected_names = set(self._required_optional_tool_names(task))
         credential_names = selected_names & CREDENTIAL_OPTIONAL_TOOL_NAMES
+        authentication_result = self._authentication_setup_results.get(task.task_uid)
+        if authentication_result is not None and authentication_result.status in {"unavailable", "failed"}:
+            return (
+                "- Authenticated coverage is unavailable for this task "
+                f"(controller status: {authentication_result.status}; reason: {authentication_result.reason or 'none'}). "
+                "Do not obtain credentials or construct session material. Record the resulting authenticated coverage gap "
+                "using current-operation evidence."
+            )
         if not credential_names:
             return ""
         guidance = self._credential_execution_guidance(credential_names)
@@ -12424,6 +13002,13 @@ while planning.
                 "artifacts, acceptance summaries, findings, or prose."
             ),
         ]
+        if "authenticated_http_request" in authorized:
+            lines.append(
+                "- A controller-owned authentication context is ready for this task. Use "
+                "`authenticated_http_request` only for this task's authenticated comparison; do not perform "
+                "credential setup, an unauthenticated baseline, or obtain, construct, or copy cookies or "
+                "Authorization headers."
+            )
         if "plan_authenticated_coverage" in authorized:
             lines.append(
                 "- For authentication-capable work, establish the unauthenticated baseline before using credentials. "
@@ -12440,6 +13025,12 @@ while planning.
             lines.append(
                 "- Self-registration uses a controller-owned provisioning profile; follow the task-specific browser and "
                 "credential instructions for the mapped registration flow."
+            )
+        if "record_authentication_flow" in authorized:
+            lines.append(
+                "- After observing a registration or authentication flow, record only its secret-free, target-scoped "
+                "descriptor so later operations can reuse setup metadata; never include query values, session values, "
+                "or credentials."
             )
         if "mark_credential_status" in authorized:
             lines.append(
@@ -12515,6 +13106,18 @@ while planning.
                 "`evidence_refs`; omit operation_scope. Do not use `email_login`: it is only for an IMAP mailbox "
                 "credential. If the mapped flow is unavailable, blocked, or fails, record one evidence-backed "
                 "coverage gap with `store_observation`; never invent an account, bypass controls, or create a finding."
+            ),
+            (
+                "- Treat a same-target redirect from the mapped registration route to its mapped login route as "
+                "registration success unless the resulting page shows a concrete registration error. Immediately store "
+                "the generated credential, then record that redirect as `success_redirect_url` in the registration "
+                "flow descriptor. A redirect to another origin is not itself registration success."
+            ),
+            (
+                "- After observing the mapped form, call `record_authentication_flow` with "
+                "`purpose=\"registration\"`, `kind=\"browser_registration\"`, the mapped `login_url`, and the "
+                "assigned role. Include `success_redirect_url` when that success signal was observed. Record only a "
+                "clean target-scoped URL, never query values, credentials, or cookies."
             ),
         ])
 

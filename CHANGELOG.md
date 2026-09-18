@@ -2,6 +2,15 @@
 
 ### Features
 
+- Persist secret-free, target-scoped authentication-flow descriptors discovered on demand, so later operations can
+  reuse validated login or protected-resource setup metadata while inventory observations remain untrusted hints.
+- Add typed, frozen authentication-flow descriptors to attack-surface inventory and pass only matching login,
+  validation, and redirect-origin metadata to the controller authentication worker; browser username/password flows
+  now use the shared browser, while mapped API forms retain direct opaque-context setup and scoped shell access.
+- Add a controller-owned authentication worker and operation-memory authenticated HTTP contexts that retain validated
+  session cookies or authorization tokens without exposing them to task executors, logs, artifacts, reports, or
+  persistent workflow state; the worker supports mapped API forms, browser and MFA flows, OAuth2 client credentials,
+  and configured API keys.
 - Capture full-page browser screenshots as durable artifacts for visual workflow evidence, including self-registration outcomes.
 - Preserve deterministic self-registration and authentication workflow metadata from SPA JavaScript routes, and
   require client-side API mapping tasks to run the scoped bundle-inventory tool before inventory synthesis.
@@ -63,6 +72,19 @@
 
 ### Fixes
 
+- Prevent failed authentication setup from reaching a task executor with a stale authenticated marker. Authentication
+  setup is now persisted as secret-free controller state, uses a narrow login/MFA-only worker bundle, and records an
+  explicit authenticated-coverage gap when validation fails. Self-registration flows now retain a same-target login
+  redirect as an evidence-backed success signal for later reuse.
+- Compare credential target URLs by parsed scheme, host, port, and path boundaries; register checked-out credential
+  secrets with runtime redaction; and keep authenticated execution available for the valid credential subset when a
+  multi-credential setup only partially succeeds.
+- Make controller authentication setup read the SQLite credential store, so registered same-target credentials remain
+  eligible across operation continuations and later operations; record a redacted pre-prompt setup outcome for every
+  authentication decision.
+- Supply the controller-owned authentication worker with frozen target, credential-ID, and origin context; skip it
+  when credentials are unavailable, gate executor request access on validated opaque sessions, and reject local or
+  unrelated direct browser navigation during authentication setup.
 - Preserve non-secret `credential_id` metadata in diagnostic redaction while continuing to mask credential payloads.
 - Replace the misleading four-request credential-registration cap with a one-credential task-result bound, so browser
   interactions and credential-storage corrections are not mistaken for request-budget exhaustion.
