@@ -72,6 +72,11 @@
 
 ### Fixes
 
+- Make artifact byte-page validation errors identify the invalid parameter, supplied value, and applicable limit.
+- Preserve the secret-free browser storage-key metadata needed by browser authentication flows, so opaque contexts
+  capture required bearer tokens alongside cookies and reject role-inaccessible validation routes before reuse.
+- Version authentication and registration flow descriptors so stale stored flow contracts are ignored and rediscovered
+  after future authentication-flow behavior changes.
 - Repair unbalanced structured JSON responses by conservatively closing missing object and array delimiters while
   rejecting mismatched delimiters and unterminated strings.
 - Reset cookies, client storage, and session headers before each browser-based credential authentication worker while

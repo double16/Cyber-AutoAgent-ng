@@ -57,7 +57,13 @@ def test_auth_chain_flow_descriptors_keep_only_observed_login_and_validation_rou
     flows = aca._authentication_flow_descriptors(
         "https://target.test",
         [
-            {"path": "/login", "full_url": "https://target.test/login", "status": "200", "type": "Session-based"},
+            {
+                "path": "/login",
+                "full_url": "https://target.test/login",
+                "status": "200",
+                "type": "Session-based",
+                "authorization_storage_key": "token",
+            },
             {"path": "/api/config", "full_url": "https://target.test/api/config", "status": "401", "type": "Generic Authentication"},
         ],
     )
@@ -65,11 +71,27 @@ def test_auth_chain_flow_descriptors_keep_only_observed_login_and_validation_rou
     assert flows == [{
         "flow_id": "auth-flow-1",
         "kind": "browser_form",
+        "flow_version": aca.AUTHENTICATION_FLOW_VERSION,
         "login_url": "https://target.test/login",
         "validation_url": "https://target.test/api/config",
+        "authorization_storage_key": "token",
         "allowed_origins": ["https://target.test"],
         "evidence": {"login_endpoint": "/login", "validation_endpoint": "/api/config"},
     }]
+
+
+def test_browser_flow_prefers_observed_user_route_over_forbidden_privileged_api():
+    flows = aca._authentication_flow_descriptors(
+        "https://target.test",
+        [
+            {"path": "/login", "full_url": "https://target.test/login", "status": "200", "type": "Session-based"},
+            {"path": "/api/products", "full_url": "https://target.test/api/products", "status": "403", "type": "Generic Authentication"},
+            {"path": "/userprofile", "full_url": "https://target.test/userprofile", "status": "200", "type": "Generic"},
+        ],
+    )
+
+    assert flows[0]["validation_url"] == "https://target.test/userprofile"
+    assert flows[0]["evidence"]["validation_endpoint"] == "/userprofile"
 
 
 def test_auth_chain_reuses_cache_for_normalized_target(monkeypatch):

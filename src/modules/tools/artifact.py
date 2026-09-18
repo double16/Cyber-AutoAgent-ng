@@ -393,11 +393,22 @@ def create_artifact_reader(context_window_tokens: int, *, max_output_chars: int 
                 start_byte = 0
             if start_byte is not None or max_bytes is not None:
                 if start_byte is None or max_bytes is None:
-                    raise ValueError("byte paging requires start_byte and max_bytes")
+                    missing = "start_byte" if start_byte is None else "max_bytes"
+                    raise ValueError(
+                        f"byte paging requires both start_byte and max_bytes; missing {missing}"
+                    )
                 if start_line is not None and start_byte > 0:
-                    raise ValueError("start_line requires start_byte to be zero")
-                if max_bytes < 1 or max_bytes > artifact_max_bytes_for_context_window(context_window_tokens):
-                    raise ValueError("max_bytes exceeds the artifact reader page budget")
+                    raise ValueError(
+                        f"start_line requires start_byte=0: start_line={start_line} cannot be combined with "
+                        f"start_byte={start_byte}; omit start_line or use start_byte=0"
+                    )
+                max_page_bytes = artifact_max_bytes_for_context_window(context_window_tokens)
+                if max_bytes < 1:
+                    raise ValueError(f"max_bytes={max_bytes} must be at least 1 byte")
+                if max_bytes > max_page_bytes:
+                    raise ValueError(
+                        f"max_bytes={max_bytes} exceeds the maximum byte page size of {max_page_bytes} bytes"
+                    )
                 byte_max_lines = max_lines if max_lines is not None else (200 if start_line is not None else None)
                 return _read_artifact_bytes(
                     path,
@@ -538,11 +549,26 @@ def create_bounded_artifact_reader(
             start_byte = 0
         byte_mode = start_byte is not None or max_bytes is not None
         if byte_mode and (start_byte is None or max_bytes is None):
-            raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte page parameters are invalid")
-        if byte_mode and not 1 <= max_bytes <= resolved_max_bytes:
-            raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte page parameters are invalid")
+            missing = "start_byte" if start_byte is None else "max_bytes"
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte paging requires both start_byte and max_bytes; "
+                f"missing {missing}"
+            )
+        if byte_mode and max_bytes < 1:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: max_bytes={max_bytes} must be at least 1 byte"
+            )
+        if byte_mode and max_bytes > resolved_max_bytes:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: max_bytes={max_bytes} exceeds the maximum "
+                f"byte page size of {resolved_max_bytes} bytes"
+            )
         if byte_mode and start_line is not None and start_byte > 0:
-            raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte page parameters are invalid")
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: start_line requires start_byte=0: "
+                f"start_line={start_line} cannot be combined with start_byte={start_byte}; "
+                "omit start_line or use start_byte=0"
+            )
         if byte_mode and resolved in terminal_byte_page_guards:
             return guide_once(
                 resolved,

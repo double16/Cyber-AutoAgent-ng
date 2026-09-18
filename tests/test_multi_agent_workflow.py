@@ -438,8 +438,10 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
             {
                 "flow_id": "flow-1",
                 "kind": "browser_form",
+                "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
                 "login_url": "https://target.test/login",
                 "validation_url": "https://target.test/account",
+                "authorization_storage_key": "token",
                 "allowed_origins": ["https://target.test"],
             },
         ),
@@ -463,6 +465,7 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
     assert "authentication_setup" in prompt
     assert "credential-1" in prompt
     assert "https://target.test/login" in prompt
+    assert "token" in prompt
     assert "capture_browser_authenticated_context" in prompt
     assert {"checkout_credential", "generate_mfa_code"}.issubset(tool_names)
     assert "set_task_auth_context" not in tool_names
@@ -726,6 +729,7 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
         "_authentication_flow_descriptors",
         lambda *_args: ({
             "flow_id": "flow-1", "kind": "api_form", "login_url": "https://target.test/login",
+            "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
             "validation_url": "https://target.test/account", "allowed_origins": ["https://target.test"],
         },),
     )
@@ -6527,12 +6531,22 @@ def test_credential_registration_uses_durable_descriptor_before_inventory_hints(
         state_store=FakeState(plan),
     )
     store = SimpleNamespace(
-        list_authentication_flows=Mock(return_value=[{
-            "descriptor": {
-                "url": "https://target.test/register",
-                "roles": ["member"],
+        list_authentication_flows=Mock(return_value=[
+            {
+                "descriptor": {
+                    "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION - 1,
+                    "url": "https://target.test/old-register",
+                    "roles": ["member"],
+                },
             },
-        }]),
+            {
+                "descriptor": {
+                    "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+                    "url": "https://target.test/register",
+                    "roles": ["member"],
+                },
+            },
+        ]),
     )
     monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
 
@@ -6543,6 +6557,7 @@ def test_credential_registration_uses_durable_descriptor_before_inventory_hints(
         "target_id": "target-1",
         "url": "https://target.test/register",
         "roles": ("member",),
+        "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
     }]
     assert store.list_authentication_flows.call_args.kwargs == {"purpose": "registration"}
 

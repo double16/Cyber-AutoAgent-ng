@@ -450,6 +450,39 @@ def test_bounded_reader_defaults_byte_page_to_zero_offset(tmp_path: Path):
         )
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"start_byte": 1}, "missing max_bytes"),
+        ({"max_bytes": 0}, "max_bytes=0 must be at least 1 byte"),
+        ({"max_bytes": 100_000}, "max_bytes=100000 exceeds the maximum byte page size of 19200 bytes"),
+        (
+            {"start_line": 1, "start_byte": 1, "max_bytes": 3},
+            "start_line requires start_byte=0",
+        ),
+    ],
+)
+def test_artifact_readers_report_specific_byte_page_validation_errors(
+    tmp_path: Path,
+    kwargs: dict[str, int],
+    message: str,
+):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("evidence", encoding="utf-8")
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        with pytest.raises(ValueError, match=message):
+            READ_ARTIFACT(str(artifact), **kwargs)
+
+        bounded_reader = create_bounded_artifact_reader(
+            max_reads=1,
+            context_window_tokens=48_000,
+            allowed_artifact_refs=[str(artifact)],
+        )
+        with pytest.raises(RuntimeError, match=f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}:.*{message}"):
+            bounded_reader(str(artifact), **kwargs)
+
+
 def test_bounded_reader_allows_paginated_authorized_artifact_reads(tmp_path: Path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()

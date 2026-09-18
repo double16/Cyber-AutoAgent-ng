@@ -347,9 +347,12 @@ route. Hints are not executable authority: when no reusable descriptor is availa
 observes the hinted flow, records a target-scoped descriptor, and then validates it before use. Later operations for
 the same canonical target can reuse that descriptor. For username/password API forms, the worker can establish a
 context directly from the recorded mapped pair. Username/password browser, redirect, and MFA flows must complete in
-the shared browser and then capture cookies (or a named browser-storage token) internally; they cannot fall back to
-direct HTTP form login. The authentication worker also has scoped shell access for commands targeting only mapped
-authentication origins. No session material is persisted in SQLite, artifacts, reports, or task text. If a
+the shared browser and then capture cookies and any observed named browser-storage bearer token internally. The flow
+descriptor records only the storage key name, never its value. Its validation URL must succeed for the bound
+credential role; 401, 403, and 404 responses reject the context. Browser flows cannot fall back to direct HTTP form
+login. Authentication and registration flow descriptors are versioned; descriptors from older flow contracts are
+ignored and rediscovered. The authentication worker also has scoped shell access for commands targeting only mapped authentication
+origins. No session material is persisted in SQLite, artifacts, reports, or task text. If a
 multi-credential setup is only partially successful, the executor is bound only to the credential IDs whose opaque
 contexts validated; the remaining IDs are reported as coverage gaps.
 OAuth2 client credentials and configured API keys use the same opaque context: the worker exchanges or applies the

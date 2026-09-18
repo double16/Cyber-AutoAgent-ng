@@ -104,6 +104,7 @@ from modules.tools.artifact import (
 from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.tools.authentication import (
     AUTHENTICATION_FLOW_KINDS,
+    AUTHENTICATION_FLOW_VERSION,
     authentication_context_is_valid,
     build_record_authentication_flow_tool,
 )
@@ -1158,7 +1159,9 @@ class AuthenticationSetupRequest:
             "  "
             + ",".join(
                 sanitize_toon_value(str(flow.get(field) or ""))
-                for field in ("flow_id", "kind", "login_url", "validation_url")
+                for field in (
+                    "flow_id", "kind", "flow_version", "login_url", "validation_url", "authorization_storage_key"
+                )
             )
             + ","
             + sanitize_toon_value("|".join(flow.get("allowed_origins") or []))
@@ -1167,7 +1170,7 @@ class AuthenticationSetupRequest:
         hint_rows = "\n".join(
             "  " + ",".join(
                 sanitize_toon_value(str(hint.get(field) or ""))
-                for field in ("kind", "login_url", "validation_url")
+                for field in ("kind", "flow_version", "login_url", "validation_url", "authorization_storage_key")
             )
             for hint in self.authentication_flow_hints
         ) or "  <none>"
@@ -1179,9 +1182,10 @@ class AuthenticationSetupRequest:
             f"{sanitize_toon_value('|'.join(self.allowed_origins))}\n"
             f"eligible_credentials[{len(self.credentials)}]{{credential_id,credential_type,role,target}}:\n{rows}\n"
             f"authentication_flows[{len(self.authentication_flows)}]"
-            "{flow_id,kind,login_url,validation_url,allowed_origins}:\n"
+            "{flow_id,kind,flow_version,login_url,validation_url,authorization_storage_key,allowed_origins}:\n"
             f"{flow_rows}"
-            f"\nauthentication_flow_hints[{len(self.authentication_flow_hints)}]{{kind,login_url,validation_url}}:\n"
+            f"\nauthentication_flow_hints[{len(self.authentication_flow_hints)}]"
+            "{kind,flow_version,login_url,validation_url,authorization_storage_key}:\n"
             f"{hint_rows}"
         )
 
@@ -2885,6 +2889,8 @@ class MultiAgentWorkflowController:
             for target, target_id in target_ids.items():
                 for stored in list_flows(target, purpose="registration"):
                     descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
+                    if descriptor.get("flow_version") != AUTHENTICATION_FLOW_VERSION:
+                        continue
                     url = str(descriptor.get("url") or descriptor.get("login_url") or "").strip()
                     roles = tuple(sorted({
                         str(role).strip() for role in descriptor.get("roles", ["user"]) if str(role).strip()
@@ -2899,6 +2905,7 @@ class MultiAgentWorkflowController:
                             "target_id": target_id,
                             "url": url,
                             "roles": roles,
+                            "flow_version": descriptor.get("flow_version"),
                         }
                         success_redirect_url = str(descriptor.get("success_redirect_url") or "")
                         if success_redirect_url:
@@ -8803,8 +8810,10 @@ Return JSON exactly: {response_schema}.
                     continue
                 hint = {
                     "kind": str(raw_flow.get("kind") or "").strip(),
+                    "flow_version": raw_flow.get("flow_version"),
                     "login_url": str(raw_flow.get("login_url") or "").strip(),
                     "validation_url": str(raw_flow.get("validation_url") or "").strip(),
+                    "authorization_storage_key": str(raw_flow.get("authorization_storage_key") or "").strip(),
                 }
                 key = json.dumps(hint, sort_keys=True)
                 if key not in seen:
@@ -8818,6 +8827,10 @@ Return JSON exactly: {response_schema}.
         login_url = str(raw_flow.get("login_url") or "").strip()
         validation_url = str(raw_flow.get("validation_url") or "").strip()
         kind = str(raw_flow.get("kind") or "").strip()
+        flow_version = raw_flow.get("flow_version")
+        authorization_storage_key = str(raw_flow.get("authorization_storage_key") or "").strip()
+        if flow_version != AUTHENTICATION_FLOW_VERSION:
+            return None
         if not validation_url or kind not in {
             "api_form", "browser_form", "browser_redirect", "browser_mfa", "api_key", "oauth2_client"
         }:
@@ -8828,6 +8841,8 @@ Return JSON exactly: {response_schema}.
             or self._authentication_origin(login_url) not in target_origins
             or self._authentication_origin(validation_url) not in target_origins
         ):
+            return None
+        if authorization_storage_key and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}", authorization_storage_key):
             return None
         raw_origins = raw_flow.get("allowed_origins")
         allowed_origins = tuple(
@@ -8841,8 +8856,10 @@ Return JSON exactly: {response_schema}.
         return {
             "flow_id": str(raw_flow.get("flow_id") or "").strip(),
             "kind": kind,
+            "flow_version": flow_version,
             "login_url": login_url,
             "validation_url": validation_url,
+            "authorization_storage_key": authorization_storage_key,
             "allowed_origins": list(dict.fromkeys((self._authentication_origin(login_url), *allowed_origins))),
         }
 
@@ -9157,9 +9174,10 @@ Establish an opaque authenticated context for this one credential and target onl
 credential ID. Use the supplied persisted flow descriptor; do not discover, query for, or switch to another credential.
 For `api_form`, call `ensure_authenticated_context` with the credential ID only: it resolves the stored flow internally.
 For browser, redirect, or MFA flows, complete only the supplied flow and capture its context using the mapped validation
-URL through `capture_browser_authenticated_context`. A credential rejection or validation failure ends this worker; do
-not retry with another credential. Never expose session material or secret values in text, artifacts, observations, or
-task acceptance.
+URL through `capture_browser_authenticated_context`. Pass the descriptor's `authorization_storage_key` when present;
+it is a key name only, never a token value. A credential rejection or validation failure ends this worker; do not retry
+with another credential. Never expose session material or secret values in text, artifacts, observations, or task
+acceptance.
 """
         policy = AgentRunPolicy(
             min_tool_calls=1,
@@ -9191,15 +9209,23 @@ task acceptance.
         if not callable(list_flows) or not callable(upsert):
             return
         expected = {
-            (str(flow.get("kind") or ""), str(flow.get("login_url") or ""), str(flow.get("validation_url") or ""))
+            (
+                str(flow.get("kind") or ""),
+                flow.get("flow_version"),
+                str(flow.get("login_url") or ""),
+                str(flow.get("validation_url") or ""),
+                str(flow.get("authorization_storage_key") or ""),
+            )
             for flow in flows
         }
         for stored in list_flows(canonicalize_credential_target(target), purpose="authentication"):
             descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
             key = (
                 str(descriptor.get("kind") or ""),
+                descriptor.get("flow_version"),
                 str(descriptor.get("login_url") or ""),
                 str(descriptor.get("validation_url") or ""),
+                str(descriptor.get("authorization_storage_key") or ""),
             )
             if key in expected:
                 upsert(self.runtime.operation_id, descriptor, status="validated")

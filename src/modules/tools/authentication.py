@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from base64 import b64encode
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -38,6 +39,8 @@ AUTHENTICATION_FLOW_KINDS = frozenset({
     "oauth2_client",
 })
 REGISTRATION_FLOW_KINDS = frozenset({"browser_registration", "api_registration"})
+AUTHENTICATION_FLOW_VERSION = 2
+_AUTHORIZATION_STORAGE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 
 
 def _credential_target_url_contains(target: str, candidate: str, *, label: str) -> bool:
@@ -71,6 +74,21 @@ def _safe_flow_descriptor_url(target: str, value: str, *, label: str) -> str:
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError(f"{label} must not contain user info, query values, or fragments")
     return value
+
+
+def _safe_authorization_storage_key(value: str) -> str:
+    """Validate a secret-free browser storage key name for a flow descriptor."""
+
+    normalized = str(value or "").strip()
+    if normalized and not _AUTHORIZATION_STORAGE_KEY_PATTERN.fullmatch(normalized):
+        raise ValueError("authorization storage key must be a simple browser storage key name")
+    return normalized
+
+
+def _is_current_authentication_flow(descriptor: dict[str, Any]) -> bool:
+    """Return whether a persisted flow uses the current descriptor contract."""
+
+    return descriptor.get("flow_version") == AUTHENTICATION_FLOW_VERSION
 
 
 def _context_key(operation_id: str, target: str, credential_id: str) -> tuple[str, str, str]:
@@ -137,6 +155,8 @@ def _stored_api_form_flow(target: str) -> dict[str, Any]:
     candidates = []
     for stored in _get_database_store().list_authentication_flows(target, purpose="authentication"):
         descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
+        if not _is_current_authentication_flow(descriptor):
+            continue
         if str(descriptor.get("kind") or "") != "api_form":
             continue
         login_url = str(descriptor.get("login_url") or "").strip()
@@ -201,6 +221,7 @@ def record_authentication_flow(
     kind: str = "",
     login_url: str = "",
     validation_url: str = "",
+    authorization_storage_key: str = "",
     request_format: str = "",
     allowed_origins: list[str] | None = None,
     purpose: str = "authentication",
@@ -241,8 +262,11 @@ def record_authentication_flow(
     effective_login_url = _safe_flow_descriptor_url(target, effective_login_url, label="login_url")
     if purpose == "authentication":
         validation_url = _safe_flow_descriptor_url(target, validation_url, label="validation_url")
+        authorization_storage_key = _safe_authorization_storage_key(authorization_storage_key)
     elif validation_url:
         raise ValueError("registration flow recording does not accept validation_url")
+    elif authorization_storage_key:
+        raise ValueError("registration flow recording does not accept an authorization storage key")
     if purpose == "authentication" and success_redirect_url:
         raise ValueError("authentication flow recording does not accept success_redirect_url")
     if purpose == "registration" and success_redirect_url:
@@ -259,8 +283,10 @@ def record_authentication_flow(
         "target": target,
         "purpose": purpose,
         "kind": kind,
+        "flow_version": AUTHENTICATION_FLOW_VERSION,
         "login_url": effective_login_url,
         "validation_url": validation_url if purpose == "authentication" else "",
+        "authorization_storage_key": authorization_storage_key if purpose == "authentication" else "",
         "url": effective_login_url if purpose == "registration" else "",
         "request_format": request_format if request_format in {"", "json", "form"} else "",
         "allowed_origins": list(dict.fromkeys([f"{urlsplit(target).scheme}://{urlsplit(target).netloc}", *normalized_origins])),
@@ -316,6 +342,7 @@ def build_record_authentication_flow_tool(
     def record_bound_authentication_flow(
         login_url: str,
         validation_url: str = "",
+        authorization_storage_key: str = "",
         request_format: str = "",
         success_redirect_url: str = "",
         identity_fields: list[str] | None = None,
@@ -330,6 +357,7 @@ def build_record_authentication_flow_tool(
             kind=normalized_kind,
             login_url=login_url,
             validation_url=validation_url,
+            authorization_storage_key=authorization_storage_key,
             request_format=request_format,
             allowed_origins=list(normalized_origins),
             purpose=normalized_purpose,
@@ -345,6 +373,10 @@ def build_record_authentication_flow_tool(
         properties = {
             "login_url": {"type": "string", "description": "Observed same-target login URL."},
             "validation_url": {"type": "string", "description": "Observed same-target protected validation URL."},
+            "authorization_storage_key": {
+                "type": "string",
+                "description": "Observed localStorage or sessionStorage bearer-token key; never a token value.",
+            },
             "request_format": {"type": "string", "enum": ["", "json", "form"]},
         }
     else:
@@ -463,6 +495,7 @@ async def capture_browser_authenticated_context(
     target = str(record["target"]).rstrip("/")
     if not _credential_target_url_contains(target, validation_url, label="validation_url"):
         raise ValueError("validation URL must share the credential target origin")
+    authorization_storage_key = _safe_authorization_storage_key(authorization_storage_key)
     session = requests.Session()
     headers: dict[str, str] = {}
     async with get_browser() as browser:

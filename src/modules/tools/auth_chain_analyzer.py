@@ -16,6 +16,7 @@ import requests
 import urllib3
 from strands import tool
 
+from modules.tools.authentication import AUTHENTICATION_FLOW_VERSION
 from modules.tools.result_cache import (
     build_result_cache_key,
     cache_result,
@@ -1399,6 +1400,10 @@ def _authentication_flow_descriptors(
             endpoint for endpoint in endpoint_records
             if any(token in str(endpoint.get("path") or "").lower() for token in ("profile", "account", "dashboard"))
         ]
+    user_scoped = [
+        endpoint for endpoint in endpoint_records
+        if any(token in str(endpoint.get("path") or "").lower() for token in ("profile", "account", "dashboard"))
+    ]
 
     descriptors = []
     for endpoint in endpoint_records:
@@ -1415,9 +1420,16 @@ def _authentication_flow_descriptors(
             flow_kind = "browser_mfa"
         else:
             flow_kind = "browser_form"
+        validation_candidates = protected
+        if flow_kind == "browser_form":
+            # A browser-form login commonly lands on a user-scoped page while
+            # administrative APIs may correctly remain forbidden to that role.
+            # Prefer an observed user route, then let authenticated capture
+            # confirm that the selected route is actually accessible.
+            validation_candidates = [*user_scoped, *protected]
         validation = next(
             (
-                candidate for candidate in protected
+                candidate for candidate in validation_candidates
                 if str(candidate.get("full_url") or candidate.get("url") or "").strip() != login_url
             ),
             None,
@@ -1427,8 +1439,10 @@ def _authentication_flow_descriptors(
             {
                 "flow_id": f"auth-flow-{len(descriptors) + 1}",
                 "kind": flow_kind,
+                "flow_version": AUTHENTICATION_FLOW_VERSION,
                 "login_url": login_url,
                 "validation_url": validation_url,
+                "authorization_storage_key": str(endpoint.get("authorization_storage_key") or "").strip(),
                 "allowed_origins": [target_origin] if target_origin else [],
                 "evidence": {
                     "login_endpoint": str(endpoint.get("path") or ""),
