@@ -30,6 +30,7 @@ Fatal failures such as budget exhaustion still propagate to the caller so the
 CLI can preserve its existing report generation and cleanup behavior.
 """
 
+import asyncio
 import hashlib
 import inspect
 import ipaddress
@@ -101,7 +102,12 @@ from modules.tools.artifact import (
     resolve_tool_result_max_chars,
 )
 from modules.tools.artifact_references import normalize_artifact_reference_token
-from modules.tools.authentication import authentication_context_is_valid
+from modules.tools.authentication import (
+    AUTHENTICATION_FLOW_KINDS,
+    authentication_context_is_valid,
+    build_record_authentication_flow_tool,
+)
+from modules.tools.browser import reset_authentication_browser_session
 from modules.tools.credentials import canonicalize_credential_target
 from modules.tools.memory import (
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
@@ -1144,7 +1150,7 @@ class AuthenticationSetupRequest:
             "  "
             + ",".join(
                 sanitize_toon_value(credential.get(key, ""))
-                for key in ("credential_id", "credential_type", "role")
+                for key in ("credential_id", "credential_type", "role", "target")
             )
             for credential in self.credentials
         ) or "  <none>"
@@ -1171,7 +1177,7 @@ class AuthenticationSetupRequest:
             f"{sanitize_toon_value(self.workstream)},"
             f"{sanitize_toon_value('|'.join(self.targets))},"
             f"{sanitize_toon_value('|'.join(self.allowed_origins))}\n"
-            f"eligible_credentials[{len(self.credentials)}]{{credential_id,credential_type,role}}:\n{rows}\n"
+            f"eligible_credentials[{len(self.credentials)}]{{credential_id,credential_type,role,target}}:\n{rows}\n"
             f"authentication_flows[{len(self.authentication_flows)}]"
             "{flow_id,kind,login_url,validation_url,allowed_origins}:\n"
             f"{flow_rows}"
@@ -2897,6 +2903,10 @@ class MultiAgentWorkflowController:
                         success_redirect_url = str(descriptor.get("success_redirect_url") or "")
                         if success_redirect_url:
                             flow["success_redirect_url"] = success_redirect_url
+                        for field_key in ("identity_fields", "required_fields", "optional_fields"):
+                            fields = descriptor.get(field_key)
+                            if isinstance(fields, list) and fields:
+                                flow[field_key] = [str(field).strip() for field in fields if str(field).strip()]
                         flows.append(flow)
         if inventory_phase_ids is None:
             inventory_phase_ids = {
@@ -2935,6 +2945,10 @@ class MultiAgentWorkflowController:
                         success_redirect_url = str(registration.get("success_redirect_url") or "")
                         if success_redirect_url:
                             flow["success_redirect_url"] = success_redirect_url
+                        for field_key in ("identity_fields", "required_fields", "optional_fields"):
+                            fields = registration.get(field_key)
+                            if isinstance(fields, list) and fields:
+                                flow[field_key] = [str(field).strip() for field in fields if str(field).strip()]
                         flows.append(flow)
         return flows
 
@@ -3017,6 +3031,9 @@ class MultiAgentWorkflowController:
                                 "url": url,
                                 "roles": [role],
                                 "success_redirect_url": str(flow.get("success_redirect_url") or ""),
+                                "identity_fields": list(flow.get("identity_fields") or []),
+                                "required_fields": list(flow.get("required_fields") or []),
+                                "optional_fields": list(flow.get("optional_fields") or []),
                             },
                             "identities_per_role": identities_per_role,
                             "credential_deficits": {role: 1},
@@ -4051,6 +4068,19 @@ class MultiAgentWorkflowController:
             selected_optional_tool_names=selected_tools,
             include_create_tasks=False,
         )
+        if self._is_credential_provisioning_task(task):
+            conditional = task.recovery_context.get("conditional_phase", {})
+            registration_flow = conditional.get("registration_flow", {}) if isinstance(conditional, dict) else {}
+            registration_target = str(registration_flow.get("target") or "").rstrip("/")
+            registration_roles = registration_flow.get("roles", [])
+            tools = [tool for tool in tools if get_tool_name(tool) != "record_authentication_flow"]
+            tools.append(build_record_authentication_flow_tool(
+                target=registration_target,
+                purpose="registration",
+                kind="browser_registration",
+                allowed_origins=(registration_target,),
+                roles=registration_roles if isinstance(registration_roles, list) else (),
+            ))
         if self._authentication_agent_tool_names(task):
             tools = self._executor_tools_without_authentication_material(tools)
         finding_tool_names = {
@@ -8839,21 +8869,18 @@ Return JSON exactly: {response_schema}.
             if str(credential_id).strip()
         }
         store = _get_database_store()
-        records = [
-            record
-            for target in targets
-            for record in store.list_credentials(
-                self.runtime.operation_id,
-                target=canonicalize_credential_target(target),
-            )
-        ]
         credentials = tuple(
             {
                 "credential_id": str(record.get("credential_id") or ""),
                 "credential_type": str(record.get("credential_type") or ""),
                 "role": str(record.get("role") or ""),
+                "target": str(record.get("target") or target).rstrip("/"),
             }
-            for record in records
+            for target in targets
+            for record in store.list_credentials(
+                self.runtime.operation_id,
+                target=canonicalize_credential_target(target),
+            )
             if str(record.get("credential_id") or "")
             and (not requested_ids or str(record.get("credential_id")) in requested_ids)
         )
@@ -8999,6 +9026,184 @@ Return JSON exactly: {response_schema}.
                 return "The shell command was not executed because its URL is outside the mapped authentication origins."
         return None
 
+    def _run_authentication_flow_discovery(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        setup: AuthenticationSetupRequest,
+        target: str,
+        tools: list[Any],
+    ) -> tuple[dict[str, Any], ...]:
+        """Discover one target-scoped authentication flow without exposing a credential."""
+
+        target_setup = replace(setup, targets=(target,), credentials=())
+        discovery_names = {
+            "browser_goto_url", "browser_observe_page", "browser_get_page_html", "browser_take_screenshot",
+            "browser_perform_action",
+        }
+        discovery_tools = [tool for tool in tools if get_tool_name(tool) in discovery_names]
+        hinted_kinds = tuple(dict.fromkeys(
+            str(hint.get("kind") or "")
+            for hint in target_setup.authentication_flow_hints
+            if str(hint.get("kind") or "") in AUTHENTICATION_FLOW_KINDS
+            and (
+                not str(hint.get("login_url") or "")
+                or self._authentication_origin(str(hint.get("login_url") or ""))
+                == self._authentication_origin(target)
+            )
+        ))
+        recorder_kinds = hinted_kinds or ("browser_form", "browser_mfa", "browser_redirect")
+        for kind in recorder_kinds:
+            recorder_name = (
+                "record_authentication_flow"
+                if len(recorder_kinds) == 1
+                else f"record_{kind}_authentication_flow"
+            )
+            discovery_tools.append(build_record_authentication_flow_tool(
+                target=target,
+                purpose="authentication",
+                kind=kind,
+                allowed_origins=target_setup.allowed_origins,
+                name=recorder_name,
+            ))
+        artifact_pages_per_file = max(
+            1,
+            self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4),
+        )
+        discovery_tools.append(create_bounded_artifact_reader(
+            max_reads=artifact_pages_per_file,
+            context_window_tokens=self._artifact_context_window_tokens(),
+            max_reads_per_artifact=artifact_pages_per_file,
+            max_lines_per_read=200,
+            max_output_chars=self._artifact_router_max_chars(),
+        ))
+        discovery_tools = self._authentication_agent_tools(discovery_tools, target_setup.allowed_origins, ())
+        prompt = f"""You are the controller-owned authentication-flow discovery worker. This is bounded target mapping,
+not assessment and not credential authentication.
+
+{target_setup.to_toon()}
+
+Discover one usable authentication flow for the supplied target only. You may navigate from the exact supplied target
+origin and follow only same-origin login links or explicitly supplied identity-provider origins. Inspect rendered forms
+and the saved HTML artifacts from `browser_get_page_html` to identify the login URL, protected validation URL, request
+format, form fields, redirects, and flow kind. Use `read_artifact` with line or byte paging when saved HTML is larger
+than one page; continue with non-overlapping pages until the relevant form and route evidence is found.
+Do not check out credentials, request MFA, capture sessions, test protected endpoints, create findings, or search
+memory or the environment. Reuse saved browser artifacts instead of repeatedly navigating to the same URL. Record the
+observed secret-free descriptor with the controller-bound recorder whose fixed kind matches the observed flow. Supply
+only the observed fields in that recorder's schema. If a usable flow cannot be identified, finish without trying
+credentials or inventing URLs.
+"""
+        policy = AgentRunPolicy(
+            min_tool_calls=1,
+            allow_text_final_after_tools=True,
+            actionless_mode="required_tool",
+            max_actionless_calls=1,
+            max_agent_calls=8,
+            max_model_turns=16,
+            terminal_reason="authentication_flow_discovery_done",
+            terminal_message="Authentication flow discovery completed",
+            recovery_objective=task.objective,
+            recovery_next_action="Record one target-scoped authentication flow or report that none was observed.",
+        )
+        self._run_worker_agent(
+            "authentication_flow_discovery_agent",
+            prompt,
+            discovery_tools,
+            "Discover only one secret-free target-scoped authentication flow.",
+            policy,
+        )
+        return self._authentication_flow_descriptors(plan, task, (target,))
+
+    def _run_authentication_credential_worker(
+        self,
+        task: Task,
+        setup: AuthenticationSetupRequest,
+        credential: dict[str, str],
+        flows: tuple[dict[str, Any], ...],
+        tools: list[Any],
+    ) -> bool:
+        """Establish one credential's opaque context without credential fallback."""
+
+        target = str(credential["target"])
+        allowed_origins = tuple(dict.fromkeys((
+            self._authentication_origin(target),
+            *(origin for flow in flows for origin in flow.get("allowed_origins", [])),
+        )))
+        credential_setup = replace(
+            setup,
+            targets=(target,),
+            allowed_origins=allowed_origins,
+            credentials=(credential,),
+            authentication_flows=flows,
+        )
+        worker_tools = self._authentication_agent_tools(tools, credential_setup.allowed_origins, flows)
+        if any(str(flow.get("kind") or "") in {"browser_form", "browser_mfa", "browser_redirect"} for flow in flows):
+            try:
+                asyncio.run(reset_authentication_browser_session())
+            except Exception as error:
+                self._log_workflow(
+                    "authentication browser-session reset failed task=%s credential=%s reason=%s",
+                    self._task_label(task),
+                    credential["credential_id"],
+                    self._short(error),
+                )
+                return False
+        prompt = f"""You are the controller-owned authentication worker. This is bounded setup work, not assessment.
+
+{credential_setup.to_toon()}
+
+Establish an opaque authenticated context for this one credential and target only. Check out only the supplied
+credential ID. Use the supplied persisted flow descriptor; do not discover, query for, or switch to another credential.
+For `api_form`, call `ensure_authenticated_context` with the credential ID only: it resolves the stored flow internally.
+For browser, redirect, or MFA flows, complete only the supplied flow and capture its context using the mapped validation
+URL through `capture_browser_authenticated_context`. A credential rejection or validation failure ends this worker; do
+not retry with another credential. Never expose session material or secret values in text, artifacts, observations, or
+task acceptance.
+"""
+        policy = AgentRunPolicy(
+            min_tool_calls=1,
+            allow_text_final_after_tools=True,
+            actionless_mode="required_tool",
+            max_actionless_calls=1,
+            max_agent_calls=12,
+            max_model_turns=24,
+            terminal_reason="authentication_credential_worker_done",
+            terminal_message="Credential authentication worker completed bounded context setup",
+            recovery_objective=task.objective,
+            recovery_next_action="Establish the opaque authenticated context for the supplied credential.",
+        )
+        self._run_worker_agent(
+            "authentication_agent",
+            prompt,
+            worker_tools,
+            "Perform only bounded authentication setup for the supplied credential. Secret values must not appear.",
+            policy,
+        )
+        return True
+
+    def _mark_authentication_flows_validated(self, target: str, flows: tuple[dict[str, Any], ...]) -> None:
+        """Promote only the flow that produced a validated opaque context."""
+
+        store = _get_database_store()
+        list_flows = getattr(store, "list_authentication_flows", None)
+        upsert = getattr(store, "upsert_authentication_flow", None)
+        if not callable(list_flows) or not callable(upsert):
+            return
+        expected = {
+            (str(flow.get("kind") or ""), str(flow.get("login_url") or ""), str(flow.get("validation_url") or ""))
+            for flow in flows
+        }
+        for stored in list_flows(canonicalize_credential_target(target), purpose="authentication"):
+            descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
+            key = (
+                str(descriptor.get("kind") or ""),
+                str(descriptor.get("login_url") or ""),
+                str(descriptor.get("validation_url") or ""),
+            )
+            if key in expected:
+                upsert(self.runtime.operation_id, descriptor, status="validated")
+
     def _run_authentication_agent(self, plan: OperationPlan, task: Task) -> AuthenticationSetupResult:
         """Establish or refresh opaque auth state before task-prompt construction."""
 
@@ -9025,11 +9230,10 @@ Return JSON exactly: {response_schema}.
                 setup,
             )
         valid_ids = tuple(
-            credential_id
-            for credential_id in credential_ids
-            if any(
-                authentication_context_is_valid(self.runtime.operation_id, target, credential_id)
-                for target in setup.targets
+            credential["credential_id"]
+            for credential in setup.credentials
+            if authentication_context_is_valid(
+                self.runtime.operation_id, credential["target"], credential["credential_id"]
             )
         )
         if len(valid_ids) == len(credential_ids):
@@ -9041,63 +9245,64 @@ Return JSON exactly: {response_schema}.
         ]
         core_tools = self.runtime.core_tools_list or self.runtime.tools_list
         tools.extend(tool for tool in core_tools if get_tool_name(tool) == "shell")
-        tools = self._authentication_agent_tools(tools, setup.allowed_origins, setup.authentication_flows)
-        prompt = f"""You are the controller-owned authentication worker. This is bounded setup work, not assessment work.
-
-{setup.to_toon()}
-
-Establish a reusable, operation-local authenticated context for the assigned target only. This is not assessment work:
-do not discover targets from files, artifacts, memories, or operation output; do not create artifacts, report findings,
-or explain secret values. Direct browser navigation is limited to the approved origins in the setup contract.
-
-The controller has selected the credential IDs in the setup contract. Check out only one of those IDs when required.
-Do not query credential stores, search memory/files/environment, or write task authentication state. Persisted
-authentication_flows are authoritative. If none applies, use only the supplied
-authentication_flow_hints to observe a flow, call `record_authentication_flow`, then use that recorded flow.
-Do not invent a login, validation, form-field, or redirect URL.
-For a same-origin `api_form`, call `ensure_authenticated_context` with its mapped login and protected validation URLs.
-For a `browser_form`, `browser_mfa`, or `browser_redirect` username/password flow, complete login using the browser;
-never use direct HTTP form login for that flow. Obtain any MFA code with the supplied MFA tools, then call
-`capture_browser_authenticated_context` using a protected validation URL. If a bearer token is in browser storage,
-provide its storage key name only; the capture tool retains the value without returning it.
-
-For an API key or OAuth2 client credential, discover a protected validation route when needed, record an `api_key` or
-`oauth2_client` flow, then call `establish_credential_authenticated_context`; it applies or exchanges the stored
-credential internally and validates the context without returning request material.
-
-Reuse a valid opaque context when one exists. Never call browser cookie extraction or JavaScript token extraction,
-never place session material in text, artifacts, observations, or task acceptance, and finish with a brief status.
-"""
-        policy = AgentRunPolicy(
-            min_tool_calls=1,
-            allow_text_final_after_tools=True,
-            actionless_mode="required_tool",
-            max_actionless_calls=1,
-            max_agent_calls=12,
-            max_model_turns=24,
-            terminal_reason="authentication_agent_done",
-            terminal_message="Authentication worker completed bounded context setup",
-            recovery_objective=task.objective,
-            recovery_next_action="Establish or refresh the opaque authenticated context.",
-        )
-        self._log_workflow(
-            "running authentication worker task=%s tools=%s",
-            self._task_label(task),
-            ",".join(selected_names),
-        )
+        flows_by_target: dict[str, tuple[dict[str, Any], ...]] = {
+            target: tuple(
+                flow
+                for flow in setup.authentication_flows
+                if self._authentication_origin(str(flow.get("login_url") or ""))
+                == self._authentication_origin(target)
+            )
+            for target in setup.targets
+        }
         try:
             with scoped_shell_command_validator(
                 lambda commands: self._validate_authentication_shell_commands(
                     plan, task, setup.allowed_origins, commands
                 )
             ):
-                self._run_worker_agent(
-                    "authentication_agent",
-                    prompt,
-                    tools,
-                    "Perform only bounded authentication setup. Secret values must not appear in your response.",
-                    policy,
-                )
+                for target in setup.targets:
+                    if not flows_by_target[target]:
+                        self._log_workflow(
+                            "running authentication flow discovery task=%s target=%s",
+                            self._task_label(task),
+                            target,
+                        )
+                        flows_by_target[target] = self._run_authentication_flow_discovery(
+                            plan, task, setup, target, tools
+                        )
+                if any(not flows_by_target[target] for target in setup.targets):
+                    return self._record_authentication_setup(
+                        task,
+                        AuthenticationSetupResult("failed", reason="no_usable_authentication_flow"),
+                        setup,
+                    )
+                for credential in setup.credentials:
+                    if credential["credential_id"] in valid_ids:
+                        continue
+                    self._log_workflow(
+                        "running authentication credential worker task=%s credential=%s",
+                        self._task_label(task),
+                        credential["credential_id"],
+                    )
+                    worker_completed = self._run_authentication_credential_worker(
+                        task,
+                        setup,
+                        credential,
+                        flows_by_target[credential["target"]],
+                        tools,
+                    )
+                    if not worker_completed:
+                        return self._record_authentication_setup(
+                            task,
+                            AuthenticationSetupResult("failed", reason="browser_session_reset_failed"),
+                            setup,
+                        )
+                    if authentication_context_is_valid(
+                        self.runtime.operation_id, credential["target"], credential["credential_id"]
+                    ):
+                        self._mark_authentication_flows_validated(
+                            credential["target"], flows_by_target[credential["target"]]
+                        )
         except Exception as error:
             self._log_workflow(
                 "authentication worker failed task=%s reason=%s",
@@ -9111,11 +9316,10 @@ never place session material in text, artifacts, observations, or task acceptanc
             )
         refreshed_setup = self._authentication_setup_request(plan, task)
         valid_ids = tuple(
-            credential_id
-            for credential_id in credential_ids
-            if any(
-                authentication_context_is_valid(self.runtime.operation_id, target, credential_id)
-                for target in setup.targets
+            credential["credential_id"]
+            for credential in setup.credentials
+            if authentication_context_is_valid(
+                self.runtime.operation_id, credential["target"], credential["credential_id"]
             )
         )
         result = (
@@ -13093,11 +13297,24 @@ while planning.
                 "needed to complete or diagnose this registration flow."
             ),
             (
-                "- Generate one password and one registration email, fill only the mapped registration form, "
-                "capture the pre-submit UI with `browser_take_screenshot()`, submit it "
+                "- Call `generate_password`, `generate_registration_email`, and `generate_registration_profile` once. "
+                "Reuse the returned profile values across retries. Stay within the "
+                "mapped registration form: fill the mapped identity fields plus every visible same-form control marked "
+                "required. Do not fill optional fields unless the flow or server validation requires them. Capture "
+                "the pre-submit UI with `browser_take_screenshot()`, submit it "
                 "with `browser_perform_action(..., wait_for_page_change=true)`, and capture the post-submit UI with "
                 "`browser_take_screenshot()`. Preserve HTML or browser state only when it substantiates the "
                 "registration result or a concrete failure."
+            ),
+            (
+                "- Treat `registration_flow.required_fields` and `registration_flow.identity_fields` as metadata hints, "
+                "then confirm them against the live form. The live form's required markers and validation responses "
+                "take precedence; metadata never authorizes navigation to another route."
+            ),
+            (
+                "- If submission reports a missing or invalid required field, fill only that same-form field using the "
+                "reusable registration profile and retry submission. Allow at most two validation-repair cycles; if "
+                "the form still cannot be completed, record an evidence-backed coverage gap."
             ),
             (
                 "- On confirmed registration, call `store_credential` with `credential_type=\"username_password\"`, "
@@ -13114,10 +13331,11 @@ while planning.
                 "flow descriptor. A redirect to another origin is not itself registration success."
             ),
             (
-                "- After observing the mapped form, call `record_authentication_flow` with "
-                "`purpose=\"registration\"`, `kind=\"browser_registration\"`, the mapped `login_url`, and the "
-                "assigned role. Include `success_redirect_url` when that success signal was observed. Record only a "
-                "clean target-scoped URL, never query values, credentials, or cookies."
+                "- After observing the mapped form, call the controller-bound `record_authentication_flow` with the "
+                "mapped `login_url`. Include the secret-free `identity_fields`, `required_fields`, and "
+                "`optional_fields` names discovered from the form, plus `success_redirect_url` when that success "
+                "signal was observed. Record only clean target-scoped URLs and field names, never query values, "
+                "credentials, or cookies."
             ),
         ])
 

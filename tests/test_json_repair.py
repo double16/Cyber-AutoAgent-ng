@@ -60,6 +60,36 @@ def test_repair_json_text_handles_comments_fences_prose_and_trailing_commas():
     }
 
 
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ('{"elements": [{"element_id": 57}]', {"elements": [{"element_id": 57}]}),
+        ('{"elements": [{"element_id": 57}', {"elements": [{"element_id": 57}]}),
+        ('{"description": "brace } and bracket ]", "items": [1, 2', {
+            "description": "brace } and bracket ]",
+            "items": [1, 2],
+        }),
+    ],
+)
+def test_repair_json_text_closes_unbalanced_containers_without_touching_strings(response, expected):
+    assert json.loads(repair_json_text(response)) == expected
+
+
+def test_parse_json_response_repairs_an_incomplete_top_level_container():
+    parsed = parse_json_response(
+        'Stagehand response: {"elements": [{"element_id": 57}]',
+        require_object=True,
+    )
+
+    assert parsed == {"elements": [{"element_id": 57}]}
+
+
+@pytest.mark.parametrize("response", ['{"items": [1}}', '{"message":"truncated'])
+def test_repair_json_text_does_not_guess_mismatched_or_unterminated_json(response):
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(repair_json_text(response))
+
+
 def test_strip_js_comments_preserves_strings():
     value = strip_js_comments('{"url":"https://example.test//path" /* comment */}')
     assert json.loads(value) == {"url": "https://example.test//path"}

@@ -3729,7 +3729,7 @@ def test_generate_security_report_validation_failures(
     objective_content = (output_dir / "report_objective_validation.md").read_text()
     assert "## OBJECTIVE VALIDATION" in objective_content
     assert "Rejected or unresolved" in objective_content
-    assert "flag{wrong}" in objective_content
+    assert "flag{[REDACTED]}" in objective_content
 
 
 def test_report_prompt_helpers_handle_malformed_optional_data():

@@ -22,6 +22,7 @@ from modules.tools.credentials import (
     generate_mfa_code,
     generate_password,
     generate_registration_email,
+    generate_registration_profile,
     mark_credential_status,
     plan_access_control_comparisons,
     plan_authenticated_coverage,
@@ -1479,6 +1480,16 @@ def test_generate_registration_email_avoids_persisted_and_reserved_addresses(tmp
 
     assert first == "testuser12345679@example.com"
     assert second == "testuser12345680@example.com"
+
+
+def test_generate_registration_profile_returns_reusable_non_secret_fields():
+    profile = json.loads(generate_registration_profile())
+
+    assert profile["first_name"] == "Test"
+    assert profile["last_name"] == "User"
+    assert profile["company"] == "TestCo"
+    assert profile["phone_number"].startswith("555")
+    assert profile["card_number"] == "4111111111111111"
 
 
 def test_checkout_and_auth_context_reject_missing_task_scope_and_unavailable_credentials(tmp_path, monkeypatch):

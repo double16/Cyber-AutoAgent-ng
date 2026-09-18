@@ -1152,6 +1152,23 @@ def generate_registration_email() -> str:
     raise RuntimeError("unable to generate a unique registration email")
 
 
+@tool(name="generate_registration_profile")
+def generate_registration_profile() -> str:
+    """Generate reusable, non-secret values for required registration profile fields."""
+
+    suffix = secrets.randbelow(9_000_000) + 1_000_000
+    return json.dumps(
+        {
+            "first_name": "Test",
+            "last_name": "User",
+            "company": "TestCo",
+            "phone_number": f"555{suffix:07d}",
+            "card_number": "4111111111111111",
+        },
+        sort_keys=True,
+    )
+
+
 def _require_rotation_request(store: Any, request_id: str) -> str:
     """Restrict maintenance mutations to the request supplied by the launcher."""
 

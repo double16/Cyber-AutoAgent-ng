@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from modules.handlers.utils import get_tool_spec
 from modules.tools import authentication
 from modules.tools.credentials import checkout_credential, set_task_auth_context
 from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, SQLiteApplicationStore, Task
@@ -105,6 +106,9 @@ def test_registration_flow_recording_reuses_active_target_without_a_credential(t
             kind="browser_registration",
             login_url=f"{target}/register",
             roles=["member"],
+            identity_fields=["email", "password"],
+            required_fields=["firstName", "lastName"],
+            optional_fields=["company"],
         )
     )
 
@@ -112,11 +116,87 @@ def test_registration_flow_recording_reuses_active_target_without_a_credential(t
     descriptor = store.list_authentication_flows(target, purpose="registration")[0]["descriptor"]
     assert descriptor["url"] == f"{target}/register"
     assert descriptor["roles"] == ["member"]
+    assert descriptor["identity_fields"] == ["email", "password"]
+    assert descriptor["required_fields"] == ["firstName", "lastName"]
+    assert descriptor["optional_fields"] == ["company"]
     with pytest.raises(ValueError, match="query values"):
         authentication.record_authentication_flow(
             purpose="registration",
             kind="browser_registration",
             login_url=f"{target}/register?token=must-not-persist",
+        )
+
+
+def test_authentication_flow_discovery_records_active_target_without_a_credential(tmp_path, monkeypatch):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
+    _activate_task(store, target)
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+
+    result = json.loads(
+        authentication.record_authentication_flow(
+            target=target,
+            purpose="authentication",
+            kind="api_form",
+            login_url=f"{target}/login",
+            validation_url=f"{target}/protected",
+            request_format="json",
+        )
+    )
+
+    assert result["recorded"] is True
+    assert result["credential_id"] == ""
+    assert store.list_authentication_flows(target)[0]["descriptor"]["login_url"] == f"{target}/login"
+
+
+def test_bound_authentication_flow_recorder_omits_controller_owned_inputs(tmp_path, monkeypatch):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
+    _activate_task(store, target)
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    recorder = authentication.build_record_authentication_flow_tool(
+        target=target,
+        purpose="authentication",
+        kind="browser_form",
+        allowed_origins=(target,),
+        name="record_browser_form_authentication_flow",
+    )
+
+    schema = get_tool_spec(recorder)["inputSchema"]["json"]
+
+    assert set(schema["properties"]) == {"login_url", "validation_url", "request_format"}
+    assert schema["required"] == ["login_url", "validation_url"]
+    result = json.loads(recorder(
+        login_url=f"{target}/login",
+        validation_url=f"{target}/protected",
+        request_format="form",
+    ))
+    assert result["recorded"] is True
+    descriptor = store.list_authentication_flows(target, purpose="authentication")[0]["descriptor"]
+    assert descriptor["target"] == target
+    assert descriptor["purpose"] == "authentication"
+    assert descriptor["kind"] == "browser_form"
+
+
+def test_bound_authentication_flow_recorder_rejects_controller_input_overrides(tmp_path, monkeypatch):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
+    _activate_task(store, target)
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    recorder = authentication.build_record_authentication_flow_tool(
+        target=target,
+        purpose="authentication",
+        kind="browser_form",
+    )
+
+    with pytest.raises(TypeError):
+        recorder(
+            login_url=f"{target}/login",
+            validation_url=f"{target}/protected",
+            kind="api_form",
         )
 
 
@@ -169,11 +249,21 @@ def test_authenticated_http_request_reuses_hidden_bearer_context(tmp_path, monke
 
         checkout_credential(credential["credential_id"], "authenticated coverage")
         set_task_auth_context([credential["credential_id"]])
+        store.upsert_authentication_flow(
+            "OP_AUTH",
+            {
+                "target": target,
+                "purpose": "authentication",
+                "kind": "api_form",
+                "login_url": f"{target}/login",
+                "validation_url": f"{target}/tenants/tenant-a/records/1",
+                "request_format": "json",
+            },
+            status="validated",
+        )
         ready = json.loads(
             authentication.ensure_authenticated_context(
                 "",
-                login_url=f"{target}/login",
-                validation_url=f"{target}/tenants/tenant-a/records/1",
             )
         )
 

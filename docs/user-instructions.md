@@ -223,6 +223,9 @@ export GEMINI_API_KEY=your_key
 See `docs/deployment.md` and `src/modules/config/README.md` for environment-variable details. Do not commit
 credentials to configuration files.
 
+Browser operations use a 240-second default timeout. Set `BROWSER_DEFAULT_TIMEOUT` to an integer number of
+milliseconds when a permitted target requires a different bound; the Docker Compose configuration forwards this value.
+
 ## Operation modules
 
 Bundled modules are `web`, `web_recon`, `ctf`, `threat_emulation`, `context_navigator`, and `code_security`. Module
@@ -328,6 +331,17 @@ available, the controller records an authenticated coverage gap without launchin
 authorization tokens remain only in an operation-memory context and are discarded on controller restart. The task
 executor receives no checkout, MFA, cookie-extraction, token-extraction, or token-preparation tools; it receives
 `authenticated_http_request` only after the controller has a valid context.
+The controller resolves a reusable target-scoped authentication-flow descriptor before checking out credentials. When
+none exists, a credential-free discovery worker maps and records one bounded flow; if discovery cannot identify a
+usable flow, credential authentication is skipped and recorded as a flow coverage gap. The controller then runs one
+isolated worker per credential, so a missing flow or a rejected credential cannot cause that worker to try another
+identity. For same-origin API-form flows, `ensure_authenticated_context` reads the stored login and validation URLs
+internally; workers pass only their controller-selected credential ID.
+For mapped self-registration, the provisioning worker fills the mapped identity fields and every visible required
+control in that same form, including required profile fields beyond username, password, and email. Optional controls
+remain untouched unless the flow or server validation requires them. A reusable synthetic profile is retained only in
+the task-local context for bounded validation-repair retries; secret-free field names may be recorded in the flow
+descriptor for later operations.
 Attack-surface mapping supplies secret-free authentication-flow hints, such as a likely login route or protected
 route. Hints are not executable authority: when no reusable descriptor is available, the authentication worker
 observes the hinted flow, records a target-scoped descriptor, and then validates it before use. Later operations for

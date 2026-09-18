@@ -114,11 +114,39 @@ def _stagehand_action_failure_reason(message: str) -> str:
     """Convert a Stagehand failure into a secret-safe diagnostic category."""
 
     normalized_message = message.strip().lower()
+    if "failed to parse json" in normalized_message or "json decode" in normalized_message:
+        return "stagehand_response_parse_error"
     if "no observe results" in normalized_message:
         return "no_actionable_element"
     if "failed to perform act" in normalized_message:
         return "playwright_action_failed"
     return "stagehand_action_failed"
+
+
+def _action_has_observable_side_effects(
+    controls: dict[str, Any], events: list[dict[str, Any]], request_count_before: int, request_count_after: int
+) -> bool:
+    """Return whether retrying an action could duplicate a browser-side effect."""
+
+    return bool(
+        controls["value_changed_control_count"]
+        or events
+        or request_count_after > request_count_before
+    )
+
+
+def _stagehand_retry_instruction(action: str, controls: list[dict[str, Any]]) -> str:
+    """Refresh Stagehand with safe current control identifiers without adding another action."""
+
+    identifiers = []
+    for control in controls:
+        if not control.get("visible") or control.get("disabled") or control.get("read_only"):
+            continue
+        identifier = control.get("name") or control.get("id") or control.get("aria_label") or control.get("placeholder")
+        if identifier:
+            identifiers.append(str(identifier))
+    control_hint = ", ".join(dict.fromkeys(identifiers[:12])) or "no named visible controls"
+    return f"{action}\nUse the current page only. Visible control identifiers: {control_hint}."
 
 
 @dataclass(frozen=True)
@@ -630,8 +658,10 @@ class LLMClientJSONResponsePatch(LLMClient):
             if not isinstance(content, str) or not content.strip():
                 continue
 
+            logger.info("Attempting to clean JSON: %s", content)
             extracted = self.extract_json_block(content)
             cleaned = repair_json_text(extracted)
+            logger.info("Cleaned JSON: %s", content)
 
             # If it's valid JSON, replace content with a normalized JSON string
             try:
@@ -640,6 +670,7 @@ class LLMClientJSONResponsePatch(LLMClient):
                     obj = {"elements": obj}
             except Exception:
                 # leave as-is if we can't safely make it valid JSON
+                logger.info("Unabled to clean JSON: %s", content)
                 continue
 
             choice.message.content = json.dumps(obj, ensure_ascii=True)
@@ -715,7 +746,7 @@ class BrowserService(EventEmitter):
                 "No artifacts_dir provided. Browser will not persist network traffic, profile, downloads to artifacts."
             )
 
-        self.default_timeout = float(os.getenv("BROWSER_DEFAULT_TIMEOUT", "120000"))
+        self.default_timeout = float(os.getenv("BROWSER_DEFAULT_TIMEOUT", "") or "240000")
         self.stagehand_config = StagehandConfig(
             env="LOCAL",
             modelName=model,
@@ -1471,6 +1502,26 @@ async def get_browser():
     yield _BROWSER
 
 
+async def reset_authentication_browser_session() -> None:
+    """Clear authentication state without destroying the shared browser service."""
+
+    async with get_browser() as browser:
+        async def _reset() -> None:
+            page_url = str(browser.page.url or "")
+            if urlparse(page_url).scheme in {"http", "https"}:
+                await browser.page.evaluate(
+                    """() => {
+                        window.localStorage.clear();
+                        window.sessionStorage.clear();
+                    }"""
+                )
+            await browser.context.clear_cookies()
+            await browser.context.set_extra_http_headers({})
+            await browser.page.goto("about:blank")
+
+        await browser.run_in_browser_loop(_reset)
+
+
 def close_browser():
     """Closes the browser if it has been initialized. If never initialized, this method returns without error."""
     global _BROWSER
@@ -2028,61 +2079,88 @@ async def browser_perform_action(
     async with get_browser() as browser:
         async def _impl():
             async with browser.interaction_context_capture(
-                    only_domains=[browser.page_domain]
+                only_domains=[browser.page_domain]
             ) as interaction_context:
                 before_content = await browser.page.content() if wait_for_page_change else ""
-                before_controls = await _safe_form_control_snapshot(browser.page)
-                event_capture_started = await _start_form_action_event_capture(browser.page)
-                act_result: Any = None
+                attempt_diagnostics = []
                 normalized_action_result: _NormalizedActionResult | None = None
-                try:
-                    async with browser.timeout():
-                        act_result = await browser.page.act(action)
-                finally:
-                    after_controls = await _safe_form_control_snapshot(browser.page)
-                    action_events = (
-                        await _stop_form_action_event_capture(browser.page)
-                        if event_capture_started
-                        else []
-                    )
+                for attempt_number in range(1, 3):
+                    before_controls = await _safe_form_control_snapshot(browser.page)
+                    request_count_before = len(interaction_context.requests)
+                    event_capture_started = await _start_form_action_event_capture(browser.page)
+                    act_result: Any = None
+                    action_error: Exception | None = None
+                    try:
+                        action_instruction = (
+                            action
+                            if attempt_number == 1
+                            else _stagehand_retry_instruction(action, before_controls)
+                        )
+                        async with browser.timeout():
+                            act_result = await browser.page.act(action_instruction)
+                    except Exception as error:
+                        action_error = error
+                    finally:
+                        after_controls = await _safe_form_control_snapshot(browser.page)
+                        action_events = (
+                            await _stop_form_action_event_capture(browser.page)
+                            if event_capture_started
+                            else []
+                        )
                     control_changes = _form_control_change_summary(before_controls, after_controls)
                     normalized_action_result = _normalize_action_result(act_result)
-                    diagnostic = {
-                        "action_category": action_category,
-                        "url": str(browser.page.url),
-                        "act_returned_value": act_result is not None,
-                        **normalized_action_result.diagnostic(),
-                        "form_controls": control_changes,
-                        "form_event_count": len(action_events),
-                        "form_events": action_events,
-                        "interaction_counts": {
-                            "same_origin_requests": len(interaction_context.requests),
-                            "console_errors": sum(
-                                1
-                                for log in interaction_context.logs
-                                if log.get("type") == "error"
-                            ),
-                            "dialogs": len(interaction_context.dialogs),
-                            "downloads": len(interaction_context.downloads),
-                        },
-                    }
-                    logger.info(
-                        "browser_perform_action diagnostics: %s",
-                        json.dumps(diagnostic, sort_keys=True),
-                    )
-                    value_events = [
-                        event for event in action_events if event.get("type") in {"input", "change"}
-                    ]
-                    if (
-                            action_category in {"input", "selection"}
-                            and control_changes["value_changed_control_count"] == 0
-                            and not value_events
-                    ):
-                        logger.warning(
-                            "browser_perform_action diagnostics: %s action completed without a form-value "
-                            "change or input/change event",
-                            action_category,
+                    if action_error is not None:
+                        normalized_action_result = _NormalizedActionResult(
+                            recognized=True,
+                            success=False,
+                            failure_reason=_stagehand_action_failure_reason(str(action_error)),
+                            type_name=type(action_error).__qualname__,
+                            module_name=type(action_error).__module__,
                         )
+                    request_count_after = len(interaction_context.requests)
+                    side_effects = _action_has_observable_side_effects(
+                        control_changes, action_events, request_count_before, request_count_after
+                    )
+                    attempt_diagnostics.append({
+                        "attempt": attempt_number,
+                        "success": normalized_action_result.success,
+                        "failure_reason": normalized_action_result.failure_reason,
+                        "side_effects": side_effects,
+                    })
+                    if normalized_action_result.success:
+                        break
+                    if side_effects or attempt_number == 2:
+                        break
+                diagnostic = {
+                    "action_category": action_category,
+                    "url": str(browser.page.url),
+                    **normalized_action_result.diagnostic(),
+                    "attempt_count": len(attempt_diagnostics),
+                    "attempts": attempt_diagnostics,
+                    "form_controls": control_changes,
+                    "form_event_count": len(action_events),
+                    "form_events": action_events,
+                    "interaction_counts": {
+                        "same_origin_requests": len(interaction_context.requests),
+                        "console_errors": sum(
+                            1 for log in interaction_context.logs if log.get("type") == "error"
+                        ),
+                        "dialogs": len(interaction_context.dialogs),
+                        "downloads": len(interaction_context.downloads),
+                    },
+                }
+                logger.info("browser_perform_action diagnostics: %s", json.dumps(diagnostic, sort_keys=True))
+                value_events = [event for event in action_events if event.get("type") in {"input", "change"}]
+                if (
+                        action_category in {"input", "selection"}
+                        and control_changes["value_changed_control_count"] == 0
+                        and not value_events
+                ):
+                    logger.warning(
+                        "browser_perform_action diagnostics: %s action completed without a form-value "
+                        "change or input/change event",
+                        action_category,
+                    )
                 if normalized_action_result is None or not normalized_action_result.success:
                     failure_reason = (
                         normalized_action_result.failure_reason
@@ -2174,9 +2252,44 @@ async def browser_observe_page(instruction: str | None = None) -> list[str]:
     logger.info("browser_observe_page: %s", instruction)
     async with get_browser() as browser:
         async def _impl():
-            async with browser.timeout():
-                observations = await browser.page.observe(instruction)
-            return [observation.description for observation in observations]
+            try:
+                async with browser.timeout():
+                    observations = await browser.page.observe(instruction)
+                return [observation.description for observation in observations]
+            except Exception as error:
+                if not isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+                    raise
+                controls = await _safe_form_control_snapshot(browser.page)
+                try:
+                    current_url = str(browser.page.url)
+                except Exception as page_error:
+                    raise RuntimeError("browser observation timed out and page state is unavailable") from page_error
+                if not controls:
+                    raise RuntimeError("browser observation timed out and no safe page-state fallback is available")
+                visible_controls = [
+                    control for control in controls if control.get("visible") and not control.get("disabled")
+                ]
+                identifiers = [
+                    (
+                        str(
+                            control.get("name")
+                            or control.get("id")
+                            or control.get("aria_label")
+                            or control.get("placeholder")
+                            or control.get("tag")
+                        )
+                        + (" [required]" if control.get("required") else "")
+                    )
+                    for control in visible_controls[:12]
+                ]
+                return [
+                    (
+                        "Degraded browser observation: Stagehand timed out; this is safe DOM metadata, not a "
+                        "semantic page observation."
+                    ),
+                    f"Current URL: {current_url}",
+                    f"Visible form controls: {', '.join(identifiers) or 'none'}",
+                ]
 
         retval = await browser.run_in_browser_loop(_impl)
         logger.info("browser_observe_page: %s", retval)

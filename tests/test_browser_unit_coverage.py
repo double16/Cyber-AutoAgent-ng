@@ -161,6 +161,173 @@ def test_normalize_action_result_accepts_protocol_shapes_and_rejects_malformed_r
     assert malformed.failure_reason == "unexpected_action_result"
 
 
+def test_stagehand_json_patch_removes_terminal_formatting_before_json_repair():
+    patch = mod.LLMClientJSONResponsePatch(SimpleNamespace(answer=1))
+
+    extracted = patch.extract_json_block("\x1b[32m```json\n{\"elements\": []}\n```\x1b[0m")
+
+    assert extracted == '{"elements": []}'
+
+
+@pytest.mark.parametrize(("configured_timeout", "expected_timeout"), [(None, 240_000), ("12_345", 12_345)])
+def test_browser_service_uses_default_or_explicit_timeout(monkeypatch, configured_timeout, expected_timeout):
+    class FakeStagehand:
+        def __init__(self, _config):
+            self.llm = None
+
+    if configured_timeout is None:
+        monkeypatch.delenv("BROWSER_DEFAULT_TIMEOUT", raising=False)
+    else:
+        monkeypatch.setenv("BROWSER_DEFAULT_TIMEOUT", configured_timeout.replace("_", ""))
+    monkeypatch.setattr(mod, "Stagehand", FakeStagehand)
+    service = mod.BrowserService("ollama", "fixture-model")
+    try:
+        assert service.default_timeout == expected_timeout
+    finally:
+        service._loop.call_soon_threadsafe(service._loop.stop)
+        service._loop_thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_browser_action_retries_once_when_failed_attempt_has_no_side_effects(monkeypatch, caplog):
+    class FakeTimeout:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    class FakePage:
+        url = "https://example.test/register"
+
+        def __init__(self):
+            self.actions = []
+
+        async def content(self):
+            return "<main>Register</main>"
+
+        async def act(self, action):
+            self.actions.append(action)
+            if len(self.actions) == 1:
+                return ForeignActResult(False, "No observe results found", action)
+            return ForeignActResult(True, "Action performed", action)
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def observe(self, _instruction):
+            return []
+
+        async def evaluate(self, expression):
+            if "querySelectorAll" in expression:
+                return [{
+                    "index": 0,
+                    "name": "email",
+                    "visible": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "value_present": False,
+                    "value_length": 0,
+                }]
+            if "return state.events" in expression:
+                return []
+            return None
+
+    class FakeBrowser:
+        def __init__(self):
+            self.page = FakePage()
+            self.page_domain = "example.test"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        def timeout(self):
+            return FakeTimeout()
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+        @asynccontextmanager
+        async def interaction_context_capture(self, **_kwargs):
+            yield SimpleNamespace(
+                requests=[], logs=[], dialogs=[], downloads=[], summarize=AsyncMock(return_value="network summary")
+            )
+
+    fake_browser = FakeBrowser()
+    monkeypatch.setattr(mod, "get_browser", lambda: fake_browser)
+
+    with caplog.at_level(logging.INFO, logger=mod.__name__):
+        result = await mod.browser_perform_action("Enter alice@example.test into the Email field")
+
+    assert len(fake_browser.page.actions) == 2
+    assert "Visible control identifiers: email" in fake_browser.page.actions[1]
+    assert '"attempt_count": 2' in caplog.text
+    assert "alice@example.test" not in caplog.text
+    assert "network summary" in result
+
+
+@pytest.mark.asyncio
+async def test_browser_action_does_not_retry_after_form_event(monkeypatch):
+    class FakeTimeout:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    class FakePage:
+        url = "https://example.test/register"
+
+        def __init__(self):
+            self.action_count = 0
+
+        async def content(self):
+            return "<main>Register</main>"
+
+        async def act(self, _action):
+            self.action_count += 1
+            return ForeignActResult(False, "No observe results found", "fill")
+
+        async def evaluate(self, expression):
+            if "querySelectorAll" in expression:
+                return []
+            if "return state.events" in expression:
+                return [{"type": "input", "tag": "input", "name": "email"}]
+            return None
+
+    class FakeBrowser:
+        def __init__(self):
+            self.page = FakePage()
+            self.page_domain = "example.test"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        def timeout(self):
+            return FakeTimeout()
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+        @asynccontextmanager
+        async def interaction_context_capture(self, **_kwargs):
+            yield SimpleNamespace(requests=[], logs=[], dialogs=[], downloads=[], summarize=AsyncMock())
+
+    fake_browser = FakeBrowser()
+    monkeypatch.setattr(mod, "get_browser", lambda: fake_browser)
+
+    with pytest.raises(RuntimeError, match="no_actionable_element"):
+        await mod.browser_perform_action("Enter alice@example.test into the Email field")
+
+    assert fake_browser.page.action_count == 1
+
+
 @pytest.mark.asyncio
 async def test_browser_action_logs_secret_safe_form_state_change(monkeypatch, caplog):
     class FakeTimeout:
@@ -442,6 +609,57 @@ async def test_browser_action_diagnostics_failure_does_not_fail_action(monkeypat
     assert "form snapshot failed: RuntimeError" in caplog.text
     assert "event capture failed to start: RuntimeError" in caplog.text
     assert "network summary" in result
+
+
+@pytest.mark.asyncio
+async def test_browser_observation_timeout_returns_safe_dom_fallback(monkeypatch):
+    class FakeTimeout:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    class FakePage:
+        url = "https://example.test/register"
+
+        async def observe(self, _instruction):
+            raise TimeoutError()
+
+        async def evaluate(self, expression):
+            if "querySelectorAll" in expression:
+                return [{
+                    "index": 0,
+                    "name": "email",
+                    "visible": True,
+                    "disabled": False,
+                    "read_only": False,
+                    "value_present": False,
+                    "value_length": 0,
+                }]
+            return None
+
+    class FakeBrowser:
+        page = FakePage()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        def timeout(self):
+            return FakeTimeout()
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+    monkeypatch.setattr(mod, "get_browser", lambda: FakeBrowser())
+
+    result = await mod.browser_observe_page("registration controls")
+
+    assert result[0].startswith("Degraded browser observation")
+    assert result[-1] == "Visible form controls: email"
 
 
 @pytest.mark.asyncio
@@ -867,6 +1085,54 @@ async def test_browser_reset_handles_close_failure_and_uninitialized_state():
     await service.reset()
     mod._BROWSER = None
     mod.close_browser()
+
+
+@pytest.mark.asyncio
+async def test_reset_authentication_browser_session_clears_state_without_closing_service(monkeypatch):
+    class Page:
+        url = "https://target.test/account"
+
+        def __init__(self):
+            self.evaluations = []
+            self.navigations = []
+
+        async def evaluate(self, expression):
+            self.evaluations.append(expression)
+
+        async def goto(self, url):
+            self.navigations.append(url)
+
+    class Context:
+        def __init__(self):
+            self.clear_cookies = AsyncMock()
+            self.set_extra_http_headers = AsyncMock()
+
+    class Browser:
+        def __init__(self):
+            self.page = Page()
+            self.context = Context()
+            self.run_calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def run_in_browser_loop(self, function):
+            self.run_calls += 1
+            return await function()
+
+    browser = Browser()
+    monkeypatch.setattr(mod, "get_browser", lambda: browser)
+
+    await mod.reset_authentication_browser_session()
+
+    assert browser.run_calls == 1
+    browser.context.clear_cookies.assert_awaited_once()
+    browser.context.set_extra_http_headers.assert_awaited_once_with({})
+    assert "localStorage.clear" in browser.page.evaluations[0]
+    assert browser.page.navigations == ["about:blank"]
 
 
 @pytest.mark.asyncio

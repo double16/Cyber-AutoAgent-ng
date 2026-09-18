@@ -13,7 +13,7 @@ def test_redact_text_removes_credential_forms_without_losing_context():
     assert "secret-value" not in result
     assert "alice:password" not in result
     assert "AKIA1234567890ABCDEF" not in result
-    assert result.count(REDACTED) == 4
+    assert result.count(REDACTED) == 5
 
 
 def test_redact_recursively_handles_mappings_lists_tuples_and_scalar_values():
@@ -57,6 +57,8 @@ def test_redaction_masks_mfa_codes_and_provisioning_secrets():
 
     result = redact_text(value)
 
+    assert "mfa_code=[REDACTED]" in result
+    assert "provisioning_secret=[REDACTED]" in result
     assert "123456" not in result
     assert "JBSWY3DPEHPK3PXP" not in result
 

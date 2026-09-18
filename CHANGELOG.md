@@ -72,6 +72,17 @@
 
 ### Fixes
 
+- Repair unbalanced structured JSON responses by conservatively closing missing object and array delimiters while
+  rejecting mismatched delimiters and unterminated strings.
+- Reset cookies, client storage, and session headers before each browser-based credential authentication worker while
+  retaining the process-wide browser service, preventing browser-form authentication from running after shutdown.
+- Bind authentication-flow recorder target, purpose, origin scope, and flow kind in controller-created discovery
+  tools, preventing free-form flow-kind calls from stalling authentication setup.
+- Give authentication-flow discovery the same bounded, paged artifact reader used by task execution, allowing it to
+  inspect large browser HTML artifacts without repeatedly navigating or accessing unrestricted files.
+- Increase the default Stagehand browser-operation timeout to 240 seconds, sanitize terminal formatting from
+  structured Stagehand responses, and retry a failed browser action once only when diagnostics prove it caused no
+  browser-side effect. Browser observations now return labeled safe DOM metadata when semantic observation times out.
 - Prevent failed authentication setup from reaching a task executor with a stale authenticated marker. Authentication
   setup is now persisted as secret-free controller state, uses a narrow login/MFA-only worker bundle, and records an
   explicit authenticated-coverage gap when validation fails. Self-registration flows now retain a same-target login
@@ -90,6 +101,11 @@
   interactions and credential-storage corrections are not mistaken for request-budget exhaustion.
 - Preserve non-secret `credential_type` metadata in diagnostic tool events and give self-registration tasks the
   canonical username/password credential contract, preventing repeated credential-storage corrections.
+- Clarify self-registration execution: fill all visible required controls in the mapped form, reuse a synthetic
+  profile during bounded validation repair, and retain only secret-free registration field metadata for later flows.
+- Resolve authentication flows before credential checkout: a credential-free worker discovers one target-scoped flow
+  when needed, then isolated workers authenticate one credential at a time. API-form context setup now resolves its
+  stored login and validation URLs internally instead of requiring agents to repeat them.
 - Retry Stagehand browser LLM requests with prompt-directed, locally normalized JSON when an LLM provider rejects
   structured output, caching that compatibility mode per model for later browser actions.
 

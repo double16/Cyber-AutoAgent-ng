@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from base64 import b64encode
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -27,6 +28,16 @@ class _AuthenticationContext:
 
 
 _CONTEXTS: dict[tuple[str, str, str], _AuthenticationContext] = {}
+
+AUTHENTICATION_FLOW_KINDS = frozenset({
+    "api_form",
+    "browser_form",
+    "browser_redirect",
+    "browser_mfa",
+    "api_key",
+    "oauth2_client",
+})
+REGISTRATION_FLOW_KINDS = frozenset({"browser_registration", "api_registration"})
 
 
 def _credential_target_url_contains(target: str, candidate: str, *, label: str) -> bool:
@@ -120,6 +131,40 @@ def _active_record(credential_id: str) -> tuple[Any, dict[str, Any], str]:
     return task, record, resolved_credential_id
 
 
+def _stored_api_form_flow(target: str) -> dict[str, Any]:
+    """Return the unambiguous stored API-form flow for one exact credential target."""
+
+    candidates = []
+    for stored in _get_database_store().list_authentication_flows(target, purpose="authentication"):
+        descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
+        if str(descriptor.get("kind") or "") != "api_form":
+            continue
+        login_url = str(descriptor.get("login_url") or "").strip()
+        validation_url = str(descriptor.get("validation_url") or "").strip()
+        if not login_url or not validation_url:
+            continue
+        if not _credential_target_url_contains(target, login_url, label="stored login_url"):
+            continue
+        if not _credential_target_url_contains(target, validation_url, label="stored validation_url"):
+            continue
+        candidates.append((str(stored.get("status") or ""), descriptor))
+    validated = [descriptor for status, descriptor in candidates if status == "validated"]
+    preferred = validated or [descriptor for status, descriptor in candidates if status == "discovered"]
+    if not preferred:
+        raise ValueError("no mapped api_form authentication flow is available for this credential target")
+    unique = {
+        (
+            str(descriptor["login_url"]),
+            str(descriptor["validation_url"]),
+            str(descriptor.get("request_format") or "json"),
+        )
+        for descriptor in preferred
+    }
+    if len(unique) != 1:
+        raise ValueError("mapped api_form authentication flow is ambiguous for this credential target")
+    return preferred[0]
+
+
 def _store_context(
     task: Any,
     record: dict[str, Any],
@@ -152,6 +197,7 @@ def _store_context(
 @tool(name="record_authentication_flow")
 def record_authentication_flow(
     credential_id: str = "",
+    target: str = "",
     kind: str = "",
     login_url: str = "",
     validation_url: str = "",
@@ -160,14 +206,25 @@ def record_authentication_flow(
     purpose: str = "authentication",
     roles: list[str] | None = None,
     success_redirect_url: str = "",
+    identity_fields: list[str] | None = None,
+    required_fields: list[str] | None = None,
+    optional_fields: list[str] | None = None,
 ) -> str:
     """Persist a secret-free observed authentication or registration flow for later same-target setup."""
 
     if purpose not in {"authentication", "registration"}:
         raise ValueError("purpose must be authentication or registration")
     if purpose == "authentication":
-        _task, record, credential_id = _active_record(credential_id)
-        target = str(record["target"]).rstrip("/")
+        if credential_id:
+            _task, record, credential_id = _active_record(credential_id)
+            target = str(record["target"]).rstrip("/")
+        else:
+            store = _get_database_store()
+            _task, target_values = _active_task_target_values(store, _operation_id())
+            normalized_target = str(target).rstrip("/")
+            if normalized_target not in {value.rstrip("/") for value in target_values}:
+                raise ValueError("authentication flow recording requires an active task target")
+            target = normalized_target
     else:
         store = _get_database_store()
         _task, target_values = _active_task_target_values(store, _operation_id())
@@ -177,11 +234,7 @@ def record_authentication_flow(
             raise ValueError("registration flow recording requires one active task target")
         target = next(iter(target_values)).rstrip("/")
         credential_id = ""
-    allowed_kinds = (
-        {"api_form", "browser_form", "browser_redirect", "browser_mfa", "api_key", "oauth2_client"}
-        if purpose == "authentication"
-        else {"browser_registration", "api_registration"}
-    )
+    allowed_kinds = AUTHENTICATION_FLOW_KINDS if purpose == "authentication" else REGISTRATION_FLOW_KINDS
     if kind not in allowed_kinds:
         raise ValueError("unknown flow kind")
     effective_login_url = login_url or (validation_url if kind in {"api_key", "oauth2_client"} else "")
@@ -216,8 +269,112 @@ def record_authentication_flow(
     if purpose == "registration":
         descriptor["roles"] = sorted({str(role).strip() for role in roles or ["user"] if str(role).strip()})
         descriptor["success_redirect_url"] = success_redirect_url
+        for key, values in {
+            "identity_fields": identity_fields,
+            "required_fields": required_fields,
+            "optional_fields": optional_fields,
+        }.items():
+            normalized_fields = sorted({str(value).strip() for value in values or [] if str(value).strip()})
+            if normalized_fields:
+                descriptor[key] = normalized_fields
     stored = _get_database_store().upsert_authentication_flow(_operation_id(), descriptor)
     return json.dumps({"recorded": True, "credential_id": credential_id, "flow": stored}, sort_keys=True)
+
+
+def build_record_authentication_flow_tool(
+    *,
+    target: str,
+    purpose: str,
+    kind: str,
+    allowed_origins: Iterable[str] = (),
+    credential_id: str = "",
+    roles: Iterable[str] = (),
+    name: str = "record_authentication_flow",
+) -> Any:
+    """Build a controller-bound recorder that exposes only observed flow fields to an agent."""
+
+    normalized_target = str(target).rstrip("/")
+    normalized_purpose = str(purpose).strip()
+    normalized_kind = str(kind).strip()
+    normalized_credential_id = str(credential_id).strip()
+    normalized_origins = tuple(
+        str(origin).strip() for origin in allowed_origins if str(origin).strip()
+    )
+    normalized_roles = tuple(str(role).strip() for role in roles if str(role).strip())
+    allowed_kinds = AUTHENTICATION_FLOW_KINDS if normalized_purpose == "authentication" else REGISTRATION_FLOW_KINDS
+    if normalized_purpose not in {"authentication", "registration"}:
+        raise ValueError("purpose must be authentication or registration")
+    if normalized_kind not in allowed_kinds:
+        raise ValueError("bound authentication flow kind is incompatible with its purpose")
+    if normalized_purpose == "registration" and normalized_credential_id:
+        raise ValueError("registration flow recorder cannot bind a credential_id")
+    if not normalized_target:
+        raise ValueError("target required when binding authentication flow recorder")
+    if not str(name).strip():
+        raise ValueError("name required when binding authentication flow recorder")
+
+    def record_bound_authentication_flow(
+        login_url: str,
+        validation_url: str = "",
+        request_format: str = "",
+        success_redirect_url: str = "",
+        identity_fields: list[str] | None = None,
+        required_fields: list[str] | None = None,
+        optional_fields: list[str] | None = None,
+    ) -> str:
+        """Persist one observed flow using controller-bound authentication context."""
+
+        return record_authentication_flow(
+            credential_id=normalized_credential_id,
+            target=normalized_target,
+            kind=normalized_kind,
+            login_url=login_url,
+            validation_url=validation_url,
+            request_format=request_format,
+            allowed_origins=list(normalized_origins),
+            purpose=normalized_purpose,
+            roles=list(normalized_roles),
+            success_redirect_url=success_redirect_url,
+            identity_fields=identity_fields,
+            required_fields=required_fields,
+            optional_fields=optional_fields,
+        )
+
+    if normalized_purpose == "authentication":
+        required = ["login_url", "validation_url"]
+        properties = {
+            "login_url": {"type": "string", "description": "Observed same-target login URL."},
+            "validation_url": {"type": "string", "description": "Observed same-target protected validation URL."},
+            "request_format": {"type": "string", "enum": ["", "json", "form"]},
+        }
+    else:
+        required = ["login_url"]
+        properties = {
+            "login_url": {"type": "string", "description": "Observed same-target registration URL."},
+            "request_format": {"type": "string", "enum": ["", "json", "form"]},
+            "success_redirect_url": {"type": "string", "description": "Observed same-target success redirect URL."},
+            "identity_fields": {"type": "array", "items": {"type": "string"}},
+            "required_fields": {"type": "array", "items": {"type": "string"}},
+            "optional_fields": {"type": "array", "items": {"type": "string"}},
+        }
+    record_bound_authentication_flow.__name__ = str(name).strip()
+    record_bound_authentication_flow.__doc__ = (
+        "Persist one observed authentication flow. The controller bound target="
+        f"{normalized_target}, purpose={normalized_purpose}, and kind={normalized_kind}. "
+        "Supply only the observed fields in this tool schema."
+    )
+    return tool(
+        record_bound_authentication_flow,
+        name=str(name).strip(),
+        inputSchema={
+            "json": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": False,
+            }
+        },
+    )
 
 
 @tool(name="ensure_authenticated_context")
@@ -225,7 +382,7 @@ def ensure_authenticated_context(
     credential_id: str,
     login_url: str = "",
     validation_url: str = "",
-    request_format: str = "json",
+    request_format: str = "",
     additional_fields: dict[str, str] | None = None,
 ) -> str:
     """Ensure one checked-out credential has an operation-local authenticated HTTP context.
@@ -246,7 +403,11 @@ def ensure_authenticated_context(
     if record["credential_type"] != "username_password":
         raise ValueError("authentication context login currently requires a username_password credential")
     if not login_url or not validation_url:
-        raise ValueError("mapped same-origin login_url and validation_url are required to establish authentication")
+        flow = _stored_api_form_flow(target)
+        login_url = login_url or str(flow["login_url"])
+        validation_url = validation_url or str(flow["validation_url"])
+        request_format = request_format or str(flow.get("request_format") or "json")
+    request_format = request_format or "json"
     if not _credential_target_url_contains(target, login_url, label="login_url") or not _credential_target_url_contains(
         target, validation_url, label="validation_url"
     ):
