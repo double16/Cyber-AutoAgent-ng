@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections import deque
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Optional
@@ -1069,7 +1070,7 @@ async def test_browser_ensure_init_configures_stagehand_and_registers_events(tmp
     stagehand.init.assert_awaited_once()
     assert service._initialized is True
     assert [item[1] for item in events if item[0] == "on"] == [
-        "dialog", "download", "request", "response", "requestfailed", "requestfinished", "console"
+        "dialog", "download", "request", "request", "response", "requestfailed", "requestfinished", "console"
     ]
 
 
@@ -1112,6 +1113,7 @@ async def test_reset_authentication_browser_session_clears_state_without_closing
             self.page = Page()
             self.context = Context()
             self.run_calls = 0
+            self.recent_requests = deque()
 
         async def __aenter__(self):
             return self

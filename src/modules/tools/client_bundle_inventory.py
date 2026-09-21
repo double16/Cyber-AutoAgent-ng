@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from strands import tool
 
 from modules.tools.artifact import resolve_operation_artifact_path
+from modules.tools.client_auth_extraction import extract_storage_header_bindings
 from modules.tools.memory import canonical_artifact_reference
 from modules.tools.recon_inventory_manifest import (
     _canonical_url,
@@ -213,6 +214,7 @@ def _bundle_inventory(text: str, target: str) -> dict[str, Any]:
         "api_paths": sorted(api_paths),
         "spa_routes": sorted(spa_routes),
         "auth_storage_keys": storage_keys,
+        "auth_storage_header_bindings": extract_storage_header_bindings(text),
         "auth_indicators": auth_indicators,
         "source_map_references": source_maps,
         "external_origins": sorted(external_origins),

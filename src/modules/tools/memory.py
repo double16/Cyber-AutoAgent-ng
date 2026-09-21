@@ -2161,6 +2161,12 @@ class SQLiteApplicationStore:
         flow_id = str(descriptor.get("flow_id") or uuid.uuid4())
         if not target or purpose not in {"authentication", "registration"} or status not in {"discovered", "validated", "invalid"}:
             raise ValueError("invalid authentication flow descriptor")
+        if (
+            purpose == "authentication"
+            and descriptor.get("flow_version") == 5
+            and descriptor.get("provenance") != "observed_flow_discovery"
+        ):
+            raise ValueError("authentication flow descriptor requires observed discovery provenance")
         now = datetime.now().isoformat()
         evidence_refs = descriptor.get("evidence_refs") if isinstance(descriptor.get("evidence_refs"), list) else []
         payload = dict(descriptor)

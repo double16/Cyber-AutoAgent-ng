@@ -388,6 +388,7 @@ def store_user_credential(
     origin: str = "provided",
     management_policy: str = "user",
     creation_evidence_refs: list[str] | None = None,
+    supersedes_credential_id: str | None = None,
 ) -> dict[str, Any]:
     """Store an explicitly user-provided credential for UI and headless import callers."""
 
@@ -416,6 +417,7 @@ def store_user_credential(
             "management_policy": management_policy,
             "status": "unknown",
             "initial_status_evidence_refs": creation_evidence_refs or [],
+            "supersedes_credential_id": supersedes_credential_id,
         },
     )
 
@@ -451,13 +453,24 @@ def store_credential(
         raise ValueError("operation-created credentials require at least one durable evidence reference")
     store = _get_database_store()
     operation_id = _operation_id()
-    _active_task_target_values(store, operation_id)
+    active_task, _target_values = _active_task_target_values(store, operation_id)
     normalized_type = str(credential_type or "").strip().lower()
     normalized_target = (
         None
         if normalized_type == "email_login"
         else _resolve_active_task_target(store, operation_id, str(target or ""))
     )
+    replacement = active_task.recovery_context.get("credential_replacement", {})
+    supersedes_credential_id = None
+    if isinstance(replacement, dict) and replacement.get("invalid_credential_id"):
+        if normalized_origin != "registered":
+            raise ValueError("credential replacement must be stored as a registered credential")
+        previous = store.get_credential(str(replacement["invalid_credential_id"]), include_payload=False)
+        if previous is None or previous.get("status") != "invalid":
+            raise ValueError("credential replacement requires its invalid predecessor")
+        if normalized_target != previous.get("target") or str(role or "") != str(previous.get("role") or ""):
+            raise ValueError("credential replacement must retain the invalid credential target and role")
+        supersedes_credential_id = str(previous["credential_id"])
     record = store_user_credential(
         operation_id=operation_id,
         credential_type=credential_type,
@@ -470,6 +483,7 @@ def store_credential(
         origin=normalized_origin,
         management_policy="operation",
         creation_evidence_refs=normalized_evidence_refs,
+        supersedes_credential_id=supersedes_credential_id,
     )
     return json.dumps({"stored": True, "credential": record})
 

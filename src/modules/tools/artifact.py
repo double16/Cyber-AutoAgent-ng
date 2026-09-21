@@ -475,12 +475,12 @@ def create_bounded_artifact_reader(
     calls = 0
     reads_by_path: dict[str, int] = {}
     seen_pages: set[tuple[Any, ...]] = set()
-    returned_ranges: dict[str, list[tuple[int, int]]] = {}
+    returned_ranges: dict[tuple[str, str], list[tuple[int, int]]] = {}
     guided_requests: set[tuple[str, tuple[Any, ...]]] = set()
     terminal_byte_page_guards: dict[str, str] = {}
-    blocked_paths: set[str] = set()
-    successful_pages: dict[str, list[dict[str, Any]]] = {}
-    replayed_epochs: dict[str, set[int]] = {}
+    blocked_pagination_modes: set[tuple[str, str]] = set()
+    successful_pages: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    replayed_epochs: dict[tuple[str, str], set[int]] = {}
     reduction_state = context_reduction_state if context_reduction_state is not None else {"epoch": 0}
 
     def reduction_epoch() -> int:
@@ -491,20 +491,25 @@ def create_bounded_artifact_reader(
         except (AttributeError, TypeError, ValueError):
             return 0
 
-    def compression_replay(resolved: str, page_range: tuple[int, int]) -> str | None:
+    def compression_replay(
+        resolved: str,
+        pagination_mode: str,
+        page_range: tuple[int, int],
+    ) -> str | None:
         """Replay one prior page when a real context reduction made it stale."""
 
         epoch = reduction_epoch()
-        if epoch < 1 or epoch in replayed_epochs.get(resolved, set()):
+        state_key = (resolved, pagination_mode)
+        if epoch < 1 or epoch in replayed_epochs.get(state_key, set()):
             return None
-        for record in reversed(successful_pages.get(resolved, [])):
+        for record in reversed(successful_pages.get(state_key, [])):
             start, end = record["range"]
             if record["epoch"] >= epoch or not (page_range[0] < end and start < page_range[1]):
                 continue
             payload = ast.literal_eval(record["result"])
             payload["compression_recovery"] = True
             payload["compression_recovery_epoch"] = epoch
-            replayed_epochs.setdefault(resolved, set()).add(epoch)
+            replayed_epochs.setdefault(state_key, set()).add(epoch)
             return str(payload)
         return None
 
@@ -540,14 +545,16 @@ def create_bounded_artifact_reader(
             raise RuntimeError(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
             )
-        if resolved in blocked_paths:
-            raise RuntimeError(
-                f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This artifact page was already rejected as overlapping; "
-                "return the requested JSON decision without rereading it"
-            )
         if max_bytes is not None and start_byte is None:
             start_byte = 0
         byte_mode = start_byte is not None or max_bytes is not None
+        pagination_mode = "byte" if byte_mode else "line"
+        state_key = (resolved, pagination_mode)
+        if state_key in blocked_pagination_modes:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This artifact {pagination_mode} page was already rejected "
+                "as overlapping; return the requested JSON decision without rereading it"
+            )
         if byte_mode and (start_byte is None or max_bytes is None):
             missing = "start_byte" if start_byte is None else "max_bytes"
             raise RuntimeError(
@@ -638,19 +645,19 @@ def create_bounded_artifact_reader(
         else:
             page_range = (int(payload["start_line"]), int(payload["end_line"]) + 1)
         if page in seen_pages:
-            replay = compression_replay(resolved, page_range)
+            replay = compression_replay(resolved, pagination_mode, page_range)
             if replay is not None:
                 return replay
-            blocked_paths.add(resolved)
+            blocked_pagination_modes.add(state_key)
             raise RuntimeError(
                 f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This exact artifact page was already returned during "
                 "this evaluation"
             )
         if any(
             page_range[0] < end and start < page_range[1]
-            for start, end in returned_ranges.get(resolved, [])
+            for start, end in returned_ranges.get(state_key, [])
         ):
-            replay = compression_replay(resolved, page_range)
+            replay = compression_replay(resolved, pagination_mode, page_range)
             if replay is not None:
                 return replay
             if byte_mode:
@@ -658,14 +665,14 @@ def create_bounded_artifact_reader(
                     "This artifact has already received an overlapping byte page. "
                     "Use the returned page, provided digest, or another artifact."
                 )
-            blocked_paths.add(resolved)
+            blocked_pagination_modes.add(state_key)
             raise RuntimeError(
                 f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This artifact page overlaps content already returned "
                 "during this evaluation"
             )
         if byte_mode and any(
             0 < min(abs(page_range[0] - end), abs(start - page_range[1])) <= ARTIFACT_NEARBY_BYTE_PAGE_GAP
-            for start, end in returned_ranges.get(resolved, [])
+            for start, end in returned_ranges.get(state_key, [])
         ):
             terminal_byte_page_guards[resolved] = (
                 "This artifact received a near-adjacent byte-page request. Continue only from a returned "
@@ -694,8 +701,8 @@ def create_bounded_artifact_reader(
         calls += 1
         reads_by_path[resolved] = reads_by_path.get(resolved, 0) + 1
         seen_pages.add(page)
-        returned_ranges.setdefault(resolved, []).append(page_range)
-        successful_pages.setdefault(resolved, []).append({
+        returned_ranges.setdefault(state_key, []).append(page_range)
+        successful_pages.setdefault(state_key, []).append({
             "epoch": reduction_epoch(),
             "range": page_range,
             "result": result,

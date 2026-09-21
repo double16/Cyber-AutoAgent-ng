@@ -291,6 +291,14 @@ attributed to the user, while found and registered credentials are attributed to
 reusable registered credentials are listed before other reusable credentials; credentials explicitly scoped to that
 later operation still take precedence.
 
+When a controller-selected login submission receives a direct HTTP 401 response, the controller marks only that
+credential invalid and retains its status history. If an observed, authorized self-registration flow exists for the
+same target and role, a separate credential-provisioning agent creates one linked replacement identity before any
+pending work requiring that role runs. The replacement is recorded as operation-managed and linked to the invalid
+credential; registration failures or unavailable registration flows become explicit role-specific coverage gaps.
+Other setup failures, including missing context, worker exhaustion, protected-resource failures, and HTTP 403
+responses, do not invalidate a credential automatically.
+
 ### Credential manager
 
 Use `/credentials <resolved-target>` in the React terminal to review credential type, role, origin, management policy,
@@ -331,28 +339,30 @@ available, the controller records an authenticated coverage gap without launchin
 authorization tokens remain only in an operation-memory context and are discarded on controller restart. The task
 executor receives no checkout, MFA, cookie-extraction, token-extraction, or token-preparation tools; it receives
 `authenticated_http_request` only after the controller has a valid context.
-The controller resolves a reusable target-scoped authentication-flow descriptor before checking out credentials. When
-none exists, a credential-free discovery worker maps and records one bounded flow; if discovery cannot identify a
-usable flow, credential authentication is skipped and recorded as a flow coverage gap. The controller then runs one
-isolated worker per credential, so a missing flow or a rejected credential cannot cause that worker to try another
-identity. For same-origin API-form flows, `ensure_authenticated_context` reads the stored login and validation URLs
-internally; workers pass only their controller-selected credential ID.
+The controller selects one reusable, validated target-scoped authentication-flow descriptor before checking out
+credentials. When none exists, it tries one observed discovered candidate at a time, retiring a candidate that fails
+context validation; only after no candidate remains does a credential-free discovery worker map and record one
+bounded flow. If discovery cannot identify a usable flow, credential authentication is skipped and recorded as a flow
+coverage gap. The controller then runs one isolated worker per credential, so a missing flow or a rejected credential
+cannot cause that worker to try another identity. For same-origin API-form flows,
+`ensure_authenticated_context` resolves the controller-selected flow ID rather than searching the stored inventory.
 For mapped self-registration, the provisioning worker fills the mapped identity fields and every visible required
 control in that same form, including required profile fields beyond username, password, and email. Optional controls
 remain untouched unless the flow or server validation requires them. A reusable synthetic profile is retained only in
 the task-local context for bounded validation-repair retries; secret-free field names may be recorded in the flow
 descriptor for later operations.
-Attack-surface mapping supplies secret-free authentication-flow hints, such as a likely login route or protected
-route. Hints are not executable authority: when no reusable descriptor is available, the authentication worker
-observes the hinted flow, records a target-scoped descriptor, and then validates it before use. Later operations for
-the same canonical target can reuse that descriptor. For username/password API forms, the worker can establish a
-context directly from the recorded mapped pair. Username/password browser, redirect, and MFA flows must complete in
-the shared browser and then capture cookies and any observed named browser-storage bearer token internally. The flow
-descriptor records only the storage key name, never its value. Its validation URL must succeed for the bound
-credential role; 401, 403, and 404 responses reject the context. Browser flows cannot fall back to direct HTTP form
-login. Authentication and registration flow descriptors are versioned; descriptors from older flow contracts are
-ignored and rediscovered. The authentication worker also has scoped shell access for commands targeting only mapped authentication
-origins. No session material is persisted in SQLite, artifacts, reports, or task text. If a
+Attack-surface mapping supplies secret-free navigation, protected-resource, and JavaScript header-binding hints.
+Those endpoints are not executable authority and do not identify a flow start. When no reusable descriptor is
+available, the discovery worker must observe a start-to-validation relationship before recording a target-scoped
+descriptor, and the controller validates it before reuse. Later operations for the same canonical target can reuse a
+validated descriptor. For username/password API forms, the worker can establish a context directly from the recorded
+mapped pair. Username/password browser, redirect, and MFA flows must complete in the shared browser and then capture
+cookies and any observed named browser-storage bearer token internally. The flow descriptor records only the storage
+key name, never its value. Its validation URL must succeed for the bound credential role; 401, 403, and 404 responses
+reject the context. Browser flows cannot fall back to direct HTTP form login. Authentication and registration flow
+descriptors are versioned; descriptors from older flow contracts are ignored and rediscovered. The authentication
+worker also has scoped shell access for commands targeting only mapped authentication origins. No session material is
+persisted in SQLite, artifacts, reports, or task text. If a
 multi-credential setup is only partially successful, the executor is bound only to the credential IDs whose opaque
 contexts validated; the remaining IDs are reported as coverage gaps.
 OAuth2 client credentials and configured API keys use the same opaque context: the worker exchanges or applies the

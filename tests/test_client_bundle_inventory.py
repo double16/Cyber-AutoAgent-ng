@@ -6,6 +6,7 @@ import pytest
 
 from modules.handlers.utils import get_tool_spec
 from modules.tools import client_bundle_inventory as bundle_tool
+from modules.tools.client_auth_extraction import extract_storage_header_bindings
 
 
 def _operation_root(monkeypatch, tmp_path: Path) -> None:
@@ -32,6 +33,24 @@ def test_client_bundle_inventory_exposes_required_runtime_schema():
         "target",
         "target_id",
     }
+
+
+def test_storage_header_extractor_handles_object_headers_methods_and_axios():
+    bindings = extract_storage_header_bindings(
+        '''
+        fetch(url, {headers: {Authorization: "Bearer " + localStorage.getItem("token")}});
+        headers.append("X-Session", sessionStorage.getItem("session_id"));
+        axios.defaults.headers.common.XApiKey = localStorage.getItem("api_key");
+        localStorage.setItem("unused", "value");
+        headers.set("X-Dynamic", makeHeader(localStorage.getItem("token")));
+        '''
+    )
+
+    assert bindings == [
+        {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"},
+        {"header_name": "X-Session", "storage_key": "session_id", "value_template": "{value}"},
+        {"header_name": "XApiKey", "storage_key": "api_key", "value_template": "{value}"},
+    ]
 
 
 def test_client_bundle_inventory_writes_extraction_and_scoped_manifest(
@@ -77,6 +96,9 @@ def test_client_bundle_inventory_writes_extraction_and_scoped_manifest(
     assert extraction["api_paths"] == ["/api/products"]
     assert extraction["spa_routes"] == ["/userprofile"]
     assert extraction["auth_storage_keys"] == ["token"]
+    assert extraction["auth_storage_header_bindings"] == [{
+        "header_name": "authorization", "storage_key": "token", "value_template": "{value}"
+    }]
     assert extraction["source_map_references"] == ["app.js.map"]
     assert extraction["external_origins"] == ["https://example.invalid"]
     assert all("example.invalid" not in item["value"] for item in manifest["items"])

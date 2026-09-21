@@ -2,6 +2,10 @@
 
 ### Features
 
+- Feed the current operation's frozen, target-scoped attack-surface inventory into deterministic authentication-chain
+  mapping so known endpoints and JavaScript bundles are prioritized with retained source provenance.
+- Add deterministic same-origin JavaScript analysis to authentication-chain mapping, exposing secret-free browser
+  storage-to-request-header bindings to controller-owned authentication setup without asking an LLM to infer them.
 - Persist secret-free, target-scoped authentication-flow descriptors discovered on demand, so later operations can
   reuse validated login or protected-resource setup metadata while inventory observations remain untrusted hints.
 - Add typed, frozen authentication-flow descriptors to attack-surface inventory and pass only matching login,
@@ -72,6 +76,25 @@
 
 ### Fixes
 
+- Provide credential provisioning workers with the complete structured registration-flow binding and profile generator,
+  retain artifact and shell processing access, and prevent prior-operation memory retrieval from steering registration.
+- Detect direct HTTP 401 responses from controller-selected login submissions, mark only the rejected credential
+  invalid, and prioritize a separate same-role self-registration replacement task before pending authenticated work.
+- Stop treating auth-related endpoint inventory as executable authentication flows; authentication setup now selects
+  one observed flow at a time, invalidates failed discovered candidates, and starts discovery only when none remains.
+- Require controller-selected authentication flow IDs for stored API-form setup and invalidate v4 flow descriptors so
+  endpoint-derived records cannot be reused.
+- Keep line- and byte-paginated artifact reads in separate overlap-guard domains, allowing an explicit byte-page retry
+  after a line request is truncated by its byte limit while retaining same-mode duplicate protection.
+- Increase the authentication-flow discovery worker limit to 32 model turns so it can inspect bounded browser and
+  artifact evidence before recording a flow.
+- Give authentication-flow discovery a controller-filtered endpoint inventory that separates browser login navigation
+  from protected validation candidates, preventing browser probes of JWT-header-only routes such as protected APIs.
+- Permit registration and authentication-flow agents to use the bounded shell tool for source and artifact inspection,
+  while retaining credential and target-scope controls.
+- Preserve protected 401/403 and administrative routes as authentication validation candidates, and capture
+  browser-storage-derived authentication headers once per operation with exact raw-JWT, Bearer-JWT, and non-standard
+  header formats alongside session cookies.
 - Redact URL-embedded usernames and passwords independently while preserving the surrounding URL context, and avoid
   treating generic field labels such as `password` or `secret` as global runtime secrets in diagnostics and exports.
 - Make artifact byte-page validation errors identify the invalid parameter, supplied value, and applicable limit.

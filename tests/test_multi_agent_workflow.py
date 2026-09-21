@@ -370,7 +370,7 @@ def _tool(name):
     return tool_func
 
 
-def test_authenticated_executor_filter_excludes_credential_and_session_extraction_tools():
+def test_authenticated_executor_filter_preserves_shell_but_excludes_credential_material():
     tools = [
         _tool(name)
         for name in (
@@ -389,7 +389,7 @@ def test_authenticated_executor_filter_excludes_credential_and_session_extractio
 
     filtered = MultiAgentWorkflowController._executor_tools_without_authentication_material(tools)
 
-    assert {tool.__name__ for tool in filtered} == {"authenticated_http_request", "browser_goto_url"}
+    assert {tool.__name__ for tool in filtered} == {"authenticated_http_request", "browser_goto_url", "shell"}
 
 
 def test_controller_runs_privileged_authentication_worker_with_separate_tool_bundle(monkeypatch):
@@ -434,7 +434,7 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
     monkeypatch.setattr(
         controller,
         "_authentication_flow_descriptors",
-        lambda *_args: (
+        lambda *_args, **_kwargs: (
             {
                 "flow_id": "flow-1",
                 "kind": "browser_form",
@@ -507,7 +507,7 @@ def test_authentication_browser_reset_failure_prevents_credential_worker(monkeyp
     monkeypatch.setattr(
         controller,
         "_authentication_flow_descriptors",
-        lambda *_args: ({
+        lambda *_args, **_kwargs: ({
             "flow_id": "flow-1",
             "kind": "browser_form",
             "login_url": "https://target.test/login",
@@ -604,6 +604,202 @@ def test_authentication_worker_uses_hints_for_on_demand_flow_discovery(monkeypat
     assert runner.call_args.args[0] == "authentication_flow_discovery_agent"
 
 
+def test_authentication_discovery_endpoints_separate_navigation_from_protected_candidates(monkeypatch):
+    plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=Mock(),
+    )
+    task = Task(
+        task_uid="endpoint-inventory",
+        title="Authenticated coverage",
+        objective="Map the login flow",
+        phase=1,
+        status="active",
+        evidence=["inventory.json"],
+    )
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda *_args, **_kwargs: ({
+            "items": [
+                {
+                    "kind": "endpoint",
+                    "value": "https://target.test/api/products?ignored=value",
+                    "attributes": {"interaction": {"operations": ["get"], "success_signals": ["HTTP 403"]}},
+                },
+                {
+                    "kind": "endpoint",
+                    "value": "https://outside.test/api/admin",
+                    "attributes": {"interaction": {"operations": ["GET"], "success_signals": ["HTTP 401"]}},
+                },
+                {
+                    "kind": "endpoint",
+                    "value": "not-a-url",
+                    "attributes": {"interaction": {"operations": ["GET"], "success_signals": ["HTTP 401"]}},
+                },
+            ],
+        }, "snapshot"),
+    )
+
+    endpoints = controller._authentication_discovery_endpoints(
+        plan,
+        task,
+        ("https://target.test",),
+        ({
+            "kind": "browser_form",
+            "login_url": "https://target.test/login",
+            "validation_url": "https://target.test/account",
+        },),
+    )
+
+    assert endpoints == (
+        {"role": "navigation", "url": "https://target.test", "method": "GET"},
+        {"role": "navigation", "url": "https://target.test/login", "method": "GET"},
+        {"role": "validation_candidate", "url": "https://target.test/account", "method": "GET"},
+        {
+            "role": "validation_candidate",
+            "url": "https://target.test/api/products",
+            "method": "GET",
+            "status": 403,
+        },
+    )
+
+
+def test_authentication_discovery_endpoints_fall_back_to_the_target_root():
+    plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=Mock(),
+    )
+    task = Task(
+        task_uid="endpoint-inventory-fallback",
+        title="Authenticated coverage",
+        objective="Map the login flow",
+        phase=1,
+        status="active",
+    )
+
+    endpoints = controller._authentication_discovery_endpoints(plan, task, ("https://target.test",), ())
+
+    assert endpoints == ({"role": "navigation", "url": "https://target.test", "method": "GET"},)
+
+
+def test_controller_consumes_deterministic_auth_chain_bindings(monkeypatch):
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "auth_chain_analyzer",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "authentication_flows": [
+                    {
+                        "kind": "browser_form",
+                        "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+                        "login_url": "https://target.test/login",
+                        "validation_url": "https://target.test/profile",
+                        "allowed_origins": ["https://target.test"],
+                    }
+                ],
+                "evidence": {
+                    "client_javascript": {
+                        "storage_header_bindings": [
+                            {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"}
+                        ]
+                    }
+                },
+            }
+        ),
+    )
+
+    flows, bindings = controller._deterministic_auth_chain_mapping("https://target.test")
+
+    assert flows == ()
+    assert bindings == (
+        {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"},
+    )
+
+
+def test_deterministic_auth_chain_mapping_ignores_inventory_flow_descriptors(monkeypatch):
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "auth_chain_analyzer",
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "authentication_flows": [
+                    {
+                        "kind": "browser_form",
+                        "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+                        "login_url": "https://target.test/login",
+                        "validation_url": "https://target.test/profile",
+                    }
+                ]
+            }
+        ),
+    )
+
+    flows, bindings = controller._deterministic_auth_chain_mapping("https://target.test")
+
+    assert flows == ()
+    assert bindings == ()
+
+
+def test_controller_builds_target_scoped_attack_surface_context(monkeypatch):
+    plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+    )
+    task = Task(task_uid="auth-context", title="Auth", objective="Map auth", phase=1, status="active", evidence=["map"])
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda *_args: (
+            {
+                "items": [
+                    {
+                        "kind": "endpoint",
+                        "value": "https://target.test/api/me",
+                        "attributes": {"interaction": {"operations": ["GET"], "success_signals": ["HTTP 401"]}},
+                    },
+                    {
+                        "kind": "endpoint",
+                        "value": "https://target.test/assets/app.js",
+                        "attributes": {"interaction": {"operations": ["GET"], "success_signals": ["HTTP 200"]}},
+                    },
+                    {"kind": "endpoint", "value": "https://outside.test/app.js", "attributes": {}},
+                ]
+            },
+            "snapshot",
+        ),
+    )
+
+    context = controller._authentication_attack_surface_context(plan, task, "https://target.test")
+
+    assert context == {
+        "target": "https://target.test",
+        "endpoints": [
+            {"url": "https://target.test/api/me", "method": "GET", "status": "401", "source_refs": ["map"]},
+            {"url": "https://target.test/assets/app.js", "method": "GET", "status": "200", "source_refs": ["map"]},
+        ],
+        "javascript": [{"url": "https://target.test/assets/app.js", "source_ref": "map"}],
+    }
+
+
 def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(monkeypatch):
     plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
     controller = MultiAgentWorkflowController(
@@ -618,13 +814,22 @@ def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(mo
         targets=("https://target.test",),
         allowed_origins=("https://target.test",),
         credentials=(),
+        discovery_endpoints=(
+            {"role": "navigation", "url": "https://target.test/login", "method": "GET"},
+            {
+                "role": "validation_candidate",
+                "url": "https://target.test/api/products",
+                "method": "GET",
+                "status": 403,
+            },
+        ),
     )
     reader = _tool("read_artifact")
     reader_factory = Mock(return_value=reader)
     worker = Mock()
     monkeypatch.setattr(workflow_mod, "create_bounded_artifact_reader", reader_factory)
     monkeypatch.setattr(controller, "_run_worker_agent", worker)
-    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
 
     controller._run_authentication_flow_discovery(
         plan,
@@ -637,7 +842,7 @@ def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(mo
         ),
         setup,
         "https://target.test",
-        [_tool("browser_get_page_html")],
+        [_tool("browser_get_page_html"), _tool("shell")],
     )
 
     reader_factory.assert_called_once_with(
@@ -656,10 +861,18 @@ def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(mo
         "record_browser_mfa_authentication_flow",
         "record_browser_redirect_authentication_flow",
     } <= supplied_names
-    assert "shell" not in supplied_names
+    assert "shell" in supplied_names
     assert "saved HTML artifacts" in worker.call_args.args[1]
     assert "line or byte paging" in worker.call_args.args[1]
     assert "controller-bound recorder" in worker.call_args.args[1]
+    assert "browser navigation is limited" in worker.call_args.args[1]
+    assert "never load it with a browser tool" in worker.call_args.args[1]
+    assert "authentication_discovery_endpoints[2]" in worker.call_args.args[1]
+    assert "validation_candidate,https://target.test/api/products,GET,403" in worker.call_args.args[1]
+    assert "client_storage_header_bindings" in worker.call_args.args[1]
+    assert "do not scan, execute, or infer" in worker.call_args.args[1]
+    assert "When client JavaScript reads" not in worker.call_args.args[1]
+    assert worker.call_args.args[4].max_model_turns == 32
 
 
 def test_authentication_flow_discovery_binds_hinted_kind_to_one_recorder(monkeypatch):
@@ -683,7 +896,7 @@ def test_authentication_flow_discovery_binds_hinted_kind_to_one_recorder(monkeyp
     )
     worker = Mock()
     monkeypatch.setattr(controller, "_run_worker_agent", worker)
-    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
 
     controller._run_authentication_flow_discovery(
         plan,
@@ -727,7 +940,7 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
     monkeypatch.setattr(
         controller,
         "_authentication_flow_descriptors",
-        lambda *_args: ({
+        lambda *_args, **_kwargs: ({
             "flow_id": "flow-1", "kind": "api_form", "login_url": "https://target.test/login",
             "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
             "validation_url": "https://target.test/account", "allowed_origins": ["https://target.test"],
@@ -749,6 +962,109 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
     assert "credential-2" not in calls[0][1]
     assert "credential-2" in calls[1][1]
     assert "credential-1" not in calls[1][1]
+
+
+def test_invalid_credential_schedules_prioritized_same_role_registration(monkeypatch):
+    plan = replace(
+        _plan(),
+        targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")],
+    )
+    blocked_task = Task(
+        task_uid="authenticated-task",
+        title="Authenticated coverage",
+        objective="Check account access",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+    )
+    other_pending = Task(
+        task_uid="other-authenticated-task",
+        title="Other authenticated coverage",
+        objective="Check another account route",
+        phase=1,
+        status="pending",
+        target_ids=["target-1"],
+    )
+    state = FakeState(plan, tasks=[blocked_task, other_pending])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state
+    )
+    store = SimpleNamespace(record_credential_status=Mock(), record_credential_usage=Mock())
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(
+        controller,
+        "_credential_registration_flows",
+        lambda *_args: [{
+            "target": "https://target.test",
+            "target_id": "target-1",
+            "url": "https://target.test/register",
+            "roles": ("member",),
+        }],
+    )
+
+    scheduled = controller._schedule_invalid_credential_replacement(
+        plan,
+        blocked_task,
+        {"credential_id": "credential-1", "target": "https://target.test", "role": "member"},
+        {"status": 401, "login_url": "https://target.test/login", "evidence_refs": ["artifact://login.har"]},
+    )
+
+    assert scheduled is True
+    replacement = next(task for task in state.tasks if task.task_uid.startswith("credential-replacement:"))
+    assert replacement.recovery_context["credential_replacement"] == {
+        "invalid_credential_id": "credential-1",
+        "target": "https://target.test",
+        "role": "member",
+        "blocked_task_uid": "authenticated-task",
+    }
+    assert controller._get_pending_task(1).task_uid == replacement.task_uid
+    store.record_credential_status.assert_called_once_with(
+        "OP_TEST", "credential-1", "invalid", "operation", "mapped login endpoint returned HTTP 401",
+        ["artifact://login.har"],
+    )
+
+
+def test_authentication_setup_selects_one_validated_flow_per_target(monkeypatch):
+    plan = replace(
+        _plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")]
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+    )
+    descriptor = {
+        "kind": "api_form",
+        "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+        "login_url": "https://target.test/login",
+        "validation_url": "https://target.test/account",
+        "allowed_origins": ["https://target.test"],
+        "provenance": "observed_flow_discovery",
+    }
+    store = SimpleNamespace(
+        list_credentials=Mock(return_value=[
+            {"credential_id": "credential-1", "credential_type": "username_password", "role": "member"}
+        ]),
+        list_authentication_flows=Mock(return_value=[
+            {"flow_id": "newer", "descriptor": {**descriptor, "flow_id": "newer"}},
+            {"flow_id": "older", "descriptor": {**descriptor, "flow_id": "older"}},
+        ]),
+    )
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    task = Task(
+        task_uid="one-flow",
+        title="Authenticated coverage",
+        objective="Compare protected route behavior",
+        phase=1,
+        status="active",
+        target_ids=["target-1"],
+        recovery_context={"phase_task_contract": {"workstream": "authenticated_credential_coverage"}},
+    )
+
+    setup = controller._authentication_setup_request(plan, task)
+
+    assert [flow["flow_id"] for flow in setup.authentication_flows] == ["newer"]
+    assert store.list_authentication_flows.call_args.kwargs["statuses"] == ("validated",)
 
 
 def test_authentication_worker_reuses_valid_opaque_context_without_agent(monkeypatch):
@@ -2294,6 +2610,7 @@ def test_credential_provisioning_recovery_preserves_registration_capabilities():
         task,
         [
             *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
+            _tool("shell"),
             _tool("generate_password"),
             _tool("generate_registration_email"),
             _tool("store_credential"),
@@ -2306,6 +2623,7 @@ def test_credential_provisioning_recovery_preserves_registration_capabilities():
 
     assert {tool.__name__ for tool in tools} == {
         *CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
+        "shell",
         "generate_password",
         "generate_registration_email",
         "store_credential",
@@ -19720,3 +20038,37 @@ def test_generated_proposal_preflight_rejects_unsatisfied_contracts_and_capabili
         target_ids=["target-1"],
     )
     controller._validate_generated_task_proposals(phase, [available])
+
+
+def test_provisioning_prompt_contains_structured_registration_binding_and_no_memory_catalog():
+    task = Task(
+        task_uid="credential-provisioning:test",
+        title="Provision a registered identity",
+        objective="Register one test identity",
+        phase=1,
+        status="active",
+        recovery_context={
+            "conditional_phase": {
+                "kind": "credential_provisioning",
+                "registration_flow": {
+                    "target": "http://example.test",
+                    "url": "http://example.test/signup",
+                    "roles": ["user"],
+                    "flow_version": "auth-flow-v2",
+                    "provenance": "inventory",
+                    "evidence_refs": ["artifact:signup"],
+                    "identity_fields": ["email"],
+                    "required_fields": ["password"],
+                },
+            }
+        },
+    )
+    context = MultiAgentWorkflowController._registration_flow_context_prompt(task)
+    assert "http://example.test/signup" in context
+    assert "auth-flow-v2" in context
+    assert '"roles": [\n    "user"\n  ]' in context
+    assert "prior memories" in context
+
+    contract = MultiAgentWorkflowController._task_executor_contract(task)
+    assert "Controller-owned registration flow" in contract
+    assert "generate_registration_profile" in contract

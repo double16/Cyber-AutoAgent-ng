@@ -29,6 +29,7 @@ class _AuthenticationContext:
 
 
 _CONTEXTS: dict[tuple[str, str, str], _AuthenticationContext] = {}
+_AUTHENTICATION_ATTEMPTS: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 AUTHENTICATION_FLOW_KINDS = frozenset({
     "api_form",
@@ -39,8 +40,9 @@ AUTHENTICATION_FLOW_KINDS = frozenset({
     "oauth2_client",
 })
 REGISTRATION_FLOW_KINDS = frozenset({"browser_registration", "api_registration"})
-AUTHENTICATION_FLOW_VERSION = 2
+AUTHENTICATION_FLOW_VERSION = 5
 _AUTHORIZATION_STORAGE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
+_HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 
 
 def _credential_target_url_contains(target: str, candidate: str, *, label: str) -> bool:
@@ -85,6 +87,54 @@ def _safe_authorization_storage_key(value: str) -> str:
     return normalized
 
 
+def _normalize_storage_header_bindings(
+    bindings: list[dict[str, str]] | None,
+    authorization_storage_key: str = "",
+) -> list[dict[str, str]]:
+    """Validate secret-free storage-to-header instructions for a browser auth flow."""
+
+    normalized: list[dict[str, str]] = []
+    seen_header_names: set[str] = set()
+    for binding in bindings or []:
+        if not isinstance(binding, dict):
+            raise ValueError("storage header bindings must be objects")
+        header_name = str(binding.get("header_name") or "").strip()
+        storage_key = _safe_authorization_storage_key(str(binding.get("storage_key") or ""))
+        value_template = str(binding.get("value_template") or "").strip()
+        if not _HEADER_NAME_PATTERN.fullmatch(header_name):
+            raise ValueError("storage header binding header_name must be a valid HTTP header name")
+        if not storage_key:
+            raise ValueError("storage header binding storage_key is required")
+        if (
+            value_template.count("{value}") != 1
+            or "{" in value_template.replace("{value}", "")
+            or "}" in value_template.replace("{value}", "")
+        ):
+            raise ValueError("storage header binding value_template must contain exactly one {value} placeholder")
+        normalized_name = header_name.lower()
+        if normalized_name in seen_header_names:
+            raise ValueError("storage header bindings must not repeat a header name")
+        seen_header_names.add(normalized_name)
+        normalized.append(
+            {
+                "header_name": header_name,
+                "storage_key": storage_key,
+                "value_template": value_template,
+            }
+        )
+
+    legacy_key = _safe_authorization_storage_key(authorization_storage_key)
+    if legacy_key and "authorization" not in seen_header_names:
+        normalized.append(
+            {
+                "header_name": "Authorization",
+                "storage_key": legacy_key,
+                "value_template": "Bearer {value}",
+            }
+        )
+    return normalized
+
+
 def _is_current_authentication_flow(descriptor: dict[str, Any]) -> bool:
     """Return whether a persisted flow uses the current descriptor contract."""
 
@@ -126,7 +176,7 @@ def _validate(context: _AuthenticationContext) -> bool:
         )
     except requests.RequestException:
         return False
-    return response.status_code not in {401, 403, 404}
+    return 200 <= response.status_code < 300
 
 
 def authentication_context_is_valid(operation_id: str, target: str, credential_id: str) -> bool:
@@ -134,6 +184,43 @@ def authentication_context_is_valid(operation_id: str, target: str, credential_i
 
     context = _CONTEXTS.get(_context_key(operation_id, target, credential_id))
     return context is not None and _validate(context)
+
+
+def authentication_attempt_result(operation_id: str, target: str, credential_id: str) -> dict[str, Any] | None:
+    """Return the controller-readable, secret-free result of a login attempt."""
+
+    result = _AUTHENTICATION_ATTEMPTS.get(_context_key(operation_id, target, credential_id))
+    return dict(result) if result is not None else None
+
+
+def record_browser_authentication_attempt(
+    operation_id: str,
+    target: str,
+    credential_id: str,
+    login_url: str,
+) -> dict[str, Any] | None:
+    """Classify the latest mapped browser login request without trusting agent prose."""
+
+    from modules.tools.browser import latest_browser_interaction_receipts
+
+    expected = urlsplit(login_url)
+    expected_url = f"{expected.scheme}://{expected.netloc}{expected.path}"
+    for receipt in reversed(latest_browser_interaction_receipts()):
+        if receipt.get("url") != expected_url:
+            continue
+        status = receipt.get("status")
+        if not isinstance(status, int):
+            continue
+        result = {
+            "outcome": "credential_rejected" if status == 401 else "completed",
+            "transport": "browser",
+            "login_url": expected_url,
+            "status": status,
+            "evidence_refs": [receipt["evidence_ref"]] if receipt.get("evidence_ref") else [],
+        }
+        _AUTHENTICATION_ATTEMPTS[_context_key(operation_id, target, credential_id)] = result
+        return dict(result)
+    return None
 
 
 def _active_record(credential_id: str) -> tuple[Any, dict[str, Any], str]:
@@ -149,11 +236,15 @@ def _active_record(credential_id: str) -> tuple[Any, dict[str, Any], str]:
     return task, record, resolved_credential_id
 
 
-def _stored_api_form_flow(target: str) -> dict[str, Any]:
-    """Return the unambiguous stored API-form flow for one exact credential target."""
+def _stored_api_form_flow(target: str, flow_id: str) -> dict[str, Any]:
+    """Return the controller-selected API-form flow for one exact credential target."""
 
     candidates = []
-    for stored in _get_database_store().list_authentication_flows(target, purpose="authentication"):
+    for stored in _get_database_store().list_authentication_flows(
+        target, purpose="authentication", statuses=("discovered", "validated")
+    ):
+        if str(stored.get("flow_id") or "") != flow_id:
+            continue
         descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
         if not _is_current_authentication_flow(descriptor):
             continue
@@ -168,21 +259,9 @@ def _stored_api_form_flow(target: str) -> dict[str, Any]:
         if not _credential_target_url_contains(target, validation_url, label="stored validation_url"):
             continue
         candidates.append((str(stored.get("status") or ""), descriptor))
-    validated = [descriptor for status, descriptor in candidates if status == "validated"]
-    preferred = validated or [descriptor for status, descriptor in candidates if status == "discovered"]
-    if not preferred:
-        raise ValueError("no mapped api_form authentication flow is available for this credential target")
-    unique = {
-        (
-            str(descriptor["login_url"]),
-            str(descriptor["validation_url"]),
-            str(descriptor.get("request_format") or "json"),
-        )
-        for descriptor in preferred
-    }
-    if len(unique) != 1:
-        raise ValueError("mapped api_form authentication flow is ambiguous for this credential target")
-    return preferred[0]
+    if len(candidates) != 1:
+        raise ValueError("the selected api_form authentication flow is unavailable for this credential target")
+    return candidates[0][1]
 
 
 def _store_context(
@@ -222,6 +301,7 @@ def record_authentication_flow(
     login_url: str = "",
     validation_url: str = "",
     authorization_storage_key: str = "",
+    storage_header_bindings: list[dict[str, str]] | None = None,
     request_format: str = "",
     allowed_origins: list[str] | None = None,
     purpose: str = "authentication",
@@ -263,10 +343,15 @@ def record_authentication_flow(
     if purpose == "authentication":
         validation_url = _safe_flow_descriptor_url(target, validation_url, label="validation_url")
         authorization_storage_key = _safe_authorization_storage_key(authorization_storage_key)
+        storage_header_bindings = _normalize_storage_header_bindings(
+            storage_header_bindings, authorization_storage_key
+        )
     elif validation_url:
         raise ValueError("registration flow recording does not accept validation_url")
     elif authorization_storage_key:
         raise ValueError("registration flow recording does not accept an authorization storage key")
+    elif storage_header_bindings:
+        raise ValueError("registration flow recording does not accept storage header bindings")
     if purpose == "authentication" and success_redirect_url:
         raise ValueError("authentication flow recording does not accept success_redirect_url")
     if purpose == "registration" and success_redirect_url:
@@ -287,11 +372,14 @@ def record_authentication_flow(
         "login_url": effective_login_url,
         "validation_url": validation_url if purpose == "authentication" else "",
         "authorization_storage_key": authorization_storage_key if purpose == "authentication" else "",
+        "storage_header_bindings": storage_header_bindings if purpose == "authentication" else [],
         "url": effective_login_url if purpose == "registration" else "",
         "request_format": request_format if request_format in {"", "json", "form"} else "",
         "allowed_origins": list(dict.fromkeys([f"{urlsplit(target).scheme}://{urlsplit(target).netloc}", *normalized_origins])),
         "evidence_refs": [],
     }
+    if purpose == "authentication":
+        descriptor["provenance"] = "observed_flow_discovery"
     if purpose == "registration":
         descriptor["roles"] = sorted({str(role).strip() for role in roles or ["user"] if str(role).strip()})
         descriptor["success_redirect_url"] = success_redirect_url
@@ -343,6 +431,7 @@ def build_record_authentication_flow_tool(
         login_url: str,
         validation_url: str = "",
         authorization_storage_key: str = "",
+        storage_header_bindings: list[dict[str, str]] | None = None,
         request_format: str = "",
         success_redirect_url: str = "",
         identity_fields: list[str] | None = None,
@@ -358,6 +447,7 @@ def build_record_authentication_flow_tool(
             login_url=login_url,
             validation_url=validation_url,
             authorization_storage_key=authorization_storage_key,
+            storage_header_bindings=storage_header_bindings,
             request_format=request_format,
             allowed_origins=list(normalized_origins),
             purpose=normalized_purpose,
@@ -375,7 +465,21 @@ def build_record_authentication_flow_tool(
             "validation_url": {"type": "string", "description": "Observed same-target protected validation URL."},
             "authorization_storage_key": {
                 "type": "string",
-                "description": "Observed localStorage or sessionStorage bearer-token key; never a token value.",
+                "description": "Legacy observed bearer-token storage key; never a token value.",
+            },
+            "storage_header_bindings": {
+                "type": "array",
+                "description": "Observed browser-storage-to-header mappings; never include header values.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "header_name": {"type": "string"},
+                        "storage_key": {"type": "string"},
+                        "value_template": {"type": "string"},
+                    },
+                    "required": ["header_name", "storage_key", "value_template"],
+                    "additionalProperties": False,
+                },
             },
             "request_format": {"type": "string", "enum": ["", "json", "form"]},
         }
@@ -412,6 +516,7 @@ def build_record_authentication_flow_tool(
 @tool(name="ensure_authenticated_context")
 def ensure_authenticated_context(
     credential_id: str,
+    flow_id: str = "",
     login_url: str = "",
     validation_url: str = "",
     request_format: str = "",
@@ -435,7 +540,9 @@ def ensure_authenticated_context(
     if record["credential_type"] != "username_password":
         raise ValueError("authentication context login currently requires a username_password credential")
     if not login_url or not validation_url:
-        flow = _stored_api_form_flow(target)
+        if not flow_id:
+            raise ValueError("authentication context login requires a controller-selected flow_id")
+        flow = _stored_api_form_flow(target, flow_id)
         login_url = login_url or str(flow["login_url"])
         validation_url = validation_url or str(flow["validation_url"])
         request_format = request_format or str(flow.get("request_format") or "json")
@@ -458,7 +565,20 @@ def ensure_authenticated_context(
         else:
             response = session.post(login_url, data=credentials, timeout=15)
     except requests.RequestException as error:
+        _AUTHENTICATION_ATTEMPTS[key] = {
+            "outcome": "request_failed",
+            "transport": "api",
+            "login_url": login_url,
+            "evidence_refs": [],
+        }
         raise ValueError("authentication request failed") from error
+    _AUTHENTICATION_ATTEMPTS[key] = {
+        "outcome": "credential_rejected" if response.status_code == 401 else "completed",
+        "transport": "api",
+        "login_url": login_url,
+        "status": response.status_code,
+        "evidence_refs": [],
+    }
     if response.status_code >= 400:
         raise ValueError("authentication was rejected")
 
@@ -481,12 +601,13 @@ async def capture_browser_authenticated_context(
     credential_id: str,
     validation_url: str,
     authorization_storage_key: str = "",
+    storage_header_bindings: list[dict[str, str]] | None = None,
 ) -> str:
     """Capture an authentication agent's browser session into an opaque HTTP context.
 
-    This tool is intentionally available only to the authentication agent. It copies same-origin cookies and, when a
-    named local/session-storage key is supplied, a bearer token directly into operation memory. Neither value is
-    returned to the agent or persisted to workflow state.
+    This tool is intentionally available only to the authentication agent. It copies same-origin cookies plus declared
+    browser-storage-derived headers into operation memory. Observed same-origin request headers take precedence for
+    matching declared names. Neither values nor cookies are returned to the agent or persisted to workflow state.
     """
 
     from modules.tools.browser import get_browser
@@ -495,22 +616,41 @@ async def capture_browser_authenticated_context(
     target = str(record["target"]).rstrip("/")
     if not _credential_target_url_contains(target, validation_url, label="validation_url"):
         raise ValueError("validation URL must share the credential target origin")
-    authorization_storage_key = _safe_authorization_storage_key(authorization_storage_key)
+    bindings = _normalize_storage_header_bindings(storage_header_bindings, authorization_storage_key)
     session = requests.Session()
     headers: dict[str, str] = {}
     async with get_browser() as browser:
-        async def capture() -> tuple[list[dict[str, Any]], str]:
+        async def capture() -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
             async with browser.timeout():
                 cookies = await browser.context.cookies([target])
-                token = ""
-                if authorization_storage_key:
-                    token = await browser.page.evaluate(
-                        "(key) => localStorage.getItem(key) || sessionStorage.getItem(key) || ''",
-                        authorization_storage_key,
+                observed_headers: dict[str, str] = {}
+                wanted_headers = {str(binding["header_name"]).lower() for binding in bindings}
+                wanted_headers.add("authorization")
+                for request in reversed(tuple(getattr(browser, "recent_requests", ()))):
+                    if not _credential_target_url_contains(target, str(request.url), label="browser request URL"):
+                        continue
+                    request_headers = await request.all_headers()
+                    for name, value in request_headers.items():
+                        normalized_name = str(name).lower()
+                        normalized_value = str(value).strip()
+                        if normalized_name in wanted_headers and normalized_value and normalized_name not in observed_headers:
+                            observed_headers[normalized_name] = normalized_value
+                    if wanted_headers.issubset(observed_headers):
+                        break
+                storage_values: dict[str, str] = {}
+                storage_keys = sorted({binding["storage_key"] for binding in bindings})
+                if storage_keys:
+                    storage_values = await browser.page.evaluate(
+                        """(keys) => Object.fromEntries(keys.map((key) => [
+                            key, localStorage.getItem(key) || sessionStorage.getItem(key) || ''
+                        ]))""",
+                        storage_keys,
                     )
-                return cookies, token
+                    if not isinstance(storage_values, dict):
+                        raise ValueError("browser storage lookup returned an invalid result")
+                return cookies, observed_headers, storage_values
 
-        cookies, token = await browser.run_in_browser_loop(capture)
+        cookies, observed_headers, storage_values = await browser.run_in_browser_loop(capture)
     for cookie in cookies:
         session.cookies.set(
             str(cookie["name"]),
@@ -518,8 +658,18 @@ async def capture_browser_authenticated_context(
             domain=str(cookie.get("domain") or ""),
             path=str(cookie.get("path") or "/"),
         )
-    if token:
-        headers["Authorization"] = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+    for binding in bindings:
+        header_name = binding["header_name"]
+        observed_value = observed_headers.get(header_name.lower(), "")
+        if observed_value:
+            headers[header_name] = observed_value
+            continue
+        storage_value = str(storage_values.get(binding["storage_key"], "")).strip()
+        if not storage_value:
+            raise ValueError(f"browser storage key for {header_name} was not available after authentication")
+        headers[header_name] = binding["value_template"].replace("{value}", storage_value)
+    if "Authorization" not in headers and observed_headers.get("authorization"):
+        headers["Authorization"] = observed_headers["authorization"]
     return _store_context(task, record, credential_id, session, headers, {}, validation_url)
 
 

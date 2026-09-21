@@ -126,6 +126,7 @@ from modules.tools.credentials import (
     generate_mfa_code,
     generate_password,
     generate_registration_email,
+    generate_registration_profile,
     mark_credential_status,
     plan_access_control_comparisons,
     plan_authenticated_coverage,
@@ -656,7 +657,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         store_credential, query_credentials, checkout_credential, exchange_oauth2_client_credentials,
         set_task_auth_context, mark_credential_status, plan_access_control_comparisons,
         plan_authenticated_coverage, prepare_api_key_authentication, prepare_login_form_authentication,
-        generate_password, generate_registration_email, generate_mfa_code, begin_email_mfa_retrieval, request_mfa_code,
+        generate_password, generate_registration_email, generate_registration_profile, generate_mfa_code,
+        begin_email_mfa_retrieval, request_mfa_code,
         retrieve_email_mfa_code, stage_credential_rotation, complete_credential_rotation,
         fail_credential_rotation, rotate_credential,
     ]

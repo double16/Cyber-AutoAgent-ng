@@ -3,6 +3,7 @@
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -16,7 +17,7 @@ import requests
 import urllib3
 from strands import tool
 
-from modules.tools.authentication import AUTHENTICATION_FLOW_VERSION
+from modules.tools.client_auth_extraction import extract_storage_header_bindings
 from modules.tools.result_cache import (
     build_result_cache_key,
     cache_result,
@@ -25,6 +26,13 @@ from modules.tools.result_cache import (
 from modules.utils.proxy import resolve_request_proxies
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+_AUTH_CHAIN_ANALYSIS_VERSION = 3
+_CLIENT_SCRIPT_PATTERN = re.compile(
+    r"<script\b[^>]*\bsrc\s*=\s*[\"'](?P<src>[^\"']+)[\"'][^>]*>", re.IGNORECASE
+)
+_MAX_CLIENT_SCRIPT_SOURCES = 20
+_MAX_CLIENT_SCRIPT_BYTES = 1_000_000
 
 
 def _coerce_str(arg: bytes | str | None) -> str:
@@ -92,6 +100,14 @@ def _normalize_analysis_mode(analysis_mode: str) -> str:
                     "default": None,
                     "description": "Optional path to write a validated inventory manifest.",
                 },
+                "attack_surface_context": {
+                    "type": ["object", "null"],
+                    "default": None,
+                    "description": (
+                        "Optional controller-provided, target-scoped endpoints and JavaScript URLs from the current "
+                        "frozen attack-surface inventory."
+                    ),
+                },
             },
             "required": ["target_url"],
         }
@@ -103,6 +119,7 @@ def auth_chain_analyzer(
         analysis_mode: str = "mapping_only",
         output_file: str | None = None,
         inventory_manifest: str | None = None,
+        attack_surface_context: dict[str, Any] | None = None,
 ) -> str:
     """
     Map auth flows for a target, optionally validating candidate bypass surfaces when authorized.
@@ -128,10 +145,11 @@ def auth_chain_analyzer(
     - analysis_mode: "mapping_only"|"validation"; semantic aliases are normalized, unknown values are rejected
     - output_file: path to write results to disk
     - inventory_manifest: path for validated inventory manifest.
+    - attack_surface_context: controller-provided, target-scoped endpoints and JavaScript URLs from frozen inventory
 
     RETURNS (JSON)
     - summary: mechanism/token types, confirmed_exploits count; mapping_only never confirms exploits
-    - evidence: endpoints/mechanisms/tokens/flow mapping
+    - evidence: endpoints/mechanisms/tokens/flow mapping plus deterministic same-origin client JavaScript header bindings
     - candidate_bypass_surfaces[]: observed surfaces or auth-chain properties that may justify a later validation task
     - findings[]: observed/confirmed auth bypass or controls + evidence; populated only in validation mode
     - next_steps[]: prioritized, capability-tagged next steps; populated only in validation mode
@@ -152,7 +170,14 @@ def auth_chain_analyzer(
     auth_type = auth_type.lower()
     analysis_mode = _normalize_analysis_mode(analysis_mode)
 
-    cache_key = build_result_cache_key(target_url=target_url, auth_type=auth_type, analysis_mode=analysis_mode)
+    attack_surface = _normalize_attack_surface_context(target_url, attack_surface_context)
+    cache_key = build_result_cache_key(
+        target_url=target_url,
+        auth_type=auth_type,
+        analysis_mode=analysis_mode,
+        analysis_version=_AUTH_CHAIN_ANALYSIS_VERSION,
+        attack_surface_context=attack_surface,
+    )
     cached_result = get_cached_result("auth_chain_analyzer", cache_key)
     if cached_result:
         cached_payload = json.loads(cached_result)
@@ -196,7 +221,11 @@ def auth_chain_analyzer(
 
     try:
         # Phase 1: Authentication endpoint discovery
-        auth_endpoints = _discover_auth_endpoints(target_url)
+        auth_endpoints = (
+            _discover_auth_endpoints(target_url, attack_surface["endpoints"])
+            if attack_surface["endpoints"]
+            else _discover_auth_endpoints(target_url)
+        )
         results["auth_endpoints"] = auth_endpoints
 
         report["evidence"]["auth_endpoints"] = {
@@ -223,6 +252,20 @@ def auth_chain_analyzer(
             "items": results.get("tokens_discovered", []) or [],
         }
 
+        client_javascript = _analyze_client_javascript_auth(
+            target_url,
+            auth_endpoints,
+            mapped_script_urls=attack_surface["javascript_urls"],
+            mapped_bindings=attack_surface["storage_header_bindings"],
+        )
+        results["client_javascript"] = client_javascript
+        report["evidence"]["client_javascript"] = client_javascript
+        report["evidence"]["attack_surface_context"] = {
+            "endpoint_count": len(attack_surface["endpoints"]),
+            "javascript_url_count": len(attack_surface["javascript_urls"]),
+            "storage_header_binding_count": len(attack_surface["storage_header_bindings"]),
+        }
+
         # Phase 4: Authentication flow mapping
         flow_analysis = _map_authentication_flows(target_url, results)
         results["flow_analysis"].update(flow_analysis)
@@ -243,7 +286,11 @@ def auth_chain_analyzer(
                 "items": flow_analysis.get("privilege_escalation", []) or [],
             },
         }
-        authentication_flows = _authentication_flow_descriptors(target_url, auth_endpoints)
+        authentication_flows = _authentication_flow_descriptors(
+            target_url,
+            auth_endpoints,
+            client_javascript["storage_header_bindings"],
+        )
         report["evidence"]["authentication_flows"] = {
             "count_total": len(authentication_flows),
             "items": authentication_flows,
@@ -666,10 +713,82 @@ def _looks_like_wildcard(candidate: dict[str, Any], baseline: dict[str, Any]) ->
     return False
 
 
-def _discover_auth_endpoints(target_url: str) -> list[dict[str, Any]]:
+def _normalize_attack_surface_context(target_url: str, context: dict[str, Any] | None) -> dict[str, list[Any]]:
+    """Keep only same-origin, structured inventory observations for this analysis."""
+
+    normalized: dict[str, list[Any]] = {"endpoints": [], "javascript_urls": [], "storage_header_bindings": []}
+    if not isinstance(context, dict):
+        return normalized
+    target_origin = f"{urlparse(target_url).scheme}://{urlparse(target_url).netloc}".rstrip("/")
+    if str(context.get("target") or "").rstrip("/") != target_url.rstrip("/"):
+        return normalized
+    seen_endpoints: set[str] = set()
+    for item in context.get("endpoints", []):
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "").strip()
+        if not _same_origin_url(url, target_origin) or url in seen_endpoints:
+            continue
+        seen_endpoints.add(url)
+        normalized["endpoints"].append(
+            {
+                "url": url,
+                "method": str(item.get("method") or "GET").upper(),
+                "status": str(item.get("status") or ""),
+                "source_refs": list(item.get("source_refs") or []),
+            }
+        )
+    normalized["javascript_urls"] = sorted(
+        {
+            str(item.get("url") or "").strip()
+            for item in context.get("javascript", [])
+            if isinstance(item, dict)
+            and _same_origin_url(str(item.get("url") or "").strip(), target_origin)
+        }
+    )
+    seen_bindings: set[str] = set()
+    for binding in context.get("storage_header_bindings", []):
+        if not isinstance(binding, dict):
+            continue
+        header_name = str(binding.get("header_name") or "").strip()
+        storage_key = str(binding.get("storage_key") or "").strip()
+        value_template = str(binding.get("value_template") or "").strip()
+        if not header_name or not storage_key or value_template not in {"{value}", "Bearer {value}"}:
+            continue
+        key = json.dumps(
+            {"header_name": header_name, "storage_key": storage_key, "value_template": value_template}, sort_keys=True
+        )
+        seen_bindings.add(key)
+    normalized["storage_header_bindings"] = [json.loads(value) for value in sorted(seen_bindings)]
+    return normalized
+
+
+def _discover_auth_endpoints(
+        target_url: str,
+        mapped_endpoints: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Discover authentication-related endpoints"""
     auth_endpoints = []
     seen_paths: set[str] = set()
+
+    for endpoint in mapped_endpoints or []:
+        url = str(endpoint.get("url") or "").strip()
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/") or "/"
+        if not url or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        auth_endpoints.append(
+            {
+                "path": path,
+                "full_url": url,
+                "status": str(endpoint.get("status") or ""),
+                "method": str(endpoint.get("method") or "GET").upper(),
+                "type": _classify_auth_endpoint(path, ""),
+                "source": "attack_surface_inventory",
+                "source_refs": list(endpoint.get("source_refs") or []),
+            }
+        )
 
     # Modern authentication endpoint wordlist (includes GraphQL, API gateways)
     auth_paths = [
@@ -1374,83 +1493,133 @@ nbf = NotBefore
     return analysis
 
 
+def _same_origin_url(candidate_url: str, target_origin: str) -> bool:
+    """Return whether a candidate URL stays on the target's explicit origin."""
+
+    parsed = urlparse(candidate_url)
+    return bool(parsed.scheme and parsed.netloc and f"{parsed.scheme}://{parsed.netloc}" == target_origin)
+
+
+def _bounded_response_bytes(response: requests.Response) -> bytes | None:
+    """Read a bounded response body, rejecting known oversized scripts."""
+
+    try:
+        content_length = int(response.headers.get("Content-Length", "0") or 0)
+    except (TypeError, ValueError):
+        content_length = 0
+    if content_length > _MAX_CLIENT_SCRIPT_BYTES:
+        return None
+    iter_content = getattr(response, "iter_content", None)
+    if callable(iter_content):
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in iter_content(chunk_size=65_536):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > _MAX_CLIENT_SCRIPT_BYTES:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+    raw = getattr(response, "raw", None)
+    read = getattr(raw, "read", None)
+    if callable(read):
+        content = read(_MAX_CLIENT_SCRIPT_BYTES + 1)
+    else:
+        content = getattr(response, "content", b"") or _coerce_str(getattr(response, "text", "")).encode("utf-8")
+    if not isinstance(content, bytes) or len(content) > _MAX_CLIENT_SCRIPT_BYTES:
+        return None
+    return content
+
+
+def _analyze_client_javascript_auth(
+        target_url: str,
+        auth_endpoints: list[dict[str, Any]],
+        *,
+        mapped_script_urls: list[str] | None = None,
+        mapped_bindings: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
+    """Statically inspect bounded same-origin scripts for storage-backed request headers."""
+
+    target_origin = f"{urlparse(target_url).scheme}://{urlparse(target_url).netloc}".rstrip("/")
+    page_urls = [target_url]
+    page_urls.extend(
+        str(endpoint.get("full_url") or endpoint.get("url") or "")
+        for endpoint in auth_endpoints
+        if isinstance(endpoint, dict)
+        and str(endpoint.get("type") or "")
+        in {"Session-based", "API Authentication", "OAuth", "SAML", "Multi-factor"}
+    )
+    script_urls: list[str] = list(mapped_script_urls or [])
+    skipped: list[dict[str, str]] = []
+    seen_pages: set[str] = set()
+    for page_url in page_urls:
+        if not page_url or page_url in seen_pages or not _same_origin_url(page_url, target_origin):
+            continue
+        seen_pages.add(page_url)
+        response = _http_request("GET", page_url, timeout=10.0, stream=True)
+        if response is None:
+            skipped.append({"url": page_url, "reason": "page_request_failed"})
+            continue
+        page_bytes = _bounded_response_bytes(response)
+        if page_bytes is None:
+            skipped.append({"url": page_url, "reason": "page_too_large"})
+            continue
+        page_text = page_bytes.decode("utf-8", errors="replace")
+        for match in _CLIENT_SCRIPT_PATTERN.finditer(page_text):
+            script_url = urljoin(page_url, match.group("src"))
+            if _same_origin_url(script_url, target_origin) and script_url not in script_urls:
+                script_urls.append(script_url)
+
+    sources: list[dict[str, Any]] = []
+    bindings: set[str] = {
+        json.dumps(binding, sort_keys=True)
+        for binding in (mapped_bindings or [])
+    }
+    for script_url in script_urls[:_MAX_CLIENT_SCRIPT_SOURCES]:
+        response = _http_request("GET", script_url, timeout=10.0, stream=True)
+        if response is None:
+            skipped.append({"url": script_url, "reason": "script_request_failed"})
+            continue
+        script_bytes = _bounded_response_bytes(response)
+        if script_bytes is None:
+            skipped.append({"url": script_url, "reason": "script_too_large"})
+            continue
+        extracted = extract_storage_header_bindings(script_bytes.decode("utf-8", errors="replace"))
+        sources.append(
+            {
+                "url": script_url,
+                "sha256": hashlib.sha256(script_bytes).hexdigest(),
+                "status": "inspected",
+                "binding_count": len(extracted),
+            }
+        )
+        bindings.update(json.dumps(binding, sort_keys=True) for binding in extracted)
+    for script_url in script_urls[_MAX_CLIENT_SCRIPT_SOURCES:]:
+        skipped.append({"url": script_url, "reason": "script_source_limit"})
+    return {
+        "inspected_source_count": len(sources),
+        "skipped_source_count": len(skipped),
+        "sources": sources,
+        "skipped_sources": skipped,
+        "storage_header_bindings": [json.loads(binding) for binding in sorted(bindings)],
+    }
+
+
 def _authentication_flow_descriptors(
         target_url: str,
         auth_endpoints: list[dict[str, Any]],
+        storage_header_bindings: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return executable, observed authentication-flow metadata for inventory consumers.
+    """Return no executable flows from endpoint inventory.
 
-    The descriptor is deliberately conservative: an authentication worker may only
-    use a flow when both the login and protected validation URLs were observed.
-    This prevents a later worker from inventing routes from descriptive auth steps.
+    Auth endpoint classifications and static client metadata are discovery hints,
+    not evidence of a login start-to-validation relationship. Only the bounded
+    discovery worker may record a reusable executable descriptor.
     """
 
-    target_origin = f"{urlparse(target_url).scheme}://{urlparse(target_url).netloc}".rstrip("/")
-    endpoint_records = [
-        endpoint for endpoint in auth_endpoints
-        if isinstance(endpoint, dict) and str(endpoint.get("full_url") or endpoint.get("url") or "").strip()
-    ]
-    protected = [
-        endpoint for endpoint in endpoint_records
-        if str(endpoint.get("status") or endpoint.get("status_code") or "") in {"401", "403"}
-        or str(endpoint.get("type") or "") == "Administrative"
-    ]
-    if not protected:
-        protected = [
-            endpoint for endpoint in endpoint_records
-            if any(token in str(endpoint.get("path") or "").lower() for token in ("profile", "account", "dashboard"))
-        ]
-    user_scoped = [
-        endpoint for endpoint in endpoint_records
-        if any(token in str(endpoint.get("path") or "").lower() for token in ("profile", "account", "dashboard"))
-    ]
-
-    descriptors = []
-    for endpoint in endpoint_records:
-        endpoint_type = str(endpoint.get("type") or "")
-        login_url = str(endpoint.get("full_url") or endpoint.get("url") or "").strip()
-        if endpoint_type not in {"Session-based", "API Authentication", "OAuth", "SAML", "Multi-factor"}:
-            continue
-        path = str(endpoint.get("path") or urlparse(login_url).path).lower()
-        if endpoint_type == "API Authentication" or path.startswith("/api/"):
-            flow_kind = "api_form"
-        elif endpoint_type in {"OAuth", "SAML"}:
-            flow_kind = "browser_redirect"
-        elif endpoint_type == "Multi-factor":
-            flow_kind = "browser_mfa"
-        else:
-            flow_kind = "browser_form"
-        validation_candidates = protected
-        if flow_kind == "browser_form":
-            # A browser-form login commonly lands on a user-scoped page while
-            # administrative APIs may correctly remain forbidden to that role.
-            # Prefer an observed user route, then let authenticated capture
-            # confirm that the selected route is actually accessible.
-            validation_candidates = [*user_scoped, *protected]
-        validation = next(
-            (
-                candidate for candidate in validation_candidates
-                if str(candidate.get("full_url") or candidate.get("url") or "").strip() != login_url
-            ),
-            None,
-        )
-        validation_url = str((validation or {}).get("full_url") or (validation or {}).get("url") or "").strip()
-        descriptors.append(
-            {
-                "flow_id": f"auth-flow-{len(descriptors) + 1}",
-                "kind": flow_kind,
-                "flow_version": AUTHENTICATION_FLOW_VERSION,
-                "login_url": login_url,
-                "validation_url": validation_url,
-                "authorization_storage_key": str(endpoint.get("authorization_storage_key") or "").strip(),
-                "allowed_origins": [target_origin] if target_origin else [],
-                "evidence": {
-                    "login_endpoint": str(endpoint.get("path") or ""),
-                    "validation_endpoint": str((validation or {}).get("path") or ""),
-                },
-            }
-        )
-    return descriptors
+    del target_url, auth_endpoints, storage_header_bindings
+    return []
 
 
 def _map_authentication_flows(target_url: str, results: dict) -> dict[str, Any]:

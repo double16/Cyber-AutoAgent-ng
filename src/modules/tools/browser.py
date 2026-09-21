@@ -11,12 +11,13 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
 from typing import Any, get_args, get_origin
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunsplit
 
 from playwright.async_api import (
     BrowserContext,
@@ -53,6 +54,34 @@ _MAX_PAGE_CHANGE_TIMEOUT_SECONDS = 60
 _FORM_CONTROL_DIAGNOSTIC_LIMIT = 100
 _FORM_ACTION_EVENT_CAPTURE_KEY = "__cyber_autoagent_form_action_events__"
 _ACTION_RESULT_FIELD_MISSING = object()
+_LAST_INTERACTION_RECEIPTS: list[dict[str, Any]] = []
+
+
+def latest_browser_interaction_receipts() -> list[dict[str, Any]]:
+    """Return secret-free response receipts from the most recent browser action."""
+
+    return [dict(receipt) for receipt in _LAST_INTERACTION_RECEIPTS]
+
+
+async def _interaction_response_receipts(requests: list[Request]) -> list[dict[str, Any]]:
+    """Collect same-action response metadata without retaining headers or bodies."""
+
+    receipts: list[dict[str, Any]] = []
+    for request in requests:
+        with suppress(asyncio.TimeoutError):
+            async with asyncio.timeout(5):
+                response = await request.response()
+                if response is None:
+                    continue
+                parsed = urlsplit(request.url)
+                receipts.append(
+                    {
+                        "method": request.method,
+                        "url": urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")),
+                        "status": response.status,
+                    }
+                )
+    return receipts
 
 
 def _structured_output_is_unavailable(error: BaseException) -> bool:
@@ -766,6 +795,7 @@ class BrowserService(EventEmitter):
         self._active_ops: int = 0
         self._active_ops_peak: int = 0
         self._active_ops_violations: int = 0
+        self.recent_requests: deque[Request] = deque(maxlen=128)
 
         def _loop_runner() -> None:
             loop = asyncio.new_event_loop()
@@ -946,6 +976,11 @@ class BrowserService(EventEmitter):
 
             self.page.on("dialog", handle_dialog)
             self.page.on("download", handle_download)
+
+            def remember_request(request: Request) -> None:
+                self.recent_requests.append(request)
+
+            self.page.on("request", remember_request)
 
             for event_name in (
                     "request",
@@ -1517,6 +1552,7 @@ async def reset_authentication_browser_session() -> None:
                 )
             await browser.context.clear_cookies()
             await browser.context.set_extra_http_headers({})
+            browser.recent_requests.clear()
             await browser.page.goto("about:blank")
 
         await browser.run_in_browser_loop(_reset)
@@ -2206,9 +2242,16 @@ async def browser_perform_action(
                             )
                     )
                 summary = await interaction_context.summarize()
-                return observations, summary, page_change, str(browser.page.url)
+                receipts = await _interaction_response_receipts(interaction_context.requests)
+                har_match = re.search(r"\[Full HAR saved to ([^\]]+)\]", summary)
+                if har_match:
+                    for receipt in receipts:
+                        receipt["evidence_ref"] = har_match.group(1)
+                return observations, summary, page_change, str(browser.page.url), receipts
 
-        observations, summary, page_change, final_url = await browser.run_in_browser_loop(_impl)
+        observations, summary, page_change, final_url, receipts = await browser.run_in_browser_loop(_impl)
+        global _LAST_INTERACTION_RECEIPTS
+        _LAST_INTERACTION_RECEIPTS = receipts
         logger.info("browser_perform_action: %s action done", action_category)
         page_change_result = ""
         if page_change is not None:

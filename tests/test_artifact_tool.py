@@ -620,6 +620,38 @@ def test_bounded_reader_rejects_overlapping_line_and_byte_pages(tmp_path: Path):
             byte_reader("artifact:artifacts/bytes.txt", start_byte=4, max_bytes=4)
 
 
+def test_bounded_reader_allows_byte_retry_after_byte_limited_line_page(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    artifact = artifacts / "large.txt"
+    artifact.write_text("\n".join("x" * 200 for _ in range(500)), encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        reader = create_bounded_artifact_reader(
+            max_reads=4,
+            context_window_tokens=40_000,
+            allowed_artifact_refs=["artifact:artifacts/large.txt"],
+        )
+        line_page = ast.literal_eval(reader("artifact:artifacts/large.txt", max_lines=500))
+        assert line_page["truncation_reason"] == "byte_limit_reached"
+
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
+            reader("artifact:artifacts/large.txt", max_lines=500)
+
+        byte_page = ast.literal_eval(
+            reader("artifact:artifacts/large.txt", start_byte=0, max_bytes=16_000)
+        )
+
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
+            reader("artifact:artifacts/large.txt", start_byte=0, max_bytes=16_000)
+
+    assert byte_page["start_byte"] == 0
+    assert byte_page["end_byte"] == 16_000
+
+
 def test_bounded_reader_replays_overlapping_page_once_after_context_reduction(tmp_path: Path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
