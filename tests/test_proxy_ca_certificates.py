@@ -4,16 +4,21 @@ Unit tests for Proxy CA Trust Store Utilities
 """
 
 import hashlib
+import os
 import ssl
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from modules.utils.proxy import (
+    DEFAULT_LANGFUSE_NO_PROXY_HOSTS,
     TrustStoreConfig,
     _parse_proxy_string,
+    build_no_proxy_string,
     compute_cert_fingerprint,
+    configure_langfuse_proxy_bypass,
     configure_proxy_ca_certificates,
+    extract_langfuse_hosts,
     extract_proxy_endpoints,
     fetch_http_certificate,
     fetch_proxy_certificate,
@@ -642,3 +647,122 @@ class TestAgentIntegration:
 
         assert hasattr(cyberautoagent, "configure_proxy_ca_certificates")
         assert callable(cyberautoagent.configure_proxy_ca_certificates)
+        assert hasattr(cyberautoagent, "configure_langfuse_proxy_bypass")
+        assert callable(cyberautoagent.configure_langfuse_proxy_bypass)
+
+
+class TestLangfuseProxyBypass:
+    """Test excluding Langfuse endpoints from intercepting proxy configurations."""
+
+    def test_extract_langfuse_hosts_default(self):
+        hosts = extract_langfuse_hosts(environ={})
+        for default_host in DEFAULT_LANGFUSE_NO_PROXY_HOSTS:
+            assert default_host in hosts
+
+    def test_extract_langfuse_hosts_from_arg(self):
+        hosts = extract_langfuse_hosts(langfuse_host="http://custom-langfuse.internal:3000")
+        assert "custom-langfuse.internal" in hosts
+        assert "custom-langfuse.internal:3000" in hosts
+        assert "localhost" in hosts
+
+    def test_extract_langfuse_hosts_from_env_host(self):
+        environ = {"LANGFUSE_HOST": "https://langfuse.mycompany.com:8443"}
+        hosts = extract_langfuse_hosts(environ=environ)
+        assert "langfuse.mycompany.com" in hosts
+        assert "langfuse.mycompany.com:8443" in hosts
+
+    def test_extract_langfuse_hosts_from_env_base_url(self):
+        environ = {"LANGFUSE_BASE_URL": "http://192.168.1.100:3000"}
+        hosts = extract_langfuse_hosts(environ=environ)
+        assert "192.168.1.100" in hosts
+        assert "192.168.1.100:3000" in hosts
+
+    def test_extract_langfuse_hosts_schemeless_and_ipv6(self):
+        hosts = extract_langfuse_hosts(langfuse_host="my-host:3000")
+        assert "my-host" in hosts
+        assert "my-host:3000" in hosts
+
+        hosts_ipv6 = extract_langfuse_hosts(langfuse_host="http://[::1]:3000")
+        assert "::1" in hosts_ipv6
+        assert "::1:3000" in hosts_ipv6
+
+    def test_build_no_proxy_string(self):
+        assert build_no_proxy_string() == ""
+        assert build_no_proxy_string(existing_no_proxy="") == ""
+
+        combined = build_no_proxy_string(
+            existing_no_proxy="localhost, 10.0.0.1",
+            additional_hosts=["10.0.0.1", "langfuse-web", "LOCALHOST"],
+        )
+        assert combined == "localhost,10.0.0.1,langfuse-web"
+
+    def test_configure_langfuse_proxy_bypass_env_dict(self):
+        env = {
+            "HTTP_PROXY": "http://127.0.0.1:8080",
+            "HTTPS_PROXY": "http://127.0.0.1:8080",
+            "LANGFUSE_HOST": "http://langfuse-web:3000",
+        }
+        res = configure_langfuse_proxy_bypass(environ=env)
+        assert "NO_PROXY" in env
+        assert "no_proxy" in env
+        assert env["NO_PROXY"] == env["no_proxy"]
+        assert "localhost" in env["NO_PROXY"]
+        assert "127.0.0.1" in env["NO_PROXY"]
+        assert "langfuse-web" in env["NO_PROXY"]
+        assert "langfuse-web:3000" in env["NO_PROXY"]
+        assert res == env["NO_PROXY"]
+
+    def test_configure_langfuse_proxy_bypass_preserves_existing(self):
+        env = {
+            "NO_PROXY": "internal.service.net,10.0.0.5",
+            "LANGFUSE_HOST": "https://cloud.langfuse.com",
+        }
+        configure_langfuse_proxy_bypass(environ=env)
+        assert env["NO_PROXY"].startswith("internal.service.net,10.0.0.5")
+        assert "cloud.langfuse.com" in env["NO_PROXY"]
+
+    def test_configure_proxy_ca_certificates_updates_no_proxy(self):
+        env = {
+            "HTTP_PROXY": "http://127.0.0.1:8080",
+        }
+        with patch("modules.utils.proxy.fetch_proxy_certificate", return_value=None):
+            configure_proxy_ca_certificates(environ=env)
+        assert "NO_PROXY" in env
+        assert "no_proxy" in env
+        assert "localhost" in env["NO_PROXY"]
+
+    def test_cyberautoagent_is_langfuse_available_sets_bypass(self, monkeypatch):
+        import cyberautoagent
+
+        env = {"LANGFUSE_HOST": "http://custom-langfuse:3000"}
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        monkeypatch.setattr(cyberautoagent.requests, "get", lambda *args, **kwargs: MagicMock(status_code=200))
+
+        assert cyberautoagent.is_langfuse_available() is True
+        assert "custom-langfuse" in os.environ.get("NO_PROXY", "")
+
+    def test_cyberautoagent_setup_langfuse_connection_sets_bypass(self, monkeypatch):
+        import cyberautoagent
+
+        monkeypatch.setenv("LANGFUSE_HOST", "http://custom-langfuse:3000")
+        logger_mock = MagicMock()
+        cyberautoagent.setup_langfuse_connection(logger_mock, "compose")
+        assert "custom-langfuse" in os.environ.get("NO_PROXY", "")
+
+    def test_prompts_factory_sets_bypass(self, monkeypatch):
+        from modules.prompts import factory
+
+        monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
+        monkeypatch.setenv("ENABLE_LANGFUSE_PROMPTS", "true")
+        monkeypatch.setenv("LANGFUSE_HOST", "http://prompts-langfuse:3000")
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.read.return_value = b'{"name": "test"}'
+            mock_resp.__enter__.return_value = mock_resp
+            mock_urlopen.return_value = mock_resp
+
+            factory._lf_get_prompt("test", "latest")
+            assert "prompts-langfuse" in os.environ.get("NO_PROXY", "")

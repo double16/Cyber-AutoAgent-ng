@@ -25,6 +25,7 @@ import yaml
 from modules.config.system.logger import get_logger
 from modules.config.types import BudgetConfig
 from modules.tools.memory import OperationPlan
+from modules.utils.proxy import configure_langfuse_proxy_bypass
 
 logger = get_logger("Prompts.Factory")
 
@@ -136,7 +137,9 @@ def _lf_get_prompt(name: str, label: str) -> dict[str, Any] | None:
     if cached is not None:
         return cached
     try:
-        url = f"{_lf_host()}/api/public/v2/prompts/{_urlparse.quote(name)}?label={_urlparse.quote(label)}"
+        host = _lf_host()
+        configure_langfuse_proxy_bypass(langfuse_host=host)
+        url = f"{host}/api/public/v2/prompts/{_urlparse.quote(name)}?label={_urlparse.quote(label)}"
         req = _urlreq.Request(url, method="GET")
         req.add_header("Authorization", _lf_auth_header())
         req.add_header("Accept", "application/json")
@@ -172,7 +175,9 @@ def _lf_create_prompt_version(
         "commitMessage": commit,
     }
     try:
-        url = f"{_lf_host()}/api/public/v2/prompts"
+        host = _lf_host()
+        configure_langfuse_proxy_bypass(langfuse_host=host)
+        url = f"{host}/api/public/v2/prompts"
         body = json.dumps(payload).encode("utf-8")
         req = _urlreq.Request(url, method="POST")
         req.add_header("Authorization", _lf_auth_header())

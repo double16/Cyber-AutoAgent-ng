@@ -64,6 +64,7 @@ from modules.config.models.factory import require_prompt_token_limit
 from modules.config.system.logger import get_logger
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.utils.json_repair import parse_json_response_with_metadata
+from modules.utils.proxy import configure_langfuse_proxy_bypass
 
 from ..config.providers.ollama_config import get_ollama_timeout
 from ..config.system import EnvironmentReader
@@ -277,17 +278,19 @@ class CyberAgentEvaluator:
         self.last_scope_errors: dict[str, str] = {}
         self.evaluation_run_id = uuid.uuid4().hex
         config_manager = get_config_manager()
+        langfuse_host = config_manager.getenv(
+            "LANGFUSE_HOST",
+            (
+                "http://langfuse-web:3000"
+                if os.path.exists("/.dockerenv") or os.path.exists("/app")
+                else "http://localhost:3000"
+            ),
+        )
+        configure_langfuse_proxy_bypass(langfuse_host=langfuse_host)
         self.langfuse = Langfuse(
             public_key=config_manager.getenv("LANGFUSE_PUBLIC_KEY", "cyber-public"),
             secret_key=config_manager.getenv("LANGFUSE_SECRET_KEY", "cyber-secret"),
-            host=config_manager.getenv(
-                "LANGFUSE_HOST",
-                (
-                    "http://langfuse-web:3000"
-                    if os.path.exists("/.dockerenv") or os.path.exists("/app")
-                    else "http://localhost:3000"
-                ),
-            ),
+            host=langfuse_host,
         )
         self.setup_models()
         self.setup_metrics()

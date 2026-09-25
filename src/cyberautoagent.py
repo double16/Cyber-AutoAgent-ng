@@ -121,7 +121,10 @@ from modules.tools.memory import (
 )
 from modules.tools.oast import close_oast_providers
 from modules.tools.tool_catalog import get_shell_command_help_context
-from modules.utils.proxy import configure_proxy_ca_certificates
+from modules.utils.proxy import (
+    configure_langfuse_proxy_bypass,
+    configure_proxy_ca_certificates,
+)
 from modules.utils.sdk_error_sanitization import sanitize_sdk_error
 from modules.utils.target_validation import (
     TargetValidationResult,
@@ -161,6 +164,7 @@ def is_langfuse_available() -> bool:
             langfuse_host = os.getenv("LANGFUSE_HOST", "http://langfuse-web:3000")
         else:
             langfuse_host = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
+        configure_langfuse_proxy_bypass(langfuse_host=langfuse_host)
         response = requests.get(f"{langfuse_host}/api/public/health", timeout=2)
         return response.status_code == 200
     except Exception:
@@ -583,6 +587,7 @@ def setup_langfuse_connection(logger, deployment_mode):
         "http://langfuse-web:3000" if is_docker() else "http://localhost:3000"
     )
     host = os.getenv("LANGFUSE_HOST", default_host)
+    configure_langfuse_proxy_bypass(langfuse_host=host, logger=logger)
     public_key = os.getenv("LANGFUSE_PUBLIC_KEY", "cyber-public")
     secret_key = os.getenv("LANGFUSE_SECRET_KEY", "cyber-secret")
 

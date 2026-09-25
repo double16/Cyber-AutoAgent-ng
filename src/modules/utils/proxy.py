@@ -33,6 +33,15 @@ DEFAULT_PROXY_ENV_VARS: tuple[str, ...] = (
     "https_proxy",
 )
 
+# Default hostnames, IPs, and service names to bypass when configuring proxy exclusion for Langfuse
+DEFAULT_LANGFUSE_NO_PROXY_HOSTS: tuple[str, ...] = (
+    "localhost",
+    "127.0.0.1",
+    "langfuse-web",
+    "cyber-langfuse",
+    "::1",
+)
+
 # Regex pattern to match PEM certificate blocks
 PEM_CERT_PATTERN = re.compile(
     r"-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----"
@@ -110,6 +119,102 @@ def extract_proxy_endpoints(
             endpoints.append(endpoint)
 
     return endpoints
+
+
+def extract_langfuse_hosts(
+    langfuse_host: str | None = None,
+    environ: dict[str, str] | None = None,
+) -> list[str]:
+    """
+    Extract hostnames, domain names, or IP addresses associated with Langfuse
+    for inclusion in NO_PROXY / no_proxy environment variables.
+    """
+    env = os.environ if environ is None else environ
+    hosts: list[str] = list(DEFAULT_LANGFUSE_NO_PROXY_HOSTS)
+
+    # Check explicitly passed langfuse_host or from env
+    target_host = langfuse_host or env.get("LANGFUSE_HOST") or env.get("LANGFUSE_BASE_URL")
+    if target_host and target_host.strip():
+        cleaned = target_host.strip()
+        if "://" not in cleaned:
+            cleaned = f"//{cleaned}"
+        try:
+            parsed = urllib.parse.urlsplit(cleaned)
+            hostname = parsed.hostname
+            if hostname:
+                hostname = hostname.strip("[]").lower()
+                if hostname not in hosts:
+                    hosts.append(hostname)
+                if parsed.port:
+                    port_entry = f"{hostname}:{parsed.port}"
+                    if port_entry not in hosts:
+                        hosts.append(port_entry)
+        except Exception:
+            pass
+
+    return hosts
+
+
+def build_no_proxy_string(
+    existing_no_proxy: str | None = None,
+    additional_hosts: tuple[str, ...] | list[str] | None = None,
+) -> str:
+    """
+    Combine existing NO_PROXY string with additional hosts, preserving order and deduplicating.
+    """
+    entries: list[str] = []
+    seen: set[str] = set()
+
+    if existing_no_proxy:
+        for item in existing_no_proxy.split(","):
+            cleaned = item.strip()
+            if cleaned:
+                key = cleaned.lower()
+                if key not in seen:
+                    seen.add(key)
+                    entries.append(cleaned)
+
+    if additional_hosts:
+        for host in additional_hosts:
+            cleaned = host.strip()
+            if cleaned:
+                key = cleaned.lower()
+                if key not in seen:
+                    seen.add(key)
+                    entries.append(cleaned)
+
+    return ",".join(entries)
+
+
+def configure_langfuse_proxy_bypass(
+    environ: dict[str, str] | None = None,
+    langfuse_host: str | None = None,
+    logger: Any | None = None,
+) -> str:
+    """
+    Ensure Langfuse endpoints (and default localhost/docker hosts) are excluded
+    from HTTP_PROXY and HTTPS_PROXY by updating NO_PROXY and no_proxy.
+
+    Updates both NO_PROXY and no_proxy in the target environment dict (defaults to os.environ).
+    Returns the updated NO_PROXY string.
+    """
+    env = os.environ if environ is None else environ
+    langfuse_hosts = extract_langfuse_hosts(langfuse_host=langfuse_host, environ=env)
+
+    # Check both NO_PROXY and no_proxy to gather any pre-existing entries
+    existing_no = env.get("NO_PROXY") or env.get("no_proxy") or ""
+    updated_no_proxy = build_no_proxy_string(
+        existing_no_proxy=existing_no,
+        additional_hosts=langfuse_hosts,
+    )
+
+    env["NO_PROXY"] = updated_no_proxy
+    env["no_proxy"] = updated_no_proxy
+
+    if logger:
+        logger.debug("Configured Langfuse proxy bypass (NO_PROXY=%s)", updated_no_proxy)
+
+    return updated_no_proxy
 
 
 def _parse_proxy_string(proxy_str: str) -> tuple[str, int] | None:
@@ -480,11 +585,13 @@ def configure_proxy_ca_certificates(
 
     Detects proxy endpoints from environment, probes for TLS certificates,
     checks if fingerprints are already installed in available Linux trust stores,
-    and installs new certificates as needed.
+    and installs new certificates as needed. Also ensures Langfuse endpoints
+    are excluded from proxying via NO_PROXY / no_proxy.
 
     Returns a list of installed certificate identifiers (e.g. ['debian:proxy.local:8080:<fp>']).
     """
     active_logger = logger or log or logging.getLogger(__name__)
+    configure_langfuse_proxy_bypass(environ=environ, logger=active_logger)
     endpoints = extract_proxy_endpoints(env_vars=env_vars, environ=environ)
     if not endpoints:
         return []
