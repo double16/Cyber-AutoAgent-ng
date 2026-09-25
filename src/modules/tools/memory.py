@@ -9382,16 +9382,20 @@ class QdrantMemoryClient:
             return OllamaEmbeddings(
                 model=model,
                 base_url=str(self.config.get("ollama_base_url") or os.getenv("OLLAMA_HOST", "http://localhost:11434")),
+                client_kwargs={"trust_env": False},
             )
         if provider == "gemini":
-            return GoogleGenerativeAIEmbeddings(model=model)
+            return GoogleGenerativeAIEmbeddings(model=model, client_args={"trust_env": False})
         if provider == "litellm":
             return _LiteLLMEmbeddings(model)
         if model.startswith("bedrock/"):
             model = model.split("/", 1)[1]
+        from botocore.config import Config as BotocoreConfig
+
         return BedrockEmbeddings(
             model_id=model,
             region_name=str(self.config.get("aws_region") or os.getenv("AWS_REGION", "us-east-1")),
+            config=BotocoreConfig(proxies={}),
         )
 
     def _build_client(self) -> QdrantClient:

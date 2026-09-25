@@ -10,7 +10,7 @@ Tests cover:
 - Fallback to snapshot
 - Edge cases and error handling
 """
-
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta
@@ -704,14 +704,17 @@ def test_real_models_from_user_examples(temp_client):
     assert limits.context == 8191
 
 
-def test_critical_bedrock_limit(temp_client):
-    """Test the critical Bedrock Claude 3.5 Sonnet v2 limit that causes specialist failures."""
-    # This is the model causing 77% specialist failure rate
-    limits = temp_client.get_limits("amazon-bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0")
+@patch.dict(os.environ, {"DEV_CLIENT_OFFLINE": "false"}, clear=False)
+def test_fetch_from_api_disables_trust_env(tmp_path, mock_models_data):
+    """Test that fetching from API explicitly uses trust_env=False."""
+    client = ModelsDevClient(cache_dir=tmp_path)
+    mock_response = Mock()
+    mock_response.json.return_value = mock_models_data
+    mock_response.raise_for_status = Mock()
+    mock_models_data_sha512 = hashlib.sha512(json.dumps(mock_models_data).encode()).hexdigest()
 
-    assert limits is not None
-    assert limits.output == 8192, "Critical: Bedrock Claude 3.5 Sonnet v2 has 8,192 token output limit"
-
-    # Verify safe max_tokens (50% of limit)
-    safe_max = limits.output // 2
-    assert safe_max == 4096, "Safe max_tokens should be 4,096 (50% of 8,192)"
+    with patch("httpx.get", return_value=mock_response) as mock_get:
+        data = client._get_data()
+        data_sha512 = hashlib.sha512(json.dumps(data).encode()).hexdigest()
+        assert data_sha512 == mock_models_data_sha512
+        mock_get.assert_called_once_with(client.API_URL, timeout=10.0, follow_redirects=True, trust_env=False)

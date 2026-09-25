@@ -121,6 +121,7 @@ from modules.tools.memory import (
 )
 from modules.tools.oast import close_oast_providers
 from modules.tools.tool_catalog import get_shell_command_help_context
+from modules.utils.proxy import configure_proxy_ca_certificates
 from modules.utils.sdk_error_sanitization import sanitize_sdk_error
 from modules.utils.target_validation import (
     TargetValidationResult,
@@ -1899,6 +1900,7 @@ def main():
         or os.environ.get("CYBER_DEBUG", "").lower() == "true"
     )
     logger = setup_logging(log_file=log_file, verbose=verbose_mode)
+    configure_proxy_ca_certificates(logger=logger)
 
     continuation_requested = bool(args.cont) and not bool(args.report)
     if continuation_requested:

@@ -59,6 +59,17 @@ RUN --mount=type=cache,target=/root/.npm \
     npm run build && \
     chown -R cyberagent:cyberagent /app/src/modules/interfaces/react
 
+# Install replay proxy wrappers for scanning tools
+COPY docker/feroxbuster docker/ffuf docker/dirsearch /tmp/
+RUN for cmd in feroxbuster ffuf dirsearch; do \
+        target=$(which "$cmd" 2>/dev/null || true); \
+        if [ -n "$target" ] && [ -f "$target" ]; then \
+            mv "$target" "${target}.orig" && \
+            cp "/tmp/$cmd" "$target" && \
+            chmod 755 "$target"; \
+        fi; \
+    done
+
 RUN /tmp/apt_proxy_clean.sh && \
     rm -rf /tmp/* /var/tmp/*
 

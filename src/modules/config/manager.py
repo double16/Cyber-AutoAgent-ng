@@ -33,18 +33,10 @@ from modules.config.providers.litellm_config import (
     get_context_window_fallbacks,
     split_litellm_model_id,
 )
-from modules.config.providers.ollama_config import (
-    get_ollama_host as _get_ollama_host_from_env,
-)
-from modules.config.providers.ollama_config import (
-    get_ollama_keep_alive as _get_ollama_keep_alive_from_env,
-)
-from modules.config.providers.ollama_config import (
-    get_ollama_options as _get_ollama_options_from_env,
-)
-from modules.config.providers.ollama_config import (
-    get_ollama_timeout as _get_ollama_timeout_from_env,
-)
+from modules.config.providers.ollama_config import get_ollama_host as _get_ollama_host_from_env
+from modules.config.providers.ollama_config import get_ollama_keep_alive as _get_ollama_keep_alive_from_env
+from modules.config.providers.ollama_config import get_ollama_options as _get_ollama_options_from_env
+from modules.config.providers.ollama_config import get_ollama_timeout as _get_ollama_timeout_from_env
 from modules.config.system.defaults import build_default_configs
 from modules.config.system.env_reader import EnvironmentReader
 from modules.config.system.logger import get_logger
@@ -367,7 +359,7 @@ class ConfigManager:
             ):
                 # Check if the default embedding model is available
                 try:
-                    client = ollama.Client(host=self.get_ollama_host())
+                    client = ollama.Client(host=self.get_ollama_host(), trust_env=False)
                     models_response = client.list()
                     available_models = [
                         m.get("model", m.get("name", ""))

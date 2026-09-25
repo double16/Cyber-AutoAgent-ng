@@ -311,8 +311,9 @@ class CyberAgentEvaluator:
         reasoning_kwargs = self._evaluation_reasoning_kwargs(server_type, evaluation_model_id)
         if server_type == "ollama":
             env_reader = EnvironmentReader()
-            client_kwargs={
-                "timeout": get_ollama_timeout(env_reader)
+            client_kwargs = {
+                "timeout": get_ollama_timeout(env_reader),
+                "trust_env": False,
             }
             # Local mode using Ollama
             ollama_host = config_manager.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -350,9 +351,12 @@ class CyberAgentEvaluator:
                 # Fallback to Titan embeddings as a baseline
                 embed_id = "amazon.titan-embed-text-v2:0"
 
+            from botocore.config import Config as BotocoreConfig
+
             langchain_embeddings = BedrockEmbeddings(
                 model_id=embed_id,
                 region_name=config_manager.get_default_region(),
+                config=BotocoreConfig(proxies={}),
             )
 
             self.llm = LangchainLLMWrapper(langchain_chat)
@@ -362,12 +366,14 @@ class CyberAgentEvaluator:
             # Remote mode using Google GenAI
             langchain_chat = ChatGoogleGenerativeAI(
                 model=evaluation_model_id,
+                client_args={"trust_env": False},
                 **reasoning_kwargs,
             )
             langchain_embeddings = GoogleGenerativeAIEmbeddings(
                 model=config_manager.getenv(
                     "CYBER_AGENT_EMBEDDING_MODEL", server_config.embedding.model_id
-                )
+                ),
+                client_args={"trust_env": False},
             )
 
             self.llm = LangchainLLMWrapper(langchain_chat)
@@ -375,15 +381,20 @@ class CyberAgentEvaluator:
             self._chat_model = langchain_chat
         elif server_type == "bedrock":
             # Remote mode using AWS Bedrock
+            from botocore.config import Config as BotocoreConfig
+
+            boto_config = BotocoreConfig(proxies={})
             langchain_chat = ChatBedrock(
                 model_id=evaluation_model_id,
                 region_name=config_manager.get_default_region(),
+                config=boto_config,
             )
             langchain_embeddings = BedrockEmbeddings(
                 model_id=config_manager.getenv(
                     "CYBER_AGENT_EMBEDDING_MODEL", server_config.embedding.model_id
                 ),
                 region_name=config_manager.get_default_region(),
+                config=boto_config,
             )
 
             self.llm = LangchainLLMWrapper(langchain_chat)

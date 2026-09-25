@@ -93,6 +93,27 @@ class TestCapabilitiesPrecedence:
         assert caps.supports_reasoning is True
         assert caps.pass_reasoning_effort is True
 
+    def test_ollama_capabilities_bypasses_proxy(self):
+        show_response = MagicMock(capabilities=["tools", "thinking"])
+        ollama_client = MagicMock()
+        ollama_client.show.return_value = show_response
+
+        with (
+            patch("modules.config.models.capabilities.get_models_client", None),
+            patch("modules.config.models.capabilities.ProviderConfigManager", None),
+            patch("modules.config.models.capabilities.LlmProviders", None),
+            patch("modules.config.models.capabilities.ModelInfoBase", None),
+            patch("modules.config.models.capabilities.ollama.Client", return_value=ollama_client) as mock_client_cls,
+        ):
+            ModelCapabilitiesResolver.capabilities.cache_clear()
+            caps = get_capabilities("ollama", "qwen3:8b")
+
+        mock_client_cls.assert_called_once()
+        _, kwargs = mock_client_cls.call_args
+        assert kwargs.get("trust_env") is False
+        assert caps.supports_reasoning is True
+        assert caps.supports_tools is True
+
 
 class TestTokenLimitPrecedence:
     """Validate models.dev used for token limits."""

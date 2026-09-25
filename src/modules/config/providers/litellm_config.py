@@ -111,10 +111,19 @@ class _LoopLocalLiteLLMLoggingWorker:
 
 def configure_litellm_runtime() -> None:
     """Apply Cyber-AutoAgent runtime defaults and LiteLLM compatibility patches."""
+    import httpx
+
     litellm.drop_params = True
     litellm.modify_params = True
     litellm.num_retries = 5
     litellm.respect_retry_after_header = True
+
+    litellm.client_session = httpx.Client(trust_env=False)
+    litellm.aclient_session = httpx.AsyncClient(trust_env=False)
+    litellm.module_level_client = httpx.Client(trust_env=False)
+    litellm.module_level_aclient = httpx.AsyncClient(trust_env=False)
+    litellm.aiohttp_trust_env = False
+    litellm.disable_aiohttp_trust_env = True
 
     try:
         from litellm.litellm_core_utils import logging_worker

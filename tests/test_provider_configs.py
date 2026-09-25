@@ -371,7 +371,7 @@ def test_get_ollama_host_finds_second_docker_candidate(monkeypatch):
     calls = []
     monkeypatch.setattr("modules.config.providers.ollama_config.os.path.exists", lambda _path: True)
 
-    def get(url, timeout):
+    def get(url, timeout, **kwargs):
         calls.append((url, timeout))
         return SimpleNamespace(status_code=503 if "localhost" in url else 200)
 

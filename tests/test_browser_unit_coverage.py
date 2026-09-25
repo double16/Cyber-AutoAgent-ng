@@ -344,8 +344,14 @@ async def test_initialize_browser_merges_default_headers_and_get_browser_require
     created = {}
 
     class StubBrowser:
-        def __init__(self, provider, model, artifacts_dir, headers):
-            created.update(provider=provider, model=model, artifacts_dir=artifacts_dir, headers=headers)
+        def __init__(self, provider, model, artifacts_dir, headers, proxy=None):
+            created.update(
+                provider=provider,
+                model=model,
+                artifacts_dir=artifacts_dir,
+                headers=headers,
+                proxy=proxy,
+            )
 
     monkeypatch.setattr(mod, "BrowserService", StubBrowser)
     monkeypatch.setenv("CYBER_BROWSER_DEFAULT_HEADERS", "true")
@@ -600,3 +606,123 @@ async def test_interaction_context_capture_filters_and_unhooks(monkeypatch):
         assert collector.logs[0]["args"] == [{"x": 1}]
 
     assert len(removed) == 7
+
+
+def test_resolve_browser_proxy_from_env_vars():
+    # Test HTTP_PROXY
+    proxy = mod.resolve_browser_proxy(environ={"HTTP_PROXY": "http://192.168.1.100:8080"})
+    assert proxy == {"server": "http://192.168.1.100:8080"}
+
+    # Test HTTPS_PROXY
+    proxy = mod.resolve_browser_proxy(environ={"HTTPS_PROXY": "http://10.0.0.1:8080"})
+    assert proxy == {"server": "http://10.0.0.1:8080"}
+
+    # Test lowercase http_proxy / https_proxy
+    proxy = mod.resolve_browser_proxy(environ={"http_proxy": "http://proxy.local:3128"})
+    assert proxy == {"server": "http://proxy.local:3128"}
+
+    proxy = mod.resolve_browser_proxy(environ={"https_proxy": "https://proxy.local:8443"})
+    assert proxy == {"server": "https://proxy.local:8443"}
+
+    # Test ALL_PROXY / all_proxy
+    proxy = mod.resolve_browser_proxy(environ={"ALL_PROXY": "socks5://127.0.0.1:1080"})
+    assert proxy == {"server": "socks5://127.0.0.1:1080"}
+
+    # Test NO_PROXY / no_proxy bypass
+    proxy = mod.resolve_browser_proxy(
+        environ={
+            "HTTP_PROXY": "http://127.0.0.1:8080",
+            "NO_PROXY": "localhost,127.0.0.1,.internal",
+        }
+    )
+    assert proxy == {
+        "server": "http://127.0.0.1:8080",
+        "bypass": "localhost,127.0.0.1,.internal",
+    }
+
+
+def test_resolve_browser_proxy_auth_and_schemes():
+    # Proxy with credentials
+    proxy = mod.resolve_browser_proxy("http://admin:secret123@127.0.0.1:8080")
+    assert proxy == {
+        "server": "http://127.0.0.1:8080",
+        "username": "admin",
+        "password": "secret123",
+    }
+
+    # Proxy with URL-encoded special characters in auth
+    proxy = mod.resolve_browser_proxy("http://user%40domain:p%40ss%3Aword@proxy:8080")
+    assert proxy == {
+        "server": "http://proxy:8080",
+        "username": "user@domain",
+        "password": "p@ss:word",
+    }
+
+    # Schemeless proxy string defaults to http
+    proxy = mod.resolve_browser_proxy("127.0.0.1:8080")
+    assert proxy == {"server": "http://127.0.0.1:8080"}
+
+    # IPv6 address
+    proxy = mod.resolve_browser_proxy("http://[::1]:8080")
+    assert proxy == {"server": "http://[::1]:8080"}
+
+
+def test_resolve_browser_proxy_dict_and_empty():
+    # Explicit dict
+    proxy_dict = {"server": "http://burp:8080", "username": "u", "password": "p"}
+    res = mod.resolve_browser_proxy(proxy_dict)
+    assert res == proxy_dict
+    assert res is not proxy_dict  # Returns a copy
+
+    # Explicit dict attaches bypass from env if not present
+    res = mod.resolve_browser_proxy(
+        {"server": "http://burp:8080"},
+        environ={"no_proxy": "localhost"},
+    )
+    assert res == {"server": "http://burp:8080", "bypass": "localhost"}
+
+    # Empty/None returns None when no env set
+    assert mod.resolve_browser_proxy(None, environ={}) is None
+    assert mod.resolve_browser_proxy("", environ={}) is None
+    assert mod.resolve_browser_proxy("   ", environ={}) is None
+
+
+def test_browser_service_configures_proxy_launch_options(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8080")
+
+    # Mock Stagehand to avoid actual browser/network initialization
+    monkeypatch.setattr(mod, "Stagehand", lambda config: SimpleNamespace(llm=None))
+
+    service = mod.BrowserService(
+        provider="ollama",
+        model="test-model",
+        artifacts_dir=None,
+    )
+    try:
+        assert service.proxy == {"server": "http://127.0.0.1:8080"}
+        launch_opts = service.stagehand_config.local_browser_launch_options
+        assert launch_opts["proxy"] == {"server": "http://127.0.0.1:8080"}
+        assert "--ignore-certificate-errors" in launch_opts["args"]
+        assert launch_opts["ignoreHTTPSErrors"] is True
+    finally:
+        if service._loop:
+            service._loop.call_soon_threadsafe(service._loop.stop)
+
+
+def test_browser_service_explicit_proxy_override(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://env-proxy:8080")
+    monkeypatch.setattr(mod, "Stagehand", lambda config: SimpleNamespace(llm=None))
+
+    service = mod.BrowserService(
+        provider="ollama",
+        model="test-model",
+        artifacts_dir=None,
+        proxy="http://explicit-proxy:9090",
+    )
+    try:
+        assert service.proxy == {"server": "http://explicit-proxy:9090"}
+        launch_opts = service.stagehand_config.local_browser_launch_options
+        assert launch_opts["proxy"] == {"server": "http://explicit-proxy:9090"}
+    finally:
+        if service._loop:
+            service._loop.call_soon_threadsafe(service._loop.stop)

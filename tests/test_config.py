@@ -5,7 +5,7 @@ Unit tests for the centralized model configuration system.
 
 import os
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 import pytest
 
@@ -242,6 +242,23 @@ class TestConfigManager:
             assert config.embedding.provider == ModelProvider.OLLAMA
             assert config.embedding.model_id == "mxbai-embed-large:latest"
             assert config.region == "ollama"
+
+    @patch("modules.config.manager.ollama.Client")
+    def test_get_ollama_server_config_bypasses_proxy(self, mock_client_cls):
+        """Test that Ollama metadata client created during server config initialization sets trust_env=False."""
+        mock_client = MagicMock()
+        mock_client.list.return_value = {"models": [{"model": "mxbai-embed-large:latest"}]}
+        mock_client_cls.return_value = mock_client
+
+        with patch.dict(os.environ, {"CYBER_AGENT_LLM_MODEL": "custom-model"}, clear=True):
+            self.config_manager._config_cache = {}
+            config = self.config_manager.get_server_config("ollama", model_id="custom-model")
+
+        assert mock_client_cls.call_count >= 1
+        for client_call in mock_client_cls.call_args_list:
+            assert client_call.kwargs.get("trust_env") is False
+        assert call(host=self.config_manager.get_ollama_host(), trust_env=False) in mock_client_cls.call_args_list
+        assert config.embedding.model_id == "mxbai-embed-large:latest"
 
     def test_get_remote_server_config(self):
         """Test getting remote server configuration."""
@@ -547,7 +564,9 @@ class TestConfigManager:
         self.config_manager.validate_requirements("bedrock")
 
         # Verify bedrock-runtime client was created
-        mock_boto_client.assert_any_call("bedrock-runtime", region_name="us-east-1")
+        assert mock_boto_client.call_args.args == ("bedrock-runtime",)
+        assert mock_boto_client.call_args.kwargs.get("region_name") == "us-east-1"
+        assert mock_boto_client.call_args.kwargs.get("config").proxies == {}
 
     @patch.dict(
         os.environ,
@@ -1244,7 +1263,7 @@ def test_validation_provider_and_litellm_paths(monkeypatch):
     monkeypatch.setattr(
         validation.ollama,
         "Client",
-        lambda host: SimpleNamespace(list=Mock(return_value={"models": [{"model": "llama"}]})),
+        lambda host=None, **kwargs: SimpleNamespace(list=Mock(return_value={"models": [{"model": "llama"}]})),
     )
     validation.validate_provider("bedrock", env, region="us-east-1")
     validation.validate_provider("ollama", env, ollama_host="http://localhost:11434")
@@ -1280,7 +1299,7 @@ def test_validation_aws_and_ollama_requirements(monkeypatch):
     monkeypatch.setattr(
         validation.ollama,
         "Client",
-        lambda host: SimpleNamespace(list=Mock(return_value={"models": [{"model": "llama"}]})),
+        lambda host=None, **kwargs: SimpleNamespace(list=Mock(return_value={"models": [{"model": "llama"}]})),
     )
     validation.validate_ollama_requirements(env, "http://localhost:11434")
     monkeypatch.setattr(validation.requests, "get", Mock(side_effect=RuntimeError("down")))

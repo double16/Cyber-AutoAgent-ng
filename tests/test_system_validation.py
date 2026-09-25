@@ -120,5 +120,33 @@ def test_validate_bedrock_model_access_requires_region_and_ignores_client_creati
     with pytest.raises(OSError, match="AWS region"):
         validation.validate_bedrock_model_access("")
 
-    monkeypatch.setattr(validation.boto3, "client", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("no creds")))
+    captured_kwargs = {}
+
+    def fake_boto_client(service_name, **kwargs):
+        captured_kwargs.update(kwargs)
+        raise RuntimeError("no creds")
+
+    monkeypatch.setattr(validation.boto3, "client", fake_boto_client)
     validation.validate_bedrock_model_access("us-east-1")
+    assert captured_kwargs.get("region_name") == "us-east-1"
+    assert captured_kwargs.get("config").proxies == {}
+
+
+def test_validate_ollama_requirements_bypasses_proxies(monkeypatch):
+    captured_requests = {}
+    captured_ollama = {}
+
+    def fake_get(url, **kwargs):
+        captured_requests.update(kwargs)
+        return SimpleNamespace(status_code=200)
+
+    def fake_ollama_client(**kwargs):
+        captured_ollama.update(kwargs)
+        return SimpleNamespace(list=lambda: {"models": [{"name": "model1"}]})
+
+    monkeypatch.setattr(validation.requests, "get", fake_get)
+    monkeypatch.setattr(validation.ollama, "Client", fake_ollama_client)
+
+    validation.validate_ollama_requirements(Env(), "http://ollama.test")
+    assert captured_requests.get("proxies") == {"http": None, "https": None}
+    assert captured_ollama.get("trust_env") is False

@@ -10,6 +10,7 @@ from modules.tools.browser import (
     browser_perform_action,
     browser_set_headers,
     initialize_browser,
+    resolve_browser_proxy,
 )
 from modules.tools.channels import (
     channel_close,
@@ -84,6 +85,7 @@ __all__ = [
     "recon_output_to_inventory_manifest",
     "record_finding_validation",
     "record_objective_validation",
+    "resolve_browser_proxy",
     "store_finding",
     "store_knowledge",
     "store_objective_candidate",

@@ -1404,9 +1404,18 @@ def test_setup_models_supports_all_configured_providers(monkeypatch):
         assert ev._chat_model.callbacks
         if provider == "ollama":
             assert ev._chat_model.kwargs["reasoning"] is False
+            assert ev._chat_model.kwargs["client_kwargs"]["trust_env"] is False
+            assert ev.embeddings.kwargs["client_kwargs"]["trust_env"] is False
         elif provider == "gemini":
             assert ev._chat_model.kwargs["thinking_budget"] == 0
             assert ev._chat_model.kwargs["include_thoughts"] is False
+            assert ev._chat_model.kwargs["client_args"] == {"trust_env": False}
+            assert ev.embeddings.kwargs["client_args"] == {"trust_env": False}
+        elif provider == "bedrock":
+            assert ev._chat_model.kwargs["config"].proxies == {}
+            assert ev.embeddings.kwargs["config"].proxies == {}
+        elif provider == "litellm":
+            assert ev.embeddings.kwargs["config"].proxies == {}
         else:
             assert "reasoning_effort" not in ev._chat_model.kwargs
             assert "effort" not in ev._chat_model.kwargs

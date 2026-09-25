@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -e
+
+# Find original binary
+REAL_BIN=""
+if [ -x "$(dirname "$0")/dirsearch.orig" ]; then
+    REAL_BIN="$(dirname "$0")/dirsearch.orig"
+elif command -v dirsearch.orig >/dev/null 2>&1; then
+    REAL_BIN="$(command -v dirsearch.orig)"
+elif [ -x "/usr/local/bin/dirsearch.orig" ]; then
+    REAL_BIN="/usr/local/bin/dirsearch.orig"
+elif [ -x "/usr/bin/dirsearch.orig" ]; then
+    REAL_BIN="/usr/bin/dirsearch.orig"
+fi
+
+if [ -z "$REAL_BIN" ]; then
+    echo "Error: dirsearch.orig not found" >&2
+    exit 1
+fi
+
+PROXY="${HTTP_PROXY:-${HTTPS_PROXY:-${http_proxy:-${https_proxy:-}}}}"
+
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+if [ -n "$PROXY" ]; then
+    has_replay=false
+    for arg in "$@"; do
+        case "$arg" in
+            --replay-proxy*|-replay-proxy*)
+                has_replay=true
+                break
+                ;;
+        esac
+    done
+    if [ "$has_replay" = false ]; then
+        exec "$REAL_BIN" --replay-proxy "$PROXY" "$@"
+    fi
+fi
+
+exec "$REAL_BIN" "$@"

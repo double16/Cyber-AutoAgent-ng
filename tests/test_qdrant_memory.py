@@ -275,7 +275,10 @@ def test_embedding_provider_selection(monkeypatch):
         )
         == "bedrock-embeddings"
     )
-    bedrock.assert_called_once_with(model_id="amazon.embed", region_name="us-east-1")
+    bedrock.assert_called_once()
+    assert bedrock.call_args.kwargs["model_id"] == "amazon.embed"
+    assert bedrock.call_args.kwargs["region_name"] == "us-east-1"
+    assert bedrock.call_args.kwargs["config"].proxies == {}
 
 
 def test_service_index_failures_are_nonfatal(monkeypatch, tmp_path):
@@ -406,3 +409,39 @@ def test_local_qdrant_round_trip_uses_target_and_operation_scope(monkeypatch, tm
     assert listed[0]["id"] == stored["results"][0]["id"]
     assert searched[0]["target_values"] == ["https://roundtrip.test"]
     client.qdrant.close()
+
+
+def test_build_embeddings_bypasses_proxies(monkeypatch):
+    captured = {}
+
+    class DummyOllama:
+        def __init__(self, **kwargs):
+            captured["ollama"] = kwargs
+
+    class DummyGemini:
+        def __init__(self, **kwargs):
+            captured["gemini"] = kwargs
+
+    class DummyBedrock:
+        def __init__(self, **kwargs):
+            captured["bedrock"] = kwargs
+
+    monkeypatch.setattr(memory, "OllamaEmbeddings", DummyOllama)
+    monkeypatch.setattr(memory, "GoogleGenerativeAIEmbeddings", DummyGemini)
+    monkeypatch.setattr(memory, "BedrockEmbeddings", DummyBedrock)
+
+    # Ollama
+    client = memory.QdrantMemoryClient.__new__(memory.QdrantMemoryClient)
+    client.config = {"embedding_provider": "ollama", "embedding_model": "model-o"}
+    client._build_embeddings()
+    assert captured["ollama"]["client_kwargs"] == {"trust_env": False}
+
+    # Gemini
+    client.config = {"embedding_provider": "gemini", "embedding_model": "model-g"}
+    client._build_embeddings()
+    assert captured["gemini"]["client_args"] == {"trust_env": False}
+
+    # Bedrock
+    client.config = {"embedding_provider": "bedrock", "embedding_model": "model-b"}
+    client._build_embeddings()
+    assert captured["bedrock"]["config"].proxies == {}
