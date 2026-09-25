@@ -331,7 +331,9 @@ that future phase; during or after a finding-validation phase, it remains in the
 call
 `record_finding_validation`; only an evaluator-approved confirmation is promoted to a verified finding. Failed or
 unfinished validations remain visible in the final report under **Findings Requiring Validation**. Evaluators and
-report agents can inspect operation artifacts with the read-only `read_artifact` tool. Report and other read-only
+report agents can inspect operation artifacts with the read-only `read_artifact` and `search_artifact` tools.
+`search_artifact` scans the full file for literal or regular-expression matches, returns bounded excerpts with line
+and column positions, and uses `next_match_offset` to page through additional matches. Report and other read-only
 agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation). A task evaluator may read
 only controller-authorized task evidence and frozen acceptance artifacts. It receives up to
 `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE` pages per artifact (default four), with its total derived from the
@@ -347,8 +349,8 @@ Finding-dependent task creation consumes only verified findings. The controller 
 Unresolved and failed-validation candidates remain unavailable to downstream task creation; controller-owned
 finding-validation tasks handle their lifecycle.
 Before artifact reads, the controller provides a deterministic digest with each artifact's byte size. Artifacts larger
-than the evaluator's page budget are omitted from its reader but retained in the digest for provenance; evaluators use
-the acceptance summary, controller-observed outcomes, and compact artifacts rather than paging through raw bundles.
+than the evaluator's page budget remain searchable and can be read through explicit byte pages. Evaluators use
+the acceptance summary, controller-observed outcomes, and compact artifacts for routine review.
 When a review agent emits several tool calls in one model response, the controller executes them in order and stops
 the batch after the first failed call. Remaining calls receive a skipped result and do not consume evaluator evidence
 read allowance.

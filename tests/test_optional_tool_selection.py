@@ -127,6 +127,58 @@ def test_authenticated_validation_tasks_receive_only_opaque_request_tool():
     assert "store_credential" not in names
 
 
+def test_future_checkout_consumer_requires_registered_mode_and_controller_grant(monkeypatch):
+    monkeypatch.setattr(selection, "_AUTHENTICATION_TOOL_ACCESS_MODES", dict(selection._AUTHENTICATION_TOOL_ACCESS_MODES))
+    selection.register_authentication_tool_access("future_auth_consumer", "checkout")
+    task = _task(recovery_context={"controller_credential_access": {
+        "mode": "checkout", "tools": ["future_auth_consumer"]
+    }})
+
+    assert selection.required_optional_tool_names(_task()) == []
+    assert selection.required_optional_tool_names(task) == ["checkout_credential", "future_auth_consumer"]
+    assert "future_auth_consumer" in selection.credential_tool_names()
+    assert selection.authentication_tool_access_mode("future_auth_consumer") == "checkout"
+
+
+def test_future_context_consumer_is_granted_without_checkout(monkeypatch):
+    monkeypatch.setattr(selection, "_AUTHENTICATION_TOOL_ACCESS_MODES", dict(selection._AUTHENTICATION_TOOL_ACCESS_MODES))
+    selection.register_authentication_tool_access("future_context_consumer", "context")
+    task = _task(recovery_context={"controller_credential_access": {
+        "mode": "context", "tools": ["future_context_consumer"]
+    }})
+
+    assert selection.required_optional_tool_names(task) == ["future_context_consumer"]
+    assert "checkout_credential" not in selection.required_optional_tool_names(task)
+
+
+@pytest.mark.parametrize(
+    "grant, message",
+    [
+        ({"mode": "unknown", "tools": ["future_auth_consumer"]}, "context or checkout mode"),
+        ({"mode": "checkout", "tools": ["unknown_tool"]}, "unregistered tool"),
+        ({"mode": "checkout", "tools": ["authenticated_http_request"]}, "unregistered tool"),
+        ({"mode": "checkout", "tools": []}, "requires tool names"),
+    ],
+)
+def test_controller_checkout_grant_rejects_invalid_or_unregistered_tools(grant, message):
+    task = _task(recovery_context={"controller_credential_access": grant})
+
+    with pytest.raises(ValueError, match=message):
+        selection.required_optional_tool_names(task)
+
+
+def test_authentication_tool_access_registration_rejects_invalid_and_conflicting_modes(monkeypatch):
+    monkeypatch.setattr(selection, "_AUTHENTICATION_TOOL_ACCESS_MODES", dict(selection._AUTHENTICATION_TOOL_ACCESS_MODES))
+
+    with pytest.raises(ValueError, match="consumer tool name"):
+        selection.register_authentication_tool_access("checkout_credential", "checkout")
+    with pytest.raises(ValueError, match="unsupported authentication tool access mode"):
+        selection.register_authentication_tool_access("future_auth_consumer", "invalid")
+    selection.register_authentication_tool_access("future_auth_consumer", "checkout")
+    with pytest.raises(ValueError, match="cannot change"):
+        selection.register_authentication_tool_access("future_auth_consumer", "context")
+
+
 def test_credential_provisioning_selects_interactive_browser_tools_only():
     task = _task(
         recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},

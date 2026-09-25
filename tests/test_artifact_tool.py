@@ -17,12 +17,27 @@ from modules.tools.artifact import (
     artifact_max_bytes_for_context_window,
     artifact_review_metadata,
     create_artifact_reader,
+    create_artifact_searcher,
     create_bounded_artifact_reader,
+    create_bounded_artifact_searcher,
     resolve_operation_artifact_path,
     resolve_tool_result_max_chars,
 )
 
 READ_ARTIFACT = create_artifact_reader(48_000)
+SEARCH_ARTIFACT = create_artifact_searcher()
+
+
+def test_artifact_read_and_search_tools_have_separate_schemas():
+    read_schema = READ_ARTIFACT.tool_spec["inputSchema"]["json"]["properties"]
+    search_schema = SEARCH_ARTIFACT.tool_spec["inputSchema"]["json"]["properties"]
+
+    assert READ_ARTIFACT.tool_name == "read_artifact"
+    assert {"start_line", "max_lines", "start_byte", "max_bytes"} <= read_schema.keys()
+    assert "search_pattern" not in read_schema
+    assert SEARCH_ARTIFACT.tool_name == "search_artifact"
+    assert {"search_pattern", "match_offset", "max_matches"} <= search_schema.keys()
+    assert "start_line" not in search_schema
 
 
 def test_artifact_page_budget_scales_with_context_window_and_clamps():
@@ -61,6 +76,171 @@ def test_read_artifact_returns_bounded_lines(tmp_path: Path):
 
     assert "'content': 'two\\nthree'" in result
     assert "'total_lines': 4" in result
+
+
+def test_search_artifact_supports_literal_and_regex_context(tmp_path: Path):
+    artifact = tmp_path / "bundle.js"
+    artifact.write_text("zero\nTOKEN=abc\none\nTOKEN=def\n", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        literal = ast.literal_eval(
+            SEARCH_ARTIFACT(
+                "bundle.js",
+                search_pattern="TOKEN=",
+                context_lines=1,
+            )
+        )
+        regex = ast.literal_eval(
+            SEARCH_ARTIFACT(
+                "bundle.js",
+                search_pattern=r"TOKEN=[a-z]+",
+                search_regex=True,
+                context_lines=0,
+            )
+        )
+
+    assert literal["match_count"] == 2
+    assert literal["matches"][0]["line"] == 2
+    assert literal["matches"][0]["context"][0]["line"] == 1
+    assert regex["regex"] is True
+    assert [match["line"] for match in regex["matches"]] == [2, 4]
+
+
+def test_bounded_artifact_search_scans_full_file_and_paginates_matches(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    artifact = artifacts / "source.map"
+    artifact.write_text("first\nneedle\nthird\nneedle\nfifth\n", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        reader = create_bounded_artifact_searcher(
+            max_searches=2,
+            allowed_artifact_refs=["artifact:artifacts/source.map"],
+            max_searches_per_artifact=2,
+        )
+        first = ast.literal_eval(
+            reader(
+                "artifact:artifacts/source.map",
+                search_pattern="needle",
+                max_matches=1,
+            )
+        )
+        second = ast.literal_eval(
+            reader(
+                "artifact:artifacts/source.map",
+                search_pattern="needle",
+                max_matches=1,
+                match_offset=first["next_match_offset"],
+            )
+        )
+        invalid_reader = create_bounded_artifact_searcher(
+            max_searches=1,
+            allowed_artifact_refs=["artifact:artifacts/source.map"],
+        )
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_POLICY_VIOLATION_MARKER):
+            invalid_reader(
+                "artifact:artifacts/source.map",
+                search_pattern="[",
+                search_regex=True,
+            )
+
+    assert [match["line"] for match in first["matches"]] == [2]
+    assert [match["line"] for match in second["matches"]] == [4]
+    assert first["match_count"] == second["match_count"] == 2
+    assert first["scanned_lines"] == second["scanned_lines"] == 5
+    assert first["next_match_offset"] == 1
+    assert second["next_match_offset"] is None
+
+
+def test_search_artifact_finds_late_match_past_read_page_limits(tmp_path: Path):
+    artifact = tmp_path / "large.txt"
+    artifact.write_text("\n".join([*(f"line {number}" for number in range(1, 2000)), "needle"]) + "\n")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        result = ast.literal_eval(
+            SEARCH_ARTIFACT(
+                "large.txt",
+                search_pattern="needle",
+            )
+        )
+
+    assert [match["line"] for match in result["matches"]] == [2000]
+    assert result["scanned_lines"] == 2000
+    assert result["eof"] is True
+
+
+def test_search_artifact_preserves_match_in_oversized_line_with_bounded_output(tmp_path: Path):
+    artifact = tmp_path / "bundle.js"
+    artifact.write_text("x" * 2000 + "needle" + "y" * 2000 + "\n", encoding="utf-8")
+    searcher = create_artifact_searcher(max_output_chars=500)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        output = searcher("bundle.js", search_pattern="needle", context_lines=0)
+
+    result = ast.literal_eval(output)
+    assert len(output) <= 500
+    assert result["match_count"] == 1
+    assert result["matches"][0]["line"] == 1
+    assert "needle" in result["matches"][0]["content"]
+    assert result["matches"][0]["match_column"] == 2001
+    assert result["matches"][0]["content_truncated"] is True
+    assert result["next_match_offset"] is None
+
+
+def test_search_artifact_output_limit_pages_without_empty_match_loop(tmp_path: Path):
+    artifact = tmp_path / "bundle.js"
+    artifact.write_text(("x" * 1000 + "needle" + "y" * 1000 + "\n") * 2, encoding="utf-8")
+    searcher = create_artifact_searcher(max_output_chars=500)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        first = ast.literal_eval(searcher("bundle.js", search_pattern="needle", context_lines=0))
+        second = ast.literal_eval(
+            searcher("bundle.js", search_pattern="needle", context_lines=0, match_offset=first["next_match_offset"])
+        )
+
+    assert [match["line"] for match in first["matches"]] == [1]
+    assert first["next_match_offset"] == 1
+    assert [match["line"] for match in second["matches"]] == [2]
+    assert second["next_match_offset"] is None
+
+
+def test_search_artifact_rejects_limit_too_small_for_match_metadata(tmp_path: Path):
+    (tmp_path / "evidence.txt").write_text("needle\n", encoding="utf-8")
+    searcher = create_artifact_searcher(max_output_chars=40)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        with pytest.raises(ValueError, match="too small for a matching excerpt"):
+            searcher("evidence.txt", search_pattern="needle", context_lines=0)
+
+
+def test_search_artifact_paging_returns_empty_after_last_match(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("needle\nother\n", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        result = ast.literal_eval(
+            SEARCH_ARTIFACT(
+                "evidence.txt",
+                search_pattern="needle",
+                match_offset=1,
+            )
+        )
+
+    assert result["match_count"] == 1
+    assert result["matches"] == []
+    assert result["next_match_offset"] is None
 
 
 def test_read_artifact_serialized_line_page_stays_below_router_limit(tmp_path: Path):

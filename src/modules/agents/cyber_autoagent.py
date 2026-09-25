@@ -87,7 +87,7 @@ from modules.handlers.utils import (
 )
 from modules.tools import python_repl
 from modules.tools.advanced_payload_coordinator import advanced_payload_coordinator
-from modules.tools.artifact import create_artifact_reader, resolve_tool_result_max_chars
+from modules.tools.artifact import create_artifact_reader, create_artifact_searcher, resolve_tool_result_max_chars
 from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
 from modules.tools.auth_chain_analyzer import auth_chain_analyzer
 from modules.tools.authentication import (
@@ -644,6 +644,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         memory_retrieve,
         memory_list,
         create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
+        create_artifact_searcher(max_output_chars=max_result_chars),
         create_tasks,
         sleep,
         python_repl,

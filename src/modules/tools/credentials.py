@@ -21,7 +21,7 @@ import string
 import struct
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
@@ -1295,22 +1295,46 @@ def _generate_totp_code(provisioning_secret: str, digits: int = 6, period: int =
     return str(binary % (10**digits)).zfill(digits)
 
 
-def _active_checked_out_credential(store: Any, operation_id: str, credential_id: str) -> tuple[Any, dict[str, Any]]:
-    """Return an active task and its selected, target-scoped target credential."""
+CredentialAccessMode = Literal["checkout", "context"]
+AUTH_CONTEXT_UNAVAILABLE_ERROR = (
+    "AUTH_CONTEXT_UNAVAILABLE: controller authentication context is unavailable for the active task; "
+    "stop authenticated attempts and record the coverage gap"
+)
 
+
+def _active_credential_for_access(
+    store: Any, operation_id: str, credential_id: str, access_mode: CredentialAccessMode
+) -> tuple[Any, dict[str, Any]]:
+    """Resolve one target-scoped credential under a declared task access mode."""
+
+    if access_mode not in {"checkout", "context"}:
+        raise ValueError("unsupported credential access mode")
     active_task, target_values = _active_task_target_values(store, operation_id)
-    selected_ids = store.credential_ids_selected_by_task(operation_id, active_task.task_uid)
-    if credential_id not in selected_ids:
+    authorized_ids = (
+        store.credential_ids_selected_by_task(operation_id, active_task.task_uid)
+        if access_mode == "checkout"
+        else store.credential_ids_authorized_by_task(operation_id, active_task.task_uid)
+    )
+    if credential_id not in authorized_ids:
+        if access_mode == "context":
+            raise ValueError(AUTH_CONTEXT_UNAVAILABLE_ERROR)
         raise ValueError("credential must be checked out by the active task")
-    record = store.get_credential(credential_id, include_payload=True)
+    record = store.get_credential(credential_id, include_payload=access_mode == "checkout")
     if record is None or record["status"] not in {"unknown", "valid"}:
-        raise ValueError("eligible credential is required for MFA")
+        raise ValueError("eligible credential is required for authentication")
     if record["credential_type"] == "email_login":
         raise ValueError("credential access requires a target credential, not a mailbox credential")
     if str(record.get("target") or "") not in target_values:
-        raise ValueError("MFA credential is outside the active task target scope")
-    _register_credential_payload_secrets(record)
+        raise ValueError("credential is outside the active task target scope")
+    if access_mode == "checkout":
+        _register_credential_payload_secrets(record)
     return active_task, record
+
+
+def _active_checked_out_credential(store: Any, operation_id: str, credential_id: str) -> tuple[Any, dict[str, Any]]:
+    """Return an active task and its checked-out, target-scoped credential material."""
+
+    return _active_credential_for_access(store, operation_id, credential_id, "checkout")
 
 
 def _register_credential_payload_secrets(record: dict[str, Any]) -> None:

@@ -1,6 +1,6 @@
 """Tools module for Cyber-AutoAgent."""
 
-from modules.tools.artifact import create_artifact_reader
+from modules.tools.artifact import create_artifact_reader, create_artifact_searcher
 from modules.tools.authentication import (
     authenticated_http_request,
     capture_browser_authenticated_context,
@@ -104,6 +104,7 @@ __all__ = [
     "complete_credential_rotation",
     "consolidate_recon_artifacts",
     "create_artifact_reader",
+    "create_artifact_searcher",
     "create_tasks",
     "discover_mcp_tools",
     "ensure_authenticated_context",

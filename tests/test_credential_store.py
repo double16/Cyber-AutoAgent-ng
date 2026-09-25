@@ -535,6 +535,31 @@ def test_credential_usage_requires_a_non_selection_event_for_authenticated_findi
     }
 
 
+def test_controller_context_authorization_is_task_scoped_and_not_reported_as_checkout(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
+    credential = store.store_credential(
+        "op-1",
+        {
+            "credential_type": "username_password",
+            "target": "https://app.example.test",
+            "role": "user",
+            "payload": {"username": "alice", "password": "must-not-leak"},
+            "origin": "provided",
+            "management_policy": "user",
+            "status": "unknown",
+        },
+    )
+
+    store.authorize_credential_for_task(
+        "op-1", credential["credential_id"], "task-1", "reused_authenticated_context"
+    )
+
+    assert store.credential_ids_authorized_by_task("op-1", "task-1") == {credential["credential_id"]}
+    assert store.credential_ids_authorized_by_task("op-1", "task-2") == set()
+    assert store.credential_ids_selected_by_task("op-1", "task-1") == set()
+    assert store.credential_ids_used_by_task("op-1", "task-1", [credential["credential_id"]]) == set()
+
+
 def test_access_control_comparisons_only_offer_distinct_account_role_or_tenant_pairs(tmp_path, monkeypatch):
     store = SQLiteApplicationStore(str(tmp_path / "credentials.db"), "logical-target")
     monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)

@@ -1579,6 +1579,12 @@ class ApplicationStore(Protocol):
 
     def credential_ids_selected_by_task(self, operation_id: str, task_uid: str) -> set[str]: ...
 
+    def credential_ids_authorized_by_task(self, operation_id: str, task_uid: str) -> set[str]: ...
+
+    def authorize_credential_for_task(
+        self, operation_id: str, credential_id: str, task_uid: str, authorization_kind: str
+    ) -> None: ...
+
     def list_credential_history(self, credential_id: str) -> list[dict[str, Any]]: ...
 
     def list_credential_inventory(self) -> list[dict[str, Any]]: ...
@@ -1681,6 +1687,8 @@ class SQLiteApplicationStore:
         "expire_mfa_challenges",
         "credential_ids_used_by_task",
         "credential_ids_selected_by_task",
+        "credential_ids_authorized_by_task",
+        "authorize_credential_for_task",
     })
 
     def __getattribute__(self, name: str) -> Any:
@@ -2163,7 +2171,7 @@ class SQLiteApplicationStore:
             raise ValueError("invalid authentication flow descriptor")
         if (
             purpose == "authentication"
-            and descriptor.get("flow_version") == 5
+            and descriptor.get("flow_version") is not None
             and descriptor.get("provenance") != "observed_flow_discovery"
         ):
             raise ValueError("authentication flow descriptor requires observed discovery provenance")
@@ -2758,6 +2766,56 @@ class SQLiteApplicationStore:
                 (self.logical_target, operation_id, task_uid),
             ).fetchall()
         return {str(row[0]) for row in rows}
+
+    def credential_ids_authorized_by_task(self, operation_id: str, task_uid: str) -> set[str]:
+        """Return checked-out or controller-authorized context credentials for one task."""
+
+        if not str(task_uid).strip():
+            return set()
+        with self._lock, closing(self._connect()) as conn, conn:
+            selected_rows = conn.execute(
+                """
+                SELECT DISTINCT credential_id FROM credential_usage_records
+                WHERE logical_target = ? AND operation_id = ? AND task_uid = ? AND outcome = 'selected'
+                """,
+                (self.logical_target, operation_id, task_uid),
+            ).fetchall()
+            authorized_rows = conn.execute(
+                """
+                SELECT credential_id FROM credential_task_authorizations
+                WHERE logical_target = ? AND operation_id = ? AND task_uid = ?
+                """,
+                (self.logical_target, operation_id, task_uid),
+            ).fetchall()
+        return {str(row[0]) for row in (*selected_rows, *authorized_rows)}
+
+    def authorize_credential_for_task(
+        self, operation_id: str, credential_id: str, task_uid: str, authorization_kind: str
+    ) -> None:
+        """Record controller authorization to use an already validated task credential context."""
+
+        if authorization_kind != "reused_authenticated_context":
+            raise ValueError("unsupported task credential authorization kind")
+        if not str(task_uid).strip():
+            raise ValueError("task_uid is required for task credential authorization")
+        with self._lock, closing(self._connect()) as conn, conn:
+            self._register_operation(conn, operation_id)
+            conn.execute(
+                """
+                INSERT INTO credential_task_authorizations (
+                    logical_target, operation_id, task_uid, credential_id, authorization_kind, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(logical_target, operation_id, task_uid, credential_id) DO NOTHING
+                """,
+                (
+                    self.logical_target,
+                    operation_id,
+                    task_uid,
+                    credential_id,
+                    authorization_kind,
+                    datetime.now().isoformat(),
+                ),
+            )
 
     def append_operation_model_metrics(
         self,

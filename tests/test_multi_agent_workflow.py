@@ -33,6 +33,7 @@ from modules.handlers.tool_recovery import (
 )
 from modules.handlers.utils import get_tool_spec
 from modules.tools import memory as memory_mod
+from modules.tools import optional_tool_selection as credential_selection
 from modules.tools.memory import (
     AcceptanceBasis,
     AcceptanceContract,
@@ -392,6 +393,29 @@ def test_authenticated_executor_filter_preserves_shell_but_excludes_credential_m
     assert {tool.__name__ for tool in filtered} == {"authenticated_http_request", "browser_goto_url", "shell"}
 
 
+def test_executor_filter_grants_registered_future_checkout_consumer(monkeypatch):
+    monkeypatch.setattr(
+        credential_selection,
+        "_AUTHENTICATION_TOOL_ACCESS_MODES",
+        dict(credential_selection._AUTHENTICATION_TOOL_ACCESS_MODES),
+    )
+    credential_selection.register_authentication_tool_access("future_auth_consumer", "checkout")
+    task = Task(
+        "future-task", "Future auth consumer", "Use selected credential", 1, "pending",
+        recovery_context={"controller_credential_access": {
+            "mode": "checkout", "tools": ["future_auth_consumer"]
+        }},
+    )
+    tools = [_tool(name) for name in (
+        "future_auth_consumer", "checkout_credential", "authenticated_http_request",
+        "ensure_authenticated_context", "browser_get_cookies", "shell",
+    )]
+
+    filtered = MultiAgentWorkflowController._executor_tools_without_authentication_material(tools, task)
+
+    assert {tool.__name__ for tool in filtered} == {"future_auth_consumer", "checkout_credential", "shell"}
+
+
 def test_controller_runs_privileged_authentication_worker_with_separate_tool_bundle(monkeypatch):
     available_names = {
         "authenticated_http_request",
@@ -467,6 +491,8 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
     assert "https://target.test/login" in prompt
     assert "token" in prompt
     assert "capture_browser_authenticated_context" in prompt
+    assert "with the supplied flow ID" in prompt
+    assert "Do not supply `authorization_storage_key` or `storage_header_bindings`" in prompt
     assert {"checkout_credential", "generate_mfa_code"}.issubset(tool_names)
     assert "set_task_auth_context" not in tool_names
     assert "query_credentials" not in tool_names
@@ -842,7 +868,7 @@ def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(mo
         ),
         setup,
         "https://target.test",
-        [_tool("browser_get_page_html"), _tool("shell")],
+        [_tool("browser_get_page_html"), _tool("http_request"), _tool("shell")],
     )
 
     reader_factory.assert_called_once_with(
@@ -854,6 +880,7 @@ def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(mo
     )
     supplied_names = {workflow_mod.get_tool_name(tool) for tool in worker.call_args.args[2]}
     assert "read_artifact" in supplied_names
+    assert "search_artifact" in supplied_names
     assert "browser_get_page_html" in supplied_names
     assert "record_authentication_flow" not in supplied_names
     assert {
@@ -861,9 +888,11 @@ def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(mo
         "record_browser_mfa_authentication_flow",
         "record_browser_redirect_authentication_flow",
     } <= supplied_names
-    assert "shell" in supplied_names
+    assert "http_request" in supplied_names
+    assert "shell" not in supplied_names
     assert "saved HTML artifacts" in worker.call_args.args[1]
-    assert "line or byte paging" in worker.call_args.args[1]
+    assert "search_artifact" in worker.call_args.args[1]
+    assert "full saved HTML" in worker.call_args.args[1]
     assert "controller-bound recorder" in worker.call_args.args[1]
     assert "browser navigation is limited" in worker.call_args.args[1]
     assert "never load it with a browser tool" in worker.call_args.args[1]
@@ -1078,9 +1107,12 @@ def test_authentication_worker_reuses_valid_opaque_context_without_agent(monkeyp
         state_store=FakeState(plan),
         text_runner=runner,
     )
-    credential_store = SimpleNamespace(list_credentials=Mock(return_value=[
-        {"credential_id": "registered-credential", "credential_type": "username_password", "role": "member"}
-    ]))
+    credential_store = SimpleNamespace(
+        list_credentials=Mock(return_value=[
+            {"credential_id": "registered-credential", "credential_type": "username_password", "role": "member"}
+        ]),
+        authorize_credential_for_task=Mock(),
+    )
     monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: credential_store)
     monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: True)
     task = Task(
@@ -1096,6 +1128,12 @@ def test_authentication_worker_reuses_valid_opaque_context_without_agent(monkeyp
 
     assert result.status == "reused"
     assert result.credential_ids == ("registered-credential",)
+    credential_store.authorize_credential_for_task.assert_called_once_with(
+        "OP_TEST",
+        "registered-credential",
+        "reused-context",
+        "reused_authenticated_context",
+    )
     runner.assert_not_called()
     assert "authenticated_http_request" in controller._required_optional_tool_names(task)
     assert credential_store.list_credentials.call_args.args == ("OP_TEST",)
@@ -1227,6 +1265,38 @@ def test_authentication_browser_navigation_rejects_file_and_unapproved_origins()
     with pytest.raises(ValueError, match="approved origin"):
         asyncio.run(scoped("https://other.test/login"))
     assert asyncio.run(scoped("https://target.test/login")) is None
+
+
+def test_authentication_discovery_http_request_is_read_only_and_same_origin():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    requests = []
+
+    def http_request(tool_use):
+        requests.append(tool_use)
+        return {"status": "success"}
+
+    http_request.__name__ = "http_request"
+    scoped = controller._authentication_agent_tools(
+        [http_request],
+        ("https://target.test",),
+        (),
+    )[0]
+
+    assert scoped("GET", "https://target.test/login", 5) == {"status": "success"}
+    assert requests[0]["input"] == {
+        "method": "GET",
+        "url": "https://target.test/login",
+        "timeout": 5.0,
+        "allow_redirects": False,
+    }
+    with pytest.raises(ValueError, match="GET and HEAD"):
+        scoped("POST", "https://target.test/login")
+    with pytest.raises(ValueError, match="approved origin"):
+        scoped("GET", "https://other.test/login")
 
 
 def test_authentication_worker_tool_bundle_allows_http_login_only_for_mapped_api_forms():
@@ -17403,7 +17473,7 @@ def test_task_evaluator_artifact_reader_allows_one_read_per_distinct_recorded_ar
     assert controller._task_evaluator_artifact_refs(task, [acceptance]) == artifact_refs
     tools = controller._task_evaluator_tools(task, [acceptance])
 
-    assert {tool.__name__ for tool in tools} == {"read_artifact"}
+    assert {tool.__name__ for tool in tools} == {"read_artifact", "search_artifact"}
     for start_line in (1, 2, 3, 4):
         assert artifact_refs[0] in tools[0](artifact_refs[0], start_line=start_line)
     page_limit = ast.literal_eval(tools[0](artifact_refs[0], start_line=5))
@@ -17436,7 +17506,8 @@ def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(m
     prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
 
     assert "- Smaller artifacts available for line review: 12" in prompt
-    assert "- Larger artifacts available only by explicit byte page: 0" in prompt
+    assert "- Larger artifacts available for full-artifact search or explicit byte page: 0" in prompt
+    assert "next_match_offset as match_offset" in prompt
     assert "- Total successful reads: 48" in prompt
     assert "- Successful pages per artifact: 4" in prompt
     assert "- Maximum lines per page: 200" in prompt
@@ -17480,7 +17551,8 @@ def test_task_evaluator_allows_large_artifact_byte_pages_but_prioritizes_digest(
     first_page = tools[0]("artifact:artifacts/bundle.js", start_byte=0, max_bytes=19_200)
     assert "'start_byte': 0" in first_page
     assert "- Smaller artifacts available for line review: 1" in prompt
-    assert "- Larger artifacts available only by explicit byte page: 1" in prompt
+    assert "- Larger artifacts available for full-artifact search or explicit byte page: 1" in prompt
+    assert "Larger artifact references (full search or explicit byte pages):" in prompt
     assert "- Total successful reads: 8" in prompt
     assert "artifact:artifacts/mapping.json (16 bytes)" in prompt
     assert "artifact:artifacts/bundle.js (19201 bytes; exceeds one page)" in prompt
@@ -17705,7 +17777,7 @@ def test_task_evaluator_artifact_reader_uses_persisted_acceptance_results_when_o
 
     controller._evaluate_task(_plan(), _plan().phases[0], task)
 
-    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact"}
+    assert {tool.__name__ for tool in captured["tools"]} == {"read_artifact", "search_artifact"}
 
 
 def test_evaluator_tools_exclude_shell_and_optional_execution_tools():

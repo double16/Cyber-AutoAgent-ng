@@ -2,6 +2,10 @@
 
 ### Features
 
+- Document how to identify and process operation continuations in the forensics skill, including the default
+  to review the latest continuation and the freshness caveat for data inherited across code updates.
+- Advertise canonical choices for authentication flow purpose, kind, and request format, while normalizing common model
+  synonyms before Pydantic validation.
 - Feed the current operation's frozen, target-scoped attack-surface inventory into deterministic authentication-chain
   mapping so known endpoints and JavaScript bundles are prioritized with retained source provenance.
 - Add deterministic same-origin JavaScript analysis to authentication-chain mapping, exposing secret-free browser
@@ -76,6 +80,24 @@
 
 ### Fixes
 
+- Separate checked-out credential material from reusable authenticated contexts with a shared access gate, register
+  access modes for future auth-consuming tools, and tell executors to stop authenticated attempts when a controller
+  context is unavailable.
+- Authorize task-scoped use of validated authentication contexts when the controller reuses them, and report missing
+  authorization as a controller setup failure instead of directing executors to an unavailable credential tool.
+- Require a successful exact-URL browser request carrying a captured session cookie for cookie-only authentication
+  capture; keep large search matches visible through bounded excerpts and clarify evaluator search guidance.
+- Separate full-artifact literal and regular-expression searching into `search_artifact`, so late matches are found
+  without changing `read_artifact` line and byte pagination; replace shell access in authentication flow discovery
+  with scoped read-only `http_request` access.
+- Log authenticated context validation status and elapsed time, and include redacted request headers and cookie
+  metadata on failures so authentication material can be diagnosed without exposing its values.
+- Explain which context-establishment tool to use when an authenticated HTTP request has no valid context.
+- Resolve browser authentication-capture header templates from the controller-selected flow rather than asking an
+  agent to reconstruct them, preventing invalid captures caused by omitted `value_template` fields.
+- Require browser authentication validation URLs to come from a successful same-origin HAR request containing the
+  declared authorization headers; provisional flow discovery no longer promotes 401/403 inventory candidates such as
+  `/api/products` into validation URLs.
 - Provide credential provisioning workers with the complete structured registration-flow binding and profile generator,
   retain artifact and shell processing access, and prevent prior-operation memory retrieval from steering registration.
 - Detect direct HTTP 401 responses from controller-selected login submissions, mark only the rejected credential

@@ -32,6 +32,9 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         task_columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
         mfa_challenge_columns = {row[1] for row in conn.execute("PRAGMA table_info(mfa_challenges)")}
         rotation_columns = {row[1] for row in conn.execute("PRAGMA table_info(credential_rotation_requests)")}
+        credential_task_authorization_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(credential_task_authorizations)")
+        }
     assert applied == [
         (1, "0001_initial_schema.sql"),
         (2, "0002_operation_model_metrics.sql"),
@@ -44,17 +47,22 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         (9, "0009_credential_rotation_requests.sql"),
         (10, "0010_credential_rotation_lifecycle.sql"),
         (11, "0011_authentication_flow_records.sql"),
+        (12, "0012_task_credential_authorizations.sql"),
     ]
     assert {
         "operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts",
         "credential_records", "credential_status_events", "credential_usage_records", "mfa_challenges",
         "credential_rotation_requests",
         "authentication_flow_records",
+        "credential_task_authorizations",
     }.issubset(tables)
     assert "correction_categories" in metric_columns
     assert "auth_context" in task_columns
     assert "task_uid" in mfa_challenge_columns
     assert {"staged_credential_id", "completed_at"}.issubset(rotation_columns)
+    assert {"logical_target", "operation_id", "task_uid", "credential_id", "authorization_kind"}.issubset(
+        credential_task_authorization_columns
+    )
 
 
 def test_task_replacement_lineage_migrates_existing_database(tmp_path, monkeypatch):
@@ -80,7 +88,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with closing(sqlite3.connect(db_path)) as conn, conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 11
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 12
 
 
 def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):

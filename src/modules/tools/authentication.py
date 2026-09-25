@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from base64 import b64encode
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
-from urllib.parse import urlsplit
+from http.cookies import SimpleCookie
+from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
+from pydantic import TypeAdapter, ValidationError
 from strands import tool
 
-from modules.tools.credentials import _active_checked_out_credential, _active_task_target_values
+from modules.tools.credentials import (
+    AUTH_CONTEXT_UNAVAILABLE_ERROR,
+    CredentialAccessMode,
+    _active_credential_for_access,
+    _active_task_target_values,
+)
 from modules.tools.memory import _get_database_store, _operation_id, active_credential_task
+from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.utils.redaction import redact, register_runtime_secret
 
 
@@ -40,9 +50,83 @@ AUTHENTICATION_FLOW_KINDS = frozenset({
     "oauth2_client",
 })
 REGISTRATION_FLOW_KINDS = frozenset({"browser_registration", "api_registration"})
-AUTHENTICATION_FLOW_VERSION = 5
+AUTHENTICATION_FLOW_VERSION = 6
 _AUTHORIZATION_STORAGE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
+_LOGGER = logging.getLogger(__name__)
+_PURPOSE_ADAPTER = TypeAdapter(Literal["authentication", "registration"])
+_FLOW_KIND_ADAPTER = TypeAdapter(
+    Literal[
+        "api_form",
+        "browser_form",
+        "browser_redirect",
+        "browser_mfa",
+        "api_key",
+        "oauth2_client",
+        "browser_registration",
+        "api_registration",
+    ]
+)
+_REQUEST_FORMAT_ADAPTER = TypeAdapter(Literal["", "json", "form"])
+
+
+def _normalize_authentication_enum(value: str, *, field_name: str) -> str:
+    """Normalize common model phrasing, then validate a fixed authentication value with Pydantic."""
+
+    aliases = {
+        "purpose": {
+            "auth": "authentication",
+            "login": "authentication",
+            "sign_in": "authentication",
+            "signin": "authentication",
+            "register": "registration",
+            "signup": "registration",
+            "sign_up": "registration",
+            "create_account": "registration",
+        },
+        "kind": {
+            "login_form": "api_form",
+            "form_login": "api_form",
+            "web_form": "browser_form",
+            "browser_login": "browser_form",
+            "redirect_login": "browser_redirect",
+            "mfa": "browser_mfa",
+            "api_key_auth": "api_key",
+            "oauth": "oauth2_client",
+            "oauth2": "oauth2_client",
+            "signup_form": "browser_registration",
+            "browser_signup": "browser_registration",
+            "api_signup": "api_registration",
+        },
+        "request_format": {
+            "application_json": "json",
+            "application/json": "json",
+            "form_encoded": "form",
+            "application/x-www-form-urlencoded": "form",
+            "urlencoded": "form",
+            "url_encoded": "form",
+        },
+    }
+    normalized = normalize_semantic_enum(
+        value,
+        aliases=aliases[field_name],
+        field_name=field_name,
+        logger=_LOGGER,
+    )
+    adapter = {
+        "purpose": _PURPOSE_ADAPTER,
+        "kind": _FLOW_KIND_ADAPTER,
+        "request_format": _REQUEST_FORMAT_ADAPTER,
+    }[field_name]
+    try:
+        return adapter.validate_python(normalized)
+    except ValidationError as error:
+        choices = {
+            "purpose": "authentication or registration",
+            "kind": ", ".join(sorted(AUTHENTICATION_FLOW_KINDS | REGISTRATION_FLOW_KINDS)),
+            "request_format": "empty, json, or form",
+        }[field_name]
+        raise ValueError(f"{field_name} must be one of: {choices}") from error
 
 
 def _credential_target_url_contains(target: str, candidate: str, *, label: str) -> bool:
@@ -170,20 +254,129 @@ def _safe_context(context: _AuthenticationContext, status: str) -> str:
 
 
 def _validate(context: _AuthenticationContext) -> bool:
+    started_at = time.perf_counter()
     try:
         response = context.session.get(
             context.validation_url, headers=context.headers, params=context.params, timeout=15
         )
-    except requests.RequestException:
+    except requests.RequestException as error:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        request = getattr(error, "request", None)
+        request_source = "exception_request" if request is not None else "intended_context"
+        diagnostics = _validation_request_diagnostics(context, request)
+        _LOGGER.warning(
+            "Authenticated context validation failed credential_id=%s method=GET url=%s "
+            "reason=request_exception exception_type=%s elapsed_ms=%.1f request_source=%s "
+            "request_headers=%s cookies=%s",
+            context.credential_id,
+            redact(_diagnostic_validation_url(context.validation_url)),
+            type(error).__name__,
+            elapsed_ms,
+            request_source,
+            json.dumps(diagnostics["headers"], sort_keys=True),
+            json.dumps(diagnostics["cookies"], sort_keys=True),
+        )
         return False
-    return 200 <= response.status_code < 300
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    if 200 <= response.status_code < 300:
+        _LOGGER.info(
+            "Authenticated context validation succeeded credential_id=%s method=GET url=%s "
+            "status_code=%s elapsed_ms=%.1f",
+            context.credential_id,
+            redact(_diagnostic_validation_url(context.validation_url)),
+            response.status_code,
+            elapsed_ms,
+        )
+        return True
+    request = getattr(response, "request", None)
+    diagnostics = _validation_request_diagnostics(context, request)
+    request_source = "response_request" if request is not None else "intended_context"
+    _LOGGER.warning(
+        "Authenticated context validation failed credential_id=%s method=GET url=%s "
+        "reason=non_success_status status_code=%s elapsed_ms=%.1f request_source=%s "
+        "request_headers=%s cookies=%s",
+        context.credential_id,
+        redact(_diagnostic_validation_url(context.validation_url)),
+        response.status_code,
+        elapsed_ms,
+        request_source,
+        json.dumps(diagnostics["headers"], sort_keys=True),
+        json.dumps(diagnostics["cookies"], sort_keys=True),
+    )
+    return False
+
+
+def _diagnostic_validation_url(value: str) -> str:
+    """Drop URL user info, query, and fragment before writing a validation URL to logs."""
+
+    parsed = urlsplit(value)
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = f"{hostname}:{port}" if port is not None else hostname
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _validation_request_diagnostics(
+    context: _AuthenticationContext,
+    request: Any = None,
+) -> dict[str, Any]:
+    """Return redacted headers and cookie metadata for a completed or intended request."""
+
+    if request is None:
+        try:
+            request = context.session.prepare_request(
+                requests.Request(
+                    "GET",
+                    context.validation_url,
+                    headers=context.headers,
+                    params=context.params,
+                )
+            )
+        except (AttributeError, requests.RequestException, TypeError, ValueError):
+            request = None
+
+    request_headers = getattr(request, "headers", None) or context.headers
+    cookie_header = str(request_headers.get("Cookie", request_headers.get("cookie", "")) or "")
+    cookies = SimpleCookie()
+    cookies.load(cookie_header)
+    cookie_metadata = [
+        {"name": name, "value": redact({"cookie": morsel.value})["cookie"]}
+        for name, morsel in sorted(cookies.items())
+    ]
+    headers_without_cookie = {
+        name: value
+        for name, value in request_headers.items()
+        if str(name).lower() != "cookie"
+    }
+    return {
+        "headers": redact(headers_without_cookie),
+        "cookies": cookie_metadata,
+    }
 
 
 def authentication_context_is_valid(operation_id: str, target: str, credential_id: str) -> bool:
     """Check an opaque operation-memory context without exposing session material."""
 
     context = _CONTEXTS.get(_context_key(operation_id, target, credential_id))
-    return context is not None and _validate(context)
+    if context is None:
+        _LOGGER.info(
+            "Authenticated context unavailable credential_id=%s reason=context_missing",
+            credential_id,
+        )
+        return False
+    return _validate(context)
+
+
+def authentication_context_validation_url(operation_id: str, target: str, credential_id: str) -> str:
+    """Return the secret-free route used to validate an opaque context."""
+
+    context = _CONTEXTS.get(_context_key(operation_id, target, credential_id))
+    return context.validation_url if context is not None else ""
 
 
 def authentication_attempt_result(operation_id: str, target: str, credential_id: str) -> dict[str, Any] | None:
@@ -223,16 +416,25 @@ def record_browser_authentication_attempt(
     return None
 
 
-def _active_record(credential_id: str) -> tuple[Any, dict[str, Any], str]:
-    """Resolve an active task's checked-out, controller-bound credential."""
+def _active_record(
+    credential_id: str, *, access_mode: CredentialAccessMode = "checkout"
+) -> tuple[Any, dict[str, Any], str]:
+    """Resolve an active task's credential under the requested access mode."""
 
     store = _get_database_store()
     operation_id = _operation_id()
     active_task = active_credential_task(store, operation_id)
     if active_task is None:
+        if access_mode == "context":
+            raise ValueError(AUTH_CONTEXT_UNAVAILABLE_ERROR)
         raise ValueError("authenticated request requires an active task")
-    resolved_credential_id = _bound_credential_id(active_task, credential_id)
-    task, record = _active_checked_out_credential(store, operation_id, resolved_credential_id)
+    try:
+        resolved_credential_id = _bound_credential_id(active_task, credential_id)
+    except ValueError as error:
+        if access_mode == "context":
+            raise ValueError(AUTH_CONTEXT_UNAVAILABLE_ERROR) from error
+        raise
+    task, record = _active_credential_for_access(store, operation_id, resolved_credential_id, access_mode)
     return task, record, resolved_credential_id
 
 
@@ -264,6 +466,39 @@ def _stored_api_form_flow(target: str, flow_id: str) -> dict[str, Any]:
     return candidates[0][1]
 
 
+def _stored_browser_flow(target: str, flow_id: str) -> dict[str, Any]:
+    """Return the controller-selected browser flow for one exact credential target."""
+
+    candidates = []
+    for stored in _get_database_store().list_authentication_flows(
+        target, purpose="authentication", statuses=("discovered", "validated")
+    ):
+        if str(stored.get("flow_id") or "") != flow_id:
+            continue
+        descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
+        if not _is_current_authentication_flow(descriptor):
+            continue
+        if str(descriptor.get("kind") or "") not in {"browser_form", "browser_redirect", "browser_mfa"}:
+            continue
+        login_url = str(descriptor.get("login_url") or "").strip()
+        if not login_url or not _credential_target_url_contains(target, login_url, label="stored login_url"):
+            continue
+        candidates.append(descriptor)
+    if len(candidates) != 1:
+        raise ValueError("the selected browser authentication flow is unavailable for this credential target")
+    return candidates[0]
+
+
+def _capture_storage_header_bindings(target: str, flow_id: str) -> list[dict[str, str]]:
+    """Resolve canonical browser capture bindings from the selected flow."""
+
+    flow = _stored_browser_flow(target, flow_id)
+    return _normalize_storage_header_bindings(
+        flow.get("storage_header_bindings") if isinstance(flow.get("storage_header_bindings"), list) else [],
+        str(flow.get("authorization_storage_key") or ""),
+    )
+
+
 def _store_context(
     task: Any,
     record: dict[str, Any],
@@ -293,7 +528,32 @@ def _store_context(
     return _safe_context(context, "valid")
 
 
-@tool(name="record_authentication_flow")
+@tool(
+    name="record_authentication_flow",
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "credential_id": {"type": "string"},
+                "target": {"type": "string"},
+                "kind": {"type": "string", "enum": sorted(AUTHENTICATION_FLOW_KINDS | REGISTRATION_FLOW_KINDS)},
+                "login_url": {"type": "string"},
+                "validation_url": {"type": "string"},
+                "authorization_storage_key": {"type": "string"},
+                "storage_header_bindings": {"type": "array", "items": {"type": "object"}},
+                "request_format": {"type": "string", "enum": ["", "json", "form"]},
+                "allowed_origins": {"type": "array", "items": {"type": "string"}},
+                "purpose": {"type": "string", "enum": ["authentication", "registration"]},
+                "roles": {"type": "array", "items": {"type": "string"}},
+                "success_redirect_url": {"type": "string"},
+                "identity_fields": {"type": "array", "items": {"type": "string"}},
+                "required_fields": {"type": "array", "items": {"type": "string"}},
+                "optional_fields": {"type": "array", "items": {"type": "string"}},
+            },
+            "additionalProperties": False,
+        }
+    },
+)
 def record_authentication_flow(
     credential_id: str = "",
     target: str = "",
@@ -313,8 +573,9 @@ def record_authentication_flow(
 ) -> str:
     """Persist a secret-free observed authentication or registration flow for later same-target setup."""
 
-    if purpose not in {"authentication", "registration"}:
-        raise ValueError("purpose must be authentication or registration")
+    purpose = _normalize_authentication_enum(purpose, field_name="purpose")
+    kind = _normalize_authentication_enum(kind, field_name="kind")
+    request_format = _normalize_authentication_enum(request_format, field_name="request_format")
     if purpose == "authentication":
         if credential_id:
             _task, record, credential_id = _active_record(credential_id)
@@ -341,7 +602,10 @@ def record_authentication_flow(
     effective_login_url = login_url or (validation_url if kind in {"api_key", "oauth2_client"} else "")
     effective_login_url = _safe_flow_descriptor_url(target, effective_login_url, label="login_url")
     if purpose == "authentication":
-        validation_url = _safe_flow_descriptor_url(target, validation_url, label="validation_url")
+        if validation_url:
+            validation_url = _safe_flow_descriptor_url(target, validation_url, label="validation_url")
+        elif kind not in {"browser_form", "browser_redirect", "browser_mfa"}:
+            raise ValueError("validation_url is required for non-browser authentication flows")
         authorization_storage_key = _safe_authorization_storage_key(authorization_storage_key)
         storage_header_bindings = _normalize_storage_header_bindings(
             storage_header_bindings, authorization_storage_key
@@ -374,7 +638,7 @@ def record_authentication_flow(
         "authorization_storage_key": authorization_storage_key if purpose == "authentication" else "",
         "storage_header_bindings": storage_header_bindings if purpose == "authentication" else [],
         "url": effective_login_url if purpose == "registration" else "",
-        "request_format": request_format if request_format in {"", "json", "form"} else "",
+        "request_format": request_format,
         "allowed_origins": list(dict.fromkeys([f"{urlsplit(target).scheme}://{urlsplit(target).netloc}", *normalized_origins])),
         "evidence_refs": [],
     }
@@ -408,8 +672,8 @@ def build_record_authentication_flow_tool(
     """Build a controller-bound recorder that exposes only observed flow fields to an agent."""
 
     normalized_target = str(target).rstrip("/")
-    normalized_purpose = str(purpose).strip()
-    normalized_kind = str(kind).strip()
+    normalized_purpose = _normalize_authentication_enum(str(purpose).strip(), field_name="purpose")
+    normalized_kind = _normalize_authentication_enum(str(kind).strip(), field_name="kind")
     normalized_credential_id = str(credential_id).strip()
     normalized_origins = tuple(
         str(origin).strip() for origin in allowed_origins if str(origin).strip()
@@ -459,7 +723,9 @@ def build_record_authentication_flow_tool(
         )
 
     if normalized_purpose == "authentication":
-        required = ["login_url", "validation_url"]
+        required = ["login_url"] if normalized_kind in {"browser_form", "browser_redirect", "browser_mfa"} else [
+            "login_url", "validation_url"
+        ]
         properties = {
             "login_url": {"type": "string", "description": "Observed same-target login URL."},
             "validation_url": {"type": "string", "description": "Observed same-target protected validation URL."},
@@ -513,7 +779,24 @@ def build_record_authentication_flow_tool(
     )
 
 
-@tool(name="ensure_authenticated_context")
+@tool(
+    name="ensure_authenticated_context",
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "credential_id": {"type": "string"},
+                "flow_id": {"type": "string"},
+                "login_url": {"type": "string"},
+                "validation_url": {"type": "string"},
+                "request_format": {"type": "string", "enum": ["", "json", "form"]},
+                "additional_fields": {"type": "object", "additionalProperties": {"type": "string"}},
+            },
+            "required": ["credential_id"],
+            "additionalProperties": False,
+        }
+    },
+)
 def ensure_authenticated_context(
     credential_id: str,
     flow_id: str = "",
@@ -528,6 +811,7 @@ def ensure_authenticated_context(
     mapped same-origin username/password login. It retains cookies and tokens only in memory and never returns them.
     """
 
+    request_format = _normalize_authentication_enum(request_format, field_name="request_format")
     operation_id = _operation_id()
     task, record, credential_id = _active_record(credential_id)
     target = str(record["target"]).rstrip("/")
@@ -596,18 +880,33 @@ def ensure_authenticated_context(
     return _store_context(task, record, credential_id, session, headers, {}, validation_url)
 
 
-@tool(name="capture_browser_authenticated_context")
+@tool(
+    name="capture_browser_authenticated_context",
+    inputSchema={
+        "json": {
+            "type": "object",
+            "properties": {
+                "credential_id": {"type": "string"},
+                "flow_id": {"type": "string"},
+                "validation_url": {"type": "string"},
+            },
+            "required": ["credential_id", "flow_id", "validation_url"],
+            "additionalProperties": False,
+        }
+    },
+)
 async def capture_browser_authenticated_context(
     credential_id: str,
+    flow_id: str,
     validation_url: str,
-    authorization_storage_key: str = "",
-    storage_header_bindings: list[dict[str, str]] | None = None,
 ) -> str:
     """Capture an authentication agent's browser session into an opaque HTTP context.
 
-    This tool is intentionally available only to the authentication agent. It copies same-origin cookies plus declared
-    browser-storage-derived headers into operation memory. Observed same-origin request headers take precedence for
-    matching declared names. Neither values nor cookies are returned to the agent or persisted to workflow state.
+    This tool is intentionally available only to the authentication agent. The required flow ID selects the
+    controller-recorded browser flow; unauthenticated tasks never invoke this tool. It copies same-origin cookies plus
+    the flow's declared browser-storage-derived headers into operation memory. Observed same-origin request headers
+    take precedence for matching declared names. Neither values nor cookies are returned to the agent or persisted to
+    workflow state.
     """
 
     from modules.tools.browser import get_browser
@@ -616,7 +915,7 @@ async def capture_browser_authenticated_context(
     target = str(record["target"]).rstrip("/")
     if not _credential_target_url_contains(target, validation_url, label="validation_url"):
         raise ValueError("validation URL must share the credential target origin")
-    bindings = _normalize_storage_header_bindings(storage_header_bindings, authorization_storage_key)
+    bindings = _capture_storage_header_bindings(target, str(flow_id or "").strip())
     session = requests.Session()
     headers: dict[str, str] = {}
     async with get_browser() as browser:
@@ -625,18 +924,44 @@ async def capture_browser_authenticated_context(
                 cookies = await browser.context.cookies([target])
                 observed_headers: dict[str, str] = {}
                 wanted_headers = {str(binding["header_name"]).lower() for binding in bindings}
-                wanted_headers.add("authorization")
+                matching_request_found = False
                 for request in reversed(tuple(getattr(browser, "recent_requests", ()))):
                     if not _credential_target_url_contains(target, str(request.url), label="browser request URL"):
                         continue
+                    if str(request.url).split("#", 1)[0] != validation_url:
+                        continue
                     request_headers = await request.all_headers()
-                    for name, value in request_headers.items():
-                        normalized_name = str(name).lower()
-                        normalized_value = str(value).strip()
-                        if normalized_name in wanted_headers and normalized_value and normalized_name not in observed_headers:
-                            observed_headers[normalized_name] = normalized_value
-                    if wanted_headers.issubset(observed_headers):
-                        break
+                    normalized_headers = {
+                        str(name).lower(): str(value).strip()
+                        for name, value in request_headers.items()
+                        if str(value).strip()
+                    }
+                    if wanted_headers and not wanted_headers.issubset(normalized_headers):
+                        continue
+                    if not wanted_headers:
+                        request_cookies = SimpleCookie()
+                        request_cookies.load(normalized_headers.get("cookie", ""))
+                        if not any(
+                            cookie.get("name") in request_cookies
+                            and request_cookies[cookie["name"]].value == cookie.get("value")
+                            for cookie in cookies
+                        ):
+                            continue
+                    response = await request.response() if hasattr(request, "response") else None
+                    status_code = getattr(response, "status", None)
+                    if not isinstance(status_code, int) or not 200 <= status_code < 300:
+                        continue
+                    matching_request_found = True
+                    observed_headers = {
+                        name: normalized_headers[name]
+                        for name in wanted_headers
+                        if name in normalized_headers
+                    }
+                    break
+                if not matching_request_found:
+                    raise ValueError(
+                        "validation URL did not produce a successful browser request with the required credentials"
+                    )
                 storage_values: dict[str, str] = {}
                 storage_keys = sorted({binding["storage_key"] for binding in bindings})
                 if storage_keys:
@@ -739,13 +1064,13 @@ def authenticated_http_request(
         raise ValueError("Cookie and Authorization headers are managed by the authenticated context")
     store = _get_database_store()
     operation_id = _operation_id()
-    task, record, credential_id = _active_record(credential_id)
+    task, record, credential_id = _active_record(credential_id, access_mode="context")
     target = str(record["target"]).rstrip("/")
     if not _credential_target_url_contains(target, url, label="request URL"):
         raise ValueError("request URL is outside the credential target origin")
     context = _CONTEXTS.get(_context_key(operation_id, target, credential_id))
     if context is None or not _validate(context):
-        raise ValueError("no valid authenticated context; establish one before requesting")
+        raise ValueError(AUTH_CONTEXT_UNAVAILABLE_ERROR)
     merged_headers = {**context.headers, **normalized_headers}
     try:
         response = context.session.request(

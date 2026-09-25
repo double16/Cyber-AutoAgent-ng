@@ -446,7 +446,7 @@ def test_read_artifact_failure_allows_one_changed_retry_then_requires_alternate_
     hook._after_tool(_after("failed", "read_artifact", failed_input, status="error", text="Artifact does not exist"))
 
     assert hook.failure_category == "artifact_unavailable"
-    assert "at most one changed read_artifact call" in hook.recovery_guidance()
+    assert "at most one changed read_artifact or search_artifact call" in hook.recovery_guidance()
     retry_input = {"path": "artifact:artifacts/renamed.txt"}
     retry = _before("retry", "read_artifact", retry_input)
     hook._before_tool(retry)

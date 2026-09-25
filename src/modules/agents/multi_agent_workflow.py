@@ -98,6 +98,7 @@ from modules.tools.artifact import (
     artifact_max_bytes_for_context_window,
     artifact_review_metadata,
     create_bounded_artifact_reader,
+    create_bounded_artifact_searcher,
     resolve_operation_artifact_path,
     resolve_tool_result_max_chars,
 )
@@ -109,6 +110,7 @@ from modules.tools.authentication import (
     _normalize_storage_header_bindings,
     authentication_attempt_result,
     authentication_context_is_valid,
+    authentication_context_validation_url,
     build_record_authentication_flow_tool,
     record_browser_authentication_attempt,
 )
@@ -162,11 +164,12 @@ from modules.tools.memory import (
     task_service_scope_violations,
 )
 from modules.tools.optional_tool_selection import (
-    CREDENTIAL_OPTIONAL_TOOL_NAMES,
     CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
     CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES,
     authentication_agent_optional_tool_names,
+    authentication_tool_access_mode,
     credential_optional_tool_names,
+    credential_tool_names,
     required_optional_tool_names,
 )
 from modules.tools.recon_inventory_manifest import consolidate_recon_artifacts
@@ -379,7 +382,7 @@ _CANONICAL_ARTIFACT_REFERENCE_PATTERN = re.compile(
 _UNSAFE_INVENTORY_URL_SYNTAX = re.compile(r"[\x00-\x20\"'\\`{}]")
 _INVALID_INVENTORY_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _NON_EVIDENCE_RECOVERY_TOOLS = frozenset(
-    {"read_artifact", "memory_retrieve", "record_task_acceptance", "tool_catalog", "get_tool_help"}
+    {"read_artifact", "search_artifact", "memory_retrieve", "record_task_acceptance", "tool_catalog", "get_tool_help"}
 )
 _SHELL_URL_LITERAL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+")
 _ABSOLUTE_ARTIFACT_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_.\-/])(/[^\s'\"`<>()\[\]{}\\]+)")
@@ -432,6 +435,7 @@ _NON_EXECUTION_RECEIPT_TOOLS = frozenset(
         "memory_list",
         "memory_retrieve",
         "read_artifact",
+        "search_artifact",
         "record_finding_validation",
         "record_task_acceptance",
         "retrieve_offloaded_content",
@@ -4167,7 +4171,7 @@ class MultiAgentWorkflowController:
                 roles=registration_roles if isinstance(registration_roles, list) else (),
             ))
         if self._authentication_agent_tool_names(task):
-            tools = self._executor_tools_without_authentication_material(tools)
+            tools = self._executor_tools_without_authentication_material(tools, task)
         finding_tool_names = {
             "record_finding_validation",
             "record_objective_validation",
@@ -4366,6 +4370,7 @@ class MultiAgentWorkflowController:
             recovery_allowed_tool_names={
                 *required_tools,
                 "read_artifact",
+                "search_artifact",
                 "store_observation",
                 "store_knowledge",
             },
@@ -5757,7 +5762,7 @@ class MultiAgentWorkflowController:
                             )
                             terminal_finding_error = repair_failure or failed_finding
                             repair_read_completed = any(
-                                outcome.tool_name == "read_artifact" and outcome.success
+                                outcome.tool_name in {"read_artifact", "search_artifact"} and outcome.success
                                 for outcome in repair_result.outcomes
                             )
                             self._emit_finding_submission_repair(
@@ -8749,7 +8754,7 @@ Return JSON exactly: {response_schema}.
                     "credential provisioning tasks may select only controller-authorized registration tools: "
                     + ", ".join(sorted(invalid_tools))
                 )
-        requested_credentials = set(selected_tools) & CREDENTIAL_OPTIONAL_TOOL_NAMES
+        requested_credentials = set(selected_tools) & credential_tool_names()
         allowed_credentials = set(self._required_optional_tool_names(task))
         invalid_credentials = requested_credentials - allowed_credentials
         if invalid_credentials:
@@ -8853,7 +8858,11 @@ Return JSON exactly: {response_schema}.
                     canonicalize_credential_target(target), purpose="authentication", statuses=statuses
                 ):
                     raw_flow = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
-                    flow = self._normalized_authentication_flow(raw_flow, target_origins)
+                    flow = self._normalized_authentication_flow(
+                        raw_flow,
+                        target_origins,
+                        allow_provisional="discovered" in statuses,
+                    )
                     if flow:
                         key = json.dumps(flow, sort_keys=True)
                         if key not in seen:
@@ -9047,7 +9056,11 @@ Return JSON exactly: {response_schema}.
         return {"target": target.rstrip("/"), "endpoints": endpoints, "javascript": javascript}
 
     def _normalized_authentication_flow(
-        self, raw_flow: dict[str, Any], target_origins: set[str]
+        self,
+        raw_flow: dict[str, Any],
+        target_origins: set[str],
+        *,
+        allow_provisional: bool = False,
     ) -> dict[str, Any] | None:
         login_url = str(raw_flow.get("login_url") or "").strip()
         validation_url = str(raw_flow.get("validation_url") or "").strip()
@@ -9059,15 +9072,18 @@ Return JSON exactly: {response_schema}.
             return None
         if raw_flow.get("provenance") != "observed_flow_discovery":
             return None
-        if not validation_url or kind not in {
+        if kind not in {
             "api_form", "browser_form", "browser_redirect", "browser_mfa", "api_key", "oauth2_client"
         }:
+            return None
+        browser_kind = kind in {"browser_form", "browser_redirect", "browser_mfa"}
+        if not validation_url and not (allow_provisional and browser_kind):
             return None
         login_url = login_url or validation_url if kind in {"api_key", "oauth2_client"} else login_url
         if (
             not login_url
             or self._authentication_origin(login_url) not in target_origins
-            or self._authentication_origin(validation_url) not in target_origins
+            or (validation_url and self._authentication_origin(validation_url) not in target_origins)
         ):
             return None
         if authorization_storage_key and not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:-]{0,127}", authorization_storage_key):
@@ -9274,8 +9290,53 @@ Return JSON exactly: {response_schema}.
 
             return scoped_browser_goto_url
 
+        def scoped_http_tool(original: Any) -> Any:
+            """Expose read-only same-origin HTTP retrieval without shell or credential inputs."""
+
+            request_function = getattr(original, "http_request", original)
+
+            @strands_tool(
+                name="http_request",
+                inputSchema={
+                    "json": {
+                        "type": "object",
+                        "properties": {
+                            "method": {"type": "string", "enum": ["GET", "HEAD"]},
+                            "url": {"type": "string"},
+                            "timeout": {"type": "number", "minimum": 1, "maximum": 30},
+                        },
+                        "required": ["method", "url"],
+                    }
+                },
+            )
+            def scoped_http_request(method: str, url: str, timeout: float = 30) -> Any:
+                normalized_method = str(method or "").upper()
+                origin = MultiAgentWorkflowController._authentication_origin(url)
+                if normalized_method not in {"GET", "HEAD"}:
+                    raise ValueError("authentication discovery HTTP requests are limited to GET and HEAD")
+                if not origin or origin not in allowed_origins:
+                    raise ValueError("authentication discovery HTTP request is outside the approved origin scope")
+                result = request_function(
+                    {
+                        "toolUseId": f"auth-discovery-http-{uuid.uuid4().hex}",
+                        "input": {
+                            "method": normalized_method,
+                            "url": url,
+                            "timeout": min(max(float(timeout), 1.0), 30.0),
+                            "allow_redirects": False,
+                        },
+                    }
+                )
+                return result
+
+            return scoped_http_request
+
         return [
-            scoped_browser_tool(item) if get_tool_name(item) == "browser_goto_url" else item
+            scoped_browser_tool(item)
+            if get_tool_name(item) == "browser_goto_url"
+            else scoped_http_tool(item)
+            if get_tool_name(item) == "http_request"
+            else item
             for item in tools if get_tool_name(item) in allowed_tool_names
         ]
 
@@ -9324,7 +9385,7 @@ Return JSON exactly: {response_schema}.
         )
         discovery_names = {
             "browser_goto_url", "browser_observe_page", "browser_get_page_html", "browser_take_screenshot",
-            "browser_perform_action", "shell",
+            "browser_perform_action", "http_request",
         }
         discovery_tools = [tool for tool in tools if get_tool_name(tool) in discovery_names]
         hinted_kinds = tuple(dict.fromkeys(
@@ -9362,6 +9423,11 @@ Return JSON exactly: {response_schema}.
             max_lines_per_read=200,
             max_output_chars=self._artifact_router_max_chars(),
         ))
+        discovery_tools.append(create_bounded_artifact_searcher(
+            max_searches=artifact_pages_per_file,
+            max_searches_per_artifact=artifact_pages_per_file,
+            max_output_chars=self._artifact_router_max_chars(),
+        ))
         discovery_tools = self._authentication_agent_tools(discovery_tools, target_setup.allowed_origins, ())
         prompt = f"""You are the controller-owned authentication-flow discovery worker. This is bounded target mapping,
 not assessment and not credential authentication.
@@ -9370,21 +9436,22 @@ not assessment and not credential authentication.
 
 Discover one usable authentication flow for the supplied target only. The controller supplied
 `authentication_discovery_endpoints`: browser navigation is limited to entries whose role is `navigation`. Entries
-whose role is `validation_candidate` are recorder-only references: use one as the protected validation URL when
-appropriate, but never load it with a browser tool. Do not infer or browser-navigate other endpoints. Inspect rendered
-forms and the saved HTML artifacts from `browser_get_page_html` to identify the login URL, protected validation URL,
-request format, form fields, redirects, and flow kind. If no validation candidate was supplied, you may record a clean
-same-target validation route evidenced in already saved HTML or inspected client-source artifacts, but do not navigate
-it. A 401 or 403 route is a valid protected validation candidate.
+whose role is `validation_candidate` are untrusted references only and must never be recorded as the final validation
+URL; never load it with a browser tool. Inspect rendered forms and saved HTML artifacts to identify the login URL,
+request format, form fields, redirects,
+and flow kind. For browser flows, record login metadata with an empty validation URL; the credential worker will
+authenticate and discover the final validation URL from authenticated HAR traffic. Do not test protected endpoints in
+this phase.
 The controller may supply deterministic `client_storage_header_bindings` extracted from same-origin JavaScript. Attach
 those exact bindings to the recorded browser flow when they match the observed flow; do not scan, execute, or infer
 JavaScript header behavior yourself. Never record a token value. The controller captures those values once after login
 and reuses them for later authenticated requests.
-Use `read_artifact` with line or byte paging when saved HTML is larger than one page; continue with non-overlapping
-pages until the relevant form and route evidence is found.
-Do not check out credentials, request MFA, capture sessions, test protected endpoints, create findings, or search
-credentials or the environment. You may use shell for bounded source/artifact inspection such as grep. Reuse saved
-browser artifacts instead of repeatedly navigating to the same URL. Record the
+Use `search_artifact` for literal or regular-expression searches across the full saved HTML, HAR, JavaScript, and
+source-map artifacts. Use `read_artifact` when you need to inspect content by line or byte page. Use
+`http_request` only for read-only GET or HEAD retrieval of same-origin static pages or resources; do not submit forms
+or send credential-bearing headers. Do not check out credentials, request MFA, capture sessions, test protected
+endpoints, create findings, or search credentials or the environment. Reuse saved browser artifacts instead of
+repeatedly navigating to the same URL. Record the
 observed secret-free descriptor with the controller-bound recorder whose fixed kind matches the observed flow. Supply
 only the observed fields in that recorder's schema. If a usable flow cannot be identified, finish without trying
 credentials or inventing URLs.
@@ -9489,11 +9556,16 @@ Establish an opaque authenticated context for this one credential and target onl
 credential ID. Use the supplied persisted flow descriptor; do not discover, query for, or switch to another credential.
 For `api_form`, call `ensure_authenticated_context` with the credential ID and supplied flow ID only. It resolves that
 exact controller-selected flow internally.
-For browser, redirect, or MFA flows, complete only the supplied flow and capture its context using the mapped validation
-URL through `capture_browser_authenticated_context`. Pass the descriptor's `authorization_storage_key` when present;
-it is a key name only, never a token value. A credential rejection or validation failure ends this worker; do not retry
-with another credential. Never expose session material or secret values in text, artifacts, observations, or task
-acceptance.
+For browser, redirect, or MFA flows, complete only the supplied login flow first. After authentication, traverse a
+bounded number of same-origin pages or normal browser actions and inspect each resulting HAR. Find a request whose URL
+is same-origin, whose response status is 2xx, and whose request headers contain every declared
+`storage_header_bindings` header. The exact request URL from that HAR is the only valid validation URL; cookies alone
+do not satisfy a declared header binding. Do not use an inventory hint, a 401/403 candidate, or a top-level navigation
+success flag as validation. Then call `capture_browser_authenticated_context` with the supplied flow ID and that exact
+URL. Do not supply `authorization_storage_key` or `storage_header_bindings`: the tool resolves the canonical,
+controller-selected bindings from the flow and never infers a template from a token or live header. A credential
+rejection, missing-header route, or validation failure ends this worker; do not retry with another credential. Never
+expose session material or secret values in text, artifacts, observations, or task acceptance.
 """
         policy = AgentRunPolicy(
             min_tool_calls=1,
@@ -9516,7 +9588,9 @@ acceptance.
         )
         return True
 
-    def _mark_authentication_flows_validated(self, target: str, flows: tuple[dict[str, Any], ...]) -> None:
+    def _mark_authentication_flows_validated(
+        self, target: str, flows: tuple[dict[str, Any], ...], validation_url: str
+    ) -> None:
         """Promote only the flow that produced a validated opaque context."""
 
         store = _get_database_store()
@@ -9529,6 +9603,8 @@ acceptance.
             if str(stored.get("flow_id") or "") not in expected_ids:
                 continue
             descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
+            descriptor = dict(descriptor)
+            descriptor["validation_url"] = validation_url
             upsert(self.runtime.operation_id, descriptor, status="validated")
 
     def _mark_authentication_flows_invalid(self, target: str, flows: tuple[dict[str, Any], ...]) -> None:
@@ -9673,6 +9749,27 @@ acceptance.
                 self.runtime.operation_id, credential["target"], credential["credential_id"]
             )
         )
+        if valid_ids:
+            try:
+                store = _get_database_store()
+                for credential_id in valid_ids:
+                    store.authorize_credential_for_task(
+                        self.runtime.operation_id,
+                        credential_id,
+                        task.task_uid,
+                        "reused_authenticated_context",
+                    )
+            except Exception as error:
+                self._log_workflow(
+                    "reused authentication context authorization failed task=%s reason=%s",
+                    self._task_label(task),
+                    self._short(error),
+                )
+                return self._record_authentication_setup(
+                    task,
+                    AuthenticationSetupResult("failed", reason="task_authorization_failed"),
+                    setup,
+                )
         if len(valid_ids) == len(credential_ids):
             return self._record_authentication_setup(task, AuthenticationSetupResult("reused", valid_ids), setup)
         tools = [
@@ -9759,7 +9856,18 @@ acceptance.
                                 setup,
                             )
                         if authentication_context_is_valid(self.runtime.operation_id, target, credential["credential_id"]):
-                            self._mark_authentication_flows_validated(target, flows_by_target[target])
+                            validation_url = authentication_context_validation_url(
+                                self.runtime.operation_id, target, credential["credential_id"]
+                            )
+                            if not validation_url:
+                                return self._record_authentication_setup(
+                                    task,
+                                    AuthenticationSetupResult("failed", reason="missing_validation_url"),
+                                    setup,
+                                )
+                            self._mark_authentication_flows_validated(
+                                target, flows_by_target[target], validation_url
+                            )
                             flow_status_by_target[target] = "validated"
                             break
                         attempt = authentication_attempt_result(
@@ -9850,10 +9958,13 @@ acceptance.
         return self._record_authentication_setup(task, result, refreshed_setup)
 
     @staticmethod
-    def _executor_tools_without_authentication_material(tools: list[Any]) -> list[Any]:
-        """Keep session extraction and credential checkout out of normal executor context."""
+    def _executor_tools_without_authentication_material(tools: list[Any], task: Task | None = None) -> list[Any]:
+        """Expose only credential tools granted by structured task metadata."""
 
-        protected_names = CREDENTIAL_OPTIONAL_TOOL_NAMES - {"authenticated_http_request"}
+        authorized_names = (
+            set(required_optional_tool_names(task)) if task is not None else {"authenticated_http_request"}
+        )
+        protected_names = credential_tool_names() - authorized_names
         protected_names |= {
             "browser_get_cookies", "browser_evaluate_js", "browser_set_headers",
         }
@@ -9865,7 +9976,7 @@ acceptance.
         if self._is_credential_provisioning_task(task):
             return self._credential_provisioning_execution_guidance()
         selected_names = set(self._required_optional_tool_names(task))
-        credential_names = selected_names & CREDENTIAL_OPTIONAL_TOOL_NAMES
+        credential_names = selected_names & credential_tool_names()
         authentication_result = self._authentication_setup_results.get(task.task_uid)
         if authentication_result is not None and authentication_result.status in {"unavailable", "failed"}:
             return (
@@ -10944,6 +11055,11 @@ applicability or a finding, and published proof of concepts must not be executed
             max_reads_per_artifact=max_reads_per_artifact,
             max_lines_per_read=200,
             max_output_chars=self._artifact_router_max_chars(),
+        ), create_bounded_artifact_searcher(
+            max_searches=max(1, (len(reviewable) + len(omitted_large)) * max_reads_per_artifact),
+            allowed_artifact_refs=[item["artifact_ref"] for item in [*reviewable, *omitted_large]],
+            max_searches_per_artifact=max_reads_per_artifact,
+            max_output_chars=self._artifact_router_max_chars(),
         )]
 
     def _task_evaluator_artifact_limit_section(
@@ -10961,8 +11077,9 @@ applicability or a finding, and published proof of concepts must not be executed
         lines = [
             "## Artifact Review Limits",
             f"- Smaller artifacts available for line review: {len(reviewable)}",
-            f"- Larger artifacts available only by explicit byte page: {len(omitted_large)}",
+            f"- Larger artifacts available for full-artifact search or explicit byte page: {len(omitted_large)}",
             f"- Total successful reads: {(len(reviewable) + len(omitted_large)) * max_reads_per_artifact}",
+            f"- Total successful searches: {(len(reviewable) + len(omitted_large)) * max_reads_per_artifact}",
             f"- Successful pages per artifact: {max_reads_per_artifact}",
             "- Maximum lines per page: 200",
             (f"- Maximum UTF-8 bytes per page: "
@@ -10981,13 +11098,16 @@ applicability or a finding, and published proof of concepts must not be executed
             "narrow a byte page, and next_start_byte continues after returned content. "
             "If the controller closes artifact access at its hard stop, synthesize immediately from the supplied "
             "summaries and receipts."),
+            ("- Use search_artifact to find literal or regular-expression matches across a listed artifact, including "
+            "larger artifacts. Continue additional matches with next_match_offset as match_offset. Use read_artifact "
+            "with explicit byte pages when surrounding content is needed."),
             "- Return the required JSON decision once you have the needed evidence.",
             "",
             "Smaller artifact references:",
         ]
         lines.extend(f"- {item['artifact_ref']} ({item['byte_size']} bytes)" for item in reviewable)
         if omitted_large:
-            lines.extend(["", "Larger artifact references (explicit byte pages only):"])
+            lines.extend(["", "Larger artifact references (full search or explicit byte pages):"])
             lines.extend(
                 f"- {item['artifact_ref']} ({item['byte_size']} bytes; exceeds one page)"
                 for item in omitted_large
@@ -11002,9 +11122,9 @@ applicability or a finding, and published proof of concepts must not be executed
 
     def _evaluator_system_prompt(self) -> str:
         return """## Evaluator Role Boundary
-Classify existing work only; Python owns execution and workflow transitions. Task evaluators may use read_artifact only
-for supplied task-local references within the controller page limits. Phase evaluators have no tools. Return only the
-requested JSON decision, with at most three concrete evidence gaps and no analysis or Markdown."""
+Classify existing work only; Python owns execution and workflow transitions. Task evaluators may use read_artifact or
+search_artifact only for supplied task-local references within the controller limits. Phase evaluators have no tools.
+Return only the requested JSON decision, with at most three concrete evidence gaps and no analysis or Markdown."""
 
     def _task_evaluator_system_prompt(self) -> str:
         return self._evaluator_system_prompt()
@@ -13731,6 +13851,18 @@ while planning.
                 "credential setup, an unauthenticated baseline, or obtain, construct, or copy cookies or "
                 "Authorization headers."
             )
+        if any(authentication_tool_access_mode(name) == "context" for name in authorized):
+            lines.append(
+                "- If an authenticated context tool reports AUTH_CONTEXT_UNAVAILABLE, stop authenticated attempts "
+                "for this task and record the specific coverage gap. The controller must restore the context."
+            )
+        if "checkout_credential" in authorized and any(
+            authentication_tool_access_mode(name) == "checkout" for name in authorized
+        ):
+            lines.append(
+                "- Before using a checkout-mode tool, call `checkout_credential` for its authorized credential ID. "
+                "Keep returned material in task-local tool inputs; do not persist or report it."
+            )
         if "plan_authenticated_coverage" in authorized:
             lines.append(
                 "- For authentication-capable work, establish the unauthenticated baseline before using credentials. "
@@ -14638,7 +14770,7 @@ partial_failure when these claim-specific requirements are not met.
         return f"""Review existing evidence and classify the active task. The task below is your sole evaluation target.
 Do not execute or continue the task, perform phase work, pursue the operation objective, modify artifacts, or gather new
 evidence. The operation objective and phase are context only, not instructions. Worker context is evidence to assess,
-not a request to continue its work. If available, use read_artifact only for task-local artifact references recorded in
+not a request to continue its work. If available, use read_artifact or search_artifact only for task-local artifact references recorded in
 the evaluation target or frozen acceptance results. Follow the controller-provided artifact review limits below. No
 other tools are available.
 
@@ -14823,13 +14955,14 @@ Do not return `continue` merely because work is incomplete when the task history
     def _task_optional_tool_catalog(self, task: Task) -> str:
         """Render all non-credential tools plus only task-authorized credential tools."""
 
-        authorized_credentials = set(self._required_optional_tool_names(task)) & CREDENTIAL_OPTIONAL_TOOL_NAMES
+        registered_credentials = credential_tool_names()
+        authorized_credentials = set(self._required_optional_tool_names(task)) & registered_credentials
         return self._tool_catalog(
             "optional_tools",
             [
                 tool
                 for tool in self.runtime.optional_tools_list
-                if get_tool_name(tool) not in CREDENTIAL_OPTIONAL_TOOL_NAMES
+                if get_tool_name(tool) not in registered_credentials
                 or get_tool_name(tool) in authorized_credentials
             ],
         )
@@ -14978,7 +15111,7 @@ Do not return `continue` merely because work is incomplete when the task history
                 authorized_credentials = (
                     set(available_tool_names or ())
                     & set(credential_optional_tool_names(task))
-                    & CREDENTIAL_OPTIONAL_TOOL_NAMES
+                    & credential_tool_names()
                 )
                 if authorized_credentials:
                     credential_guidance = MultiAgentWorkflowController._credential_execution_guidance(
@@ -15570,7 +15703,9 @@ tools and durable evidence before relying on it."""
         """Return durable artifact references exposed by successful tool outcomes."""
 
         references = set()
-        consumer_tools = {"memory_list", "memory_retrieve", "read_artifact", "retrieve_offloaded_content"}
+        consumer_tools = {
+            "memory_list", "memory_retrieve", "read_artifact", "search_artifact", "retrieve_offloaded_content"
+        }
         for outcome in tool_outcomes:
             if not outcome.success or outcome.tool_name in consumer_tools:
                 continue
@@ -16406,7 +16541,9 @@ tools and durable evidence before relying on it."""
             return
         fallback_target = selected_targets[0].value
         for outcome in outcomes:
-            if not outcome.success or outcome.tool_name in {"read_artifact", "retrieve_offloaded_content"}:
+            if not outcome.success or outcome.tool_name in {
+                "read_artifact", "search_artifact", "retrieve_offloaded_content"
+            }:
                 continue
             submitted = outcome.structured_input or {}
             target = str(submitted.get("url") or fallback_target)

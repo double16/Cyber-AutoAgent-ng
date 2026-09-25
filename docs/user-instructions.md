@@ -291,6 +291,13 @@ attributed to the user, while found and registered credentials are attributed to
 reusable registered credentials are listed before other reusable credentials; credentials explicitly scoped to that
 later operation still take precedence.
 
+Credential-consuming tools declare whether they need a validated opaque context or checked-out credential material.
+Context access accepts a controller authorization for the active task; material access requires checkout by that same
+task. A missing or expired opaque context returns `AUTH_CONTEXT_UNAVAILABLE`, which means the executor records an
+authenticated coverage gap and stops authenticated attempts. Future executor tools can receive context access or
+checkout access through a controller-owned task grant once their access mode is registered. Checkout access also
+exposes `checkout_credential` to that task.
+
 When a controller-selected login submission receives a direct HTTP 401 response, the controller marks only that
 credential invalid and retains its status history. If an observed, authorized self-registration flow exists for the
 same target and role, a separate credential-provisioning agent creates one linked replacement identity before any
