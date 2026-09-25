@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -e
+
+# Find original binary
+REAL_BIN=""
+if [ -x "$(dirname "$0")/gobuster.orig" ]; then
+    REAL_BIN="$(dirname "$0")/gobuster.orig"
+elif command -v gobuster.orig >/dev/null 2>&1; then
+    REAL_BIN="$(command -v gobuster.orig)"
+elif [ -x "/usr/local/bin/gobuster.orig" ]; then
+    REAL_BIN="/usr/local/bin/gobuster.orig"
+elif [ -x "/usr/bin/gobuster.orig" ]; then
+    REAL_BIN="/usr/bin/gobuster.orig"
+fi
+
+if [ -z "$REAL_BIN" ]; then
+    echo "Error: gobuster.orig not found" >&2
+    exit 1
+fi
+
+PROXY="${HTTP_PROXY:-${HTTPS_PROXY:-${http_proxy:-${https_proxy:-}}}}"
+
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+if [ -n "$PROXY" ]; then
+    has_proxy=false
+    for arg in "$@"; do
+        case "$arg" in
+            --proxy*|-p)
+                has_proxy=true
+                break
+                ;;
+        esac
+    done
+    if [ "$has_proxy" = false ]; then
+        exec "$REAL_BIN" "$@" --proxy "$PROXY"
+    fi
+fi
+
+exec "$REAL_BIN" "$@"

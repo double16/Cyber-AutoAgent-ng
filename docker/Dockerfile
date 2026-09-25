@@ -59,9 +59,16 @@ RUN --mount=type=cache,target=/root/.npm \
     npm run build && \
     chown -R cyberagent:cyberagent /app/src/modules/interfaces/react
 
-# Install replay proxy wrappers for scanning tools
-COPY docker/feroxbuster docker/ffuf docker/dirsearch /tmp/
-RUN for cmd in feroxbuster ffuf dirsearch; do \
+# Install replay and proxy wrappers for scanning and testing tools
+COPY docker/feroxbuster docker/ffuf docker/dirsearch docker/wpscan docker/katana \
+     docker/nuclei docker/httpx docker/gobuster docker/sqlmap docker/commix \
+     docker/nikto docker/whatweb docker/wafw00f docker/wapiti docker/wfuzz \
+     docker/joomscan docker/paramspider docker/gospider docker/dalfox docker/sstimap \
+     docker/lfimap docker/clairvoyance docker/subfinder docker/cewl docker/ncrack \
+     docker/testssl docker/arjun /tmp/
+RUN for cmd in feroxbuster ffuf dirsearch wpscan katana nuclei httpx gobuster sqlmap \
+               commix nikto whatweb wafw00f wapiti wfuzz joomscan paramspider gospider \
+               dalfox sstimap lfimap clairvoyance subfinder cewl ncrack testssl arjun; do \
         target=$(which "$cmd" 2>/dev/null || true); \
         if [ -n "$target" ] && [ -f "$target" ]; then \
             mv "$target" "${target}.orig" && \

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -e
+
+# Find original binary
+REAL_BIN=""
+if [ -x "$(dirname "$0")/wfuzz.orig" ]; then
+    REAL_BIN="$(dirname "$0")/wfuzz.orig"
+elif command -v wfuzz.orig >/dev/null 2>&1; then
+    REAL_BIN="$(command -v wfuzz.orig)"
+elif [ -x "/usr/local/bin/wfuzz.orig" ]; then
+    REAL_BIN="/usr/local/bin/wfuzz.orig"
+elif [ -x "/usr/bin/wfuzz.orig" ]; then
+    REAL_BIN="/usr/bin/wfuzz.orig"
+fi
+
+if [ -z "$REAL_BIN" ]; then
+    echo "Error: wfuzz.orig not found" >&2
+    exit 1
+fi
+
+PROXY="${HTTP_PROXY:-${HTTPS_PROXY:-${http_proxy:-${https_proxy:-}}}}"
+
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+if [ -n "$PROXY" ]; then
+    has_proxy=false
+    for arg in "$@"; do
+        case "$arg" in
+            -p)
+                has_proxy=true
+                break
+                ;;
+        esac
+    done
+    if [ "$has_proxy" = false ]; then
+        # wfuzz expects proxy format ip:port:type or url
+        # Strip protocol prefix if present: http://host:port -> host:port:HTTP, socks5://host:port -> host:port:SOCKS5
+        PROXY_ARG="$PROXY"
+        if [[ "$PROXY" =~ ^(https?|socks5|socks4)://([^/]+) ]]; then
+            PROTO="${BASH_REMATCH[1]}"
+            HOSTPORT="${BASH_REMATCH[2]}"
+            case "$PROTO" in
+                http|https)
+                    PROXY_ARG="${HOSTPORT}:HTTP"
+                    ;;
+                socks5)
+                    PROXY_ARG="${HOSTPORT}:SOCKS5"
+                    ;;
+                socks4)
+                    PROXY_ARG="${HOSTPORT}:SOCKS4"
+                    ;;
+            esac
+        fi
+        exec "$REAL_BIN" -p "$PROXY_ARG" "$@"
+    fi
+fi
+
+exec "$REAL_BIN" "$@"
