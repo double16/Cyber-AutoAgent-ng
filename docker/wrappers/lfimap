@@ -3,22 +3,22 @@ set -e
 
 # Find original binary
 REAL_BIN=""
-if [ -x "$(dirname "$0")/joomscan.orig" ]; then
-    REAL_BIN="$(dirname "$0")/joomscan.orig"
-elif command -v joomscan.orig >/dev/null 2>&1; then
-    REAL_BIN="$(command -v joomscan.orig)"
-elif [ -x "/usr/local/bin/joomscan.orig" ]; then
-    REAL_BIN="/usr/local/bin/joomscan.orig"
-elif [ -x "/usr/bin/joomscan.orig" ]; then
-    REAL_BIN="/usr/bin/joomscan.orig"
+if [ -x "$(dirname "$0")/lfimap.orig" ]; then
+    REAL_BIN="$(dirname "$0")/lfimap.orig"
+elif command -v lfimap.orig >/dev/null 2>&1; then
+    REAL_BIN="$(command -v lfimap.orig)"
+elif [ -x "/usr/local/bin/lfimap.orig" ]; then
+    REAL_BIN="/usr/local/bin/lfimap.orig"
+elif [ -x "/usr/bin/lfimap.orig" ]; then
+    REAL_BIN="/usr/bin/lfimap.orig"
 fi
 
 if [ -z "$REAL_BIN" ]; then
-    echo "Error: joomscan.orig not found" >&2
+    echo "Error: lfimap.orig not found" >&2
     exit 1
 fi
 
-PROXY="${HTTP_PROXY:-${HTTPS_PROXY:-${http_proxy:-${https_proxy:-}}}}"
+PROXY="${http_proxy:-${https_proxy:-${HTTP_PROXY:-${HTTPS_PROXY:-}}}}"
 
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 

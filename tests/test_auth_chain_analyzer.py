@@ -986,3 +986,23 @@ def test_recommendations_include_each_signal_and_remove_duplicate_ids():
     }
     ids = [step["id"] for step in aca._generate_auth_recommendations(results)]
     assert {"MAP_AUTH_ENTRYPOINTS", "ADMIN_ENDPOINT_AUTHZ_MATRIX", "SESSION_REPLAY_AND_FIXATION", "JWT_CLAIM_TAMPER_VERIFY", "OAUTH_REDIRECT_AND_STATE_TESTS", "SAML_ASSERTION_VALIDATION_TESTS", "VERIFY_BYPASS_HYPOTHESIS_1", "PRIV_ESC_TARGETED_VALIDATION"} <= set(ids)
+
+
+def test_auth_chain_analyzer_http_request_respects_proxy(monkeypatch):
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+    recorded = []
+
+    def mock_request(*args, **kwargs):
+        recorded.append(kwargs.get("proxies"))
+        return DummyResp(text="ok")
+
+    monkeypatch.setattr(aca.requests, "request", mock_request)
+    aca._http_request("GET", "http://example.test")
+
+    assert len(recorded) == 1
+    assert recorded[0] == {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}

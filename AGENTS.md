@@ -94,6 +94,9 @@
 - In shared memory mode, prior-operation memories are advisory investigation context only. Render their origin and do
   not allow them to satisfy current-operation acceptance, findings, proof, completion, or report evidence without
   current-operation revalidation.
+- For tools that access HTTP/HTTPS targets, use proxies that may be set in HTTP_PROXY/HTTPS_PROXY/http_proxy/https_proxy. For large volume
+  scanners, attempt to only use the proxy for replaying verified endpoints when the tool offers that option. Fall back to using
+  available proxy option(s).
 
 ## Application Best Practices
 - Budget is reporting only after reporting or evaluation stages are reached.

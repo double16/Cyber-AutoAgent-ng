@@ -2159,3 +2159,32 @@ def test_comprehensive_coordinator_orchestrates_quiet_all_phase_success_paths(mo
         "tools_failed": 0,
     }
     assert capsys.readouterr().err == ""
+
+
+def test_requests_respect_proxy_env(monkeypatch):
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+    recorded_proxies = []
+
+    def mock_request(*args, **kwargs):
+        recorded_proxies.append(kwargs.get("proxies"))
+        return FakeResponse("mock response", status_code=200)
+
+    def mock_head(*args, **kwargs):
+        recorded_proxies.append(kwargs.get("proxies"))
+        return FakeResponse("", status_code=200, headers={"X-Header": "value"})
+
+    monkeypatch.setattr(apc.requests, "request", mock_request)
+    monkeypatch.setattr(apc.requests, "head", mock_head)
+
+    cfg = apc.RequestConfig(target_url="http://target.test")
+    apc._requests_get_text("http://target.test/get", {}, cfg)
+    apc._requests_head_raw_headers("http://target.test/head", {}, cfg)
+
+    assert len(recorded_proxies) == 2
+    assert recorded_proxies[0] == {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
+    assert recorded_proxies[1] == {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}

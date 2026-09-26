@@ -45,7 +45,7 @@ def wrapper_env(tmp_path: Path) -> Callable[[str], tuple[Path, Path]]:
     """
     Set up a sandbox directory with a wrapper script and a mock .orig binary.
     """
-    docker_dir = Path(__file__).parent.parent / "docker"
+    docker_dir = Path(__file__).parent.parent / "docker" / "wrappers"
 
     def _setup_tool(tool_name: str) -> tuple[Path, Path]:
         wrapper_source = docker_dir / tool_name
@@ -76,7 +76,6 @@ ALL_WRAPPERS = [
     "sqlmap",
     "commix",
     "nikto",
-    "whatweb",
     "wafw00f",
     "wapiti",
     "wfuzz",
@@ -235,13 +234,6 @@ TOOL_PROXY_CASES: list[tuple[str, list[str], list[str], list[str], list[str]]] =
         ["-h", "http://example.com", "-useproxy", "http://custom:8080"],
     ),
     (
-        "whatweb",
-        ["http://example.com"],
-        ["--proxy", "http://127.0.0.1:8080", "http://example.com"],
-        ["http://example.com", "--proxy", "custom:8080"],
-        ["http://example.com", "--proxy", "custom:8080"],
-    ),
-    (
         "wafw00f",
         ["http://example.com"],
         ["--proxy", "http://127.0.0.1:8080", "http://example.com"],
@@ -361,12 +353,12 @@ def test_proxy_injection_and_passthrough(
     user_proxy_args: list[str],
     expected_user_args: list[str],
 ):
-    """Verify proxy injection when HTTP_PROXY is set, and non-duplication when user provides proxy."""
+    """Verify proxy injection when http_proxy is set, and non-duplication when user provides proxy."""
     tool_wrapper, _ = wrapper_env(tool_name)
     env = {
         **os.environ,
-        "HTTP_PROXY": "http://127.0.0.1:8080",
-        "HTTPS_PROXY": "http://127.0.0.1:8080",
+        "http_proxy": "http://127.0.0.1:8080",
+        "https_proxy": "http://127.0.0.1:8080",
     }
 
     # Case 1: Injects proxy automatically
@@ -379,8 +371,8 @@ def test_proxy_injection_and_passthrough(
     )
     data = json.loads(result.stdout)
     assert data["args"] == expected_injected_args
-    assert data["HTTP_PROXY"] is None
-    assert data["HTTPS_PROXY"] is None
+    assert data["http_proxy"] is None
+    assert data["https_proxy"] is None
 
     # Case 2: Does not duplicate user-supplied proxy argument
     result2 = subprocess.run(
@@ -392,5 +384,28 @@ def test_proxy_injection_and_passthrough(
     )
     data2 = json.loads(result2.stdout)
     assert data2["args"] == expected_user_args
-    assert data2["HTTP_PROXY"] is None
-    assert data2["HTTPS_PROXY"] is None
+    assert data2["http_proxy"] is None
+    assert data2["https_proxy"] is None
+
+
+def test_resolve_request_proxies():
+    from modules.utils.proxy import resolve_request_proxies
+
+    assert resolve_request_proxies({}) is None
+    assert resolve_request_proxies({"HTTP_PROXY": "127.0.0.1:8080"}) == {
+        "http": "http://127.0.0.1:8080",
+        "https": "http://127.0.0.1:8080",
+    }
+    assert resolve_request_proxies({"HTTPS_PROXY": "http://10.0.0.1:8443"}) == {
+        "https": "http://10.0.0.1:8443",
+    }
+    assert resolve_request_proxies(
+        {"http_proxy": "http://127.0.0.1:8080", "https_proxy": "https://127.0.0.1:8443"}
+    ) == {
+        "http": "http://127.0.0.1:8080",
+        "https": "https://127.0.0.1:8443",
+    }
+    assert resolve_request_proxies({"ALL_PROXY": "socks5://127.0.0.1:1080"}) == {
+        "http": "socks5://127.0.0.1:1080",
+        "https": "socks5://127.0.0.1:1080",
+    }

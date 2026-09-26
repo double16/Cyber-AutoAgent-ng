@@ -21,6 +21,7 @@ from modules.tools.result_cache import (
     cache_result,
     get_cached_result,
 )
+from modules.utils.proxy import resolve_request_proxies
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -471,6 +472,7 @@ def _http_request(
             allow_redirects=False,
             stream=stream,
             verify=verify_tls,
+            proxies=resolve_request_proxies(),
         )
     except requests.RequestException:
         return None

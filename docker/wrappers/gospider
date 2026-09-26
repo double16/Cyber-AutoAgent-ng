@@ -18,7 +18,7 @@ if [ -z "$REAL_BIN" ]; then
     exit 1
 fi
 
-PROXY="${HTTP_PROXY:-${HTTPS_PROXY:-${http_proxy:-${https_proxy:-}}}}"
+PROXY="${http_proxy:-${https_proxy:-${HTTP_PROXY:-${HTTPS_PROXY:-}}}}"
 
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 

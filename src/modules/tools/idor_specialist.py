@@ -34,6 +34,8 @@ import requests
 import urllib3
 from strands import ToolContext, tool
 
+from modules.utils.proxy import resolve_request_proxies
+
 module_path = Path(__file__).resolve().parent / "advanced_payload_coordinator.py"
 
 spec = importlib.util.spec_from_file_location("advanced_payload_coordinator", str(module_path))
@@ -372,7 +374,8 @@ def _perform_login(
             "headers": headers,
             "timeout": timeout,
             "verify": False,
-            "allow_redirects": True
+            "allow_redirects": True,
+            "proxies": resolve_request_proxies(),
         }
 
         if auth_type == "oauth" or auth_type == "jwt":
@@ -836,6 +839,7 @@ def _send_request(
             "timeout": request_config.timeout,
             "allow_redirects": True,
             "verify": False,
+            "proxies": resolve_request_proxies(),
         }
 
         # Request Type logic from IDORChecker.py

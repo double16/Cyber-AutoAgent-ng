@@ -124,6 +124,7 @@ from modules.tools.tool_catalog import get_shell_command_help_context
 from modules.utils.proxy import (
     configure_langfuse_proxy_bypass,
     configure_proxy_ca_certificates,
+    ensure_proxy_variables,
 )
 from modules.utils.sdk_error_sanitization import sanitize_sdk_error
 from modules.utils.target_validation import (
@@ -1896,6 +1897,8 @@ def main():
         server_config.output.base_dir,
     )
     log_file = os.path.join(log_path, "cyber_operations.log")
+
+    ensure_proxy_variables()
 
     # Enable verbose logging in React mode to capture debug information
     ui_mode = os.environ.get("CYBER_UI_MODE", "cli").lower()

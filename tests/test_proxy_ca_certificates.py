@@ -18,6 +18,7 @@ from modules.utils.proxy import (
     compute_cert_fingerprint,
     configure_langfuse_proxy_bypass,
     configure_proxy_ca_certificates,
+    ensure_proxy_variables,
     extract_langfuse_hosts,
     extract_proxy_endpoints,
     fetch_http_certificate,
@@ -766,3 +767,99 @@ class TestLangfuseProxyBypass:
 
             factory._lf_get_prompt("test", "latest")
             assert "prompts-langfuse" in os.environ.get("NO_PROXY", "")
+
+
+class TestEnsureProxyVariables:
+    """Test ensuring proxy environment variables have matching upper and lower case entries."""
+
+    PROXY_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+
+    def _clear_proxy_env(self, monkeypatch):
+        for key in self.PROXY_KEYS:
+            monkeypatch.delenv(key, raising=False)
+            monkeypatch.delenv(key.upper(), raising=False)
+
+    def test_ensure_proxy_variables_from_lowercase(self, monkeypatch):
+        """When lowercase proxy variables are set, uppercase ones are created."""
+        self._clear_proxy_env(monkeypatch)
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
+        monkeypatch.setenv("https_proxy", "http://127.0.0.1:8443")
+        monkeypatch.setenv("all_proxy", "socks5://127.0.0.1:1080")
+        monkeypatch.setenv("no_proxy", "localhost,127.0.0.1")
+
+        ensure_proxy_variables()
+
+        assert os.environ.get("HTTP_PROXY") == "http://127.0.0.1:8080"
+        assert os.environ.get("HTTPS_PROXY") == "http://127.0.0.1:8443"
+        assert os.environ.get("ALL_PROXY") == "socks5://127.0.0.1:1080"
+        assert os.environ.get("NO_PROXY") == "localhost,127.0.0.1"
+
+    def test_ensure_proxy_variables_from_uppercase(self, monkeypatch):
+        """When uppercase proxy variables are set, lowercase ones are created."""
+        self._clear_proxy_env(monkeypatch)
+        monkeypatch.setenv("HTTP_PROXY", "http://proxy.corp:8080")
+        monkeypatch.setenv("HTTPS_PROXY", "https://proxy.corp:8443")
+        monkeypatch.setenv("ALL_PROXY", "socks5://proxy.corp:1080")
+        monkeypatch.setenv("NO_PROXY", "internal.corp")
+
+        ensure_proxy_variables()
+
+        assert os.environ.get("http_proxy") == "http://proxy.corp:8080"
+        assert os.environ.get("https_proxy") == "https://proxy.corp:8443"
+        assert os.environ.get("all_proxy") == "socks5://proxy.corp:1080"  # noqa: SIM112
+        assert os.environ.get("no_proxy") == "internal.corp"
+
+    def test_ensure_proxy_variables_both_set_syncs_lowercase_to_uppercase(self, monkeypatch):
+        """When both lowercase and uppercase are set, lowercase value takes precedence and syncs to upper."""
+        self._clear_proxy_env(monkeypatch)
+        monkeypatch.setenv("http_proxy", "http://primary:8080")
+        monkeypatch.setenv("HTTP_PROXY", "http://stale:8080")
+
+        ensure_proxy_variables()
+
+        assert os.environ.get("http_proxy") == "http://primary:8080"
+        assert os.environ.get("HTTP_PROXY") == "http://primary:8080"
+
+    def test_ensure_proxy_variables_no_vars_set(self, monkeypatch):
+        """When no proxy variables exist, none are created."""
+        self._clear_proxy_env(monkeypatch)
+
+        ensure_proxy_variables()
+
+        for key in self.PROXY_KEYS:
+            assert key not in os.environ
+            assert key.upper() not in os.environ
+
+    def test_ensure_proxy_variables_mixed(self, monkeypatch):
+        """When some are uppercase and some lowercase, both cases are synchronized."""
+        self._clear_proxy_env(monkeypatch)
+        monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
+        monkeypatch.setenv("HTTPS_PROXY", "https://127.0.0.1:8443")
+
+        ensure_proxy_variables()
+
+        assert os.environ.get("HTTP_PROXY") == "http://127.0.0.1:8080"
+        assert os.environ.get("http_proxy") == "http://127.0.0.1:8080"
+        assert os.environ.get("HTTPS_PROXY") == "https://127.0.0.1:8443"
+        assert os.environ.get("https_proxy") == "https://127.0.0.1:8443"
+        assert "all_proxy" not in os.environ
+        assert "ALL_PROXY" not in os.environ
+        assert "no_proxy" not in os.environ
+        assert "NO_PROXY" not in os.environ
+
+    def test_ensure_proxy_variables_empty_string(self, monkeypatch):
+        """Empty string proxy variable is propagated correctly."""
+        self._clear_proxy_env(monkeypatch)
+        monkeypatch.setenv("all_proxy", "")
+
+        ensure_proxy_variables()
+
+        assert os.environ.get("ALL_PROXY") == ""
+        assert os.environ.get("all_proxy") == ""  # noqa: SIM112
+
+    def test_cyberautoagent_exports_ensure_proxy_variables(self):
+        """Verify cyberautoagent module exports ensure_proxy_variables."""
+        import cyberautoagent
+
+        assert hasattr(cyberautoagent, "ensure_proxy_variables")
+        assert callable(cyberautoagent.ensure_proxy_variables)

@@ -688,7 +688,7 @@ def test_resolve_browser_proxy_dict_and_empty():
 
 
 def test_browser_service_configures_proxy_launch_options(monkeypatch):
-    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8080")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
 
     # Mock Stagehand to avoid actual browser/network initialization
     monkeypatch.setattr(mod, "Stagehand", lambda config: SimpleNamespace(llm=None))

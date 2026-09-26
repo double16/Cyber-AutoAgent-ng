@@ -121,12 +121,12 @@ def resolve_browser_proxy(
         raw = proxy.strip()
     else:
         for var in (
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
             "http_proxy",
             "https_proxy",
-            "ALL_PROXY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
             "all_proxy",
+            "ALL_PROXY",
         ):
             val = env.get(var, "").strip()
             if val:

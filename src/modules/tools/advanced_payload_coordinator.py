@@ -28,6 +28,7 @@ from modules.tools.result_cache import (
     cache_result,
     get_cached_result,
 )
+from modules.utils.proxy import resolve_request_proxies
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -583,6 +584,7 @@ def advanced_parameter_discovery(
     ]
     if not discovered_params:
         try:
+            proxies = resolve_request_proxies()
             response_baseline = requests.request(
                 request_config.http_method,
                 request_config.target_url,
@@ -590,7 +592,8 @@ def advanced_parameter_discovery(
                 cookies=request_config.cookies,
                 timeout=10,
                 allow_redirects=True,
-                verify=False
+                verify=False,
+                proxies=proxies,
             )
             length_baseline = int(response_baseline.headers.get("Content-Length", 1))
 
@@ -603,7 +606,8 @@ def advanced_parameter_discovery(
                     cookies=request_config.cookies,
                     timeout=10,
                     allow_redirects=True,
-                    verify=False
+                    verify=False,
+                    proxies=proxies,
                 )
                 if response_baseline.status_code != response_param.status_code:
                     discovered_params.add(param)
@@ -646,7 +650,8 @@ def _requests_get_text(url: str, params: dict[str, Any], request_config: Request
             cookies=request_config.cookies,
             timeout=timeout,
             allow_redirects=True,
-            verify=False
+            verify=False,
+            proxies=resolve_request_proxies(),
         )
         return resp.text
     except Exception:
@@ -663,7 +668,8 @@ def _requests_head_raw_headers(url: str, headers: dict[str, str], request_config
             cookies=request_config.cookies,
             timeout=timeout,
             allow_redirects=True,
-            verify=False
+            verify=False,
+            proxies=resolve_request_proxies(),
         )
         # Build a curl-like header dump for simple substring checks.
         lines = []

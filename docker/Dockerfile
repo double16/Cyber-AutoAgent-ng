@@ -60,14 +60,14 @@ RUN --mount=type=cache,target=/root/.npm \
     chown -R cyberagent:cyberagent /app/src/modules/interfaces/react
 
 # Install replay and proxy wrappers for scanning and testing tools
-COPY docker/feroxbuster docker/ffuf docker/dirsearch docker/wpscan docker/katana \
-     docker/nuclei docker/httpx docker/gobuster docker/sqlmap docker/commix \
-     docker/nikto docker/whatweb docker/wafw00f docker/wapiti docker/wfuzz \
-     docker/joomscan docker/paramspider docker/gospider docker/dalfox docker/sstimap \
-     docker/lfimap docker/clairvoyance docker/subfinder docker/cewl docker/ncrack \
-     docker/testssl docker/arjun /tmp/
+COPY docker/wrappers/feroxbuster docker/wrappers/ffuf docker/wrappers/dirsearch docker/wrappers/wpscan docker/wrappers/katana \
+     docker/wrappers/nuclei docker/wrappers/httpx docker/wrappers/gobuster docker/wrappers/sqlmap docker/wrappers/commix \
+     docker/wrappers/nikto docker/wrappers/wafw00f docker/wrappers/wapiti docker/wrappers/wfuzz \
+     docker/wrappers/joomscan docker/wrappers/paramspider docker/wrappers/gospider docker/wrappers/dalfox docker/wrappers/sstimap \
+     docker/wrappers/lfimap docker/wrappers/clairvoyance docker/wrappers/subfinder docker/wrappers/cewl docker/wrappers/ncrack \
+     docker/wrappers/testssl docker/wrappers/arjun /tmp/
 RUN for cmd in feroxbuster ffuf dirsearch wpscan katana nuclei httpx gobuster sqlmap \
-               commix nikto whatweb wafw00f wapiti wfuzz joomscan paramspider gospider \
+               commix nikto wafw00f wapiti wfuzz joomscan paramspider gospider \
                dalfox sstimap lfimap clairvoyance subfinder cewl ncrack testssl arjun; do \
         target=$(which "$cmd" 2>/dev/null || true); \
         if [ -n "$target" ] && [ -f "$target" ]; then \

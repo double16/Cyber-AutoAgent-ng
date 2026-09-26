@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 
 # Standard environment variables for HTTP/HTTPS proxies
 DEFAULT_PROXY_ENV_VARS: tuple[str, ...] = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
     "http_proxy",
     "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
 )
 
 # Default hostnames, IPs, and service names to bypass when configuring proxy exclusion for Langfuse
@@ -193,7 +193,7 @@ def configure_langfuse_proxy_bypass(
 ) -> str:
     """
     Ensure Langfuse endpoints (and default localhost/docker hosts) are excluded
-    from HTTP_PROXY and HTTPS_PROXY by updating NO_PROXY and no_proxy.
+    from http_proxy and https_proxy by updating NO_PROXY and no_proxy.
 
     Updates both NO_PROXY and no_proxy in the target environment dict (defaults to os.environ).
     Returns the updated NO_PROXY string.
@@ -572,6 +572,44 @@ def install_ca_certificate_to_store(
     return True
 
 
+def resolve_request_proxies(
+    environ: dict[str, str] | None = None,
+) -> dict[str, str] | None:
+    """
+    Resolve proxy configuration for requests sessions / calls.
+
+    Inspects HTTP_PROXY, HTTPS_PROXY (and lowercase variants http_proxy, https_proxy,
+    ALL_PROXY, all_proxy) from the environment (defaulting to os.environ).
+
+    Returns:
+        A dict with 'http' and/or 'https' keys mapping to proxy URLs, or None if
+        no proxy is configured.
+    """
+    env = os.environ if environ is None else environ
+
+    http_val = (env.get("http_proxy") or env.get("HTTP_PROXY") or "").strip()
+    https_val = (env.get("https_proxy") or env.get("HTTPS_PROXY") or "").strip()
+    all_val = (env.get("all_proxy") or env.get("ALL_PROXY") or "").strip()
+
+    if not http_val and not https_val and not all_val:
+        return None
+
+    proxies: dict[str, str] = {}
+    effective_http = http_val or all_val
+    effective_https = https_val or all_val or http_val
+
+    if effective_http:
+        if "://" not in effective_http:
+            effective_http = f"http://{effective_http}"
+        proxies["http"] = effective_http
+    if effective_https:
+        if "://" not in effective_https:
+            effective_https = f"http://{effective_https}"
+        proxies["https"] = effective_https
+
+    return proxies or None
+
+
 def configure_proxy_ca_certificates(
     log: Any | None = None,
     logger: Any | None = None,
@@ -658,3 +696,13 @@ def configure_proxy_ca_certificates(
                 installed_identifiers.append(identifier)
 
     return installed_identifiers
+
+
+def ensure_proxy_variables():
+    """Ensure proxy variables have both upper and lower case."""
+    for proxy_var in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}:
+        proxy_var_upper = proxy_var.upper()
+        if proxy_var in os.environ:
+            os.environ[proxy_var_upper] = os.environ.get(proxy_var, "")
+        elif proxy_var_upper in os.environ:
+            os.environ[proxy_var] = os.environ.get(proxy_var_upper, "")
