@@ -243,6 +243,9 @@ The controller runs this loop:
 10. If task creation and its bounded prerequisite repair both produce no tasks, raise a workflow invariant error.
 11. For each active task:
     - run `task_prompt_builder`, then apply the configured critic/revision cycle
+    - validate assigned credentials and establish the opaque authentication context after prompt approval and before
+      creating the executor; the controller then appends the validated credential IDs to the executor prompt, while
+      an unsuccessful required authentication setup ends the task as a coverage gap
     - create one `task_executor` agent with restricted tools
     - run `task_executor` and require one atomic terminal acceptance submission for every frozen criterion
     - validate typed evidence references and exact coverage of frozen manifest item IDs before persistence
@@ -254,6 +257,12 @@ The controller runs this loop:
     - after the configured cycle limit, Python marks the task with the evaluator's final status and reason
     - loop back to active phase/task selection
 12. When all phases are terminal, Python marks the plan complete and emits the completion `termination_reason` event for UI consumers.
+
+Controller-owned inventory synthesis and web baseline tasks bypass prompt building and executor creation. Their
+credential validation and authentication setup run after controller ownership is confirmed and before the controller
+executes the task.
+Prompt building sees assigned authentication metadata as pending validation and excludes prior setup results and
+credential IDs. This ordering preserves more of a short-lived session for execution.
 
 Final report generation receives the workflow completion status before it runs. If the plan has not reached
 `assessment_complete=true` or the termination reason is not `complete`, the report is marked as incomplete and states

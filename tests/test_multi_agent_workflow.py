@@ -6747,6 +6747,12 @@ def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(m
     )
     calls = []
 
+    def authenticate(_plan, _task):
+        calls.append("authentication")
+        return workflow_mod.AuthenticationSetupResult("not_required")
+
+    monkeypatch.setattr(controller, "_run_authentication_agent", authenticate)
+
     def consolidate(source_artifacts, output_file, **kwargs):
         calls.append((source_artifacts, output_file, kwargs))
         return {
@@ -6766,6 +6772,7 @@ def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(m
     controller._run_task_in_trace(plan, plan.phases[0], synthesis)
 
     assert calls == [
+        "authentication",
         (
             ["artifact:artifacts/katana.json"],
             "artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
@@ -7054,6 +7061,13 @@ def test_web_workflow_baseline_runs_in_controller_without_prompt_or_executor(mon
     runtime.config.module = "web"
     state = FakeState(plan, tasks=[task], acceptance_complete=False)
     controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=state)
+    calls = []
+
+    def authenticate(_plan, _task):
+        calls.append("authentication")
+        return workflow_mod.AuthenticationSetupResult("not_required")
+
+    monkeypatch.setattr(controller, "_run_authentication_agent", authenticate)
     manifest = {"items": [{
         "id": "workflow-login",
         "kind": "workflow",
@@ -7068,7 +7082,9 @@ def test_web_workflow_baseline_runs_in_controller_without_prompt_or_executor(mon
     monkeypatch.setattr(
         controller,
         "_controller_baseline_request",
-        lambda url, method: {"outcome": "response", "url": url, "method": method, "status": 200},
+        lambda url, method: calls.append("baseline_request") or {
+            "outcome": "response", "url": url, "method": method, "status": 200,
+        },
     )
     monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: pytest.fail("baseline must bypass prompt building"))
 
@@ -7077,7 +7093,70 @@ def test_web_workflow_baseline_runs_in_controller_without_prompt_or_executor(mon
     completed = next(item for item in state.tasks if item.task_uid == "baseline")
     assert completed.status == "done"
     assert completed.status_reason == "Controller captured 1 unauthenticated baseline response(s)."
+    assert calls == ["authentication", "baseline_request"]
     assert state.acceptance_results["baseline"][0].evidence_refs[0].startswith("artifact:artifacts/controller_baseline/")
+
+
+def test_controller_baseline_authentication_failure_stops_before_inventory_read(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Credential Provisioning", status="not_applicable", dynamic_kind="credential_provisioning"),
+            PlanPhase(id=3, title="Authentication Coverage", status="active"),
+        ],
+        targets=[OperationTarget("target-1", "https://target.test", "network")],
+    )
+    task = Task(
+        task_uid="baseline-auth-failed",
+        title="Baseline login workflow",
+        objective="Capture baseline",
+        phase=3,
+        status="active",
+        target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Frozen workflow inventory",
+                source_refs=["artifact:artifacts/inventory.json"],
+                snapshot_hash="inventory-hash",
+                item_ids=["workflow-login"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="baseline",
+                description="Capture the baseline",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+        recovery_context={"phase_task_contract": {
+            "module": "web",
+            "phase_id": 3,
+            "workstream": "unauthenticated_baseline",
+            "task_role": "mapping",
+            "execution_owner": "controller",
+        }},
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=state)
+    monkeypatch.setattr(
+        controller, "_run_authentication_agent",
+        lambda *_args: workflow_mod.AuthenticationSetupResult("failed", reason="context_validation_failed"),
+    )
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda *_args: ["checkout_credential"])
+    monkeypatch.setattr(
+        workflow_mod,
+        "_load_inventory_manifest",
+        lambda *_args: pytest.fail("controller task must stop before reading inventory"),
+    )
+
+    assert controller._run_controller_web_baseline(plan, plan.phases[2], task) is True
+    assert state.tasks[0].status == "partial_failure"
+    assert "context_validation_failed" in state.tasks[0].status_reason
 
 
 def test_web_baseline_records_request_errors_as_partial_failure(monkeypatch, tmp_path):
@@ -8572,13 +8651,16 @@ def test_inventory_manifest_prompt_is_omitted_for_generic_artifact_task():
     assert MultiAgentWorkflowController._inventory_manifest_evidence_prompt(task) == ""
 
 
-def test_task_roles_share_task_trace_attributes():
+def test_task_roles_share_task_trace_attributes(monkeypatch):
     runtime = _runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 1})
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
     state = FakeState(_plan(), tasks=[task])
     captured = {}
+    order = []
+    execution_prompts = []
 
     def capture(role):
+        order.append(role)
         captured.setdefault(role, []).append(dict(runtime.trace_attributes))
 
     def text_runner(role, prompt, tools, system_prompt):
@@ -8597,6 +8679,7 @@ def test_task_roles_share_task_trace_attributes():
 
         def run(prompt, run_policy):
             capture(f"{role}:run")
+            execution_prompts.append(prompt)
             return "actor result"
 
         yield run
@@ -8608,8 +8691,18 @@ def test_task_roles_share_task_trace_attributes():
         text_runner=text_runner,
         executor_session_factory=executor_session,
     )
+    def authenticate(_plan, _task):
+        order.append("authentication")
+        return controller._record_authentication_setup(
+            _task, workflow_mod.AuthenticationSetupResult("established", ("validated-credential",))
+        )
+
+    monkeypatch.setattr(controller, "_run_authentication_agent", authenticate)
 
     controller._run_task(_plan(), _plan().phases[0], task)
+
+    assert order.index("task_prompt_critic") < order.index("authentication") < order.index("task_executor")
+    assert "validated-credential" in execution_prompts[0]
 
     shared_roles = [
         "task_prompt_builder",
@@ -8630,6 +8723,41 @@ def test_task_roles_share_task_trace_attributes():
         assert attrs["workflow.phase.id"] == 1
         assert "workflow-task" in attrs["langfuse.trace.tags"]
     assert runtime.trace_attributes == {"operation.id": "OP_TEST"}
+
+
+def test_executor_task_authentication_failure_follows_prompt_build_and_stops_execution(monkeypatch):
+    plan = _plan()
+    task = Task(task_uid="auth-failed", title="Authenticated task", objective="Assess access", phase=1, status="active")
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+    order = []
+
+    def build_prompt(*_args):
+        order.append("prompt_builder")
+        return {"prompt": "Assess access", "tools": [], "shell_commands": []}
+
+    def authenticate(*_args):
+        order.append("authentication")
+        return workflow_mod.AuthenticationSetupResult("failed", reason="context_validation_failed")
+
+    monkeypatch.setattr(controller, "_build_task_prompt", build_prompt)
+    monkeypatch.setattr(controller, "_run_authentication_agent", authenticate)
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda *_args: ["checkout_credential"])
+    monkeypatch.setattr(
+        workflow_mod,
+        "build_role_tools",
+        lambda *_args, **_kwargs: pytest.fail("executor tools must not be built after failed authentication"),
+    )
+
+    controller._run_task_in_trace(plan, plan.phases[0], task)
+
+    assert order == ["prompt_builder", "authentication"]
+    assert state.tasks[0].status == "partial_failure"
+    assert "context_validation_failed" in state.tasks[0].status_reason
 
 
 def test_different_tasks_get_distinct_task_trace_attributes():
@@ -16301,6 +16429,46 @@ def test_task_prompt_builder_and_fallback_preserve_credential_execution_rules():
         assert "prepare_login_form_authentication" not in prompt
         assert "plan_access_control_comparisons" not in prompt
         assert "Authorization headers" in prompt
+
+
+def test_prompt_building_treats_prior_authentication_context_as_unvalidated():
+    runtime = _runtime()
+    runtime.optional_tools_list = [_tool("authenticated_http_request")]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    task = Task(
+        task_uid="prior-auth-context",
+        title="Assess access",
+        objective="Assess assigned route",
+        phase=1,
+        status="active",
+        auth_context={"mode": "authenticated", "credential_ids": ["stale-credential"], "roles": ["member"]},
+        recovery_context={
+            "phase_task_contract": {"workstream": "authenticated_credential_coverage"},
+            "authentication_setup": {"status": "reused", "reason": "stale-auth-result"},
+        },
+    )
+
+    builder = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+    critic = controller._task_prompt_critic_prompt(_plan(), _plan().phases[0], task, {"prompt": "Assess access"})
+    revision = controller._task_prompt_revision_prompt(
+        _plan(), _plan().phases[0], task, {"prompt": "Assess access"}, ["Clarify access"]
+    )
+    fallback = controller._deterministic_task_prompt_spec(
+        _plan(), _plan().phases[0], task, RuntimeError("prompt unavailable")
+    )["prompt"]
+
+    for prompt in (builder, critic, revision, fallback):
+        assert "stale-credential" not in prompt
+        assert "stale-auth-result" not in prompt
+        assert '"validation_status": "pending"' in prompt
+        assert '"member"' in prompt
+    assert "controller will validate an authentication context after prompt approval" in builder
+    assert "authentication context is ready" not in builder
+    assert "authentication context is ready" not in fallback
 
 
 def test_task_prompt_builder_hides_access_control_credentials_from_task_executor():

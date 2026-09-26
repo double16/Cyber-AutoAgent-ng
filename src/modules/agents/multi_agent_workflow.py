@@ -3328,6 +3328,10 @@ class MultiAgentWorkflowController:
         ):
             return False
 
+        task = self._prepare_task_authentication(plan, task)
+        if task is None:
+            return True
+
         context = task.recovery_context.get("phase_task_contract")
         dependencies = context.get("depends_on_workstreams") if isinstance(context, dict) else []
         dependency_workstreams = {str(value) for value in dependencies if str(value).strip()}
@@ -3568,6 +3572,9 @@ class MultiAgentWorkflowController:
             or task.acceptance.basis.kind != "snapshot"
         ):
             return False
+        task = self._prepare_task_authentication(plan, task)
+        if task is None:
+            return True
         manifest_ref = next(
             (reference for reference in task.acceptance.basis.source_refs if reference.startswith("artifact:")), ""
         )
@@ -4061,6 +4068,21 @@ class MultiAgentWorkflowController:
             updated_task = self.state.mark_task(task, "partial_failure", reason)
             self._emit_task_done(updated_task)
 
+    def _prepare_task_authentication(self, plan: OperationPlan, task: Task) -> Task | None:
+        """Validate credentials and establish opaque auth state immediately before task execution."""
+
+        authentication_setup = self._run_authentication_agent(plan, task)
+        task = self._apply_authenticated_credential_subset(task, authentication_setup)
+        if self._authentication_agent_tool_names(task) and not authentication_setup.ready:
+            reason = (
+                "Authenticated coverage gap: controller could not establish a validated authentication context "
+                f"({authentication_setup.reason or authentication_setup.status})."
+            )
+            updated_task = self.state.mark_task(task, "partial_failure", reason)
+            self._emit_task_done(updated_task)
+            return None
+        return task
+
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
         self._emit_task_started(task)
         self._log_workflow("running task=%s phase=%s", self._task_label(task), phase.id)
@@ -4092,18 +4114,6 @@ class MultiAgentWorkflowController:
         inventory_feedback = self._task_inventory_route_feedback(plan, task)
         if inventory_feedback:
             reason = "Task endpoint is absent from its validated inventory snapshot: " + "; ".join(inventory_feedback)
-            updated_task = self.state.mark_task(task, "partial_failure", reason)
-            self._emit_task_done(updated_task)
-            return
-        # Authentication setup runs before prompt construction so the executor sees the actual safe context state,
-        # never raw credentials or a misleading promise that a session is available.
-        authentication_setup = self._run_authentication_agent(plan, task)
-        task = self._apply_authenticated_credential_subset(task, authentication_setup)
-        if self._authentication_agent_tool_names(task) and not authentication_setup.ready:
-            reason = (
-                "Authenticated coverage gap: controller could not establish a validated authentication context "
-                f"({authentication_setup.reason or authentication_setup.status})."
-            )
             updated_task = self.state.mark_task(task, "partial_failure", reason)
             self._emit_task_done(updated_task)
             return
@@ -4144,6 +4154,10 @@ class MultiAgentWorkflowController:
             "pre_executor",
             "allowed",
         )
+
+        task = self._prepare_task_authentication(plan, task)
+        if task is None:
+            return
 
         tool_outcomes: list[ToolOutcome] = []
         active_live_outcomes_reader: Callable[[], list[ToolOutcome]] | None = None
@@ -4220,6 +4234,14 @@ class MultiAgentWorkflowController:
                 )
                 tools.append(acceptance_tool)
         execution_prompt = str(prompt_spec.get("prompt") or task.objective)
+        authentication_result = self._authentication_setup_results.get(task.task_uid)
+        if authentication_result is not None and authentication_result.ready and authentication_result.credential_ids:
+            execution_prompt += (
+                "\n\n## Validated Authentication Context (Controller-owned)\n"
+                "The controller established an opaque context for these credential IDs. Use only these IDs for "
+                "authenticated work in this task: "
+                + json.dumps(list(authentication_result.credential_ids))
+            )
         execution_prompt = (
             execution_prompt.rstrip()
             + "\n\n## Frozen Task Acceptance Contract (Controller-owned)\n"
@@ -8614,6 +8636,26 @@ Return exactly one decision for each candidate.
 
         return task_service_scope_violations(plan, task, str(prompt_spec.get("prompt") or ""))
 
+    @staticmethod
+    def _pre_auth_task_prompt_data(task: Task) -> dict[str, Any]:
+        """Show prompt roles assigned auth metadata without implying that a session is validated."""
+
+        data = task.to_dict()
+        auth_context = data.get("auth_context")
+        if isinstance(auth_context, dict) and auth_context:
+            data["auth_context"] = {
+                key: value
+                for key, value in auth_context.items()
+                if key not in {"mode", "credential_ids"}
+            }
+            data["auth_context"]["validation_status"] = "pending"
+        recovery_context = data.get("recovery_context")
+        if isinstance(recovery_context, dict):
+            data["recovery_context"] = {
+                key: value for key, value in recovery_context.items() if key != "authentication_setup"
+            }
+        return data
+
     def _task_inventory_route_feedback(self, plan: OperationPlan, task: Task) -> list[str]:
         """Reject concrete same-target web routes that are absent from cited inventory evidence."""
 
@@ -8713,7 +8755,7 @@ shell command selections. Do not broaden scope or add criteria.
 {hypothesis_guidance}
 
 ## Task
-{json.dumps(task.to_dict(), indent=2, sort_keys=True)}
+{json.dumps(self._pre_auth_task_prompt_data(task), indent=2, sort_keys=True)}
 
 ## Draft
 {json.dumps(prompt_spec, indent=2, sort_keys=True)}
@@ -9215,7 +9257,7 @@ Return JSON exactly: {response_schema}.
         result: AuthenticationSetupResult,
         setup: AuthenticationSetupRequest | None = None,
     ) -> AuthenticationSetupResult:
-        """Persist and emit a secret-safe authentication setup outcome before prompt construction."""
+        """Persist and emit a secret-safe authentication setup outcome before execution."""
 
         self._authentication_setup_results[task.task_uid] = result
         eligible_ids = tuple(credential["credential_id"] for credential in (setup.credentials if setup else ()))
@@ -9773,7 +9815,7 @@ expose session material or secret values in text, artifacts, observations, or ta
         return True
 
     def _run_authentication_agent(self, plan: OperationPlan, task: Task) -> AuthenticationSetupResult:
-        """Establish or refresh opaque auth state before task-prompt construction."""
+        """Establish or refresh opaque auth state before task execution."""
 
         selected_names = self._authentication_agent_tool_names(task)
         if not selected_names:
@@ -10093,7 +10135,7 @@ expose session material or secret values in text, artifacts, observations, or ta
             )
         if not credential_names:
             return ""
-        guidance = self._credential_execution_guidance(credential_names)
+        guidance = self._credential_execution_guidance(credential_names, authentication_pending=True)
         if "plan_authenticated_coverage" in selected_names:
             gaps = self._unresolved_credential_provisioning_gaps()
             if gaps:
@@ -10165,7 +10207,7 @@ expose session material or secret values in text, artifacts, observations, or ta
                 f"## Credential Execution Rules\n{self._credential_execution_guidance_for_task(task)}\n"
                 f"## Client Bundle Inventory Rules\n{self._client_bundle_execution_guidance_for_task(task)}\n"
                 f"## Active phase\n{json.dumps(phase.to_dict(), sort_keys=True)}\n\n"
-                f"## Assigned task\n{json.dumps(task.to_dict(), sort_keys=True)}\n\n"
+                f"## Assigned task\n{json.dumps(self._pre_auth_task_prompt_data(task), sort_keys=True)}\n\n"
                 f"{hypothesis_guidance}\n"
                 f"## Prompt-build fallback reason\n{self._short(error, 500)}\n\n"
             ),
@@ -13940,7 +13982,9 @@ while planning.
 {policy}"""
 
     @staticmethod
-    def _credential_execution_guidance(credential_names: Iterable[str]) -> str:
+    def _credential_execution_guidance(
+        credential_names: Iterable[str], *, authentication_pending: bool = False
+    ) -> str:
         """Return credential rules required in both generated and fallback task prompts."""
 
         authorized = set(credential_names)
@@ -13951,8 +13995,13 @@ while planning.
             ),
         ]
         if "authenticated_http_request" in authorized:
+            context_status = (
+                "The controller will validate an authentication context after prompt approval."
+                if authentication_pending
+                else "A controller-owned authentication context is ready for this task."
+            )
             lines.append(
-                "- A controller-owned authentication context is ready for this task. Use "
+                f"- {context_status} Use "
                 "`authenticated_http_request` only for this task's authenticated comparison; do not perform "
                 "credential setup, an unauthenticated baseline, or obtain, construct, or copy cookies or "
                 "Authorization headers."
@@ -14226,6 +14275,8 @@ The generated prompt must instruct the task-executor agent:
 - Execute only the assigned task objective below.
 - Execute only against the assigned target scope. Do not scan, exploit, or validate unrelated targets.
 {finding_validation_guidance}- Preserve the exact assigned target boundary for every outgoing request.
+- Authentication runs after prompt approval. Do not claim a session is ready or copy credential IDs into the
+  generated prompt; the controller supplies validated IDs to the executor after authentication succeeds.
 {credential_guidance}
 {registration_flow_context}
 {client_bundle_guidance}
@@ -14270,7 +14321,7 @@ Shell command selection guidance:
 {json.dumps(phase.to_dict(), indent=2, sort_keys=True)}
 
 ## Task
-{json.dumps(task.to_dict(), indent=2, sort_keys=True)}
+{json.dumps(self._pre_auth_task_prompt_data(task), indent=2, sort_keys=True)}
 
 ## Finding Validation Context
 {self._finding_validation_context(task) or "None"}
@@ -14370,7 +14421,7 @@ When approved is false, provide concise, actionable feedback for every material 
 {json.dumps(phase.to_dict(), indent=2, sort_keys=True)}
 
 ## Assigned task
-{json.dumps(task.to_dict(), indent=2, sort_keys=True)}
+{json.dumps(self._pre_auth_task_prompt_data(task), indent=2, sort_keys=True)}
 
 ## Task history
 {self._task_history_summary(phase.id)}
@@ -14428,7 +14479,7 @@ recording. Remove vague or unnecessary swarm instructions.
 {json.dumps(phase.to_dict(), indent=2, sort_keys=True)}
 
 ## Assigned task
-{json.dumps(task.to_dict(), indent=2, sort_keys=True)}
+{json.dumps(self._pre_auth_task_prompt_data(task), indent=2, sort_keys=True)}
 
 ## Task history
 {self._task_history_summary(phase.id)}

@@ -405,7 +405,7 @@ def create_agent_runtime_resources(
 
     initialize_browser(
         provider=config.provider,
-        model=config.model_id,
+        model=os.getenv("CYBER_AGENT_BROWSER_MODEL") or config.model_id,
         artifacts_dir=os.getenv("CYBER_ARTIFACTS_DIR"),
     )
     initialize_memory_system(
