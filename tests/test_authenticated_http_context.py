@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from base64 import urlsafe_b64encode
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import pytest
 
@@ -29,6 +32,13 @@ def _activate_task(store: SQLiteApplicationStore, target: str) -> None:
         ),
     )
     store.store_task("OP_AUTH", Task("auth-task", "Auth", "Authenticate", make_acceptance("auth-task"), 1, "active"))
+
+
+def _jwt_with_exp(expiration: int) -> str:
+    def segment(value: dict[str, object]) -> str:
+        return urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+
+    return f"{segment({'alg': 'HS256', 'typ': 'JWT'})}.{segment({'exp': expiration})}.signature"
 
 
 @pytest.mark.parametrize(
@@ -81,6 +91,20 @@ def test_browser_login_receipt_does_not_invalidate_forbidden_response(monkeypatc
 
     assert result is not None
     assert result["outcome"] == "completed"
+
+
+def test_browser_login_receipt_ignores_unrelated_and_missing_status(monkeypatch):
+    monkeypatch.setattr(
+        "modules.tools.browser.latest_browser_interaction_receipts",
+        lambda: [
+            {"url": "https://target.test/login", "status": "401"},
+            {"url": "https://target.test/unrelated", "status": 401},
+        ],
+    )
+
+    assert authentication.record_browser_authentication_attempt(
+        "OP_AUTH", "https://target.test", "credential-3", "https://target.test/login"
+    ) is None
 
 
 def test_checkout_registers_credential_payload_values_for_runtime_redaction(tmp_path, monkeypatch):
@@ -428,6 +452,461 @@ def test_context_validation_failure_logs_redacted_sent_headers_and_cookies(caplo
     assert "query-secret" not in caplog.text
     assert "fragment-secret" not in caplog.text
     assert "url=https://target.test/protected" in caplog.text
+
+
+@pytest.mark.parametrize("placement", ["header", "cookie_header", "cookie_jar", "query"])
+def test_expiring_jwt_skips_validation_request(placement, monkeypatch, caplog):
+    now = int(time.time())
+    token = _jwt_with_exp(now + 599)
+    session = authentication.requests.Session()
+    calls = []
+    monkeypatch.setattr(session, "get", lambda *_args, **_kwargs: calls.append("requested"))
+    monkeypatch.setattr(authentication.time, "time", lambda: now)
+    headers = {}
+    params = {}
+    if placement == "header":
+        headers["X-Session-Assertion"] = f"Token {token}"
+    elif placement == "cookie_header":
+        headers["Cookie"] = f"sid={token}"
+    elif placement == "cookie_jar":
+        session.cookies.set("sid", token, domain="target.test", path="/")
+    else:
+        params["access_token"] = token
+    context = authentication._AuthenticationContext(
+        "https://target.test", "credential", session, headers, params, "https://target.test/protected"
+    )
+
+    with caplog.at_level("INFO", logger=authentication.__name__):
+        assert authentication._validate(context) is False
+
+    assert calls == []
+    assert "reason=auth_material_expiring" in caplog.text
+    assert "material_kind=jwt" in caplog.text
+    assert token not in caplog.text
+
+
+def test_jwt_at_ten_minute_boundary_still_validates_http(monkeypatch):
+    now = int(time.time())
+    token = _jwt_with_exp(now + 600)
+    session = authentication.requests.Session()
+    calls = []
+
+    def get(*_args, **_kwargs):
+        calls.append("requested")
+        return type("Response", (), {"status_code": 204})()
+
+    monkeypatch.setattr(session, "get", get)
+    monkeypatch.setattr(authentication.time, "time", lambda: now)
+    context = authentication._AuthenticationContext(
+        "https://target.test", "credential", session, {"Authorization": token}, {}, "https://target.test/protected"
+    )
+
+    assert authentication._validate(context) is True
+    assert calls == ["requested"]
+
+
+def test_unreadable_jwt_uses_http_validation(monkeypatch):
+    session = authentication.requests.Session()
+    calls = []
+
+    def get(*_args, **_kwargs):
+        calls.append("requested")
+        return type("Response", (), {"status_code": 200})()
+
+    monkeypatch.setattr(session, "get", get)
+    context = authentication._AuthenticationContext(
+        "https://target.test", "credential", session,
+        {"X-Session-Assertion": "Bearer opaque.not-json.signature"}, {}, "https://target.test/protected"
+    )
+
+    assert authentication._validate(context) is True
+    assert calls == ["requested"]
+
+
+@pytest.mark.parametrize("claim", [{}, {"exp": "soon"}, {"exp": True}])
+def test_jwt_without_numeric_expiration_uses_http_validation(claim, monkeypatch):
+    header = urlsafe_b64encode(b'{"alg":"HS256"}').rstrip(b"=").decode()
+    payload = urlsafe_b64encode(json.dumps(claim).encode()).rstrip(b"=").decode()
+    session = authentication.requests.Session()
+    calls = []
+
+    def get(*_args, **_kwargs):
+        calls.append("requested")
+        return type("Response", (), {"status_code": 200})()
+
+    monkeypatch.setattr(session, "get", get)
+    context = authentication._AuthenticationContext(
+        "https://target.test", "credential", session,
+        {"X-Session": f"{header}.{payload}.signature"}, {}, "https://target.test/protected"
+    )
+
+    assert authentication._validate(context) is True
+    assert calls == ["requested"]
+
+
+def test_jwt_with_invalid_structure_or_unrepresentable_expiration_is_ignored():
+    def encode(value):
+        return urlsafe_b64encode(json.dumps(value).encode()).rstrip(b"=").decode()
+
+    for header, payload in [
+        ([], {"exp": 1}),
+        ({"typ": "JWT"}, {"exp": 1}),
+        ({"alg": "HS256"}, []),
+        ({"alg": "HS256"}, {"exp": 10**1000}),
+        ({"alg": "HS256"}, {"exp": float("inf")}),
+    ]:
+        assert list(authentication._jwt_expirations(f"{encode(header)}.{encode(payload)}.signature")) == []
+
+
+def test_long_lived_cookie_and_jwt_continue_to_http_validation(monkeypatch):
+    now = int(time.time())
+    session = authentication.requests.Session()
+    session.cookies.set("sid", _jwt_with_exp(now + 1800), domain="target.test", path="/", expires=now + 1200)
+    calls = []
+
+    def get(*_args, **_kwargs):
+        calls.append("requested")
+        return type("Response", (), {"status_code": 200})()
+
+    monkeypatch.setattr(session, "get", get)
+    monkeypatch.setattr(authentication.time, "time", lambda: now)
+    context = authentication._AuthenticationContext(
+        "https://target.test", "credential", session, {}, {}, "https://target.test/protected"
+    )
+
+    assert authentication._validate(context) is True
+    assert calls == ["requested"]
+
+
+@pytest.mark.parametrize(
+    ("domain", "secure", "validation_url"),
+    [
+        ("elsewhere.test", False, "https://target.test/protected"),
+        ("target.test", True, "http://target.test/protected"),
+    ],
+)
+def test_expiring_cookie_outside_domain_or_scheme_is_ignored(domain, secure, validation_url, monkeypatch):
+    now = int(time.time())
+    session = authentication.requests.Session()
+    session.cookies.set("sid", "opaque", domain=domain, path="/", secure=secure, expires=now + 1)
+    calls = []
+
+    def get(*_args, **_kwargs):
+        calls.append("requested")
+        return type("Response", (), {"status_code": 200})()
+
+    monkeypatch.setattr(session, "get", get)
+    monkeypatch.setattr(authentication.time, "time", lambda: now)
+    context = authentication._AuthenticationContext(
+        "https://target.test", "credential", session, {}, {}, validation_url
+    )
+
+    assert authentication._validate(context) is True
+    assert calls == ["requested"]
+
+
+def test_expiring_applicable_cookie_skips_http_validation(monkeypatch, caplog):
+    now = int(time.time())
+    session = authentication.requests.Session()
+    session.cookies.set("session", "opaque", domain="target.test", path="/", expires=now + 599)
+    session.cookies.set("other_path", "opaque", domain="target.test", path="/other", expires=now + 1)
+    calls = []
+    monkeypatch.setattr(session, "get", lambda *_args, **_kwargs: calls.append("requested"))
+    monkeypatch.setattr(authentication.time, "time", lambda: now)
+    context = authentication._AuthenticationContext(
+        "https://target.test", "credential", session, {}, {}, "https://target.test/protected"
+    )
+
+    with caplog.at_level("INFO", logger=authentication.__name__):
+        assert authentication._validate(context) is False
+
+    assert calls == []
+    assert "material_kind=cookie" in caplog.text
+    assert "cookie:session" in caplog.text
+
+
+def test_expiring_cookie_outside_validation_path_does_not_skip_http(monkeypatch):
+    now = int(time.time())
+    session = authentication.requests.Session()
+    session.cookies.set("other_path", "opaque", domain="target.test", path="/other", expires=now + 1)
+    calls = []
+
+    def get(*_args, **_kwargs):
+        calls.append("requested")
+        return type("Response", (), {"status_code": 204})()
+
+    monkeypatch.setattr(session, "get", get)
+    monkeypatch.setattr(authentication.time, "time", lambda: now)
+    context = authentication._AuthenticationContext(
+        "https://target.test", "credential", session, {}, {}, "https://target.test/protected"
+    )
+
+    assert authentication._validate(context) is True
+    assert calls == ["requested"]
+
+
+def test_har_set_cookie_expiry_uses_max_age_and_latest_matching_response():
+    target = "https://target.test"
+    issued_at = int(time.time())
+    cookie = {"name": "sid", "value": "current-value", "domain": "target.test", "path": "/"}
+
+    class Response:
+        def __init__(self, headers):
+            self.headers = headers
+
+        async def header_values(self, name):
+            assert name == "set-cookie"
+            return self.headers
+
+    class Request:
+        def __init__(self, url, when, headers):
+            self.url = url
+            self.timing = {"startTime": when * 1000}
+            self.result = Response(headers)
+
+        async def response(self):
+            return self.result
+
+    browser = type("Browser", (), {"recent_requests": [
+        Request(f"{target}/login", issued_at, [
+            "sid=current-value; Path=/; Max-Age=60; Expires=Wed, 21 Oct 2037 07:28:00 GMT",
+            "unrelated=other; Path=/; Max-Age=1",
+        ]),
+        Request("https://other.test/login", issued_at + 10, ["sid=current-value; Path=/; Max-Age=1"]),
+        Request(f"{target}/login", issued_at + 20, ["sid=old-value; Path=/; Max-Age=1"]),
+        Request(f"{target}/login", issued_at + 30, ["sid=current-value; Path=/; Max-Age=3600"]),
+    ]})()
+
+    observed = asyncio.run(authentication._observed_cookie_expirations(browser, target, [cookie]))
+
+    assert observed == {("sid", "target.test", "/"): issued_at + 3630}
+
+
+def test_har_set_cookie_expires_and_session_replacement():
+    target = "https://target.test"
+    cookie = {"name": "sid", "value": "current-value", "domain": "target.test", "path": "/"}
+
+    class Response:
+        def __init__(self, header):
+            self.header = header
+
+        async def all_headers(self):
+            return {"set-cookie": self.header}
+
+    class Request:
+        url = f"{target}/login"
+
+        def __init__(self, header):
+            self.header = header
+
+        async def response(self):
+            return Response(self.header)
+
+    first_request = Request("sid=current-value; Path=/; Expires=Wed, 21 Oct 2037 07:28:00 GMT")
+    browser = type("Browser", (), {"recent_requests": [first_request]})()
+
+    assert asyncio.run(authentication._observed_cookie_expirations(browser, target, [cookie])) == {
+        ("sid", "target.test", "/"): datetime(2037, 10, 21, 7, 28, tzinfo=UTC).timestamp()
+    }
+    browser.recent_requests.append(Request("sid=current-value; Path=/"))
+
+    assert asyncio.run(authentication._observed_cookie_expirations(browser, target, [cookie])) == {
+        ("sid", "target.test", "/"): None
+    }
+
+
+def test_har_max_age_without_response_time_does_not_use_expires():
+    parsed_cookie = authentication.SimpleCookie()
+    parsed_cookie.load("sid=value; Max-Age=60; Expires=Wed, 21 Oct 2037 07:28:00 GMT")
+
+    assert authentication._set_cookie_expiration(parsed_cookie["sid"], None) is None
+
+
+@pytest.mark.parametrize(
+    ("header", "issued_at", "expected"),
+    [
+        ("sid=value; Max-Age=bogus; Expires=Wed, 21 Oct 2037 07:28:00 GMT", 100, "expires"),
+        ("sid=value; Expires=not-a-date", 100, None),
+        ("sid=value; Max-Age=999999999999999999999999999999999999999", 100, "huge"),
+        ("sid=value; Max-Age=60", 100, 160),
+    ],
+)
+def test_set_cookie_expiration_handles_invalid_and_large_values(header, issued_at, expected):
+    parsed_cookie = authentication.SimpleCookie()
+    parsed_cookie.load(header)
+    actual = authentication._set_cookie_expiration(parsed_cookie["sid"], issued_at)
+    if expected == "expires":
+        assert actual == datetime(2037, 10, 21, 7, 28, tzinfo=UTC).timestamp()
+    elif expected == "huge":
+        assert actual is not None and actual > 10**30
+    else:
+        assert actual == expected
+
+
+def test_har_cookie_expiry_ignores_unavailable_responses_and_mismatched_scope():
+    target = "https://target.test"
+    cookie = {"name": "sid", "value": "current", "domain": "target.test", "path": "/"}
+
+    class Request:
+        def __init__(self, url, response):
+            self.url = url
+            self.result = response
+
+        async def response(self):
+            if isinstance(self.result, Exception):
+                raise self.result
+            return self.result
+
+    class Response:
+        async def header_values(self, _name):
+            return [
+                "sid=current; Domain=other.test; Path=/; Max-Age=1",
+                "sid=current; Path=/other; Max-Age=1",
+                "sid=previous; Path=/; Max-Age=1",
+            ]
+
+    browser = type("Browser", (), {"recent_requests": [
+        Request("not-a-url", Response()),
+        Request("https://other.test/login", Response()),
+        Request(f"{target}/login", None),
+        Request(f"{target}/login", RuntimeError("no response")),
+        Request(f"{target}/login", Response()),
+    ]})()
+
+    assert asyncio.run(authentication._observed_cookie_expirations(browser, target, [cookie])) == {}
+
+
+def test_validation_url_diagnostic_preserves_ipv6_without_sensitive_parts():
+    assert authentication._diagnostic_validation_url(
+        "https://user:secret@[::1]:8443/protected?token=secret#fragment"
+    ) == "https://[::1]:8443/protected"
+
+
+@pytest.mark.parametrize(("browser_expiry_seconds", "expected_seconds"), [(None, 900), (3600, 3600)])
+def test_browser_capture_preserves_cookie_expiry_from_browser_or_har(
+    browser_expiry_seconds, expected_seconds, monkeypatch
+):
+    target = "https://target.test"
+    validation_url = f"{target}/protected"
+    now = int(time.time())
+    cookie = {
+        "name": "sid", "value": "opaque-session", "domain": "target.test", "path": "/",
+        "expires": -1 if browser_expiry_seconds is None else now + browser_expiry_seconds,
+    }
+
+    class LoginRequest:
+        url = f"{target}/login"
+        timing = {"startTime": now * 1000}
+
+        async def response(self):
+            return type("Response", (), {
+                "status": 302,
+                "header_values": staticmethod(lambda _name: _set_cookie_headers()),
+            })()
+
+    class ValidationRequest:
+        url = validation_url
+
+        async def all_headers(self):
+            return {"Cookie": "sid=opaque-session"}
+
+        async def response(self):
+            return type("Response", (), {"status": 204})()
+
+    async def _set_cookie_headers():
+        return ["sid=opaque-session; Path=/; Max-Age=900"]
+
+    async def _cookies(_urls):
+        return [cookie]
+
+    class Browser:
+        recent_requests = [LoginRequest(), ValidationRequest()]
+        context = type("Context", (), {"cookies": staticmethod(_cookies)})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        @asynccontextmanager
+        async def timeout(self):
+            yield
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+    captured = {}
+
+    def store_context(_task, _record, _credential_id, session, _headers, _params, _url):
+        captured["expires"] = next(iter(session.cookies)).expires
+        return "captured"
+
+    monkeypatch.setattr(authentication, "_active_record", lambda _id: (object(), {"target": target}, "credential"))
+    monkeypatch.setattr(authentication, "_capture_storage_header_bindings", lambda *_args: [])
+    monkeypatch.setattr(authentication, "_store_context", store_context)
+    monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
+
+    assert asyncio.run(
+        authentication.capture_browser_authenticated_context("credential", "flow", validation_url)
+    ) == "captured"
+    assert captured["expires"] == now + expected_seconds
+
+
+@pytest.mark.parametrize("failure", ["wrong_origin", "missing_header", "invalid_storage"])
+def test_browser_capture_rejects_invalid_validation_evidence(failure, monkeypatch):
+    target = "https://target.test"
+    validation_url = f"{target}/protected"
+    binding = {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"}
+
+    class Request:
+        url = validation_url
+
+        async def all_headers(self):
+            return {} if failure == "missing_header" else {"Authorization": "Bearer observed"}
+
+        async def response(self):
+            return type("Response", (), {"status": 200})()
+
+    async def _cookies(_urls):
+        return []
+
+    async def _evaluate(_script, _keys):
+        return []
+
+    class Browser:
+        recent_requests = [Request()]
+        context = type("Context", (), {"cookies": staticmethod(_cookies)})()
+        page = type("Page", (), {"evaluate": staticmethod(_evaluate)})()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        @asynccontextmanager
+        async def timeout(self):
+            yield
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+    monkeypatch.setattr(authentication, "_active_record", lambda _id: (object(), {"target": target}, "credential"))
+    monkeypatch.setattr(authentication, "_capture_storage_header_bindings", lambda *_args: [binding])
+    monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
+
+    if failure == "wrong_origin":
+        with pytest.raises(ValueError, match="share the credential target origin"):
+            asyncio.run(authentication.capture_browser_authenticated_context(
+                "credential", "flow", "https://other.test/protected"
+            ))
+    elif failure == "missing_header":
+        with pytest.raises(ValueError, match="required credentials"):
+            asyncio.run(authentication.capture_browser_authenticated_context("credential", "flow", validation_url))
+    else:
+        with pytest.raises(ValueError, match="invalid result"):
+            asyncio.run(authentication.capture_browser_authenticated_context("credential", "flow", validation_url))
 
 
 def test_context_validation_logs_request_exception_type(caplog):

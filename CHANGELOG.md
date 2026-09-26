@@ -80,6 +80,8 @@
 
 ### Fixes
 
+- Refresh authenticated contexts before a captured JWT or applicable cookie expires within ten minutes; retain browser
+  cookie lifetimes and recover missing expiry attributes from matching `Set-Cookie` network responses.
 - Separate checked-out credential material from reusable authenticated contexts with a shared access gate, register
   access modes for future auth-consuming tools, and tell executors to stop authenticated attempts when a controller
   context is unavailable.

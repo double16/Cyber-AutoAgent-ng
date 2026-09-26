@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import math
 import re
 import time
-from base64 import b64encode
+from base64 import b64encode, urlsafe_b64decode
+from binascii import Error as BinasciiError
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
 from typing import Any, Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 import requests
 from pydantic import TypeAdapter, ValidationError
@@ -53,6 +58,11 @@ REGISTRATION_FLOW_KINDS = frozenset({"browser_registration", "api_registration"}
 AUTHENTICATION_FLOW_VERSION = 6
 _AUTHORIZATION_STORAGE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
+_JWT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]{2,4096}\.[A-Za-z0-9_-]{2,16384}\.[A-Za-z0-9_-]{0,8192})"
+    r"(?![A-Za-z0-9_-])"
+)
+_AUTH_EXPIRY_WINDOW_SECONDS = 600
 _LOGGER = logging.getLogger(__name__)
 _PURPOSE_ADAPTER = TypeAdapter(Literal["authentication", "registration"])
 _FLOW_KIND_ADAPTER = TypeAdapter(
@@ -254,6 +264,18 @@ def _safe_context(context: _AuthenticationContext, status: str) -> str:
 
 
 def _validate(context: _AuthenticationContext) -> bool:
+    expiring_material = _expiring_authentication_material(context, time.time())
+    if expiring_material is not None:
+        kind, source, remaining_seconds = expiring_material
+        _LOGGER.info(
+            "Authenticated context validation skipped credential_id=%s reason=auth_material_expiring "
+            "material_kind=%s material_source=%s remaining_seconds=%.1f",
+            context.credential_id,
+            kind,
+            redact(source),
+            remaining_seconds,
+        )
+        return False
     started_at = time.perf_counter()
     try:
         response = context.session.get(
@@ -304,6 +326,174 @@ def _validate(context: _AuthenticationContext) -> bool:
         json.dumps(diagnostics["cookies"], sort_keys=True),
     )
     return False
+
+
+def _jwt_expirations(value: str) -> Iterable[float]:
+    """Yield readable JWT expiration claims without treating the token as verified."""
+
+    for match in _JWT_PATTERN.finditer(unquote(str(value))):
+        header_segment, payload_segment, _signature_segment = match.group(1).split(".")
+        try:
+            header = json.loads(urlsafe_b64decode(header_segment + "=" * (-len(header_segment) % 4)))
+            payload = json.loads(urlsafe_b64decode(payload_segment + "=" * (-len(payload_segment) % 4)))
+        except (BinasciiError, ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(header, dict) or not isinstance(header.get("alg"), str) or not isinstance(payload, dict):
+            continue
+        expiration = _finite_timestamp(payload.get("exp"))
+        if expiration is not None:
+            yield expiration
+
+
+def _finite_timestamp(value: Any) -> float | None:
+    """Accept finite numeric times without allowing booleans or oversized integers."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        numeric = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def _cookie_applies_to_url(cookie: Any, url: str) -> bool:
+    """Check domain, path, and secure scope even if the cookie is already expired."""
+
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower()
+    domain = str(cookie.domain or "").lstrip(".").lower()
+    if domain and host != domain and not (cookie.domain_initial_dot and host.endswith(f".{domain}")):
+        return False
+    if cookie.secure and parsed.scheme.lower() != "https":
+        return False
+    path = str(cookie.path or "/")
+    request_path = parsed.path or "/"
+    return request_path == path or (
+        request_path.startswith(path) and (path.endswith("/") or request_path[len(path):].startswith("/"))
+    )
+
+
+def _expiring_authentication_material(
+    context: _AuthenticationContext, now: float
+) -> tuple[str, str, float] | None:
+    """Find known JWT or cookie expiry inside the ten-minute refresh window."""
+
+    for source, values in (
+        ("header", {**getattr(context.session, "headers", {}), **context.headers}),
+        ("query", context.params),
+    ):
+        for name, value in values.items():
+            for expiration in _jwt_expirations(str(value)):
+                remaining = expiration - now
+                if remaining < _AUTH_EXPIRY_WINDOW_SECONDS:
+                    return "jwt", f"{source}:{name}", remaining
+    for cookie in getattr(context.session, "cookies", ()):
+        if not _cookie_applies_to_url(cookie, context.validation_url):
+            continue
+        for expiration in _jwt_expirations(cookie.value):
+            remaining = expiration - now
+            if remaining < _AUTH_EXPIRY_WINDOW_SECONDS:
+                return "jwt", f"cookie:{cookie.name}", remaining
+        cookie_expiry = _finite_timestamp(cookie.expires)
+        if cookie_expiry is not None:
+            remaining = cookie_expiry - now
+            if remaining < _AUTH_EXPIRY_WINDOW_SECONDS:
+                return "cookie", f"cookie:{cookie.name}", remaining
+    return None
+
+
+def _set_cookie_expiration(morsel: Any, issued_at: float | None) -> float | None:
+    """Resolve RFC cookie lifetime, preferring Max-Age to Expires."""
+
+    max_age = str(morsel["max-age"] or "").strip()
+    if max_age:
+        try:
+            seconds = int(max_age)
+        except ValueError:
+            pass
+        else:
+            if issued_at is None:
+                return None
+            try:
+                return _finite_timestamp(issued_at + seconds)
+            except OverflowError:
+                return None
+    expires = str(morsel["expires"] or "").strip()
+    if expires:
+        try:
+            parsed = parsedate_to_datetime(expires)
+            return parsed.replace(tzinfo=UTC).timestamp() if parsed.tzinfo is None else parsed.timestamp()
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return None
+
+
+def _matches_captured_cookie(captured: dict[str, Any], morsel: Any, request_url: str) -> bool:
+    """Bind a Set-Cookie observation to the current cookie value and scope."""
+
+    if str(captured.get("name")) != morsel.key or str(captured.get("value")) != morsel.value:
+        return False
+    parsed = urlsplit(request_url)
+    domain = str(morsel["domain"] or parsed.hostname or "").lstrip(".").lower()
+    captured_domain = str(captured.get("domain") or "").lstrip(".").lower()
+    if domain != captured_domain:
+        return False
+    request_path = parsed.path or "/"
+    default_path = request_path.rpartition("/")[0] or "/"
+    path = str(morsel["path"] or default_path)
+    return path == str(captured.get("path") or "/")
+
+
+async def _observed_cookie_expirations(
+    browser: Any,
+    target: str,
+    cookies: list[dict[str, Any]],
+) -> dict[tuple[str, str, str], float | None]:
+    """Use current-session HAR source responses to recover matching cookie lifetimes."""
+
+    observations: dict[tuple[str, str, str], float | None] = {}
+    for request in tuple(getattr(browser, "recent_requests", ())):
+        request_url = str(getattr(request, "url", ""))
+        try:
+            in_scope = _credential_target_url_contains(target, request_url, label="browser request URL")
+        except ValueError:
+            continue
+        if not in_scope:
+            continue
+        try:
+            response = await asyncio.wait_for(request.response(), timeout=0.25)
+            if response is None:
+                continue
+            header_values = getattr(response, "header_values", None)
+            if callable(header_values):
+                set_cookie_lines = await asyncio.wait_for(header_values("set-cookie"), timeout=0.25)
+            else:
+                all_headers = getattr(response, "all_headers", None)
+                response_headers = await asyncio.wait_for(all_headers(), timeout=0.25) if callable(all_headers) else {}
+                set_cookie_lines = [
+                    value for name, value in response_headers.items() if str(name).lower() == "set-cookie"
+                ]
+        except Exception:
+            continue
+        timing = getattr(request, "timing", {})
+        started_ms = timing.get("startTime") if isinstance(timing, dict) else None
+        finite_start = _finite_timestamp(started_ms)
+        issued_at = finite_start / 1000 if finite_start is not None else None
+        for header_value in set_cookie_lines or ():
+            for line in str(header_value).splitlines():
+                parsed_cookies = SimpleCookie()
+                parsed_cookies.load(line)
+                for morsel in parsed_cookies.values():
+                    for cookie in cookies:
+                        if _matches_captured_cookie(cookie, morsel, request_url):
+                            key = (
+                                str(cookie["name"]),
+                                str(cookie.get("domain") or ""),
+                                str(cookie.get("path") or "/"),
+                            )
+                            observations[key] = _set_cookie_expiration(morsel, issued_at)
+    return observations
 
 
 def _diagnostic_validation_url(value: str) -> str:
@@ -919,7 +1109,12 @@ async def capture_browser_authenticated_context(
     session = requests.Session()
     headers: dict[str, str] = {}
     async with get_browser() as browser:
-        async def capture() -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
+        async def capture() -> tuple[
+            list[dict[str, Any]],
+            dict[str, str],
+            dict[str, str],
+            dict[tuple[str, str, str], float | None],
+        ]:
             async with browser.timeout():
                 cookies = await browser.context.cookies([target])
                 observed_headers: dict[str, str] = {}
@@ -973,15 +1168,31 @@ async def capture_browser_authenticated_context(
                     )
                     if not isinstance(storage_values, dict):
                         raise ValueError("browser storage lookup returned an invalid result")
-                return cookies, observed_headers, storage_values
+                needs_cookie_expiry = any(
+                    (expiry := _finite_timestamp(cookie.get("expires"))) is None or expiry <= 0
+                    for cookie in cookies
+                )
+                observed_expirations = (
+                    await _observed_cookie_expirations(browser, target, cookies) if needs_cookie_expiry else {}
+                )
+                return cookies, observed_headers, storage_values, observed_expirations
 
-        cookies, observed_headers, storage_values = await browser.run_in_browser_loop(capture)
+        cookies, observed_headers, storage_values, observed_expirations = await browser.run_in_browser_loop(capture)
     for cookie in cookies:
+        expiry = _finite_timestamp(cookie.get("expires"))
+        if expiry is None or expiry <= 0:
+            key = (
+                str(cookie["name"]),
+                str(cookie.get("domain") or ""),
+                str(cookie.get("path") or "/"),
+            )
+            expiry = observed_expirations.get(key)
         session.cookies.set(
             str(cookie["name"]),
             str(cookie["value"]),
             domain=str(cookie.get("domain") or ""),
             path=str(cookie.get("path") or "/"),
+            expires=int(expiry) if _finite_timestamp(expiry) is not None else None,
         )
     for binding in bindings:
         header_name = binding["header_name"]
