@@ -701,6 +701,7 @@ class AgentEventHandler(PrintingCallbackHandler):
         self.tool_input_buffer = {}
         self.tool_name_buffer = {}  # Map tool_id -> tool_name for correct attribution
         self.tool_outcome_journal = ToolOutcomeJournal()
+        self.successful_tool_completions: set[tuple[str, str]] = set()
         self.tools_used = set()
         # Track per-tool usage counts for accurate reporting
         self.tool_counts = {}
@@ -2194,6 +2195,8 @@ class AgentEventHandler(PrintingCallbackHandler):
         success = status != "error"
         outcome = str(tool_result_dict.get("_cyber_outcome") or ("success" if success else "error"))
         executed = bool(tool_result_dict.get("_cyber_executed", True))
+        if success and outcome == "success" and executed:
+            self.successful_tool_completions.add((str(tool_name), str(tool_use_id)))
         completion_metadata = {
             "success": success,
             "outcome": outcome,

@@ -538,6 +538,23 @@ def test_cli_successful_required_tools_uses_journal_baseline_and_rejects_missing
     assert cyberautoagent._successful_required_tools_satisfied(SimpleNamespace(), policy, 0) is False
 
 
+def test_cli_successful_required_tools_uses_current_callback_completions():
+    policy = cyberautoagent.AgentRunPolicy(required_tool_names={
+        "capture_browser_authenticated_context", "ensure_authenticated_context",
+    })
+    previous = {("capture_browser_authenticated_context", "old-call")}
+    handler = SimpleNamespace(successful_tool_completions=set(previous))
+
+    assert cyberautoagent._successful_required_tools_satisfied(handler, policy, 0, previous) is False
+    handler.successful_tool_completions.add(("ensure_authenticated_context", "new-call"))
+    assert cyberautoagent._successful_required_tools_satisfied(handler, policy, 0, previous) is False
+    handler.successful_tool_completions.add(("capture_browser_authenticated_context", "new-capture"))
+    assert cyberautoagent._successful_required_tools_satisfied(handler, policy, 0, previous) is True
+    assert cyberautoagent._successful_required_tools_satisfied(
+        handler, cyberautoagent.AgentRunPolicy(), 0, previous
+    ) is False
+
+
 def test_agent_run_policy_normalizes_limits_and_rejects_unknown_actionless_modes():
     policy = cyberautoagent.AgentRunPolicy(max_actionless_calls=0, max_agent_calls=0, max_model_turns=0)
     assert policy.max_actionless_calls == 1
@@ -1204,6 +1221,38 @@ def test_run_agent_controller_covers_unmet_terminal_tool_stopiteration_and_timeo
     )
     assert unmet.reason == "stalled"
 
+    context_capture = cyberautoagent.run_agent_until_terminal_state(
+        agent=Agent([result({cyberautoagent.TERMINAL_TOOL_COMPLETED_STATE_KEY: {
+            "tool_name": "capture_browser_authenticated_context",
+        }})]),
+        callback_handler=Handler(), current_message="go", initial_prompt="go", budget_cfg=budget,
+        operation_start=time.time(), max_duration=None, logger=Mock(),
+        run_policy=cyberautoagent.AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"capture_browser_authenticated_context"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            max_actionless_calls=1,
+        ),
+    )
+    assert context_capture.reason == "agent_completed_required_tools"
+
+    failed_context_capture = cyberautoagent.run_agent_until_terminal_state(
+        agent=Agent([result({cyberautoagent.TERMINAL_TOOL_REJECTED_STATE_KEY: {
+            "tool_name": "capture_browser_authenticated_context", "error": "capture failed",
+        }})]),
+        callback_handler=Handler(), current_message="go", initial_prompt="go", budget_cfg=budget,
+        operation_start=time.time(), max_duration=None, logger=Mock(),
+        run_policy=cyberautoagent.AgentRunPolicy(
+            min_tool_calls=1,
+            required_tool_names={"capture_browser_authenticated_context"},
+            terminal_after_required_tools=True,
+            require_successful_required_tools=True,
+            max_actionless_calls=1,
+        ),
+    )
+    assert failed_context_capture.reason == "required_tool_rejected"
+
     retry_exhausted = cyberautoagent.run_agent_until_terminal_state(
         agent=Agent([result(), result(), result()]), callback_handler=Handler(), current_message="go",
         initial_prompt="go", budget_cfg=budget, operation_start=time.time(), max_duration=None, logger=Mock(),
@@ -1274,6 +1323,7 @@ def test_run_agent_controller_handles_falsey_callback_without_optional_terminati
         run_policy=cyberautoagent.AgentRunPolicy(max_actionless_calls=1, required_tool_names={"finish"}),
     )
     assert no_actions.reason == "stalled"
+    assert no_actions.details == {"tool_call_counts": {}}
 
     max_calls = cyberautoagent.run_agent_until_terminal_state(
         agent=Agent([SimpleNamespace(state={}, stop_reason="", metrics=None)]), callback_handler=FalseyHandler(),
@@ -2797,6 +2847,70 @@ def test_run_agent_policy_waits_for_all_successful_required_tool_outcomes(monkey
     assert len(agent.calls) == 2
 
 
+@pytest.mark.parametrize("terminal_tool", ["capture_browser_authenticated_context", "ensure_authenticated_context"])
+def test_run_agent_policy_completes_after_callback_observes_auth_tool(monkeypatch, terminal_tool):
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    callback.successful_tool_completions = set()
+
+    class AuthenticationAgent:
+        messages = []
+        _cyber_callback_handler = callback
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, _message):
+            self.calls += 1
+            callback.tool_counts[terminal_tool] = 1
+            callback.successful_tool_completions.add((terminal_tool, "capture-1"))
+            return SimpleNamespace(metrics=None, state={}, stop_reason="limit_turns")
+
+    agent = AuthenticationAgent()
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+    policy = cyberautoagent.AgentRunPolicy(
+        required_tool_names={terminal_tool}, terminal_after_required_tools=True,
+        require_successful_required_tools=True, max_actionless_calls=1,
+        terminal_reason="authentication_credential_worker_done",
+    )
+
+    result = _run_agent_helper(agent, callback, run_policy=policy)
+
+    assert result.reason == policy.terminal_reason
+    assert agent.calls == 1
+    callback.emit_termination.assert_not_called()
+
+
+def test_run_agent_policy_does_not_reuse_prior_auth_completion(monkeypatch):
+    terminal_tool = "capture_browser_authenticated_context"
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    callback.successful_tool_completions = {(terminal_tool, "earlier-call")}
+
+    class AuthenticationAgent:
+        messages = []
+        _cyber_callback_handler = callback
+
+        def __call__(self, _message):
+            callback.tool_counts[terminal_tool] = 1
+            return SimpleNamespace(metrics=None, state={})
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+    result = _run_agent_helper(
+        AuthenticationAgent(), callback,
+        run_policy=cyberautoagent.AgentRunPolicy(
+            required_tool_names={terminal_tool}, terminal_after_required_tools=True,
+            require_successful_required_tools=True, max_actionless_calls=1,
+        ),
+    )
+
+    assert result.reason == "stalled"
+
+
 def test_run_agent_policy_requires_new_tool_calls_for_reused_agent_pass(monkeypatch):
     root_callback = CliCallback()
     role_callback = CliCallback()
@@ -3726,6 +3840,30 @@ def test_cli_main_workflow_runner_creates_role_agent(monkeypatch, tmp_path):
     assert run_kwargs["callback_handler"] is callback
     assert run_kwargs["current_message"] == "do the task"
     assert run_kwargs["run_policy"].required_tool_names == frozenset({"shell"})
+    fake_agent.cleanup.assert_called_once()
+
+
+def test_cli_main_authentication_worker_runner_preserves_terminal_result(monkeypatch, tmp_path):
+    callback = CliCallback()
+    fake_agent = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, fake_agent, callback)
+    runner_result = cyberautoagent.AgentRunResult(
+        "stalled", "No actions taken", details={"tool_call_counts": {"checkout_credential": 1}}
+    )
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", Mock(return_value=runner_result))
+    monkeypatch.setattr(cyberautoagent.sys, "argv", [
+        "cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60",
+        "--provider", "ollama",
+    ])
+
+    def run_workflow():
+        work_runner = config_manager.workflow_controller.call_args.kwargs["work_runner"]
+        result = work_runner("authentication_agent", "capture context", [], "role system")
+        assert result is runner_result
+
+    config_manager.workflow.run.side_effect = run_workflow
+
+    cyberautoagent.main()
     fake_agent.cleanup.assert_called_once()
 
 

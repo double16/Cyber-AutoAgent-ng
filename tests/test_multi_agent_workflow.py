@@ -504,6 +504,9 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
     assert "shell" in tool_names
     assert "ensure_authenticated_context" not in tool_names
     assert policy.max_agent_calls == 12
+    assert policy.required_tool_names == {"capture_browser_authenticated_context"}
+    assert policy.terminal_after_required_tools is True
+    assert policy.require_successful_required_tools is True
     reset_session.assert_awaited_once()
     setup_events = [event for event in runtime.callback_handler.events if event["type"] == "authentication_setup"]
     assert setup_events[-1]["status"] == "failed"
@@ -1137,6 +1140,320 @@ def test_authentication_worker_reuses_valid_opaque_context_without_agent(monkeyp
     runner.assert_not_called()
     assert "authenticated_http_request" in controller._required_optional_tool_names(task)
     assert credential_store.list_credentials.call_args.args == ("OP_TEST",)
+
+
+def _refresh_setup_controller(monkeypatch, credential_ids=("first", "second")):
+    target = "https://target.test"
+    plan = replace(_plan(), targets=[OperationTarget("target-1", target, "network")])
+    task = Task(
+        task_uid="refresh-context",
+        title="Authenticated coverage",
+        objective="Compare protected route behavior",
+        phase=1,
+        status="active",
+        recovery_context={"phase_task_contract": {"workstream": "authenticated_credential_coverage"}},
+    )
+    runtime = _runtime()
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, [task]),
+        text_runner=Mock(),
+    )
+    setup = workflow_mod.AuthenticationSetupRequest(
+        task_uid=task.task_uid,
+        workstream="authenticated_credential_coverage",
+        targets=(target,),
+        allowed_origins=(target,),
+        credentials=tuple(
+            {"credential_id": credential_id, "credential_type": "username_password", "role": "member", "target": target}
+            for credential_id in credential_ids
+        ),
+        authentication_flows=({
+            "flow_id": "flow", "kind": "browser_form", "login_url": f"{target}/login",
+            "validation_url": f"{target}/account", "allowed_origins": [target],
+        },),
+    )
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda _task: ("checkout_credential",))
+    monkeypatch.setattr(controller, "_authentication_setup_request", lambda *_args: setup)
+    monkeypatch.setattr(controller, "_mark_authentication_flows_validated", Mock())
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        authorize_credential_for_task=Mock(),
+    ))
+    monkeypatch.setattr(workflow_mod, "authentication_context_validation_url", lambda *_args: f"{target}/account")
+    monkeypatch.setattr(workflow_mod, "authentication_attempt_result", lambda *_args: None)
+    monkeypatch.setattr(workflow_mod, "record_browser_authentication_attempt", lambda *_args: None)
+    return controller, plan, task
+
+
+@pytest.mark.parametrize(
+    ("flow_kind", "expected_terminal_tool"),
+    [
+        ("browser_form", "capture_browser_authenticated_context"),
+        ("browser_mfa", "capture_browser_authenticated_context"),
+        ("api_form", "ensure_authenticated_context"),
+    ],
+)
+def test_authentication_worker_policy_requires_successful_context_tool(
+    flow_kind, expected_terminal_tool, monkeypatch
+):
+    controller, _plan_value, task = _refresh_setup_controller(monkeypatch, ("first",))
+    target = "https://target.test"
+    credential = {"credential_id": "first", "credential_type": "username_password", "role": "member", "target": target}
+    flow = {"flow_id": "flow", "kind": flow_kind, "login_url": f"{target}/login"}
+    setup = workflow_mod.AuthenticationSetupRequest(
+        task_uid=task.task_uid, workstream="authenticated_credential_coverage", targets=(target,),
+        allowed_origins=(target,), credentials=(credential,), authentication_flows=(flow,),
+    )
+    monkeypatch.setattr(workflow_mod, "reset_authentication_browser_session", AsyncMock())
+    worker_runner = Mock(return_value=SimpleNamespace(
+        reason="stalled",
+        details={"tool_call_counts": {"checkout_credential": 1, "browser_observe_page": 0}},
+    ))
+    monkeypatch.setattr(controller, "_run_worker_agent", worker_runner)
+
+    result = controller._run_authentication_credential_worker(task, setup, credential, (flow,), [])
+
+    assert result.browser_session_ready is True
+    assert result.tool_names == frozenset({"checkout_credential"})
+    assert result.stalled_before_login is True
+    policy = worker_runner.call_args.args[4]
+    assert policy.required_tool_names == {expected_terminal_tool}
+    assert policy.terminal_after_required_tools is True
+    assert policy.require_successful_required_tools is True
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_outcome"),
+    [
+        ("authentication_credential_worker_done", "required_tool_succeeded"),
+        ("stalled", "stalled"),
+    ],
+)
+def test_authentication_worker_logs_actual_terminal_outcome(monkeypatch, reason, expected_outcome):
+    controller, _plan_value, task = _refresh_setup_controller(monkeypatch, ("first",))
+    target = "https://target.test"
+    credential = {"credential_id": "first", "credential_type": "username_password", "role": "member", "target": target}
+    flow = {"flow_id": "flow", "kind": "browser_form", "login_url": f"{target}/login"}
+    setup = workflow_mod.AuthenticationSetupRequest(
+        task_uid=task.task_uid, workstream="authenticated_credential_coverage", targets=(target,),
+        allowed_origins=(target,), credentials=(credential,), authentication_flows=(flow,),
+    )
+    monkeypatch.setattr(workflow_mod, "reset_authentication_browser_session", AsyncMock())
+    monkeypatch.setattr(controller, "_run_worker_agent", Mock(return_value=SimpleNamespace(
+        reason=reason, details={"tool_call_counts": {"checkout_credential": 1}},
+    )))
+    log_workflow = Mock()
+    monkeypatch.setattr(controller, "_log_workflow", log_workflow)
+
+    result = controller._run_authentication_credential_worker(task, setup, credential, (flow,), [])
+
+    assert result.terminal_reason == reason
+    assert log_workflow.call_args.args[-1] == expected_outcome
+
+
+def test_authentication_setup_refreshes_credential_expiring_during_another_refresh(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch)
+    valid = {"first": False, "second": True}
+    calls = []
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, cid: valid[cid])
+
+    def worker(_task, _setup, credential, _flows, _tools):
+        cid = credential["credential_id"]
+        calls.append(cid)
+        valid[cid] = True
+        if cid == "first":
+            valid["second"] = False
+        return workflow_mod.AuthenticationWorkerResult(True)
+
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+
+    result = controller._run_authentication_agent(plan, task)
+
+    assert result.status == "established"
+    assert result.credential_ids == ("first", "second")
+    assert calls == ["first", "second"]
+
+
+def test_authentication_setup_repairs_context_expiring_at_final_check(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch)
+    valid = {"first": True, "second": False}
+    calls = []
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, cid: valid[cid])
+
+    def worker(_task, _setup, credential, _flows, _tools):
+        cid = credential["credential_id"]
+        calls.append(cid)
+        valid[cid] = True
+        if cid == "second":
+            valid["first"] = False
+        return workflow_mod.AuthenticationWorkerResult(True)
+
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+
+    result = controller._run_authentication_agent(plan, task)
+
+    assert result.status == "established"
+    assert calls == ["second", "first"]
+
+
+def test_authentication_setup_caps_repair_at_two_worker_runs(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch)
+    valid = {"first": False, "second": True}
+    calls = []
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, cid: valid[cid])
+
+    def worker(_task, _setup, credential, _flows, _tools):
+        cid = credential["credential_id"]
+        calls.append(cid)
+        if cid == "first" and calls.count(cid) == 2:
+            return workflow_mod.AuthenticationWorkerResult(True)
+        valid[cid] = True
+        valid["first"] = cid != "second"
+        if cid == "first":
+            valid["second"] = False
+        return workflow_mod.AuthenticationWorkerResult(True)
+
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+
+    result = controller._run_authentication_agent(plan, task)
+
+    assert result.status == "partial"
+    assert result.credential_ids == ("second",)
+    assert calls == ["first", "second", "first"]
+
+
+@pytest.mark.parametrize(
+    ("worker_result", "observed_attempt", "expected_calls"),
+    [
+        (
+            workflow_mod.AuthenticationWorkerResult(
+                True, "stalled", frozenset({"checkout_credential", "browser_goto_url", "browser_observe_page"})
+            ),
+            None,
+            2,
+        ),
+        (workflow_mod.AuthenticationWorkerResult(True, "stalled", frozenset({"browser_perform_action"})), None, 1),
+        (workflow_mod.AuthenticationWorkerResult(True, "stalled", None), None, 1),
+        (workflow_mod.AuthenticationWorkerResult(True, "stalled", frozenset()), {"outcome": "completed"}, 1),
+    ],
+)
+def test_authentication_refresh_retries_only_pre_login_stall(
+    worker_result, observed_attempt, expected_calls, monkeypatch
+):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
+    valid = {"first": False}
+    calls = []
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, cid: valid[cid])
+    monkeypatch.setattr(workflow_mod, "authentication_attempt_result", lambda *_args: observed_attempt)
+
+    def worker(_task, _setup, credential, _flows, _tools):
+        calls.append(credential["credential_id"])
+        if len(calls) == 2:
+            valid["first"] = True
+        return worker_result
+
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+
+    result = controller._run_authentication_agent(plan, task)
+
+    assert len(calls) == expected_calls
+    assert result.status == ("established" if expected_calls == 2 else "failed")
+
+
+def test_authentication_refresh_accepts_valid_capture_even_if_worker_stalls(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
+    valid = {"first": False}
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, cid: valid[cid])
+
+    def worker(_task, _setup, _credential, _flows, _tools):
+        valid["first"] = True
+        return workflow_mod.AuthenticationWorkerResult(
+            True, "stalled", frozenset({"checkout_credential", "capture_browser_authenticated_context"})
+        )
+
+    worker_call = Mock(side_effect=worker)
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker_call)
+
+    result = controller._run_authentication_agent(plan, task)
+
+    assert result.status == "established"
+    worker_call.assert_called_once()
+
+
+def test_authentication_refresh_requires_validation_url_after_capture(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
+    valid = {"first": False}
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, cid: valid[cid])
+    monkeypatch.setattr(workflow_mod, "authentication_context_validation_url", lambda *_args: "")
+
+    def worker(_task, _setup, _credential, _flows, _tools):
+        valid["first"] = True
+        return workflow_mod.AuthenticationWorkerResult(True)
+
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+
+    result = controller._run_authentication_agent(plan, task)
+
+    assert result.status == "failed"
+    assert result.reason == "missing_validation_url"
+
+
+def test_authentication_refresh_does_not_retry_rejected_credential(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: False)
+    monkeypatch.setattr(workflow_mod, "authentication_attempt_result", lambda *_args: {"outcome": "credential_rejected"})
+    monkeypatch.setattr(controller, "_schedule_invalid_credential_replacement", lambda *_args: False)
+    worker = Mock(return_value=workflow_mod.AuthenticationWorkerResult(True, "stalled", frozenset()))
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+
+    result = controller._run_authentication_agent(plan, task)
+
+    assert result.status == "unavailable"
+    assert result.reason == "credential_replacement_unavailable"
+    worker.assert_called_once()
+
+
+def test_authentication_refresh_updates_only_selected_flow(monkeypatch):
+    controller = object.__new__(MultiAgentWorkflowController)
+    controller.runtime = SimpleNamespace(operation_id="OP_TEST")
+    store = SimpleNamespace(
+        list_authentication_flows=Mock(return_value=[
+            {"flow_id": "other", "descriptor": {"kind": "browser_form"}},
+            {"flow_id": "selected", "descriptor": {"kind": "browser_form", "login_url": "https://target.test/login"}},
+        ]),
+        upsert_authentication_flow=Mock(),
+    )
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+
+    controller._mark_authentication_flows_validated(
+        "https://target.test", ({"flow_id": "selected"},), "https://target.test/account"
+    )
+
+    store.upsert_authentication_flow.assert_called_once_with(
+        "OP_TEST",
+        {
+            "kind": "browser_form", "login_url": "https://target.test/login",
+            "validation_url": "https://target.test/account",
+        },
+        status="validated",
+    )
+    store.upsert_authentication_flow.reset_mock()
+    controller._mark_authentication_flows_invalid("https://target.test", ({"flow_id": "selected"},))
+    store.upsert_authentication_flow.assert_called_once_with(
+        "OP_TEST", {"kind": "browser_form", "login_url": "https://target.test/login"}, status="invalid"
+    )
+
+
+def test_authentication_refresh_flow_updates_tolerate_missing_store_methods(monkeypatch):
+    controller = object.__new__(MultiAgentWorkflowController)
+    controller.runtime = SimpleNamespace(operation_id="OP_TEST")
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace())
+
+    controller._mark_authentication_flows_validated(
+        "https://target.test", ({"flow_id": "selected"},), "https://target.test/account"
+    )
+    controller._mark_authentication_flows_invalid("https://target.test", ({"flow_id": "selected"},))
 
 
 def test_authentication_setup_persists_only_valid_credential_subset():

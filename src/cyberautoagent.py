@@ -759,13 +759,21 @@ def _required_tools_satisfied(
     return all(int(tool_counts.get(name, 0) or 0) > 0 for name in run_policy.required_tool_names)
 
 
-def _successful_required_tools_satisfied(callback_handler: Any, run_policy: AgentRunPolicy, baseline: int) -> bool:
+def _successful_required_tools_satisfied(
+    callback_handler: Any,
+    run_policy: AgentRunPolicy,
+    baseline: int,
+    completion_baseline: set[tuple[str, str]] | None = None,
+) -> bool:
     """Return true when every required tool has a successful controller-observed outcome."""
 
-    journal = getattr(callback_handler, "tool_outcome_journal", None)
-    if journal is None or not hasattr(journal, "since"):
+    if not run_policy.required_tool_names:
         return False
-    successful = {outcome.tool_name for outcome in journal.since(baseline) if outcome.success}
+    completions = getattr(callback_handler, "successful_tool_completions", set()) or set()
+    successful = {name for name, _tool_use_id in completions - (completion_baseline or set())}
+    journal = getattr(callback_handler, "tool_outcome_journal", None)
+    if journal is not None and hasattr(journal, "since"):
+        successful.update(outcome.tool_name for outcome in journal.since(baseline) if outcome.success)
     return run_policy.required_tool_names.issubset(successful)
 
 
@@ -827,6 +835,7 @@ def run_agent_until_terminal_state(
     run_tool_count_baseline = dict(getattr(agent_callback_handler, "tool_counts", {}) or {})
     outcome_journal = getattr(agent_callback_handler, "tool_outcome_journal", None)
     outcome_baseline = outcome_journal.snapshot() if outcome_journal is not None else 0
+    completion_baseline = set(getattr(agent_callback_handler, "successful_tool_completions", set()) or set())
 
     while not interrupted:
         if agent_call_count >= run_policy.max_agent_calls:
@@ -856,14 +865,6 @@ def run_agent_until_terminal_state(
             logger.debug("Agent result: %r", result)
             process_agent_metrics(agent_callback_handler, result)
 
-            stop_reason = str(getattr(result, "stop_reason", "") or "")
-            if stop_reason.startswith("limit_"):
-                termination_reason = f"Agent stopped at its configured SDK limit: {stop_reason}"
-                print_status(termination_reason, "WARNING")
-                if agent_callback_handler:
-                    agent_callback_handler.emit_termination("stalled", termination_reason)
-                return AgentRunResult("stalled", termination_reason)
-
             result_state = getattr(result, "state", {})
             terminal_tool_completed = (
                 result_state.get(TERMINAL_TOOL_COMPLETED_STATE_KEY)
@@ -877,9 +878,18 @@ def run_agent_until_terminal_state(
             if (
                 run_policy.require_successful_required_tools
                 and run_policy.terminal_after_required_tools
-                and _successful_required_tools_satisfied(agent_callback_handler, run_policy, outcome_baseline)
+                and _successful_required_tools_satisfied(
+                    agent_callback_handler, run_policy, outcome_baseline, completion_baseline
+                )
             ):
                 return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
+            stop_reason = str(getattr(result, "stop_reason", "") or "")
+            if stop_reason.startswith("limit_"):
+                termination_reason = f"Agent stopped at its configured SDK limit: {stop_reason}"
+                print_status(termination_reason, "WARNING")
+                if agent_callback_handler:
+                    agent_callback_handler.emit_termination("stalled", termination_reason)
+                return AgentRunResult("stalled", termination_reason)
             terminal_tool_rejected = (
                 result_state.get(TERMINAL_TOOL_REJECTED_STATE_KEY)
                 if isinstance(result_state, dict)
@@ -972,7 +982,11 @@ def run_agent_until_terminal_state(
                     print_status(termination_reason, "WARNING")
                     if agent_callback_handler:
                         agent_callback_handler.emit_termination("stalled", termination_reason)
-                    return AgentRunResult("stalled", termination_reason)
+                    return AgentRunResult(
+                        "stalled",
+                        termination_reason,
+                        details={"tool_call_counts": dict(run_tool_deltas)},
+                    )
                 print_status("No actions taken - completing", "SUCCESS")
                 return AgentRunResult("no_actions", termination_reason)
 
@@ -2308,7 +2322,7 @@ def main():
                 tools: list[Any],
                 system_prompt: str,
                 run_policy: AgentRunPolicy | None = None,
-            ) -> str:
+            ) -> str | AgentRunResult:
                 agent = create_agent(
                     target=args.target,
                     objective=args.objective,
@@ -2321,8 +2335,8 @@ def main():
                     include_tool_catalog=role != "task_creator",
                 )
                 try:
-                    _, worker_text = run_workflow_agent(agent, prompt, run_policy)
-                    return worker_text
+                    run_result, worker_text = run_workflow_agent(agent, prompt, run_policy)
+                    return run_result if role == "authentication_agent" else worker_text
                 finally:
                     try:
                         agent.cleanup()

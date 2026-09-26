@@ -80,6 +80,11 @@
 
 ### Fixes
 
+- Preserve authentication worker terminal reasons and stop after a successful context tool completion, so captured
+  sessions do not produce misleading `outcome=unknown` or stalled worker results.
+- End authentication workers after their required context tool succeeds, avoiding false stalled outcomes after capture.
+- Recheck authenticated contexts during multi-credential setup and make one bounded retry when a refresh worker stalls
+  before attempting login, preventing contexts that expire mid-setup from being treated as reusable.
 - Refresh authenticated contexts before a captured JWT or applicable cookie expires within ten minutes; retain browser
   cookie lifetimes and recover missing expiry attributes from matching `Set-Cookie` network responses.
 - Separate checked-out credential material from reusable authenticated contexts with a shared access gate, register

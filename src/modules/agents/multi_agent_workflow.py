@@ -1236,6 +1236,30 @@ class AuthenticationSetupResult:
         return self.status in {"reused", "established", "partial"}
 
 
+@dataclass(frozen=True)
+class AuthenticationWorkerResult:
+    """Secret-free outcome of one credential worker invocation."""
+
+    browser_session_ready: bool
+    terminal_reason: str = ""
+    tool_names: frozenset[str] | None = None
+
+    @property
+    def stalled_before_login(self) -> bool:
+        preparatory_tools = {
+            "checkout_credential",
+            "browser_goto_url",
+            "browser_observe_page",
+            "browser_get_page_html",
+            "browser_take_screenshot",
+        }
+        return (
+            self.terminal_reason == "stalled"
+            and self.tool_names is not None
+            and self.tool_names <= preparatory_tools
+        )
+
+
 class MultiAgentWorkflowController:
     """Run the assessment as many short-lived role agents coordinated by Python."""
 
@@ -9521,7 +9545,7 @@ credentials or inventing URLs.
         credential: dict[str, str],
         flows: tuple[dict[str, Any], ...],
         tools: list[Any],
-    ) -> bool:
+    ) -> AuthenticationWorkerResult:
         """Establish one credential's opaque context without credential fallback."""
 
         target = str(credential["target"])
@@ -9537,7 +9561,15 @@ credentials or inventing URLs.
             authentication_flows=flows,
         )
         worker_tools = self._authentication_agent_tools(tools, credential_setup.allowed_origins, flows)
-        if any(str(flow.get("kind") or "") in {"browser_form", "browser_mfa", "browser_redirect"} for flow in flows):
+        flow_kinds = {str(flow.get("kind") or "") for flow in flows}
+        browser_flow_kinds = {"browser_form", "browser_mfa", "browser_redirect"}
+        browser_flow = bool(flow_kinds & browser_flow_kinds)
+        terminal_tool_name = (
+            "ensure_authenticated_context" if flow_kinds == {"api_form"}
+            else "capture_browser_authenticated_context" if flow_kinds and flow_kinds <= browser_flow_kinds
+            else ""
+        )
+        if browser_flow:
             try:
                 asyncio.run(reset_authentication_browser_session())
             except Exception as error:
@@ -9547,7 +9579,7 @@ credentials or inventing URLs.
                     credential["credential_id"],
                     self._short(error),
                 )
-                return False
+                return AuthenticationWorkerResult(False)
         prompt = f"""You are the controller-owned authentication worker. This is bounded setup work, not assessment.
 
 {credential_setup.to_toon()}
@@ -9569,7 +9601,10 @@ expose session material or secret values in text, artifacts, observations, or ta
 """
         policy = AgentRunPolicy(
             min_tool_calls=1,
-            allow_text_final_after_tools=True,
+            required_tool_names={terminal_tool_name} if terminal_tool_name else (),
+            terminal_after_required_tools=bool(terminal_tool_name),
+            require_successful_required_tools=bool(terminal_tool_name),
+            allow_text_final_after_tools=False,
             actionless_mode="required_tool",
             max_actionless_calls=1,
             max_agent_calls=12,
@@ -9579,14 +9614,34 @@ expose session material or secret values in text, artifacts, observations, or ta
             recovery_objective=task.objective,
             recovery_next_action="Establish the opaque authenticated context for the supplied credential.",
         )
-        self._run_worker_agent(
+        run_result = self._run_worker_agent(
             "authentication_agent",
             prompt,
             worker_tools,
             "Perform only bounded authentication setup for the supplied credential. Secret values must not appear.",
             policy,
         )
-        return True
+        terminal_reason = str(getattr(run_result, "reason", ""))
+        outcome = (
+            "required_tool_succeeded"
+            if terminal_tool_name and terminal_reason == policy.terminal_reason
+            else terminal_reason or "worker_result_unavailable"
+        )
+        self._log_workflow(
+            "authentication worker finished task=%s credential=%s terminal_tool=%s outcome=%s",
+            self._task_label(task),
+            credential["credential_id"],
+            terminal_tool_name or "none",
+            outcome,
+        )
+        details = getattr(run_result, "details", None)
+        tool_counts = details.get("tool_call_counts") if isinstance(details, dict) else None
+        tool_names = (
+            frozenset(str(name) for name, count in tool_counts.items() if count > 0)
+            if isinstance(tool_counts, dict)
+            else None
+        )
+        return AuthenticationWorkerResult(True, terminal_reason, tool_names)
 
     def _mark_authentication_flows_validated(
         self, target: str, flows: tuple[dict[str, Any], ...], validation_url: str
@@ -9836,99 +9891,150 @@ expose session material or secret values in text, artifacts, observations, or ta
                         AuthenticationSetupResult("failed", reason="no_usable_authentication_flow"),
                         setup,
                     )
-                for credential in setup.credentials:
-                    if credential["credential_id"] in valid_ids:
-                        continue
-                    target = credential["target"]
-                    while True:
-                        self._log_workflow(
-                            "running authentication credential worker task=%s credential=%s",
-                            self._task_label(task),
-                            credential["credential_id"],
+                worker_runs: dict[str, int] = {}
+                refreshable_ids = set(valid_ids)
+                worker_ran = False
+                for sweep in range(2):
+                    for credential in setup.credentials:
+                        credential_id = credential["credential_id"]
+                        target = credential["target"]
+                        if sweep and credential_id not in refreshable_ids:
+                            continue
+                        context_valid = (
+                            credential_id in valid_ids
+                            if sweep == 0 and not worker_ran
+                            else authentication_context_is_valid(self.runtime.operation_id, target, credential_id)
                         )
-                        worker_completed = self._run_authentication_credential_worker(
-                            task, setup, credential, flows_by_target[target], tools
-                        )
-                        if not worker_completed:
-                            return self._record_authentication_setup(
-                                task,
-                                AuthenticationSetupResult("failed", reason="browser_session_reset_failed"),
-                                setup,
+                        if context_valid or worker_runs.get(credential_id, 0) >= 2:
+                            continue
+                        while worker_runs.get(credential_id, 0) < 2:
+                            worker_runs[credential_id] = worker_runs.get(credential_id, 0) + 1
+                            worker_ran = True
+                            self._log_workflow(
+                                "running authentication credential worker task=%s credential=%s attempt=%s/2",
+                                self._task_label(task),
+                                credential_id,
+                                worker_runs[credential_id],
                             )
-                        if authentication_context_is_valid(self.runtime.operation_id, target, credential["credential_id"]):
-                            validation_url = authentication_context_validation_url(
-                                self.runtime.operation_id, target, credential["credential_id"]
+                            worker_result = self._run_authentication_credential_worker(
+                                task, setup, credential, flows_by_target[target], tools
                             )
-                            if not validation_url:
+                            if not worker_result.browser_session_ready:
                                 return self._record_authentication_setup(
                                     task,
-                                    AuthenticationSetupResult("failed", reason="missing_validation_url"),
+                                    AuthenticationSetupResult("failed", reason="browser_session_reset_failed"),
                                     setup,
                                 )
-                            self._mark_authentication_flows_validated(
-                                target, flows_by_target[target], validation_url
-                            )
-                            flow_status_by_target[target] = "validated"
-                            break
-                        attempt = authentication_attempt_result(
-                            self.runtime.operation_id, target, credential["credential_id"]
-                        )
-                        if attempt is None:
-                            for flow in flows_by_target[target]:
-                                attempt = record_browser_authentication_attempt(
-                                    self.runtime.operation_id,
-                                    target,
-                                    credential["credential_id"],
-                                    str(flow.get("login_url") or ""),
+                            if authentication_context_is_valid(self.runtime.operation_id, target, credential_id):
+                                validation_url = authentication_context_validation_url(
+                                    self.runtime.operation_id, target, credential_id
                                 )
-                                if attempt is not None:
-                                    break
-                        if attempt and attempt.get("outcome") == "credential_rejected":
-                            scheduled = self._schedule_invalid_credential_replacement(
-                                plan, task, credential, attempt
+                                if not validation_url:
+                                    return self._record_authentication_setup(
+                                        task,
+                                        AuthenticationSetupResult("failed", reason="missing_validation_url"),
+                                        setup,
+                                    )
+                                self._mark_authentication_flows_validated(
+                                    target, flows_by_target[target], validation_url
+                                )
+                                flow_status_by_target[target] = "validated"
+                                refreshable_ids.add(credential_id)
+                                self._log_workflow(
+                                    "authentication credential refresh task=%s credential=%s result=valid attempt=%s/2",
+                                    self._task_label(task), credential_id, worker_runs[credential_id],
+                                )
+                                break
+                            attempt = authentication_attempt_result(
+                                self.runtime.operation_id, target, credential_id
                             )
-                            return self._record_authentication_setup(
-                                task,
-                                AuthenticationSetupResult(
-                                    "unavailable",
-                                    reason=(
-                                        "credential_replacement_pending"
-                                        if scheduled
-                                        else "credential_replacement_unavailable"
+                            if attempt is None:
+                                for flow in flows_by_target[target]:
+                                    attempt = record_browser_authentication_attempt(
+                                        self.runtime.operation_id,
+                                        target,
+                                        credential_id,
+                                        str(flow.get("login_url") or ""),
+                                    )
+                                    if attempt is not None:
+                                        break
+                            if attempt and attempt.get("outcome") == "credential_rejected":
+                                scheduled = self._schedule_invalid_credential_replacement(
+                                    plan, task, credential, attempt
+                                )
+                                return self._record_authentication_setup(
+                                    task,
+                                    AuthenticationSetupResult(
+                                        "unavailable",
+                                        reason=(
+                                            "credential_replacement_pending"
+                                            if scheduled
+                                            else "credential_replacement_unavailable"
+                                        ),
                                     ),
-                                ),
-                                setup,
+                                    setup,
+                                )
+                            if (
+                                flow_status_by_target[target] == "validated"
+                                and worker_result.stalled_before_login
+                                and attempt is None
+                                and worker_runs[credential_id] < 2
+                            ):
+                                self._log_workflow(
+                                    "authentication credential refresh task=%s credential=%s "
+                                    "result=pre_login_stall retrying=true",
+                                    self._task_label(task), credential_id,
+                                )
+                                continue
+                            refreshable_ids.discard(credential_id)
+                            self._log_workflow(
+                                "authentication credential refresh task=%s credential=%s result=invalid "
+                                "attempt=%s/2",
+                                self._task_label(task), credential_id, worker_runs[credential_id],
                             )
-                        if flow_status_by_target[target] != "discovered":
-                            break
-                        self._mark_authentication_flows_invalid(target, flows_by_target[target])
-                        discovered_flows = self._authentication_flow_descriptors(
-                            plan, task, (target,), statuses=("discovered",)
+                            if flow_status_by_target[target] != "discovered":
+                                break
+                            self._mark_authentication_flows_invalid(target, flows_by_target[target])
+                            discovered_flows = self._authentication_flow_descriptors(
+                                plan, task, (target,), statuses=("discovered",)
+                            )
+                            if discovered_flows:
+                                flows_by_target[target] = discovered_flows[:1]
+                                continue
+                            if target in discovery_attempted_targets:
+                                return self._record_authentication_setup(
+                                    task, AuthenticationSetupResult("failed", reason="no_usable_authentication_flow"), setup
+                                )
+                            self._log_workflow(
+                                "running authentication flow discovery task=%s target=%s",
+                                self._task_label(task), target,
+                            )
+                            flows_by_target[target] = self._run_authentication_flow_discovery(
+                                plan,
+                                task,
+                                replace(setup, client_storage_header_bindings=bindings_by_target.get(target, ())),
+                                target,
+                                tools,
+                            )[:1]
+                            discovery_attempted_targets.add(target)
+                            if not flows_by_target[target]:
+                                return self._record_authentication_setup(
+                                    task, AuthenticationSetupResult("failed", reason="no_usable_authentication_flow"), setup
+                                )
+                    valid_ids = tuple(
+                        credential["credential_id"]
+                        for credential in setup.credentials
+                        if authentication_context_is_valid(
+                            self.runtime.operation_id, credential["target"], credential["credential_id"]
                         )
-                        if discovered_flows:
-                            flows_by_target[target] = discovered_flows[:1]
-                            continue
-                        if target in discovery_attempted_targets:
-                            return self._record_authentication_setup(
-                                task, AuthenticationSetupResult("failed", reason="no_usable_authentication_flow"), setup
-                            )
-                        self._log_workflow(
-                            "running authentication flow discovery task=%s target=%s",
-                            self._task_label(task),
-                            target,
-                        )
-                        flows_by_target[target] = self._run_authentication_flow_discovery(
-                            plan,
-                            task,
-                            replace(setup, client_storage_header_bindings=bindings_by_target.get(target, ())),
-                            target,
-                            tools,
-                        )[:1]
-                        discovery_attempted_targets.add(target)
-                        if not flows_by_target[target]:
-                            return self._record_authentication_setup(
-                                task, AuthenticationSetupResult("failed", reason="no_usable_authentication_flow"), setup
-                            )
+                    )
+                    if len(valid_ids) == len(credential_ids) or not any(
+                        credential_id in refreshable_ids
+                        and credential_id not in valid_ids
+                        and worker_runs.get(credential_id, 0) < 2
+                        for credential_id in credential_ids
+                    ):
+                        break
         except Exception as error:
             self._log_workflow(
                 "authentication worker failed task=%s reason=%s",

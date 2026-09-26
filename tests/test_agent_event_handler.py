@@ -47,6 +47,7 @@ def make_handler():
     handler.tool_name_buffer = {}
     handler.tools_used = set()
     handler.tool_counts = {}
+    handler.successful_tool_completions = set()
     handler.tool_use_output_emitted = {}
     handler.tools_with_complete_input = set()
     handler.reasoning_buffer = []
@@ -452,6 +453,32 @@ def test_tool_result_output_redacts_checked_out_credential_values():
     outputs = [event["content"] for event in handler._events if event["type"] == "output"]
     assert "must-not-leak" not in "\n".join(outputs)
     assert "[REDACTED]" in "\n".join(outputs)
+
+
+def test_successful_tool_completion_tracks_only_executed_results_once():
+    handler = make_handler()
+    handler.tool_name_buffer.update({
+        "success": "capture_browser_authenticated_context",
+        "failed": "ensure_authenticated_context",
+        "blocked": "ensure_authenticated_context",
+    })
+    successful_result = {
+        "toolUseId": "success",
+        "status": "success",
+        "content": [{"text": "opaque context captured"}],
+    }
+
+    handler._process_tool_result_from_message(successful_result)
+    handler._process_tool_result_from_message(successful_result)
+    handler._process_tool_result_from_message({
+        "toolUseId": "failed", "status": "error", "content": [{"text": "rejected"}],
+    })
+    handler._process_tool_result_from_message({
+        "toolUseId": "blocked", "status": "success", "_cyber_outcome": "blocked",
+        "_cyber_executed": False, "content": [{"text": "blocked"}],
+    })
+
+    assert handler.successful_tool_completions == {("capture_browser_authenticated_context", "success")}
 
 
 def test_empty_tool_error_emits_failure_reason_instead_of_success_completion(monkeypatch):
