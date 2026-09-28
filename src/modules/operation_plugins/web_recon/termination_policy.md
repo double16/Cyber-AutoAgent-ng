@@ -24,6 +24,10 @@ task or cross the module's non-exploitation boundary.
    to prove or reject the access boundary. Record unavailable identities, MFA factors, or roles as explicit coverage
    gaps. Do not automatically self-register, enumerate identifiers, or alter target state in this read-only module.
 
+Mapped static asset routes are excluded from this phase only after the controller confirms a credential-free 2xx
+response with a static media type. The exclusion and response metadata are retained as a controller artifact; uncertain
+or non-static responses remain in scope.
+
 ### Phase-2 task fan-out
 
 Create separate artifact-producing tasks for unauthenticated posture, authenticated access coverage, and read-only

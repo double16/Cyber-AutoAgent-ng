@@ -20,6 +20,8 @@ confirmation. A vulnerability or intermediate capability is progress, not succes
   MFA, API-key, or OAuth2 adapter instead of copying secrets into artifacts or tool arguments. A normal public sign-up
   flow may create a reusable registered test identity when it is in scope. Use credential-ID-backed comparisons for
   account, role, or tenant authorization testing rather than raw credential JSON.
+- Do not spend individual access-context checks on static assets already confirmed as public 2xx responses; keep those
+  assets available for later content and vulnerability analysis.
 - Validate both client-side behavior and server-side acceptance when relevant. Treat reflection, upload, or client
   execution alone as insufficient when the objective depends on server state.
 - After gaining a capability, test its direct path to the flag. If it does not complete the assigned task, record the

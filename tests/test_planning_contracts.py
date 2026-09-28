@@ -89,6 +89,24 @@ def test_web_phase_three_declares_controller_owned_baseline_workstream():
     contract = load_phase_task_contract("web", 3)
 
     assert contract.controller_mapping_workstreams == {"unauthenticated_baseline"}
+    assert contract.exclude_public_static_assets is True
+
+
+def test_web_recon_access_context_phase_excludes_confirmed_public_static_assets():
+    contract = load_phase_task_contract("web_recon", 2)
+
+    assert contract.exclude_public_static_assets is True
+
+
+def test_public_static_asset_exclusion_contract_requires_boolean():
+    with pytest.raises(ValueError, match="exclude_public_static_assets must be a boolean"):
+        contracts._parse_contract("fixture", {
+            "phase_id": 1,
+            "mode": "fanout",
+            "min_mapping_tasks": 1,
+            "mapping_workstreams": ["mapping"],
+            "exclude_public_static_assets": "true",
+        })
 
 
 def test_web_declares_dependency_based_credential_provisioning_contract():

@@ -45,6 +45,7 @@ class PhaseTaskContract:
     prerequisite_workstreams: frozenset[str] = frozenset()
     registration_attribute: str = ""
     identities_per_role: int = 0
+    exclude_public_static_assets: bool = False
 
 
 @dataclass(frozen=True)
@@ -303,6 +304,9 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         synthesis_workstream = None
         synthesis_execution = None
     allow_direct = bool(raw.get("allow_direct_single_step", False))
+    exclude_public_static_assets = raw.get("exclude_public_static_assets", False)
+    if not isinstance(exclude_public_static_assets, bool):
+        raise ValueError(f"exclude_public_static_assets must be a boolean for {module}")
     direct_workstreams = raw.get("direct_single_step_workstreams", [])
     if not isinstance(direct_workstreams, list) or not all(
         isinstance(item, str) and item.strip() for item in direct_workstreams
@@ -327,6 +331,7 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         synthesis_execution=synthesis_execution,
         allow_direct_single_step=allow_direct,
         direct_single_step_workstreams=normalized_direct_workstreams,
+        exclude_public_static_assets=exclude_public_static_assets,
     )
 
 

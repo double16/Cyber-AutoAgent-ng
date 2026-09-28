@@ -113,6 +113,7 @@ def _record(
     *,
     method: str = "GET",
     status: Any = None,
+    content_type: Any = None,
     technologies: Any = None,
     response_length: Any = None,
     words: Any = None,
@@ -126,6 +127,8 @@ def _record(
         "status": int(status) if str(status or "").isdigit() else None,
         "technologies": technologies if isinstance(technologies, list) else [],
     }
+    if str(content_type or "").strip():
+        record["content_type"] = str(content_type).split(";", 1)[0].strip().lower()
     for key, value in (("response_length", response_length), ("words", words), ("lines", lines)):
         if str(value or "").isdigit():
             record[key] = int(value)
@@ -168,9 +171,17 @@ def _parse_katana(text: str) -> list[dict[str, Any]]:
             continue
         request = value.get("request") if isinstance(value.get("request"), dict) else {}
         response = value.get("response") if isinstance(value.get("response"), dict) else {}
+        response_headers = response.get("headers") if isinstance(response.get("headers"), dict) else {}
         url = request.get("endpoint") or request.get("url") or value.get("url")
         if url:
-            records.append(_record(url, method=request.get("method", "GET"), status=response.get("status_code")))
+            content_type = response.get("content_type") or response.get("content-type")
+            content_type = content_type or response_headers.get("content-type") or response_headers.get("Content-Type")
+            records.append(_record(
+                url,
+                method=request.get("method", "GET"),
+                status=response.get("status_code"),
+                content_type=content_type,
+            ))
     return records or _urls_from_text(text)
 
 
@@ -262,6 +273,7 @@ def _parse_httpx(text: str) -> list[dict[str, Any]]:
                 _record(
                     url,
                     status=value.get("status_code"),
+                    content_type=value.get("content_type") or value.get("content-type"),
                     technologies=value.get("tech") or value.get("technologies"),
                 )
             )
@@ -426,6 +438,7 @@ def _parse_technology_inventory(text: str) -> list[dict[str, Any]]:
                 str(entry["url"]),
                 method=entry.get("method", "GET"),
                 status=entry.get("response_status", entry.get("status")),
+                content_type=entry.get("content_type") or entry.get("mime_type"),
                 technologies=entry.get("technology_clues", entry.get("technologies")),
                 version_strings=entry.get("version_strings"),
                 research_notes=entry.get("research_notes"),
@@ -623,6 +636,11 @@ def records_to_inventory_manifest(
                 "evidence_refs": ([source_ref] if source_ref else []),
             }
             endpoint_attributes: dict[str, Any] = {"interaction": interaction}
+            if record.get("content_type"):
+                endpoint_attributes["response"] = {
+                    "content_type": str(record["content_type"]).split(";", 1)[0].strip().lower(),
+                    "status": record.get("status"),
+                }
             technology_attributes = {
                 "clues": [str(value).strip() for value in record.get("technologies") or [] if str(value).strip()],
                 "version_strings": [

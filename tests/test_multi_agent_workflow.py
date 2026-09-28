@@ -14748,6 +14748,128 @@ def test_task_creation_batches_use_resolved_context_and_preserve_atomic_groups(m
     }
 
 
+def test_public_static_asset_groups_are_excluded_with_durable_metadata(monkeypatch, tmp_path):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Mapping", status="done"),
+            PlanPhase(id=2, title="Credentials", status="done"),
+            PlanPhase(id=3, title="Authentication Coverage", status="active"),
+        ],
+        targets=[OperationTarget("target-1", "https://target.test", "network")],
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=lambda *_args: "{}",
+    )
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda path: f"artifact:{Path(path).name}")
+    monkeypatch.setattr(
+        controller,
+        "_controller_static_asset_probe",
+        lambda _url: {
+            "outcome": "response",
+            "status": 200,
+            "content_type": "image/png",
+            "url": "https://target.test/assets/logo.png",
+        },
+    )
+    manifest = {"items": [{
+        "id": "asset",
+        "kind": "endpoint",
+        "target_id": "target-1",
+        "value": "https://target.test/assets/logo.png",
+        "attributes": {"interaction": {"operations": ["GET"]}},
+    }]}
+    groups = [("target-1", "endpoint", "https://target.test/assets/logo.png", ("asset",))]
+
+    retained = controller._exclude_public_static_asset_groups(
+        plan, plan.phases[0], "artifact:artifacts/inventory.json", manifest, groups,
+    )
+
+    assert retained == []
+    exclusion_files = list((tmp_path / "artifacts" / "static_asset_exclusions").glob("*.json"))
+    exclusion_data = json.loads(exclusion_files[0].read_text(encoding="utf-8"))
+    assert exclusion_data["excluded_assets"] == [{
+        "target_id": "target-1",
+        "item_ids": ["asset"],
+        "url": "https://target.test/assets/logo.png",
+        "status": 200,
+        "content_type": "image/png",
+    }]
+
+
+@pytest.mark.parametrize(
+    ("url", "operations", "probe_result"),
+    [
+        (
+            "https://target.test/assets/app.js",
+            ["GET"],
+            {"outcome": "response", "status": 200, "content_type": "text/html"},
+        ),
+        (
+            "https://target.test/assets/private.css",
+            ["GET"],
+            {"outcome": "response", "status": 401, "content_type": "text/css"},
+        ),
+        (
+            "https://target.test/assets/logo.png",
+            ["GET", "POST"],
+            {"outcome": "response", "status": 200, "content_type": "image/png"},
+        ),
+        (
+            "https://target.test/assets/app.js",
+            ["GET"],
+            {"outcome": "request_error", "error": "timeout"},
+        ),
+    ],
+)
+def test_static_asset_filter_keeps_uncertain_or_non_read_only_routes(
+    monkeypatch, tmp_path, url, operations, probe_result,
+):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Mapping", status="done"),
+            PlanPhase(id=2, title="Credentials", status="done"),
+            PlanPhase(id=3, title="Authentication Coverage", status="active"),
+        ],
+        targets=[OperationTarget("target-1", "https://target.test", "network")],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=lambda *_args: "{}",
+    )
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda path: f"artifact:{Path(path).name}")
+    monkeypatch.setattr(controller, "_controller_static_asset_probe", lambda _url: probe_result)
+    manifest = {"items": [{
+        "id": "endpoint",
+        "kind": "endpoint",
+        "target_id": "target-1",
+        "value": url,
+        "attributes": {"interaction": {"operations": operations}},
+    }]}
+    groups = [("target-1", "endpoint", url, ("endpoint",))]
+
+    retained = controller._exclude_public_static_asset_groups(
+        plan, plan.phases[0], "artifact:artifacts/inventory.json", manifest, groups,
+    )
+
+    assert retained == groups
+    assert not (tmp_path / "artifacts" / "static_asset_exclusions").exists()
+
+
 def test_snapshot_dependent_batches_use_an_earlier_inventory_manifest(monkeypatch):
     plan = OperationPlan(
         objective="assess",

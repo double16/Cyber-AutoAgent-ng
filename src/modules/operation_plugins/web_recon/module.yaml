@@ -50,6 +50,7 @@ planning:
       synthesis_execution: controller
     - phase_id: 2
       mode: fanout
+      exclude_public_static_assets: true
       min_mapping_tasks: 3
       mapping_workstreams:
         - unauthenticated_posture

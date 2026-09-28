@@ -24,6 +24,10 @@ inventory manifest.
    unavailable, record the specific coverage gap. A normal public sign-up flow may create a reusable registered test
    identity unless an operation constraint prohibits that state change.
 
+Mapped static asset routes are excluded from this phase only after the controller confirms a credential-free 2xx
+response with a static media type. The exclusion and response metadata are retained as a controller artifact; uncertain
+or non-static responses remain in scope.
+
 ### Phase-2 task fan-out
 
 Create separate artifact-producing tasks for unauthenticated baseline, authenticated credential coverage, and

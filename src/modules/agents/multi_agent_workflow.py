@@ -335,7 +335,45 @@ class _ScopedBaselineRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(request, fp, code, message, headers, new_url)
 
 
+class _SameServiceRedirectHandler(HTTPRedirectHandler):
+    """Follow only same-service redirects while checking unauthenticated static assets."""
+
+    def __init__(self, service: str) -> None:
+        super().__init__()
+        self.service = service.rstrip("/")
+
+    def redirect_request(
+        self,
+        request: Request,
+        fp: Any,
+        code: int,
+        message: str,
+        headers: Any,
+        new_url: str,
+    ) -> Request | None:
+        parsed = urlparse(new_url)
+        redirected_service = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        if redirected_service.rstrip("/") != self.service:
+            raise HTTPError(
+                request.full_url,
+                code,
+                "Static asset redirect is outside the assigned service boundary",
+                headers,
+                fp,
+            )
+        return super().redirect_request(request, fp, code, message, headers, new_url)
+
+
 _SAFE_BASELINE_HTTP_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_STATIC_ASSET_EXTENSIONS = frozenset({
+    ".js", ".mjs", ".cjs", ".css", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico",
+    ".svg", ".bmp", ".tif", ".tiff", ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp3", ".wav",
+    ".ogg", ".oga", ".m4a", ".mp4", ".webm", ".mov", ".m4v", ".avi",
+})
+_STATIC_ASSET_CONTENT_TYPES = frozenset({
+    "application/javascript", "application/x-javascript", "text/javascript", "text/css", "image/svg+xml",
+    "application/font-woff", "application/x-font-ttf", "application/vnd.ms-fontobject",
+})
 
 
 @dataclass
@@ -3496,6 +3534,134 @@ class MultiAgentWorkflowController:
                 "method": method,
                 "error": str(error)[:500],
             }
+
+    @staticmethod
+    def _controller_static_asset_probe(url: str) -> dict[str, Any]:
+        """Return bounded unauthenticated response metadata for one mapped static candidate."""
+
+        parsed = urlparse(url)
+        service = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        request = Request(url, method="GET", headers={"Accept-Encoding": "identity"})
+        try:
+            opener = build_opener(_SameServiceRedirectHandler(service))
+            with opener.open(request, timeout=10) as response:
+                response.read(1)
+                final_url = response.geturl()
+                final_parsed = urlparse(final_url)
+                final_service = f"{final_parsed.scheme}://{final_parsed.netloc}"
+                if final_service.rstrip("/") != service.rstrip("/"):
+                    return {"outcome": "out_of_boundary", "status": int(response.status)}
+                return {
+                    "outcome": "response",
+                    "status": int(response.status),
+                    "content_type": str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower(),
+                    "url": final_url,
+                }
+        except HTTPError as error:
+            return {
+                "outcome": "response",
+                "status": int(error.code),
+                "content_type": str(error.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
+                if error.headers
+                else "",
+                "url": url,
+            }
+        except (OSError, URLError, ValueError) as error:
+            return {"outcome": "request_error", "error": str(error)[:300]}
+
+    @staticmethod
+    def _is_static_asset_content_type(content_type: str) -> bool:
+        """Return whether an HTTP media type is in the narrow static asset set."""
+
+        normalized = str(content_type or "").split(";", 1)[0].strip().lower()
+        return (
+            normalized in _STATIC_ASSET_CONTENT_TYPES
+            or normalized.startswith(("image/", "font/", "audio/", "video/"))
+        )
+
+    def _exclude_public_static_asset_groups(
+        self,
+        plan: OperationPlan,
+        phase: PlanPhase,
+        snapshot_ref: str,
+        manifest: dict[str, Any],
+        groups: list[tuple[str, str, str, tuple[str, ...]]],
+    ) -> list[tuple[str, str, str, tuple[str, ...]]]:
+        """Remove only durably recorded, confirmed public static asset endpoint groups."""
+
+        items_by_id = {str(item.get("id")): item for item in manifest.get("items", []) if isinstance(item, dict)}
+        excluded = []
+        retained = []
+        for group in groups:
+            if group[1] != "endpoint":
+                retained.append(group)
+                continue
+            endpoint = next(
+                (items_by_id.get(item_id) for item_id in group[3] if items_by_id.get(item_id, {}).get("kind") == "endpoint"),
+                None,
+            )
+            if endpoint is None:
+                retained.append(group)
+                continue
+            url = str(endpoint.get("value") or "")
+            path = urlparse(url).path.casefold()
+            suffix = "." + path.rsplit(".", 1)[-1] if "." in path.rsplit("/", 1)[-1] else ""
+            attributes = endpoint.get("attributes") if isinstance(endpoint.get("attributes"), dict) else {}
+            response_metadata = attributes.get("response") if isinstance(attributes.get("response"), dict) else {}
+            candidate_type = str(response_metadata.get("content_type") or "")
+            if suffix not in _STATIC_ASSET_EXTENSIONS and not self._is_static_asset_content_type(candidate_type):
+                retained.append(group)
+                continue
+            interaction = attributes.get("interaction") if isinstance(attributes.get("interaction"), dict) else {}
+            operations = [str(value).upper() for value in interaction.get("operations", []) if str(value).strip()]
+            if not operations or not set(operations).issubset({"GET", "HEAD"}):
+                retained.append(group)
+                continue
+            result = self._controller_static_asset_probe(url)
+            content_type = str(result.get("content_type") or "")
+            if (
+                result.get("outcome") == "response"
+                and isinstance(result.get("status"), int)
+                and 200 <= result["status"] < 300
+                and self._is_static_asset_content_type(content_type)
+            ):
+                excluded.append({
+                    "target_id": group[0],
+                    "item_ids": list(group[3]),
+                    "url": url,
+                    "status": result["status"],
+                    "content_type": content_type,
+                })
+            else:
+                retained.append(group)
+        if not excluded:
+            return retained
+
+        output_path = (
+            Path(_operation_output_root())
+            / "artifacts"
+            / "static_asset_exclusions"
+            / f"phase-{phase.id}-{hashlib.sha256(snapshot_ref.encode()).hexdigest()[:12]}.json"
+        )
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps({
+                "phase_id": phase.id,
+                "snapshot_ref": snapshot_ref,
+                "excluded_assets": excluded,
+            }, indent=2), encoding="utf-8")
+        except OSError:
+            logger.warning("Unable to persist public static asset exclusions; retaining all endpoint groups")
+            return groups
+        artifact_ref = canonical_artifact_reference(str(output_path))
+        self._emit_workflow_event({
+            "type": "static_asset_exclusions",
+            "phase_id": phase.id,
+            "snapshot_ref": snapshot_ref,
+            "artifact_ref": artifact_ref,
+            "excluded_item_count": sum(len(item["item_ids"]) for item in excluded),
+        })
+        return retained
 
     @staticmethod
     def _controller_baseline_input(
@@ -11600,6 +11766,15 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                 )
                 if not set(item_ids).issubset(assigned_ids)
             ]
+            phase_contract = self._phase_task_contract(phase)
+            if phase_contract is not None and phase_contract.exclude_public_static_assets:
+                groups = self._exclude_public_static_asset_groups(
+                    plan,
+                    phase,
+                    snapshot_ref,
+                    manifest,
+                    groups,
+                )
             if phase.task_creation_mode == "hypothesis_dependent":
                 missing_groups = [
                     label

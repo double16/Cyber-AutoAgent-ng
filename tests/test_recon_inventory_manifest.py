@@ -46,6 +46,16 @@ def test_supported_recon_parsers_extract_urls(source_format, text, expected_url,
     assert records[0]["status"] == expected_status
 
 
+def test_httpx_content_type_is_preserved_as_endpoint_response_metadata():
+    records = manifest_tool._parse_httpx(
+        '{"url":"https://target.test/assets/font","status_code":200,"content_type":"font/woff2; charset=binary"}'
+    )
+    manifest = manifest_tool.records_to_inventory_manifest(records, target_id="target-1")
+    endpoint = next(item for item in manifest["items"] if item["kind"] == "endpoint")
+
+    assert endpoint["attributes"]["response"] == {"content_type": "font/woff2", "status": 200}
+
+
 def test_ffuf_parser_accepts_csv_and_rejects_relative_fuzz_input():
     csv_records = manifest_tool._parse_ffuf("url,status\nhttps://target.test/csv,204\n")
     relative_records = manifest_tool._parse_ffuf('{"results":[{"input":{"FUZZ":"admin"},"status":200}]}')
