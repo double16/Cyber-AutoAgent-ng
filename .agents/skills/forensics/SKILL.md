@@ -134,8 +134,12 @@ Do not install packages or create a replacement database as part of forensic rev
 
 **Step 2: Run the mandatory integrity check**
 
-Run this before any schema discovery or data query. The check validates the database and repairs it. It needs
-a normal SQLite connection, so do not add `-readonly` to this command.
+Run this before any schema discovery or data query, using a normal writable SQLite connection; do not add
+`-readonly`. Opening the database this way lets SQLite perform any required crash recovery first, such as rolling
+back a hot journal left by an interrupted transaction. The `PRAGMA integrity_check` statement then checks the
+database's structural consistency and reports whether it is `ok`; the pragma itself does not repair arbitrary
+corruption. Keep this command separate and sequential so recovery and the integrity result are established before
+any schema discovery or data query.
 
 ```bash
 if ! integrity=$(sqlite3 outputs/cyber_autoagent.db "PRAGMA integrity_check;"); then
