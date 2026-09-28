@@ -2188,6 +2188,19 @@ class MultiAgentWorkflowController:
                 raise WorkflowInvariantError(prerequisite_blocker)
             self._log_workflow("creating tasks phase=%s existing_task_count=%s", self._phase_label(phase), before_count)
             creation = self._create_tasks(plan, phase)
+            if phase.task_creation_mode == "hypothesis_dependent" and creation.batch_count == 0:
+                self._log_workflow(
+                    "closing hypothesis-dependent phase=%s status=partial_failure reason=%s",
+                    self._phase_label(phase),
+                    creation.failure_reason,
+                )
+                previous_signature = self._plan_signature(plan)
+                updated_plan = self._mark_phase(plan, phase.id, "partial_failure")
+                self._emit_plan_output("updated", updated_plan, previous_signature)
+                if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
+                    self._emit_workflow_completion(updated_plan)
+                    return
+                continue
             task = self._get_or_activate_task(phase.id)
             if task:
                 self._log_workflow("task available after creation task=%s phase=%s", self._task_label(task), phase.id)
@@ -2386,6 +2399,15 @@ class MultiAgentWorkflowController:
             if phase.status in {"partial_failure", "blocked"}
         }
         failure_phase_ids = sorted(failed_task_phase_ids | failed_phase_ids)
+        incomplete_hypothesis_phase_ids = sorted(
+            phase.id
+            for phase in plan.phases
+            if phase.produces_hypotheses and phase.status in {"partial_failure", "blocked"}
+            and any(
+                task.status in {"active", "pending", "partial_failure", "blocked"}
+                for task in current_workflow_tasks(self.state.list_tasks(phase=phase.id))
+            )
+        )
         incomplete_phase_ids = sorted({
             *actionable_phase_ids,
             *failure_phase_ids,
@@ -2399,6 +2421,7 @@ class MultiAgentWorkflowController:
             "actionable_task_count": len(actionable),
             "actionable_task_status_counts": dict(sorted(actionable_counts.items())),
             "incomplete_phase_ids": incomplete_phase_ids,
+            "incomplete_hypothesis_phase_ids": incomplete_hypothesis_phase_ids,
             "terminal_phase_completed_with_unresolved_prior_work": terminal_phase_with_unresolved_prior_work,
         })
         partial_count = sum(phase.status == "partial_failure" for phase in plan.phases)
@@ -2426,6 +2449,11 @@ class MultiAgentWorkflowController:
                 message = (
                     "Assessment incomplete: terminal task or phase failures remain in phase(s) "
                     f"{', '.join(str(phase_id) for phase_id in incomplete_phase_ids) or 'none'}"
+                )
+            if incomplete_hypothesis_phase_ids:
+                message += (
+                    "; incomplete hypothesis coverage in phase(s) "
+                    f"{', '.join(str(phase_id) for phase_id in incomplete_hypothesis_phase_ids)}"
                 )
         self._log_workflow(
             "emitting completion phase_count=%s statuses=%s reason=%s actionable=%s",
@@ -11470,6 +11498,13 @@ Return only the requested JSON decision, with at most three concrete evidence ga
             self.state.list_tasks(phase=phase.id, status=["active", "pending"])
         )
         batches = self._task_creation_batches(plan, phase, system_prompt)
+        if phase.task_creation_mode == "hypothesis_dependent" and not batches:
+            return TaskCreationOutcome(
+                created_count=0,
+                attempts=0,
+                failure_reason="No completed hypothesis-covered inventory groups are available for testing.",
+                batch_count=0,
+            )
         self._validate_task_creation_feasibility(phase, batches)
         failure_reasons = []
         attempts = 0
@@ -11684,9 +11719,9 @@ Return only the requested JSON decision, with at most three concrete evidence ga
         for candidate_source_phase in source_phase_ids:
             candidate_snapshot_refs = []
             for task in self.state.list_tasks(phase=candidate_source_phase):
-                if task.status != "done":
-                    continue
                 if phase.task_creation_mode == "hypothesis_dependent":
+                    if task.status not in {"active", "pending", "done", "partial_failure", "blocked"}:
+                        continue
                     basis = task.acceptance.basis
                     if basis.kind != "snapshot" or not basis.snapshot_hash or not basis.item_ids:
                         continue
@@ -11700,6 +11735,8 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                             continue
                         if reference not in candidate_snapshot_refs:
                             candidate_snapshot_refs.append(reference)
+                        if task.status != "done":
+                            continue
                         for item_id in basis.item_ids:
                             prior = hypothesis_sources.get(item_id, ())
                             hypothesis_sources[item_id] = tuple(sorted({*prior, task.task_uid}))
@@ -11720,6 +11757,8 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                             )
                     continue
 
+                if task.status != "done":
+                    continue
                 procedure = task.acceptance.basis.procedure
                 if procedure is None or procedure.output_kind != "inventory_manifest":
                     continue
@@ -11741,6 +11780,8 @@ Return only the requested JSON decision, with at most three concrete evidence ga
         if not snapshot_refs:
             if phase.task_creation_mode == "snapshot_dependent":
                 raise ValueError("snapshot-dependent phase requires a completed prior inventory manifest")
+            if phase.task_creation_mode == "hypothesis_dependent":
+                raise ValueError("hypothesis-dependent phase requires an assigned prior inventory manifest")
             return [self._default_task_creation_batch(plan, phase, system_prompt)]
 
         if len(snapshot_refs) > 1:
@@ -11790,11 +11831,10 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                     "missing_group_count": len(missing_groups),
                     "missing_groups": sorted(missing_groups),
                 })
-                if missing_groups:
-                    raise ValueError(
-                        "hypothesis-dependent phase requires completed hypothesis coverage for every assigned "
-                        "inventory group; missing=" + ", ".join(sorted(missing_groups))
-                    )
+                groups = [
+                    group for group in groups
+                    if set(group[3]).issubset(hypothesis_sources)
+                ]
             if not groups:
                 continue
             empty_batch = TaskCreationBatch(1, 1, snapshot_ref, (), 0)
@@ -11816,6 +11856,8 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                 estimated = math.ceil((base_chars + current_chars) / 4)
                 raw_batches.append((snapshot_ref, tuple(current), estimated))
         if not raw_batches:
+            if phase.task_creation_mode == "hypothesis_dependent":
+                return []
             return [self._default_task_creation_batch(plan, phase, system_prompt)]
         total = len(raw_batches)
         return [

@@ -15017,14 +15017,14 @@ def test_hypothesis_dependent_batches_cover_every_completed_hypothesis(monkeypat
     }
 
 
-def test_hypothesis_dependent_batches_reject_missing_hypothesis_coverage(monkeypatch):
+def test_hypothesis_dependent_batches_record_gaps_and_use_covered_groups(monkeypatch):
     plan = OperationPlan(
         objective="assess",
         current_phase=3,
         total_phases=3,
         phases=[
             PlanPhase(id=1, title="Inventory", status="done"),
-            PlanPhase(id=2, title="Hypotheses", status="done", produces_hypotheses=True),
+            PlanPhase(id=2, title="Hypotheses", status="partial_failure", produces_hypotheses=True),
             PlanPhase(id=3, title="Test", status="active", task_creation_mode="hypothesis_dependent"),
         ],
     )
@@ -15071,8 +15071,151 @@ def test_hypothesis_dependent_batches_reject_missing_hypothesis_coverage(monkeyp
         ],
     )
 
-    with pytest.raises(ValueError, match="missing=http://target.test/two"):
-        controller._task_creation_batches(plan, plan.phases[2], "system")
+    batches = controller._task_creation_batches(plan, plan.phases[2], "system")
+
+    assert len(batches) == 1
+    assert batches[0].item_ids == {"endpoint-1"}
+    assert batches[0].hypothesis_source_task_uids == {"endpoint-1": ("hypothesis-1",)}
+    coverage = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "hypothesis_coverage"
+    )
+    assert coverage["total_group_count"] == 2
+    assert coverage["covered_group_count"] == 1
+    assert coverage["missing_groups"] == ["http://target.test/two"]
+
+
+def test_hypothesis_dependent_phase_with_zero_completed_groups_finishes_incomplete(monkeypatch):
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=3,
+        total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Hypotheses", status="partial_failure", produces_hypotheses=True),
+            PlanPhase(id=3, title="Test", status="active", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    pending = Task(
+        task_uid="hypothesis-1",
+        title="Pending hypothesis",
+        objective="Record a testable hypothesis",
+        phase=2,
+        status="pending",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Frozen endpoint",
+                source_refs=["artifact:artifacts/inventory.json"],
+                snapshot_hash="snapshot-hash",
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="hypothesis",
+                description="Record the hypothesis",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+    )
+    state = FakeState(plan, [pending])
+
+    def mark_phase(current_plan, phase_id, status):
+        state.plan = replace(
+            current_plan,
+            phases=[
+                replace(phase, status=status if phase.id == phase_id else phase.status)
+                for phase in current_plan.phases
+            ],
+            assessment_complete=True,
+        )
+        return state.plan
+
+    state.mark_phase = mark_phase
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+        text_runner=lambda *_args: pytest.fail("no task creator should run without completed hypotheses"),
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    monkeypatch.setattr(
+        controller,
+        "_load_controller_inventory_manifest",
+        lambda *_args: ({"items": []}, "snapshot-hash"),
+    )
+    monkeypatch.setattr(
+        workflow_mod,
+        "_coverage_route_groups",
+        lambda *_args, **_kwargs: [("target-1", "endpoint", "http://target.test/one", ["endpoint-1"])],
+    )
+
+    controller.run()
+
+    assert state.plan.phases[2].status == "partial_failure"
+    assert state.tasks[0].status == "pending"
+    assert controller.runtime.callback_handler.termination_events[0][0] == "partial_failure"
+    assert "incomplete hypothesis coverage in phase(s) 2" in controller.runtime.callback_handler.termination_events[0][1]
+    coverage = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "hypothesis_coverage"
+    )
+    assert coverage["covered_group_count"] == 0
+    assert coverage["missing_groups"] == ["http://target.test/one"]
+    summary = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "workflow_coverage_summary"
+    )
+    assert summary["incomplete_hypothesis_phase_ids"] == [2]
+
+
+def test_hypothesis_dependent_batches_require_valid_assigned_manifest():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Hypotheses", status="partial_failure", produces_hypotheses=True),
+            PlanPhase(id=2, title="Test", status="active", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+        text_runner=lambda *_args: "{}",
+    )
+
+    with pytest.raises(ValueError, match="requires an assigned prior inventory manifest"):
+        controller._task_creation_batches(plan, plan.phases[1], "system")
+
+
+def test_hypothesis_phase_partial_status_without_unfinished_tasks_is_not_reported_as_coverage_gap():
+    plan = OperationPlan(
+        objective="assess",
+        current_phase=2,
+        total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Hypotheses", status="partial_failure", produces_hypotheses=True),
+            PlanPhase(id=2, title="Testing", status="partial_failure", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    completed = Task(task_uid="hypothesis-1", title="Done", objective="assess", phase=1, status="done")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan, [completed]),
+        text_runner=lambda *_args: "{}",
+    )
+
+    controller._emit_workflow_completion(plan)
+
+    summary = next(
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "workflow_coverage_summary"
+    )
+    assert summary["incomplete_hypothesis_phase_ids"] == []
+    assert "incomplete hypothesis coverage" not in controller.runtime.callback_handler.termination_events[0][1]
 
 
 def test_plan_creation_normalizes_following_standard_phase_to_hypothesis_dependent():
