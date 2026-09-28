@@ -12,6 +12,8 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { themeManager } from '../themes/theme-manager.js';
 import { PasswordInput } from './PasswordInput.js';
 import { TokenInput } from './TokenInput.js';
+import { resolveHttpProxyEnvironment } from '../utils/httpProxy.js';
+import { discoverHttpProxies, DiscoveredProxy } from '../services/ProxyDiscoveryService.js';
 
 interface ConfigEditorProps {
   onClose: () => void;
@@ -178,6 +180,10 @@ const CONFIG_FIELDS: ConfigField[] = [
   { key: 'dockerTimeout', label: 'Docker Timeout (s)', type: 'number', section: 'Operations' },
   { key: 'verbose', label: 'Verbose Output', type: 'boolean', section: 'Operations' },
   {
+    key: 'httpProxy', label: 'HTTP Proxy', type: 'text', section: 'Operations',
+    description: 'One proxy URL for HTTP and HTTPS assessment traffic (for example, http://127.0.0.1:8080).'
+  },
+  {
     key: 'bugBountyHeaders', label: 'Bug Bounty Headers (JSON)', type: 'text', section: 'Operations',
     description: 'JSON map of authorized bug bounty marker headers.'
   },
@@ -307,6 +313,10 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
   const [selectedFieldIndex, setSelectedFieldIndex] = useState(0);
   const [editingField, setEditingField] = useState<EditingField>(null);
   const [tempValue, setTempValue] = useState('');
+  const [proxySelectionMode, setProxySelectionMode] = useState<'choices' | 'manual'>('choices');
+  const [discoveredProxies, setDiscoveredProxies] = useState<DiscoveredProxy[]>([]);
+  const [proxyScanStatus, setProxyScanStatus] = useState<'scanning' | 'ready' | 'error'>('ready');
+  const proxyScanRef = React.useRef<AbortController | null>(null);
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [unsavedChanges, setUnsavedChanges] = useState(false);
   const [navigationMode, setNavigationMode] = useState<'sections' | 'fields'>('sections');
@@ -326,6 +336,11 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
 
   // Ref for ESC to prevent navigation mode change when exiting edit mode
   const justExitedViaEscRef = React.useRef(false);
+
+  useEffect(() => () => proxyScanRef.current?.abort(), []);
+  useEffect(() => {
+    if (editingField?.field !== 'httpProxy') proxyScanRef.current?.abort();
+  }, [editingField]);
 
   // Track previous editingField to detect when we exit edit mode
   const prevEditingFieldRef = React.useRef<typeof editingField>(null);
@@ -971,7 +986,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
     // Handle Ctrl/Cmd+S for save
     if ((key.ctrl || key.meta) && (input?.toLowerCase?.() === 's')) {
       // Save the current editing value first
-      if (editingField && tempValue) {
+      if (editingField && (tempValue || editingField.field === 'httpProxy')) {
         const field = getCurrentSectionFields().find(f => f.key === editingField.field);
         if (field) {
           if (field.type === 'number') {
@@ -982,7 +997,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
           } else {
             // Clean and sanitize the value, especially for tokens/keys
             const cleanedValue = cleanInputForKey(field.key, tempValue);
-            updateConfigValue(field.key, cleanedValue);
+            if (updateConfigValue(field.key, cleanedValue) === false) return;
           }
         }
       }
@@ -1048,6 +1063,18 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
   };
 
   const updateConfigValue = useCallback((key: string, value: any) => {
+    if (key === 'httpProxy') {
+      try {
+        resolveHttpProxyEnvironment(value);
+      } catch (error) {
+        showMessage((error as Error).message, 'error', 5000);
+        return false;
+      }
+      updateConfig({ httpProxy: value });
+      setUnsavedChanges(true);
+      return true;
+    }
+
     // Validate temperature for models that require temperature=1.0
     if (key === 'temperature' && value !== null && value !== undefined && value !== '') {
       const capabilities = getModelCapabilities(config.modelId);
@@ -1192,6 +1219,25 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
     }
 
     const currentValue = config[field.key as keyof typeof config];
+
+    if (field.key === 'httpProxy') {
+      proxyScanRef.current?.abort();
+      const controller = new AbortController();
+      proxyScanRef.current = controller;
+      setEditingField({ field: field.key, type: 'text' });
+      setTempValue(String(currentValue || ''));
+      setProxySelectionMode('choices');
+      setDiscoveredProxies([]);
+      setProxyScanStatus('scanning');
+      discoverHttpProxies({ signal: controller.signal }).then(proxies => {
+        if (controller.signal.aborted) return;
+        setDiscoveredProxies(proxies);
+        setProxyScanStatus('ready');
+      }).catch(() => {
+        if (!controller.signal.aborted) setProxyScanStatus('error');
+      });
+      return;
+    }
 
     if (field.type === 'boolean') {
       // Toggle boolean immediately
@@ -1508,6 +1554,42 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
 
   const renderEditingField = (field: ConfigField) => {
     if (!editingField) return null;
+
+    if (field.key === 'httpProxy' && proxySelectionMode === 'choices') {
+      const current = config.httpProxy?.trim();
+      const items = [
+        ...(current ? [{ label: `Keep current: ${current}`, value: '__keep__' }] : []),
+        ...discoveredProxies.map(proxy => ({ label: `${proxy.product}: ${proxy.url}`, value: proxy.url })),
+        { label: 'Enter URL manually', value: '__manual__' },
+        { label: 'No proxy', value: '__none__' },
+      ];
+      return (
+        <Box flexDirection="column">
+          <Text color={theme.muted}>
+            {proxyScanStatus === 'scanning' ? 'Scanning local ports 8080–8089…' :
+              proxyScanStatus === 'error' ? 'Discovery unavailable; enter a URL manually.' :
+                discoveredProxies.length === 0 ? 'No local proxy detected.' : 'Detected local proxies:'}
+          </Text>
+          <SelectInput
+            items={items}
+            onSelect={(item) => {
+              if (item.value === '__manual__') {
+                setProxySelectionMode('manual');
+                return;
+              }
+              if (item.value !== '__keep__' &&
+                  updateConfigValue('httpProxy', item.value === '__none__' ? '' : item.value) === false) return;
+              proxyScanRef.current?.abort();
+              setEditingField(null);
+              setTempValue('');
+              setNavigationMode('fields');
+              const fields = getCurrentSectionFields();
+              if (selectedFieldIndex < fields.length - 1) setSelectedFieldIndex(prev => prev + 1);
+            }}
+          />
+        </Box>
+      );
+    }
 
     // MCP transport (single select with custom updater)
     if (field.key === 'mcp.conn.transport') {
@@ -1870,7 +1952,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
           } else {
             // Clean and sanitize the value, especially for tokens/keys
             const cleanedValue = cleanInputForKey(field.key, value);
-            updateConfigValue(field.key, cleanedValue);
+            if (updateConfigValue(field.key, cleanedValue) === false) return;
           }
 
           setEditingField(null);

@@ -40,7 +40,7 @@ def get_ollama_host(env_reader: EnvironmentReader) -> str:
         candidates = ["http://localhost:11434", "http://host.docker.internal:11434"]
         for host in candidates:
             try:
-                response = requests.get(f"{host}/api/version", timeout=2)
+                response = requests.get(f"{host}/api/version", timeout=2, proxies={"http": None, "https": None})
                 if response.status_code == 200:
                     logger.debug("Found Ollama at %s", host)
                     return host

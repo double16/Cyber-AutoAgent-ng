@@ -113,9 +113,11 @@ describe('ConfigProvider', () => {
                     includeEvidence: undefined,
                 },
                 modelProvider: 'ollama',
+                httpProxy: 'https://proxy.example:8443',
             });
         });
         expect(ctx.config.modelProvider).toBe('ollama');
+        expect(ctx.config.httpProxy).toBe('https://proxy.example:8443');
         expect(ctx.config.reportSettings.includeTimestamps).toBe(false);
         expect(ctx.config.reportSettings.includeEvidence).toBe(false);
 
@@ -126,6 +128,10 @@ describe('ConfigProvider', () => {
         expect(writeFile).toHaveBeenCalledWith(
             '/tmp/cyber-config-test/config.json',
             expect.stringContaining('"modelProvider": "ollama"')
+        );
+        expect(writeFile).toHaveBeenCalledWith(
+            '/tmp/cyber-config-test/config.json',
+            expect.stringContaining('"httpProxy": "https://proxy.example:8443"')
         );
 
         readFile.mockResolvedValueOnce(JSON.stringify({

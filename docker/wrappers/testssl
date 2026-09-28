@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -e
+
+# Find original binary
+REAL_BIN=""
+if [ -x "$(dirname "$0")/testssl.orig" ]; then
+    REAL_BIN="$(dirname "$0")/testssl.orig"
+elif [ -x "$(dirname "$0")/testssl.sh.orig" ]; then
+    REAL_BIN="$(dirname "$0")/testssl.sh.orig"
+elif command -v testssl.orig >/dev/null 2>&1; then
+    REAL_BIN="$(command -v testssl.orig)"
+elif command -v testssl.sh.orig >/dev/null 2>&1; then
+    REAL_BIN="$(command -v testssl.sh.orig)"
+elif [ -x "/usr/local/bin/testssl.orig" ]; then
+    REAL_BIN="/usr/local/bin/testssl.orig"
+elif [ -x "/usr/bin/testssl.orig" ]; then
+    REAL_BIN="/usr/bin/testssl.orig"
+fi
+
+if [ -z "$REAL_BIN" ]; then
+    echo "Error: testssl.orig not found" >&2
+    exit 1
+fi
+
+PROXY="${http_proxy:-${https_proxy:-${HTTP_PROXY:-${HTTPS_PROXY:-}}}}"
+
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+if [ -n "$PROXY" ]; then
+    has_proxy=false
+    for arg in "$@"; do
+        case "$arg" in
+            --proxy*)
+                has_proxy=true
+                break
+                ;;
+        esac
+    done
+    if [ "$has_proxy" = false ]; then
+        # testssl expects host:port without protocol prefix
+        PROXY_CLEAN="${PROXY#*://}" # strip protocol://
+        PROXY_CLEAN="${PROXY_CLEAN%%/*}" # strip any trailing path
+        exec "$REAL_BIN" --proxy "$PROXY_CLEAN" "$@"
+    fi
+fi
+
+exec "$REAL_BIN" "$@"

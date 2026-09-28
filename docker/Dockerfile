@@ -59,6 +59,24 @@ RUN --mount=type=cache,target=/root/.npm \
     npm run build && \
     chown -R cyberagent:cyberagent /app/src/modules/interfaces/react
 
+# Install replay and proxy wrappers for scanning and testing tools
+COPY docker/wrappers/feroxbuster docker/wrappers/ffuf docker/wrappers/dirsearch docker/wrappers/wpscan docker/wrappers/katana \
+     docker/wrappers/nuclei docker/wrappers/httpx docker/wrappers/gobuster docker/wrappers/sqlmap docker/wrappers/commix \
+     docker/wrappers/nikto docker/wrappers/wafw00f docker/wrappers/wapiti docker/wrappers/wfuzz \
+     docker/wrappers/joomscan docker/wrappers/paramspider docker/wrappers/gospider docker/wrappers/dalfox docker/wrappers/sstimap \
+     docker/wrappers/lfimap docker/wrappers/clairvoyance docker/wrappers/subfinder docker/wrappers/cewl docker/wrappers/ncrack \
+     docker/wrappers/testssl docker/wrappers/arjun /tmp/
+RUN for cmd in feroxbuster ffuf dirsearch wpscan katana nuclei httpx gobuster sqlmap \
+               commix nikto wafw00f wapiti wfuzz joomscan paramspider gospider \
+               dalfox sstimap lfimap clairvoyance subfinder cewl ncrack testssl arjun; do \
+        target=$(which "$cmd" 2>/dev/null || true); \
+        if [ -n "$target" ] && [ -f "$target" ]; then \
+            mv "$target" "${target}.orig" && \
+            cp "/tmp/$cmd" "$target" && \
+            chmod 755 "$target"; \
+        fi; \
+    done
+
 RUN /tmp/apt_proxy_clean.sh && \
     rm -rf /tmp/* /var/tmp/*
 

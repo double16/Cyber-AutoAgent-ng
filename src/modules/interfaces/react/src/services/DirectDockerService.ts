@@ -28,6 +28,7 @@ import { Config } from '../contexts/ConfigContext.js';
 import { ContainerManager, DeploymentMode } from './ContainerManager.js';
 import { createLogger } from '../utils/logger.js';
 import { flattenEnvironment } from '../utils/env.js';
+import { resolveHttpProxyEnvironment } from '../utils/httpProxy.js';
 import {
   CyberEventStreamParserState,
   emitStatusEvents,
@@ -601,7 +602,7 @@ export class DirectDockerService extends EventEmitter {
       for (const entry of env) {
         const idx = entry.indexOf('=');
         if (idx > 0) {
-          const key = entry.slice(0, idx).toUpperCase();
+          const key = entry.slice(0, idx);
           const value = entry.slice(idx + 1);
           envMap.set(key, value);
         }
@@ -633,8 +634,11 @@ export class DirectDockerService extends EventEmitter {
       const userEnvironment = flattenEnvironment(config.environment as any);
       for (const [key, value] of Object.entries(userEnvironment)) {
         if (value !== undefined) {
-          envMap.set(key.toUpperCase(), value);
+          envMap.set(key, value);
         }
+      }
+      for (const [key, value] of Object.entries(resolveHttpProxyEnvironment(config.httpProxy))) {
+        envMap.set(key, value);
       }
       env = Array.from(envMap.entries()).map(([key, value]) => `${key}=${value}`);
 

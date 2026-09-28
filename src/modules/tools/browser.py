@@ -14,7 +14,7 @@ import time
 from contextlib import asynccontextmanager, suppress
 from http.cookies import SimpleCookie
 from typing import Any, get_args, get_origin
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from playwright.async_api import (
     BrowserContext,
@@ -90,6 +90,76 @@ def extract_domain(url_or_fqdn: str) -> str:
         return domain_extract.domain
 
     return f"{domain_extract.domain}.{domain_extract.suffix}"
+
+
+def resolve_browser_proxy(
+    proxy: dict[str, Any] | str | None = None,
+    environ: dict[str, str] | None = None,
+) -> dict[str, str] | None:
+    """
+    Resolve proxy configuration for browser sessions.
+
+    Accepts an explicit proxy URL string or dict, or detects proxy settings from
+    environment variables (HTTP_PROXY, HTTPS_PROXY, http_proxy, https_proxy, ALL_PROXY, all_proxy).
+    Also attaches bypass domains from NO_PROXY / no_proxy if set.
+
+    Returns:
+        A dict matching Playwright's ProxySettings schema (e.g. {'server': '...', 'bypass': '...'})
+        or None if no proxy is configured.
+    """
+    env = os.environ if environ is None else environ
+    if isinstance(proxy, dict):
+        res = dict(proxy)
+        if "bypass" not in res:
+            bypass = env.get("NO_PROXY") or env.get("no_proxy")
+            if bypass:
+                res["bypass"] = bypass
+        return res
+
+    raw: str | None = None
+    if isinstance(proxy, str) and proxy.strip():
+        raw = proxy.strip()
+    else:
+        for var in (
+            "http_proxy",
+            "https_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+        ):
+            val = env.get(var, "").strip()
+            if val:
+                raw = val
+                break
+
+    if not raw:
+        return None
+
+    if "://" not in raw:
+        raw = f"http://{raw}"
+
+    parsed = urlparse(raw)
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+
+    scheme = parsed.scheme or "http"
+    server = f"{scheme}://{host}"
+    if parsed.port:
+        server += f":{parsed.port}"
+
+    result: dict[str, str] = {"server": server}
+    if parsed.username:
+        result["username"] = unquote(parsed.username)
+    if parsed.password:
+        result["password"] = unquote(parsed.password)
+
+    bypass = env.get("NO_PROXY") or env.get("no_proxy")
+    if bypass:
+        result["bypass"] = bypass
+
+    return result
 
 
 class InteractionCollector:
@@ -252,6 +322,7 @@ class BrowserService(EventEmitter):
     artifacts_dir: str
     provider: str
     model: str
+    proxy: dict[str, str] | None
 
     def __init__(
             self,
@@ -259,6 +330,7 @@ class BrowserService(EventEmitter):
             model: str,
             artifacts_dir: str | None = None,
             extra_http_headers: dict[str, str] | None = None,
+            proxy: dict[str, Any] | str | None = None,
     ):
         super().__init__()
         api_key = None
@@ -273,14 +345,21 @@ class BrowserService(EventEmitter):
         self.provider = provider
         self.model = model
         self.artifacts_dir = artifacts_dir
+        self.proxy = resolve_browser_proxy(proxy)
         launch_options: dict[str, Any] = {
             "headless": True,
             "viewPort": {"width": 1280, "height": 720},
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-smooth-scrolling",
+                "--ignore-certificate-errors",
             ],
+            "ignoreHTTPSErrors": True,
         }
+
+        if self.proxy:
+            launch_options["proxy"] = self.proxy
+            logger.info("Configured browser proxy: %s", self.proxy.get("server"))
 
         if extra_http_headers:
             launch_options["extra_http_headers"] = extra_http_headers
@@ -994,6 +1073,7 @@ def initialize_browser(
         model: str,
         artifacts_dir: str | None = None,
         extra_http_headers: dict[str, str] | None = None,
+        proxy: dict[str, Any] | str | None = None,
 ):
     """Initialize the shared browser instance.
 
@@ -1023,7 +1103,7 @@ def initialize_browser(
         extra_http_headers = merged
 
     global _BROWSER
-    _BROWSER = BrowserService(provider, model, artifacts_dir, extra_http_headers)
+    _BROWSER = BrowserService(provider, model, artifacts_dir, extra_http_headers, proxy)
     return _BROWSER
 
 

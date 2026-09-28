@@ -104,7 +104,8 @@ class OllamaModel(Model):
             **model_config: Configuration options for the Ollama model.
         """
         self.host = host
-        self.client_args = ollama_client_args or {}
+        self.client_args = dict(ollama_client_args or {})
+        self.client_args.setdefault("trust_env", False)
         validate_config_keys(model_config, self.OllamaConfig)
         self.config = OllamaModel.OllamaConfig(**model_config)
 

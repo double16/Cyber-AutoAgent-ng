@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -e
+
+# Find original binary
+REAL_BIN=""
+if [ -x "$(dirname "$0")/wpscan.orig" ]; then
+    REAL_BIN="$(dirname "$0")/wpscan.orig"
+elif command -v wpscan.orig >/dev/null 2>&1; then
+    REAL_BIN="$(command -v wpscan.orig)"
+elif [ -x "/usr/local/bin/wpscan.orig" ]; then
+    REAL_BIN="/usr/local/bin/wpscan.orig"
+elif [ -x "/usr/bin/wpscan.orig" ]; then
+    REAL_BIN="/usr/bin/wpscan.orig"
+fi
+
+if [ -z "$REAL_BIN" ]; then
+    echo "Error: wpscan.orig not found" >&2
+    exit 1
+fi
+
+PROXY="${http_proxy:-${https_proxy:-${HTTP_PROXY:-${HTTPS_PROXY:-}}}}"
+
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+if [ -n "$PROXY" ]; then
+    has_proxy=false
+    for arg in "$@"; do
+        case "$arg" in
+            --proxy*|--proxy-target-only)
+                has_proxy=true
+                break
+                ;;
+        esac
+    done
+    if [ "$has_proxy" = false ]; then
+        exec "$REAL_BIN" --proxy "$PROXY" --proxy-target-only "$@"
+    fi
+fi
+
+exec "$REAL_BIN" "$@"

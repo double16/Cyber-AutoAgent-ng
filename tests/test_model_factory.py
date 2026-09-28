@@ -1,6 +1,6 @@
 import sys
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -136,11 +136,13 @@ def test_create_bedrock_model_standard_and_thinking(monkeypatch, config_manager)
     assert standard.kwargs["additional_request_fields"]["output_config"]["effort"] == "medium"
     assert standard.kwargs["streaming"] is False
     assert standard._output_tokens == 8192
+    assert standard.kwargs["boto_client_config"].proxies == {}
     assert "top_p" not in standard.kwargs
 
     thinking = mod.create_bedrock_model("thinking", "us-east-1", role="plan_creator")
     assert thinking.kwargs["max_tokens"] == 8192
     assert thinking.kwargs["streaming"] is False
+    assert thinking.kwargs["boto_client_config"].proxies == {}
     assert "existing" in thinking.kwargs["additional_request_fields"]["anthropic_beta"]
 
 
@@ -183,6 +185,7 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     assert ollama_model.kwargs["additional_args"]["think"] == "medium"
     assert ollama_model.kwargs["stream"] is False
     assert ollama_model._output_tokens == 8192
+    assert ollama_model.kwargs["ollama_client_args"]["trust_env"] is False
 
     fake_litellm = SimpleNamespace(get_max_tokens=Mock(return_value=500), context_window_fallbacks=None)
     monkeypatch.setitem(sys.modules, "litellm", fake_litellm)
@@ -199,6 +202,8 @@ def test_create_ollama_litellm_and_gemini_models(monkeypatch, config_manager):
     gemini_model = mod.create_gemini_model("gemini/gemini-pro", "us-east-1", role="plan_creator")
     assert gemini_model.model_id == "gemini-pro"
     assert gemini_model.kwargs["params"]["max_output_tokens"] == 8192
+    assert gemini_model.kwargs["client_args"]["http_options"].client_args == {"trust_env": False}
+    assert gemini_model.kwargs["client_args"]["http_options"].async_client_args == {"trust_env": False}
 
     config_manager.env.pop("GEMINI_API_KEY")
     with pytest.raises(ValueError):
@@ -838,3 +843,46 @@ def test_model_helpers_cover_unavailable_ids_timeouts_and_no_rate_limit(monkeypa
         get_provider=lambda: "ollama", get_rate_limit_config=lambda _provider: None
     ))
     assert mod.configure_model_rate_limits() is None
+
+
+def test_ollama_model_trust_env_default():
+    import modules.config.models.ollama as ollama_mod
+
+    model = ollama_mod.OllamaModel("http://localhost:11434", model_id="llama3")
+    assert model.client_args.get("trust_env") is False
+
+
+def test_ollama_get_model_input_limit_bypasses_proxy():
+    import os
+
+    show_response = Mock()
+    show_response.parameters = "num_ctx 8192"
+    mock_client = Mock()
+    mock_client.show.return_value = show_response
+
+    mod._resolve_prompt_token_limit.cache_clear()
+    with (
+        patch("modules.config.models.factory.ollama.Client", return_value=mock_client) as mock_client_cls,
+        patch.dict(os.environ, {"OLLAMA_CONTEXT_LENGTH": "0"}, clear=True),
+    ):
+        limit = mod._resolve_prompt_token_limit("ollama", "qwen2.5:7b")
+
+    mock_client_cls.assert_called_once()
+    _, kwargs = mock_client_cls.call_args
+    assert kwargs.get("trust_env") is False
+    assert limit == 8192
+
+
+def test_configure_litellm_runtime_disables_proxy():
+    import litellm
+
+    from modules.config.providers.litellm_config import configure_litellm_runtime
+
+    configure_litellm_runtime()
+    assert litellm.client_session is not None
+    assert litellm.client_session.trust_env is False
+    assert litellm.aclient_session.trust_env is False
+    assert litellm.module_level_client.trust_env is False
+    assert litellm.module_level_aclient.trust_env is False
+    assert litellm.aiohttp_trust_env is False
+    assert litellm.disable_aiohttp_trust_env is True

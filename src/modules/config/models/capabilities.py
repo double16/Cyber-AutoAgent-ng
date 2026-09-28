@@ -42,9 +42,7 @@ try:
         ModelInfoBase,
         ProviderConfigManager,
     )
-    from litellm.utils import (
-        supports_reasoning as llm_supports_reasoning,
-    )
+    from litellm.utils import supports_reasoning as llm_supports_reasoning
 except Exception:  # pragma: no cover
     litellm = None  # type: ignore
     ProviderConfigManager = None  # type: ignore
@@ -241,7 +239,11 @@ class ModelCapabilitiesResolver:
                 allowed_params.remove("reasoning_effort")
 
             env_reader = EnvironmentReader()
-            ollama_client = ollama.Client(host=get_ollama_host(env_reader), timeout=get_ollama_timeout(env_reader))
+            ollama_client = ollama.Client(
+                host=get_ollama_host(env_reader),
+                timeout=get_ollama_timeout(env_reader),
+                trust_env=False,
+            )
 
             try:
                 show_response = ollama_client.show(model=model)

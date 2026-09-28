@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 from langfuse import Langfuse
 
+from modules.utils.proxy import configure_langfuse_proxy_bypass
 from modules.utils.redaction import REDACTED, redact
 
 __all__ = ["REDACTED"]
@@ -351,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         print("LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY must be set.", file=sys.stderr)
         return 2
 
+    configure_langfuse_proxy_bypass(langfuse_host=host)
     client = Langfuse(public_key=public_key, secret_key=secret_key, base_url=host)
     try:
         _write_packet(

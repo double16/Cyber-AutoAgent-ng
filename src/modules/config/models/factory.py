@@ -192,7 +192,11 @@ def _resolve_prompt_token_limit(
         if num_ctx >= 2048:
             return min(num_ctx, prompt_token_clamp)
 
-        ollama_client = ollama.Client(host=get_ollama_host(env_reader), timeout=get_ollama_timeout(env_reader))
+        ollama_client = ollama.Client(
+            host=get_ollama_host(env_reader),
+            timeout=get_ollama_timeout(env_reader),
+            trust_env=False,
+        )
 
         try:
             # check if num_ctx is defined in the model
@@ -493,6 +497,7 @@ def create_bedrock_model(
         read_timeout=1200,  # 20 minutes
         connect_timeout=1200,  # 20 minutes
         max_pool_connections=100,
+        proxies={},
     )
 
     # Handle beta features (effort, etc.) passed via kwargs
@@ -656,6 +661,7 @@ def create_ollama_model(
     from modules.agents.patches import patch_ollama_model_json_toolcalls
     from modules.config.models import get_capabilities
     from modules.config.models.ollama import OllamaModel
+
     # patch_ollama_model_token_usage()
 
     # The AgentRepairHook will detect and patch. For models we know need the patch, do it before model use.
@@ -715,6 +721,7 @@ def create_ollama_model(
         max_tokens=llm_max,
         ollama_client_args={
             "timeout": config["timeout"],
+            "trust_env": False,
         },
         keep_alive=config.get("keep_alive"),
         additional_args=additional_args,
@@ -965,10 +972,12 @@ def create_gemini_model(
     )
 
     client_args["http_options"] = HttpOptions(
+        client_args={"trust_env": False},
+        async_client_args={"trust_env": False},
         retry_options=HttpRetryOptions(
             attempts=10,
             exp_base=4.0,
-        )
+        ),
     )
 
     model = GeminiModel(

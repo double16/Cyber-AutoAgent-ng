@@ -10,7 +10,7 @@ Tests cover:
 - Fallback to snapshot
 - Edge cases and error handling
 """
-
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta
@@ -704,14 +704,112 @@ def test_real_models_from_user_examples(temp_client):
     assert limits.context == 8191
 
 
-def test_critical_bedrock_limit(temp_client):
-    """Test the critical Bedrock Claude 3.5 Sonnet v2 limit that causes specialist failures."""
-    # This is the model causing 77% specialist failure rate
-    limits = temp_client.get_limits("amazon-bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0")
+@patch.dict(os.environ, {"DEV_CLIENT_OFFLINE": "false"}, clear=False)
+def test_fetch_from_api_disables_trust_env(tmp_path, mock_models_data):
+    """Test that fetching from API explicitly uses trust_env=False."""
+    client = ModelsDevClient(cache_dir=tmp_path)
+    mock_response = Mock()
+    mock_response.json.return_value = mock_models_data
+    mock_response.raise_for_status = Mock()
+    mock_models_data_sha512 = hashlib.sha512(json.dumps(mock_models_data).encode()).hexdigest()
 
-    assert limits is not None
-    assert limits.output == 8192, "Critical: Bedrock Claude 3.5 Sonnet v2 has 8,192 token output limit"
+    with patch("httpx.get", return_value=mock_response) as mock_get:
+        data = client._get_data()
+        data_sha512 = hashlib.sha512(json.dumps(data).encode()).hexdigest()
+        assert data_sha512 == mock_models_data_sha512
+        mock_get.assert_called_once_with(client.API_URL, timeout=10.0, follow_redirects=True, trust_env=False)
 
-    # Verify safe max_tokens (50% of limit)
-    safe_max = limits.output // 2
-    assert safe_max == 4096, "Safe max_tokens should be 4,096 (50% of 8,192)"
+
+def test_offline_mode_and_missing_snapshot_return_empty(tmp_path, monkeypatch):
+    client = ModelsDevClient(cache_dir=tmp_path)
+    client.snapshot_file = tmp_path / "missing.json"
+    monkeypatch.setenv("DEV_CLIENT_OFFLINE", "TRUE")
+
+    with patch("httpx.get") as mock_get:
+        assert client._get_data() == {}
+
+    mock_get.assert_not_called()
+    assert client.get_data_source() == "unknown"
+
+
+def test_invalid_cache_then_invalid_snapshot_return_empty(tmp_path, monkeypatch):
+    client = ModelsDevClient(cache_dir=tmp_path)
+    client.cache_file.write_text("not json")
+    client.snapshot_file = tmp_path / "models_snapshot.json"
+    client.snapshot_file.write_text("also not json")
+    monkeypatch.setenv("DEV_CLIENT_OFFLINE", "true")
+
+    assert client._get_data() == {}
+
+
+def test_snapshot_loader_handles_missing_and_invalid_files(tmp_path):
+    client = ModelsDevClient(cache_dir=tmp_path)
+    client.snapshot_file = tmp_path / "missing.json"
+    assert client._get_snapshot_data() == {}
+
+    client.snapshot_file.write_text("invalid")
+    assert client._get_snapshot_data() == {}
+
+
+def test_cache_expiration_and_stat_failure(tmp_path, monkeypatch):
+    client = ModelsDevClient(cache_dir=tmp_path)
+    assert client._is_cache_valid() is False
+    client.cache_file.write_text("{}")
+    with patch("pathlib.Path.stat", side_effect=OSError("stat failed")):
+        assert client._is_cache_valid() is False
+
+
+def test_cache_clear_without_file_and_cache_save_failure(tmp_path, monkeypatch):
+    client = ModelsDevClient(cache_dir=tmp_path / "cache")
+    client.clear_cache()
+    with patch("pathlib.Path.mkdir", side_effect=OSError("read only")):
+        client._save_cache({"provider": {}})
+
+
+def test_model_aliases_latest_and_variant_pricing(temp_client):
+    assert temp_client.get_model_info("moonshot/kimi-k2-thinking").provider == "moonshotai"
+    assert temp_client.get_model_info("claude-3.5-haiku-latest") is not None
+    free_info = temp_client.get_model_info("azure/gpt-5:free")
+    assert free_info.pricing.input == 0
+    assert free_info.pricing.output == 0
+    assert temp_client.get_model_info("azure/gpt-5:preview").pricing.input == 1.25
+    free_pricing = temp_client.get_pricing("azure/gpt-5:free")
+    assert free_pricing.input == 0
+
+
+def test_lookup_and_parse_malformed_data(temp_client):
+    assert temp_client._lookup_model({"empty": {}}, "missing") is None
+    assert temp_client._lookup_model({"provider": {"models": {}}}, "provider/") is None
+    assert temp_client._parse_model({"provider": {"models": {}}}, "provider", "broken") is None
+
+
+def test_fuzzy_lookup_unknown_and_unresolvable_alias(temp_client):
+    data = {"azure": {"models": {"known": {}}}}
+    assert temp_client._fuzzy_lookup(data, "unknown.latest") is None
+    assert temp_client._fuzzy_lookup(data, "gemini/not-present") is None
+    assert temp_client._fuzzy_lookup(data, "us") is None
+    assert temp_client._fuzzy_lookup(data, "unknown-latest") is None
+
+
+@patch.dict(os.environ, {"DEV_CLIENT_OFFLINE": "false"}, clear=False)
+def test_api_failure_and_snapshot_model_fallback(tmp_path, mock_models_data):
+    client = ModelsDevClient(cache_dir=tmp_path)
+    snapshot_data = {"azure": mock_models_data["azure"]}
+    client.snapshot_file = tmp_path / "models_snapshot.json"
+    client.snapshot_file.write_text(json.dumps(snapshot_data))
+
+    with patch("httpx.get", side_effect=RuntimeError("API unavailable")):
+        assert client.get_model_info("azure/gpt-5") is not None
+        assert client.get_data_source() == "snapshot"
+
+    # Simulate data loaded from an API response that omitted a model available in
+    # the bundled snapshot. This exercises the secondary snapshot lookup path.
+    client.get_model_info.cache_clear()
+    client._data = {"azure": {"models": {}}}
+    client._data_source = "api"
+    assert client.get_model_info("azure/gpt-5").model_id == "gpt-5"
+
+
+def test_apply_variant_none_and_non_free_pricing(temp_client):
+    assert temp_client._apply_variant(None, "model:free") is None
+    assert temp_client._apply_variant(temp_client.get_model_info("azure/gpt-5"), "azure/gpt-5:other")

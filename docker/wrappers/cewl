@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -e
+
+# Find original binary
+REAL_BIN=""
+if [ -x "$(dirname "$0")/cewl.orig" ]; then
+    REAL_BIN="$(dirname "$0")/cewl.orig"
+elif command -v cewl.orig >/dev/null 2>&1; then
+    REAL_BIN="$(command -v cewl.orig)"
+elif [ -x "/usr/local/bin/cewl.orig" ]; then
+    REAL_BIN="/usr/local/bin/cewl.orig"
+elif [ -x "/usr/bin/cewl.orig" ]; then
+    REAL_BIN="/usr/bin/cewl.orig"
+fi
+
+if [ -z "$REAL_BIN" ]; then
+    echo "Error: cewl.orig not found" >&2
+    exit 1
+fi
+
+PROXY="${http_proxy:-${https_proxy:-${HTTP_PROXY:-${HTTPS_PROXY:-}}}}"
+
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+if [ -n "$PROXY" ]; then
+    has_proxy=false
+    for arg in "$@"; do
+        case "$arg" in
+            --proxy_host*)
+                has_proxy=true
+                break
+                ;;
+        esac
+    done
+    if [ "$has_proxy" = false ]; then
+        # Parse host and port from URL or host:port
+        PROXY_CLEAN="${PROXY#*://}" # strip protocol://
+        PROXY_CLEAN="${PROXY_CLEAN%%/*}" # strip any trailing path
+        PROXY_HOST="${PROXY_CLEAN%%:*}"
+        if [[ "$PROXY_CLEAN" == *:* ]]; then
+            PROXY_PORT="${PROXY_CLEAN##*:}"
+        else
+            PROXY_PORT="8080"
+        fi
+        exec "$REAL_BIN" --proxy_host "$PROXY_HOST" --proxy_port "$PROXY_PORT" "$@"
+    fi
+fi
+
+exec "$REAL_BIN" "$@"

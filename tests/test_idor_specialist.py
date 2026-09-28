@@ -692,3 +692,29 @@ def test_idor_parameter_discovery_path_id():
 
         assert "(path_id_at_3)" in params
         assert not mock_adv.called
+
+
+def test_idor_specialist_requests_respect_proxy(monkeypatch):
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+    recorded_proxies = []
+
+    def mock_request(*args, **kwargs):
+        recorded_proxies.append(kwargs.get("proxies"))
+        return FakeResponse("{}", 200)
+
+    monkeypatch.setattr(ids.requests, "request", mock_request)
+
+    # test _perform_login
+    ids._perform_login("http://example.com/login", {"user": "pass"})
+    # test _send_request
+    rc = ids.RequestConfig(target_url="http://example.com/api")
+    ids._send_request(rc, "http://example.com/api", "GET", None, None, False)
+
+    assert len(recorded_proxies) == 2
+    assert recorded_proxies[0] == {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
+    assert recorded_proxies[1] == {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}

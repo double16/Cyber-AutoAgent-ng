@@ -101,7 +101,7 @@ class TestOllamaHostDetection:
         mock_response = Mock()
         mock_response.status_code = 200
 
-        def side_effect(url, timeout=None):
+        def side_effect(url, timeout=None, **kwargs):
             if "localhost" in url:
                 return mock_response
             else:
@@ -114,7 +114,7 @@ class TestOllamaHostDetection:
 
         # Verify it tested localhost first and found it working
         assert mock_test.call_count >= 1
-        mock_test.assert_any_call("http://localhost:11434/api/version", timeout=2)
+        mock_test.assert_any_call("http://localhost:11434/api/version", timeout=2, proxies={"http": None, "https": None})
 
     @patch.dict(os.environ, {}, clear=True)
     @patch("os.path.exists")
@@ -126,7 +126,7 @@ class TestOllamaHostDetection:
         mock_response = Mock()
         mock_response.status_code = 200
 
-        def side_effect(url, timeout=None):
+        def side_effect(url, timeout=None, **kwargs):
             if "host.docker.internal" in url:
                 return mock_response
             else:
@@ -139,9 +139,9 @@ class TestOllamaHostDetection:
 
         # Verify it tested both options
         assert mock_test.call_count >= 2
-        mock_test.assert_any_call("http://localhost:11434/api/version", timeout=2)
+        mock_test.assert_any_call("http://localhost:11434/api/version", timeout=2, proxies={"http": None, "https": None})
         mock_test.assert_any_call(
-            "http://host.docker.internal:11434/api/version", timeout=2
+            "http://host.docker.internal:11434/api/version", timeout=2, proxies={"http": None, "https": None}
         )
 
     @patch.dict(os.environ, {}, clear=True)

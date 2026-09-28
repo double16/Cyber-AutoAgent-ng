@@ -76,7 +76,7 @@ def validate_ollama_requirements(
 
     # Check if Ollama is running
     try:
-        response = requests.get(f"{ollama_host}/api/version", timeout=5)
+        response = requests.get(f"{ollama_host}/api/version", timeout=5, proxies={"http": None, "https": None})
         if response.status_code != 200:
             raise ConnectionError("Ollama server not responding")
     except Exception as e:
@@ -87,7 +87,7 @@ def validate_ollama_requirements(
 
     # Check if at least one model is available
     try:
-        client = ollama.Client(host=ollama_host)
+        client = ollama.Client(host=ollama_host, trust_env=False)
         models_response = client.list()
         available_models = [
             m.get("model", m.get("name", "")) for m in models_response["models"]
@@ -147,7 +147,9 @@ def validate_bedrock_model_access(region: str) -> None:
 
     # Verify boto3 client can be created with current credentials
     try:
-        boto3.client("bedrock-runtime", region_name=region)
+        from botocore.config import Config as BotocoreConfig
+
+        boto3.client("bedrock-runtime", region_name=region, config=BotocoreConfig(proxies={}))
     except Exception as e:
         logger.debug("Could not create bedrock-runtime client: %s", e)
         # Model-specific errors will be handled by strands-agents during actual usage

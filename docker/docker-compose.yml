@@ -216,6 +216,12 @@ services:
       - TOKENIZERS_PARALLELISM=true
       - STRANDS_NON_INTERACTIVE=true
       - STRANDS_HTTP_ALLOW_INSECURE_SSL=true
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - http_proxy=${http_proxy:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - https_proxy=${https_proxy:-}
+      - NO_PROXY=${NO_PROXY:-}
+      - no_proxy=${no_proxy:-}
       - CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS=${CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS:-}
       - CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS=${CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS:-}
       - CYBER_WORKFLOW_TASK_EXECUTION_CYCLES=${CYBER_WORKFLOW_TASK_EXECUTION_CYCLES:-}
@@ -582,7 +588,7 @@ services:
           cpus: '0.1'
 
   minio:
-    image: docker.io/minio/minio
+    image: pgsty/silo:latest
     container_name: cyber-langfuse-minio
     restart: unless-stopped
     entrypoint: sh

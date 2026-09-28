@@ -21,6 +21,7 @@ from modules.tools.result_cache import (
     cache_result,
     get_cached_result,
 )
+from modules.utils.proxy import resolve_request_proxies
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -834,7 +835,7 @@ def _advanced_subdomain_enum(target: str, errors: list[dict[str, Any]] | None = 
     # Method 4: Certificate transparency fallback using requests
     try:
         url = f"https://crt.sh/?q=%.{target}&output=json"
-        resp = requests.get(url, timeout=30, verify=False)
+        resp = requests.get(url, timeout=30, verify=False, proxies=resolve_request_proxies())
         if resp.ok and resp.text:
             try:
                 cert_data = resp.json()
@@ -908,15 +909,16 @@ def _analyze_live_hosts(hosts: list[str], errors: list[dict[str, Any]] | None = 
                         live_analysis["technologies"].append(str(tech).lower())
     else:
         # Fallback to simple requests checks
+        proxies = resolve_request_proxies()
         for host in hosts[:LIVE_HOSTS_LIMIT]:  # Limit to first 10 for performance
             for protocol in ["https", "http"]:
                 try:
                     test_url = f"{protocol}://{host}"
                     # HEAD first, then GET as fallback (some servers block HEAD)
                     try:
-                        r = requests.head(test_url, timeout=5, verify=False, allow_redirects=True)
+                        r = requests.head(test_url, timeout=5, verify=False, allow_redirects=True, proxies=proxies)
                     except Exception:
-                        r = requests.get(test_url, timeout=5, verify=False, allow_redirects=True)
+                        r = requests.get(test_url, timeout=5, verify=False, allow_redirects=True, proxies=proxies)
 
                     if getattr(r, "status_code", 0):
                         live_analysis["hosts"].append(test_url)

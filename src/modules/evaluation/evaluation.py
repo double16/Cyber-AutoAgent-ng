@@ -64,6 +64,7 @@ from modules.config.models.factory import require_prompt_token_limit
 from modules.config.system.logger import get_logger
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.utils.json_repair import parse_json_response_with_metadata
+from modules.utils.proxy import configure_langfuse_proxy_bypass
 
 from ..config.providers.ollama_config import get_ollama_timeout
 from ..config.system import EnvironmentReader
@@ -277,17 +278,19 @@ class CyberAgentEvaluator:
         self.last_scope_errors: dict[str, str] = {}
         self.evaluation_run_id = uuid.uuid4().hex
         config_manager = get_config_manager()
+        langfuse_host = config_manager.getenv(
+            "LANGFUSE_HOST",
+            (
+                "http://langfuse-web:3000"
+                if os.path.exists("/.dockerenv") or os.path.exists("/app")
+                else "http://localhost:3000"
+            ),
+        )
+        configure_langfuse_proxy_bypass(langfuse_host=langfuse_host)
         self.langfuse = Langfuse(
             public_key=config_manager.getenv("LANGFUSE_PUBLIC_KEY", "cyber-public"),
             secret_key=config_manager.getenv("LANGFUSE_SECRET_KEY", "cyber-secret"),
-            host=config_manager.getenv(
-                "LANGFUSE_HOST",
-                (
-                    "http://langfuse-web:3000"
-                    if os.path.exists("/.dockerenv") or os.path.exists("/app")
-                    else "http://localhost:3000"
-                ),
-            ),
+            host=langfuse_host,
         )
         self.setup_models()
         self.setup_metrics()
@@ -311,8 +314,9 @@ class CyberAgentEvaluator:
         reasoning_kwargs = self._evaluation_reasoning_kwargs(server_type, evaluation_model_id)
         if server_type == "ollama":
             env_reader = EnvironmentReader()
-            client_kwargs={
-                "timeout": get_ollama_timeout(env_reader)
+            client_kwargs = {
+                "timeout": get_ollama_timeout(env_reader),
+                "trust_env": False,
             }
             # Local mode using Ollama
             ollama_host = config_manager.getenv("OLLAMA_HOST", "http://localhost:11434")
@@ -350,9 +354,12 @@ class CyberAgentEvaluator:
                 # Fallback to Titan embeddings as a baseline
                 embed_id = "amazon.titan-embed-text-v2:0"
 
+            from botocore.config import Config as BotocoreConfig
+
             langchain_embeddings = BedrockEmbeddings(
                 model_id=embed_id,
                 region_name=config_manager.get_default_region(),
+                config=BotocoreConfig(proxies={}),
             )
 
             self.llm = LangchainLLMWrapper(langchain_chat)
@@ -362,12 +369,14 @@ class CyberAgentEvaluator:
             # Remote mode using Google GenAI
             langchain_chat = ChatGoogleGenerativeAI(
                 model=evaluation_model_id,
+                client_args={"trust_env": False},
                 **reasoning_kwargs,
             )
             langchain_embeddings = GoogleGenerativeAIEmbeddings(
                 model=config_manager.getenv(
                     "CYBER_AGENT_EMBEDDING_MODEL", server_config.embedding.model_id
-                )
+                ),
+                client_args={"trust_env": False},
             )
 
             self.llm = LangchainLLMWrapper(langchain_chat)
@@ -375,15 +384,20 @@ class CyberAgentEvaluator:
             self._chat_model = langchain_chat
         elif server_type == "bedrock":
             # Remote mode using AWS Bedrock
+            from botocore.config import Config as BotocoreConfig
+
+            boto_config = BotocoreConfig(proxies={})
             langchain_chat = ChatBedrock(
                 model_id=evaluation_model_id,
                 region_name=config_manager.get_default_region(),
+                config=boto_config,
             )
             langchain_embeddings = BedrockEmbeddings(
                 model_id=config_manager.getenv(
                     "CYBER_AGENT_EMBEDDING_MODEL", server_config.embedding.model_id
                 ),
                 region_name=config_manager.get_default_region(),
+                config=boto_config,
             )
 
             self.llm = LangchainLLMWrapper(langchain_chat)

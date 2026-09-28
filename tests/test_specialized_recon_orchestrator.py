@@ -1144,3 +1144,32 @@ def test_generate_recon_tasks_hidden_services_evidence_and_selectors():
     assert hs["evidence"], "hidden service evidence should be present"
     assert "select" in hs["inputs"]
     assert any(sel.get("from") == "intelligence.hidden_services" for sel in hs["inputs"]["select"])
+
+
+def test_specialized_recon_orchestrator_requests_respect_proxy(monkeypatch):
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+    recorded = []
+
+    def mock_get(url, **kwargs):
+        recorded.append(("get", kwargs.get("proxies")))
+        return _Resp(ok=True, text="[]", json_obj=[])
+
+    def mock_head(url, **kwargs):
+        recorded.append(("head", kwargs.get("proxies")))
+        return _Resp(ok=True, status_code=200, headers={"Server": "nginx"})
+
+    monkeypatch.setattr(sro.requests, "get", mock_get)
+    monkeypatch.setattr(sro.requests, "head", mock_head)
+
+    # crt.sh query
+    sro._advanced_subdomain_enum("example.com", errors=[])
+    # live hosts fallback
+    sro._analyze_live_hosts(["example.com"], errors=[])
+
+    assert len(recorded) >= 2
+    assert all(r[1] == {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"} for r in recorded)

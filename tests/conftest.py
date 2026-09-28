@@ -135,6 +135,7 @@ def ollama_taxonomy_client(request):
     client = ollama.Client(
         host=request.config.getoption("ollama_host"),
         timeout=request.config.getoption("ollama_timeout"),
+        trust_env=False,
     )
     try:
         response = client.list()
@@ -361,7 +362,11 @@ def pytest_runtest_setup(item):
         if "://" not in ollama_host:
             ollama_host = "http://" + ollama_host
         try:
-            r = requests.get(f"{ollama_host}/api/tags", timeout=5)
+            r = requests.get(
+                f"{ollama_host}/api/tags",
+                timeout=5,
+                proxies={"http": None, "https": None},
+            )
             r.raise_for_status()
         except (requests.RequestException, ValueError):
             pytest.skip(f"Skipping tests: Ollama is not available at {ollama_host}", allow_module_level=True)

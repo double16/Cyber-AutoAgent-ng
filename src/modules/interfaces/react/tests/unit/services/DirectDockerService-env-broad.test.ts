@@ -48,7 +48,8 @@ const baseConfig = {
     dockerImage: 'cyber:test',
     confirmations: false,
     verbose: true,
-    environment: {customKey: 'custom-value'},
+    environment: {customKey: 'custom-value', http_proxy: 'http://older.example:8080'},
+    httpProxy: 'http://proxy.example:8080',
     mcp: {
         enabled: true,
         connections: [{id: 'tools', transport: 'sse', server_url: 'http://mcp'}],
@@ -214,6 +215,9 @@ describe('DirectDockerService broad environment construction', () => {
         expect(env.EVAL_SUMMARY_MAX_CHARS).toBe('9000');
         expect(env.CYBER_AGENT_PRICING_INPUT).toBe('0.003');
         expect(env.CUSTOMKEY).toBe('custom-value');
+        for (const key of ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']) {
+            expect(env[key]).toBe('http://proxy.example:8080');
+        }
         expect(events.map(event => event.content).join('\n')).toContain('Using configured Langfuse host');
     });
 
@@ -227,7 +231,7 @@ describe('DirectDockerService broad environment construction', () => {
 
         await expect(service.executeAssessment(
             {module: 'web', target: 'example.com'} as any,
-            {...baseConfig, outputDir: path.join(tempRoot!, 'cyber-outputs'), observability: false, autoEvaluation: false, environment: {}, mcp: {enabled: false, connections: []}} as any
+            {...baseConfig, httpProxy: '', outputDir: path.join(tempRoot!, 'cyber-outputs'), observability: false, autoEvaluation: false, environment: {}, mcp: {enabled: false, connections: []}} as any
         )).rejects.toThrow('abort-after-create');
 
         const env = Object.fromEntries((createContainer.mock.calls[0][0] as any).Env.map((entry: string) => {
@@ -236,6 +240,8 @@ describe('DirectDockerService broad environment construction', () => {
         }));
         expect(env.ENABLE_OBSERVABILITY).toBe('false');
         expect(env.ENABLE_AUTO_EVALUATION).toBe('false');
+        expect(env.http_proxy).toBeUndefined();
+        expect(env.https_proxy).toBeUndefined();
         expect(events.map(event => event.content).join('\n')).toContain('Disabled by user configuration in single-container mode');
     });
 });

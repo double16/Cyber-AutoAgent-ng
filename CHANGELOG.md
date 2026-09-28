@@ -4,6 +4,8 @@
 
 ### Features
 
+- Automatically discover intercepting proxies configured in HTTP_PROXY and HTTPS_PROXY and proxy assessment requests
+  through it.
 - Add a seven-day Qdrant semantic cache for successful web-search responses, shared across operations that use the
   same embedding model and conservatively reused only for high-confidence matches.
 - Add `--reset-phases` continuation mode that selectively resets phases, archives prior tasks, and creates fresh task

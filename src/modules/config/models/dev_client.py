@@ -204,6 +204,19 @@ class ModelsDevClient:
             if info:
                 return self._apply_variant(info, model_id)
 
+        # Fallback to embedded snapshot if model is missing in live API/cache
+        if self._data_source != "snapshot" and self.snapshot_file.exists():
+            snapshot_data = self._get_snapshot_data()
+            if snapshot_data:
+                for variant in variants:
+                    info = self._lookup_model(snapshot_data, variant)
+                    if info:
+                        return self._apply_variant(info, model_id)
+
+                    info = self._fuzzy_lookup(snapshot_data, variant)
+                    if info:
+                        return self._apply_variant(info, model_id)
+
         logger.debug(f"Model not found: {model_id}")
         return None
 
@@ -306,6 +319,20 @@ class ModelsDevClient:
         self._data = None
         self._data_source = None
 
+    def _get_snapshot_data(self) -> dict:
+        """Load data from embedded snapshot file.
+
+        Returns:
+            Dictionary with provider data from snapshot, or empty dict if failed
+        """
+        if self.snapshot_file.exists():
+            try:
+                with open(self.snapshot_file) as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load snapshot: {e}")
+        return {}
+
     def _get_data(self) -> dict:
         """Get models data from cache, API, or snapshot (in priority order).
 
@@ -341,7 +368,7 @@ class ModelsDevClient:
 
                 # import here for unit test mocks
                 import httpx
-                response = httpx.get(self.API_URL, timeout=10.0, follow_redirects=True)
+                response = httpx.get(self.API_URL, timeout=10.0, follow_redirects=True, trust_env=False)
                 response.raise_for_status()
                 self._data = response.json()
                 self._data_source = "api"
