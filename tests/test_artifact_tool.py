@@ -501,6 +501,20 @@ def test_read_artifact_lists_immediate_files_when_given_a_directory(tmp_path: Pa
     assert "hidden.txt" not in result
 
 
+def test_artifact_directory_guidance_rejects_unrepresentable_output(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "evidence.txt").write_text("proof", encoding="utf-8")
+    reader = create_artifact_reader(48_000, max_output_chars=1)
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match="output limit is too small"),
+    ):
+        reader("artifacts")
+
+
 def test_read_artifact_directory_listing_is_bounded(tmp_path: Path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()

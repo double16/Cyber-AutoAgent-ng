@@ -3,6 +3,7 @@ import json
 import pytest
 
 from modules.tools.credential_management import execute_credential_management
+from modules.tools.credential_management import main as credential_management_main
 from modules.tools.credentials import complete_credential_rotation, stage_credential_rotation
 from modules.tools.memory import SQLiteApplicationStore, Task, create_tasks
 from tests.helpers.acceptance import make_acceptance
@@ -38,6 +39,22 @@ def test_management_inventory_is_secret_safe_and_includes_history(tmp_path):
     assert result["credentials"][0]["history"][-1]["status"] == "valid"
     assert "secret-value" not in json.dumps(result)
     assert "payload" not in result["credentials"][0]
+
+
+def test_management_rejects_output_directory_without_database(tmp_path):
+    with pytest.raises(ValueError, match="database does not exist"):
+        execute_credential_management(
+            ["--output-dir", str(tmp_path), "--target", "https://app.example.test", "list"]
+        )
+
+
+def test_management_cli_converts_storage_errors_to_exit_message(monkeypatch):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["credential_management", "--output-dir", "/missing", "--target", "example.test", "list"],
+    )
+    with pytest.raises(SystemExit, match="credential database does not exist"):
+        credential_management_main()
 
 
 def test_management_queues_and_cancels_only_eligible_operation_credentials(tmp_path):
