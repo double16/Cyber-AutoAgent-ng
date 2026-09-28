@@ -18,6 +18,7 @@ import { AssessmentParams } from '../types/Assessment.js';
 import { Config } from '../contexts/ConfigContext.js';
 import { EventType } from '../types/events.js';
 import { flattenEnvironment } from '../utils/env.js';
+import { resolveHttpProxyEnvironment } from '../utils/httpProxy.js';
 import {
   CyberEventStreamParserState,
   emitStatusEvents,
@@ -850,6 +851,7 @@ export class PythonExecutionService extends EventEmitter {
       for (const [key, value] of Object.entries(userEnvironment)) {
         env[key] = value;
       }
+      Object.assign(env, resolveHttpProxyEnvironment(config.httpProxy));
       // Only set AWS credentials/bearer if provided in config; do not overwrite existing env with empty strings
       if (config.awsAccessKeyId) env.AWS_ACCESS_KEY_ID = config.awsAccessKeyId;
       if (config.awsSecretAccessKey) env.AWS_SECRET_ACCESS_KEY = config.awsSecretAccessKey;

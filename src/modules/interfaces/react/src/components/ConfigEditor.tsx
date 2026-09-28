@@ -12,6 +12,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { themeManager } from '../themes/theme-manager.js';
 import { PasswordInput } from './PasswordInput.js';
 import { TokenInput } from './TokenInput.js';
+import { resolveHttpProxyEnvironment } from '../utils/httpProxy.js';
 
 interface ConfigEditorProps {
   onClose: () => void;
@@ -177,6 +178,10 @@ const CONFIG_FIELDS: ConfigField[] = [
   { key: 'maxThreads', label: 'Max Threads', type: 'number', section: 'Operations' },
   { key: 'dockerTimeout', label: 'Docker Timeout (s)', type: 'number', section: 'Operations' },
   { key: 'verbose', label: 'Verbose Output', type: 'boolean', section: 'Operations' },
+  {
+    key: 'httpProxy', label: 'HTTP Proxy', type: 'text', section: 'Operations',
+    description: 'One proxy URL for HTTP and HTTPS assessment traffic (for example, http://127.0.0.1:8080).'
+  },
   {
     key: 'bugBountyHeaders', label: 'Bug Bounty Headers (JSON)', type: 'text', section: 'Operations',
     description: 'JSON map of authorized bug bounty marker headers.'
@@ -971,7 +976,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
     // Handle Ctrl/Cmd+S for save
     if ((key.ctrl || key.meta) && (input?.toLowerCase?.() === 's')) {
       // Save the current editing value first
-      if (editingField && tempValue) {
+      if (editingField && (tempValue || editingField.field === 'httpProxy')) {
         const field = getCurrentSectionFields().find(f => f.key === editingField.field);
         if (field) {
           if (field.type === 'number') {
@@ -982,7 +987,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
           } else {
             // Clean and sanitize the value, especially for tokens/keys
             const cleanedValue = cleanInputForKey(field.key, tempValue);
-            updateConfigValue(field.key, cleanedValue);
+            if (updateConfigValue(field.key, cleanedValue) === false) return;
           }
         }
       }
@@ -1048,6 +1053,18 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
   };
 
   const updateConfigValue = useCallback((key: string, value: any) => {
+    if (key === 'httpProxy') {
+      try {
+        resolveHttpProxyEnvironment(value);
+      } catch (error) {
+        showMessage((error as Error).message, 'error', 5000);
+        return false;
+      }
+      updateConfig({ httpProxy: value });
+      setUnsavedChanges(true);
+      return true;
+    }
+
     // Validate temperature for models that require temperature=1.0
     if (key === 'temperature' && value !== null && value !== undefined && value !== '') {
       const capabilities = getModelCapabilities(config.modelId);
@@ -1870,7 +1887,7 @@ export const ConfigEditor: React.FC<ConfigEditorProps> = ({ onClose }) => {
           } else {
             // Clean and sanitize the value, especially for tokens/keys
             const cleanedValue = cleanInputForKey(field.key, value);
-            updateConfigValue(field.key, cleanedValue);
+            if (updateConfigValue(field.key, cleanedValue) === false) return;
           }
 
           setEditingField(null);

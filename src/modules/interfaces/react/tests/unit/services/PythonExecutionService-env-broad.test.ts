@@ -64,7 +64,8 @@ describe('PythonExecutionService broad environment construction', () => {
             confirmations: true,
             verbose: false,
             outputDir: 'outputs',
-            environment: {extra_env: 'extra'},
+            environment: {extra_env: 'extra', http_proxy: 'http://older.example:8080'},
+            httpProxy: 'http://127.0.0.1:8080',
             awsAccessKeyId: 'AKIA',
             awsSecretAccessKey: 'SECRET',
             awsSessionToken: 'SESSION',
@@ -148,6 +149,9 @@ describe('PythonExecutionService broad environment construction', () => {
             '--region', 'us-west-1',
         ]));
         expect(opts.detached).toBe(true);
+        for (const key of ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY']) {
+            expect(opts.env[key]).toBe('http://127.0.0.1:8080');
+        }
         expect(opts.env.CYBER_OBJECTIVE).toBe('audit api');
         expect(opts.env.BYPASS_TOOL_CONSENT).toBe('false');
         expect(opts.env.AWS_ACCESS_KEY_ID).toBe('AKIA');
@@ -166,6 +170,41 @@ describe('PythonExecutionService broad environment construction', () => {
         expect(opts.env.CYBER_AGENT_PRICING_OUTPUT).toBe('0.009');
         expect(opts.env.EXTRA_ENV).toBe('extra');
         expect(events.some(event => event.type === 'operation_finalized')).toBe(true);
+    });
+
+    it('preserves inherited proxy variables when the field is blank', async () => {
+        const names = ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY'] as const;
+        const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+        try {
+            for (const name of names) process.env[name] = `http://${name}.example:8080`;
+            const {PythonExecutionService} = await load();
+            const service = new PythonExecutionService();
+            (service as any).preflightChecks = jest.fn(async () => true);
+            const promise = service.executeAssessment(
+                {module: 'web', target: 'example.com', objective: 'audit'} as any,
+                {
+                    budgetMaxDuration: 60,
+                    modelProvider: 'litellm',
+                    modelId: 'gpt-test',
+                    awsRegion: 'us-east-1',
+                    confirmations: false,
+                    verbose: false,
+                    outputDir: 'outputs',
+                    environment: {},
+                    httpProxy: '',
+                } as any
+            );
+            await actPromiseTick();
+            await promise;
+
+            const opts = (spawn.mock.calls[0] as any)[2];
+            for (const name of names) expect(opts.env[name]).toBe(`http://${name}.example:8080`);
+        } finally {
+            for (const name of names) {
+                if (previous[name] === undefined) delete process.env[name];
+                else process.env[name] = previous[name];
+            }
+        }
     });
 });
 

@@ -192,6 +192,12 @@ are unavailable.
 The React configuration editor stores settings in `~/.cyber-autoagent/config.json`. Environment variables and CLI
 options are also supported. CLI values take precedence over saved configuration for the same setting.
 
+In the editor's Operations section, **HTTP Proxy** accepts one `http://` or `https://` proxy URL, such as
+`http://127.0.0.1:8080`. It sets `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY` to that URL for new
+assessment runs in local Python and Docker modes. Leave it blank to use the environment's existing proxy settings.
+For Docker runs, the proxy host must be reachable from the container; `127.0.0.1` refers to the container itself.
+The field does not configure the TUI process's own network requests. `NO_PROXY` remains an environment setting.
+
 Common provider configuration includes:
 
 ```bash

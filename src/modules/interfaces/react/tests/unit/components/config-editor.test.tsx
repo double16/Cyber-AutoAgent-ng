@@ -50,6 +50,9 @@ jest.unstable_mockModule('ink-text-input', () => ({
             <button onClick={() => onChange?.('42')}>text-change-number</button>
             <button onClick={() => onChange?.('updated-value')}>text-change</button>
             <button onClick={() => onSubmit?.('updated-value')}>text-submit</button>
+            <button onClick={() => onSubmit?.('invalid-proxy')}>invalid-proxy-submit</button>
+            <button onClick={() => onSubmit?.('http://proxy.example:8080')}>proxy-submit</button>
+            <button onClick={() => onSubmit?.('')}>clear-submit</button>
         </div>
     ),
     UncontrolledTextInput: ({onSubmit}: any) => (
@@ -174,6 +177,44 @@ describe('ConfigEditor', () => {
         sendInput('', {escape: true});
         sendInput('', {escape: true});
         expect(textFromTree(view.toJSON())).toContain('Configuration Editor');
+    });
+
+    it('edits one proxy field and keeps invalid input open for correction', async () => {
+        const {ConfigEditor} = await load();
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
+            await Promise.resolve();
+        });
+
+        sendInput('', {downArrow: true});
+        sendInput('', {return: true});
+        for (let index = 0; index < 7; index += 1) sendInput('', {downArrow: true});
+        expect(textFromTree(view.toJSON())).toContain('HTTP Proxy');
+        sendInput('', {return: true});
+
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'invalid-proxy-submit')!
+                .props.onClick();
+        });
+        expect(updateConfig).not.toHaveBeenCalledWith({httpProxy: 'invalid-proxy'});
+        expect(textFromTree(view.toJSON())).toContain('Invalid HTTP proxy URL');
+        expect(textFromTree(view.toJSON())).toContain('text-input:');
+
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'proxy-submit')!
+                .props.onClick();
+        });
+        expect(updateConfig).toHaveBeenCalledWith({httpProxy: 'http://proxy.example:8080'});
+
+        sendInput('', {upArrow: true});
+        sendInput('', {return: true});
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'clear-submit')!
+                .props.onClick();
+        });
+        expect(updateConfig).toHaveBeenCalledWith({httpProxy: ''});
+        act(() => view.unmount());
     });
 
     it('navigates MCP fields and triggers connection actions', async () => {
