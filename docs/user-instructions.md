@@ -192,9 +192,14 @@ are unavailable.
 The React configuration editor stores settings in `~/.cyber-autoagent/config.json`. Environment variables and CLI
 options are also supported. CLI values take precedence over saved configuration for the same setting.
 
-In the editor's Operations section, **HTTP Proxy** accepts one `http://` or `https://` proxy URL, such as
-`http://127.0.0.1:8080`. It sets `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY` to that URL for new
-assessment runs in local Python and Docker modes. Leave it blank to use the environment's existing proxy settings.
+In the editor's Operations section, **HTTP Proxy** scans local private IPv4 addresses and localhost on ports
+8080–8089 when opened. It offers listeners verified as Burp Suite, OWASP ZAP, or mitmproxy in a drop-down, preferring
+a private address when the same proxy is also reachable on localhost. You can still enter an `http://` or `https://`
+URL manually or choose **No proxy**. Discovery does not change the saved setting until you select a choice and save.
+The selected URL sets `http_proxy`, `https_proxy`, `HTTP_PROXY`, and `HTTPS_PROXY` for new assessment runs in local
+Python and Docker modes. An empty field uses the environment's existing proxy settings. Discovery sees only the
+network interfaces available to the TUI process; if the TUI runs inside Docker, enter a proxy bound only on the host
+manually.
 For Docker runs, the proxy host must be reachable from the container; `127.0.0.1` refers to the container itself.
 The field does not configure the TUI process's own network requests. `NO_PROXY` remains an environment setting.
 

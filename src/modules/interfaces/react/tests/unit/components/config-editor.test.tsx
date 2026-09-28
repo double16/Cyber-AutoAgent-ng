@@ -15,6 +15,7 @@ const updateConfig = jest.fn((updates: any) => {
     config = {...config, ...updates};
 });
 const saveConfig = jest.fn<() => Promise<void>>(async () => undefined);
+const discoverHttpProxies = jest.fn(async () => [] as Array<{product: string; url: string; fingerprint: string}>);
 
 const inputHandlers: Array<(input: string, key: any) => void> = [];
 
@@ -32,19 +33,18 @@ jest.unstable_mockModule('../../../src/contexts/ConfigContext.js', () => ({
     useConfig: () => ({config, updateConfig, saveConfig}),
 }));
 
-jest.unstable_mockModule('ink-select-input', () => ({
-    default: ({items, onSelect}: any) => (
-        <div>
-            <span>select:{items?.map((item: any) => item.label).join('|')}</span>
-            <button onClick={() => onSelect(items?.[0])}>select-first</button>
-            <button onClick={() => onSelect(items?.[1] || items?.[0])}>select-second</button>
-            <button onClick={() => onSelect(items?.[2] || items?.[0])}>select-third</button>
-        </div>
-    ),
-}));
+jest.unstable_mockModule('../../../src/services/ProxyDiscoveryService.js', () => ({discoverHttpProxies}));
 
 jest.unstable_mockModule('ink-text-input', () => ({
-    default: ({value, onChange, onSubmit}: any) => (
+    default: ({value, onChange, onSubmit, items, onSelect}: any) => items ? (
+        <div>
+            <span>select:{items.map((item: any) => item.label).join('|')}</span>
+            <button onClick={() => onSelect(items[0])}>select-first</button>
+            <button onClick={() => onSelect(items[1] || items[0])}>select-second</button>
+            <button onClick={() => onSelect(items[2] || items[0])}>select-third</button>
+            <button onClick={() => onSelect(items[3] || items[0])}>select-fourth</button>
+        </div>
+    ) : (
         <div>
             <span>text-input:{value}</span>
             <button onClick={() => onChange?.('42')}>text-change-number</button>
@@ -127,6 +127,8 @@ describe('ConfigEditor', () => {
         };
         updateConfig.mockClear();
         saveConfig.mockClear();
+        discoverHttpProxies.mockReset();
+        discoverHttpProxies.mockResolvedValue([]);
         inputHandlers.length = 0;
         delete (global as any).__inkInputHandler;
     });
@@ -156,14 +158,18 @@ describe('ConfigEditor', () => {
         expect(textFromTree(view.toJSON())).toContain('Primary Model');
 
         sendInput('', {return: true});
-        expect(textFromTree(view.toJSON())).toContain('text-input:');
-
-        sendInput('', {downArrow: true});
+        expect(textFromTree(view.toJSON())).toContain('select:AWS Bedrock');
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'select-first')!.props.onClick();
+        });
         sendInput('', {return: true});
+        expect(textFromTree(view.toJSON())).toContain('text-input:');
         act(() => {
             view.root.findAllByType('button').find(button => button.props.children === 'text-change')!.props.onClick();
         });
-        sendInput('', {return: true});
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'text-submit')!.props.onClick();
+        });
         expect(textFromTree(view.toJSON())).toContain('Primary Model');
 
         sendInput('s', {ctrl: true});
@@ -191,7 +197,16 @@ describe('ConfigEditor', () => {
         sendInput('', {return: true});
         for (let index = 0; index < 7; index += 1) sendInput('', {downArrow: true});
         expect(textFromTree(view.toJSON())).toContain('HTTP Proxy');
-        sendInput('', {return: true});
+        await act(async () => {
+            sendInput('', {return: true});
+            await Promise.resolve();
+        });
+        expect(discoverHttpProxies).toHaveBeenCalledTimes(1);
+        expect(textFromTree(view.toJSON())).toContain('No local proxy detected');
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'select-first')!
+                .props.onClick();
+        });
 
         act(() => {
             view.root.findAllByType('button').find(button => button.props.children === 'invalid-proxy-submit')!
@@ -208,12 +223,42 @@ describe('ConfigEditor', () => {
         expect(updateConfig).toHaveBeenCalledWith({httpProxy: 'http://proxy.example:8080'});
 
         sendInput('', {upArrow: true});
-        sendInput('', {return: true});
+        await act(async () => {
+            sendInput('', {return: true});
+            await Promise.resolve();
+        });
         act(() => {
-            view.root.findAllByType('button').find(button => button.props.children === 'clear-submit')!
+            view.root.findAllByType('button').find(button => button.props.children === 'select-third')!
                 .props.onClick();
         });
         expect(updateConfig).toHaveBeenCalledWith({httpProxy: ''});
+        act(() => view.unmount());
+    });
+
+    it('offers detected proxies without changing the saved value until selected', async () => {
+        discoverHttpProxies.mockResolvedValueOnce([
+            {product: 'Burp Suite', url: 'http://192.168.1.4:8080', fingerprint: 'cert-1'},
+        ]);
+        const {ConfigEditor} = await load();
+        let view!: ReactTestRenderer;
+        await act(async () => {
+            view = TestRenderer.create(<ConfigEditor onClose={jest.fn()}/>);
+            await Promise.resolve();
+        });
+        sendInput('', {downArrow: true});
+        sendInput('', {return: true});
+        for (let index = 0; index < 7; index += 1) sendInput('', {downArrow: true});
+        await act(async () => {
+            sendInput('', {return: true});
+            await Promise.resolve();
+        });
+        expect(textFromTree(view.toJSON())).toContain('Burp Suite: http://192.168.1.4:8080');
+        expect(updateConfig).not.toHaveBeenCalledWith(expect.objectContaining({httpProxy: expect.any(String)}));
+        act(() => {
+            view.root.findAllByType('button').find(button => button.props.children === 'select-first')!
+                .props.onClick();
+        });
+        expect(updateConfig).toHaveBeenCalledWith({httpProxy: 'http://192.168.1.4:8080'});
         act(() => view.unmount());
     });
 
