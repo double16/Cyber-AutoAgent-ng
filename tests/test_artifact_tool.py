@@ -14,16 +14,30 @@ from modules.tools.artifact import (
     ARTIFACT_READ_OVERLAP_GUARD_MARKER,
     ARTIFACT_READ_POLICY_VIOLATION_MARKER,
     ARTIFACT_READ_REPEAT_GUARD_MARKER,
-    ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER,
     artifact_max_bytes_for_context_window,
     artifact_review_metadata,
     create_artifact_reader,
+    create_artifact_searcher,
     create_bounded_artifact_reader,
+    create_bounded_artifact_searcher,
     resolve_operation_artifact_path,
     resolve_tool_result_max_chars,
 )
 
 READ_ARTIFACT = create_artifact_reader(48_000)
+SEARCH_ARTIFACT = create_artifact_searcher()
+
+
+def test_artifact_read_and_search_tools_have_separate_schemas():
+    read_schema = READ_ARTIFACT.tool_spec["inputSchema"]["json"]["properties"]
+    search_schema = SEARCH_ARTIFACT.tool_spec["inputSchema"]["json"]["properties"]
+
+    assert READ_ARTIFACT.tool_name == "read_artifact"
+    assert {"start_line", "max_lines", "start_byte", "max_bytes"} <= read_schema.keys()
+    assert "search_pattern" not in read_schema
+    assert SEARCH_ARTIFACT.tool_name == "search_artifact"
+    assert {"search_pattern", "match_offset", "max_matches"} <= search_schema.keys()
+    assert "start_line" not in search_schema
 
 
 def test_artifact_page_budget_scales_with_context_window_and_clamps():
@@ -62,6 +76,171 @@ def test_read_artifact_returns_bounded_lines(tmp_path: Path):
 
     assert "'content': 'two\\nthree'" in result
     assert "'total_lines': 4" in result
+
+
+def test_search_artifact_supports_literal_and_regex_context(tmp_path: Path):
+    artifact = tmp_path / "bundle.js"
+    artifact.write_text("zero\nTOKEN=abc\none\nTOKEN=def\n", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        literal = ast.literal_eval(
+            SEARCH_ARTIFACT(
+                "bundle.js",
+                search_pattern="TOKEN=",
+                context_lines=1,
+            )
+        )
+        regex = ast.literal_eval(
+            SEARCH_ARTIFACT(
+                "bundle.js",
+                search_pattern=r"TOKEN=[a-z]+",
+                search_regex=True,
+                context_lines=0,
+            )
+        )
+
+    assert literal["match_count"] == 2
+    assert literal["matches"][0]["line"] == 2
+    assert literal["matches"][0]["context"][0]["line"] == 1
+    assert regex["regex"] is True
+    assert [match["line"] for match in regex["matches"]] == [2, 4]
+
+
+def test_bounded_artifact_search_scans_full_file_and_paginates_matches(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    artifact = artifacts / "source.map"
+    artifact.write_text("first\nneedle\nthird\nneedle\nfifth\n", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        reader = create_bounded_artifact_searcher(
+            max_searches=2,
+            allowed_artifact_refs=["artifact:artifacts/source.map"],
+            max_searches_per_artifact=2,
+        )
+        first = ast.literal_eval(
+            reader(
+                "artifact:artifacts/source.map",
+                search_pattern="needle",
+                max_matches=1,
+            )
+        )
+        second = ast.literal_eval(
+            reader(
+                "artifact:artifacts/source.map",
+                search_pattern="needle",
+                max_matches=1,
+                match_offset=first["next_match_offset"],
+            )
+        )
+        invalid_reader = create_bounded_artifact_searcher(
+            max_searches=1,
+            allowed_artifact_refs=["artifact:artifacts/source.map"],
+        )
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_POLICY_VIOLATION_MARKER):
+            invalid_reader(
+                "artifact:artifacts/source.map",
+                search_pattern="[",
+                search_regex=True,
+            )
+
+    assert [match["line"] for match in first["matches"]] == [2]
+    assert [match["line"] for match in second["matches"]] == [4]
+    assert first["match_count"] == second["match_count"] == 2
+    assert first["scanned_lines"] == second["scanned_lines"] == 5
+    assert first["next_match_offset"] == 1
+    assert second["next_match_offset"] is None
+
+
+def test_search_artifact_finds_late_match_past_read_page_limits(tmp_path: Path):
+    artifact = tmp_path / "large.txt"
+    artifact.write_text("\n".join([*(f"line {number}" for number in range(1, 2000)), "needle"]) + "\n")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        result = ast.literal_eval(
+            SEARCH_ARTIFACT(
+                "large.txt",
+                search_pattern="needle",
+            )
+        )
+
+    assert [match["line"] for match in result["matches"]] == [2000]
+    assert result["scanned_lines"] == 2000
+    assert result["eof"] is True
+
+
+def test_search_artifact_preserves_match_in_oversized_line_with_bounded_output(tmp_path: Path):
+    artifact = tmp_path / "bundle.js"
+    artifact.write_text("x" * 2000 + "needle" + "y" * 2000 + "\n", encoding="utf-8")
+    searcher = create_artifact_searcher(max_output_chars=500)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        output = searcher("bundle.js", search_pattern="needle", context_lines=0)
+
+    result = ast.literal_eval(output)
+    assert len(output) <= 500
+    assert result["match_count"] == 1
+    assert result["matches"][0]["line"] == 1
+    assert "needle" in result["matches"][0]["content"]
+    assert result["matches"][0]["match_column"] == 2001
+    assert result["matches"][0]["content_truncated"] is True
+    assert result["next_match_offset"] is None
+
+
+def test_search_artifact_output_limit_pages_without_empty_match_loop(tmp_path: Path):
+    artifact = tmp_path / "bundle.js"
+    artifact.write_text(("x" * 1000 + "needle" + "y" * 1000 + "\n") * 2, encoding="utf-8")
+    searcher = create_artifact_searcher(max_output_chars=500)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        first = ast.literal_eval(searcher("bundle.js", search_pattern="needle", context_lines=0))
+        second = ast.literal_eval(
+            searcher("bundle.js", search_pattern="needle", context_lines=0, match_offset=first["next_match_offset"])
+        )
+
+    assert [match["line"] for match in first["matches"]] == [1]
+    assert first["next_match_offset"] == 1
+    assert [match["line"] for match in second["matches"]] == [2]
+    assert second["next_match_offset"] is None
+
+
+def test_search_artifact_rejects_limit_too_small_for_match_metadata(tmp_path: Path):
+    (tmp_path / "evidence.txt").write_text("needle\n", encoding="utf-8")
+    searcher = create_artifact_searcher(max_output_chars=40)
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        with pytest.raises(ValueError, match="too small for a matching excerpt"):
+            searcher("evidence.txt", search_pattern="needle", context_lines=0)
+
+
+def test_search_artifact_paging_returns_empty_after_last_match(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("needle\nother\n", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        result = ast.literal_eval(
+            SEARCH_ARTIFACT(
+                "evidence.txt",
+                search_pattern="needle",
+                match_offset=1,
+            )
+        )
+
+    assert result["match_count"] == 1
+    assert result["matches"] == []
+    assert result["next_match_offset"] is None
 
 
 def test_read_artifact_serialized_line_page_stays_below_router_limit(tmp_path: Path):
@@ -148,7 +327,7 @@ def test_artifact_reader_rejects_invalid_output_and_byte_page_parameters(tmp_pat
     with pytest.raises(ValueError, match="max_bytes"):
         artifact_review_metadata("evidence.txt", 0)
 
-def test_read_artifact_rejects_oversized_minified_page_without_returning_content(tmp_path: Path):
+def test_read_artifact_returns_paginated_content_when_line_page_reaches_byte_limit(tmp_path: Path):
     artifact = tmp_path / "minified.js"
     oversized_content = "x" * 19_201
     artifact.write_text(oversized_content, encoding="utf-8")
@@ -156,14 +335,25 @@ def test_read_artifact_rejects_oversized_minified_page_without_returning_content
     with (
         patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
-        pytest.raises(ValueError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER) as error,
     ):
-        READ_ARTIFACT("minified.js")
+        first = ast.literal_eval(READ_ARTIFACT("minified.js"))
+        second = ast.literal_eval(
+            READ_ARTIFACT(
+                first["pagination"]["path"],
+                start_byte=first["pagination"]["start_byte"],
+                max_bytes=first["pagination"]["max_bytes"],
+            )
+        )
 
-    assert oversized_content not in str(error.value)
-    assert "max_lines" in str(error.value)
-    assert "start_byte" in str(error.value)
-    assert "max_bytes" in str(error.value)
+    assert first["content"] == oversized_content[:19_200]
+    assert first["truncated"] is True
+    assert first["truncation_reason"] == "byte_limit_reached"
+    assert first["next_start_byte"] == 19_200
+    assert first["pagination"]["start_byte"] == first["next_start_byte"]
+    assert first["pagination"]["max_bytes"] == 19_200
+    assert second["content"] == "x"
+    assert second["eof"] is True
+    assert second["truncated"] is False
 
 
 def test_read_artifact_reads_oversized_minified_content_by_byte_page(tmp_path: Path):
@@ -233,16 +423,19 @@ def test_read_artifact_allows_start_line_only_at_zero_byte_offset(tmp_path: Path
     assert result["next_start_byte"] == len(b"one\ntwo\n")
 
 
-def test_read_artifact_counts_utf8_bytes_not_characters(tmp_path: Path):
+def test_read_artifact_paginates_utf8_content_by_bytes(tmp_path: Path):
     artifact = tmp_path / "unicode.txt"
     artifact.write_text("é" * 9_601, encoding="utf-8")
 
     with (
         patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
-        pytest.raises(ValueError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER),
     ):
-        READ_ARTIFACT("unicode.txt")
+        result = ast.literal_eval(READ_ARTIFACT("unicode.txt"))
+
+    assert result["end_byte"] == 19_200
+    assert result["next_start_byte"] == 19_200
+    assert result["truncation_reason"] == "byte_limit_reached"
 
 
 def test_read_artifact_prefers_artifact_directory_for_relative_paths(tmp_path: Path):
@@ -306,6 +499,20 @@ def test_read_artifact_lists_immediate_files_when_given_a_directory(tmp_path: Pa
     assert "artifact:artifacts/zeta.txt" in result
     assert result.index("artifact:artifacts/alpha.txt") < result.index("artifact:artifacts/zeta.txt")
     assert "hidden.txt" not in result
+
+
+def test_artifact_directory_guidance_rejects_unrepresentable_output(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "evidence.txt").write_text("proof", encoding="utf-8")
+    reader = create_artifact_reader(48_000, max_output_chars=1)
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+        pytest.raises(ValueError, match="output limit is too small"),
+    ):
+        reader("artifacts")
 
 
 def test_read_artifact_directory_listing_is_bounded(tmp_path: Path):
@@ -435,6 +642,39 @@ def test_bounded_reader_defaults_byte_page_to_zero_offset(tmp_path: Path):
             max_bytes=3,
             max_lines=1,
         )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"start_byte": 1}, "missing max_bytes"),
+        ({"max_bytes": 0}, "max_bytes=0 must be at least 1 byte"),
+        ({"max_bytes": 100_000}, "max_bytes=100000 exceeds the maximum byte page size of 19200 bytes"),
+        (
+            {"start_line": 1, "start_byte": 1, "max_bytes": 3},
+            "start_line requires start_byte=0",
+        ),
+    ],
+)
+def test_artifact_readers_report_specific_byte_page_validation_errors(
+    tmp_path: Path,
+    kwargs: dict[str, int],
+    message: str,
+):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("evidence", encoding="utf-8")
+
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        with pytest.raises(ValueError, match=message):
+            READ_ARTIFACT(str(artifact), **kwargs)
+
+        bounded_reader = create_bounded_artifact_reader(
+            max_reads=1,
+            context_window_tokens=48_000,
+            allowed_artifact_refs=[str(artifact)],
+        )
+        with pytest.raises(RuntimeError, match=f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}:.*{message}"):
+            bounded_reader(str(artifact), **kwargs)
 
 
 def test_bounded_reader_allows_paginated_authorized_artifact_reads(tmp_path: Path):
@@ -574,6 +814,38 @@ def test_bounded_reader_rejects_overlapping_line_and_byte_pages(tmp_path: Path):
             byte_reader("artifact:artifacts/bytes.txt", start_byte=4, max_bytes=4)
 
 
+def test_bounded_reader_allows_byte_retry_after_byte_limited_line_page(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    artifact = artifacts / "large.txt"
+    artifact.write_text("\n".join("x" * 200 for _ in range(500)), encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        reader = create_bounded_artifact_reader(
+            max_reads=4,
+            context_window_tokens=40_000,
+            allowed_artifact_refs=["artifact:artifacts/large.txt"],
+        )
+        line_page = ast.literal_eval(reader("artifact:artifacts/large.txt", max_lines=500))
+        assert line_page["truncation_reason"] == "byte_limit_reached"
+
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
+            reader("artifact:artifacts/large.txt", max_lines=500)
+
+        byte_page = ast.literal_eval(
+            reader("artifact:artifacts/large.txt", start_byte=0, max_bytes=16_000)
+        )
+
+        with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
+            reader("artifact:artifacts/large.txt", start_byte=0, max_bytes=16_000)
+
+    assert byte_page["start_byte"] == 0
+    assert byte_page["end_byte"] == 16_000
+
+
 def test_bounded_reader_replays_overlapping_page_once_after_context_reduction(tmp_path: Path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
@@ -637,7 +909,7 @@ def test_bounded_reader_terminally_guards_nearby_byte_pages(tmp_path: Path):
             reader("artifact:artifacts/bytes.txt", start_byte=100, max_bytes=100)
 
 
-def test_bounded_reader_rejects_oversized_page_without_consuming_successful_read_budget(tmp_path: Path):
+def test_bounded_reader_accepts_paginated_oversized_page_and_consumes_read_budget(tmp_path: Path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     oversized = artifacts / "minified.js"
@@ -650,14 +922,24 @@ def test_bounded_reader_rejects_oversized_page_without_consuming_successful_read
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         reader = create_bounded_artifact_reader(
-            max_reads=1,
+            max_reads=2,
             context_window_tokens=48_000,
             allowed_artifact_refs=["artifact:artifacts/minified.js", "artifact:artifacts/evidence.txt"],
         )
 
-        with pytest.raises(RuntimeError, match=ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER):
-            reader("artifact:artifacts/minified.js")
-        assert "proof" in reader("artifact:artifacts/evidence.txt")
+        result = ast.literal_eval(reader("artifact:artifacts/minified.js"))
+        assert result["truncation_reason"] == "byte_limit_reached"
+        continuation = ast.literal_eval(
+            reader(
+                result["pagination"]["path"],
+                start_byte=result["pagination"]["start_byte"],
+                max_bytes=result["pagination"]["max_bytes"],
+            )
+        )
+        assert continuation["content"] == "x"
+        assert continuation["eof"] is True
+        budget_guidance = ast.literal_eval(reader("artifact:artifacts/evidence.txt"))
+        assert budget_guidance["reason"] == "evaluator_read_budget_exhausted"
 
 
 def test_bounded_reader_requires_explicit_byte_page_for_large_artifact(tmp_path: Path):

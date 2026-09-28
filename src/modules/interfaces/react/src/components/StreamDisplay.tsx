@@ -1417,6 +1417,17 @@ const method = latestInput.method || 'GET';
           );
         }
 
+        case 'browser_take_screenshot': {
+          return (
+            <Box flexDirection="column" marginTop={1}>
+              <Text color="green" bold>tool: browser_take_screenshot{agentContext}</Text>
+              <Box marginLeft={2}>
+                <Text dimColor>└─ capture a full-page screenshot and save it as an artifact</Text>
+              </Box>
+            </Box>
+          );
+        }
+
         case 'browser_set_headers': {
           const headers = latestInput.headers || {};
           const headersDisplay = Object.keys(headers).length > 0 ? JSON.stringify(headers) : '(awaiting args …)';

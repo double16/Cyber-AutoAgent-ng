@@ -211,6 +211,16 @@ provenance-preserving snapshot for fan-out. A manifest is not valid proof for a 
 subject; that rejection occurs before ledger persistence. Prompt-memory selectors are advisory: stale IDs or indices
 are logged and dropped while valid selected context remains available to the executor.
 
+A testing phase that depends on hypotheses creates tasks only for inventory groups with completed hypothesis tasks.
+If a hypothesis phase reaches its cap before covering every group, the controller records the uncovered groups,
+continues testing covered groups, and reports the remaining coverage as an incomplete assessment. With no completed
+hypotheses, the dependent phase closes as a partial failure without creating generic testing tasks.
+
+Web authentication coverage and web-recon access-context fan-out omit static asset routes only after a bounded,
+credential-free same-service GET confirms a 2xx response with a static media type. The controller records excluded
+inventory IDs and response metadata in an operation artifact; uncertain responses stay eligible, and the assets remain
+in the frozen inventory for later phases.
+
 Execution requirements remain frozen in the task contract, but execution proof is controller-owned. The controller
 matches successful task-local tool capabilities and normalized subjects to durable current-operation artifacts when
 the executor submits acceptance. If proof is missing, Python retains the semantic acceptance payload, permits one

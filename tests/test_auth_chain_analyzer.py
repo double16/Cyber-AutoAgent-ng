@@ -11,6 +11,8 @@ import modules.tools.auth_chain_analyzer as aca
 import modules.tools.recon_inventory_manifest as manifest_tool
 from modules.handlers.utils import get_tool_spec
 
+_REAL_CLIENT_JAVASCRIPT_ANALYZER = aca._analyze_client_javascript_auth
+
 
 class DummyResp:
     """Minimal requests.Response stand-in for unit tests."""
@@ -46,11 +48,184 @@ def _loads(out: str) -> dict:
     return json.loads(out)
 
 
+@pytest.fixture(autouse=True)
+def _skip_client_script_requests(monkeypatch):
+    """Keep auth-chain unit tests hermetic unless they explicitly test scripts."""
+
+    monkeypatch.setattr(
+        aca,
+        "_analyze_client_javascript_auth",
+        lambda *_args, **_kwargs: {
+            "inspected_source_count": 0,
+            "skipped_source_count": 0,
+            "sources": [],
+            "skipped_sources": [],
+            "storage_header_bindings": [],
+        },
+    )
+
+
 def test_auth_chain_coerce_str_handles_none_bytes_text_and_other_values():
     assert aca._coerce_str(None) == ""
     assert aca._coerce_str(b"token") == "token"
     assert aca._coerce_str("token") == "token"
     assert aca._coerce_str(42) == "42"
+
+
+def test_auth_chain_normalizes_only_current_target_attack_surface_context():
+    context = aca._normalize_attack_surface_context(
+        "https://target.test",
+        {
+            "target": "https://target.test",
+            "endpoints": [
+                {"url": "https://target.test/api/me", "method": "get", "status": "401"},
+                {"url": "https://outside.test/login", "status": "200"},
+            ],
+            "javascript": [{"url": "https://target.test/assets/app.js"}, {"url": "https://outside.test/app.js"}],
+            "storage_header_bindings": [
+                {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"},
+                {"header_name": "X-Bad", "storage_key": "token", "value_template": "dynamic"},
+            ],
+        },
+    )
+
+    assert context == {
+        "endpoints": [{"url": "https://target.test/api/me", "method": "GET", "status": "401", "source_refs": []}],
+        "javascript_urls": ["https://target.test/assets/app.js"],
+        "storage_header_bindings": [
+            {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"}
+        ],
+    }
+    assert aca._normalize_attack_surface_context("https://target.test", {"target": "https://other.test"}) == {
+        "endpoints": [],
+        "javascript_urls": [],
+        "storage_header_bindings": [],
+    }
+
+
+def test_auth_chain_prioritizes_inventory_endpoints_before_fallback_probes(monkeypatch):
+    monkeypatch.setattr(aca, "_wildcard_baseline_signature", lambda *_args: {})
+    monkeypatch.setattr(aca, "_http_request", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(aca.subprocess, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError()))
+
+    endpoints = aca._discover_auth_endpoints(
+        "https://target.test",
+        [{"url": "https://target.test/private", "method": "GET", "status": "403", "source_refs": ["artifact:map.json"]}],
+    )
+
+    assert endpoints[0] == {
+        "path": "/private",
+        "full_url": "https://target.test/private",
+        "status": "403",
+        "method": "GET",
+        "type": "Generic Authentication",
+        "source": "attack_surface_inventory",
+        "source_refs": ["artifact:map.json"],
+    }
+
+
+def test_auth_chain_extracts_same_origin_storage_header_bindings(monkeypatch):
+    responses = {
+        "https://target.test": DummyResp(text='<script src="/assets/app.js"></script><script src="https://outside.test/x.js"></script>'),
+        "https://target.test/assets/app.js": DummyResp(
+            content=(
+                b'fetch("/api", {headers: {Authorization: "Bearer " + localStorage.getItem("token")}});'
+                b'headers.set("X-Session", sessionStorage.getItem("session_id"));'
+            )
+        ),
+    }
+    monkeypatch.setattr(aca, "_http_request", lambda _method, url, **_kwargs: responses.get(url))
+
+    evidence = _REAL_CLIENT_JAVASCRIPT_ANALYZER("https://target.test", [])
+
+    assert evidence["inspected_source_count"] == 1
+    assert evidence["skipped_source_count"] == 0
+    assert evidence["sources"][0]["url"] == "https://target.test/assets/app.js"
+    assert evidence["sources"][0]["sha256"]
+    assert evidence["storage_header_bindings"] == [
+        {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"},
+        {"header_name": "X-Session", "storage_key": "session_id", "value_template": "{value}"},
+    ]
+
+
+def test_auth_chain_skips_cross_origin_and_oversized_scripts(monkeypatch):
+    responses = {
+        "https://target.test": DummyResp(text='<script src="/small.js"></script><script src="/large.js"></script>'),
+        "https://target.test/small.js": DummyResp(content=b"const x = 1;"),
+        "https://target.test/large.js": DummyResp(headers={"Content-Length": str(aca._MAX_CLIENT_SCRIPT_BYTES + 1)}),
+    }
+    monkeypatch.setattr(aca, "_http_request", lambda _method, url, **_kwargs: responses.get(url))
+
+    evidence = _REAL_CLIENT_JAVASCRIPT_ANALYZER("https://target.test", [])
+
+    assert evidence["inspected_source_count"] == 1
+    assert evidence["storage_header_bindings"] == []
+    assert evidence["skipped_sources"] == [{"url": "https://target.test/large.js", "reason": "script_too_large"}]
+
+
+def test_auth_chain_uses_mapped_script_and_binding_without_page_inference(monkeypatch):
+    responses = {
+        "https://target.test": DummyResp(text="<html></html>"),
+        "https://target.test/assets/app.js": DummyResp(content=b'headers.set("X-Session", sessionStorage.getItem("sid"));'),
+    }
+    monkeypatch.setattr(aca, "_http_request", lambda _method, url, **_kwargs: responses.get(url))
+
+    evidence = _REAL_CLIENT_JAVASCRIPT_ANALYZER(
+        "https://target.test",
+        [],
+        mapped_script_urls=["https://target.test/assets/app.js"],
+        mapped_bindings=[{"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"}],
+    )
+
+    assert evidence["inspected_source_count"] == 1
+    assert evidence["storage_header_bindings"] == [
+        {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"},
+        {"header_name": "X-Session", "storage_key": "sid", "value_template": "{value}"},
+    ]
+
+
+def test_auth_chain_endpoint_inventory_never_creates_an_executable_flow():
+    flows = aca._authentication_flow_descriptors(
+        "https://target.test",
+        [
+            {
+                "path": "/login",
+                "full_url": "https://target.test/login",
+                "status": "200",
+                "type": "Session-based",
+                "authorization_storage_key": "token",
+            },
+            {"path": "/api/config", "full_url": "https://target.test/api/config", "status": "401", "type": "Generic Authentication"},
+        ],
+    )
+
+    assert flows == []
+
+
+def test_auth_chain_client_bindings_do_not_turn_endpoint_inventory_into_a_flow():
+    flows = aca._authentication_flow_descriptors(
+        "https://target.test",
+        [
+            {"path": "/login", "full_url": "https://target.test/login", "status": "200", "type": "Session-based"},
+            {"path": "/profile", "full_url": "https://target.test/profile", "status": "403", "type": "Generic Authentication"},
+        ],
+        [{"header_name": "X-Session", "storage_key": "session_id", "value_template": "{value}"}],
+    )
+
+    assert flows == []
+
+
+def test_auth_chain_endpoint_relationships_do_not_infer_a_browser_flow():
+    flows = aca._authentication_flow_descriptors(
+        "https://target.test",
+        [
+            {"path": "/login", "full_url": "https://target.test/login", "status": "200", "type": "Session-based"},
+            {"path": "/api/products", "full_url": "https://target.test/api/products", "status": "403", "type": "Generic Authentication"},
+            {"path": "/userprofile", "full_url": "https://target.test/userprofile", "status": "200", "type": "Generic"},
+        ],
+    )
+
+    assert flows == []
 
 
 def test_auth_chain_reuses_cache_for_normalized_target(monkeypatch):
@@ -146,6 +321,7 @@ def test_auth_chain_analyzer_adds_scheme_and_emits_json(monkeypatch):
     assert "timestamp" in j
     assert "summary" in j
     assert "evidence" in j
+    assert "client_javascript" in j["evidence"]
     assert "candidate_bypass_surfaces" in j
     assert "findings" in j
     assert "next_steps" in j
@@ -283,6 +459,42 @@ def test_auth_chain_inventory_manifest_is_additive(monkeypatch, tmp_path):
         "service",
         "technology",
         "workflow",
+    }
+
+
+def test_auth_chain_inventory_marks_observed_registration_as_structured_flow(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        aca,
+        "_discover_auth_endpoints",
+        lambda url: [{"path": "/register", "full_url": f"{url}/register", "status": 200, "type": "Self-registration"}],
+    )
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda *_args: [])
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda *_args: {"tokens": [], "session_info": {}})
+    monkeypatch.setattr(
+        aca,
+        "_map_authentication_flows",
+        lambda *_args: {"authentication_steps": [], "bypass_opportunities": [], "privilege_escalation": []},
+    )
+    captured = {}
+    monkeypatch.setattr(manifest_tool, "resolve_inventory_target", lambda target, target_id="target-1": (target, target_id))
+    def write_manifest(_path, manifest):
+        captured["manifest"] = manifest
+        return {"validation_status": "valid"}
+
+    monkeypatch.setattr(manifest_tool, "write_inventory_manifest", write_manifest)
+
+    aca.auth_chain_analyzer("https://registration-flow.test", inventory_manifest=str(tmp_path / "inventory.json"))
+
+    registration = next(
+        item["attributes"]["registration"]
+        for item in captured["manifest"]["items"]
+        if item["kind"] == "workflow" and "registration" in item["attributes"]
+    )
+    assert registration == {
+        "enabled": True,
+        "target": "https://registration-flow.test",
+        "url": "https://registration-flow.test/register",
+        "roles": ["user"],
     }
 
 

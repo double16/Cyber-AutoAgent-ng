@@ -98,7 +98,7 @@ function sanitizeValue(val: any, max: number, keyHint?: string): any {
 }
 
 function sanitizeEntry(entry: LogEntry, max: number): LogEntry {
-  const safeMsg = truncateString(sanitizeForLogging(entry.message ?? ''), max);
+  const safeMsg = truncateString(sanitizeForLogging(entry.message ?? '').trim(), max);
   const safeError = entry.error
     ? {
         name: entry.error.name,
@@ -204,6 +204,9 @@ export class Logger {
     // Apply safety truncation/redaction
     const max = Number(process.env.CYBER_MAX_LOG_CHARS || MAX_LOG_CHARS_DEFAULT);
     const safeEntry = sanitizeEntry(entry, isFinite(max) && max > 0 ? max : MAX_LOG_CHARS_DEFAULT);
+    if (!safeEntry.message) {
+      return;
+    }
 
     if (this.config.structured) {
       this.outputStructured(safeEntry);

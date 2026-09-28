@@ -509,6 +509,136 @@ def test_idor_specialist_multi_creds_full(mock_request, mock_discovery):
     assert "2" in sessions
 
 
+def test_idor_specialist_uses_credential_id_login_contexts(monkeypatch):
+    built_calls = []
+    login_calls = []
+    usage_calls = []
+    engine_calls = []
+
+    def fake_build(**kwargs):
+        built_calls.append(kwargs)
+        return [
+            {"credential_id": "cred-admin", "form_fields": {"username": "admin", "password": "secret-1"}},
+            {"credential_id": "cred-user", "form_fields": {"username": "user", "password": "secret-2"}},
+        ]
+
+    def fake_login(**kwargs):
+        login_calls.append(kwargs)
+        session_id = "admin-session" if kwargs["credentials"]["username"] == "admin" else "user-session"
+        return {"session": session_id}, {"X-Context": session_id}
+
+    def fake_engine(request_config, **kwargs):
+        engine_calls.append((request_config, kwargs))
+        return [{"finding_type": "authz_replay_match", "vulnerable": True}]
+
+    monkeypatch.setattr(ids, "build_checked_out_idor_login_contexts", fake_build)
+    monkeypatch.setattr(ids, "record_checked_out_credential_usage", lambda credential_ids, outcome: usage_calls.append((credential_ids, outcome)))
+    monkeypatch.setattr(ids, "_perform_login", fake_login)
+    monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: ["id"])
+    monkeypatch.setattr(ids, "_python_idor_engine", fake_engine)
+    monkeypatch.setattr(ids, "_analyze_idor_intelligence", lambda _results, has_alt: {"has_alt": has_alt})
+    monkeypatch.setattr(ids, "_generate_idor_recommendations", lambda _type, _results: [])
+
+    result = json.loads(
+        ids.idor_specialist(
+            target_url="https://app.example.test/api?id=1",
+            login_url="https://app.example.test/login",
+            credential_ids=["cred-admin", "cred-user"],
+            username_field="username",
+            password_field="password",
+            extra_login_fields={"csrf": "token"},
+            test_type="comprehensive",
+        )
+    )
+
+    assert built_calls[0]["credential_ids"] == ["cred-admin", "cred-user"]
+    assert built_calls[0]["extra_form_fields"] == {"csrf": "token"}
+    assert [call["credentials"]["username"] for call in login_calls] == ["admin", "user"]
+    request_config, engine_kwargs = engine_calls[0]
+    assert request_config.cookies == {"session": "admin-session"}
+    assert request_config.alt_cookies == {"session": "user-session"}
+    assert engine_kwargs["do_authz_replay"] is True
+    assert result["credential_contexts"] == [{"credential_id": "cred-admin"}, {"credential_id": "cred-user"}]
+    assert "secret-1" not in json.dumps(result)
+    assert usage_calls == [(["cred-admin", "cred-user"], "succeeded")]
+
+
+def test_idor_specialist_rejects_mixed_raw_and_store_credentials(monkeypatch):
+    monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ids, "_python_idor_engine", lambda *args, **kwargs: [])
+
+    result = json.loads(
+        ids.idor_specialist(
+            target_url="https://app.example.test/api?id=1",
+            login_url="https://app.example.test/login",
+            credentials='{"username": "admin", "password": "secret"}',
+            credential_ids=["cred-admin", "cred-user"],
+        )
+    )
+
+    assert "credential_ids cannot be combined" in result["errors"][0]
+    assert "secret" not in json.dumps(result)
+
+
+def test_idor_specialist_rejects_raw_login_credentials_for_workflow_agents(monkeypatch):
+    monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ids, "_python_idor_engine", lambda *args, **kwargs: [])
+
+    result = json.loads(
+        ids.idor_specialist(
+            target_url="https://app.example.test/api?id=1",
+            login_url="https://app.example.test/login",
+            credentials='{"username": "admin", "password": "secret"}',
+            tool_context=MagicMock(spec=ids.ToolContext),
+        )
+    )
+
+    assert "workflow agent login credentials must use checked-out credential_ids" in result["errors"][0]
+    assert "secret" not in json.dumps(result)
+
+
+def test_idor_specialist_requires_login_url_for_credential_ids(monkeypatch):
+    monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ids, "_python_idor_engine", lambda *args, **kwargs: [])
+
+    result = json.loads(
+        ids.idor_specialist(
+            target_url="https://app.example.test/api?id=1",
+            credential_ids=["cred-admin", "cred-user"],
+        )
+    )
+
+    assert result["errors"] == ["credential_ids require login_url"]
+
+
+def test_idor_specialist_records_failed_credential_id_logins(monkeypatch):
+    usage_calls = []
+
+    monkeypatch.setattr(
+        ids,
+        "build_checked_out_idor_login_contexts",
+        lambda **_kwargs: [
+            {"credential_id": "cred-a", "form_fields": {"username": "a", "password": "secret-a"}},
+            {"credential_id": "cred-b", "form_fields": {"username": "b", "password": "secret-b"}},
+        ],
+    )
+    monkeypatch.setattr(ids, "record_checked_out_credential_usage", lambda credential_ids, outcome: usage_calls.append((credential_ids, outcome)))
+    monkeypatch.setattr(ids, "_perform_login", lambda **_kwargs: (None, None))
+    monkeypatch.setattr(ids, "_idor_parameter_discovery", lambda *args, **kwargs: ["id"])
+
+    result = json.loads(
+        ids.idor_specialist(
+            target_url="https://app.example.test/api?id=1",
+            login_url="https://app.example.test/login",
+            credential_ids=["cred-a", "cred-b"],
+        )
+    )
+
+    assert result["errors"] == ["credential-backed IDOR login failed"]
+    assert usage_calls == [(["cred-a", "cred-b"], "failed")]
+    assert "secret-a" not in json.dumps(result)
+
+
 @patch("modules.tools.idor_specialist.requests.request")
 def test_idor_specialist_graphql_mode(mock_request):
     # Mock baseline

@@ -110,6 +110,12 @@ from modules.handlers.utils import (
     update_latest_output_pointer,
 )
 from modules.tools import browser, channel_close_all
+from modules.tools.credentials import (
+    extract_config_credentials,
+    extract_objective_credentials,
+    resolve_credential_target_for_operation,
+    store_user_credential,
+)
 from modules.tools.memory import (
     OperationTarget,
     create_application_store,
@@ -481,7 +487,7 @@ def reset_continuation_phases(
     phase_selector: str,
     logger: Any,
 ) -> tuple[int, tuple[int, ...]]:
-    """Archive selected phase work and reopen it for fresh task proposals."""
+    """Archive selected phase work and reopen it for fresh work."""
 
     store = create_application_store(
         get_application_database_path({"output_dir": output_dir}),
@@ -753,13 +759,21 @@ def _required_tools_satisfied(
     return all(int(tool_counts.get(name, 0) or 0) > 0 for name in run_policy.required_tool_names)
 
 
-def _successful_required_tools_satisfied(callback_handler: Any, run_policy: AgentRunPolicy, baseline: int) -> bool:
+def _successful_required_tools_satisfied(
+    callback_handler: Any,
+    run_policy: AgentRunPolicy,
+    baseline: int,
+    completion_baseline: set[tuple[str, str]] | None = None,
+) -> bool:
     """Return true when every required tool has a successful controller-observed outcome."""
 
-    journal = getattr(callback_handler, "tool_outcome_journal", None)
-    if journal is None or not hasattr(journal, "since"):
+    if not run_policy.required_tool_names:
         return False
-    successful = {outcome.tool_name for outcome in journal.since(baseline) if outcome.success}
+    completions = getattr(callback_handler, "successful_tool_completions", set()) or set()
+    successful = {name for name, _tool_use_id in completions - (completion_baseline or set())}
+    journal = getattr(callback_handler, "tool_outcome_journal", None)
+    if journal is not None and hasattr(journal, "since"):
+        successful.update(outcome.tool_name for outcome in journal.since(baseline) if outcome.success)
     return run_policy.required_tool_names.issubset(successful)
 
 
@@ -821,6 +835,7 @@ def run_agent_until_terminal_state(
     run_tool_count_baseline = dict(getattr(agent_callback_handler, "tool_counts", {}) or {})
     outcome_journal = getattr(agent_callback_handler, "tool_outcome_journal", None)
     outcome_baseline = outcome_journal.snapshot() if outcome_journal is not None else 0
+    completion_baseline = set(getattr(agent_callback_handler, "successful_tool_completions", set()) or set())
 
     while not interrupted:
         if agent_call_count >= run_policy.max_agent_calls:
@@ -850,14 +865,6 @@ def run_agent_until_terminal_state(
             logger.debug("Agent result: %r", result)
             process_agent_metrics(agent_callback_handler, result)
 
-            stop_reason = str(getattr(result, "stop_reason", "") or "")
-            if stop_reason.startswith("limit_"):
-                termination_reason = f"Agent stopped at its configured SDK limit: {stop_reason}"
-                print_status(termination_reason, "WARNING")
-                if agent_callback_handler:
-                    agent_callback_handler.emit_termination("stalled", termination_reason)
-                return AgentRunResult("stalled", termination_reason)
-
             result_state = getattr(result, "state", {})
             terminal_tool_completed = (
                 result_state.get(TERMINAL_TOOL_COMPLETED_STATE_KEY)
@@ -871,9 +878,18 @@ def run_agent_until_terminal_state(
             if (
                 run_policy.require_successful_required_tools
                 and run_policy.terminal_after_required_tools
-                and _successful_required_tools_satisfied(agent_callback_handler, run_policy, outcome_baseline)
+                and _successful_required_tools_satisfied(
+                    agent_callback_handler, run_policy, outcome_baseline, completion_baseline
+                )
             ):
                 return AgentRunResult(run_policy.terminal_reason, run_policy.terminal_message)
+            stop_reason = str(getattr(result, "stop_reason", "") or "")
+            if stop_reason.startswith("limit_"):
+                termination_reason = f"Agent stopped at its configured SDK limit: {stop_reason}"
+                print_status(termination_reason, "WARNING")
+                if agent_callback_handler:
+                    agent_callback_handler.emit_termination("stalled", termination_reason)
+                return AgentRunResult("stalled", termination_reason)
             terminal_tool_rejected = (
                 result_state.get(TERMINAL_TOOL_REJECTED_STATE_KEY)
                 if isinstance(result_state, dict)
@@ -966,7 +982,11 @@ def run_agent_until_terminal_state(
                     print_status(termination_reason, "WARNING")
                     if agent_callback_handler:
                         agent_callback_handler.emit_termination("stalled", termination_reason)
-                    return AgentRunResult("stalled", termination_reason)
+                    return AgentRunResult(
+                        "stalled",
+                        termination_reason,
+                        details={"tool_call_counts": dict(run_tool_deltas)},
+                    )
                 print_status("No actions taken - completing", "SUCCESS")
                 return AgentRunResult("no_actions", termination_reason)
 
@@ -1623,6 +1643,16 @@ def main():
         help="Base directory for output artifacts (default: ./outputs)",
     )
     parser.add_argument(
+        "--operation-id",
+        type=str,
+        help="Use a caller-assigned operation ID for an authorized maintenance operation",
+    )
+    parser.add_argument(
+        "--credential-rotation-request",
+        type=str,
+        help="Opaque claimed credential rotation request ID for a constrained maintenance operation",
+    )
+    parser.add_argument(
         "--continue",
         dest="cont",
         nargs="?",
@@ -1638,7 +1668,7 @@ def main():
     parser.add_argument(
         "--reset-phases",
         type=str,
-        help="With --continue, archive selected phase tasks and propose fresh work (for example: 3,5- or 2-4)",
+        help="With --continue, archive selected phase tasks and create fresh work (for example: 3,5- or 2-4)",
     )
     parser.add_argument(
         "--report",
@@ -1688,6 +1718,8 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.credential_rotation_request and not args.operation_id:
+        parser.error("--credential-rotation-request requires --operation-id")
     if args.reset_failed and not bool(args.cont):
         parser.error("--reset-failed requires --continue")
     if args.reset_failed and bool(args.report):
@@ -1755,6 +1787,14 @@ def main():
     # Preserve the existing React environment override for callers that do not use the sentinel.
     if env_objective and os.environ.get("CYBER_UI_MODE") == "react":
         args.objective = env_objective
+
+    # Remove common credential forms before the objective reaches logs, plans, or a model. Drafts remain only in
+    # process memory until the application database is initialized for this operation below.
+    args.objective, objective_credential_drafts = extract_objective_credentials(args.objective)
+    try:
+        configured_credential_drafts = extract_config_credentials(os.environ.get("CYBER_ASSESSMENT_CREDENTIALS"))
+    except ValueError as error:
+        parser.error(str(error))
 
     # Persist provider/model selections to environment for downstream configuration
     if args.provider:
@@ -1837,7 +1877,9 @@ def main():
     # Operation ID
     target_sanitized = sanitize_target_name(args.target)
     operation_id = None
-    if isinstance(args.cont, str) and args.cont:
+    if args.operation_id:
+        operation_id = args.operation_id
+    elif isinstance(args.cont, str) and args.cont:
         operation_id = args.cont
     elif isinstance(args.report, str) and args.report:
         operation_id = args.report
@@ -1870,6 +1912,8 @@ def main():
     # Expose operation ID to tools via environment for consistent evidence tagging
     os.environ["CYBER_OPERATION_ID"] = operation_id
     os.environ["CYBER_LOGICAL_TARGET"] = args.target
+    if args.credential_rotation_request:
+        os.environ["CYBER_CREDENTIAL_ROTATION_REQUEST"] = args.credential_rotation_request
 
     server_config = config_manager.get_server_config(args.provider, **config_overrides)
 
@@ -2010,7 +2054,7 @@ def main():
         )
         print_status(
             f"Reset phase(s) {', '.join(str(phase_id) for phase_id in selected_phase_ids)} "
-            f"and archived {task_count} task(s) for fresh proposals",
+            f"and archived {task_count} task(s) for fresh work",
             "SUCCESS",
         )
 
@@ -2215,6 +2259,28 @@ def main():
             config=config,
         )
         callback_handler = runtime_resources.callback_handler
+        resolved_credential_target = operation_targets[0].value if len(operation_targets) == 1 else None
+        for draft in [*objective_credential_drafts, *configured_credential_drafts]:
+            try:
+                credential_type = str(draft["credential_type"])
+                credential_target = draft.get("target") or resolved_credential_target
+                credential_target = resolve_credential_target_for_operation(
+                    credential_type,
+                    credential_target,
+                    operation_targets,
+                )
+                store_user_credential(
+                    operation_id=operation_id,
+                    credential_type=credential_type,
+                    target=credential_target,
+                    role=draft.get("role"),
+                    values=dict(draft["values"]),
+                    operation_scope=draft.get("operation_scope"),
+                    account_label=draft.get("account_label"),
+                    tenant_label=draft.get("tenant_label"),
+                )
+            except (TypeError, ValueError) as error:
+                logger.warning("Could not store a credential configuration draft: %s", error)
 
         if not bool(args.report):
             def run_workflow_agent(
@@ -2256,7 +2322,7 @@ def main():
                 tools: list[Any],
                 system_prompt: str,
                 run_policy: AgentRunPolicy | None = None,
-            ) -> str:
+            ) -> str | AgentRunResult:
                 agent = create_agent(
                     target=args.target,
                     objective=args.objective,
@@ -2269,8 +2335,8 @@ def main():
                     include_tool_catalog=role != "task_creator",
                 )
                 try:
-                    _, worker_text = run_workflow_agent(agent, prompt, run_policy)
-                    return worker_text
+                    run_result, worker_text = run_workflow_agent(agent, prompt, run_policy)
+                    return run_result if role == "authentication_agent" else worker_text
                 finally:
                     try:
                         agent.cleanup()

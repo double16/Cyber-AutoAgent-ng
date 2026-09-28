@@ -300,6 +300,8 @@ export class DirectDockerService extends EventEmitter {
       } else if (params.evaluateOnly) {
         args.push('--evaluate', params.evaluateOnly);
       }
+      if (params.operationId) args.push('--operation-id', params.operationId);
+      if (params.credentialRotationRequestId) args.push('--credential-rotation-request', params.credentialRotationRequestId);
 
       if (config.modelId) {
         args.push('--model', config.modelId);
@@ -328,6 +330,9 @@ export class DirectDockerService extends EventEmitter {
         'CYBERAGENT_NO_BANNER=true',
         `DEV=${config.verbose ? 'true' : 'false'}`,
       );
+      if (config.assessmentCredentialsJson) {
+        env.push(`CYBER_ASSESSMENT_CREDENTIALS=${config.assessmentCredentialsJson}`);
+      }
 
       // Provider and model configuration
       // ConfigManager reads from these env vars, not just command-line args

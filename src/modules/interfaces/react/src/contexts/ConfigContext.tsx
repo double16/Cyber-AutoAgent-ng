@@ -175,6 +175,8 @@ export interface Config {
   bugBountyHeaders?: Record<string, string>;
   /** Optional proxy URL shared by HTTP and HTTPS assessment traffic */
   httpProxy?: string;
+  /** JSON credentials imported into the credential store when the next assessment begins. */
+  assessmentCredentialsJson?: string;
 
   // Context Management
   /** Conversation window size - max messages in history */
@@ -396,6 +398,7 @@ export const defaultConfig: Config = {
   verbose: false, // Default to non-verbose mode
   bugBountyHeaders: {},
   httpProxy: '',
+  assessmentCredentialsJson: process.env.CYBER_ASSESSMENT_CREDENTIALS,
 
   // Context Management
   conversationWindow: 100, // Default conversation window size (sliding window)

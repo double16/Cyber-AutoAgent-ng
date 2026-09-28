@@ -70,6 +70,14 @@ export const useSlashCommands = () => {
         }
       },
       {
+        command: '/credentials',
+        description: 'Review credential status, history, and queued rotations',
+        action: () => {
+          throw new Error('Credential management should be handled by useCommandHandler');
+        },
+        args: ['target']
+      },
+      {
         command: '/setup',
         description: 'Launch deployment setup wizard',
         action: () => {

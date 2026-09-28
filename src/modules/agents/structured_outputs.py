@@ -69,6 +69,8 @@ class PlanPhaseOutput(StrictStructuredOutput):
         "finding_dependent",
         "finding_validation",
     ] = "standard"
+    controller_owned_phase_kind: str = ""
+    provided_workstreams: list[str] = Field(default_factory=list)
 
 
 class PlanOutput(StrictStructuredOutput):

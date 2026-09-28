@@ -92,7 +92,7 @@ _STRUCTURED_VALIDATION_PATTERNS = tuple(
         r"\bmust (?:be|contain|describe|include|use)\b",
     )
 )
-_READ_ONLY_TOOLS = {"memory_retrieve", "read_artifact", "tool_catalog"}
+_READ_ONLY_TOOLS = {"memory_retrieve", "read_artifact", "search_artifact", "tool_catalog"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 TOOL_RECOVERY_EXHAUSTED_STATE_KEY = "tool_recovery_exhausted"
 STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY = "store_finding_recovery_exhausted"
@@ -226,7 +226,7 @@ def is_correctable_tool_failure(tool_name: str, tool_input: Any, output: str) ->
         return False
     if tool_name == "shell" and "service target is outside the assigned task boundary" in str(output).lower():
         return True
-    if tool_name in {"read_artifact", "http_request"}:
+    if tool_name in {"read_artifact", "search_artifact", "http_request"}:
         return True
     if _REDIRECT_BODY_FAILURE_PATTERN.search(output):
         return True
@@ -707,7 +707,7 @@ class TaskFailureRecoveryHook(HookProvider):
                     "record_task_acceptance until a changed store_finding call succeeds and returns finding:<id>.",
                 )
                 return
-            if tool_name not in {"read_artifact", "store_finding"}:
+            if tool_name not in {"read_artifact", "search_artifact", "store_finding"}:
                 self._block(
                     event,
                     tool_id,
@@ -727,7 +727,7 @@ class TaskFailureRecoveryHook(HookProvider):
                     "artifact, then submit one changed store_finding payload using a verbatim positive marker.",
                 )
                 return
-        if self.failure_category == "artifact_unavailable" and tool_name == "read_artifact":
+        if self.failure_category == "artifact_unavailable" and tool_name in {"read_artifact", "search_artifact"}:
             if self._artifact_retry_used:
                 self._block(
                     event,
@@ -921,7 +921,7 @@ class TaskFailureRecoveryHook(HookProvider):
                 self.exhausted = True
                 self._stop_event_loop(event, "correction_failed")
             return
-        if role in {"diagnostic", "read_only"} and success and tool_name == "read_artifact":
+        if role in {"diagnostic", "read_only"} and success and tool_name in {"read_artifact", "search_artifact"}:
             self._finding_repair_artifact_read_complete = True
         if role == "alternative" and success:
             if self.failed_tool_name == "record_finding_validation":
@@ -958,7 +958,7 @@ class TaskFailureRecoveryHook(HookProvider):
     def _failure_category(tool_name: str, tool_input: Any, output: str) -> str:
         if tool_name == "shell" and "service target is outside the assigned task boundary" in output.lower():
             return "task_scope_violation"
-        if tool_name == "read_artifact":
+        if tool_name in {"read_artifact", "search_artifact"}:
             return "artifact_unavailable"
         if _REDIRECT_BODY_FAILURE_PATTERN.search(output):
             return "redirect_response_unavailable"
@@ -976,12 +976,14 @@ class TaskFailureRecoveryHook(HookProvider):
         if self.finding_submission_repair_active:
             guidance = (
                 "A finding submission failed. Do not call record_task_acceptance or unrelated tools. "
-                "Use only read_artifact and one changed store_finding call until it returns finding:<id>. "
+                "Use only read_artifact or search_artifact and one changed store_finding call until it returns "
+                "finding:<id>. "
                 f"Repair instruction: {self.failed_output}"
             )
         elif self.failure_category == "artifact_unavailable":
             guidance = (
-                "An artifact could not be read. Make at most one changed read_artifact call using its canonical "
+                "An artifact could not be read or searched. Make at most one changed read_artifact or "
+                "search_artifact call using its canonical "
                 "artifact: reference or a relative path (artifacts/ is searched first, then the operation root). "
                 "If it still fails, do not read that artifact again; use an existing durable "
                 "reference or capture bounded alternate evidence before recording acceptance. "

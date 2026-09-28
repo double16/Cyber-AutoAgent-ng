@@ -13,9 +13,11 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from strands import tool
 
 from modules.tools.artifact import resolve_operation_artifact_path
+from modules.tools.client_auth_extraction import extract_storage_header_bindings
 from modules.tools.memory import canonical_artifact_reference
 from modules.tools.recon_inventory_manifest import (
     _canonical_url,
+    client_bundle_workflows,
     records_to_inventory_manifest,
     resolve_inventory_target,
     write_inventory_manifest,
@@ -212,6 +214,7 @@ def _bundle_inventory(text: str, target: str) -> dict[str, Any]:
         "api_paths": sorted(api_paths),
         "spa_routes": sorted(spa_routes),
         "auth_storage_keys": storage_keys,
+        "auth_storage_header_bindings": extract_storage_header_bindings(text),
         "auth_indicators": auth_indicators,
         "source_map_references": source_maps,
         "external_origins": sorted(external_origins),
@@ -298,11 +301,13 @@ def client_bundle_inventory(
         {"url": urljoin(canonical_target.rstrip("/") + "/", path.lstrip("/"))}
         for path in endpoint_paths
     )
+    workflows = client_bundle_workflows(extraction_payload, source_ref=extraction_ref)
     manifest = records_to_inventory_manifest(
         records,
         target_id=resolved_target_id,
         target=canonical_target,
         source_ref=extraction_ref,
+        workflows=workflows,
     )
     manifest_result = write_inventory_manifest(inventory_manifest, manifest)
     return json.dumps(
@@ -313,6 +318,11 @@ def client_bundle_inventory(
             "format_status": format_status,
             "api_path_count": len(extracted["api_paths"]),
             "spa_route_count": len(extracted["spa_routes"]),
+            "registration_route_count": sum(
+                1
+                for workflow in workflows
+                if "registration" in workflow.get("attributes", {})
+            ),
             "external_origin_count": len(extracted["external_origins"]),
         },
         sort_keys=True,

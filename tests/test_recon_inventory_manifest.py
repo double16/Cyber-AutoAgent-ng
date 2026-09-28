@@ -46,6 +46,16 @@ def test_supported_recon_parsers_extract_urls(source_format, text, expected_url,
     assert records[0]["status"] == expected_status
 
 
+def test_httpx_content_type_is_preserved_as_endpoint_response_metadata():
+    records = manifest_tool._parse_httpx(
+        '{"url":"https://target.test/assets/font","status_code":200,"content_type":"font/woff2; charset=binary"}'
+    )
+    manifest = manifest_tool.records_to_inventory_manifest(records, target_id="target-1")
+    endpoint = next(item for item in manifest["items"] if item["kind"] == "endpoint")
+
+    assert endpoint["attributes"]["response"] == {"content_type": "font/woff2", "status": 200}
+
+
 def test_ffuf_parser_accepts_csv_and_rejects_relative_fuzz_input():
     csv_records = manifest_tool._parse_ffuf("url,status\nhttps://target.test/csv,204\n")
     relative_records = manifest_tool._parse_ffuf('{"results":[{"input":{"FUZZ":"admin"},"status":200}]}')
@@ -403,6 +413,110 @@ def test_consolidation_merges_case_variant_technologies_with_one_stable_id(tmp_p
     }
 
 
+def test_consolidation_normalizes_document_target_id_and_technology_inventory(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    auth = artifact_dir / "auth-inventory.json"
+    auth.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target_id": "target-1",
+                "items": [
+                    {
+                        "id": "endpoint-login",
+                        "kind": "endpoint",
+                        "value": "https://target.test/login",
+                        "attributes": {},
+                    }
+                ],
+                "unassessed_gaps": [{"reason": "post_not_tested"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    technology = artifact_dir / "technology-inventory.json"
+    technology.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "url": "https://target.test/login",
+                        "method": "GET",
+                        "response_status": 200,
+                        "technology_clues": ["Example Server"],
+                        "version_strings": ["1.2.3"],
+                        "research_notes": ["Observed in response headers."],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = artifact_dir / "consolidated.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = manifest_tool.consolidate_recon_artifacts(
+        ["artifact:artifacts/auth-inventory.json", "artifact:artifacts/technology-inventory.json"],
+        str(output),
+        target_id="target-1",
+        target="https://target.test",
+    )
+
+    manifest = json.loads(output.read_text(encoding="utf-8"))
+    login = next(item for item in manifest["items"] if item["kind"] == "endpoint" and item["value"].endswith("/login"))
+    technology_item = next(item for item in manifest["items"] if item["kind"] == "technology")
+    assert result["validation_status"] == "valid"
+    assert not result["skipped_artifacts"]
+    assert all(item["target_id"] == "target-1" for item in manifest["items"])
+    assert login["attributes"]["technology"] == {
+        "clues": ["Example Server"],
+        "version_strings": ["1.2.3"],
+        "research_notes": ["Observed in response headers."],
+    }
+    assert technology_item["attributes"]["entrypoints"] == ["https://target.test/login"]
+
+
+def test_consolidation_skips_inventory_fragment_with_a_conflicting_target_id(tmp_path, monkeypatch):
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    valid = artifact_dir / "valid.json"
+    valid.write_text("https://target.test/", encoding="utf-8")
+    invalid = artifact_dir / "invalid.json"
+    invalid.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "target_id": "target-2",
+                "items": [{"id": "endpoint-admin", "kind": "endpoint", "value": "https://target.test/admin"}],
+                "unassessed_gaps": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = artifact_dir / "consolidated.json"
+    plan = SimpleNamespace(targets=[SimpleNamespace(target_id="target-1", value="https://target.test")])
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_get_active_plan", lambda: plan)
+
+    result = manifest_tool.consolidate_recon_artifacts(
+        ["artifact:artifacts/valid.json", "artifact:artifacts/invalid.json"],
+        str(output),
+        target_id="target-1",
+        target="https://target.test",
+    )
+
+    assert result["validation_status"] == "valid"
+    assert result["skipped_artifacts"] == [{
+        "source_artifact": "artifact:artifacts/invalid.json",
+        "reason": "inventory_manifest source target_id does not match the resolved synthesis target",
+    }]
+
+
 def test_consolidation_rejects_when_every_source_is_unsupported(tmp_path, monkeypatch):
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
@@ -435,7 +549,7 @@ def test_converter_recognizes_client_bundle_inventory_extraction(
                 "target": "https://target.test",
                 "target_id": "target-1",
                 "api_paths": ["/api/products"],
-                "spa_routes": ["/profile"],
+                "spa_routes": ["/usersignup", "/userlogin", "/newuserlogin"],
                 "auth_indicators": [],
                 "auth_storage_keys": [],
                 "external_origins": [],
@@ -467,8 +581,20 @@ def test_converter_recognizes_client_bundle_inventory_extraction(
     } == {
         "https://target.test/",
         "https://target.test/api/products",
-        "https://target.test/profile",
+        "https://target.test/usersignup",
+        "https://target.test/userlogin",
+        "https://target.test/newuserlogin",
     }
+    workflows = {item["value"]: item["attributes"] for item in manifest["items"] if item["kind"] == "workflow"}
+    assert workflows["Self-registration route: https://target.test/usersignup"]["registration"] == {
+        "enabled": True,
+        "target": "https://target.test",
+        "url": "https://target.test/usersignup",
+        "roles": ["user"],
+        "evidence_refs": ["artifact:artifacts/bundle-inventory.json"],
+    }
+    assert workflows["Authentication route: https://target.test/userlogin"]["client_route"]["classification"] == "authentication"
+    assert "registration" not in workflows["Authentication route: https://target.test/newuserlogin"]
 
 
 def test_converter_rejects_malformed_client_bundle_inventory_extraction(

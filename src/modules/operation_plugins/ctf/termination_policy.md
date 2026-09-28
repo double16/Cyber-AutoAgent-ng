@@ -16,7 +16,11 @@ requires a flag.
 Create separate artifact-producing tasks for at least three applicable workstreams: challenge hints, endpoint and
 capability discovery, access-context mapping, and flag-path investigation. Queue one challenge-surface synthesis task
 after the mapping tasks. A one-task direct flag path is allowed only when its structured exception records a concrete
-reason.
+reason. The access-context task must preserve unauthenticated behavior and, when credentials are eligible, use
+checked-out credential-store identities and task-bound authentication contexts. Document unavailable identities or
+MFA as coverage gaps; use credential-ID-backed comparisons for account, role, or tenant authorization behavior.
+Confirmed public static assets do not need individual access-context checks; retain them in the challenge inventory for
+later content and vulnerability analysis.
 2. **Generate Exploit Hypotheses from the Challenge Surface** — Derive detailed, testable exploit paths from challenge
    hints, exposed capabilities, inputs, and trust boundaries. For each path, record preconditions, the suspected
    mechanism and attacker-controlled flow, safe future test steps, expected positive and negative/control results,

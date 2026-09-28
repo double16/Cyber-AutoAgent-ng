@@ -25,6 +25,7 @@ interface UseCommandHandlerProps {
   openModuleSelector: (callback: (moduleName: string) => void) => void;
   openSafetyWarning: (context: any) => void;
   openDocumentation: (docIndex?: number) => void;
+  openCredentials: (target?: string) => void;
   handleScreenClear: () => void;
   refreshStatic: () => void;
   modalManager: any;
@@ -46,6 +47,7 @@ export function useCommandHandler({
   openModuleSelector,
   openSafetyWarning,
   openDocumentation,
+  openCredentials,
   handleScreenClear,
   refreshStatic,
   modalManager,
@@ -67,7 +69,7 @@ export function useCommandHandler({
         const service = appState.executionService as any;
         if (service.sendUserInput) {
           await service.sendUserInput(userInput);
-          addOperationHistoryEntry('info', `User response sent: ${userInput}`);
+          addOperationHistoryEntry('info', 'User response sent.');
           actions.setUserHandoff(false);
           return;
         } else {
@@ -249,6 +251,9 @@ export function useCommandHandler({
           }
         } catch {}
         break;
+      case 'credentials':
+        openCredentials(args[0]);
+        break;
       case 'memory':
         // Semantic memory is managed by the Python Qdrant integration.
         addOperationHistoryEntry('info', 'Memory operations are available during Python or container operations');
@@ -275,6 +280,7 @@ SLASH COMMANDS:
   /docs                 - Browse documentation interactively
   /modules              - Select security assessment module
   /config               - View current configuration
+  /credentials [target] - Review credential status/history and queue rotations
   /health               - Check system and container status
   /setup                - Setup wizard (initial setup or switch deployments)
 
@@ -350,7 +356,7 @@ For detailed instructions, use: /docs`;
     }
   }, [
     openConfig, openMemorySearch, openModuleSelector,
-    openDocumentation, handleScreenClear, handleHealthCheck, commandParser, assessmentFlowManager, 
+    openDocumentation, openCredentials, handleScreenClear, handleHealthCheck, commandParser, assessmentFlowManager,
     addOperationHistoryEntry, actions, modalManager
   ]);
 

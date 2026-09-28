@@ -265,6 +265,7 @@ describe('StreamDisplay broad event rendering', () => {
       { type: 'tool_start', tool_name: 'browser_evaluate_js', tool_input: { script: 'document.title' } },
       { type: 'tool_start', tool_name: 'browser_get_cookies', tool_input: {} },
       { type: 'tool_start', tool_name: 'browser_get_page_html', tool_input: {} },
+      { type: 'tool_start', tool_name: 'browser_take_screenshot', tool_input: {} },
       { type: 'tool_start', tool_name: 'browser_set_headers', tool_input: { headers: { Authorization: 'Bearer x' } } },
       { type: 'tool_start', tool_name: 'file_write', tool_input: { path: '/tmp/a.txt', content: 'hello' } },
       { type: 'tool_start', tool_name: 'editor', tool_input: { command: 'replace', path: 'app.py' } },
@@ -281,6 +282,7 @@ describe('StreamDisplay broad event rendering', () => {
 
     expect(output).toContain('tool: swarm');
     expect(output).toContain('tool: shell');
+    expect(output).toContain('tool: browser_take_screenshot');
     expect(output).toContain('nmap -sV');
     expect(output).toContain('https://example.com');
     expect(output).toContain('tool: report_generator');

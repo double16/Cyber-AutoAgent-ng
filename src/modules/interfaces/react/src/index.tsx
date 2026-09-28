@@ -98,7 +98,7 @@ const cli = meow(`
     --headless          Run in headless mode for scripting
     --continue          Continue a previous operation, optionally by operation ID, defaults to last operation
     --reset-failed      With --continue, reset partial-failure and blocked work before resuming
-    --reset-phases      With --continue, reset phase IDs/ranges and propose fresh work (e.g. 3,5-)
+    --reset-phases      With --continue, reset phase IDs/ranges and create fresh work (e.g. 3,5-)
     --report            Re-generate a report, optionally by operation ID, defaults to last operation
     --evaluate          Re-run evaluation, optionally by operation ID, defaults to last operation
     --deployment-mode   Deployment mode: local-cli, single-container, full-stack

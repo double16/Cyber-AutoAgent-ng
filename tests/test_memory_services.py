@@ -14,6 +14,7 @@ from strands.hooks.events import BeforeToolCallEvent
 
 import modules.tools as tools_module
 from modules.handlers.utils import get_tool_spec
+from modules.operation_plugins.planning_contracts import PhaseTaskContract
 from modules.tools import memory as mod
 from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
 from tests.helpers import memory_tasks
@@ -3022,6 +3023,7 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
         "limits": {},
         "snapshot_refs": [canonical_manifest],
         "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+        "workstream": "trust_boundary_mapping",
     }])
 
     assert json.loads(result)["created_count"] == 2
@@ -3095,7 +3097,7 @@ def test_bound_create_tasks_tool_rejects_duplicate_preflight_batch(fake_memory_c
     assert all("key workflows" not in task.acceptance.criteria[0].description.lower() for task in store.tasks)
 
 
-def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(fake_memory_client):
+def test_bound_create_tasks_tool_fans_out_distinct_snapshot_workstreams_atomically(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(
         objective="Assess inventory",
@@ -3134,6 +3136,7 @@ def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(
         "limits": {},
         "snapshot_refs": [canonical_manifest],
         "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+        "workstream": "unauthenticated_baseline",
     }
     create_tool = mod.build_create_tasks_tool(
         coverage_item_ids={"endpoint-0", "endpoint-1"},
@@ -3150,10 +3153,103 @@ def test_bound_create_tasks_tool_rejects_multiple_snapshot_proposals_atomically(
     with pytest.raises(ValueError, match="generic endpoint assessment"):
         create_tool(tasks=[generic_proposal])
 
-    with pytest.raises(ValueError, match="requires exactly one snapshot proposal"):
-        create_tool(tasks=[proposal, {**proposal, "title": "Second category"}])
+    with pytest.raises(ValueError, match="declare a non-empty workstream"):
+        create_tool(tasks=[{key: value for key, value in proposal.items() if key != "workstream"}])
 
-    assert store.tasks == []
+    with pytest.raises(ValueError, match="distinct snapshot proposal workstreams"):
+        create_tool(tasks=[proposal, {**proposal, "title": "Duplicate workstream"}])
+
+    authorization = {
+        **proposal,
+        "title": "Assess authorization controls",
+        "objective": "Assess authorization boundaries for every assigned frozen inventory item",
+        "criteria": [{"description": "Record authorization-boundary dispositions for every assigned item"}],
+        "workstream": "authorization_comparison",
+    }
+
+    result = json.loads(create_tool(tasks=[proposal, authorization]))
+
+    assert result == {"complete": True, "created_count": 4, "duplicate_count": 0}
+    assert {task.recovery_context["coverage_family"] for task in store.tasks} == {
+        "unauthenticated_baseline",
+        "authorization_comparison",
+    }
+    assert {task.acceptance.basis.item_ids for task in store.tasks} == {("endpoint-0",), ("endpoint-1",)}
+
+
+def test_bound_create_tasks_tool_resolves_controller_ownership_per_snapshot_group(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess inventory",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Coverage", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "controller-ownership-inventory.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [
+            {
+                "id": "endpoint-0",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": "http://target.test/",
+                "attributes": {"interaction": {"operations": ["GET"]}},
+            },
+            {
+                "id": "technology-bootstrap",
+                "target_id": "target-1",
+                "kind": "technology",
+                "value": "Bootstrap",
+                "attributes": {},
+            },
+        ],
+        "unassessed_gaps": [],
+    }))
+    canonical_manifest = mod.canonical_artifact_reference(str(manifest))
+    proposal = {
+        "title": "Preserve unauthenticated baseline",
+        "objective": "Record a baseline disposition for every assigned frozen inventory item",
+        "methods": [],
+        "limits": {},
+        "snapshot_refs": [canonical_manifest],
+        "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+        "workstream": "Unauthenticated Baseline",
+    }
+
+    def resolve_owner(_contract, _proposal, inventory, item_ids, _targets):
+        items = {item["id"]: item for item in inventory["items"]}
+        return "controller" if items[item_ids[0]]["kind"] == "endpoint" else "executor"
+
+    create_tool = mod.build_create_tasks_tool(
+        coverage_item_ids={"endpoint-0", "technology-bootstrap"},
+        expected_snapshot_ref=canonical_manifest,
+        phase_title="Authentication Coverage",
+        phase_objective="Preserve unauthenticated baselines",
+        phase_task_contract=PhaseTaskContract(
+            module="web",
+            phase_id=1,
+            mode="fanout",
+            min_mapping_tasks=1,
+            mapping_workstreams=frozenset({"unauthenticated_baseline"}),
+            controller_mapping_workstreams=frozenset({"unauthenticated_baseline"}),
+        ),
+        execution_owner_resolver=resolve_owner,
+    )
+
+    result = json.loads(create_tool(tasks=[proposal]))
+
+    assert result == {"complete": True, "created_count": 2, "duplicate_count": 0}
+    owners_by_item_id = {
+        task.acceptance.basis.item_ids[0]: task.recovery_context["phase_task_contract"]["execution_owner"]
+        for task in store.tasks
+    }
+    assert owners_by_item_id == {"endpoint-0": "controller", "technology-bootstrap": "executor"}
+    assert {task.recovery_context["phase_task_contract"]["workstream"] for task in store.tasks} == {
+        "unauthenticated_baseline"
+    }
 
 
 def test_bound_create_tasks_tool_rejects_wrong_snapshot_and_split_route(fake_memory_client):
@@ -3195,6 +3291,7 @@ def test_bound_create_tasks_tool_rejects_wrong_snapshot_and_split_route(fake_mem
         "limits": {},
         "snapshot_refs": [canonical_manifest],
         "criteria": [{"description": "Record a terminal disposition for every assigned item"}],
+        "workstream": "route_validation",
     }
 
     wrong_snapshot_tool = mod.build_create_tasks_tool(
@@ -3270,6 +3367,85 @@ def test_create_tasks_coverage_retry_excludes_previously_dispositioned_items(fak
         ("endpoint-1",),
         ("endpoint-2",),
     ]
+
+
+def test_bound_snapshot_coverage_families_remain_independently_eligible(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess inventory",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Coverage", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "coverage-family-inventory.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [
+            {
+                "id": f"endpoint-{index}",
+                "target_id": "target-1",
+                "kind": "endpoint",
+                "value": f"http://target.test/{index}",
+                "attributes": {},
+            }
+            for index in range(2)
+        ],
+        "unassessed_gaps": [],
+    }))
+    canonical_manifest = mod.canonical_artifact_reference(str(manifest))
+    create_tool = mod.build_create_tasks_tool(
+        coverage_item_ids={"endpoint-0", "endpoint-1"},
+        expected_snapshot_ref=canonical_manifest,
+        phase_title="Attack Hypotheses",
+        phase_objective="Develop independently testable attack hypotheses for the frozen inventory.",
+    )
+    xss = {
+        "title": "Develop XSS hypotheses",
+        "objective": "Develop XSS hypotheses for every assigned frozen inventory item",
+        "methods": [],
+        "limits": {},
+        "snapshot_refs": [canonical_manifest],
+        "criteria": [{"description": "Record XSS hypotheses for every assigned item"}],
+        "workstream": "xss",
+    }
+    lfi = {
+        **xss,
+        "title": "Develop LFI hypotheses",
+        "objective": "Develop LFI hypotheses for every assigned frozen inventory item",
+        "criteria": [{"description": "Record LFI hypotheses for every assigned item"}],
+        "workstream": "lfi",
+    }
+
+    assert json.loads(create_tool(tasks=[xss]))["created_count"] == 2
+    for task in store.tasks:
+        store.acceptance_results[task.task_uid] = [mod.AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id,
+            status="satisfied",
+            disposition="observation",
+            summary="XSS hypothesis coverage recorded",
+            evidence_refs=(canonical_manifest,),
+            coverage=tuple(
+                mod.CoverageResult(
+                    item_id=item_id,
+                    status="assessed_negative",
+                    evidence_refs=(canonical_manifest,),
+                )
+                for item_id in task.acceptance.basis.item_ids
+            ),
+        )]
+
+    later_create_tool = mod.build_create_tasks_tool(
+        coverage_item_ids={"endpoint-0", "endpoint-1"},
+        expected_snapshot_ref=canonical_manifest,
+        phase_title="Attack Hypotheses",
+        phase_objective="Develop independently testable attack hypotheses for the frozen inventory.",
+    )
+    result = json.loads(later_create_tool(tasks=[lfi]))
+
+    assert result == {"complete": True, "created_count": 2, "duplicate_count": 0}
+    assert [task.recovery_context["coverage_family"] for task in store.tasks[-2:]] == ["lfi", "lfi"]
 
 
 def test_create_tasks_rejects_semantic_cross_phase_duplicate(fake_memory_client):
@@ -4067,6 +4243,50 @@ def test_bound_create_tasks_tool_requires_and_persists_candidate_source_refs(fak
 
     assert json.loads(result)["created_count"] == 1
     assert store.tasks[-1].evidence == ["finding:candidate-1"]
+
+
+def test_finding_dependent_tasks_inherit_or_reject_frozen_authentication_bindings(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Impact Demonstration", status="active")],
+    )
+    binding = {
+        "auth_context": {"mode": "authenticated", "credential_ids": ["credential-1"]},
+        "validation_auth_context": {
+            "mode": "authenticated",
+            "credential_ids": ["credential-1"],
+            "target_scope": "subset",
+            "target_ids": ["app"],
+            "source_task_uid": "source-authenticated",
+        },
+    }
+    proposal = task_proposal("Demonstrate impact", "Demonstrate the assigned finding", "impact")
+    submit = mod.build_create_tasks_submitter(
+        required_finding_refs={"finding:authenticated"},
+        finding_auth_bindings={"finding:authenticated": binding},
+    )
+
+    result = json.loads(submit([proposal]))
+    task = store.tasks[-1]
+
+    assert result["created_count"] == 1
+    assert task.auth_context["credential_ids"] == ["credential-1"]
+    assert task.target_scope == "subset"
+    assert task.target_ids == ["app"]
+    assert task.recovery_context["validation_auth_context"] == binding["validation_auth_context"]
+
+    mixed = task_proposal("Compare impacts", "Compare assigned findings", "impact")
+    mixed["finding_refs"] = ["finding:authenticated", "finding:unauthenticated"]
+    submit = mod.build_create_tasks_submitter(
+        required_finding_refs={"finding:authenticated", "finding:unauthenticated"},
+        finding_auth_bindings={"finding:authenticated": binding, "finding:unauthenticated": {}},
+    )
+
+    with pytest.raises(ValueError, match="mixes incompatible authentication contexts"):
+        submit([mixed])
 
     proposal = task_proposal("Demonstrate impact", "Demonstrate the assigned finding", "impact")
     proposal["finding_refs"] = ["finding:unknown"]

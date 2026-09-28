@@ -63,6 +63,30 @@ tail -n 100 <log_path>
 
 ---
 
+### "Process a continuation"
+
+A continuation resumes an operation using data from a previous operation. The `cyber_operations.log` records
+continuation session starts with lines such as:
+
+```text
+CYBER-AUTOAGENT SESSION STARTED: 2026-09-23 20:54:17
+```
+
+When the user asks to process a continuation:
+
+1. Find every `CYBER-AUTOAGENT SESSION STARTED:` line in the operation log. Each marker starts a session; its
+   log section runs up to the next marker or the end of the file.
+2. By default, process the latest continuation session. Use the user's specified session if they identify one.
+3. Compare multiple continuations only when the user requests a comparison. Cite the relevant timestamps and
+   log line numbers when describing changes between sessions.
+
+After code updates, users commonly continue an operation to reuse earlier data, such as the discovered attack
+surface or authentication flows. That data may have been collected before the code changes, so do not treat it
+as reflecting the updated code unless the continuation produced fresh evidence. When relevant, distinguish
+inherited data from observations made during the selected continuation.
+
+---
+
 ### "Targeted log inspection"
 
 Locate key events and inspect their reasoning payloads using line numbers.
@@ -85,6 +109,11 @@ Use the SQLite database for structured workflow state when it is available. This
 missing `sqlite3` executable, missing database, corrupted database, or failed query must not fail the forensic
 request. Report the database as unavailable and continue with the operation log and Langfuse playbooks.
 
+SQLite access has a required order: **check availability → run the integrity check → discover the schema → query data**.
+The integrity check is a mandatory gate before any other database command. Run it as a separate, sequential command;
+do not run it in parallel with `.tables`, `.schema`, or `SELECT`. Do not inspect the schema or query rows unless it
+returns exactly `ok`.
+
 The database is always at `outputs/cyber_autoagent.db`.
 
 **Step 1: Check that the optional database tooling and file are available**
@@ -103,10 +132,14 @@ fi
 
 Do not install packages or create a replacement database as part of forensic review.
 
-**Step 2: Validate and repair the database**
+**Step 2: Run the mandatory integrity check**
 
-This step will attempt to validate the integrity of the SQLite database and repair any issues found. The integrity
-check requires write access, this is acceptable during review. Do not add `-readonly` to the integrity check command.
+Run this before any schema discovery or data query, using a normal writable SQLite connection; do not add
+`-readonly`. Opening the database this way lets SQLite perform any required crash recovery first, such as rolling
+back a hot journal left by an interrupted transaction. The `PRAGMA integrity_check` statement then checks the
+database's structural consistency and reports whether it is `ok`; the pragma itself does not repair arbitrary
+corruption. Keep this command separate and sequential so recovery and the integrity result are established before
+any schema discovery or data query.
 
 ```bash
 if ! integrity=$(sqlite3 outputs/cyber_autoagent.db "PRAGMA integrity_check;"); then
@@ -118,9 +151,10 @@ else
 fi
 ```
 
-If validation fails, do not retry with a writable connection. Continue the investigation using other sources.
+If the command fails or returns anything other than exactly `ok`, stop database inspection. Do not retry with another
+connection mode or issue schema/data queries. Report the database lookup failure and continue using other sources.
 
-**Step 3: Discover the schema before issuing table-specific queries**
+**Step 3: Discover the schema only after the integrity check passes**
 
 ```bash
 sqlite3 -readonly \
@@ -130,8 +164,11 @@ sqlite3 -readonly \
 ```
 
 The current workflow schema includes `operations`, `plans`, `tasks`, `task_acceptance_results`,
-`operation_preflight_results`, `finding_records`, `finding_evidence_receipts`, and
-`operation_model_metrics`. Schema discovery is authoritative if a database has a different migration level.
+`operation_preflight_results`, `finding_records`, `objective_validation_records`,
+`finding_evidence_receipts`, `operation_model_metrics`, `credential_records`,
+`credential_target_aliases`, `credential_status_events`, `credential_usage_records`, `mfa_challenges`,
+`credential_rotation_requests`, `authentication_flow_records`, and `credential_task_authorizations`. Schema discovery is
+authoritative if a database has a different migration level.
 
 **Step 4: Query structured operation data**
 
@@ -178,6 +215,18 @@ sqlite3 -readonly -header -column outputs/cyber_autoagent.db \
       AND operation_id = 'OPERATION_ID'
     ORDER BY created_at, finding_uid;
 
+   SELECT candidate_uid, fingerprint, verification_task_uid, resolution, created_at, updated_at
+     FROM objective_validation_records
+    WHERE logical_target = 'TARGET'
+      AND operation_id = 'OPERATION_ID'
+    ORDER BY created_at, candidate_uid;
+
+   SELECT receipt_uid, source_task_uid, artifact_ref, marker, artifact_fingerprint, created_at
+     FROM finding_evidence_receipts
+    WHERE logical_target = 'TARGET'
+      AND operation_id = 'OPERATION_ID'
+    ORDER BY created_at, receipt_uid;
+
    SELECT target_id, target, target_type, status, reason, resolved_addresses, recorded_at
      FROM operation_preflight_results
     WHERE logical_target = 'TARGET'
@@ -188,13 +237,67 @@ sqlite3 -readonly -header -column outputs/cyber_autoagent.db \
           model_calls, correction_loops, efficiency
      FROM operation_model_metrics
     WHERE logical_target = 'TARGET'
-      AND operation_id = 'OPERATION_ID'
+     AND operation_id = 'OPERATION_ID'
     ORDER BY captured_at, provider, model;"
 ```
 
-Use `finding_evidence_receipts` to locate artifact references and their source tasks. Treat database rows as
-structured workflow records, not as independent proof: readable or successful records establish availability,
-while semantic support or contradiction still requires inspection of the cited artifacts and other evidence.
+For credential and authentication provenance, query metadata and lifecycle records only; never select the
+`credential_records.payload` column:
+
+```bash
+sqlite3 -readonly -header -column outputs/cyber_autoagent.db \
+  "SELECT credential_id, target, role, operation_id, credential_type, origin, management_policy,
+          status, invalid_at, supersedes_credential_id, created_at, updated_at
+     FROM credential_records
+    WHERE logical_target = 'TARGET'
+      AND (operation_id = 'OPERATION_ID' OR operation_id IS NULL)
+    ORDER BY created_at, credential_id;
+
+   SELECT event_id, credential_id, operation_id, status, actor, reason, evidence_refs, created_at
+     FROM credential_status_events
+    WHERE logical_target = 'TARGET'
+      AND (operation_id = 'OPERATION_ID' OR operation_id IS NULL)
+    ORDER BY created_at, event_id;
+
+   SELECT usage_id, credential_id, task_uid, authentication_mode, outcome, evidence_refs, created_at
+     FROM credential_usage_records
+    WHERE logical_target = 'TARGET'
+      AND operation_id = 'OPERATION_ID'
+    ORDER BY created_at, usage_id;
+
+   SELECT task_uid, credential_id, authorization_kind, created_at
+     FROM credential_task_authorizations
+    WHERE logical_target = 'TARGET'
+      AND operation_id = 'OPERATION_ID'
+    ORDER BY task_uid, created_at, credential_id;
+
+   SELECT challenge_id, credential_id, task_uid, method, status, expires_at, metadata, created_at, updated_at
+     FROM mfa_challenges
+    WHERE logical_target = 'TARGET'
+      AND operation_id = 'OPERATION_ID'
+    ORDER BY created_at, challenge_id;
+
+   SELECT request_id, credential_id, request_operation_id, maintenance_operation_id, status, reason,
+          evidence_refs, claimed_task_uid, failure_reason, staged_credential_id, created_at, updated_at,
+          completed_at
+     FROM credential_rotation_requests
+    WHERE logical_target = 'TARGET'
+      AND (request_operation_id = 'OPERATION_ID' OR maintenance_operation_id = 'OPERATION_ID')
+    ORDER BY created_at, request_id;
+
+   SELECT flow_id, target, purpose, flow_kind, status, evidence_refs, discovered_operation_id,
+          created_at, updated_at, last_validated_at
+     FROM authentication_flow_records
+    WHERE logical_target = 'TARGET'
+      AND discovered_operation_id = 'OPERATION_ID'
+    ORDER BY updated_at DESC, flow_id;"
+```
+
+Use `credential_target_aliases` when checking user-declared target aliases. Treat database rows as structured
+workflow records, not as independent proof: readable or successful records establish availability, while
+semantic support or contradiction still requires inspection of the cited artifacts and other evidence. In
+particular, credential metadata establishes provenance and lifecycle state, not credential validity or finding
+support.
 
 Never use `.output`, `.dump` into a file, `INSERT`, `UPDATE`, `DELETE`, `CREATE`, `ALTER`, or other write-capable
 SQLite commands during forensic review. If any query returns an error, record the failed database lookup and

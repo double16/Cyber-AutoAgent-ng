@@ -13,6 +13,7 @@ import {
   ModuleSelectorLazy,
   DocumentationViewerLazy 
 } from './LazyComponents.js';
+import { CredentialManagerLazy } from './LazyComponents.js';
 // These components are small enough to load directly
 import { SafetyWarning } from './SafetyWarning.js';
 import { InitializationFlow } from './InitializationFlow.js';
@@ -32,6 +33,7 @@ interface ModalRegistryProps {
   isFirstRunExperience?: boolean;
   setIsFirstRunExperience?: (value: boolean) => void;
   setIsConfigurationModalOpen?: (value: boolean) => void;
+  onStartCredentialRotation?: (request: any, objective: string, target: string) => void;
 }
 
 const ModalWrapper: React.FC<{ children: React.ReactNode; terminalWidth: number }> = ({ children, terminalWidth }) => {
@@ -55,7 +57,8 @@ export const ModalRegistry: React.FC<ModalRegistryProps> = ({
   onSafetyConfirm,
   isFirstRunExperience,
   setIsFirstRunExperience,
-  setIsConfigurationModalOpen
+  setIsConfigurationModalOpen,
+  onStartCredentialRotation,
 }) => {
   // Don't render anything if no modal is active
   if (activeModal === ModalType.NONE) {
@@ -134,6 +137,20 @@ export const ModalRegistry: React.FC<ModalRegistryProps> = ({
           <DocumentationViewerLazy 
             onClose={onClose}
             selectedDoc={modalContext.documentIndex}
+          />
+        </ModalWrapper>
+      );
+
+    case ModalType.CREDENTIALS:
+      return (
+        <ModalWrapper terminalWidth={terminalWidth}>
+          <CredentialManagerLazy
+            initialTarget={modalContext.credentialTarget}
+            onClose={onClose}
+            onStartRotation={(request: any, objective: string, target: string) => {
+              onClose();
+              onStartCredentialRotation?.(request, objective, target);
+            }}
           />
         </ModalWrapper>
       );

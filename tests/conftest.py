@@ -348,6 +348,12 @@ def pytest_addoption(parser):
         default=False,
         help="Run tests that reach out to the Internet."
     )
+    parser.addoption(
+        "--network",
+        action="store_true",
+        default=False,
+        help="Run tests that connect to or listen on network sockets."
+    )
 
 
 def pytest_runtest_setup(item):
@@ -356,6 +362,9 @@ def pytest_runtest_setup(item):
 
     if "external" in item.keywords and not item.config.getoption("--external"):
         pytest.skip("Test requires --external option to run.")
+
+    if "network" in item.keywords and not item.config.getoption("--network"):
+        pytest.skip("Test requires --network option to run.")
 
     if "ollama" in item.keywords:
         ollama_host = item.config.getoption("ollama_host")

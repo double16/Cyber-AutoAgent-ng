@@ -703,6 +703,8 @@ export class PythonExecutionService extends EventEmitter {
       } else if (params.evaluateOnly) {
         args.push('--evaluate', params.evaluateOnly);
       }
+      if (params.operationId) args.push('--operation-id', params.operationId);
+      if (params.credentialRotationRequestId) args.push('--credential-rotation-request', params.credentialRotationRequestId);
 
       if (config.modelId) {
         args.push('--model', config.modelId);
@@ -728,6 +730,7 @@ export class PythonExecutionService extends EventEmitter {
         FORCE_COLOR: '1',
         // Always pass objective via environment to avoid escaping issues
         CYBER_OBJECTIVE: objective,
+        ...(config.assessmentCredentialsJson ? { CYBER_ASSESSMENT_CREDENTIALS: config.assessmentCredentialsJson } : {}),
         // React UI integration - critical for event emission
         BYPASS_TOOL_CONSENT: config.confirmations ? 'false' : 'true',
         CYBER_UI_MODE: 'react',

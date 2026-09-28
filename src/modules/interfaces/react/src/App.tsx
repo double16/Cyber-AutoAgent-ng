@@ -313,6 +313,7 @@ const AppContent: React.FC<AppProps> = ({
     openModuleSelector: modalManager.openModuleSelector,
     openSafetyWarning: modalManager.openSafetyWarning,
     openDocumentation: modalManager.openDocumentation,
+    openCredentials: modalManager.openCredentials,
     handleScreenClear,
     refreshStatic,
     modalManager,
@@ -401,6 +402,9 @@ const AppContent: React.FC<AppProps> = ({
     onModalClose: handleModalClose,
     addOperationHistoryEntry: operationManager.addOperationHistoryEntry,
     onSafetyConfirm: operationManager.startAssessmentExecution,
+    onStartCredentialRotation: (request: any, objective: string, credentialTarget: string) => operationManager.startCredentialRotationExecution(
+      request, objective, credentialTarget
+    ),
     applicationConfig,
     terminalCleanupRef
   }), [
@@ -418,6 +422,7 @@ const AppContent: React.FC<AppProps> = ({
     handleModalClose,
     operationManager.addOperationHistoryEntry,
     operationManager.startAssessmentExecution,
+    operationManager.startCredentialRotationExecution,
     applicationConfig,
     terminalCleanupRef
   ]);

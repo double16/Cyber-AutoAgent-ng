@@ -43,6 +43,20 @@ class _InnerLLM:
         return self._response
 
 
+class _OutcomeInnerLLM(_InnerLLM):
+    def __init__(self, outcomes, default_model="ollama/browser-model"):
+        super().__init__(None)
+        self._outcomes = list(outcomes)
+        self.default_model = default_model
+
+    async def create_response(self, **kwargs):
+        self.calls.append(kwargs)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
 def _mk_patch_with_content(content: str) -> tuple[LLMClientJSONResponsePatch, _InnerLLM, _FakeResponse]:
     resp = _FakeResponse(choices=[_FakeChoice(content)])
     inner = _InnerLLM(resp)
@@ -142,6 +156,64 @@ async def test_create_response_no_response_format_does_not_modify():
     # unchanged because response_format not set
     assert resp.choices[0].message.content.strip().startswith("```json")
     assert inner.calls and "messages" in inner.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_create_response_retries_without_response_format_when_provider_rejects_it(caplog):
+    response = _FakeResponse([_FakeChoice('{"elements": []}')])
+    provider_error = RuntimeError('OllamaException - {"error":"structured output is unavailable"}')
+    wrapped_error = RuntimeError("LiteLLM request failed")
+    wrapped_error.__cause__ = provider_error
+    inner = _OutcomeInnerLLM([
+        wrapped_error,
+        response,
+    ])
+    patch = LLMClientJSONResponsePatch(inner)
+
+    result = await patch.create_response(
+        messages=[{"role": "system", "content": "base"}, {"role": "user", "content": "x"}],
+        response_format=_ElementsModel,
+    )
+
+    assert result is response
+    assert "response_format" in inner.calls[0]
+    assert "response_format" not in inner.calls[1]
+    assert "Format results as valid JSON" in inner.calls[1]["messages"][1]["content"]
+    assert "retrying with prompt-directed JSON" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_create_response_caches_structured_output_fallback_per_model():
+    first_response = _FakeResponse([_FakeChoice('{"elements": []}')])
+    second_response = _FakeResponse([_FakeChoice('{"elements": []}')])
+    inner = _OutcomeInnerLLM([
+        RuntimeError("structured output is unavailable"),
+        first_response,
+        second_response,
+    ])
+    patch = LLMClientJSONResponsePatch(inner)
+
+    await patch.create_response(messages=[{"role": "user", "content": "x"}], response_format=_ElementsModel)
+    await patch.create_response(messages=[{"role": "user", "content": "x"}], response_format=_ElementsModel)
+
+    assert len(inner.calls) == 3
+    assert "response_format" in inner.calls[0]
+    assert "response_format" not in inner.calls[1]
+    assert "response_format" not in inner.calls[2]
+
+
+@pytest.mark.asyncio
+async def test_create_response_does_not_retry_unrelated_provider_failure():
+    inner = _OutcomeInnerLLM([RuntimeError("connection refused")])
+    patch = LLMClientJSONResponsePatch(inner)
+
+    with pytest.raises(RuntimeError, match="connection refused"):
+        await patch.create_response(
+            messages=[{"role": "user", "content": "x"}],
+            response_format=_ElementsModel,
+        )
+
+    assert len(inner.calls) == 1
 
 
 @pytest.mark.asyncio

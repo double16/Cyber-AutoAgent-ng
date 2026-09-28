@@ -67,10 +67,18 @@ export class LoggingService {
     }
   }
 
+  private formatMessage(args: any[], includeErrors = false): string {
+    return args.map(arg => {
+      if (includeErrors && arg instanceof Error) {
+        return `${arg.message}\n${arg.stack}`;
+      }
+      return typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg);
+    }).join(' ').trim();
+  }
+
   debug(...args: any[]): void {
-    const message = args.map(arg => 
-      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
-    ).join(' ');
+    const message = this.formatMessage(args);
+    if (!message) return;
 
     this.addToBuffer(LogLevel.DEBUG, message);
 
@@ -80,9 +88,8 @@ export class LoggingService {
   }
 
   info(...args: any[]): void {
-    const message = args.map(arg => 
-      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
-    ).join(' ');
+    const message = this.formatMessage(args);
+    if (!message) return;
 
     this.addToBuffer(LogLevel.INFO, message);
 
@@ -92,9 +99,8 @@ export class LoggingService {
   }
 
   warn(...args: any[]): void {
-    const message = args.map(arg => 
-      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
-    ).join(' ');
+    const message = this.formatMessage(args);
+    if (!message) return;
 
     this.addToBuffer(LogLevel.WARN, message);
 
@@ -104,12 +110,8 @@ export class LoggingService {
   }
 
   error(...args: any[]): void {
-    const message = args.map(arg => {
-      if (arg instanceof Error) {
-        return `${arg.message}\n${arg.stack}`;
-      }
-      return typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg);
-    }).join(' ');
+    const message = this.formatMessage(args, true);
+    if (!message) return;
 
     this.addToBuffer(LogLevel.ERROR, message);
 

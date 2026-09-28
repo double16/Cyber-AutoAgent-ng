@@ -11,13 +11,16 @@ from modules.tools.memory import (
 )
 
 
-def _task(*, output_kind="artifact", evidence_kind="artifact"):
+def _task(*, output_kind="artifact", evidence_kind="artifact", recovery_context=None, kind="standard", auth_context=None):
     return Task(
         task_uid="task-1",
         title="Bounded task",
         objective="Produce the declared output",
         phase=1,
         status="pending",
+        kind=kind,
+        auth_context=auth_context or {},
+        recovery_context=recovery_context or {},
         acceptance=AcceptanceContract(
             mode="outcome",
             basis=AcceptanceBasis(
@@ -84,6 +87,123 @@ def test_required_optional_tools_match_inventory_output_or_evidence():
 
 def test_required_optional_tools_ignore_generic_artifact_contracts():
     assert selection.required_optional_tool_names(_task()) == []
+
+
+def test_client_side_api_workstream_requires_bundle_inventory_tool():
+    task = _task(
+        recovery_context={"phase_task_contract": {"workstream": "client_side_api"}},
+    )
+
+    assert selection.required_optional_tool_names(task) == ["client_bundle_inventory"]
+
+
+def test_other_workstreams_do_not_require_bundle_inventory_tool():
+    task = _task(
+        recovery_context={"phase_task_contract": {"workstream": "auth_workflow"}},
+    )
+
+    assert selection.required_optional_tool_names(task) == []
+
+
+def test_authenticated_validation_tasks_receive_only_opaque_request_tool():
+    task = _task(
+        kind="finding_validation",
+        auth_context={"mode": "authenticated", "credential_ids": ["credential-1"]},
+    )
+
+    names = selection.required_optional_tool_names(task)
+
+    assert names == ["authenticated_http_request"]
+    auth_agent_names = selection.authentication_agent_optional_tool_names(task)
+    assert "checkout_credential" in auth_agent_names
+    assert "set_task_auth_context" not in auth_agent_names
+    assert "prepare_login_form_authentication" not in auth_agent_names
+    assert "capture_browser_authenticated_context" in auth_agent_names
+    assert "authenticated_http_request" not in auth_agent_names
+    assert "query_credentials" not in auth_agent_names
+    assert "store_credential" not in auth_agent_names
+    assert "browser_get_cookies" not in auth_agent_names
+    assert "browser_evaluate_js" not in auth_agent_names
+    assert "store_credential" not in names
+
+
+def test_future_checkout_consumer_requires_registered_mode_and_controller_grant(monkeypatch):
+    monkeypatch.setattr(selection, "_AUTHENTICATION_TOOL_ACCESS_MODES", dict(selection._AUTHENTICATION_TOOL_ACCESS_MODES))
+    selection.register_authentication_tool_access("future_auth_consumer", "checkout")
+    task = _task(recovery_context={"controller_credential_access": {
+        "mode": "checkout", "tools": ["future_auth_consumer"]
+    }})
+
+    assert selection.required_optional_tool_names(_task()) == []
+    assert selection.required_optional_tool_names(task) == ["checkout_credential", "future_auth_consumer"]
+    assert "future_auth_consumer" in selection.credential_tool_names()
+    assert selection.authentication_tool_access_mode("future_auth_consumer") == "checkout"
+
+
+def test_future_context_consumer_is_granted_without_checkout(monkeypatch):
+    monkeypatch.setattr(selection, "_AUTHENTICATION_TOOL_ACCESS_MODES", dict(selection._AUTHENTICATION_TOOL_ACCESS_MODES))
+    selection.register_authentication_tool_access("future_context_consumer", "context")
+    task = _task(recovery_context={"controller_credential_access": {
+        "mode": "context", "tools": ["future_context_consumer"]
+    }})
+
+    assert selection.required_optional_tool_names(task) == ["future_context_consumer"]
+    assert "checkout_credential" not in selection.required_optional_tool_names(task)
+
+
+@pytest.mark.parametrize(
+    "grant, message",
+    [
+        ({"mode": "unknown", "tools": ["future_auth_consumer"]}, "context or checkout mode"),
+        ({"mode": "checkout", "tools": ["unknown_tool"]}, "unregistered tool"),
+        ({"mode": "checkout", "tools": ["authenticated_http_request"]}, "unregistered tool"),
+        ({"mode": "checkout", "tools": []}, "requires tool names"),
+    ],
+)
+def test_controller_checkout_grant_rejects_invalid_or_unregistered_tools(grant, message):
+    task = _task(recovery_context={"controller_credential_access": grant})
+
+    with pytest.raises(ValueError, match=message):
+        selection.required_optional_tool_names(task)
+
+
+def test_authentication_tool_access_registration_rejects_invalid_and_conflicting_modes(monkeypatch):
+    monkeypatch.setattr(selection, "_AUTHENTICATION_TOOL_ACCESS_MODES", dict(selection._AUTHENTICATION_TOOL_ACCESS_MODES))
+
+    with pytest.raises(ValueError, match="consumer tool name"):
+        selection.register_authentication_tool_access("checkout_credential", "checkout")
+    with pytest.raises(ValueError, match="unsupported authentication tool access mode"):
+        selection.register_authentication_tool_access("future_auth_consumer", "invalid")
+    selection.register_authentication_tool_access("future_auth_consumer", "checkout")
+    with pytest.raises(ValueError, match="cannot change"):
+        selection.register_authentication_tool_access("future_auth_consumer", "context")
+
+
+def test_credential_provisioning_selects_interactive_browser_tools_only():
+    task = _task(
+        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+    )
+
+    names = selection.required_optional_tool_names(task)
+
+    assert set(selection.CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES).issubset(names)
+    assert "generate_password" in names
+    assert "generate_registration_email" in names
+    assert "store_credential" in names
+    assert "query_credentials" not in names
+    assert "checkout_credential" not in names
+    assert "mark_credential_status" not in names
+    assert "browser_set_headers" not in names
+
+
+def test_other_credential_tasks_do_not_select_provisioning_browser_tools():
+    task = _task(
+        recovery_context={"phase_task_contract": {"workstream": "authenticated_credential_coverage"}},
+    )
+
+    names = selection.required_optional_tool_names(task)
+
+    assert not set(selection.CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES).intersection(names)
 
 
 def test_optional_tool_selection_catalog_rejects_invalid_rule(monkeypatch, tmp_path):

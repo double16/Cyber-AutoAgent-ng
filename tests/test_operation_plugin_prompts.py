@@ -103,6 +103,40 @@ def test_web_recon_preserves_non_exploitation_and_three_endpoint_policy():
     assert "at least three endpoints" in policy
 
 
+def test_web_modules_define_credential_coverage_phases_with_different_state_change_boundaries():
+    web_prompt = (PLUGIN_ROOT / "web" / "execution_prompt.md").read_text(encoding="utf-8")
+    web_policy = (PLUGIN_ROOT / "web" / "termination_policy.md").read_text(encoding="utf-8")
+    recon_prompt = (PLUGIN_ROOT / "web_recon" / "execution_prompt.md").read_text(encoding="utf-8")
+    recon_policy = (PLUGIN_ROOT / "web_recon" / "termination_policy.md").read_text(encoding="utf-8")
+
+    assert "Authentication Coverage and Authorization Controls" in web_policy
+    assert web_policy.index("Authentication Coverage and Authorization Controls") < web_policy.index(
+        "Generate Attack Hypotheses"
+    )
+    assert "store-backed IDOR path" in web_prompt
+    assert "public sign-up flow may be used" in web_prompt
+    assert "Access Context Mapping" in recon_policy
+    assert "unauthenticated posture" in recon_policy
+    assert "Do not guess credentials or automatically self-register" in recon_prompt
+    assert "read-only IDOR comparison" in recon_prompt
+    assert "Use GET requests only" in recon_prompt
+    assert "credential-ID-backed IDOR comparison" in recon_policy
+    assert "Do not automatically self-register, enumerate identifiers, or alter target state" in recon_policy
+    assert "controller-owned inventory-synthesis task" in recon_policy
+    assert "Phases 2 through 5 use the frozen phase-1 inventory manifest" in recon_policy
+
+
+def test_ctf_access_context_uses_credential_store_without_adding_an_assessment_phase():
+    prompt = (PLUGIN_ROOT / "ctf" / "execution_prompt.md").read_text(encoding="utf-8")
+    policy = (PLUGIN_ROOT / "ctf" / "termination_policy.md").read_text(encoding="utf-8")
+
+    assert "phase-one access-context workstream" in prompt
+    assert "checked-out, target-scoped credential-store identities" in prompt
+    assert "credential-ID-backed comparisons" in prompt
+    assert "access-context task must preserve unauthenticated behavior" in policy
+    assert "Authentication Coverage and Authorization Controls" not in policy
+
+
 @pytest.mark.parametrize("module", ("web", "web_recon"))
 def test_web_modules_preserve_explicit_url_scheme_and_port_scope(module):
     prompt = (PLUGIN_ROOT / module / "execution_prompt.md").read_text(encoding="utf-8")

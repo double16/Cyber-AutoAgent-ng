@@ -1,5 +1,14 @@
 # Cyber-AutoAgent-ng Changelog
 
+### Features
+
+- Add credential store with typed login/API/OAuth credentials, lifecycle status history, exact
+  resolved-target scoping, explicit aliases, agent checkout tools, password/TOTP generation, objective sanitization,
+  authentication context for tasks/findings, interactive email-MFA handoff, operation-managed credential rotation,
+  target-scoped authenticated-task binding, and masked credential-use reporting.
+
+### Fixes
+
 ## v0.10.0
 
 ### Features

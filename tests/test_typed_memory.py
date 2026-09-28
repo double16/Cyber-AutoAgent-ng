@@ -39,6 +39,30 @@ def test_plan_phase_normalizes_finding_dependency_to_creation_mode():
     assert phase.to_dict()["task_creation_mode"] == "finding_dependent"
 
 
+def test_plan_phase_round_trips_structured_provided_workstreams():
+    phase = mod.PlanPhase.from_obj({
+        "id": 1,
+        "title": "Inventory",
+        "status": "pending",
+        "produces_hypotheses": False,
+        "provided_workstreams": ["inventory_synthesis", "auth_workflow"],
+    })
+
+    assert phase.provided_workstreams == ("inventory_synthesis", "auth_workflow")
+    assert mod.PlanPhase.from_obj(phase.to_dict()).provided_workstreams == phase.provided_workstreams
+
+
+def test_plan_phase_rejects_non_list_provided_workstreams():
+    with pytest.raises(ValueError, match="provided_workstreams"):
+        mod.PlanPhase.from_obj({
+            "id": 1,
+            "title": "Inventory",
+            "status": "pending",
+            "produces_hypotheses": False,
+            "provided_workstreams": "inventory_synthesis",
+        })
+
+
 def test_plan_phase_rejects_missing_hypothesis_metadata():
     with pytest.raises(ValueError, match="produces_hypotheses is required"):
         mod.PlanPhase.from_obj({"id": 1, "title": "Discovery", "status": "pending"})
@@ -489,6 +513,7 @@ def test_store_finding_routes_task_to_future_validation_phase(memory_client, ope
         }],
         "artifacts": ["artifact:admin-response.txt"],
         "artifact_fingerprints": candidate["artifact_fingerprints"],
+        "auth_context": {"mode": "unauthenticated"},
     }
 
 
@@ -1923,6 +1948,51 @@ def test_store_objective_candidate_creates_separate_validation_task(memory_clien
     assert candidate["validation_type"] == "objective"
     assert candidate["constraints"] == {"exact_length": 9, "format_template": "FLAG{...}"}
     assert store_entry.call_args.args[1] == "objective_candidate"
+
+
+def test_store_objective_candidate_inherits_authenticated_source_task(memory_client, operation_ids, tmp_path: Path):
+    artifact = tmp_path / "flag.txt"
+    artifact.write_text("FLAG{abc}", encoding="utf-8")
+    source_task = Task(
+        task_uid="source-authenticated",
+        title="Read protected flag",
+        objective="Read the protected flag",
+        acceptance=AcceptanceContract(
+            mode="outcome",
+            basis=AcceptanceBasis(kind="snapshot", description="Source", source_refs=["artifact:source"]),
+            criteria=[AcceptanceCriterion(
+                id="source",
+                description="Read protected value",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+        phase=5,
+        status="active",
+        target_scope="subset",
+        target_ids=["app"],
+        auth_context={"mode": "authenticated", "credential_ids": ["credential-1"]},
+    )
+    plan_store = MagicMock()
+    plan_store.get_objective_candidate_by_fingerprint.return_value = None
+    plan_store.get_plan.return_value = SimpleNamespace(
+        objective="Find the flag. Flag format is: FLAG{...} and has length 9."
+    )
+    plan_store.get_tasks.return_value = [source_task]
+    with (
+        patch("src.modules.tools.memory._get_database_store", return_value=plan_store),
+        patch("src.modules.tools.memory._get_plan_current_phase", return_value=5),
+        patch("src.modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        store_objective_candidate(
+            "flag", "FLAG{abc}", "Retrieved while authenticated", ["Read response"], [str(artifact)]
+        )
+
+    task = memory_client.store_task.call_args.kwargs["task"]
+
+    assert task.auth_context == {"mode": "authenticated", "credential_ids": ["credential-1"], "roles": [], "account_labels": [], "tenant_labels": []}
+    assert task.target_scope == "subset"
+    assert task.target_ids == ["app"]
+    assert task.recovery_context["validation_auth_context"]["credential_ids"] == ["credential-1"]
 
 
 def test_store_objective_candidate_validates_inputs_and_is_idempotent(

@@ -29,6 +29,11 @@ module_interface:
   provides_to: []
   finding_categories: ["web-vulnerabilities", "authentication-flaws", "business-logic", "injection-vulnerabilities", "xss-bypasses", "idor-discoveries", "auth-bypasses", "injection-points", "file-traversal", "ssrf"]
 planning:
+  phase_metadata_contracts:
+    - phase_id: 2
+      task_creation_mode: snapshot_dependent
+    - phase_id: 3
+      task_creation_mode: snapshot_dependent
   phase_task_contracts:
     - phase_id: 1
       mode: fanout_with_synthesis
@@ -41,3 +46,21 @@ planning:
       synthesis_workstream: inventory_synthesis
       synthesis_output_kind: inventory_manifest
       synthesis_execution: controller
+    - phase_id: 2
+      mode: controller_owned
+      controller_owned_phase_kind: credential_provisioning
+      prerequisite_workstreams:
+        - inventory_synthesis
+        - auth_workflow
+      registration_attribute: registration
+      identities_per_role: 2
+    - phase_id: 3
+      mode: fanout
+      exclude_public_static_assets: true
+      min_mapping_tasks: 3
+      mapping_workstreams:
+        - unauthenticated_baseline
+        - authenticated_credential_coverage
+        - authorization_comparison
+      controller_mapping_workstreams:
+        - unauthenticated_baseline

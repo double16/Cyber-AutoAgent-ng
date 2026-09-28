@@ -356,64 +356,67 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | Variable                                           | Description                                                 | Required                                                        |
 |----------------------------------------------------|-------------------------------------------------------------|-----------------------------------------------------------------|
 | `CYBER_AGENT_PROVIDER`                             | Provider choice (bedrock/ollama/litellm/gemini)             | No (default: bedrock)                                           |
-| `CYBER_AGENT_LLM_MODEL`                            | Main LLM model ID                                           | Yes                                                             |
-| `CYBER_AGENT_EMBEDDING_MODEL`                      | Embedding model ID                                          | No (provider default)                                           |
-| `REASONING_EFFORT`                                 | Reasoning effort (low/medium/high)                          | No (default: medium)                                            |
-| `MAX_TOKENS`                                       | Override LLM max (output) tokens                            | No (models.dev default)                                         |
-| `CYBER_AGENT_SWARM_MODEL`                          | Swarm tool LLM model ID                                     | No                                                              |
-| `CYBER_AGENT_SWARM_MAX_TOKENS`                     | Override specialist max tokens                              | No (models.dev default)                                         |
-| `MAX_TOKENS_LIMIT`                                 | Override LLM output token upper bound                       | No (12,000 default)                                             |
-| `MAX_TOKENS_REASONING_LIMIT`                       | Override LLM output token upper bound (reasoning)           | No (32,000 default)                                             |
-| `CYBER_CONTEXT_LIMIT`                              | Limit detected prompt tokens                                | No (auto-detected)                                              |
-| `CYBER_PROMPT_LIMIT_FORCE`                         | Force prompt token limit                                    | No (auto-detected)                                              |
-| `CYBER_SDK_CONTEXT_MANAGER`                        | Strands context facade (`auto`, `agentic`, `false`)         | No (default: `false`)                                           |
-| `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique  | No (default: `7`)                                               |
-| `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique   | No (default: `3`)                                               |
-| `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum normal executor passes per task                     | No (default: `3`, minimum `1`)                                  |
-| `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS`             | Extra executor passes for actionable evaluator feedback     | No (default: `1`, minimum `0`)                                  |
+| `CYBER_AGENT_LLM_MODEL`                            | Main LLM model ID                                          | Yes                                                             |
+| `CYBER_AGENT_EMBEDDING_MODEL`                      | Embedding model ID                                         | No (provider default)                                           |
+| `CYBER_ASSESSMENT_CREDENTIALS`                      | Sensitive credential JSON imported at operation start      | No                                                              |
+| `CYBER_CREDENTIAL_STORE_KEY`                        | URL-safe base64 32-byte AES-256-GCM credential-store key  | No (recommended when credentials persist)                      |
+| `CYBER_CREDENTIAL_STORE_PREVIOUS_KEYS`              | Temporary comma-separated prior keys for credential-store rotation | No (remove after startup migrates payloads)             |
+| `REASONING_EFFORT`                                 | Reasoning effort (low/medium/high)                         | No (default: medium)                                            |
+| `MAX_TOKENS`                                       | Override LLM max (output) tokens                           | No (models.dev default)                                         |
+| `CYBER_AGENT_SWARM_MODEL`                          | Swarm tool LLM model ID                                    | No                                                              |
+| `CYBER_AGENT_SWARM_MAX_TOKENS`                     | Override specialist max tokens                             | No (models.dev default)                                         |
+| `MAX_TOKENS_LIMIT`                                 | Override LLM output token upper bound                      | No (12,000 default)                                             |
+| `MAX_TOKENS_REASONING_LIMIT`                       | Override LLM output token upper bound (reasoning)          | No (32,000 default)                                             |
+| `CYBER_CONTEXT_LIMIT`                              | Limit detected prompt tokens                               | No (auto-detected)                                              |
+| `CYBER_PROMPT_LIMIT_FORCE`                         | Force prompt token limit                                   | No (auto-detected)                                              |
+| `CYBER_SDK_CONTEXT_MANAGER`                        | Strands context facade (`auto`, `agentic`, `false`)        | No (default: `false`)                                           |
+| `CYBER_WORKFLOW_PLAN_REFINEMENT_ITERATIONS`        | Maximum initial plan critic reviews; `0` disables critique | No (default: `7`)                                               |
+| `CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS` | Maximum task prompt critic reviews; `0` disables critique  | No (default: `3`)                                               |
+| `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum normal executor passes per task                    | No (default: `3`, minimum `1`)                                  |
+| `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS`             | Extra executor passes for actionable evaluator feedback    | No (default: `1`, minimum `0`)                                  |
 | `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE`     | Successful pages per authorized evaluator evidence artifact | No (default: `4`, minimum `1`; 200 lines per page)              |
-| `CYBER_SECLISTS_DIR`                               | Absolute SecLists root for wordlist-consuming tools         | No (common locations; container default: `/usr/share/seclists`) |
-| `CYBER_REPORT_REFINEMENT_CYCLES`                   | Critic-guided revision cycles per generated report section  | No (default: `2`; `0` disables)                                 |
-| `CYBER_REPORT_EVIDENCE_GROUPING`                   | Merge corroborating evidence into canonical report findings | No (default: `false`)                                           |
-| `CYBER_TAXONOMY_CACHE_DIR`                         | Local cache directory for CWE and ATT&CK catalogs           | No (default: user cache directory)                              |
-| `CYBER_TAXONOMY_REFRESH_DAYS`                      | Days before cached taxonomy catalogs are refreshed          | No (default: `30`)                                              |
-| `CYBER_TAXONOMY_REFRESH`                           | Fetch current catalogs when the cache is stale              | No (default: `true`)                                            |
-| `CYBER_TAXONOMY_OFFLINE`                           | Disable taxonomy catalog network refreshes                  | No (default: `false`)                                           |
-| `CYBER_TAXONOMY_CATALOG_URL`                       | Optional normalized taxonomy catalog mirror                 | No                                                              |
-| `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS`        | Repeated blocked recovery calls before stopping execution   | No (default: `2`, minimum `1`)                                  |
-| `CYBER_TOOL_RECOVERY_MAX_CORRECTIONS`              | Changed retries allowed for one failed task invocation      | No (default: `2`, minimum `1`)                                  |
-| `CYBER_TASK_CREATOR_MAX_CORRECTIONS`               | Retained correction turns after rejected task creation      | No (default: `6`, minimum `0`)                                  |
-| `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS`            | Retained correction turns after rejected task acceptance    | No (default: `2`, minimum `0`)                                  |
-| `AWS_ACCESS_KEY_ID`                                | AWS credentials for Bedrock                                 | For Bedrock provider                                            |
-| `AWS_SECRET_ACCESS_KEY`                            | AWS credentials for Bedrock                                 | For Bedrock provider                                            |
-| `AWS_REGION`                                       | AWS region (default: us-east-1)                             | For Bedrock provider                                            |
-| `OLLAMA_HOST`                                      | Ollama API endpoint                                         | For Ollama provider                                             |
-| `OLLAMA_CONTEXT_LENGTH`                            | Ollama model context length                                 | No, Ollama default                                              |
-| `OLLAMA_TIMEOUT`                                   | Ollama API timeout in seconds                               | No (default: 120)                                               |
-| `OLLAMA_KEEP_ALIVE`                                | Ollama model keep alive                                     | No (default: 30m)                                               |
-| `AZURE_API_KEY`                                    | Azure OpenAI API key                                        | For Azure/LiteLLM                                               |
-| `AZURE_API_BASE`                                   | Azure endpoint URL                                          | For Azure/LiteLLM                                               |
-| `AZURE_API_VERSION`                                | Azure API version                                           | For Azure/LiteLLM                                               |
-| `CYBER_MEMORY_MODE`                                | Memory query scope: `operation` or `shared`                 | No (default: `operation`)                                       |
-| `QDRANT_URL`                                       | Qdrant service endpoint; unset uses `outputs/qdrant`        | No                                                              |
-| `QDRANT_API_KEY`                                   | Optional Qdrant service API key                             | Only for authenticated services                                 |
-| `QDRANT_COLLECTION`                                | Qdrant semantic-memory collection                           | No (default: `cyber_autoagent_memories`)                        |
-| `LANGFUSE_HOST`                                    | Langfuse observability endpoint                             | For observability                                               |
-| `LANGFUSE_PUBLIC_KEY`                              | Langfuse API public key                                     | For observability                                               |
-| `LANGFUSE_SECRET_KEY`                              | Langfuse API secret key                                     | For observability                                               |
+| `CYBER_SECLISTS_DIR`                               | Absolute SecLists root for wordlist-consuming tools        | No (common locations; container default: `/usr/share/seclists`) |
+| `CYBER_REPORT_REFINEMENT_CYCLES`                   | Critic-guided revision cycles per generated report section | No (default: `2`; `0` disables)                                 |
+| `CYBER_REPORT_EVIDENCE_GROUPING`                   | Merge corroborating evidence into canonical report findings | No (default: `false`)                                            |
+| `CYBER_TAXONOMY_CACHE_DIR`                         | Local cache directory for CWE and ATT&CK catalogs          | No (default: user cache directory)                              |
+| `CYBER_TAXONOMY_REFRESH_DAYS`                      | Days before cached taxonomy catalogs are refreshed         | No (default: `30`)                                              |
+| `CYBER_TAXONOMY_REFRESH`                           | Fetch current catalogs when the cache is stale             | No (default: `true`)                                            |
+| `CYBER_TAXONOMY_OFFLINE`                           | Disable taxonomy catalog network refreshes                 | No (default: `false`)                                           |
+| `CYBER_TAXONOMY_CATALOG_URL`                       | Optional normalized taxonomy catalog mirror                | No                                                              |
+| `CYBER_TOOL_RECOVERY_MAX_POLICY_VIOLATIONS`        | Repeated blocked recovery calls before stopping execution  | No (default: `2`, minimum `1`)                                  |
+| `CYBER_TOOL_RECOVERY_MAX_CORRECTIONS`              | Changed retries allowed for one failed task invocation     | No (default: `2`, minimum `1`)                                  |
+| `CYBER_TASK_CREATOR_MAX_CORRECTIONS`               | Retained correction turns after rejected task creation     | No (default: `6`, minimum `0`)                                  |
+| `CYBER_TASK_ACCEPTANCE_MAX_CORRECTIONS`            | Retained correction turns after rejected task acceptance   | No (default: `2`, minimum `0`)                                  |
+| `AWS_ACCESS_KEY_ID`                                | AWS credentials for Bedrock                                | For Bedrock provider                                            |
+| `AWS_SECRET_ACCESS_KEY`                            | AWS credentials for Bedrock                                | For Bedrock provider                                            |
+| `AWS_REGION`                                       | AWS region (default: us-east-1)                            | For Bedrock provider                                            |
+| `OLLAMA_HOST`                                      | Ollama API endpoint                                        | For Ollama provider                                             |
+| `OLLAMA_CONTEXT_LENGTH`                            | Ollama model context length                                | No, Ollama default                                              |
+| `OLLAMA_TIMEOUT`                                   | Ollama API timeout in seconds                              | No (default: 120)                                               |
+| `OLLAMA_KEEP_ALIVE`                                | Ollama model keep alive                                    | No (default: 30m)                                               |
+| `AZURE_API_KEY`                                    | Azure OpenAI API key                                       | For Azure/LiteLLM                                               |
+| `AZURE_API_BASE`                                   | Azure endpoint URL                                         | For Azure/LiteLLM                                               |
+| `AZURE_API_VERSION`                                | Azure API version                                          | For Azure/LiteLLM                                               |
+| `CYBER_MEMORY_MODE`                                | Memory query scope: `operation` or `shared`                | No (default: `operation`)                                       |
+| `QDRANT_URL`                                       | Qdrant service endpoint; unset uses `outputs/qdrant`       | No                                                              |
+| `QDRANT_API_KEY`                                   | Optional Qdrant service API key                            | Only for authenticated services                                 |
+| `QDRANT_COLLECTION`                                | Qdrant semantic-memory collection                          | No (default: `cyber_autoagent_memories`)                        |
+| `LANGFUSE_HOST`                                    | Langfuse observability endpoint                            | For observability                                               |
+| `LANGFUSE_PUBLIC_KEY`                              | Langfuse API public key                                    | For observability                                               |
+| `LANGFUSE_SECRET_KEY`                              | Langfuse API secret key                                    | For observability                                               |
 | `HTTP_PROXY`, `http_proxy`                         | Outbound HTTP proxy endpoint                                | No                                                              |
 | `HTTPS_PROXY`, `https_proxy`                       | Outbound HTTPS proxy endpoint                               | No                                                              |
 | `NO_PROXY`, `no_proxy`                             | Comma-separated hosts bypassing outbound proxies            | No (Langfuse hosts automatically bypassed)                      |
-| `ENABLE_AUTO_EVALUATION`                           | Enable automatic Ragas evaluation                           | For evaluation                                                  |
-| `CYBER_RATE_LIMIT_REQ_PER_MIN`                     | Limit model requests per minute                             | No (no limit)                                                   |
-| `CYBER_RATE_LIMIT_TOKENS_PER_MIN`                  | Limit model tokens per minute                               | No (no limit)                                                   |
-| `CYBER_RATE_LIMIT_MAX_CONCURRENT`                  | Limit model concurrent requests                             | No (Ollama defaults to 1)                                       |
-| `CYBER_HEAP_MONITOR_AUTOSTART`                     | Auto-start heap monitor thread (`0` disables)               | No (default: 1)                                                 |
-| `CYBER_AGENT_PRICING_INPUT`                        | Model price per 1M input tokens                             | No (defaults to models.dev)                                     |
-| `CYBER_AGENT_PRICING_OUTPUT`                       | Model price per 1M output tokens                            | No (defaults to models.dev)                                     |
-| `CYBER_AGENT_PRICING_CACHE_READ`                   | Model price per 1M cache read tokens                        | No (defaults to models.dev)                                     |
-| `CYBER_AGENT_PRICING_CACHE_WRITE`                  | Model price per 1M cache write tokens                       | No (defaults to models.dev)                                     |
-| `CYBER_SDK_ENABLE_STREAMING`                       | Enable/disable model streaming.                             | No (defaults to `false`)                                        |
+| `ENABLE_AUTO_EVALUATION`                           | Enable automatic Ragas evaluation                          | For evaluation                                                  |
+| `CYBER_RATE_LIMIT_REQ_PER_MIN`                     | Limit model requests per minute                            | No (no limit)                                                   |
+| `CYBER_RATE_LIMIT_TOKENS_PER_MIN`                  | Limit model tokens per minute                              | No (no limit)                                                   |
+| `CYBER_RATE_LIMIT_MAX_CONCURRENT`                  | Limit model concurrent requests                            | No (Ollama defaults to 1)                                       |
+| `CYBER_HEAP_MONITOR_AUTOSTART`                     | Auto-start heap monitor thread (`0` disables)              | No (default: 1)                                                 |
+| `CYBER_AGENT_PRICING_INPUT`                        | Model price per 1M input tokens                            | No (defaults to models.dev)                                     |
+| `CYBER_AGENT_PRICING_OUTPUT`                       | Model price per 1M output tokens                           | No (defaults to models.dev)                                     |
+| `CYBER_AGENT_PRICING_CACHE_READ`                   | Model price per 1M cache read tokens                       | No (defaults to models.dev)                                     |
+| `CYBER_AGENT_PRICING_CACHE_WRITE`                  | Model price per 1M cache write tokens                      | No (defaults to models.dev)                                     |
+| `CYBER_SDK_ENABLE_STREAMING`                       | Enable/disable model streaming.                            | No (defaults to `false`)                                        |
 
 ### Kubernetes Deployment
 

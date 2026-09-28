@@ -159,7 +159,7 @@ describe('useCommandHandler', () => {
         });
 
         expect(sendUserInput).toHaveBeenCalledWith('y');
-        expect(props.addOperationHistoryEntry).toHaveBeenCalledWith('info', 'User response sent: y');
+        expect(props.addOperationHistoryEntry).toHaveBeenCalledWith('info', 'User response sent.');
         expect(props.actions.setUserHandoff).toHaveBeenCalledWith(false);
         expect(props.commandParser.parse).not.toHaveBeenCalled();
 

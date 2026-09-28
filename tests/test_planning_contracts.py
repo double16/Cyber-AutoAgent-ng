@@ -4,6 +4,8 @@ import pytest
 
 from modules.operation_plugins import planning_contracts as contracts
 from modules.operation_plugins.planning_contracts import (
+    load_controller_owned_phase_contracts,
+    load_phase_metadata_contracts,
     load_phase_task_contract,
     validate_phase_task_proposals,
 )
@@ -27,13 +29,123 @@ def _proposal(workstream, role="mapping", depends=(), reason=None, output_kind="
     )
 
 
-def test_only_enabled_modules_declare_phase_one_fanout_contracts():
+def test_enabled_web_modules_declare_credential_coverage_phase_contracts():
     assert load_phase_task_contract("web", 1) is not None
     assert load_phase_task_contract("web_recon", 1) is not None
     assert load_phase_task_contract("ctf", 1) is not None
+    assert load_phase_task_contract("web", 3) is not None
+    assert load_phase_task_contract("web_recon", 2) is not None
+    assert load_phase_task_contract("ctf", 2) is None
     assert load_phase_task_contract("code_security", 1) is None
     assert load_phase_task_contract("context_navigator", 1) is None
     assert load_phase_task_contract("threat_emulation", 1) is None
+
+
+def test_planning_contract_loaders_ignore_empty_and_unknown_modules():
+    assert load_phase_metadata_contracts("") == {}
+    assert load_phase_metadata_contracts("unknown_module") == {}
+    assert contracts.load_phase_task_contracts("") == {}
+    assert contracts.load_phase_task_contracts("unknown_module") == {}
+
+
+def test_controller_owned_phase_contract_loader_rejects_duplicate_kinds(monkeypatch):
+    contract = contracts.PhaseTaskContract(
+        module="fixture",
+        phase_id=1,
+        mode="controller_owned",
+        min_mapping_tasks=0,
+        mapping_workstreams=frozenset(),
+        controller_owned_phase_kind="credential_provisioning",
+    )
+    duplicate = contracts.PhaseTaskContract(
+        module="fixture",
+        phase_id=2,
+        mode="controller_owned",
+        min_mapping_tasks=0,
+        mapping_workstreams=frozenset(),
+        controller_owned_phase_kind="credential_provisioning",
+    )
+    monkeypatch.setattr(contracts, "load_phase_task_contracts", lambda _module: {1: contract, 2: duplicate})
+
+    with pytest.raises(ValueError, match="Duplicate controller-owned"):
+        load_controller_owned_phase_contracts("fixture")
+
+
+def test_web_phase_metadata_requires_inventory_snapshot_task_creation():
+    contracts_by_phase = load_phase_metadata_contracts("web")
+    recon_contracts_by_phase = load_phase_metadata_contracts("web_recon")
+
+    assert contracts_by_phase[2].task_creation_mode == "snapshot_dependent"
+    assert contracts_by_phase[3].task_creation_mode == "snapshot_dependent"
+    assert [recon_contracts_by_phase[phase_id].task_creation_mode for phase_id in range(2, 6)] == [
+        "snapshot_dependent",
+        "snapshot_dependent",
+        "snapshot_dependent",
+        "snapshot_dependent",
+    ]
+
+
+def test_web_phase_three_declares_controller_owned_baseline_workstream():
+    contract = load_phase_task_contract("web", 3)
+
+    assert contract.controller_mapping_workstreams == {"unauthenticated_baseline"}
+    assert contract.exclude_public_static_assets is True
+
+
+def test_web_recon_access_context_phase_excludes_confirmed_public_static_assets():
+    contract = load_phase_task_contract("web_recon", 2)
+
+    assert contract.exclude_public_static_assets is True
+
+
+def test_public_static_asset_exclusion_contract_requires_boolean():
+    with pytest.raises(ValueError, match="exclude_public_static_assets must be a boolean"):
+        contracts._parse_contract("fixture", {
+            "phase_id": 1,
+            "mode": "fanout",
+            "min_mapping_tasks": 1,
+            "mapping_workstreams": ["mapping"],
+            "exclude_public_static_assets": "true",
+        })
+
+
+def test_web_declares_dependency_based_credential_provisioning_contract():
+    contract = load_phase_task_contract("web", 2)
+
+    assert contract.mode == "controller_owned"
+    assert contract.controller_owned_phase_kind == "credential_provisioning"
+    assert contract.prerequisite_workstreams == {"inventory_synthesis", "auth_workflow"}
+    assert contract.registration_attribute == "registration"
+    assert contract.identities_per_role == 2
+
+
+def test_controller_owned_phase_contract_requires_credential_metadata():
+    with pytest.raises(ValueError, match="controller-owned phase contract"):
+        contracts._parse_contract(
+            "fixture",
+            {
+                "phase_id": 2,
+                "mode": "controller_owned",
+                "controller_owned_phase_kind": "credential_provisioning",
+                "prerequisite_workstreams": ["inventory_synthesis"],
+            },
+        )
+
+
+@pytest.mark.parametrize("phase_id", [None, 0, -1, "2"])
+def test_controller_owned_phase_contract_requires_positive_integer_phase_id(phase_id):
+    with pytest.raises(ValueError, match="phase_id"):
+        contracts._parse_contract(
+            "fixture",
+            {
+                "phase_id": phase_id,
+                "mode": "controller_owned",
+                "controller_owned_phase_kind": "credential_provisioning",
+                "prerequisite_workstreams": ["inventory_synthesis"],
+                "registration_attribute": "registration",
+                "identities_per_role": 2,
+            },
+        )
 
 
 def test_web_contract_accepts_distinct_mapping_tasks_and_inventory_synthesis():
@@ -227,17 +339,21 @@ def test_web_contract_rejects_incomplete_or_overlapping_fanout(proposals, messag
         validate_phase_task_proposals(load_phase_task_contract("web", 1), proposals)
 
 
-def test_web_recon_contract_rejects_synthesis_task():
-    with pytest.raises(ValueError, match="does not allow a synthesis"):
-        validate_phase_task_proposals(
-            load_phase_task_contract("web_recon", 1),
-            [
-                _proposal("service_entrypoints"),
-                _proposal("technology_trust_boundary"),
-                _proposal("access_context_session"),
-                _proposal("coverage", role="synthesis"),
-            ],
-        )
+def test_web_recon_contract_requires_controller_owned_inventory_synthesis():
+    validate_phase_task_proposals(
+        load_phase_task_contract("web_recon", 1),
+        [
+            _proposal("service_entrypoints"),
+            _proposal("technology_trust_boundary"),
+            _proposal("access_context_session"),
+            _proposal(
+                "inventory_synthesis",
+                role="synthesis",
+                depends=("service_entrypoints", "technology_trust_boundary", "access_context_session"),
+                output_kind="inventory_manifest",
+            ),
+        ],
+    )
 
 
 def test_web_recon_contract_accepts_distinct_read_only_mapping_workstreams():
@@ -247,8 +363,102 @@ def test_web_recon_contract_accepts_distinct_read_only_mapping_workstreams():
             _proposal("service_entrypoints"),
             _proposal("technology_trust_boundary"),
             _proposal("safe_read_only_verification"),
+            _proposal(
+                "inventory_synthesis",
+                role="synthesis",
+                depends=("service_entrypoints", "technology_trust_boundary", "safe_read_only_verification"),
+                output_kind="inventory_manifest",
+            ),
         ],
     )
+
+
+@pytest.mark.parametrize(
+    ("module", "workstreams"),
+    [
+        (
+            "web",
+            ("unauthenticated_baseline", "authenticated_credential_coverage", "authorization_comparison"),
+        ),
+        (
+            "web_recon",
+            ("unauthenticated_posture", "authenticated_access_coverage", "read_only_authorization_comparison"),
+        ),
+    ],
+)
+def test_credential_coverage_phase_contracts_accept_their_declared_workstreams(module, workstreams):
+    phase_id = 3 if module == "web" else 2
+    validate_phase_task_proposals(load_phase_task_contract(module, phase_id), [_proposal(workstream) for workstream in workstreams])
+
+
+def test_web_contract_accepts_case_and_separator_variants_of_declared_workstreams():
+    contract = load_phase_task_contract("web", 3)
+
+    validate_phase_task_proposals(
+        contract,
+        [
+            _proposal("Unauthenticated Baseline"),
+            _proposal("authenticated-credential coverage"),
+            _proposal("AUTHORIZATION__COMPARISON"),
+        ],
+    )
+
+
+def test_web_contract_normalizes_synthesis_workstream_dependencies():
+    validate_phase_task_proposals(
+        load_phase_task_contract("web", 1),
+        [
+            _proposal("Entrypoint Technology"),
+            _proposal("bounded-crawl"),
+            _proposal("CLIENT__SIDE API"),
+            _proposal(
+                "Inventory Synthesis",
+                role="synthesis",
+                depends=("entrypoint-technology", "BOUNDED CRAWL", "client_side-api"),
+                output_kind="inventory_manifest",
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize("module", ("web", "web_recon"))
+def test_credential_coverage_phase_contracts_reject_missing_or_unknown_workstreams(module):
+    contract = load_phase_task_contract(module, 3 if module == "web" else 2)
+    with pytest.raises(ValueError, match="at least 3"):
+        validate_phase_task_proposals(contract, [_proposal("unauthenticated_baseline")])
+    with pytest.raises(ValueError, match="not declared"):
+        validate_phase_task_proposals(
+            contract,
+            [_proposal("unauthenticated_baseline"), _proposal("authenticated_credential_coverage"), _proposal("raw_credentials")],
+        )
+
+
+@pytest.mark.parametrize("workstream", ("authorization/comparison", "raw credentials"))
+def test_web_contract_rejects_unknown_workstream_variants(workstream):
+    contract = load_phase_task_contract("web", 3)
+
+    with pytest.raises(ValueError, match="not declared"):
+        validate_phase_task_proposals(
+            contract,
+            [
+                _proposal("unauthenticated_baseline"),
+                _proposal("authenticated_credential_coverage"),
+                _proposal(workstream),
+            ],
+        )
+
+
+def test_contract_loader_rejects_normalization_collisions():
+    with pytest.raises(ValueError, match="normalization collisions"):
+        contracts._parse_contract(
+            "fixture",
+            {
+                "phase_id": 1,
+                "mode": "fanout",
+                "min_mapping_tasks": 1,
+                "mapping_workstreams": ["auth coverage", "auth_coverage"],
+            },
+        )
 
 
 def test_ctf_contract_accepts_documented_direct_single_step_exception():

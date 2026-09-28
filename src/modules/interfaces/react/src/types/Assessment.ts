@@ -12,6 +12,8 @@ export interface AssessmentParams {
   resetPhases?: string;
   reportOnly?: string | boolean;
   evaluateOnly?: string | boolean;
+  operationId?: string;
+  credentialRotationRequestId?: string;
 }
 
 export interface AssessmentState {

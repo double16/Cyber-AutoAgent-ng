@@ -9,18 +9,21 @@ import pytest
 import modules.utils.pick_nic as mod
 
 
+@pytest.mark.network
 def test_pick_local_addr_loopback_ipv4():
     ip, fam = mod.pick_local_addr("127.0.0.1", 53)
     assert ip == "127.0.0.1"
     assert fam == socket.AF_INET
 
 
+@pytest.mark.network
 def test_pick_local_addr_invalid_destination_raises():
     # getaddrinfo should fail for an invalid IP literal
     with pytest.raises((socket.gaierror, OSError)):
         mod.pick_local_addr("256.256.256.256", 53)
 
 
+@pytest.mark.network
 def test_pick_local_addr_loopback_ipv6_if_available():
     try:
         ip, fam = mod.pick_local_addr("::1", 53)

@@ -23,6 +23,13 @@ mapping, prioritized hypothesis testing, exploitation validation, and impact dem
   directory listing, or generic errors are not vulnerabilities without demonstrated unauthorized behavior or impact.
 - Validate authorization and tenant boundaries with suitable controls. For client/server behaviors, confirm the channel
   that matters to the claimed impact.
+- After attack-surface mapping, establish the unauthenticated baseline for each applicable authentication workflow.
+  Query and check out only target-scoped credential-store entries, bind their task authentication context, and compare
+  each eligible account or role. For authorized account, role, or tenant comparisons, use the store-backed IDOR path;
+  never pass raw credentials to an agent tool.
+- A normal public sign-up flow may be used to create a test account when it is in the resolved target scope and no
+  operation constraint prohibits the state change. Store a successful account as reusable `registered` credentials
+  with durable registration evidence. Otherwise preserve the missing identity as a coverage gap.
 - After proving a capability, demonstrate the minimum safe impact needed for evidence. Capture additional exploitation,
   chaining, or uncovered surfaces as pending tasks rather than leaving the assigned task.
 </module_execution_policy>

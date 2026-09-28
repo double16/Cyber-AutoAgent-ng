@@ -119,8 +119,30 @@ def _candidate(text: str) -> str:
     if not starts:
         return text.strip()
     start = min(starts)
-    end = max(text.rfind("}"), text.rfind("]"))
-    return text[start : end + 1] if end >= start else text.strip()
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text[start:], start=start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            expected = "{" if char == "}" else "["
+            if not stack or stack[-1] != expected:
+                return text[start:].strip()
+            stack.pop()
+            if not stack:
+                return text[start : index + 1].strip()
+    return text[start:].strip()
 
 
 def _balanced_json_candidates(text: str) -> list[str]:
@@ -169,6 +191,36 @@ def _next_significant(text: str, index: int) -> str:
     while index < len(text) and text[index].isspace():
         index += 1
     return text[index] if index < len(text) else ""
+
+
+def _close_unbalanced_json_containers(text: str) -> str:
+    """Append unambiguous JSON container closers without guessing through malformed input."""
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            expected = "{" if char == "}" else "["
+            if not stack or stack[-1] != expected:
+                return text
+            stack.pop()
+
+    if in_string:
+        return text
+    return text + "".join("}" if opener == "{" else "]" for opener in reversed(stack))
 
 
 def repair_json_text(text: str) -> str:
@@ -226,7 +278,8 @@ def repair_json_text(text: str) -> str:
         index += 1
 
     repaired = "".join(output)
-    return re.sub(r",\s*([}\]])", r"\1", repaired)
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    return _close_unbalanced_json_containers(repaired)
 
 
 def _quoted_fenced_json_candidate(value: Any) -> str | None:
@@ -265,6 +318,10 @@ def parse_json_response_with_metadata(text: str, *, require_object: bool = False
             repaired = True
     except json.JSONDecodeError:
         candidates = _balanced_json_candidates(text)
+        if not candidates:
+            candidate = _candidate(text).strip()
+            if candidate.startswith(("{", "[")):
+                candidates = [candidate]
         valid_candidates: list[tuple[Any, bool]] = []
         for candidate in candidates:
             try:

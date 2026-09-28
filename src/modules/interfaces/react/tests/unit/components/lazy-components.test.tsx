@@ -3,6 +3,7 @@ import TestRenderer, {ReactTestRenderer, act} from '../test-renderer.js';
 import {describe, expect, it} from '@jest/globals';
 import {
     ConfigEditorLazy,
+    CredentialManagerLazy,
     DocumentationViewerLazy,
     ModuleSelectorLazy,
     TerminalLazy,
@@ -24,6 +25,7 @@ describe('LazyComponents', () => {
             view = TestRenderer.create(
                 <>
                     <ConfigEditorLazy/>
+                    <CredentialManagerLazy/>
                     <DocumentationViewerLazy/>
                     <ModuleSelectorLazy/>
                     <TerminalLazy/>
@@ -33,6 +35,7 @@ describe('LazyComponents', () => {
 
         const text = textFromTree(view.toJSON());
         expect(text).toContain('Loading Configuration Editor...');
+        expect(text).toContain('Loading Credential Manager...');
         expect(text).toContain('Loading Documentation...');
         expect(text).toContain('Loading Module Selector...');
         expect(text).toContain('Loading Terminal...');

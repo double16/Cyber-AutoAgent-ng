@@ -295,11 +295,9 @@ async def channel_create_reverse(
     async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         # Only allow a single active client; drop additional connections.
         if ch._client_writer is not None:
-            try:
-                writer.close()
-                await writer.wait_closed()
-            finally:
-                return
+            writer.close()
+            await writer.wait_closed()
+            return
         ch._client_reader = reader
         ch._client_writer = writer
         await ch.mark_status("client_connected")

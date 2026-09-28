@@ -64,6 +64,7 @@ from modules.handlers.conversation_budget import (
     _ensure_prompt_within_budget,
     register_conversation_manager,
 )
+from modules.handlers.credential_usage import CredentialUsageHook
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.terminal_tool import TerminalToolHook
 from modules.handlers.tool_recovery import (
@@ -86,9 +87,16 @@ from modules.handlers.utils import (
 )
 from modules.tools import python_repl
 from modules.tools.advanced_payload_coordinator import advanced_payload_coordinator
-from modules.tools.artifact import create_artifact_reader, resolve_tool_result_max_chars
+from modules.tools.artifact import create_artifact_reader, create_artifact_searcher, resolve_tool_result_max_chars
 from modules.tools.artifact_references import ArtifactReferenceInputNormalizationHook
 from modules.tools.auth_chain_analyzer import auth_chain_analyzer
+from modules.tools.authentication import (
+    authenticated_http_request,
+    capture_browser_authenticated_context,
+    ensure_authenticated_context,
+    establish_credential_authenticated_context,
+    record_authentication_flow,
+)
 from modules.tools.browser import (
     browser_evaluate_js,
     browser_get_cookies,
@@ -97,6 +105,7 @@ from modules.tools.browser import (
     browser_observe_page,
     browser_perform_action,
     browser_set_headers,
+    browser_take_screenshot,
     initialize_browser,
 )
 from modules.tools.channels import (
@@ -108,6 +117,29 @@ from modules.tools.channels import (
     channel_status,
 )
 from modules.tools.client_bundle_inventory import client_bundle_inventory
+from modules.tools.credentials import (
+    begin_email_mfa_retrieval,
+    checkout_credential,
+    complete_credential_rotation,
+    exchange_oauth2_client_credentials,
+    fail_credential_rotation,
+    generate_mfa_code,
+    generate_password,
+    generate_registration_email,
+    generate_registration_profile,
+    mark_credential_status,
+    plan_access_control_comparisons,
+    plan_authenticated_coverage,
+    prepare_api_key_authentication,
+    prepare_login_form_authentication,
+    query_credentials,
+    request_mfa_code,
+    retrieve_email_mfa_code,
+    rotate_credential,
+    set_task_auth_context,
+    stage_credential_rotation,
+    store_credential,
+)
 from modules.tools.editor import create_absolute_path_editor
 from modules.tools.idor_specialist import idor_specialist
 from modules.tools.mcp import (
@@ -373,7 +405,7 @@ def create_agent_runtime_resources(
 
     initialize_browser(
         provider=config.provider,
-        model=config.model_id,
+        model=os.getenv("CYBER_AGENT_BROWSER_MODEL") or config.model_id,
         artifacts_dir=os.getenv("CYBER_ARTIFACTS_DIR"),
     )
     initialize_memory_system(
@@ -556,6 +588,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         browser_set_headers,
         browser_goto_url,
         browser_get_page_html,
+        browser_take_screenshot,
         browser_perform_action,
         browser_observe_page,
         browser_evaluate_js,
@@ -611,13 +644,25 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         memory_retrieve,
         memory_list,
         create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
+        create_artifact_searcher(max_output_chars=max_result_chars),
         create_tasks,
         sleep,
         python_repl,
         environment,  # environment is referenced by other strands tools
     ]
 
-    optional_tools_list = [recon_output_to_inventory_manifest]
+    optional_tools_list = [
+        recon_output_to_inventory_manifest,
+        authenticated_http_request, capture_browser_authenticated_context, establish_credential_authenticated_context,
+        ensure_authenticated_context, record_authentication_flow,
+        store_credential, query_credentials, checkout_credential, exchange_oauth2_client_credentials,
+        set_task_auth_context, mark_credential_status, plan_access_control_comparisons,
+        plan_authenticated_coverage, prepare_api_key_authentication, prepare_login_form_authentication,
+        generate_password, generate_registration_email, generate_registration_profile, generate_mfa_code,
+        begin_email_mfa_retrieval, request_mfa_code,
+        retrieve_email_mfa_code, stage_credential_rotation, complete_credential_rotation,
+        fail_credential_rotation, rotate_credential,
+    ]
 
     if "module_tool_allowlist" in locals() and module_tool_allowlist is not None:
         for builtin_tool in builtin_tools_list:
@@ -847,6 +892,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     prompt_budget_hook = PromptBudgetHook(_ensure_prompt_within_budget)
 
+    credential_usage_hook = CredentialUsageHook()
+
     tool_router_hook = ToolRouterHook(
         max_result_chars=max_result_chars,
         artifacts_dir=paths.get("artifacts"),
@@ -863,6 +910,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
                 tool_repeat_guard_hook,
                 tool_router_hook,
                 react_hooks,
+                credential_usage_hook,
                 prompt_budget_hook,
             ],
         )
@@ -876,6 +924,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
                 tool_repeat_guard_hook,
                 tool_router_hook,
                 react_hooks,
+                credential_usage_hook,
                 prompt_budget_hook,
             ],
         )

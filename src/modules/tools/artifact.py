@@ -2,6 +2,7 @@
 
 import ast
 import os
+import re
 from collections.abc import Iterable, Mapping
 from math import ceil
 from typing import Any
@@ -25,6 +26,9 @@ ARTIFACT_NEARBY_BYTE_PAGE_GAP = 256
 TOOL_RESULT_CONTEXT_FRACTION = 0.10
 TOOL_RESULT_CHARS_PER_TOKEN = 4
 TOOL_RESULT_MAX_CHARS = 30_000
+ARTIFACT_SEARCH_MAX_PATTERN_CHARS = 512
+ARTIFACT_SEARCH_MAX_CONTEXT_LINES = 10
+ARTIFACT_SEARCH_MAX_MATCHES = 50
 
 
 def artifact_max_bytes_for_context_window(context_window_tokens: int) -> int:
@@ -190,7 +194,7 @@ def _read_artifact_with_limit(
     max_bytes: int,
     max_output_chars: int | None = None,
 ) -> str:
-    """Read a bounded artifact excerpt without materializing more than ``max_bytes``."""
+    """Read a bounded artifact excerpt, returning a byte page when line mode overflows."""
 
     root = os.path.realpath(_operation_output_root())
     resolved = resolve_operation_artifact_path(path)
@@ -204,20 +208,27 @@ def _read_artifact_with_limit(
         content_size = 0
         total_lines = 0
         end_line = start_line + max_lines - 1
+        selected_start_byte: int | None = None
         while True:
+            line_start_byte = artifact_file.tell()
             raw_line = artifact_file.readline(max_bytes + 1)
             if not raw_line:
                 break
             total_lines += 1
             line_exceeds_limit = len(raw_line) > max_bytes and not raw_line.endswith(b"\n")
             if start_line <= total_lines <= end_line:
+                if selected_start_byte is None:
+                    selected_start_byte = line_start_byte
                 normalized_line = raw_line.rstrip(b"\n")
                 additional_size = len(normalized_line) + (1 if lines else 0)
                 if line_exceeds_limit or content_size + additional_size > max_bytes:
-                    raise ValueError(
-                        f"{ARTIFACT_READ_SIZE_LIMIT_REACHED_MARKER}: Requested artifact page exceeds "
-                        f"the {max_bytes}-byte limit. Retry with a smaller max_lines value or use "
-                        "byte paging with start_byte and max_bytes"
+                    return _read_artifact_bytes(
+                        resolved,
+                        selected_start_byte,
+                        max_bytes,
+                        max_output_chars=max_output_chars,
+                        page_start_line=start_line,
+                        page_max_lines=max_lines,
                     )
                 decoded_line = normalized_line.decode("utf-8", errors="replace")
                 lines.append(decoded_line)
@@ -254,6 +265,9 @@ def _read_artifact_bytes(
     start_line: int | None = None,
     max_lines: int | None = None,
     max_output_chars: int | None = None,
+    *,
+    page_start_line: int | None = None,
+    page_max_lines: int | None = None,
 ) -> str:
     """Read one byte page, optionally narrowed to a bounded line range."""
 
@@ -263,6 +277,10 @@ def _read_artifact_bytes(
         raise ValueError("start_line must be at least 1")
     if max_lines is not None and not 1 <= max_lines <= 500:
         raise ValueError("max_lines must be between 1 and 500")
+    if page_start_line is not None and page_start_line < 1:
+        raise ValueError("page_start_line must be at least 1")
+    if page_max_lines is not None and not 1 <= page_max_lines <= 500:
+        raise ValueError("page_max_lines must be between 1 and 500")
     root = os.path.realpath(_operation_output_root())
     resolved = resolve_operation_artifact_path(path)
     byte_size = os.path.getsize(resolved)
@@ -273,7 +291,7 @@ def _read_artifact_bytes(
         byte_page = artifact_file.read(max_bytes)
 
     content_start = 0
-    current_line = 1
+    current_line = page_start_line if page_start_line is not None else 1
     if start_line is not None:
         while current_line < start_line and content_start < len(byte_page):
             newline = byte_page.find(b"\n", content_start)
@@ -284,9 +302,10 @@ def _read_artifact_bytes(
             current_line += 1
 
     content_end = len(byte_page)
-    if max_lines is not None and content_start < len(byte_page):
+    content_line_limit = page_max_lines if page_max_lines is not None else max_lines
+    if content_line_limit is not None and content_start < len(byte_page):
         line_end = content_start
-        for _ in range(max_lines):
+        for _ in range(content_line_limit):
             newline = byte_page.find(b"\n", line_end)
             if newline < 0:
                 line_end = len(byte_page)
@@ -299,21 +318,36 @@ def _read_artifact_bytes(
     def payload_for(page_content: bytes) -> dict[str, Any]:
         page_end = content_start + len(page_content)
         end_byte = start_byte + page_end
+        next_start_byte = end_byte if end_byte < byte_size else None
         payload: dict[str, Any] = {
             "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
             "start_byte": start_byte,
             "end_byte": end_byte,
-            "next_start_byte": end_byte if end_byte < byte_size else None,
+            "next_start_byte": next_start_byte,
             "eof": end_byte >= byte_size,
             "byte_size": byte_size,
             "content": page_content.decode("utf-8", errors="replace"),
         }
-        if max_lines is not None:
+        if content_line_limit is not None:
             returned_line_count = page_content.count(b"\n") + int(
                 bool(page_content) and not page_content.endswith(b"\n")
             )
             payload["start_line"] = current_line
             payload["end_line"] = current_line + returned_line_count - 1
+        if next_start_byte is not None:
+            reached_byte_limit = len(page_content) == max_bytes
+            payload["truncated"] = True
+            payload["truncation_reason"] = (
+                "byte_limit_reached" if reached_byte_limit else "line_limit_reached"
+            )
+            payload["pagination"] = {
+                "path": payload["artifact_ref"],
+                "start_byte": next_start_byte,
+                "max_bytes": max_bytes,
+                "message": "Continue with start_byte=next_start_byte and the same max_bytes.",
+            }
+        else:
+            payload["truncated"] = False
         return payload
 
     payload = payload_for(content)
@@ -328,8 +362,162 @@ def _read_artifact_bytes(
                 upper = midpoint - 1
         content = content[:lower]
         payload = payload_for(content)
+        if content and payload["next_start_byte"] is not None:
+            payload["truncated"] = True
+            payload["truncation_reason"] = "output_limit_reached"
+            while content and len(str(payload)) > max_output_chars:
+                content = content[:-1]
+                payload = payload_for(content)
+                payload["truncated"] = True
+                payload["truncation_reason"] = "output_limit_reached"
     if max_output_chars is not None and len(str(payload)) > max_output_chars:
         raise ValueError("artifact reader output limit is too small for result metadata")
+    return str(payload)
+
+
+def _search_artifact(
+    path: str,
+    pattern: str,
+    *,
+    regex: bool,
+    context_lines: int,
+    max_matches: int,
+    match_offset: int,
+    max_output_chars: int | None = None,
+) -> str:
+    """Search the full artifact and return one bounded slice of match context."""
+
+    if not pattern:
+        raise ValueError("search_pattern is required for search mode")
+    if len(pattern) > ARTIFACT_SEARCH_MAX_PATTERN_CHARS:
+        raise ValueError(
+            f"search_pattern exceeds the maximum length of {ARTIFACT_SEARCH_MAX_PATTERN_CHARS} characters"
+        )
+    if not 0 <= context_lines <= ARTIFACT_SEARCH_MAX_CONTEXT_LINES:
+        raise ValueError(f"context_lines must be between 0 and {ARTIFACT_SEARCH_MAX_CONTEXT_LINES}")
+    if not 1 <= max_matches <= ARTIFACT_SEARCH_MAX_MATCHES:
+        raise ValueError(f"max_matches must be between 1 and {ARTIFACT_SEARCH_MAX_MATCHES}")
+    if match_offset < 0:
+        raise ValueError("match_offset must be at least 0")
+
+    try:
+        matcher = re.compile(pattern) if regex else None
+    except re.error as error:
+        raise ValueError(f"invalid regular expression: {error}") from error
+    resolved = resolve_operation_artifact_path(path)
+    root = os.path.realpath(_operation_output_root())
+    matching_lines: list[tuple[int, int, int]] = []
+    total_lines = 0
+    scanned_bytes = 0
+    with open(resolved, "rb") as artifact_file:
+        while True:
+            raw_line = artifact_file.readline()
+            if not raw_line:
+                break
+            total_lines += 1
+            scanned_bytes += len(raw_line)
+            line = raw_line.rstrip(b"\r\n").decode("utf-8", errors="replace")
+            found = matcher.search(line) if matcher is not None else None
+            column = line.find(pattern) if matcher is None else -1
+            if found is not None or column >= 0:
+                start, end = found.span() if found is not None else (column, column + len(pattern))
+                matching_lines.append((total_lines, start, end))
+
+    selected_lines = matching_lines[match_offset : match_offset + max_matches]
+    matches: list[dict[str, Any]] = []
+    if selected_lines:
+        context_numbers = {
+            context_number
+            for number, _, _ in selected_lines
+            for context_number in range(max(1, number - context_lines), min(total_lines, number + context_lines) + 1)
+        }
+        with open(resolved, "rb") as artifact_file:
+            context_lines_by_number: dict[int, str] = {}
+            line_number = 0
+            while line_number < max(context_numbers):
+                raw_line = artifact_file.readline()
+                if not raw_line:
+                    break
+                line_number += 1
+                if line_number in context_numbers:
+                    context_lines_by_number[line_number] = raw_line.rstrip(b"\r\n").decode(
+                        "utf-8", errors="replace"
+                    )
+        def excerpt(line: str, start: int, end: int, width: int) -> tuple[str, int]:
+            first = max(0, min(start - max(0, (width - (end - start)) // 2), len(line) - width))
+            return line[first:first + width], first + 1
+
+        for number, start, end in selected_lines:
+            line = context_lines_by_number[number]
+            content, first_column = excerpt(line, start, end, max(320, end - start))
+            matches.append(
+                {
+                    "line": number,
+                    "content": content,
+                    "content_start_column": first_column,
+                    "content_truncated": len(content) < len(line),
+                    "match_column": start + 1,
+                    "context": [
+                        {
+                            "line": context_number,
+                            "content": content if context_number == number else context_lines_by_number[context_number][:160],
+                            "content_truncated": (
+                                len(content) < len(line) if context_number == number
+                                else len(context_lines_by_number[context_number]) > 160
+                            ),
+                        }
+                        for context_number in range(
+                            max(1, number - context_lines), min(total_lines, number + context_lines) + 1
+                        )
+                    ],
+                }
+            )
+
+    next_match_offset = match_offset + len(matches) if match_offset + len(matches) < len(matching_lines) else None
+    payload: dict[str, Any] = {
+        "artifact_ref": f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}",
+        "mode": "search",
+        "regex": regex,
+        "match_count": len(matching_lines),
+        "matches": matches,
+        "match_offset": match_offset,
+        "scanned_lines": total_lines,
+        "scanned_bytes": scanned_bytes,
+        "next_match_offset": next_match_offset,
+        "eof": True,
+        "match_limit_reached": next_match_offset is not None,
+    }
+    if max_output_chars is not None:
+        while len(matches) > 1 and len(str(payload)) > max_output_chars:
+            matches.pop()
+            payload["next_match_offset"] = (
+                match_offset + len(matches) if match_offset + len(matches) < len(matching_lines) else None
+            )
+            payload["match_limit_reached"] = payload["next_match_offset"] is not None
+        if matches and len(str(payload)) > max_output_chars:
+            matches[0]["context"] = []
+        if matches and len(str(payload)) > max_output_chars:
+            match = matches[0]
+            original = context_lines_by_number[match["line"]]
+            selected = selected_lines[0]
+            minimum = max(1, selected[2] - selected[1])
+            lower, upper = minimum, len(match["content"])
+            while lower < upper:
+                midpoint = (lower + upper + 1) // 2
+                match["content"], match["content_start_column"] = excerpt(
+                    original, selected[1], selected[2], midpoint
+                )
+                match["content_truncated"] = len(match["content"]) < len(original)
+                if len(str(payload)) <= max_output_chars:
+                    lower = midpoint
+                else:
+                    upper = midpoint - 1
+            match["content"], match["content_start_column"] = excerpt(
+                original, selected[1], selected[2], lower
+            )
+            match["content_truncated"] = len(match["content"]) < len(original)
+        if len(str(payload)) > max_output_chars:
+            raise ValueError("artifact search output limit is too small for a matching excerpt")
     return str(payload)
 
 
@@ -347,7 +535,7 @@ def create_artifact_reader(context_window_tokens: int, *, max_output_chars: int 
         start_byte: int | None = None,
         max_bytes: int | None = None,
     ) -> str:
-        """Read a bounded text excerpt or an explicit byte page."""
+        """Read a bounded current-operation artifact with line or byte paging."""
 
         root = os.path.realpath(_operation_output_root())
         try:
@@ -355,11 +543,22 @@ def create_artifact_reader(context_window_tokens: int, *, max_output_chars: int 
                 start_byte = 0
             if start_byte is not None or max_bytes is not None:
                 if start_byte is None or max_bytes is None:
-                    raise ValueError("byte paging requires start_byte and max_bytes")
+                    missing = "start_byte" if start_byte is None else "max_bytes"
+                    raise ValueError(
+                        f"byte paging requires both start_byte and max_bytes; missing {missing}"
+                    )
                 if start_line is not None and start_byte > 0:
-                    raise ValueError("start_line requires start_byte to be zero")
-                if max_bytes < 1 or max_bytes > artifact_max_bytes_for_context_window(context_window_tokens):
-                    raise ValueError("max_bytes exceeds the artifact reader page budget")
+                    raise ValueError(
+                        f"start_line requires start_byte=0: start_line={start_line} cannot be combined with "
+                        f"start_byte={start_byte}; omit start_line or use start_byte=0"
+                    )
+                max_page_bytes = artifact_max_bytes_for_context_window(context_window_tokens)
+                if max_bytes < 1:
+                    raise ValueError(f"max_bytes={max_bytes} must be at least 1 byte")
+                if max_bytes > max_page_bytes:
+                    raise ValueError(
+                        f"max_bytes={max_bytes} exceeds the maximum byte page size of {max_page_bytes} bytes"
+                    )
                 byte_max_lines = max_lines if max_lines is not None else (200 if start_line is not None else None)
                 return _read_artifact_bytes(
                     path,
@@ -385,6 +584,110 @@ def create_artifact_reader(context_window_tokens: int, *, max_output_chars: int 
             raise
 
     return read_artifact
+
+
+def create_artifact_searcher(*, max_output_chars: int | None = None) -> Any:
+    """Create a full-artifact literal and regular-expression search tool."""
+
+    if max_output_chars is not None and max_output_chars < 1:
+        raise ValueError("max_output_chars must be at least 1")
+
+    @tool(name="search_artifact")
+    def search_artifact(
+        path: str,
+        search_pattern: str,
+        search_regex: bool = False,
+        context_lines: int = 2,
+        max_matches: int = 25,
+        match_offset: int = 0,
+    ) -> str:
+        """Search an entire current-operation artifact and return bounded matching context."""
+
+        return _search_artifact(
+            path,
+            search_pattern,
+            regex=search_regex,
+            context_lines=context_lines,
+            max_matches=max_matches,
+            match_offset=match_offset,
+            max_output_chars=max_output_chars,
+        )
+
+    return search_artifact
+
+
+def create_bounded_artifact_searcher(
+    *,
+    max_searches: int | None = None,
+    allowed_artifact_refs: Iterable[str] | None = None,
+    max_searches_per_artifact: int | None = None,
+    max_output_chars: int | None = None,
+) -> Any:
+    """Create a scoped full-artifact search tool with optional path and call limits."""
+
+    if max_searches is None:
+        try:
+            max_searches = max(1, int(os.getenv("CYBER_WORKFLOW_ARTIFACT_READ_LIMIT", "4")))
+        except ValueError:
+            max_searches = 4
+    if max_searches_per_artifact is not None and max_searches_per_artifact < 1:
+        raise ValueError("max_searches_per_artifact must be at least 1")
+    if max_output_chars is not None and max_output_chars < 1:
+        raise ValueError("max_output_chars must be at least 1")
+    allowed_paths = (
+        {resolve_operation_artifact_path(reference) for reference in allowed_artifact_refs}
+        if allowed_artifact_refs is not None
+        else None
+    )
+    calls = 0
+    searches_by_path: dict[str, int] = {}
+
+    @tool(name="search_artifact")
+    def search_artifact(
+        path: str,
+        search_pattern: str,
+        search_regex: bool = False,
+        context_lines: int = 2,
+        max_matches: int = 25,
+        match_offset: int = 0,
+    ) -> str:
+        """Search an entire allowed artifact and return bounded matching context."""
+
+        nonlocal calls
+        try:
+            resolved = resolve_operation_artifact_path(path)
+        except (OSError, TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
+            ) from error
+        if allowed_paths is not None and resolved not in allowed_paths:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
+            )
+        if calls >= max_searches:
+            raise RuntimeError(f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Search limit reached")
+        if (
+            max_searches_per_artifact is not None
+            and searches_by_path.get(resolved, 0) >= max_searches_per_artifact
+        ):
+            raise RuntimeError(f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact search limit reached")
+        try:
+            result = _search_artifact(
+                resolved,
+                search_pattern,
+                regex=search_regex,
+                context_lines=context_lines,
+                max_matches=max_matches,
+                match_offset=match_offset,
+                max_output_chars=max_output_chars,
+            )
+        except ValueError as error:
+            raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: {error}") from error
+        calls += 1
+        searches_by_path[resolved] = searches_by_path.get(resolved, 0) + 1
+        return result
+
+    return search_artifact
 
 
 def create_bounded_artifact_reader(
@@ -426,12 +729,12 @@ def create_bounded_artifact_reader(
     calls = 0
     reads_by_path: dict[str, int] = {}
     seen_pages: set[tuple[Any, ...]] = set()
-    returned_ranges: dict[str, list[tuple[int, int]]] = {}
+    returned_ranges: dict[tuple[str, str], list[tuple[int, int]]] = {}
     guided_requests: set[tuple[str, tuple[Any, ...]]] = set()
     terminal_byte_page_guards: dict[str, str] = {}
-    blocked_paths: set[str] = set()
-    successful_pages: dict[str, list[dict[str, Any]]] = {}
-    replayed_epochs: dict[str, set[int]] = {}
+    blocked_pagination_modes: set[tuple[str, str]] = set()
+    successful_pages: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    replayed_epochs: dict[tuple[str, str], set[int]] = {}
     reduction_state = context_reduction_state if context_reduction_state is not None else {"epoch": 0}
 
     def reduction_epoch() -> int:
@@ -442,20 +745,25 @@ def create_bounded_artifact_reader(
         except (AttributeError, TypeError, ValueError):
             return 0
 
-    def compression_replay(resolved: str, page_range: tuple[int, int]) -> str | None:
+    def compression_replay(
+        resolved: str,
+        pagination_mode: str,
+        page_range: tuple[int, int],
+    ) -> str | None:
         """Replay one prior page when a real context reduction made it stale."""
 
         epoch = reduction_epoch()
-        if epoch < 1 or epoch in replayed_epochs.get(resolved, set()):
+        state_key = (resolved, pagination_mode)
+        if epoch < 1 or epoch in replayed_epochs.get(state_key, set()):
             return None
-        for record in reversed(successful_pages.get(resolved, [])):
+        for record in reversed(successful_pages.get(state_key, [])):
             start, end = record["range"]
             if record["epoch"] >= epoch or not (page_range[0] < end and start < page_range[1]):
                 continue
             payload = ast.literal_eval(record["result"])
             payload["compression_recovery"] = True
             payload["compression_recovery_epoch"] = epoch
-            replayed_epochs.setdefault(resolved, set()).add(epoch)
+            replayed_epochs.setdefault(state_key, set()).add(epoch)
             return str(payload)
         return None
 
@@ -478,7 +786,7 @@ def create_bounded_artifact_reader(
         start_byte: int | None = None,
         max_bytes: int | None = None,
     ) -> str:
-        """Read a bounded text excerpt or an explicit byte page."""
+        """Read a bounded current-operation artifact with line or byte paging."""
 
         nonlocal calls
         try:
@@ -491,20 +799,37 @@ def create_bounded_artifact_reader(
             raise RuntimeError(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
             )
-        if resolved in blocked_paths:
-            raise RuntimeError(
-                f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This artifact page was already rejected as overlapping; "
-                "return the requested JSON decision without rereading it"
-            )
         if max_bytes is not None and start_byte is None:
             start_byte = 0
         byte_mode = start_byte is not None or max_bytes is not None
+        pagination_mode = "byte" if byte_mode else "line"
+        state_key = (resolved, pagination_mode)
+        if state_key in blocked_pagination_modes:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This artifact {pagination_mode} page was already rejected "
+                "as overlapping; return the requested JSON decision without rereading it"
+            )
         if byte_mode and (start_byte is None or max_bytes is None):
-            raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte page parameters are invalid")
-        if byte_mode and not 1 <= max_bytes <= resolved_max_bytes:
-            raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte page parameters are invalid")
+            missing = "start_byte" if start_byte is None else "max_bytes"
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte paging requires both start_byte and max_bytes; "
+                f"missing {missing}"
+            )
+        if byte_mode and max_bytes < 1:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: max_bytes={max_bytes} must be at least 1 byte"
+            )
+        if byte_mode and max_bytes > resolved_max_bytes:
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: max_bytes={max_bytes} exceeds the maximum "
+                f"byte page size of {resolved_max_bytes} bytes"
+            )
         if byte_mode and start_line is not None and start_byte > 0:
-            raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: byte page parameters are invalid")
+            raise RuntimeError(
+                f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: start_line requires start_byte=0: "
+                f"start_line={start_line} cannot be combined with start_byte={start_byte}; "
+                "omit start_line or use start_byte=0"
+            )
         if byte_mode and resolved in terminal_byte_page_guards:
             return guide_once(
                 resolved,
@@ -574,19 +899,19 @@ def create_bounded_artifact_reader(
         else:
             page_range = (int(payload["start_line"]), int(payload["end_line"]) + 1)
         if page in seen_pages:
-            replay = compression_replay(resolved, page_range)
+            replay = compression_replay(resolved, pagination_mode, page_range)
             if replay is not None:
                 return replay
-            blocked_paths.add(resolved)
+            blocked_pagination_modes.add(state_key)
             raise RuntimeError(
                 f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This exact artifact page was already returned during "
                 "this evaluation"
             )
         if any(
             page_range[0] < end and start < page_range[1]
-            for start, end in returned_ranges.get(resolved, [])
+            for start, end in returned_ranges.get(state_key, [])
         ):
-            replay = compression_replay(resolved, page_range)
+            replay = compression_replay(resolved, pagination_mode, page_range)
             if replay is not None:
                 return replay
             if byte_mode:
@@ -594,14 +919,14 @@ def create_bounded_artifact_reader(
                     "This artifact has already received an overlapping byte page. "
                     "Use the returned page, provided digest, or another artifact."
                 )
-            blocked_paths.add(resolved)
+            blocked_pagination_modes.add(state_key)
             raise RuntimeError(
                 f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: This artifact page overlaps content already returned "
                 "during this evaluation"
             )
         if byte_mode and any(
             0 < min(abs(page_range[0] - end), abs(start - page_range[1])) <= ARTIFACT_NEARBY_BYTE_PAGE_GAP
-            for start, end in returned_ranges.get(resolved, [])
+            for start, end in returned_ranges.get(state_key, [])
         ):
             terminal_byte_page_guards[resolved] = (
                 "This artifact received a near-adjacent byte-page request. Continue only from a returned "
@@ -630,8 +955,8 @@ def create_bounded_artifact_reader(
         calls += 1
         reads_by_path[resolved] = reads_by_path.get(resolved, 0) + 1
         seen_pages.add(page)
-        returned_ranges.setdefault(resolved, []).append(page_range)
-        successful_pages.setdefault(resolved, []).append({
+        returned_ranges.setdefault(state_key, []).append(page_range)
+        successful_pages.setdefault(state_key, []).append({
             "epoch": reduction_epoch(),
             "range": page_range,
             "result": result,

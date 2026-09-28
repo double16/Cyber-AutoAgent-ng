@@ -23,7 +23,8 @@ export enum ModalType {
   MODULE_SELECTOR = 'moduleSelector',
   SAFETY_WARNING = 'safetyWarning',
   INITIALIZATION = 'initialization',
-  DOCUMENTATION = 'documentation'
+  DOCUMENTATION = 'documentation',
+  CREDENTIALS = 'credentials'
 }
 
 interface ModalContext {
@@ -42,6 +43,8 @@ interface ModalContext {
   
   // Documentation viewer
   documentIndex?: number;
+
+  credentialTarget?: string;
 }
 
 interface UseModalManagerResult {
@@ -66,6 +69,7 @@ interface UseModalManagerResult {
   openModuleSelector: (onSelect: (name: string) => void) => void;
   openSafetyWarning: (execution: ModalContext['pendingExecution']) => void;
   openDocumentation: (docIndex?: number) => void;
+  openCredentials: (target?: string) => void;
   
   // Check if specific modal is open
   isModalOpen: (type: ModalType) => boolean;
@@ -159,6 +163,10 @@ export const useModalManager = (): UseModalManagerResult => {
   const openDocumentation = useCallback((docIndex?: number) => {
     openModal(ModalType.DOCUMENTATION, { documentIndex: docIndex });
   }, [openModal]);
+
+  const openCredentials = useCallback((target?: string) => {
+    openModal(ModalType.CREDENTIALS, { credentialTarget: target });
+  }, [openModal]);
   
   const isModalOpen = useCallback((type: ModalType) => {
     return activeModal === type;
@@ -177,6 +185,7 @@ export const useModalManager = (): UseModalManagerResult => {
     openModuleSelector,
     openSafetyWarning,
     openDocumentation,
+    openCredentials,
     isModalOpen
   };
 };

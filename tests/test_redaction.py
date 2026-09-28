@@ -1,4 +1,4 @@
-from modules.utils.redaction import REDACTED, bounded_redacted_text, redact, redact_text
+from modules.utils.redaction import REDACTED, bounded_redacted_text, redact, redact_text, register_runtime_secret
 
 
 def test_redact_text_removes_credential_forms_without_losing_context():
@@ -13,7 +13,8 @@ def test_redact_text_removes_credential_forms_without_losing_context():
     assert "secret-value" not in result
     assert "alice:password" not in result
     assert "AKIA1234567890ABCDEF" not in result
-    assert result.count(REDACTED) == 4
+    assert result.count(REDACTED) == 5
+    assert f"https://{REDACTED}:{REDACTED}@example.test/path" in result
 
 
 def test_redact_recursively_handles_mappings_lists_tuples_and_scalar_values():
@@ -30,9 +31,47 @@ def test_redact_recursively_handles_mappings_lists_tuples_and_scalar_values():
     }
 
 
+def test_redact_preserves_safe_credential_type_metadata_but_masks_payload_values():
+    assert redact(
+        {
+            "credential_id": "credential-123",
+            "credential_type": "username_password",
+            "credential_payload": {"password": "must-not-leak"},
+        }
+    ) == {
+        "credential_id": "credential-123",
+        "credential_type": "username_password",
+        "credential_payload": REDACTED,
+    }
+
+
 def test_bounded_redacted_text_returns_full_or_truncated_safe_text():
     assert bounded_redacted_text("token=secret", limit=30) == f"token={REDACTED}"
 
     result = bounded_redacted_text("x" * 10, limit=5)
 
     assert result == "xxxxx…[truncated]"
+
+
+def test_redaction_masks_mfa_codes_and_provisioning_secrets():
+    value = "mfa_code=123456 provisioning_secret=JBSWY3DPEHPK3PXP"
+
+    result = redact_text(value)
+
+    assert "mfa_code=[REDACTED]" in result
+    assert "provisioning_secret=[REDACTED]" in result
+    assert "123456" not in result
+    assert "JBSWY3DPEHPK3PXP" not in result
+
+
+def test_redact_text_masks_registered_bare_runtime_secret():
+    register_runtime_secret("bare-one-time-value")
+    assert redact_text("tool returned bare-one-time-value") == f"tool returned {REDACTED}"
+
+
+def test_register_runtime_secret_ignores_generic_field_values():
+    register_runtime_secret("password")
+    register_runtime_secret("secret")
+    register_runtime_secret("key")
+
+    assert redact_text("password secret api_key") == "password secret api_key"

@@ -31,6 +31,10 @@ export const LazyModuleSelector = React.lazy(() =>
   import('./ModuleSelector.js').then(module => ({ default: module.ModuleSelector }))
 );
 
+export const LazyCredentialManager = React.lazy(() =>
+  import('./CredentialManager.js').then(module => ({ default: module.CredentialManager }))
+);
+
 export const LazyTerminal = React.lazy(() => 
   import('./Terminal.js').then(module => ({ default: module.Terminal }))
 );
@@ -51,6 +55,12 @@ export const DocumentationViewerLazy: React.FC<any> = (props) => (
 export const ModuleSelectorLazy: React.FC<any> = (props) => (
   <Suspense fallback={<LoadingFallback componentName="Module Selector" />}>
     <LazyModuleSelector {...props} />
+  </Suspense>
+);
+
+export const CredentialManagerLazy: React.FC<any> = (props) => (
+  <Suspense fallback={<LoadingFallback componentName="Credential Manager" />}>
+    <LazyCredentialManager {...props} />
   </Suspense>
 );
 

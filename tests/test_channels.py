@@ -115,6 +115,7 @@ async def test_poll_timeout_returns_quickly(mock_subprocess):
 # Reverse channel tests
 
 @pytest.mark.asyncio
+@pytest.mark.network
 async def test_reverse_connect_duplex_send_both_ways_and_close():
     r = await mod.channel_create_reverse(target=None, listener_host="127.0.0.1", listener_port=0)
     cid = r.channel_id
@@ -155,6 +156,7 @@ async def test_reverse_connect_duplex_send_both_ways_and_close():
 
 
 @pytest.mark.asyncio
+@pytest.mark.network
 async def test_reverse_send_when_not_connected_returns_zero():
     r = await mod.channel_create_reverse(target=None, listener_host="127.0.0.1", listener_port=0)
     cid = r.channel_id
