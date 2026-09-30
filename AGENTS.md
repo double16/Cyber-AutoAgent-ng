@@ -53,7 +53,9 @@
   KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q --tb=short
   UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
   # Use the repository coverage entry point. It configures pytest-cov correctly.
-  ./.github/scripts/run-python-coverage.sh
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run ./.github/scripts/run-python-coverage.sh
+  # Run after coverage is collected, it reports files that do not pass the python coverage floor.
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run ./.github/scripts/check-python-coverage-floor.py coverage.json
   ```
 
 - Do not invoke `coverage run -m pytest` as a replacement for the repository coverage script. In this environment it

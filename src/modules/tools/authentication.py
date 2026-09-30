@@ -63,6 +63,10 @@ _JWT_PATTERN = re.compile(
     r"(?![A-Za-z0-9_-])"
 )
 _AUTH_EXPIRY_WINDOW_SECONDS = 600
+AUTH_CONTEXT_REFRESH_REQUIRED_ERROR = (
+    "AUTH_CONTEXT_REFRESH_REQUIRED: authenticated context is stale; request controller refresh for this "
+    "credential before retrying the request"
+)
 _LOGGER = logging.getLogger(__name__)
 _PURPOSE_ADAPTER = TypeAdapter(Literal["authentication", "registration"])
 _FLOW_KIND_ADAPTER = TypeAdapter(
@@ -264,18 +268,8 @@ def _safe_context(context: _AuthenticationContext, status: str) -> str:
 
 
 def _validate(context: _AuthenticationContext) -> bool:
-    expiring_material = _expiring_authentication_material(context, time.time())
-    if expiring_material is not None:
-        kind, source, remaining_seconds = expiring_material
-        _LOGGER.info(
-            "Authenticated context validation skipped credential_id=%s reason=auth_material_expiring "
-            "material_kind=%s material_source=%s remaining_seconds=%.1f",
-            context.credential_id,
-            kind,
-            redact(source),
-            remaining_seconds,
-        )
-        return False
+    """Probe the protected route regardless of the remaining material lifetime."""
+
     started_at = time.perf_counter()
     try:
         response = context.session.get(
@@ -375,9 +369,12 @@ def _cookie_applies_to_url(cookie: Any, url: str) -> bool:
 
 
 def _expiring_authentication_material(
-    context: _AuthenticationContext, now: float
+    context: _AuthenticationContext, now: float, *, expired_only: bool = False
 ) -> tuple[str, str, float] | None:
-    """Find known JWT or cookie expiry inside the ten-minute refresh window."""
+    """Find known JWT or cookie expiry inside the task window or already expired."""
+
+    def matches(remaining: float) -> bool:
+        return remaining <= 0 if expired_only else remaining < _AUTH_EXPIRY_WINDOW_SECONDS
 
     for source, values in (
         ("header", {**getattr(context.session, "headers", {}), **context.headers}),
@@ -386,19 +383,19 @@ def _expiring_authentication_material(
         for name, value in values.items():
             for expiration in _jwt_expirations(str(value)):
                 remaining = expiration - now
-                if remaining < _AUTH_EXPIRY_WINDOW_SECONDS:
+                if matches(remaining):
                     return "jwt", f"{source}:{name}", remaining
     for cookie in getattr(context.session, "cookies", ()):
         if not _cookie_applies_to_url(cookie, context.validation_url):
             continue
         for expiration in _jwt_expirations(cookie.value):
             remaining = expiration - now
-            if remaining < _AUTH_EXPIRY_WINDOW_SECONDS:
+            if matches(remaining):
                 return "jwt", f"cookie:{cookie.name}", remaining
         cookie_expiry = _finite_timestamp(cookie.expires)
         if cookie_expiry is not None:
             remaining = cookie_expiry - now
-            if remaining < _AUTH_EXPIRY_WINDOW_SECONDS:
+            if matches(remaining):
                 return "cookie", f"cookie:{cookie.name}", remaining
     return None
 
@@ -550,7 +547,7 @@ def _validation_request_diagnostics(
 
 
 def authentication_context_is_valid(operation_id: str, target: str, credential_id: str) -> bool:
-    """Check an opaque operation-memory context without exposing session material."""
+    """Check whether a validated context has enough lifetime to start a task."""
 
     context = _CONTEXTS.get(_context_key(operation_id, target, credential_id))
     if context is None:
@@ -559,7 +556,17 @@ def authentication_context_is_valid(operation_id: str, target: str, credential_i
             credential_id,
         )
         return False
-    return _validate(context)
+    validated = _validate(context)
+    expiring_material = _expiring_authentication_material(context, time.time())
+    if expiring_material is not None:
+        kind, source, remaining_seconds = expiring_material
+        _LOGGER.info(
+            "Authenticated context not ready for task credential_id=%s reason=auth_material_expiring "
+            "material_kind=%s material_source=%s remaining_seconds=%.1f",
+            credential_id, kind, redact(source), remaining_seconds,
+        )
+        return False
+    return validated
 
 
 def authentication_context_validation_url(operation_id: str, target: str, credential_id: str) -> str:
@@ -1264,6 +1271,7 @@ def authenticated_http_request(
     credential_id: str = "",
     body: str | None = None,
     headers: dict[str, str] | None = None,
+    allow_redirects: bool = True,
 ) -> str:
     """Make one request through a validated operation-local authenticated context.
 
@@ -1280,12 +1288,16 @@ def authenticated_http_request(
     if not _credential_target_url_contains(target, url, label="request URL"):
         raise ValueError("request URL is outside the credential target origin")
     context = _CONTEXTS.get(_context_key(operation_id, target, credential_id))
-    if context is None or not _validate(context):
-        raise ValueError(AUTH_CONTEXT_UNAVAILABLE_ERROR)
+    if context is None:
+        raise ValueError(AUTH_CONTEXT_REFRESH_REQUIRED_ERROR)
+    validated = _validate(context)
+    if not validated or _expiring_authentication_material(context, time.time(), expired_only=True):
+        raise ValueError(AUTH_CONTEXT_REFRESH_REQUIRED_ERROR)
     merged_headers = {**context.headers, **normalized_headers}
     try:
         response = context.session.request(
-            method.upper(), url, data=body, headers=merged_headers, params=context.params, timeout=20
+            method.upper(), url, data=body, headers=merged_headers, params=context.params, timeout=20,
+            allow_redirects=allow_redirects,
         )
     except requests.RequestException as error:
         raise ValueError("authenticated request failed") from error

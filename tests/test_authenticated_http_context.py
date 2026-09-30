@@ -8,6 +8,8 @@ import time
 from base64 import urlsafe_b64encode
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -54,6 +56,34 @@ def _jwt_with_exp(expiration: int) -> str:
 )
 def test_credential_target_url_scope_uses_parsed_origin_and_path(candidate, expected):
     assert authentication._credential_target_url_contains("https://target.test/app", candidate, label="URL") is expected
+
+
+def test_authenticated_http_request_can_disable_redirects_for_controller(monkeypatch):
+    target = "https://target.test"
+    credential_id = "credential-1"
+    session = Mock()
+    session.headers = {}
+    session.cookies = []
+    session.request.return_value = SimpleNamespace(status_code=302, headers={"Location": "/login"}, text="")
+    context = authentication._AuthenticationContext(
+        target, credential_id, session, {"Authorization": "Bearer hidden"}, {}, f"{target}/private",
+    )
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: SimpleNamespace(
+        record_credential_usage=Mock(),
+    ))
+    monkeypatch.setattr(authentication, "_active_record", lambda *_args, **_kwargs: (
+        SimpleNamespace(task_uid="coverage-task"), {"target": target}, credential_id,
+    ))
+    monkeypatch.setattr(authentication, "_validate", lambda _context: True)
+    monkeypatch.setitem(authentication._CONTEXTS, ("OP_AUTH", target, credential_id), context)
+
+    response = json.loads(authentication.authenticated_http_request(
+        "GET", f"{target}/private", credential_id, allow_redirects=False,
+    ))
+
+    assert response["status_code"] == 302
+    assert session.request.call_args.kwargs["allow_redirects"] is False
 
 
 def test_browser_login_receipt_marks_only_mapped_401_as_credential_rejected(monkeypatch):
@@ -455,12 +485,16 @@ def test_context_validation_failure_logs_redacted_sent_headers_and_cookies(caplo
 
 
 @pytest.mark.parametrize("placement", ["header", "cookie_header", "cookie_jar", "query"])
-def test_expiring_jwt_skips_validation_request(placement, monkeypatch, caplog):
+def test_expiring_jwt_still_validates_http(placement, monkeypatch):
     now = int(time.time())
     token = _jwt_with_exp(now + 599)
     session = authentication.requests.Session()
     calls = []
-    monkeypatch.setattr(session, "get", lambda *_args, **_kwargs: calls.append("requested"))
+    def get(*_args, **_kwargs):
+        calls.append("requested")
+        return SimpleNamespace(status_code=204)
+
+    monkeypatch.setattr(session, "get", get)
     monkeypatch.setattr(authentication.time, "time", lambda: now)
     headers = {}
     params = {}
@@ -476,13 +510,8 @@ def test_expiring_jwt_skips_validation_request(placement, monkeypatch, caplog):
         "https://target.test", "credential", session, headers, params, "https://target.test/protected"
     )
 
-    with caplog.at_level("INFO", logger=authentication.__name__):
-        assert authentication._validate(context) is False
-
-    assert calls == []
-    assert "reason=auth_material_expiring" in caplog.text
-    assert "material_kind=jwt" in caplog.text
-    assert token not in caplog.text
+    assert authentication._validate(context) is True
+    assert calls == ["requested"]
 
 
 def test_jwt_at_ten_minute_boundary_still_validates_http(monkeypatch):
@@ -503,6 +532,117 @@ def test_jwt_at_ten_minute_boundary_still_validates_http(monkeypatch):
 
     assert authentication._validate(context) is True
     assert calls == ["requested"]
+
+
+@pytest.mark.parametrize("remaining, request_succeeds", [(104, True), (-1, False)])
+def test_request_validates_near_expiry_but_rejects_expired_material(monkeypatch, remaining, request_succeeds):
+    now = int(time.time())
+    target = "https://target.test"
+    credential_id = "credential-1"
+    session = Mock()
+    session.headers = {}
+    session.cookies = []
+    session.get.return_value = SimpleNamespace(status_code=204)
+    session.request.return_value = SimpleNamespace(status_code=200, headers={}, text="ok")
+    context = authentication._AuthenticationContext(
+        target, credential_id, session, {"Authorization": _jwt_with_exp(now + remaining)}, {},
+        f"{target}/protected",
+    )
+    monkeypatch.setattr(authentication.time, "time", lambda: now)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: SimpleNamespace(
+        record_credential_usage=Mock(),
+    ))
+    monkeypatch.setattr(authentication, "_active_record", lambda *_args, **_kwargs: (
+        SimpleNamespace(task_uid="coverage-task"), {"target": target}, credential_id,
+    ))
+    monkeypatch.setitem(authentication._CONTEXTS, ("OP_AUTH", target, credential_id), context)
+
+    assert authentication._validate(context) is True
+    assert authentication.authentication_context_is_valid("OP_AUTH", target, credential_id) is False
+    if request_succeeds:
+        assert json.loads(authentication.authenticated_http_request("GET", f"{target}/protected"))["status_code"] == 200
+        session.request.assert_called_once()
+    else:
+        with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
+            authentication.authenticated_http_request("GET", f"{target}/protected")
+        session.request.assert_not_called()
+
+
+def test_ensure_authenticated_context_refreshes_near_expiry_material(monkeypatch):
+    now = int(time.time())
+    target = "https://target.test"
+    credential_id = "credential-1"
+    old_session = Mock(headers={}, cookies=[])
+    old_session.get.return_value = SimpleNamespace(status_code=204)
+    old_context = authentication._AuthenticationContext(
+        target, credential_id, old_session, {"Authorization": _jwt_with_exp(now + 104)}, {},
+        f"{target}/protected",
+    )
+    new_session = Mock(headers={}, cookies=[])
+    new_session.post.return_value = SimpleNamespace(
+        status_code=200, headers={}, json=lambda: {"access_token": _jwt_with_exp(now + 3600)},
+    )
+    new_session.get.return_value = SimpleNamespace(status_code=204)
+    store = SimpleNamespace(record_credential_usage=Mock())
+    monkeypatch.setattr(authentication.time, "time", lambda: now)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_active_record", lambda *_args, **_kwargs: (
+        SimpleNamespace(task_uid="coverage-task"),
+        {"target": target, "credential_type": "username_password", "payload": {
+            "username": "alice", "password": "secret",
+        }},
+        credential_id,
+    ))
+    monkeypatch.setattr(authentication.requests, "Session", lambda: new_session)
+    monkeypatch.setitem(authentication._CONTEXTS, ("OP_AUTH", target, credential_id), old_context)
+
+    result = json.loads(authentication.ensure_authenticated_context(
+        credential_id, login_url=f"{target}/login", validation_url=f"{target}/protected",
+    ))
+
+    assert result["authentication_ready"] is True
+    new_session.post.assert_called_once()
+    assert authentication._CONTEXTS[("OP_AUTH", target, credential_id)].session is new_session
+    assert authentication.authentication_context_is_valid("OP_AUTH", target, credential_id) is True
+
+
+@pytest.mark.parametrize("placement", ["header", "query", "cookie_jwt", "cookie_expiry"])
+def test_known_expired_material_is_rejected_after_validation(placement, monkeypatch):
+    now = int(time.time())
+    target = "https://target.test"
+    session = authentication.requests.Session()
+    session.get = Mock(return_value=SimpleNamespace(status_code=204))
+    session.request = Mock(return_value=SimpleNamespace(status_code=200, headers={}, text="ok"))
+    headers = {}
+    params = {}
+    if placement == "header":
+        headers["Authorization"] = _jwt_with_exp(now - 1)
+    elif placement == "query":
+        params["access_token"] = _jwt_with_exp(now - 1)
+    elif placement == "cookie_jwt":
+        session.cookies.set("sid", _jwt_with_exp(now - 1), domain="target.test", path="/")
+    else:
+        session.cookies.set("sid", "opaque", domain="target.test", path="/", expires=now - 1)
+    context = authentication._AuthenticationContext(
+        target, "credential-1", session, headers, params, f"{target}/protected",
+    )
+    monkeypatch.setattr(authentication.time, "time", lambda: now)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: SimpleNamespace(
+        record_credential_usage=Mock(),
+    ))
+    monkeypatch.setattr(authentication, "_active_record", lambda *_args, **_kwargs: (
+        SimpleNamespace(task_uid="coverage-task"), {"target": target}, "credential-1",
+    ))
+    monkeypatch.setitem(authentication._CONTEXTS, ("OP_AUTH", target, "credential-1"), context)
+
+    with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
+        authentication.authenticated_http_request("GET", f"{target}/protected", "credential-1")
+
+    session.get.assert_called_once()
+    session.request.assert_not_called()
 
 
 def test_unreadable_jwt_uses_http_validation(monkeypatch):
@@ -575,6 +715,7 @@ def test_long_lived_cookie_and_jwt_continue_to_http_validation(monkeypatch):
     )
 
     assert authentication._validate(context) is True
+    assert authentication._expiring_authentication_material(context, now) is None
     assert calls == ["requested"]
 
 
@@ -602,27 +743,28 @@ def test_expiring_cookie_outside_domain_or_scheme_is_ignored(domain, secure, val
     )
 
     assert authentication._validate(context) is True
+    assert authentication._expiring_authentication_material(context, now) is None
     assert calls == ["requested"]
 
 
-def test_expiring_applicable_cookie_skips_http_validation(monkeypatch, caplog):
+def test_expiring_applicable_cookie_still_validates_http(monkeypatch):
     now = int(time.time())
     session = authentication.requests.Session()
     session.cookies.set("session", "opaque", domain="target.test", path="/", expires=now + 599)
     session.cookies.set("other_path", "opaque", domain="target.test", path="/other", expires=now + 1)
     calls = []
-    monkeypatch.setattr(session, "get", lambda *_args, **_kwargs: calls.append("requested"))
+    def get(*_args, **_kwargs):
+        calls.append("requested")
+        return SimpleNamespace(status_code=204)
+
+    monkeypatch.setattr(session, "get", get)
     monkeypatch.setattr(authentication.time, "time", lambda: now)
     context = authentication._AuthenticationContext(
         "https://target.test", "credential", session, {}, {}, "https://target.test/protected"
     )
 
-    with caplog.at_level("INFO", logger=authentication.__name__):
-        assert authentication._validate(context) is False
-
-    assert calls == []
-    assert "material_kind=cookie" in caplog.text
-    assert "cookie:session" in caplog.text
+    assert authentication._validate(context) is True
+    assert calls == ["requested"]
 
 
 def test_expiring_cookie_outside_validation_path_does_not_skip_http(monkeypatch):
@@ -642,6 +784,7 @@ def test_expiring_cookie_outside_validation_path_does_not_skip_http(monkeypatch)
     )
 
     assert authentication._validate(context) is True
+    assert authentication._expiring_authentication_material(context, now) is None
     assert calls == ["requested"]
 
 
@@ -1412,11 +1555,11 @@ def test_authenticated_http_request_reuses_hidden_bearer_context(tmp_path, monke
 
         checkout_credential(credential["credential_id"], "authenticated coverage")
         set_task_auth_context([credential["credential_id"]])
-        with pytest.raises(ValueError, match="AUTH_CONTEXT_UNAVAILABLE") as error:
+        with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED") as error:
             authentication.authenticated_http_request(
                 "GET", f"{target}/tenants/tenant-a/records/2", credential["credential_id"]
             )
-        assert "stop authenticated attempts" in str(error.value)
+        assert "request controller refresh" in str(error.value)
         assert "ensure_authenticated_context" not in str(error.value)
         stored_flow = store.upsert_authentication_flow(
             "OP_AUTH",
@@ -1449,7 +1592,7 @@ def test_authenticated_http_request_reuses_hidden_bearer_context(tmp_path, monke
         assert response["status_code"] == 200
         assert response["body"] == '{"tenant":"tenant-a","record_id":"2","requested_by":"alice"}'
         monkeypatch.setattr(authentication, "_validate", lambda _context: False)
-        with pytest.raises(ValueError, match="AUTH_CONTEXT_UNAVAILABLE"):
+        with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
             authentication.authenticated_http_request(
                 "GET", f"{target}/tenants/tenant-a/records/2", credential["credential_id"]
             )

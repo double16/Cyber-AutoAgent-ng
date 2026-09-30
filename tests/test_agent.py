@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
+from strands.tools.executors import SequentialToolExecutor
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -689,7 +690,7 @@ def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
         ("task_executor", False),
     ],
 )
-def test_create_agent_assigns_review_roles_a_fail_fast_executor(
+def test_create_agent_assigns_fail_fast_executor_to_configured_roles(
     monkeypatch,
     agent_type,
     uses_fail_fast_executor,
@@ -734,7 +735,9 @@ def test_create_agent_assigns_review_roles_a_fail_fast_executor(
     if agent_type == "task_evaluator":
         assert agent._cyber_evaluator_artifact_read_limit_hook in kwargs["hooks"]
         assert agent._cyber_evaluator_artifact_read_limit_hook.exhausted is False
-    if uses_fail_fast_executor:
+    if agent_type == "task_executor":
+        assert isinstance(kwargs["tool_executor"], SequentialToolExecutor)
+    elif uses_fail_fast_executor:
         assert isinstance(kwargs["tool_executor"], FailFastSequentialToolExecutor)
     else:
         assert kwargs["tool_executor"] is runtime.tool_executor

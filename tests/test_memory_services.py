@@ -5679,6 +5679,77 @@ def test_exhausted_snapshot_with_gap_creates_inventory_refinement(fake_memory_cl
     assert store.tasks[-1].acceptance.basis.procedure.output_kind == "inventory_manifest"
 
 
+@pytest.mark.parametrize("prior_status, expected_created", [("done", 2), ("replanned", 3)])
+def test_coverage_expansion_only_uses_current_task_results(fake_memory_client, prior_status, expected_created):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess http://target.test",
+        current_phase=1,
+        total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    proposal = {
+        "title": "Assess inventory",
+        "objective": "Assess the frozen inventory",
+        "methods": [],
+        "limits": {},
+        "snapshot_refs": [f"artifact:{manifest}"],
+        "criteria": [{"description": "Assess the assigned inventory unit"}],
+        "target_ids": ["target-1"],
+        "workstream": "unauthenticated_baseline",
+    }
+    mod.create_tasks([proposal])
+    prior_task = store.tasks[0]
+    store.acceptance_results[prior_task.task_uid] = [mod.AcceptanceResult(
+        criterion_id=prior_task.acceptance.criteria[0].id,
+        status="assessed_negative",
+        disposition="no_vulnerability",
+        summary="Endpoint assessed",
+        evidence_refs=(f"artifact:{manifest}",),
+        coverage=(mod.CoverageResult(
+            item_id="endpoint-1",
+            status="assessed_negative",
+            evidence_refs=(f"artifact:{manifest}",),
+        ),),
+    )]
+    store.store_task("op1", replace(prior_task, status=prior_status))
+
+    proposals = [
+        proposal,
+        {
+            **proposal,
+            "title": "Authenticated credential coverage",
+            "objective": "Assess the inventory using eligible authenticated credentials",
+            "criteria": [{"description": "Record authenticated coverage for the assigned inventory unit"}],
+            "workstream": "authenticated_credential_coverage",
+        },
+        {
+            **proposal,
+            "title": "Authorization comparison",
+            "objective": "Compare access across eligible accounts and roles",
+            "criteria": [{"description": "Record authorization comparisons for the assigned inventory unit"}],
+            "workstream": "authorization_comparison",
+        },
+    ]
+
+    result = json.loads(mod.create_tasks(proposals))
+
+    assert result["created_count"] == expected_created
+    assert len(store.tasks) == 1 + expected_created
+    if prior_status == "replanned":
+        assert {
+            task.recovery_context["coverage_family"]
+            for task in store.tasks
+            if task.status == "pending"
+        } == {
+            "unauthenticated_baseline",
+            "authenticated_credential_coverage",
+            "authorization_comparison",
+        }
+
+
 def test_acceptance_disposition_requires_finding_for_confirmed_behavior(fake_memory_client):
     _client, store = fake_memory_client
     manifest = _write_inventory_manifest()

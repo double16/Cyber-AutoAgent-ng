@@ -8770,7 +8770,7 @@ def _completed_coverage_item_ids(
     completed: set[str] = set()
     store = _get_database_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
-    for task in existing_tasks:
+    for task in current_workflow_tasks(existing_tasks):
         if (
             task.phase != phase
             or task.acceptance.mode != "coverage"

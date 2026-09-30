@@ -88,7 +88,9 @@ def test_web_phase_metadata_requires_inventory_snapshot_task_creation():
 def test_web_phase_three_declares_controller_owned_baseline_workstream():
     contract = load_phase_task_contract("web", 3)
 
-    assert contract.controller_mapping_workstreams == {"unauthenticated_baseline"}
+    assert contract.controller_mapping_workstreams == {
+        "unauthenticated_baseline", "authenticated_credential_coverage",
+    }
     assert contract.exclude_public_static_assets is True
 
 

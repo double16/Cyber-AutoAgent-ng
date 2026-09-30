@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from strands.tools.executors import SequentialToolExecutor
 from strands.tools.executors._executor import ToolExecutor
 from strands.types._events import ToolInterruptEvent, ToolResultEvent
 
@@ -69,6 +70,36 @@ def test_fail_fast_executor_skips_remaining_tools_after_error_result(monkeypatch
     assert [result["status"] for result in results] == ["error", "error", "error"]
     assert results[1]["content"] == [{"text": _SKIPPED_TOOL_MESSAGE}]
     assert results[2]["content"] == [{"text": _SKIPPED_TOOL_MESSAGE}]
+
+
+def test_task_executor_strategy_runs_next_tool_after_error(monkeypatch):
+    calls = []
+    results = []
+
+    async def stream_with_trace(_agent, tool_use, tool_results, *_args) -> AsyncGenerator[Any, None]:
+        calls.append(tool_use["toolUseId"])
+        result = {
+            "toolUseId": tool_use["toolUseId"],
+            "status": "error" if len(calls) == 1 else "success",
+            "content": [],
+        }
+        tool_results.append(result)
+        yield ToolResultEvent(result)
+
+    monkeypatch.setattr(ToolExecutor, "_stream_with_trace", staticmethod(stream_with_trace))
+    agent = type("Agent", (), {"_observe_cancellation": lambda self: False})()
+
+    async def collect() -> list[Any]:
+        return [
+            event async for event in SequentialToolExecutor()._execute(
+                agent, [_tool_use("first"), _tool_use("second")], results, object(), object(), {}, None
+            )
+        ]
+
+    events = asyncio.run(collect())
+
+    assert calls == ["first", "second"]
+    assert [event.tool_result["status"] for event in events] == ["error", "success"]
 
 
 def test_fail_fast_executor_skips_remaining_tools_after_exception_result(monkeypatch):

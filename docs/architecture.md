@@ -157,6 +157,19 @@ Task creators return one typed proposal batch, after which Python applies the ex
 durable persistence checks. Rejected batches remain correctable within the configured bound. Task executors stop after
 a complete `record_task_acceptance` result; rejected calls remain correctable.
 
+The task prompt builder uses the frozen task and acceptance contract to describe only the assigned execution steps.
+Python appends the full acceptance contract and operation constraints to the approved executor prompt. Authentication
+setup runs between prompt approval and task execution; an assigned unauthenticated baseline remains executor work.
+Cookie and Authorization header restrictions follow their stated operation and target scope. The prompt critic reviews
+the draft against this assembled context and does not require it to repeat controller-owned rules.
+Automatic task prompt memories are limited by controller-owned task, target, and frozen inventory-item provenance;
+unscoped observations and findings remain available through explicit retrieval rather than appearing in every task
+prompt. General unscoped knowledge can still guide task planning. Prompt memory catalogs show provenance alongside
+each selected item. Before authentication setup, prompt builders cannot supply credential IDs. After setup, executors
+may use controller-validated opaque IDs in authorized tool calls and durable evidence when acceptance requires ID
+binding, while keeping secret credential values out of reportable material. For self-registration, the recorder's
+legacy `login_url` argument carries the mapped registration URL; a success redirect is recorded only if observed.
+
 Every role invocation also has deterministic safety bounds. Three consecutive responses without a new tool action stop
 a required-tool role as stalled, regardless of tool calls or reasoning emitted during an earlier actor cycle. An
 absolute controller-to-agent call ceiling bounds repeated invocations, while the Strands SDK `turns` limit bounds model
@@ -535,3 +548,20 @@ Evaluation triggers automatically after operation completion when `ENABLE_AUTO_E
 7. **Continuous Evaluation**: Automated performance metrics support operational improvement.
 
 This architecture enables autonomous operation while keeping workflow control deterministic, inspectable, and resilient to context loss.
+
+# Controller-owned authenticated coverage
+
+For web phase-3 tasks, the controller can execute an authenticated credential-coverage task when its frozen inventory
+provides an in-scope HTTP endpoint with a recorded GET or HEAD interaction. The authentication worker establishes or
+refreshes an opaque context only when needed. The controller then uses each validated, task-authorized credential ID
+to request the endpoint without following redirects and stores the response with a specific gap for failed requests.
+Authorization comparisons and interactions without a safe recorded method continue through task executors.
+
+Authenticated task executors can call `refresh_authenticated_context` with a credential ID already bound to their
+task. The controller runs the authentication worker for that credential and returns only `ready` or `unavailable`.
+The executor can retry a failed authenticated request once after `ready`; credential material stays with the worker.
+For example, if a token expires during a long task, the executor requests a refresh before retrying its GET.
+
+The controller requires at least 10 minutes of known authentication-material lifetime when assigning a context to a
+new task. HTTP validation still probes the protected route when less time remains. An active task may use a context
+that passes that probe until the material expires; known-expired material cannot be used for an endpoint request.

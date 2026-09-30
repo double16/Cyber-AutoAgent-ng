@@ -16,7 +16,7 @@ from typing import Any
 
 from strands import Agent
 from strands.hooks import HookProvider
-from strands.tools.executors import ConcurrentToolExecutor
+from strands.tools.executors import ConcurrentToolExecutor, SequentialToolExecutor
 
 # These tools are modules, not functions, the following imports MUST import the module
 from strands_tools import (
@@ -1203,7 +1203,9 @@ def create_agent(
         agent_hooks.append(TerminalToolHook(agent_type))
 
     tool_executor = runtime.tool_executor
-    if agent_type in _FAIL_FAST_TOOL_ROLES:
+    if agent_type == "task_executor":
+        tool_executor = SequentialToolExecutor()
+    elif agent_type in _FAIL_FAST_TOOL_ROLES:
         tool_executor = FailFastSequentialToolExecutor()
 
     agent_kwargs = {
