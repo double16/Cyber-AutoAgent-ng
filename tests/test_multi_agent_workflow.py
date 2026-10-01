@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import hashlib
 import inspect
 import json
 from contextlib import contextmanager
@@ -1201,6 +1202,13 @@ def test_controller_refreshes_only_task_authorized_credential(monkeypatch):
     assert controller._refresh_authenticated_context_for_task(plan, task, "first") == {
         "credential_id": "first", "status": "ready", "reason": "refreshed",
     }
+    refresh_events = [
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "authentication_context_refresh"
+    ]
+    assert [(event["credential_id"], event["status"]) for event in refresh_events] == [
+        ("second", "unavailable"), ("first", "ready"),
+    ]
     assert worker.call_count == 1
     assert worker.call_args.args[2]["credential_id"] == "first"
     monkeypatch.setattr(workflow_mod, "_get_database_store", Mock(side_effect=RuntimeError("store unavailable")))
@@ -1239,6 +1247,62 @@ def test_refresh_tool_returns_only_controller_status(monkeypatch):
     assert workflow_mod.get_tool_name(tool) == "refresh_authenticated_context"
     assert result == {"credential_id": "first", "status": "ready", "reason": "refreshed"}
     refresh.assert_called_once_with(plan, task, "first")
+
+
+@pytest.mark.parametrize("outcome", ["success", "refresh_failed", "retry_failed"])
+def test_executor_tools_recover_stale_request_for_one_credential(monkeypatch, outcome):
+    controller, plan, original_task = _refresh_setup_controller(monkeypatch, ("first", "second"))
+    task = replace(original_task, auth_context={"mode": "authenticated", "credential_ids": ["first", "second"]})
+    calls = []
+
+    def authenticated_http_request(credential_id):
+        calls.append(("request", credential_id))
+        if credential_id == "first" and (
+            calls.count(("request", "first")) == 1 or outcome == "retry_failed"
+        ):
+            raise ValueError("AUTH_CONTEXT_REFRESH_REQUIRED")
+        return json.dumps({"status_code": 200})
+
+    controller.runtime.optional_tools_list.append(authenticated_http_request)
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        credential_ids_authorized_by_task=lambda *_args: {"first", "second"},
+    ))
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", lambda *_args: (
+        calls.append(("worker", "first")) or workflow_mod.AuthenticationWorkerResult(True)
+    ))
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: outcome != "refresh_failed")
+
+    tools = controller._resolve_task_executor_base_tools(plan, task, {"tools": []})
+    by_name = {workflow_mod.get_tool_name(item): item for item in tools}
+    assert "refresh_authenticated_context" in by_name
+    with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
+        by_name["authenticated_http_request"]("first")
+    assert json.loads(by_name["authenticated_http_request"]("second"))["status_code"] == 200
+    result = json.loads(by_name["refresh_authenticated_context"]("first"))
+    assert result["status"] == ("unavailable" if outcome == "refresh_failed" else "ready")
+    if outcome == "success":
+        assert json.loads(by_name["authenticated_http_request"]("first"))["status_code"] == 200
+    elif outcome == "retry_failed":
+        with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
+            by_name["authenticated_http_request"]("first")
+    else:
+        assert calls.count(("request", "first")) == 1
+    assert calls.count(("worker", "first")) == 1
+    assert json.loads(by_name["refresh_authenticated_context"]("unknown"))["reason"] == "not_authorized"
+
+
+def test_prompt_review_uses_actual_authentication_recovery_tool_catalog(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
+    controller.runtime.optional_tools_list.append(_tool("authenticated_http_request"))
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda *_args: ["checkout_credential"])
+    prompt_spec = {"prompt": "Use refresh_authenticated_context if context expires", "tools": []}
+
+    critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, prompt_spec)
+    builder = controller._task_prompt_builder_prompt(plan, plan.phases[0], task)
+
+    assert "task_executor_tools" in critic
+    assert "refresh_authenticated_context" in critic
+    assert "refresh_authenticated_context" in builder
 
 
 @pytest.mark.parametrize(
@@ -1953,7 +2017,15 @@ def test_controller_seeds_secret_candidate_only_from_target_scoped_tool_outcomes
     monkeypatch.setattr(
         workflow_mod,
         "detect_secret_exposures",
-        lambda _ref: [SimpleNamespace(kind="connection_string", digest="a" * 64)],
+        lambda _ref: [
+            SimpleNamespace(
+                kind="connection_string",
+                digest="a" * 64,
+                line_number=3,
+                column_start=4,
+                column_end=12,
+            )
+        ],
     )
     monkeypatch.setattr(
         workflow_mod,
@@ -1982,6 +2054,11 @@ def test_controller_seeds_secret_candidate_only_from_target_scoped_tool_outcomes
     assert len(stored) == 1
     assert stored[0]["target"] == "http://target.test/api/config"
     assert stored[0]["evidence_assertions"][0]["digest"] == "a" * 64
+    assert stored[0]["evidence_assertions"][0]["source_location"] == {
+        "line_number": 3,
+        "column_start": 4,
+        "column_end": 12,
+    }
     assert any(event["type"] == "secret_exposure_candidate_created" for event in controller.runtime.callback_handler.events)
 
 
@@ -15406,8 +15483,121 @@ def test_hypothesis_dependent_batches_require_valid_assigned_manifest():
         text_runner=lambda *_args: "{}",
     )
 
-    with pytest.raises(ValueError, match="requires an assigned prior inventory manifest"):
-        controller._task_creation_batches(plan, plan.phases[1], "system")
+    assert controller._task_creation_batches(plan, plan.phases[1], "system") == []
+    assert any(
+        event["type"] == "hypothesis_prerequisite_gap" and event["reason"] == "missing_inventory_manifest"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
+def test_missing_hypothesis_manifest_finishes_as_incomplete_coverage():
+    plan = OperationPlan(
+        objective="assess", current_phase=2, total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Hypotheses", status="partial_failure", produces_hypotheses=True),
+            PlanPhase(id=2, title="Test", status="active", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    state = FakeState(plan)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+        text_runner=lambda *_args: pytest.fail("task creator must not run without a manifest"),
+    )
+
+    controller.run()
+
+    assert state.plan.phases[1].status == "partial_failure"
+    assert controller.runtime.callback_handler.termination_events[0][0] == "partial_failure"
+
+
+def test_hypothesis_inventory_binding_survives_empty_producer_phase(monkeypatch):
+    reference = "artifact:artifacts/inventory.json"
+    plan = OperationPlan(
+        objective="assess", current_phase=2, total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Hypotheses", status="active", produces_hypotheses=True),
+            PlanPhase(id=3, title="Test", status="pending", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    inventory = Task(
+        task_uid="inventory", title="Inventory", objective="Map target", phase=1, status="done",
+        evidence=[reference], acceptance=_acceptance(),
+    )
+    state = FakeState(plan, [inventory])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda value: value)
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", lambda *_args: ({"items": []}, "hash"))
+    monkeypatch.setattr(
+        workflow_mod, "_coverage_route_groups",
+        lambda *_args, **_kwargs: [("target-1", "endpoint", "http://target.test/one", ["endpoint-1"])],
+    )
+
+    bound = controller._bind_hypothesis_inventory(plan, plan.phases[1])
+
+    assert bound.phases[1].source_manifest_refs == (reference,)
+    restored = OperationPlan.from_obj(bound.to_dict())
+    assert restored.phases[1].source_manifest_refs == (reference,)
+    assert controller._task_creation_batches(restored, restored.phases[2], "system") == []
+    coverage = next(
+        event for event in controller.runtime.callback_handler.events if event["type"] == "hypothesis_coverage"
+    )
+    assert coverage["missing_groups"] == ["http://target.test/one"]
+
+
+def test_hypothesis_inventory_binding_preserves_separate_manifest_item_ids(monkeypatch):
+    references = ("artifact:artifacts/one.json", "artifact:artifacts/two.json")
+    plan = OperationPlan(
+        objective="assess", current_phase=3, total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Hypotheses", status="done", produces_hypotheses=True),
+            PlanPhase(id=3, title="Test", status="active", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    tasks = [
+        Task(
+            task_uid=f"hypothesis-{index}", title="Hypothesis", objective="Assess route", phase=2,
+            status="done", evidence=[f"artifact:artifacts/hypothesis-{index}.json"],
+            acceptance=AcceptanceContract(
+                mode="coverage",
+                basis=AcceptanceBasis(
+                    kind="snapshot", description="Frozen endpoint", source_refs=[reference],
+                    snapshot_hash=f"hash-{index}", item_ids=[f"endpoint-{index}"],
+                ),
+                criteria=[AcceptanceCriterion(
+                    id="hypothesis", description="Record hypothesis",
+                    evidence_requirements=[EvidenceRequirement(kind="artifact")],
+                )],
+            ),
+        )
+        for index, reference in enumerate(references, start=1)
+    ]
+    state = FakeState(plan, tasks)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda value: value)
+    monkeypatch.setattr(
+        controller, "_load_controller_inventory_manifest",
+        lambda _plan, reference: ({"reference": reference}, f"hash-{references.index(reference) + 1}"),
+    )
+    monkeypatch.setattr(
+        workflow_mod, "_coverage_route_groups",
+        lambda manifest, **_kwargs: [(
+            "target-1", "endpoint", manifest["reference"],
+            [f"endpoint-{references.index(manifest['reference']) + 1}"],
+        )],
+    )
+
+    bound = controller._bind_hypothesis_inventory(plan, plan.phases[1])
+    batches = controller._task_creation_batches(bound, bound.phases[2], "system")
+
+    assert bound.phases[1].source_manifest_refs == references
+    assert len(batches) == 2
+    assert {item_id for batch in batches for item_id in batch.item_ids} == {"endpoint-1", "endpoint-2"}
 
 
 def test_hypothesis_phase_partial_status_without_unfinished_tasks_is_not_reported_as_coverage_gap():
@@ -16827,6 +17017,71 @@ def test_finding_validation_context_documents_secret_exposure_manifest_schema():
     }
     assert "Only this controller-bound finding_uid" in context["binding_rule"]
     assert "version" not in context["confirmation_manifest_rule"]
+
+
+def test_finding_validation_context_backfills_legacy_locator_and_includes_prior_result(tmp_path, monkeypatch):
+    source = tmp_path / "source.js"
+    secret = "named-secret-value-123"
+    source.write_text(f"const label = 'secret';\npassword=\"{secret}\"\n", encoding="utf-8")
+    source_ref = "artifact:artifacts/source.js"
+    fingerprint = hashlib.sha256(source.read_bytes()).hexdigest()
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(source))
+    monkeypatch.setattr(memory_mod, "_artifact_path_from_ref", lambda _reference: str(source))
+    exposure = next(
+        item for item in memory_mod.detect_secret_exposures(source_ref) if item.kind == "named_secret"
+    )
+    task = TaskModel(
+        task_uid="verify-legacy",
+        title="Verify legacy candidate",
+        objective="Verify candidate",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-legacy",
+    )
+    record = {
+        "finding_uid": "finding-legacy",
+        "resolution": "validation_failure",
+        "candidate_data": {
+            "verification_packet": {
+                "target": "http://target.test/",
+                "technique": "secret exposure",
+                "evidence_assertions": [{
+                    "artifact": source_ref,
+                    "type": "secret_exposure",
+                    "kind": exposure.kind,
+                    "digest": exposure.digest,
+                }],
+                "artifacts": [source_ref],
+                "artifact_fingerprints": {source_ref: fingerprint},
+            }
+        },
+        "validation_data": {
+            "outcome": "not_confirmed",
+            "summary": "Prior validation did not reproduce the claim.",
+            "evidence_artifacts": ["artifact:artifacts/prior-response.txt"],
+            "evidence_artifact_fingerprints": {"artifact:artifacts/prior-response.txt": "b" * 64},
+        },
+    }
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task], finding_records=[record]),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    context = json.loads(controller._finding_validation_context(task))
+
+    assert context["evidence_assertions"][0]["source_location"] == {
+        "line_number": exposure.line_number,
+        "column_start": exposure.column_start,
+        "column_end": exposure.column_end,
+    }
+    assert context["prior_resolution"] == "validation_failure"
+    assert context["prior_validation"]["outcome"] == "not_confirmed"
+    assert context["prior_validation"]["historical_only"] is True
+    assert context["prior_validation_rule"].endswith("fresh evidence.")
 
 
 def test_task_prompt_builder_requires_reusable_acceptance_summaries():

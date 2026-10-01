@@ -161,7 +161,9 @@ The task prompt builder uses the frozen task and acceptance contract to describe
 Python appends the full acceptance contract and operation constraints to the approved executor prompt. Authentication
 setup runs between prompt approval and task execution; an assigned unauthenticated baseline remains executor work.
 Cookie and Authorization header restrictions follow their stated operation and target scope. The prompt critic reviews
-the draft against this assembled context and does not require it to repeat controller-owned rules.
+the draft against this assembled context and does not require it to repeat controller-owned rules. The builder and
+critic see the controller-supplied task tools, including authenticated-context refresh when authorized; the critic's
+tool catalog uses the same resolver as execution. Controller-supplied tools are not optional-tool selections.
 Automatic task prompt memories are limited by controller-owned task, target, and frozen inventory-item provenance;
 unscoped observations and findings remain available through explicit retrieval rather than appearing in every task
 prompt. General unscoped knowledge can still guide task planning. Prompt memory catalogs show provenance alongside
@@ -225,9 +227,13 @@ subject; that rejection occurs before ledger persistence. Prompt-memory selector
 are logged and dropped while valid selected context remains available to the executor.
 
 A testing phase that depends on hypotheses creates tasks only for inventory groups with completed hypothesis tasks.
+The hypothesis phase persists its verified source inventory manifest in plan metadata before its execution cap check.
+On older plans, the controller reconstructs that binding from valid task assignments or a completed inventory
+producer. This lets the dependent phase measure missing coverage even when the hypothesis phase has no task records.
 If a hypothesis phase reaches its cap before covering every group, the controller records the uncovered groups,
 continues testing covered groups, and reports the remaining coverage as an incomplete assessment. With no completed
-hypotheses, the dependent phase closes as a partial failure without creating generic testing tasks.
+hypotheses, the dependent phase closes as a partial failure without creating generic testing tasks. If no verified
+source manifest is available, it records a prerequisite gap and also closes as a partial failure.
 
 Web authentication coverage and web-recon access-context fan-out omit static asset routes only after a bounded,
 credential-free same-service GET confirms a 2xx response with a static media type. The controller records excluded
@@ -561,6 +567,7 @@ Authenticated task executors can call `refresh_authenticated_context` with a cre
 task. The controller runs the authentication worker for that credential and returns only `ready` or `unavailable`.
 The executor can retry a failed authenticated request once after `ready`; credential material stays with the worker.
 For example, if a token expires during a long task, the executor requests a refresh before retrying its GET.
+Each refresh outcome is recorded as a secret-safe operation event with the task and opaque credential IDs.
 
 The controller requires at least 10 minutes of known authentication-material lifetime when assigning a context to a
 new task. HTTP validation still probes the protected route when less time remains. An active task may use a context

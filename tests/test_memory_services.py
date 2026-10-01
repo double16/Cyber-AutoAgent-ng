@@ -3612,6 +3612,25 @@ def test_detect_secret_exposures_returns_only_redaction_safe_fingerprints(fake_m
     assert all(len(exposure.digest) == 64 for exposure in exposures)
 
 
+def test_detect_secret_exposures_returns_first_match_location_without_value(fake_memory_client):
+    artifact = Path(mod._operation_output_root()) / "artifacts" / "located-secret.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    secret = "named-secret-value-123"
+    prefix = "password=\""
+    artifact.write_text(f"header\n{prefix}{secret}\npassword=\"{secret}\"\n", encoding="utf-8")
+
+    exposures = mod.detect_secret_exposures("artifact:artifacts/located-secret.txt")
+    named_secret = next(item for item in exposures if item.kind == "named_secret")
+
+    assert (named_secret.line_number, named_secret.column_start, named_secret.column_end) == (
+        2,
+        len(prefix) + 1,
+        len(prefix) + len(secret) + 1,
+    )
+    assert secret not in str(named_secret)
+    assert len([item for item in exposures if item.kind == "named_secret"]) == 1
+
+
 def test_detect_secret_exposures_ignores_redacted_and_short_placeholder_values(fake_memory_client):
     artifact = Path(mod._operation_output_root()) / "artifacts" / "redacted-config.txt"
     artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -3640,6 +3659,77 @@ def test_secret_exposure_assertion_validates_without_persisting_raw_value(fake_m
 
     assert assertions[0]["digest"] == exposure.digest
     assert secret not in str(assertions)
+
+
+def test_secret_exposure_assertion_validates_source_location_but_excludes_it_from_predicate(fake_memory_client):
+    artifacts = Path(mod._operation_output_root()) / "artifacts"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    secret = "AIzaSyD2wIxpYCuNI0Zjt8kChs2hLTS5abVQfRQ"
+    original = artifacts / "original-key.txt"
+    fresh = artifacts / "fresh-key.txt"
+    original.write_text(f"config\napi_key=\"{secret}\"\n", encoding="utf-8")
+    fresh.write_text(f"header\n\napi_key=\"{secret}\"\n", encoding="utf-8")
+    original_ref = "artifact:artifacts/original-key.txt"
+    fresh_ref = "artifact:artifacts/fresh-key.txt"
+    exposure = next(item for item in mod.detect_secret_exposures(original_ref) if item.kind == "named_secret")
+    fresh_exposure = next(item for item in mod.detect_secret_exposures(fresh_ref) if item.kind == "named_secret")
+    assertion = {
+        "artifact": original_ref,
+        "type": "secret_exposure",
+        "kind": exposure.kind,
+        "digest": exposure.digest,
+        "source_location": {
+            "line_number": exposure.line_number,
+            "column_start": exposure.column_start,
+            "column_end": exposure.column_end,
+        },
+    }
+
+    normalized = mod._validated_evidence_assertions([assertion], [original_ref], require_one=True)
+    fresh_assertion = {
+        **assertion,
+        "artifact": fresh_ref,
+        "source_location": {
+            "line_number": fresh_exposure.line_number,
+            "column_start": fresh_exposure.column_start,
+            "column_end": fresh_exposure.column_end,
+        },
+    }
+
+    assert normalized[0]["source_location"] == assertion["source_location"]
+    assert mod._canonical_assertion_predicate(assertion) == mod._canonical_assertion_predicate(fresh_assertion)
+    assert mod._matching_evidence_assertions(
+        normalized,
+        [fresh_assertion],
+        [fresh_ref],
+        mod._artifact_fingerprints([fresh_ref]),
+    )
+
+
+def test_secret_exposure_assertion_rejects_a_stale_source_location(fake_memory_client):
+    artifact = Path(mod._operation_output_root()) / "artifacts" / "stale-location.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    secret = "AIzaSyD2wIxpYCuNI0Zjt8kChs2hLTS5abVQfRQ"
+    artifact.write_text(f"api_key=\"{secret}\"\n", encoding="utf-8")
+    reference = "artifact:artifacts/stale-location.txt"
+    exposure = next(item for item in mod.detect_secret_exposures(reference) if item.kind == "named_secret")
+
+    with pytest.raises(ValueError, match="was not satisfied"):
+        mod._validated_evidence_assertions(
+            [{
+                "artifact": reference,
+                "type": "secret_exposure",
+                "kind": exposure.kind,
+                "digest": exposure.digest,
+                "source_location": {
+                    "line_number": 8,
+                    "column_start": exposure.column_start,
+                    "column_end": exposure.column_end,
+                },
+            }],
+            [reference],
+            require_one=True,
+        )
 
 
 def test_bound_acceptance_tool_normalizes_aliases_before_validation(fake_memory_client):
@@ -5229,6 +5319,11 @@ def test_removed_plan_task_tools_are_not_exported_from_tools_module():
     phase = mod.PlanPhase.from_obj({
         "id": 1, "title": "Recon", "status": "active", "criteria": None, "produces_hypotheses": False
     })
+    with pytest.raises(ValueError, match="source_manifest_refs"):
+        mod.PlanPhase.from_obj({
+            "id": 1, "title": "Recon", "status": "active", "produces_hypotheses": False,
+            "source_manifest_refs": ["target:outside"],
+        })
     plan = mod.OperationPlan.from_obj(
         {
             "objective": "Assess target",

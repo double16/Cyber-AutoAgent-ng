@@ -339,10 +339,17 @@ controller-owned `finding_validation` task. Before the first planned finding-val
 that future phase; during or after a finding-validation phase, it remains in the current phase. The linked task must
 call
 `record_finding_validation`; only an evaluator-approved confirmation is promoted to a verified finding. Failed or
-unfinished validations remain visible in the final report under **Findings Requiring Validation**. Evaluators and
-report agents can inspect operation artifacts with the read-only `read_artifact` and `search_artifact` tools.
+unfinished validations remain visible in the final report under **Findings Requiring Validation**. Explicitly replanned
+finding validations receive prior outcomes and evidence as historical context and still collect fresh evidence.
+Secret-exposure assertions retain a redaction-safe line and column locator tied to the source artifact fingerprint;
+the matched value itself is not copied into workflow metadata. Legacy candidates derive a locator only when the source
+artifact still matches its stored fingerprint. Evaluators and report agents can inspect operation artifacts with the
+read-only `read_artifact` and `search_artifact` tools.
 `search_artifact` scans the full file for literal or regular-expression matches, returns bounded excerpts with line
-and column positions, and uses `next_match_offset` to page through additional matches. Report and other read-only
+and column positions, and uses `next_match_offset` to page through additional matches. Its `context_lines` parameter
+accepts 0 through 10 surrounding lines on each side of a match (default 2); zero returns only the matching line.
+Task-executor tool recovery counts corrected calls by model response, so several calls emitted together consume one
+correction attempt. Report and other read-only
 agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation). A task evaluator may read
 only controller-authorized task evidence and frozen acceptance artifacts. It receives up to
 `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE` pages per artifact (default four), with its total derived from the
@@ -363,11 +370,13 @@ the acceptance summary, controller-observed outcomes, and compact artifacts for 
 When a review agent emits several tool calls in one model response, the controller executes them in order and stops
 the batch after the first failed call. Remaining calls receive a skipped result and do not consume evaluator evidence
 read allowance.
-The general reader accepts one file per call. When it receives an in-scope directory, it returns up to 25 immediate
-file references so the agent can retry with a specific artifact; evaluator readers do not disclose directory listings.
+The general reader and searcher accept one file per call. When either receives an in-scope directory, it returns up to
+25 immediate eligible file references so the agent can retry with a specific artifact; bounded evaluator searchers
+list only files authorized for that evaluator.
 
-Target-owned artifacts are also checked for broad secret-exposure patterns. The detector retains only a secret type
-and SHA-256 fingerprint in workflow state; raw values remain solely in the evidence artifact. A match from a
+Target-owned artifacts are also checked for broad secret-exposure patterns. The detector retains a secret type,
+SHA-256 fingerprint, and source line/column location in workflow state; raw values remain solely in the evidence
+artifact. A match from a
 successful, target-scoped tool outcome creates a validation-required finding candidate. Local context, user input,
 and unproven artifacts do not qualify. Independent validation must re-establish exposure without using the secret to
 access another system.

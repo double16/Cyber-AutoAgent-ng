@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 from strands.hooks.events import AfterToolCallEvent, BeforeToolCallEvent
@@ -41,6 +42,127 @@ def _after(tool_id, name, tool_input, *, status, text):
         invocation_state={},
         result={"status": status, "toolUseId": tool_id, "content": [{"text": text}]},
     )
+
+
+def _model_turn(hook, *tool_ids):
+    hook._after_model(
+        SimpleNamespace(
+            stop_response=SimpleNamespace(
+                message={"content": [{"toolUse": {"toolUseId": tool_id}} for tool_id in tool_ids]}
+            )
+        )
+    )
+
+
+def _finish_turn(hook, invocation_state=None):
+    state = {} if invocation_state is None else invocation_state
+    hook._after_tools(SimpleNamespace(invocation_state=state))
+    return state
+
+
+def test_two_invalid_searches_in_one_model_turn_allow_corrected_next_turn():
+    journal = ToolOutcomeJournal()
+    hook = TaskFailureRecoveryHook(journal)
+    invalid = [
+        ("first", {"path": "artifact:inventory.json", "search_pattern": "endpoint", "context_lines": 20}),
+        ("second", {"path": "artifact:inventory.json", "search_pattern": "parameter", "context_lines": 20}),
+    ]
+    _model_turn(hook, "first", "second")
+    for tool_id, tool_input in invalid:
+        before = _before(tool_id, "search_artifact", tool_input)
+        hook._before_tool(before)
+        assert before.cancel_tool is False
+        hook._after_tool(_after(tool_id, "search_artifact", tool_input, status="error", text="context_lines must be between 0 and 10"))
+    _finish_turn(hook)
+
+    assert hook.failure_category == "invalid_invocation"
+    assert hook._correction_attempts == 0
+    assert "context_lines" in hook.recovery_guidance()
+
+    _model_turn(hook, "corrected-first", "corrected-second")
+    for tool_id, (_, invalid_input) in zip(("corrected-first", "corrected-second"), invalid, strict=True):
+        corrected_input = {**invalid_input, "context_lines": 5}
+        before = _before(tool_id, "search_artifact", corrected_input)
+        hook._before_tool(before)
+        assert before.cancel_tool is False
+        hook._after_tool(_after(tool_id, "search_artifact", corrected_input, status="success", text="match"))
+    _finish_turn(hook)
+
+    assert hook.unresolved is False
+    assert hook._correction_attempts == 1
+    assert [outcome.recovery_role for outcome in journal.entries()] == [
+        "normal", "normal", "correction", "correction"
+    ]
+
+
+def test_failed_corrections_count_model_turns_and_mixed_success_recovers():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_corrections=2)
+    failed_input = {"url": "http://target.test/bad"}
+    _model_turn(hook, "original")
+    hook._before_tool(_before("original", "http_request", failed_input))
+    hook._after_tool(_after("original", "http_request", failed_input, status="error", text="connection refused"))
+    _finish_turn(hook)
+
+    for turn_index in (1, 2):
+        identifiers = (f"retry-{turn_index}-a", f"retry-{turn_index}-b")
+        _model_turn(hook, *identifiers)
+        for tool_id in identifiers:
+            tool_input = {"url": f"http://target.test/{tool_id}"}
+            before = _before(tool_id, "http_request", tool_input)
+            hook._before_tool(before)
+            assert before.cancel_tool is False
+            hook._after_tool(_after(tool_id, "http_request", tool_input, status="error", text="connection refused"))
+        state = _finish_turn(hook)
+        assert hook._correction_attempts == turn_index
+        assert bool(state.get("request_state", {}).get("stop_event_loop")) is (turn_index == 2)
+
+    mixed = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    _model_turn(mixed, "original")
+    mixed._after_tool(_after("original", "http_request", failed_input, status="error", text="connection refused"))
+    _finish_turn(mixed)
+    _model_turn(mixed, "failed", "succeeded")
+    for tool_id, status in (("failed", "error"), ("succeeded", "success")):
+        tool_input = {"url": f"http://target.test/{tool_id}"}
+        before = _before(tool_id, "http_request", tool_input)
+        mixed._before_tool(before)
+        assert before.cancel_tool is False
+        mixed._after_tool(_after(tool_id, "http_request", tool_input, status=status, text=status))
+    assert _finish_turn(mixed).get("request_state", {}) == {}
+    assert mixed.unresolved is False
+
+
+def test_repeated_policy_blocks_in_one_model_turn_count_once():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=2)
+    failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
+    _model_turn(hook, "original")
+    hook._after_tool(_after("original", "shell", failed_input, status="error", text="Could not open /missing.txt"))
+    _finish_turn(hook)
+
+    _model_turn(hook, "blocked-a", "blocked-b")
+    for tool_id in ("blocked-a", "blocked-b"):
+        before = _before(tool_id, "shell", failed_input)
+        hook._before_tool(before)
+        assert before.cancel_tool
+        assert before.invocation_state.get("request_state", {}) == {}
+    assert hook._policy_violations == 1
+
+    _model_turn(hook, "blocked-next-turn")
+    next_turn = _before("blocked-next-turn", "shell", failed_input)
+    hook._before_tool(next_turn)
+    assert next_turn.invocation_state["request_state"][TOOL_RECOVERY_EXHAUSTED_STATE_KEY]["reason"] == (
+        "policy_violation_limit"
+    )
+
+
+def test_same_turn_failed_finding_still_blocks_dependent_acceptance():
+    hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
+    _model_turn(hook, "finding", "acceptance")
+    hook._after_tool(
+        _after("finding", "store_finding", {"claim": "candidate"}, status="error", text="evidence assertion required")
+    )
+    acceptance = _before("acceptance", "record_task_acceptance", {"results": []})
+    hook._before_tool(acceptance)
+    assert "FINDING_REPAIR_REQUIRED" in acceptance.cancel_tool
 
 
 def test_prerequisite_failure_allows_independent_work_until_successful_correction():

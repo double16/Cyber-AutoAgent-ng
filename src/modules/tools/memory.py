@@ -122,6 +122,9 @@ class SecretExposure:
 
     kind: str
     digest: str
+    line_number: int
+    column_start: int
+    column_end: int
 
 
 _SECRET_EXPOSURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -148,15 +151,31 @@ def detect_secret_exposures(artifact_ref: str) -> list[SecretExposure]:
         text = Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    matches: set[tuple[str, str]] = set()
+    matches: dict[tuple[str, str], SecretExposure] = {}
     for kind, pattern in _SECRET_EXPOSURE_PATTERNS:
         for match in pattern.finditer(text):
             value = match.group(1) if kind == "named_secret" and match.lastindex else match.group(0)
             value = value.strip()
             if len(value) < 8 or re.fullmatch(r"(?:redacted|masked|example|changeme|\*+)", value, re.IGNORECASE):
                 continue
-            matches.add((kind, hashlib.sha256(value.encode("utf-8")).hexdigest()))
-    return [SecretExposure(kind=kind, digest=digest) for kind, digest in sorted(matches)]
+            match_start = match.start(1) if kind == "named_secret" and match.lastindex else match.start()
+            match_end = match.end(1) if kind == "named_secret" and match.lastindex else match.end()
+            line_start = text.rfind("\n", 0, match_start) + 1
+            key = (kind, hashlib.sha256(value.encode("utf-8")).hexdigest())
+            exposure = SecretExposure(
+                kind=kind,
+                digest=key[1],
+                line_number=text.count("\n", 0, match_start) + 1,
+                column_start=match_start - line_start + 1,
+                column_end=match_end - line_start + 1,
+            )
+            current = matches.get(key)
+            if current is None or (exposure.line_number, exposure.column_start) < (
+                current.line_number,
+                current.column_start,
+            ):
+                matches[key] = exposure
+    return [matches[key] for key in sorted(matches)]
 
 # Global configuration and client
 _MEMORY_CONFIG: dict[str, str] | None = None
@@ -1137,6 +1156,7 @@ class PlanPhase:
     ] = "standard"
     dynamic_kind: str = ""
     provided_workstreams: tuple[str, ...] = ()
+    source_manifest_refs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, int) or self.id < 0:
@@ -1172,6 +1192,11 @@ class PlanPhase:
             isinstance(workstream, str) and workstream.strip() for workstream in self.provided_workstreams
         ):
             raise ValueError("phase.provided_workstreams must contain non-empty strings")
+        if not isinstance(self.source_manifest_refs, tuple) or not all(
+            isinstance(reference, str) and reference.startswith("artifact:")
+            for reference in self.source_manifest_refs
+        ):
+            raise ValueError("phase.source_manifest_refs must contain artifact references")
 
     @staticmethod
     def from_obj(obj: Any) -> "PlanPhase":
@@ -1184,6 +1209,9 @@ class PlanPhase:
             isinstance(workstream, str) and workstream.strip() for workstream in raw_workstreams
         ):
             raise ValueError("phase.provided_workstreams must be a list of non-empty strings")
+        raw_source_refs = obj.get("source_manifest_refs", [])
+        if not isinstance(raw_source_refs, list):
+            raise ValueError("phase.source_manifest_refs must be a list")
         return PlanPhase(
             id=int(obj.get("id")),
             title=str(obj.get("title", "")),
@@ -1197,6 +1225,7 @@ class PlanPhase:
             ),
             dynamic_kind=str(obj.get("dynamic_kind") or ""),
             provided_workstreams=tuple(workstream.strip() for workstream in raw_workstreams),
+            source_manifest_refs=tuple(raw_source_refs),
         )
 
     @staticmethod
@@ -1233,6 +1262,7 @@ class PlanPhase:
             "task_creation_mode": self.task_creation_mode,
             "dynamic_kind": self.dynamic_kind or None,
             "provided_workstreams": list(self.provided_workstreams),
+            "source_manifest_refs": list(self.source_manifest_refs),
         })
 
 
@@ -4609,10 +4639,22 @@ def _assertion_matches_artifact(assertion: dict[str, Any], reference: str) -> bo
         if assertion_type == "secret_exposure":
             kind = str(assertion.get("kind") or "")
             digest = str(assertion.get("digest") or "")
-            return any(
-                exposure.kind == kind and exposure.digest == digest
-                for exposure in detect_secret_exposures(reference)
-            )
+            source_location = assertion.get("source_location")
+            for exposure in detect_secret_exposures(reference):
+                if exposure.kind != kind or exposure.digest != digest:
+                    continue
+                # A stored location verifies the original evidence locator. It is
+                # not part of the proof predicate for a fresh validation artifact.
+                if source_location and reference == assertion.get("artifact"):
+                    actual_location = {
+                        "line_number": exposure.line_number,
+                        "column_start": exposure.column_start,
+                        "column_end": exposure.column_end,
+                    }
+                    if source_location != actual_location:
+                        continue
+                return True
+            return False
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
         return False
     return False
@@ -4621,7 +4663,10 @@ def _assertion_matches_artifact(assertion: dict[str, Any], reference: str) -> bo
 def _canonical_assertion_predicate(assertion: dict[str, Any]) -> str:
     """Return an artifact-independent identity for a canonical evidence assertion."""
 
-    predicate = {key: value for key, value in assertion.items() if key not in {"artifact", "marker"}}
+    predicate = {
+        key: value for key, value in assertion.items()
+        if key not in {"artifact", "marker", "source_location"}
+    }
     if not predicate.get("type") and assertion.get("marker"):
         predicate = {"type": "literal_text", "value": str(assertion["marker"])}
     return json.dumps(
@@ -4643,7 +4688,7 @@ def _validated_evidence_assertions(
         assertions = []
     if not isinstance(assertions, list):
         raise ValueError("evidence_assertions must be a list")
-    validated: list[dict[str, str]] = []
+    validated: list[dict[str, Any]] = []
     for assertion in assertions:
         if not isinstance(assertion, dict):
             raise ValueError("each evidence assertion must be an object")
@@ -4685,6 +4730,25 @@ def _validated_evidence_assertions(
             if not kind or not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError("secret_exposure evidence assertion requires kind and SHA-256 digest")
             normalized.update({"kind": kind, "digest": digest})
+            source_location = assertion.get("source_location")
+            if source_location is not None:
+                if not isinstance(source_location, dict):
+                    raise ValueError("secret_exposure source_location must be an object")
+                line_number = source_location.get("line_number")
+                column_start = source_location.get("column_start")
+                column_end = source_location.get("column_end")
+                if any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 1
+                    for value in (line_number, column_start, column_end)
+                ) or column_end <= column_start:
+                    raise ValueError(
+                        "secret_exposure source_location requires positive line and columns with end after start"
+                    )
+                normalized["source_location"] = {
+                    "line_number": line_number,
+                    "column_start": column_start,
+                    "column_end": column_end,
+                }
         if not _assertion_matches_artifact(normalized, reference):
             raise ValueError(f"evidence assertion was not satisfied by {reference}")
         if normalized not in validated:
@@ -5144,6 +5208,19 @@ def _record_source_task_finding_receipt(
                             "expected": {},
                             "kind": {"type": "string"},
                             "digest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+                            "source_location": {
+                                "type": "object",
+                                "properties": {
+                                    "line_number": {"type": "integer", "minimum": 1},
+                                    "column_start": {"type": "integer", "minimum": 1},
+                                    "column_end": {"type": "integer", "minimum": 2},
+                                },
+                                "required": ["line_number", "column_start", "column_end"],
+                                "additionalProperties": False,
+                                "description": (
+                                    "Optional 1-based source position for the matched evidence; end column is exclusive."
+                                ),
+                            },
                         },
                         "oneOf": [
                             {"required": ["artifact", "marker"]},

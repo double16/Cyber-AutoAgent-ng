@@ -38,6 +38,24 @@ def test_artifact_read_and_search_tools_have_separate_schemas():
     assert SEARCH_ARTIFACT.tool_name == "search_artifact"
     assert {"search_pattern", "match_offset", "max_matches"} <= search_schema.keys()
     assert "start_line" not in search_schema
+    bounded_schema = create_bounded_artifact_searcher(max_searches=1).tool_spec["inputSchema"]["json"]["properties"]
+    for schema in (search_schema, bounded_schema):
+        assert schema["context_lines"]["minimum"] == 0
+        assert schema["context_lines"]["maximum"] == 10
+        assert schema["context_lines"]["default"] == 2
+
+
+def test_search_artifact_context_range_keeps_zero_and_ten_and_rejects_twenty(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("needle\n", encoding="utf-8")
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        assert "'match_count': 1" in SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=0)
+        assert "'match_count': 1" in SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=10)
+        with pytest.raises(ValueError, match="context_lines must be between 0 and 10"):
+            SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=20)
 
 
 def test_artifact_page_budget_scales_with_context_window_and_clamps():
@@ -499,6 +517,63 @@ def test_read_artifact_lists_immediate_files_when_given_a_directory(tmp_path: Pa
     assert "artifact:artifacts/zeta.txt" in result
     assert result.index("artifact:artifacts/alpha.txt") < result.index("artifact:artifacts/zeta.txt")
     assert "hidden.txt" not in result
+
+
+def test_search_artifact_lists_files_when_given_a_directory(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "evidence.txt").write_text("needle", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        result = ast.literal_eval(SEARCH_ARTIFACT("artifacts", "needle"))
+
+    assert result["status"] == "directory"
+    assert "search_artifact requires one file" in result["message"]
+    assert result["artifact_refs"] == ["artifact:artifacts/evidence.txt"]
+
+
+def test_bounded_search_directory_lists_only_allowed_files_without_spending_search(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    allowed = artifacts / "allowed.txt"
+    denied = artifacts / "denied.txt"
+    allowed.write_text("needle", encoding="utf-8")
+    denied.write_text("needle", encoding="utf-8")
+    allowed_ref = "artifact:artifacts/allowed.txt"
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        searcher = create_bounded_artifact_searcher(max_searches=1, allowed_artifact_refs=[allowed_ref])
+        directory_result = ast.literal_eval(searcher("artifacts", search_pattern="needle"))
+        search_result = ast.literal_eval(searcher(allowed_ref, search_pattern="needle"))
+
+    assert directory_result["status"] == "directory"
+    assert directory_result["artifact_refs"] == [allowed_ref]
+    assert "denied.txt" not in str(directory_result)
+    assert search_result["match_count"] == 1
+
+
+def test_bounded_search_directory_guidance_respects_output_limit(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    evidence = artifacts / "evidence.txt"
+    evidence.write_text("needle", encoding="utf-8")
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        searcher = create_bounded_artifact_searcher(
+            max_searches=1,
+            allowed_artifact_refs=["artifact:artifacts/evidence.txt"],
+            max_output_chars=1,
+        )
+        with pytest.raises(ValueError, match="output limit is too small"):
+            searcher("artifacts", search_pattern="needle")
 
 
 def test_artifact_directory_guidance_rejects_unrepresentable_output(tmp_path: Path):

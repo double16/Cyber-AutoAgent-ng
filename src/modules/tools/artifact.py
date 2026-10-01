@@ -29,6 +29,26 @@ TOOL_RESULT_MAX_CHARS = 30_000
 ARTIFACT_SEARCH_MAX_PATTERN_CHARS = 512
 ARTIFACT_SEARCH_MAX_CONTEXT_LINES = 10
 ARTIFACT_SEARCH_MAX_MATCHES = 50
+_SEARCH_ARTIFACT_INPUT_SCHEMA = {
+    "json": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Current-operation artifact path or reference"},
+            "search_pattern": {"type": "string", "description": "Literal text or regular expression to find"},
+            "search_regex": {"type": "boolean", "default": False},
+            "context_lines": {
+                "type": "integer",
+                "default": 2,
+                "minimum": 0,
+                "maximum": ARTIFACT_SEARCH_MAX_CONTEXT_LINES,
+                "description": "Number of lines before and after each match (0 through 10)",
+            },
+            "max_matches": {"type": "integer", "default": 25},
+            "match_offset": {"type": "integer", "default": 0},
+        },
+        "required": ["path", "search_pattern"],
+    }
+}
 
 
 def artifact_max_bytes_for_context_window(context_window_tokens: int) -> int:
@@ -127,8 +147,15 @@ def _resolve_operation_directory_path(path: str) -> str | None:
     return None
 
 
-def _directory_read_guidance(directory: str, root: str, max_output_chars: int | None = None) -> str:
-    """Return a bounded, non-recursive file listing for a directory read attempt."""
+def _directory_read_guidance(
+    directory: str,
+    root: str,
+    max_output_chars: int | None = None,
+    *,
+    tool_name: str = "read_artifact",
+    allowed_paths: set[str] | None = None,
+) -> str:
+    """Return a bounded, non-recursive listing after an artifact tool receives a directory."""
 
     files = []
     for entry in os.scandir(directory):
@@ -136,7 +163,7 @@ def _directory_read_guidance(directory: str, root: str, max_output_chars: int | 
             resolved = _resolved_operation_path(entry.path, root)
         except ValueError:
             continue
-        if entry.is_file() and os.path.isfile(resolved):
+        if entry.is_file() and os.path.isfile(resolved) and (allowed_paths is None or resolved in allowed_paths):
             files.append(f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}")
     files.sort()
     listed_files = files[:ARTIFACT_DIRECTORY_LISTING_LIMIT]
@@ -144,7 +171,7 @@ def _directory_read_guidance(directory: str, root: str, max_output_chars: int | 
     def payload_for(references: list[str]) -> dict[str, Any]:
         return {
             "status": "directory",
-            "message": "read_artifact requires one file. Retry with one listed artifact_ref.",
+            "message": f"{tool_name} requires one file. Retry with one listed artifact_ref.",
             "directory": f"artifact:{os.path.relpath(directory, root).replace(os.sep, '/')}",
             "artifact_refs": references,
             "omitted_file_count": len(files) - len(references),
@@ -404,8 +431,16 @@ def _search_artifact(
         matcher = re.compile(pattern) if regex else None
     except re.error as error:
         raise ValueError(f"invalid regular expression: {error}") from error
-    resolved = resolve_operation_artifact_path(path)
     root = os.path.realpath(_operation_output_root())
+    directory = _resolve_operation_directory_path(path)
+    if directory is not None:
+        return _directory_read_guidance(
+            directory,
+            root,
+            max_output_chars,
+            tool_name="search_artifact",
+        )
+    resolved = resolve_operation_artifact_path(path)
     matching_lines: list[tuple[int, int, int]] = []
     total_lines = 0
     scanned_bytes = 0
@@ -592,7 +627,7 @@ def create_artifact_searcher(*, max_output_chars: int | None = None) -> Any:
     if max_output_chars is not None and max_output_chars < 1:
         raise ValueError("max_output_chars must be at least 1")
 
-    @tool(name="search_artifact")
+    @tool(name="search_artifact", inputSchema=_SEARCH_ARTIFACT_INPUT_SCHEMA)
     def search_artifact(
         path: str,
         search_pattern: str,
@@ -642,7 +677,7 @@ def create_bounded_artifact_searcher(
     calls = 0
     searches_by_path: dict[str, int] = {}
 
-    @tool(name="search_artifact")
+    @tool(name="search_artifact", inputSchema=_SEARCH_ARTIFACT_INPUT_SCHEMA)
     def search_artifact(
         path: str,
         search_pattern: str,
@@ -654,6 +689,16 @@ def create_bounded_artifact_searcher(
         """Search an entire allowed artifact and return bounded matching context."""
 
         nonlocal calls
+        root = os.path.realpath(_operation_output_root())
+        directory = _resolve_operation_directory_path(path)
+        if directory is not None:
+            return _directory_read_guidance(
+                directory,
+                root,
+                max_output_chars,
+                tool_name="search_artifact",
+                allowed_paths=allowed_paths,
+            )
         try:
             resolved = resolve_operation_artifact_path(path)
         except (OSError, TypeError, ValueError) as error:

@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from strands.hooks import (
+    AfterModelCallEvent,
     AfterToolCallEvent,
+    AfterToolsEvent,
     BeforeToolCallEvent,
     HookProvider,
     HookRegistry,
@@ -676,10 +678,66 @@ class TaskFailureRecoveryHook(HookProvider):
         self.finding_submission_repair_active = False
         self._finding_repair_requires_artifact_read = False
         self._finding_repair_artifact_read_complete = False
+        self._model_turn = 0
+        self._failure_origin_turn = 0
+        self._turn_start_unresolved = False
+        self._turn_correction_keys: set[tuple[str, str] | None] = set()
+        self._turn_tool_ids: set[str] = set()
+        self._turn_completed_tool_ids: set[str] = set()
+        self._turn_correction_results: list[bool] = []
+        self._turn_policy_violation_recorded = False
 
     def register_hooks(self, registry: HookRegistry) -> None:
+        registry.add_callback(AfterModelCallEvent, self._after_model)
         registry.add_callback(BeforeToolCallEvent, self._before_tool)
         registry.add_callback(AfterToolCallEvent, self._after_tool)
+        registry.add_callback(AfterToolsEvent, self._after_tools)
+
+    def _after_model(self, event: AfterModelCallEvent) -> None:
+        """Freeze the recovery state for all calls emitted by one model response."""
+
+        response = event.stop_response
+        if response is None:
+            return
+        self._model_turn += 1
+        self._turn_start_unresolved = self.unresolved
+        self._turn_correction_keys.clear()
+        self._turn_completed_tool_ids.clear()
+        self._turn_correction_results.clear()
+        self._turn_policy_violation_recorded = False
+        self._turn_tool_ids = {
+            str(block["toolUse"].get("toolUseId", ""))
+            for block in response.message.get("content", [])
+            if isinstance(block, dict) and isinstance(block.get("toolUse"), dict)
+        }
+
+    def _after_tools(self, event: AfterToolsEvent) -> None:
+        """Judge a correction after every call from its model response has returned."""
+
+        if not self._turn_tool_ids or not self._turn_tool_ids <= self._turn_completed_tool_ids:
+            return
+        if self._turn_correction_results:
+            if any(self._turn_correction_results):
+                self.unresolved = False
+                self.exhausted = False
+                self._policy_violations = 0
+                self._artifact_retry_used = False
+                if self._active_correction_key is not None:
+                    self._session_correction_attempts.pop(self._active_correction_key, None)
+                self._active_correction_key = None
+                if self.failed_tool_name == "store_finding":
+                    self.finding_submission_repair_active = False
+                    self._finding_repair_requires_artifact_read = False
+                    self._finding_repair_artifact_read_complete = False
+            elif self.failure_category == "artifact_unavailable":
+                self._artifact_retry_used = True
+            elif self._correction_attempts >= (
+                1 if self.failure_category == "task_scope_violation" else self.max_corrections
+            ):
+                self.exhausted = True
+                self._stop_event_loop(event, "correction_failed")
+        self._turn_correction_results.clear()
+        self._turn_tool_ids.clear()
 
     def _before_tool(self, event: BeforeToolCallEvent) -> None:
         tool_use = event.tool_use
@@ -727,6 +785,9 @@ class TaskFailureRecoveryHook(HookProvider):
                     "artifact, then submit one changed store_finding payload using a verbatim positive marker.",
                 )
                 return
+        if self._model_turn and not self._turn_start_unresolved and self._failure_origin_turn == self._model_turn:
+            # Another call from this response cannot have seen the failed call's result.
+            return
         if self.failure_category == "artifact_unavailable" and tool_name in {"read_artifact", "search_artifact"}:
             if self._artifact_retry_used:
                 self._block(
@@ -759,18 +820,22 @@ class TaskFailureRecoveryHook(HookProvider):
                 if correction_key is not None
                 else self._correction_attempts
             )
-            if correction_attempts >= correction_limit:
+            if correction_attempts >= correction_limit and (
+                not self._model_turn or correction_key not in self._turn_correction_keys
+            ):
                 self.exhausted = True
                 self._block(event, tool_id, "The configured correction allowance has been exhausted.")
                 return
-            correction_attempts += 1
-            if correction_key is not None:
-                self._session_correction_attempts[correction_key] = correction_attempts
-            self._correction_attempts = correction_attempts
+            if not self._model_turn or correction_key not in self._turn_correction_keys:
+                correction_attempts += 1
+                if correction_key is not None:
+                    self._session_correction_attempts[correction_key] = correction_attempts
+                self._correction_attempts = correction_attempts
+                self._turn_correction_keys.add(correction_key)
+                if self.efficiency_callback is not None:
+                    self.efficiency_callback("tool_correction")
             self._active_correction_key = correction_key
             self._recovery_roles[tool_id] = "correction"
-            if self.efficiency_callback is not None:
-                self.efficiency_callback("tool_correction")
             return
         if self._is_diagnostic(tool_name, tool_input):
             self._recovery_roles[tool_id] = "diagnostic"
@@ -784,14 +849,16 @@ class TaskFailureRecoveryHook(HookProvider):
     def _block(self, event: BeforeToolCallEvent, tool_id: str, message: str) -> None:
         event.cancel_tool = message
         self._recovery_roles[tool_id] = "blocked"
-        self._policy_violations += 1
+        if not self._model_turn or not self._turn_policy_violation_recorded:
+            self._policy_violations += 1
+            self._turn_policy_violation_recorded = True
         if self.efficiency_callback is not None:
             self.efficiency_callback("tool_policy_recovery")
         if self.exhausted or self._policy_violations >= self.max_policy_violations:
             self.exhausted = True
             self._stop_event_loop(event, "policy_violation_limit")
 
-    def _stop_event_loop(self, event: BeforeToolCallEvent | AfterToolCallEvent, reason: str) -> None:
+    def _stop_event_loop(self, event: BeforeToolCallEvent | AfterToolCallEvent | AfterToolsEvent, reason: str) -> None:
         """Request that Strands stops this invocation after the current tool batch.
 
         ``request_state`` belongs to the active Strands invocation. It must not
@@ -852,6 +919,8 @@ class TaskFailureRecoveryHook(HookProvider):
         tool_use = event.tool_use
         tool_name = str(tool_use.get("name", "unknown"))
         tool_id = str(tool_use.get("toolUseId", tool_use.get("_toolUseId", "")))
+        if self._model_turn:
+            self._turn_completed_tool_ids.add(tool_id)
         tool_input = tool_use.get("input", {})
         raw_output = _result_text(event.result)
         output = raw_output
@@ -902,6 +971,9 @@ class TaskFailureRecoveryHook(HookProvider):
                 self.unresolved = False
             return
         if role == "correction":
+            if self._model_turn and self._turn_tool_ids:
+                self._turn_correction_results.append(success)
+                return
             if success:
                 self.unresolved = False
                 self.exhausted = False
@@ -949,6 +1021,7 @@ class TaskFailureRecoveryHook(HookProvider):
             self._correction_attempts = 0
             self._policy_violations = 0
             self._artifact_retry_used = False
+            self._failure_origin_turn = self._model_turn
             if tool_name == "store_finding":
                 self.finding_submission_repair_active = True
                 self._finding_repair_requires_artifact_read = "marker" in raw_output.lower()
@@ -959,6 +1032,10 @@ class TaskFailureRecoveryHook(HookProvider):
         if tool_name == "shell" and "service target is outside the assigned task boundary" in output.lower():
             return "task_scope_violation"
         if tool_name in {"read_artifact", "search_artifact"}:
+            if tool_name == "search_artifact" and (
+                "context_lines" in output or "validation error" in output.lower()
+            ):
+                return "invalid_invocation"
             return "artifact_unavailable"
         if _REDIRECT_BODY_FAILURE_PATTERN.search(output):
             return "redirect_response_unavailable"

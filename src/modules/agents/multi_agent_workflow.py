@@ -2037,6 +2037,10 @@ class MultiAgentWorkflowController:
                 self._emit_plan_output("updated", conditional_plan, self._plan_signature(plan))
                 continue
 
+            if phase.produces_hypotheses and not phase.source_manifest_refs:
+                plan = self._bind_hypothesis_inventory(plan, phase)
+                phase = next(item for item in plan.phases if item.id == phase.id)
+
             self._claim_finding_validation_tasks(phase)
             self._recover_missing_finding_validation_tasks(phase)
 
@@ -4405,6 +4409,21 @@ class MultiAgentWorkflowController:
     ) -> dict[str, str]:
         """Run the privileged authentication worker for one task-authorized credential."""
 
+        result = self._perform_authenticated_context_refresh(plan, task, credential_id)
+        self._emit_workflow_event({
+            "type": "authentication_context_refresh",
+            "task_uid": task.task_uid,
+            "credential_id": credential_id,
+            "status": result["status"],
+            "reason": result["reason"],
+        })
+        return result
+
+    def _perform_authenticated_context_refresh(
+        self, plan: OperationPlan, task: Task, credential_id: str
+    ) -> dict[str, str]:
+        """Refresh one task-bound credential without returning authentication material."""
+
         bound_ids = task.auth_context.get("credential_ids", ()) if isinstance(task.auth_context, dict) else ()
         try:
             store = _get_database_store()
@@ -4482,6 +4501,38 @@ class MultiAgentWorkflowController:
             return json.dumps(self._refresh_authenticated_context_for_task(plan, task, credential_id))
 
         return refresh_authenticated_context
+
+    def _resolve_task_executor_base_tools(
+        self, plan: OperationPlan, task: Task, prompt_spec: dict[str, Any]
+    ) -> list[Any]:
+        """Resolve the same pre-acceptance tools for prompt review and execution."""
+
+        selected = prompt_spec.get("tools", [])
+        selected = list(selected) if isinstance(selected, list) else []
+        selected = list(dict.fromkeys([*self._required_optional_tool_names(task), *selected]))
+        tools = build_role_tools(
+            self.runtime, selected_optional_tool_names=selected, include_create_tasks=False,
+        )
+        if self._is_credential_provisioning_task(task):
+            tools = [item for item in tools if get_tool_name(item) not in {"memory_retrieve", "memory_list"}]
+            conditional = task.recovery_context.get("conditional_phase", {})
+            registration_flow = conditional.get("registration_flow", {}) if isinstance(conditional, dict) else {}
+            registration_target = str(registration_flow.get("target") or "").rstrip("/")
+            registration_roles = registration_flow.get("roles", [])
+            tools = [item for item in tools if get_tool_name(item) != "record_authentication_flow"]
+            if registration_target:
+                tools.append(build_record_authentication_flow_tool(
+                    target=registration_target,
+                    purpose="registration",
+                    kind="browser_registration",
+                    allowed_origins=(registration_target,),
+                    roles=registration_roles if isinstance(registration_roles, list) else (),
+                ))
+        if self._authentication_agent_tool_names(task):
+            tools = self._executor_tools_without_authentication_material(tools, task)
+            if "authenticated_http_request" in {get_tool_name(item) for item in tools}:
+                tools.append(self._build_refresh_authenticated_context_tool(plan, task))
+        return tools
 
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
         self._emit_task_started(task)
@@ -4584,36 +4635,10 @@ class MultiAgentWorkflowController:
                         outcomes.append(outcome)
             return self._resolve_controller_execution_evidence(plan, current_task, criterion, outcomes)
 
-        selected_tools = prompt_spec.get("tools", [])
-        selected_tools = list(selected_tools) if isinstance(selected_tools, list) else []
-        required_optional_tools = self._required_optional_tool_names(task)
-        selected_tools = list(dict.fromkeys([*required_optional_tools, *selected_tools]))
-        tools = build_role_tools(
-            self.runtime,
-            selected_optional_tool_names=selected_tools,
-            include_create_tasks=False,
-        )
-        if self._is_credential_provisioning_task(task):
-            tools = [
-                tool for tool in tools
-                if get_tool_name(tool) not in {"memory_retrieve", "memory_list"}
-            ]
-            conditional = task.recovery_context.get("conditional_phase", {})
-            registration_flow = conditional.get("registration_flow", {}) if isinstance(conditional, dict) else {}
-            registration_target = str(registration_flow.get("target") or "").rstrip("/")
-            registration_roles = registration_flow.get("roles", [])
-            tools = [tool for tool in tools if get_tool_name(tool) != "record_authentication_flow"]
-            tools.append(build_record_authentication_flow_tool(
-                target=registration_target,
-                purpose="registration",
-                kind="browser_registration",
-                allowed_origins=(registration_target,),
-                roles=registration_roles if isinstance(registration_roles, list) else (),
-            ))
-        if self._authentication_agent_tool_names(task):
-            tools = self._executor_tools_without_authentication_material(tools, task)
-            if "authenticated_http_request" in {get_tool_name(item) for item in tools}:
-                tools.append(self._build_refresh_authenticated_context_tool(plan, task))
+        tools = self._resolve_task_executor_base_tools(plan, task, prompt_spec)
+        reviewed_tools = prompt_spec.get("_reviewed_tool_names")
+        if reviewed_tools is not None and sorted(get_tool_name(item) for item in tools) != reviewed_tools:
+            raise WorkflowInvariantError("Task executor tool list differs from the prompt critic review")
         finding_tool_names = {
             "record_finding_validation",
             "record_objective_validation",
@@ -4726,7 +4751,7 @@ class MultiAgentWorkflowController:
         self._log_workflow(
             "task prompt built task=%s selected_optional_tools=%s actual_tools=%s selected_shell_commands=%s",
             self._task_label(task),
-            ",".join(selected_tools) if isinstance(selected_tools, list) else "",
+            ",".join(prompt_spec.get("tools", [])),
             ",".join(get_tool_name(tool) for tool in tools),
             ",".join(spec["command"] for spec in selected_shell_commands),
         )
@@ -9025,6 +9050,9 @@ Return exactly one decision for each candidate.
                 feedback=error.feedback if isinstance(error, TaskPromptBuildError) else repair_context_feedback,
                 failure_source=active_role,
             ) from error
+        prompt_spec["_reviewed_tool_names"] = sorted(
+            get_tool_name(item) for item in self._resolve_task_executor_base_tools(plan, task, prompt_spec)
+        )
         self._log_workflow(
             "task prompt spec role=task_prompt_builder task=%s keys=%s",
             self._task_label(task),
@@ -11044,6 +11072,49 @@ applicability or a finding, and published proof of concepts must not be executed
         packet = candidate.get("verification_packet")
         if not isinstance(packet, dict):
             packet = candidate
+        evidence_assertions = packet.get("evidence_assertions") or candidate.get("evidence_assertions", [])
+        artifact_fingerprints = packet.get("artifact_fingerprints") or candidate.get("artifact_fingerprints", {})
+        located_assertions = []
+        for assertion in evidence_assertions:
+            if not isinstance(assertion, dict):
+                continue
+            located = dict(assertion)
+            if located.get("type") == "secret_exposure" and not located.get("source_location"):
+                artifact_ref = str(located.get("artifact") or "")
+                expected_fingerprint = artifact_fingerprints.get(artifact_ref)
+                if expected_fingerprint:
+                    try:
+                        artifact_bytes = Path(_artifact_path_from_ref(artifact_ref)).read_bytes()
+                        current_fingerprint = hashlib.sha256(artifact_bytes).hexdigest()
+                    except (OSError, ValueError):
+                        current_fingerprint = ""
+                    if current_fingerprint == expected_fingerprint:
+                        exposure = next(
+                            (
+                                item
+                                for item in detect_secret_exposures(artifact_ref)
+                                if item.kind == located.get("kind") and item.digest == located.get("digest")
+                            ),
+                            None,
+                        )
+                        if exposure is not None:
+                            located["source_location"] = {
+                                "line_number": exposure.line_number,
+                                "column_start": exposure.column_start,
+                                "column_end": exposure.column_end,
+                            }
+            located_assertions.append(located)
+        prior_validation = record.get("validation_data")
+        if isinstance(prior_validation, dict):
+            prior_validation_context = {
+                "outcome": prior_validation.get("outcome"),
+                "summary": prior_validation.get("summary"),
+                "evidence_artifacts": prior_validation.get("evidence_artifacts", []),
+                "evidence_artifact_fingerprints": prior_validation.get("evidence_artifact_fingerprints", {}),
+                "historical_only": True,
+            }
+        else:
+            prior_validation_context = None
         context = {
             "finding_uid": task.reference_id,
             "binding_rule": (
@@ -11055,7 +11126,14 @@ applicability or a finding, and published proof of concepts must not be executed
             "claim": packet.get("claim") or candidate.get("claim"),
             "expected_result": packet.get("expected_result") or candidate.get("expected_result"),
             "observed_result": packet.get("observed_result") or candidate.get("observed_result"),
-            "evidence_assertions": packet.get("evidence_assertions") or candidate.get("evidence_assertions", []),
+            "evidence_assertions": located_assertions,
+            "source_artifact_fingerprints": artifact_fingerprints,
+            "prior_resolution": record.get("resolution"),
+            "prior_validation": prior_validation_context,
+            "prior_validation_rule": (
+                "Prior outcomes and artifacts are historical context. This task must independently validate using "
+                "fresh evidence."
+            ),
             "confirmation_requirement_ids": [
                 str(requirement["id"])
                 for requirement in _frozen_finding_confirmation_requirements(candidate)
@@ -11919,6 +11997,60 @@ Return only the requested JSON decision, with at most three concrete evidence ga
             failed_batch_count=failed_batch_count,
         )
 
+    def _bind_hypothesis_inventory(self, plan: OperationPlan, phase: PlanPhase) -> OperationPlan:
+        """Persist the validated inventory assigned to a hypothesis producer phase."""
+
+        if phase.source_manifest_refs:
+            return plan
+        references: list[str] = []
+        for task in self.state.list_tasks(phase=phase.id):
+            if task.status not in {"active", "pending", "done", "partial_failure", "blocked"}:
+                continue
+            basis = task.acceptance.basis
+            if basis.kind != "snapshot" or not basis.snapshot_hash:
+                continue
+            for candidate in basis.source_refs:
+                try:
+                    reference = canonical_artifact_reference(candidate)
+                    if not reference.startswith("artifact:"):
+                        continue
+                    _manifest, snapshot_hash = self._load_controller_inventory_manifest(plan, reference)
+                except ValueError:
+                    continue
+                if snapshot_hash == basis.snapshot_hash and reference not in references:
+                    references.append(reference)
+        if not references:
+            for source_phase in sorted((item.id for item in plan.phases if item.id < phase.id), reverse=True):
+                for task in self.state.list_tasks(phase=source_phase, status=["done"]):
+                    procedure = task.acceptance.basis.procedure
+                    if procedure is None or procedure.output_kind != "inventory_manifest":
+                        continue
+                    candidates = [*task.evidence]
+                    for result in self.state.list_task_acceptance_results(task.task_uid):
+                        candidates.extend(result.evidence_refs)
+                    for candidate in candidates:
+                        try:
+                            reference = canonical_artifact_reference(candidate)
+                            if not reference.startswith("artifact:"):
+                                continue
+                            self._load_controller_inventory_manifest(plan, reference)
+                        except ValueError:
+                            continue
+                        if reference not in references:
+                            references.append(reference)
+                if references:
+                    break
+        if not references:
+            return plan
+        updated = replace(
+            plan,
+            phases=[
+                replace(item, source_manifest_refs=tuple(references)) if item.id == phase.id else item
+                for item in plan.phases
+            ],
+        )
+        return self.state.store_plan(updated)
+
     def _task_creation_batches(
         self,
         plan: OperationPlan,
@@ -11941,12 +12073,27 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                 raise ValueError("hypothesis-dependent phase has no preceding hypothesis producer phase")
             source_phase = max(item.id for item in hypothesis_phases)
 
+        hypothesis_phase = next((item for item in plan.phases if item.id == source_phase), None)
+        if phase.task_creation_mode == "hypothesis_dependent" and hypothesis_phase is not None:
+            if not hypothesis_phase.source_manifest_refs:
+                plan = self._bind_hypothesis_inventory(plan, hypothesis_phase)
+                hypothesis_phase = next(item for item in plan.phases if item.id == source_phase)
+
         source_phase_ids = [source_phase]
         if phase.task_creation_mode == "snapshot_dependent":
             source_phase_ids = sorted(prior_phase_ids, reverse=True)
         snapshot_refs = []
         for candidate_source_phase in source_phase_ids:
+            pinned_refs = list(hypothesis_phase.source_manifest_refs) if (
+                phase.task_creation_mode == "hypothesis_dependent" and hypothesis_phase is not None
+            ) else []
             candidate_snapshot_refs = []
+            for reference in pinned_refs:
+                try:
+                    self._load_controller_inventory_manifest(plan, reference)
+                except ValueError:
+                    continue
+                candidate_snapshot_refs.append(reference)
             for task in self.state.list_tasks(phase=candidate_source_phase):
                 if phase.task_creation_mode == "hypothesis_dependent":
                     if task.status not in {"active", "pending", "done", "partial_failure", "blocked"}:
@@ -11962,8 +12109,10 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                             continue
                         if snapshot_hash != basis.snapshot_hash:
                             continue
-                        if reference not in candidate_snapshot_refs:
+                        if not pinned_refs and reference not in candidate_snapshot_refs:
                             candidate_snapshot_refs.append(reference)
+                        if pinned_refs and reference not in candidate_snapshot_refs:
+                            continue
                         if task.status != "done":
                             continue
                         for item_id in basis.item_ids:
@@ -12010,10 +12159,16 @@ Return only the requested JSON decision, with at most three concrete evidence ga
             if phase.task_creation_mode == "snapshot_dependent":
                 raise ValueError("snapshot-dependent phase requires a completed prior inventory manifest")
             if phase.task_creation_mode == "hypothesis_dependent":
-                raise ValueError("hypothesis-dependent phase requires an assigned prior inventory manifest")
+                self._emit_workflow_event({
+                    "type": "hypothesis_prerequisite_gap",
+                    "source_phase": source_phase,
+                    "target_phase": phase.id,
+                    "reason": "missing_inventory_manifest",
+                })
+                return []
             return [self._default_task_creation_batch(plan, phase, system_prompt)]
 
-        if len(snapshot_refs) > 1:
+        if len(snapshot_refs) > 1 and phase.task_creation_mode != "hypothesis_dependent":
             snapshot_refs = [self._merge_phase_inventory_manifests(plan, source_phase, snapshot_refs)]
 
         prompt_token_limit = int(getattr(self.runtime, "prompt_token_limit", 48_000) or 48_000)
@@ -14815,6 +14970,9 @@ Shell command selection guidance:
 ## Candidate optional tools
 {self._task_optional_tool_catalog(task)}
 
+## Controller-supplied task tools
+{self._tool_catalog("controller_task_tools", self._resolve_task_executor_base_tools(plan, task, {"tools": []}))}
+
 ## Candidate shell commands
 {self._shell_command_catalog()}
 """
@@ -14922,6 +15080,9 @@ When approved is false, provide concise, actionable feedback for every material 
 
 ## Candidate optional tools
 {self._task_optional_tool_catalog(task)}
+
+## Actual task executor tools for this draft
+{self._tool_catalog("task_executor_tools", self._resolve_task_executor_base_tools(plan, task, prompt_spec))}
 
 ## Candidate shell commands
 {self._shell_command_catalog()}
@@ -15567,7 +15728,7 @@ Do not return `continue` merely because work is incomplete when the task history
 """
 
     def _tool_catalog(self, structure_name: str, tools: list[Any]) -> str:
-        if structure_name not in {"core_tools", "optional_tools"}:
+        if structure_name not in {"core_tools", "optional_tools", "controller_task_tools", "task_executor_tools"}:
             raise ValueError(f"Unsupported tool catalog structure: {structure_name}")
         toon = f"{structure_name}[{len(tools)}]{{name,description}}:\n"
         for tool in tools:
@@ -17337,6 +17498,11 @@ tools and durable evidence before relying on it."""
                                         "type": "secret_exposure",
                                         "kind": exposure.kind,
                                         "digest": exposure.digest,
+                                        "source_location": {
+                                            "line_number": exposure.line_number,
+                                            "column_start": exposure.column_start,
+                                            "column_end": exposure.column_end,
+                                        },
                                     }
                                 ],
                             )
