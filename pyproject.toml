@@ -32,9 +32,9 @@ dependencies = [
     "cryptography~=48.0.1",
     "strands-agents[ollama,otel,litellm]~=1.54.0",
     "strands-agents-tools~=0.8.3",
-    "qdrant-client==1.19.0",
+    "qdrant-client==1.19.1",
     "google-genai~=1.71.0",
-    "litellm>=1.92,<1.98",
+    "litellm>=1.92,<1.104",
     "fastapi>=0.136.3,<0.142.0",
     "azure-identity~=1.25.0",
     "boto3~=1.43.1",
@@ -48,7 +48,7 @@ dependencies = [
     "langfuse~=3.14.4",
     "langchain-aws>=1.6.1,<1.8.0",
     "langchain-ollama~=1.1.0",
-    "langchain-litellm>=0.6.4,<0.8.0",
+    "langchain-litellm>=0.6.4,<0.11.0",
     "langchain-google-genai>=4.2.6,<4.4.0",
     "stagehand~=0.5.7",
     "pymitter~=1.1.3",
@@ -57,7 +57,7 @@ dependencies = [
     "standard-distutils~=3.11.9",
     "guppy3~=3.1.5",
     "validators~=0.35.0",
-    "ddgs>=9.14.1,<9.16.0",
+    "ddgs>=9.14.1,<9.17.0",
     "rapidfuzz~=3.14.3",
     "psutil~=7.2.2",
     "pyyaml~=6.0",
@@ -79,7 +79,7 @@ dev = [
 [tool.uv]
 # Stagehand 0.5.x is retained for its local-browser behavior but caps LiteLLM at 1.80.
 # Override that transitive cap for the explicitly requested LiteLLM 1.92 compatibility assessment.
-override-dependencies = ["litellm>=1.92,<1.98"]
+override-dependencies = ["litellm>=1.92,<1.104"]
 
 [project.urls]
 Homepage = "https://github.com/double16/Cyber-AutoAgent-ng"
@@ -187,10 +187,10 @@ max-attributes = 15
 
 [dependency-groups]
 dev = [
-    "pylint~=4.0.6",
+    "pylint>=4.0.6,<4.2.0",
     "pyright~=1.1.411",
     "pytest~=9.0.2",
-    "pytest-mock~=3.15.1",
+    "pytest-mock>=3.15.1,<3.17.0",
     "ruff>=0.15.20,<0.17.0",
     "pytest-asyncio~=1.4.0",
 ]
