@@ -43,6 +43,10 @@ def test_artifact_read_and_search_tools_have_separate_schemas():
         assert schema["context_lines"]["minimum"] == 0
         assert schema["context_lines"]["maximum"] == 10
         assert schema["context_lines"]["default"] == 2
+        assert schema["max_matches"]["minimum"] == 1
+        assert schema["max_matches"]["maximum"] == 50
+        assert schema["max_matches"]["default"] == 25
+        assert "1 through 50" in schema["max_matches"]["description"]
 
 
 def test_search_artifact_context_range_keeps_zero_and_ten_and_rejects_twenty(tmp_path: Path):
@@ -56,6 +60,28 @@ def test_search_artifact_context_range_keeps_zero_and_ten_and_rejects_twenty(tmp
         assert "'match_count': 1" in SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=10)
         with pytest.raises(ValueError, match="context_lines must be between 0 and 10"):
             SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=20)
+        with pytest.raises(ValueError, match="context_lines must be between 0 and 10"):
+            SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=-1)
+
+
+def test_search_artifact_match_limit_boundaries_and_validation(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("needle\n" * 51, encoding="utf-8")
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        minimum = ast.literal_eval(SEARCH_ARTIFACT("evidence.txt", "needle", max_matches=1))
+        maximum = ast.literal_eval(SEARCH_ARTIFACT("evidence.txt", "needle", max_matches=50))
+
+        assert len(minimum["matches"]) == 1
+        assert minimum["match_limit_reached"] is True
+        assert len(maximum["matches"]) == 50
+        assert maximum["match_limit_reached"] is True
+        with pytest.raises(ValueError, match="max_matches must be between 1 and 50"):
+            SEARCH_ARTIFACT("evidence.txt", "needle", max_matches=0)
+        with pytest.raises(ValueError, match="max_matches must be between 1 and 50"):
+            SEARCH_ARTIFACT("evidence.txt", "needle", max_matches=51)
 
 
 def test_artifact_page_budget_scales_with_context_window_and_clamps():

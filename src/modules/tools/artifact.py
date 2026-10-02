@@ -41,9 +41,18 @@ _SEARCH_ARTIFACT_INPUT_SCHEMA = {
                 "default": 2,
                 "minimum": 0,
                 "maximum": ARTIFACT_SEARCH_MAX_CONTEXT_LINES,
-                "description": "Number of lines before and after each match (0 through 10)",
+                "description": (
+                    "Number of lines before and after each match "
+                    f"(0 through {ARTIFACT_SEARCH_MAX_CONTEXT_LINES}; default 2)"
+                ),
             },
-            "max_matches": {"type": "integer", "default": 25},
+            "max_matches": {
+                "type": "integer",
+                "default": 25,
+                "minimum": 1,
+                "maximum": ARTIFACT_SEARCH_MAX_MATCHES,
+                "description": f"Maximum matches to return (1 through {ARTIFACT_SEARCH_MAX_MATCHES}; default 25)",
+            },
             "match_offset": {"type": "integer", "default": 0},
         },
         "required": ["path", "search_pattern"],

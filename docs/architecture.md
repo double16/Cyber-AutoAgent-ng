@@ -563,11 +563,18 @@ refreshes an opaque context only when needed. The controller then uses each vali
 to request the endpoint without following redirects and stores the response with a specific gap for failed requests.
 Authorization comparisons and interactions without a safe recorded method continue through task executors.
 
-Authenticated task executors can call `refresh_authenticated_context` with a credential ID already bound to their
-task. The controller runs the authentication worker for that credential and returns only `ready` or `unavailable`.
+Authenticated task executors can call `refresh_authenticated_context` for a credential already bound to their task.
+When only one credential is authorized, credential tools take no credential ID; tasks with multiple authorized
+credentials still select an ID. The controller runs the authentication worker for that credential and returns only
+`ready` or `unavailable`.
 The executor can retry a failed authenticated request once after `ready`; credential material stays with the worker.
 For example, if a token expires during a long task, the executor requests a refresh before retrying its GET.
 Each refresh outcome is recorded as a secret-safe operation event with the task and opaque credential IDs.
+
+Each credential worker receives one selected credential and flow. Its checkout and context tools bind those fixed
+identifiers, while browser capture still requires the URL observed in authenticated HAR traffic. The worker prompt
+contains the login route and required header names, without discovery candidates or internal flow metadata. Flow
+discovery runs separately and receives the mapping hints it needs.
 
 The controller requires at least 10 minutes of known authentication-material lifetime when assigning a context to a
 new task. HTTP validation still probes the protected route when less time remains. An active task may use a context

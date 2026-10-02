@@ -204,6 +204,12 @@ Inventory item `kind` is one of `endpoint`, `parameter`, `workflow`, `service`, 
 such as discovered parameters, in `attributes`. The executor receives this exact contract whenever a criterion
 requires `inventory_manifest`; ordinary JSON outputs must use the generic `artifact` evidence kind.
 
+Use `get_inventory_item` to read one manifest item by its exact `item_id`, or to narrow items by exact `kind`,
+`endpoint_id`, `target_id`, or `value`. The tool returns a matching item with its manifest reference and digest, or a
+bounded list of IDs when selectors are ambiguous. It reads only current-operation manifests and does not rewrite them.
+Task evaluators can use it only with their controller-approved snapshot manifest, and the tool rejects a changed frozen
+snapshot.
+
 Web discovery tasks should prefer deterministic manifest production. Pass `--inventory-manifest` (or the additive
 `inventory_manifest` tool argument) to `specialized_recon_orchestrator` or `auth_chain_analyzer` while retaining their
 normal output. The generally available `recon_output_to_inventory_manifest` tool converts katana, feroxbuster, ffuf,

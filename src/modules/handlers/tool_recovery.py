@@ -94,7 +94,7 @@ _STRUCTURED_VALIDATION_PATTERNS = tuple(
         r"\bmust (?:be|contain|describe|include|use)\b",
     )
 )
-_READ_ONLY_TOOLS = {"memory_retrieve", "read_artifact", "search_artifact", "tool_catalog"}
+_READ_ONLY_TOOLS = {"memory_retrieve", "read_artifact", "search_artifact", "get_inventory_item", "tool_catalog"}
 _DIAGNOSTIC_EXECUTABLES = {"command", "find", "ls", "stat", "test", "type", "which"}
 TOOL_RECOVERY_EXHAUSTED_STATE_KEY = "tool_recovery_exhausted"
 STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY = "store_finding_recovery_exhausted"
@@ -228,7 +228,7 @@ def is_correctable_tool_failure(tool_name: str, tool_input: Any, output: str) ->
         return False
     if tool_name == "shell" and "service target is outside the assigned task boundary" in str(output).lower():
         return True
-    if tool_name in {"read_artifact", "search_artifact", "http_request"}:
+    if tool_name in {"read_artifact", "search_artifact", "get_inventory_item", "http_request"}:
         return True
     if _REDIRECT_BODY_FAILURE_PATTERN.search(output):
         return True
@@ -788,7 +788,11 @@ class TaskFailureRecoveryHook(HookProvider):
         if self._model_turn and not self._turn_start_unresolved and self._failure_origin_turn == self._model_turn:
             # Another call from this response cannot have seen the failed call's result.
             return
-        if self.failure_category == "artifact_unavailable" and tool_name in {"read_artifact", "search_artifact"}:
+        if self.failure_category == "artifact_unavailable" and tool_name in {
+            "read_artifact",
+            "search_artifact",
+            "get_inventory_item",
+        }:
             if self._artifact_retry_used:
                 self._block(
                     event,

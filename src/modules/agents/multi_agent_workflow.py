@@ -45,10 +45,11 @@ import uuid
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_type_hints
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -91,6 +92,7 @@ from modules.handlers.tool_recovery import (
 from modules.handlers.utils import (
     get_tool_description,
     get_tool_name,
+    get_tool_spec,
     sanitize_toon_value,
 )
 from modules.prompts import get_module_loader
@@ -118,6 +120,7 @@ from modules.tools.authentication import (
 )
 from modules.tools.browser import reset_authentication_browser_session
 from modules.tools.credentials import canonicalize_credential_target
+from modules.tools.inventory_item import create_inventory_item_reader
 from modules.tools.memory import (
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
@@ -422,7 +425,15 @@ _CANONICAL_ARTIFACT_REFERENCE_PATTERN = re.compile(
 _UNSAFE_INVENTORY_URL_SYNTAX = re.compile(r"[\x00-\x20\"'\\`{}]")
 _INVALID_INVENTORY_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _NON_EVIDENCE_RECOVERY_TOOLS = frozenset(
-    {"read_artifact", "search_artifact", "memory_retrieve", "record_task_acceptance", "tool_catalog", "get_tool_help"}
+    {
+        "read_artifact",
+        "search_artifact",
+        "get_inventory_item",
+        "memory_retrieve",
+        "record_task_acceptance",
+        "tool_catalog",
+        "get_tool_help",
+    }
 )
 _SHELL_URL_LITERAL_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>`]+")
 _ABSOLUTE_ARTIFACT_PATH_PATTERN = re.compile(r"(?<![A-Za-z0-9_.\-/])(/[^\s'\"`<>()\[\]{}\\]+)")
@@ -472,6 +483,7 @@ _NON_EXECUTION_RECEIPT_TOOLS = frozenset(
         "create_tasks",
         "editor",
         "get_tool_help",
+        "get_inventory_item",
         "memory_list",
         "memory_retrieve",
         "read_artifact",
@@ -1197,35 +1209,11 @@ class AuthenticationSetupRequest:
     client_storage_header_bindings: tuple[dict[str, str], ...] = ()
 
     def to_toon(self) -> str:
-        rows = "\n".join(
-            "  "
-            + ",".join(
-                sanitize_toon_value(credential.get(key, ""))
-                for key in ("credential_id", "credential_type", "role", "target")
-            )
-            for credential in self.credentials
-        ) or "  <none>"
-        flow_rows = "\n".join(
-            "  "
-            + ",".join(
-                sanitize_toon_value(str(flow.get(field) or ""))
-                for field in (
-                    "flow_id", "kind", "flow_version", "login_url", "validation_url", "authorization_storage_key"
-                )
-            )
-            + ","
-            + sanitize_toon_value(json.dumps(flow.get("storage_header_bindings") or [], sort_keys=True))
-            + ","
-            + sanitize_toon_value("|".join(flow.get("allowed_origins") or []))
-            for flow in self.authentication_flows
-        ) or "  <none>"
         hint_rows = "\n".join(
             "  " + ",".join(
                 sanitize_toon_value(str(hint.get(field) or ""))
-                for field in ("kind", "flow_version", "login_url", "validation_url", "authorization_storage_key")
+                for field in ("kind", "login_url")
             )
-            + ","
-            + sanitize_toon_value(json.dumps(hint.get("storage_header_bindings") or [], sort_keys=True))
             for hint in self.authentication_flow_hints
         ) or "  <none>"
         endpoint_rows = "\n".join(
@@ -1248,18 +1236,36 @@ class AuthenticationSetupRequest:
             f"{sanitize_toon_value(self.workstream)},"
             f"{sanitize_toon_value('|'.join(self.targets))},"
             f"{sanitize_toon_value('|'.join(self.allowed_origins))}\n"
-            f"eligible_credentials[{len(self.credentials)}]{{credential_id,credential_type,role,target}}:\n{rows}\n"
-            f"authentication_flows[{len(self.authentication_flows)}]"
-            "{flow_id,kind,flow_version,login_url,validation_url,authorization_storage_key,storage_header_bindings,allowed_origins}:\n"
-            f"{flow_rows}"
-            f"\nauthentication_flow_hints[{len(self.authentication_flow_hints)}]"
-            "{kind,flow_version,login_url,validation_url,authorization_storage_key,storage_header_bindings}:\n"
+            f"authentication_flow_hints[{len(self.authentication_flow_hints)}]"
+            "{kind,login_url}:\n"
             f"{hint_rows}"
             f"\nauthentication_discovery_endpoints[{len(self.discovery_endpoints)}]{{role,url,method,status}}:\n"
             f"{endpoint_rows}"
             f"\nclient_storage_header_bindings[{len(self.client_storage_header_bindings)}]"
             "{header_name,storage_key,value_template}:\n"
             f"{binding_rows}"
+        )
+
+    def credential_worker_toon(self) -> str:
+        """Render only actionable, secret-free details for a single credential worker."""
+
+        credential = self.credentials[0]
+        flow = self.authentication_flows[0]
+        header_names = [
+            str(binding.get("header_name") or "")
+            for binding in flow.get("storage_header_bindings") or []
+            if isinstance(binding, dict) and binding.get("header_name")
+        ]
+        return (
+            "authentication_setup{credential_type,role,target,flow_kind,login_url,required_header_names}:\n"
+            "  " + ",".join(sanitize_toon_value(value) for value in (
+                str(credential.get("credential_type") or ""),
+                str(credential.get("role") or ""),
+                str(credential.get("target") or ""),
+                str(flow.get("kind") or ""),
+                str(flow.get("login_url") or ""),
+                "|".join(header_names),
+            ))
         )
 
 
@@ -1299,6 +1305,62 @@ class AuthenticationWorkerResult:
             and self.tool_names <= preparatory_tools
         )
 
+
+def _bind_single_choice_tool(original: Any, fixed_arguments: dict[str, Any]) -> Any:
+    """Remove controller-selected arguments from an agent-facing tool schema."""
+
+    specification = get_tool_spec(original)
+    if not specification or not isinstance(specification.get("inputSchema"), dict):
+        return original
+    schema = deepcopy(specification["inputSchema"].get("json") or {})
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not all(name in properties for name in fixed_arguments):
+        return original
+    for name in fixed_arguments:
+        properties.pop(name)
+    schema["required"] = [name for name in schema.get("required", []) if name not in fixed_arguments]
+    schema["additionalProperties"] = False
+    name = get_tool_name(original)
+    original_parameters = inspect.signature(original).parameters
+    annotations = get_type_hints(original, include_extras=True)
+    remaining_parameters = []
+    for argument_name in properties:
+        if argument_name not in original_parameters:
+            raise ValueError(f"cannot bind {name}: tool schema parameter {argument_name} has no callable parameter")
+        parameter = original_parameters[argument_name]
+        remaining_parameters.append(parameter.replace(
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            annotation=annotations.get(argument_name, Any),
+        ))
+
+    if inspect.iscoroutinefunction(inspect.unwrap(original)):
+        async def bound_tool(**arguments: Any) -> Any:
+            """Call the underlying tool with controller-selected arguments."""
+
+            if fixed_arguments.keys() & arguments.keys():
+                raise ValueError("controller-bound tool arguments cannot be overridden")
+            return await original(**arguments, **fixed_arguments)
+    else:
+        def bound_tool(**arguments: Any) -> Any:
+            """Call the underlying tool with controller-selected arguments."""
+
+            if fixed_arguments.keys() & arguments.keys():
+                raise ValueError("controller-bound tool arguments cannot be overridden")
+            return original(**arguments, **fixed_arguments)
+
+    bound_tool.__name__ = name
+    bound_tool.__doc__ = (
+        f"{get_tool_description(original)} The controller supplies fixed task arguments."
+    )
+    bound_tool.__signature__ = inspect.Signature(parameters=remaining_parameters)
+    bound_tool.__annotations__ = {
+        parameter.name: parameter.annotation for parameter in remaining_parameters
+    }
+    return strands_tool(
+        bound_tool,
+        name=name,
+        inputSchema={"json": schema},
+    )
 
 class MultiAgentWorkflowController:
     """Run the assessment as many short-lived role agents coordinated by Python."""
@@ -4532,6 +4594,21 @@ class MultiAgentWorkflowController:
             tools = self._executor_tools_without_authentication_material(tools, task)
             if "authenticated_http_request" in {get_tool_name(item) for item in tools}:
                 tools.append(self._build_refresh_authenticated_context_tool(plan, task))
+        bound_ids = task.auth_context.get("credential_ids", ()) if isinstance(task.auth_context, dict) else ()
+        if len(bound_ids) == 1:
+            bound_tools = []
+            for item in tools:
+                name = get_tool_name(item)
+                schema = ((get_tool_spec(item) or {}).get("inputSchema") or {}).get("json") or {}
+                properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+                fixed = {}
+                if name in credential_tool_names() | {"refresh_authenticated_context"}:
+                    if "credential_id" in properties:
+                        fixed["credential_id"] = str(bound_ids[0])
+                    if name == "set_task_auth_context" and "credential_ids" in properties:
+                        fixed["credential_ids"] = [str(bound_ids[0])]
+                bound_tools.append(_bind_single_choice_tool(item, fixed) if fixed else item)
+            tools = bound_tools
         return tools
 
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
@@ -9854,6 +9931,70 @@ Return JSON exactly: {response_schema}.
             for item in tools if get_tool_name(item) in allowed_tool_names
         ]
 
+    @staticmethod
+    def _authentication_credential_worker_tools(
+        tools: list[Any], credential: dict[str, str], flow: dict[str, Any]
+    ) -> list[Any]:
+        """Expose only relevant tools and bind this worker's credential and flow."""
+
+        credential_type = str(credential.get("credential_type") or "")
+        flow_kind = str(flow.get("kind") or "")
+        credential_id = str(credential["credential_id"])
+        flow_id = str(flow["flow_id"])
+        browser_flow = flow_kind in {"browser_form", "browser_redirect", "browser_mfa"}
+        mailbox_id = ""
+        allowed = {"checkout_credential", "shell"}
+        if credential_type == "username_password" and browser_flow:
+            allowed.update({
+                "browser_goto_url", "browser_observe_page", "browser_get_page_html",
+                "browser_take_screenshot", "browser_perform_action", "capture_browser_authenticated_context",
+            })
+            try:
+                record = _get_database_store().get_credential(credential_id, include_payload=True)
+            except (AttributeError, KeyError, OSError, ValueError):
+                record = None
+            payload = record.get("payload") if isinstance(record, dict) else None
+            mfa = payload.get("mfa") if isinstance(payload, dict) else None
+            mfa_type = str(mfa.get("type") or "").lower() if isinstance(mfa, dict) else ""
+            mailbox_id = str(mfa.get("mailbox_credential_id") or "") if isinstance(mfa, dict) else ""
+            if mfa_type == "totp":
+                allowed.add("generate_mfa_code")
+            elif mfa_type == "email":
+                allowed.update({"begin_email_mfa_retrieval", "request_mfa_code", "retrieve_email_mfa_code"})
+        elif credential_type == "username_password" and flow_kind == "api_form":
+            allowed.add("ensure_authenticated_context")
+        elif credential_type in {"api_key", "oauth2_client"}:
+            allowed.add("establish_credential_authenticated_context")
+        bound = []
+        for item in tools:
+            name = get_tool_name(item)
+            if name not in allowed:
+                continue
+            fixed = {}
+            if name == "checkout_credential":
+                fixed = {"credential_id": credential_id, "purpose": "authentication setup"}
+            elif name in {
+                "ensure_authenticated_context", "capture_browser_authenticated_context",
+                "establish_credential_authenticated_context", "generate_mfa_code", "request_mfa_code",
+            }:
+                fixed = {"credential_id": credential_id}
+            if name == "generate_mfa_code":
+                fixed.update({
+                    "provisioning_secret": None, "digits": 6, "period": 30, "algorithm": "SHA1",
+                })
+            if name == "begin_email_mfa_retrieval" and mailbox_id:
+                fixed = {"mailbox_credential_id": mailbox_id}
+            if name in {"ensure_authenticated_context", "capture_browser_authenticated_context"}:
+                fixed["flow_id"] = flow_id
+            if name == "ensure_authenticated_context":
+                fixed.update({
+                    "login_url": "", "validation_url": "", "request_format": "", "additional_fields": None,
+                })
+            if name == "establish_credential_authenticated_context" and flow.get("validation_url"):
+                fixed["validation_url"] = str(flow["validation_url"])
+            bound.append(_bind_single_choice_tool(item, fixed) if fixed else item)
+        return bound
+
     def _validate_authentication_shell_commands(
         self,
         plan: OperationPlan,
@@ -9891,6 +10032,12 @@ Return JSON exactly: {response_schema}.
             setup,
             targets=(target,),
             credentials=(),
+            authentication_flows=(),
+            authentication_flow_hints=tuple(
+                hint for hint in setup.authentication_flow_hints
+                if not hint.get("login_url")
+                or self._authentication_origin(str(hint["login_url"])) == target_origin
+            ),
             discovery_endpoints=tuple(
                 endpoint
                 for endpoint in setup.discovery_endpoints
@@ -10051,12 +10198,15 @@ credentials or inventing URLs.
             authentication_flows=flows,
         )
         worker_tools = self._authentication_agent_tools(tools, credential_setup.allowed_origins, flows)
+        worker_tools = self._authentication_credential_worker_tools(worker_tools, credential, flows[0])
         flow_kinds = {str(flow.get("kind") or "") for flow in flows}
         browser_flow_kinds = {"browser_form", "browser_mfa", "browser_redirect"}
-        browser_flow = bool(flow_kinds & browser_flow_kinds)
+        credential_type = str(credential.get("credential_type") or "")
+        browser_flow = credential_type == "username_password" and bool(flow_kinds & browser_flow_kinds)
         terminal_tool_name = (
-            "ensure_authenticated_context" if flow_kinds == {"api_form"}
-            else "capture_browser_authenticated_context" if flow_kinds and flow_kinds <= browser_flow_kinds
+            "establish_credential_authenticated_context" if credential_type in {"api_key", "oauth2_client"}
+            else "ensure_authenticated_context" if flow_kinds == {"api_form"}
+            else "capture_browser_authenticated_context" if browser_flow
             else ""
         )
         if browser_flow:
@@ -10070,23 +10220,26 @@ credentials or inventing URLs.
                     self._short(error),
                 )
                 return AuthenticationWorkerResult(False)
-        prompt = f"""You are the controller-owned authentication worker. This is bounded setup work, not assessment.
+        if browser_flow:
+            flow_instructions = """Complete the supplied login flow. After authentication, inspect same-origin HAR
+requests from a bounded number of normal browser actions. Select a request with a 2xx response and every declared
+required header; use its exact URL as the validation_url for `capture_browser_authenticated_context`. Cookies alone do
+not satisfy a required header. Reject a 401/403 response, inventory candidate, or navigation success flag as proof.
+"""
+        elif credential_type == "username_password" and flow_kinds == {"api_form"}:
+            flow_instructions = "Call `ensure_authenticated_context` with no arguments; it resolves the selected flow."
+        else:
+            flow_instructions = (
+                "Call `establish_credential_authenticated_context` with no arguments; the controller supplies "
+                "the selected validation URL."
+            )
+        prompt = f"""You are the controller-owned authentication worker. Establish an opaque context for this one
+credential and target. Check out the controller-selected credential using `checkout_credential` with no arguments.
 
-{credential_setup.to_toon()}
+{credential_setup.credential_worker_toon()}
 
-Establish an opaque authenticated context for this one credential and target only. Check out only the supplied
-credential ID. Use the supplied persisted flow descriptor; do not discover, query for, or switch to another credential.
-For `api_form`, call `ensure_authenticated_context` with the credential ID and supplied flow ID only. It resolves that
-exact controller-selected flow internally.
-For browser, redirect, or MFA flows, complete only the supplied login flow first. After authentication, traverse a
-bounded number of same-origin pages or normal browser actions and inspect each resulting HAR. Find a request whose URL
-is same-origin, whose response status is 2xx, and whose request headers contain every declared
-`storage_header_bindings` header. The exact request URL from that HAR is the only valid validation URL; cookies alone
-do not satisfy a declared header binding. Do not use an inventory hint, a 401/403 candidate, or a top-level navigation
-success flag as validation. Then call `capture_browser_authenticated_context` with the supplied flow ID and that exact
-URL. Do not supply `authorization_storage_key` or `storage_header_bindings`: the tool resolves the canonical,
-controller-selected bindings from the flow and never infers a template from a token or live header. A credential
-rejection, missing-header route, or validation failure ends this worker; do not retry with another credential. Never
+{flow_instructions}
+Do not discover or switch credentials or flows. A credential rejection or validation failure ends this worker. Never
 expose session material or secret values in text, artifacts, observations, or task acceptance.
 """
         policy = AgentRunPolicy(
@@ -11684,32 +11837,48 @@ applicability or a finding, and published proof of concepts must not be executed
         """Return a task-local artifact reader with bounded per-artifact pagination."""
 
         reviewable, omitted_large = self._task_evaluator_artifact_review(task, acceptance_results)
-        if not reviewable and not omitted_large:
+        basis = task.acceptance.basis
+        inventory_refs = []
+        if basis.kind == "snapshot":
+            for reference in basis.source_refs:
+                if not reference.startswith(("artifact:", "artifact_id:")):
+                    continue
+                try:
+                    inventory_refs.append(canonical_artifact_reference(reference))
+                except (OSError, TypeError, ValueError):
+                    continue
+        if not reviewable and not omitted_large and not inventory_refs:
             return []
-        max_reads_per_artifact = max(
-            1,
-            self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4),
-        )
-        return [create_bounded_artifact_reader(
-            max_reads=max(1, (len(reviewable) + len(omitted_large)) * max_reads_per_artifact),
-            context_window_tokens=self._artifact_context_window_tokens(),
-            allowed_artifact_refs=[
-                item["artifact_ref"]
-                for item in [*reviewable, *omitted_large]
-            ],
-            omitted_large_artifact_sizes={
-                item["artifact_ref"]: item["byte_size"]
-                for item in omitted_large
-            },
-            max_reads_per_artifact=max_reads_per_artifact,
-            max_lines_per_read=200,
-            max_output_chars=self._artifact_router_max_chars(),
-        ), create_bounded_artifact_searcher(
-            max_searches=max(1, (len(reviewable) + len(omitted_large)) * max_reads_per_artifact),
-            allowed_artifact_refs=[item["artifact_ref"] for item in [*reviewable, *omitted_large]],
-            max_searches_per_artifact=max_reads_per_artifact,
-            max_output_chars=self._artifact_router_max_chars(),
-        )]
+
+        tools = []
+        if reviewable or omitted_large:
+            max_reads_per_artifact = max(
+                1,
+                self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4),
+            )
+            allowed_refs = [item["artifact_ref"] for item in [*reviewable, *omitted_large]]
+            tools.extend((create_bounded_artifact_reader(
+                max_reads=max(1, len(allowed_refs) * max_reads_per_artifact),
+                context_window_tokens=self._artifact_context_window_tokens(),
+                allowed_artifact_refs=allowed_refs,
+                omitted_large_artifact_sizes={item["artifact_ref"]: item["byte_size"] for item in omitted_large},
+                max_reads_per_artifact=max_reads_per_artifact,
+                max_lines_per_read=200,
+                max_output_chars=self._artifact_router_max_chars(),
+            ), create_bounded_artifact_searcher(
+                max_searches=max(1, len(allowed_refs) * max_reads_per_artifact),
+                allowed_artifact_refs=allowed_refs,
+                max_searches_per_artifact=max_reads_per_artifact,
+                max_output_chars=self._artifact_router_max_chars(),
+            )))
+        if inventory_refs:
+            expected_digests = {reference: basis.snapshot_hash} if basis.snapshot_hash else {}
+            tools.append(create_inventory_item_reader(
+                allowed_manifest_refs=inventory_refs,
+                expected_manifest_digests=expected_digests,
+                max_output_chars=self._artifact_router_max_chars(),
+            ))
+        return tools
 
     def _task_evaluator_artifact_limit_section(
         self,
@@ -11750,6 +11919,8 @@ applicability or a finding, and published proof of concepts must not be executed
             ("- Use search_artifact to find literal or regular-expression matches across a listed artifact, including "
             "larger artifacts. Continue additional matches with next_match_offset as match_offset. Use read_artifact "
             "with explicit byte pages when surrounding content is needed."),
+            ("- For this frozen inventory snapshot, use get_inventory_item with an exact item_id or exact selectors "
+            "to inspect manifest records. This lookup is limited to the task snapshot and rejects a changed digest."),
             "- Return the required JSON decision once you have the needed evidence.",
             "",
             "Smaller artifact references:",
@@ -11761,6 +11932,15 @@ applicability or a finding, and published proof of concepts must not be executed
                 f"- {item['artifact_ref']} ({item['byte_size']} bytes; exceeds one page)"
                 for item in omitted_large
             )
+        basis = task.acceptance.basis
+        if basis.kind == "snapshot":
+            refs = [
+                reference for reference in basis.source_refs
+                if reference.startswith(("artifact:", "artifact_id:"))
+            ]
+            if refs:
+                lines.extend(["", "Frozen inventory snapshot references:"])
+                lines.extend(f"- {reference}" for reference in refs)
         return "\n".join(lines)
 
     @staticmethod
@@ -11771,8 +11951,9 @@ applicability or a finding, and published proof of concepts must not be executed
 
     def _evaluator_system_prompt(self) -> str:
         return """## Evaluator Role Boundary
-Classify existing work only; Python owns execution and workflow transitions. Task evaluators may use read_artifact or
-search_artifact only for supplied task-local references within the controller limits. Phase evaluators have no tools.
+Classify existing work only; Python owns execution and workflow transitions. Task evaluators may use read_artifact,
+search_artifact, or get_inventory_item only for supplied task-local references within controller limits. Phase evaluators
+have no tools.
 Return only the requested JSON decision, with at most three concrete evidence gaps and no analysis or Markdown."""
 
     def _task_evaluator_system_prompt(self) -> str:
@@ -16599,7 +16780,8 @@ tools and durable evidence before relying on it."""
 
         references = set()
         consumer_tools = {
-            "memory_list", "memory_retrieve", "read_artifact", "search_artifact", "retrieve_offloaded_content"
+            "memory_list", "memory_retrieve", "read_artifact", "search_artifact", "get_inventory_item",
+            "retrieve_offloaded_content"
         }
         for outcome in tool_outcomes:
             if not outcome.success or outcome.tool_name in consumer_tools:
@@ -17437,7 +17619,7 @@ tools and durable evidence before relying on it."""
         fallback_target = selected_targets[0].value
         for outcome in outcomes:
             if not outcome.success or outcome.tool_name in {
-                "read_artifact", "search_artifact", "retrieve_offloaded_content"
+                "read_artifact", "search_artifact", "get_inventory_item", "retrieve_offloaded_content"
             }:
                 continue
             submitted = outcome.structured_input or {}

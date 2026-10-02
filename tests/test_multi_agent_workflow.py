@@ -372,6 +372,180 @@ def _tool(name):
     return tool_func
 
 
+@pytest.mark.asyncio
+async def test_bound_credential_tool_schema_and_dispatch_rejects_override():
+    calls = []
+
+    @workflow_mod.strands_tool(name="checkout_credential")
+    def checkout_credential(credential_id: str, purpose: str) -> str:
+        calls.append((credential_id, purpose))
+        return "selected"
+
+    bound = workflow_mod._bind_single_choice_tool(
+        checkout_credential, {"credential_id": "selected-id", "purpose": "authentication setup"}
+    )
+
+    assert bound.tool_spec["inputSchema"]["json"] == {
+        "properties": {}, "required": [], "type": "object", "additionalProperties": False,
+    }
+    assert bound._metadata.input_model.model_fields == {}
+    events = [event async for event in bound.stream({
+        "toolUseId": "checkout-test", "name": "checkout_credential", "input": {},
+    }, {})]
+    assert events[-1]["tool_result"]["status"] == "success"
+    assert events[-1]["tool_result"]["content"] == [{"text": "selected"}]
+    assert calls == [("selected-id", "authentication setup")]
+    override_events = [event async for event in bound.stream({
+        "toolUseId": "checkout-override", "name": "checkout_credential",
+        "input": {"credential_id": "other-id"},
+    }, {})]
+    assert override_events[-1]["tool_result"]["status"] == "success"
+    assert calls[-1] == ("selected-id", "authentication setup")
+    assert bound() == "selected"
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        bound(credential_id="other-id")
+    assert calls == [("selected-id", "authentication setup")] * 3
+
+
+@pytest.mark.asyncio
+async def test_bound_browser_capture_retains_observed_url_and_selected_ids():
+    calls = []
+
+    @workflow_mod.strands_tool(name="capture_browser_authenticated_context")
+    async def capture_browser_authenticated_context(
+        credential_id: str, flow_id: str, validation_url: str
+    ) -> str:
+        calls.append((credential_id, flow_id, validation_url))
+        return "captured"
+
+    bound = workflow_mod._bind_single_choice_tool(
+        capture_browser_authenticated_context, {"credential_id": "selected-id", "flow_id": "selected-flow"}
+    )
+
+    schema = bound.tool_spec["inputSchema"]["json"]
+    assert set(schema["properties"]) == {"validation_url"}
+    assert schema["required"] == ["validation_url"]
+    assert set(bound._metadata.input_model.model_fields) == {"validation_url"}
+    missing_url_events = [event async for event in bound.stream({
+        "toolUseId": "capture-missing", "name": "capture_browser_authenticated_context", "input": {},
+    }, {})]
+    assert missing_url_events[-1]["tool_result"]["status"] == "error"
+    assert calls == []
+    captured_events = [event async for event in bound.stream({
+        "toolUseId": "capture-test", "name": "capture_browser_authenticated_context",
+        "input": {"validation_url": "https://target.test/verified"},
+    }, {})]
+    assert captured_events[-1]["tool_result"]["status"] == "success"
+    assert calls == [("selected-id", "selected-flow", "https://target.test/verified")]
+    assert await bound(validation_url="https://target.test/verified") == "captured"
+    assert calls == [("selected-id", "selected-flow", "https://target.test/verified")] * 2
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        await bound(flow_id="other-flow", validation_url="https://target.test/verified")
+
+
+@pytest.mark.asyncio
+async def test_authentication_credential_worker_tools_filter_and_bind_selected_flow():
+    @workflow_mod.strands_tool(name="ensure_authenticated_context")
+    def ensure_authenticated_context(
+        credential_id: str, flow_id: str, login_url: str = "", validation_url: str = "",
+        request_format: str = "", additional_fields: dict[str, str] | None = None,
+    ) -> str:
+        assert not any((login_url, validation_url, request_format, additional_fields))
+        return f"{credential_id}:{flow_id}"
+
+    @workflow_mod.strands_tool(name="checkout_credential")
+    def checkout_credential(credential_id: str, purpose: str) -> str:
+        return credential_id
+
+    tools = MultiAgentWorkflowController._authentication_credential_worker_tools(
+        [ensure_authenticated_context, checkout_credential, _tool("record_authentication_flow")],
+        {"credential_id": "credential-1", "credential_type": "username_password"},
+        {"flow_id": "flow-1", "kind": "api_form"},
+    )
+
+    by_name = {workflow_mod.get_tool_name(item): item for item in tools}
+    assert set(by_name) == {"ensure_authenticated_context", "checkout_credential"}
+    assert by_name["ensure_authenticated_context"].tool_spec["inputSchema"]["json"]["properties"] == {}
+    assert by_name["ensure_authenticated_context"]._metadata.input_model.model_fields == {}
+    events = [event async for event in by_name["ensure_authenticated_context"].stream({
+        "toolUseId": "api-context", "name": "ensure_authenticated_context", "input": {},
+    }, {})]
+    assert events[-1]["tool_result"]["status"] == "success"
+    assert events[-1]["tool_result"]["content"] == [{"text": "credential-1:flow-1"}]
+
+
+def test_authentication_worker_hides_standalone_totp_arguments(monkeypatch):
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        get_credential=lambda *_args, **_kwargs: {"payload": {"mfa": {"type": "totp"}}},
+    ))
+    @workflow_mod.strands_tool(name="generate_mfa_code")
+    def generate_mfa_code(
+        credential_id: str, provisioning_secret: str | None = None, digits: int = 6,
+        period: int = 30, algorithm: str = "SHA1",
+    ) -> str:
+        assert provisioning_secret is None
+        return credential_id
+
+    tools = MultiAgentWorkflowController._authentication_credential_worker_tools(
+        [generate_mfa_code],
+        {"credential_id": "credential-1", "credential_type": "username_password"},
+        {"flow_id": "flow-1", "kind": "browser_mfa"},
+    )
+
+    assert tools[0].tool_spec["inputSchema"]["json"]["properties"] == {}
+    assert tools[0]() == "credential-1"
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        tools[0](provisioning_secret="unexpected")
+
+
+def test_authentication_worker_binds_configured_email_mailbox(monkeypatch):
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        get_credential=lambda *_args, **_kwargs: {
+            "payload": {"mfa": {"type": "email", "mailbox_credential_id": "mailbox-1"}}
+        },
+    ))
+
+    @workflow_mod.strands_tool(name="begin_email_mfa_retrieval")
+    def begin_email_mfa_retrieval(mailbox_credential_id: str) -> str:
+        return mailbox_credential_id
+
+    tools = MultiAgentWorkflowController._authentication_credential_worker_tools(
+        [begin_email_mfa_retrieval, _tool("generate_mfa_code")],
+        {"credential_id": "credential-1", "credential_type": "username_password"},
+        {"flow_id": "flow-1", "kind": "browser_mfa"},
+    )
+
+    assert [workflow_mod.get_tool_name(item) for item in tools] == ["begin_email_mfa_retrieval"]
+    assert tools[0].tool_spec["inputSchema"]["json"]["properties"] == {}
+    assert tools[0]() == "mailbox-1"
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        tools[0](mailbox_credential_id="other-mailbox")
+
+
+def test_credential_worker_prompt_excludes_discovery_and_internal_flow_metadata():
+    request = workflow_mod.AuthenticationSetupRequest(
+        task_uid="task", workstream="authenticated_credential_coverage",
+        targets=("https://target.test",), allowed_origins=("https://target.test",),
+        credentials=({"credential_id": "credential-1", "credential_type": "username_password",
+                      "role": "member", "target": "https://target.test"},),
+        authentication_flows=({
+            "flow_id": "flow-1", "kind": "browser_form", "flow_version": 6,
+            "login_url": "https://target.test/login", "validation_url": "https://target.test/old",
+            "authorization_storage_key": "private-key",
+            "storage_header_bindings": [{"header_name": "X-Session", "storage_key": "private-key"}],
+        },),
+        authentication_flow_hints=({"kind": "api_form", "login_url": "https://other.test/login"},),
+        discovery_endpoints=({"url": "https://target.test/candidate"},),
+    )
+
+    prompt_data = request.credential_worker_toon()
+
+    assert "https://target.test/login" in prompt_data
+    assert "X-Session" in prompt_data
+    for excluded in ("credential-1", "flow-1", "private-key", "flow_version", "old", "candidate", "other.test"):
+        assert excluded not in prompt_data
+
+
 def test_authenticated_executor_filter_preserves_shell_but_excludes_credential_material():
     tools = [
         _tool(name)
@@ -488,18 +662,23 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
     role, prompt, tool_names, policy = calls[0]
     assert role == "authentication_agent"
     assert "authentication_setup" in prompt
-    assert "credential-1" in prompt
+    assert "credential-1" not in prompt
     assert "https://target.test/login" in prompt
-    assert "token" in prompt
+    assert "flow-1" not in prompt
+    assert "token" not in prompt
+    assert "flow_version" not in prompt
+    assert "authentication_flow_hints" not in prompt
+    assert "authentication_discovery_endpoints" not in prompt
+    assert "https://target.test/account" not in prompt
     assert "capture_browser_authenticated_context" in prompt
-    assert "with the supplied flow ID" in prompt
-    assert "Do not supply `authorization_storage_key` or `storage_header_bindings`" in prompt
-    assert {"checkout_credential", "generate_mfa_code"}.issubset(tool_names)
+    assert "validation_url" in prompt
+    assert "checkout_credential" in tool_names
+    assert "generate_mfa_code" not in tool_names
     assert "set_task_auth_context" not in tool_names
     assert "query_credentials" not in tool_names
     assert "store_credential" not in tool_names
     assert "authenticated_http_request" not in tool_names
-    assert "establish_credential_authenticated_context" in tool_names
+    assert "establish_credential_authenticated_context" not in tool_names
     assert "browser_get_cookies" not in tool_names
     assert "browser_evaluate_js" not in tool_names
     assert "shell" in tool_names
@@ -991,10 +1170,7 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
     controller._run_authentication_agent(plan, task)
 
     assert [role for role, _prompt in calls] == ["authentication_agent", "authentication_agent"]
-    assert "credential-1" in calls[0][1]
-    assert "credential-2" not in calls[0][1]
-    assert "credential-2" in calls[1][1]
-    assert "credential-1" not in calls[1][1]
+    assert all("credential-1" not in prompt and "credential-2" not in prompt for _, prompt in calls)
 
 
 def test_invalid_credential_schedules_prioritized_same_role_registration(monkeypatch):
@@ -1185,6 +1361,32 @@ def _refresh_setup_controller(monkeypatch, credential_ids=("first", "second")):
     monkeypatch.setattr(workflow_mod, "authentication_attempt_result", lambda *_args: None)
     monkeypatch.setattr(workflow_mod, "record_browser_authentication_attempt", lambda *_args: None)
     return controller, plan, task
+
+
+@pytest.mark.parametrize("credential_ids,expected_bound", [(["first"], True), (["first", "second"], False)])
+def test_executor_binds_credential_arguments_only_for_one_authorized_id(
+    monkeypatch, credential_ids, expected_bound
+):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, tuple(credential_ids))
+    task = replace(task, auth_context={"mode": "authenticated", "credential_ids": credential_ids})
+
+    @workflow_mod.strands_tool(name="authenticated_http_request")
+    def authenticated_http_request(method: str, url: str, credential_id: str = "") -> str:
+        return credential_id
+
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [authenticated_http_request])
+    tools = controller._resolve_task_executor_base_tools(plan, task, {"tools": []})
+    by_name = {workflow_mod.get_tool_name(item): item for item in tools}
+    request_schema = by_name["authenticated_http_request"].tool_spec["inputSchema"]["json"]
+    assert ("credential_id" not in request_schema["properties"]) is expected_bound
+    refresh_schema = by_name["refresh_authenticated_context"].tool_spec["inputSchema"]["json"]
+    assert ("credential_id" not in refresh_schema["properties"]) is expected_bound
+    if expected_bound:
+        assert by_name["authenticated_http_request"](method="GET", url="https://target.test") == "first"
+        with pytest.raises(ValueError, match="cannot be overridden"):
+            by_name["authenticated_http_request"](
+                method="GET", url="https://target.test", credential_id="second"
+            )
 
 
 def test_controller_refreshes_only_task_authorized_credential(monkeypatch):
@@ -18785,6 +18987,61 @@ def test_task_evaluator_artifact_reader_allows_one_read_per_distinct_recorded_ar
     page_limit = ast.literal_eval(tools[0](artifact_refs[0], start_line=5))
     assert page_limit["status"] == "not_directly_readable"
     assert page_limit["reason"] == "artifact_page_budget_exhausted"
+
+
+def test_snapshot_evaluator_gets_lookup_scoped_to_frozen_manifest(monkeypatch, tmp_path):
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    manifest_path = artifact_root / "inventory.json"
+    manifest_path.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [{
+            "id": "endpoint-1",
+            "target_id": "target-1",
+            "kind": "endpoint",
+            "value": "https://example.test/",
+            "attributes": {},
+        }],
+        "unassessed_gaps": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+    _manifest, snapshot_digest = memory_mod._load_inventory_manifest("artifact:artifacts/inventory.json")
+    task = Task(
+        task_uid="snapshot-evaluator-lookup",
+        title="Review frozen inventory item",
+        objective="Review the endpoint evidence",
+        phase=1,
+        status="active",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Frozen inventory",
+                source_refs=["artifact:artifacts/inventory.json"],
+                snapshot_hash=snapshot_digest,
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="coverage",
+                description="Review endpoint",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+
+    tools = controller._task_evaluator_tools(task, [])
+
+    assert [tool.__name__ for tool in tools] == ["get_inventory_item"]
+    found = json.loads(tools[0]("artifact:artifacts/inventory.json", item_id="endpoint-1"))
+    assert found["status"] == "found"
+    with pytest.raises(RuntimeError, match="not available"):
+        tools[0]("artifact:artifacts/other.json", item_id="endpoint-1")
 
 
 def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(monkeypatch, tmp_path):

@@ -1052,6 +1052,14 @@ def test_correctable_classifier_does_not_retry_ordinary_negative_result():
     assert is_correctable_tool_failure("shell", tool_input, "scan completed; zero results") is False
 
 
+def test_inventory_item_read_failure_is_locally_correctable():
+    assert is_correctable_tool_failure(
+        "get_inventory_item",
+        {"manifest_ref": "artifact:artifacts/inventory.json", "item_id": "missing"},
+        "inventory item was not found",
+    ) is True
+
+
 def test_shell_scope_rejection_is_correctable_with_controller_target_guidance():
     output = (
         "The shell command was not executed because its service target is outside the assigned task boundary. "

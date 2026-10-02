@@ -7945,7 +7945,12 @@ def _normalize_inventory_interaction(item_id: str, attributes: dict[str, Any]) -
     return changed
 
 
-def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> tuple[dict[str, Any], str]:
+def _load_inventory_manifest(
+    reference: str,
+    *,
+    reconcile: bool = False,
+    persist_normalization: bool = True,
+) -> tuple[dict[str, Any], str]:
     path = _artifact_path_from_ref(reference)
     try:
         with open(path, "rb") as manifest_file:
@@ -7990,7 +7995,7 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> tupl
     if missing_schema_version and compatibility_shape:
         manifest["schema_version"] = INVENTORY_MANIFEST_SCHEMA_VERSION
         normalized_root = True
-    if normalized_root:
+    if normalized_root and persist_normalization:
         _write_inventory_manifest_atomically(path, manifest)
     if removed_count:
         logger.info(
@@ -8110,7 +8115,7 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> tupl
         )
     if reconcile:
         manifest = _reconcile_inventory_manifest(path, manifest)
-    elif normalized_inventory:
+    elif normalized_inventory and persist_normalization:
         _write_inventory_manifest_atomically(path, manifest)
     canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
     return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()

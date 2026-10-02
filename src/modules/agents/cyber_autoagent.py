@@ -142,6 +142,7 @@ from modules.tools.credentials import (
 )
 from modules.tools.editor import create_absolute_path_editor
 from modules.tools.idor_specialist import idor_specialist
+from modules.tools.inventory_item import create_inventory_item_reader
 from modules.tools.mcp import (
     discover_mcp_tools,
 )
@@ -645,6 +646,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         memory_list,
         create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
         create_artifact_searcher(max_output_chars=max_result_chars),
+        create_inventory_item_reader(max_output_chars=max_result_chars),
         create_tasks,
         sleep,
         python_repl,
