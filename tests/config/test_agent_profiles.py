@@ -329,3 +329,18 @@ def test_agent_profile_mutators_cover_bedrock_cleanup_and_token_parameter_source
     params_model = type("Params", (), {"params": {"max_tokens": 10}})()
     assert profiles.mutate_agent_model_max_tokens(params_model, 5) == 15
     assert params_model.params["max_tokens"] == 15
+
+
+
+def test_discovery_roles_have_independent_actor_and_critic_profiles():
+    registry = AgentSettingsRegistry()
+    for purpose in ("authentication", "registration"):
+        actor_role = f"{purpose}_flow_discovery_agent"
+        critic_role = f"{purpose}_flow_discovery_critic"
+        assert normalize_agent_type(actor_role) == actor_role
+        assert registry.get_settings(actor_role).max_tokens == 8192
+        assert registry.get_settings(critic_role).temperature == 0.0
+        assert registry.get_settings(critic_role).max_tokens == 4096
+        registry.apply_reasoning_repair(critic_role, ReasoningLevel.LOW, "test")
+        assert registry.get_settings(actor_role).reasoning_level == ReasoningLevel.MEDIUM
+        assert registry.get_settings(critic_role).reasoning_level == ReasoningLevel.LOW

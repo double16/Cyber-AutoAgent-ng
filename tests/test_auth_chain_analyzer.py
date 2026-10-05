@@ -2,6 +2,7 @@
 # tests/test_auth_chain_analyzer.py
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -10,6 +11,7 @@ import pytest
 import modules.tools.auth_chain_analyzer as aca
 import modules.tools.recon_inventory_manifest as manifest_tool
 from modules.handlers.utils import get_tool_spec
+from modules.tools.artifact import resolve_operation_artifact_path
 
 _REAL_CLIENT_JAVASCRIPT_ANALYZER = aca._analyze_client_javascript_auth
 
@@ -49,9 +51,10 @@ def _loads(out: str) -> dict:
 
 
 @pytest.fixture(autouse=True)
-def _skip_client_script_requests(monkeypatch):
+def _skip_client_script_requests(monkeypatch, tmp_path):
     """Keep auth-chain unit tests hermetic unless they explicitly test scripts."""
 
+    monkeypatch.setenv("CYBER_AGENT_OUTPUT_DIR", str(tmp_path))
     monkeypatch.setattr(
         aca,
         "_analyze_client_javascript_auth",
@@ -612,7 +615,7 @@ def test_decision_logic_prefers_bypass_validation_when_opps_exist(monkeypatch):
     monkeypatch.setattr(aca, "_generate_auth_recommendations", lambda results: [{"id": "x", "confidence": 0.8}])
 
     j = _loads(aca.auth_chain_analyzer("https://t.example", auth_type="auto", analysis_mode="validation"))
-    assert j["decision"]["primary_auth"] == "session"
+    assert j["decision"]["primary_auth"] == "unknown"
     assert j["decision"]["best_attack_surface"] == "bypass_validation"
     assert j["decision"]["next_phase"] == "bypass_testing"
     assert j["summary"]["high_confidence_hypotheses"] == 1
@@ -770,7 +773,8 @@ def test_auth_mechanism_parsers_and_flow_mapping():
     flow = aca._map_authentication_flows(
         "https://t.example",
         {
-            "auth_mechanisms": [{"type": "Session-based"}, {"type": "JWT"}],
+            "auth_mechanisms": [{"type": kind, "evidence_status": "observed_indicator", "supports_mechanism": True}
+                                for kind in ("Session-based", "JWT")],
             "flow_analysis": {
                 "session_management": {
                     "security_analysis": [
@@ -1129,7 +1133,7 @@ def test_mechanism_analyzers_cover_negative_and_content_free_paths():
     assert session["properties"] == {}
 
 
-def test_analyze_auth_mechanisms_dispatches_all_types_and_auto_detects(monkeypatch):
+def test_analyze_auth_mechanisms_keeps_path_candidates_and_rejects_keyword_detection(monkeypatch):
     endpoints = [
         {"path": "/jwt", "full_url": "https://t/jwt", "type": "JWT"},
         {"path": "/oauth", "full_url": "https://t/oauth", "type": "OAuth"},
@@ -1148,7 +1152,7 @@ def test_analyze_auth_mechanisms_dispatches_all_types_and_auto_detects(monkeypat
     responses = iter([DummyResp(text="JWT bearer OAuth client_id session csrf")])
     monkeypatch.setattr(aca, "_http_request", lambda *args, **kwargs: next(responses))
     detected = aca._analyze_auth_mechanisms("https://t", [], "auto")
-    assert {m["type"] for m in detected} == {"JWT", "OAuth", "Session-based"}
+    assert detected == []
 
 
 def test_analyze_tokens_handles_cookie_errors_and_jwt_tool_failures(monkeypatch):
@@ -1218,3 +1222,221 @@ def test_auth_chain_analyzer_http_request_respects_proxy(monkeypatch):
 
     assert len(recorded) == 1
     assert recorded[0] == {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
+
+
+def test_spa_routes_are_candidates_without_observed_protocols(monkeypatch):
+    endpoints = [{"path": path, "full_url": f"https://target.test{path}", "type": kind}
+                 for path, kind in [("/oauth", "OAuth"), ("/sso", "SAML"), ("/login", "Session-based")]]
+    monkeypatch.setattr(aca, "_http_request", lambda *_args, **_kwargs: DummyResp(
+        status_code=200, headers={"Set-Cookie": "tracking=value"}, text="<html>OAuth SAML session SPA</html>",
+    ))
+    mechanisms = aca._analyze_auth_mechanisms("https://target.test", endpoints, "auto")
+    assert {item["type"] for item in mechanisms if item["evidence_status"] == "candidate"} == {
+        "OAuth", "SAML", "Session-based",
+    }
+    assert not any(item["supports_mechanism"] for item in mechanisms)
+    assert not any(item["validated_flow"] for item in mechanisms)
+    assert aca._map_authentication_flows("https://target.test", {"auth_mechanisms": mechanisms})[
+        "authentication_steps"
+    ] == []
+
+
+def test_protocol_response_evidence_separates_candidate_and_observation(monkeypatch):
+    body = json.dumps({key: f"https://identity.test/{key}" for key in
+                       ("issuer", "authorization_endpoint", "token_endpoint", "jwks_uri")})
+    monkeypatch.setattr(aca, "_http_request", lambda *_args, **_kwargs: DummyResp(
+        status_code=200, headers={}, text=body,
+    ))
+    endpoints = [{"path": "/discovery", "full_url": "https://target.test/discovery", "type": "OAuth"}]
+    mechanisms = aca._analyze_auth_mechanisms("https://target.test", endpoints, "auto")
+    assert mechanisms[0]["evidence_status"] == "candidate"
+    assert mechanisms[1]["indicator"] == "oidc_discovery"
+    assert mechanisms[1]["supports_mechanism"] is True
+    assert mechanisms[1]["response_evidence"]["status_code"] == 200
+    assert mechanisms[1]["response_evidence"]["url"] == endpoints[0]["full_url"]
+    assert not mechanisms[1]["validated_flow"]
+    saved = json.loads(Path(resolve_operation_artifact_path(
+        mechanisms[1]["response_evidence"]["artifact_ref"],
+    )).read_text())
+    assert saved["body"] == body and saved["status_code"] == 200
+
+
+@pytest.mark.parametrize("status", [None, 200, 302, 403, 500, "error"])
+@pytest.mark.parametrize("location", ["", "/login", "/unrelated"])
+def test_bypass_probe_matrix_keeps_redirect_and_failure_results(monkeypatch, status, location):
+    endpoint = {"type": "Administrative", "path": "/admin", "full_url": "https://target.test/admin"}
+
+    def request(*_args, **_kwargs):
+        if status == "error":
+            raise RuntimeError("request failed")
+        return None if status is None else DummyResp(status, {"Location": location, "Content-Type": "text/html"})
+
+    monkeypatch.setattr(aca, "_http_request", request)
+    results = aca._test_advanced_auth_bypasses("https://target.test", {"auth_endpoints": [endpoint]})
+    assert all(item["technique"] == "Forced Browsing" for item in results)
+    if status == 200:
+        assert results[0]["successful"] is True
+    elif status in {None, "error"}:
+        assert results == []
+    else:
+        assert not results[0]["successful"]
+
+
+@pytest.mark.parametrize("baseline_status,baseline_location", [(200, ""), (403, ""), (302, "/login"), (500, "")])
+@pytest.mark.parametrize("changed_status,changed_location", [(200, ""), (204, ""), (302, "/login"), (403, ""),
+                                                            (None, ""), ("error", "")])
+def test_bypass_method_and_header_comparisons_use_protected_baseline(
+    monkeypatch, baseline_status, baseline_location, changed_status, changed_location,
+):
+    endpoint = {"type": "Administrative", "path": "/admin", "full_url": "https://target.test/admin"}
+
+    def request(method, _url, **kwargs):
+        if method == "GET" and not kwargs.get("headers"):
+            return DummyResp(baseline_status, {"Location": baseline_location, "Content-Type": "text/html"})
+        if changed_status == "error":
+            raise RuntimeError("request failed")
+        return None if changed_status is None else DummyResp(
+            changed_status, {"Location": changed_location, "Content-Type": "application/json"},
+        )
+
+    monkeypatch.setattr(aca, "_http_request", request)
+    results = aca._test_advanced_auth_bypasses("https://target.test", {"auth_endpoints": [endpoint]})
+    bypasses = [item for item in results if item["technique"] != "Forced Browsing"]
+    assert bool(bypasses) == (baseline_status in {403, 302} and changed_status in {200, 204})
+
+
+@pytest.mark.parametrize("kind", ["JWT", "OAuth", "SAML", "Session-based", "unknown"])
+@pytest.mark.parametrize("signals", [False, True])
+def test_recommendation_matrix_remains_bounded_and_requires_validation(kind, signals):
+    data = {"auth_mechanisms": [{"type": kind, "endpoint": "/auth"}, None],
+            "auth_endpoints": [{"path": "/login", "type": "Session-based"}, {"path": None}],
+            "tokens_discovered": [None, {"type": "Cookie", "name": "session"}] if signals else [],
+            "vulnerabilities": [None, {"successful": True}, {"successful": True, "path": "/admin"}] if signals else [],
+            "flow_analysis": {"bypass_opportunities": [None, {"type": "candidate"}] if signals else [],
+                              "privilege_escalation": [None, {"endpoint": "/admin"}] if signals else []}}
+    results = aca._generate_auth_recommendations(data)
+    assert results and len({item["id"] for item in results}) == len(results)
+    assert [item["priority"] for item in results] == sorted(item["priority"] for item in results)
+    assert all(item["success_criteria"] and item["artifacts"] for item in results)
+
+
+@pytest.mark.parametrize("line", ["invalid", "x=" + "v" * 25, "session=v; SameSite=None", "x=v; unknown",
+                                  "x=v; Secure; HttpOnly; SameSite=Lax"])
+def test_cookie_observations_do_not_infer_validated_authentication(line):
+    result = aca._analyze_cookie_security(line)
+    if line == "invalid":
+        assert result is None
+    else:
+        assert result["name"] in {"x", "session"}
+        assert len(result["value"]) <= 23
+        assert "validated_flow" not in result
+
+
+@pytest.mark.parametrize("content", ["", "not-json", '{"other": []}', '{"keys": []}', '{"keys": [{}]}'])
+def test_legacy_jwt_properties_are_separate_from_protocol_observation(content):
+    assert aca._analyze_jwt_mechanism({"path": "/jwks"}, content)["type"] == "JWT"
+    assert not any(item["supports_mechanism"] for item in aca.authentication_indicators(content, {}, "https://t"))
+    assert aca._analyze_oauth_mechanism({"path": "/callback"}, content)["description"] == "OAuth callback endpoint"
+    assert aca._analyze_saml_mechanism({"path": "/saml"}, content)["confidence"] == "medium"
+    assert aca._analyze_session_mechanism({"path": "/login"}, content)["confidence"] == "medium"
+
+
+@pytest.mark.parametrize("response_kind", ["none", "error", "oversized", "plain", "save_error"])
+def test_protocol_analysis_requires_available_response_evidence(monkeypatch, response_kind):
+    endpoints = [{"path": "/oauth", "full_url": "https://target.test/oauth", "type": "OAuth"}]
+    oidc = json.dumps({key: f"https://identity.test/{key}" for key in
+                       ("issuer", "authorization_endpoint", "token_endpoint", "jwks_uri")})
+
+    def request(*_args, **_kwargs):
+        if response_kind == "error":
+            raise RuntimeError("request failed")
+        if response_kind == "none":
+            return None
+        return DummyResp(text="x" * 1_000_001 if response_kind == "oversized" else (
+            "plain" if response_kind == "plain" else oidc
+        ))
+
+    monkeypatch.setattr(aca, "_http_request", request)
+    if response_kind == "save_error":
+        monkeypatch.setattr(aca, "_save_authentication_response", Mock(side_effect=OSError("unavailable")))
+    mechanisms = aca._analyze_auth_mechanisms("https://target.test", endpoints, "auto")
+    assert len(mechanisms) == 1 and mechanisms[0]["evidence_status"] == "candidate"
+
+
+@pytest.mark.parametrize("kind", ["OAuth", "JWT", "SAML"])
+def test_summary_uses_only_observed_protocol_evidence(monkeypatch, kind):
+    mechanisms = [{"type": kind, "evidence_status": "candidate", "supports_mechanism": False},
+                  {"type": kind, "evidence_status": "observed_indicator", "supports_mechanism": True,
+                   "indicator": "structural_document"}]
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", lambda *_args: [])
+    monkeypatch.setattr(aca, "_analyze_auth_mechanisms", lambda *_args: mechanisms)
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda *_args: {"tokens": []})
+    monkeypatch.setattr(aca, "_map_authentication_flows", lambda *_args: {})
+    report = _loads(aca.auth_chain_analyzer("https://target.test"))
+    assert report["summary"]["mechanisms"] == [kind]
+    assert report["summary"]["candidate_mechanisms"] == [kind]
+    assert report["summary"]["observed_indicators"] == ["structural_document"]
+    assert report["summary"]["validated_authentication_flow"] is False
+    assert report["decision"]["primary_auth"] == kind.lower()
+
+
+@pytest.mark.parametrize("change", ["none", "missing", "body", "url", "status", "headers", "malformed", "prior_operation"])
+def test_cached_protocol_observations_require_current_unchanged_response(monkeypatch, tmp_path, change):
+    response = DummyResp(200, {}, '<form><input type="password"></form>')
+    monkeypatch.setattr(aca, "_http_request", lambda *_args, **_kwargs: response)
+    mechanisms = aca._analyze_auth_mechanisms("https://target.test", [], "auto")
+    evidence = mechanisms[0]["response_evidence"]
+    artifact_path = Path(resolve_operation_artifact_path(evidence["artifact_ref"]))
+    payload = json.dumps({"report": {"evidence": {"auth_mechanisms": {"items": mechanisms}}}})
+    if change == "missing":
+        artifact_path.unlink()
+    elif change == "malformed":
+        artifact_path.write_text("not-json")
+    elif change == "prior_operation":
+        monkeypatch.setenv("CYBER_AGENT_OUTPUT_DIR", str(tmp_path / "another-operation"))
+    elif change != "none":
+        altered = json.loads(artifact_path.read_text())
+        altered[change if change != "status" else "status_code"] = (
+            403 if change == "status" else {"Location": "https://changed.test"} if change == "headers" else "changed"
+        )
+        artifact_path.write_text(json.dumps(altered))
+    assert aca._cached_protocol_evidence_available(payload) == (change == "none")
+
+
+@pytest.mark.parametrize("payload", [
+    "not-json", "[]", '{"evidence": {"auth_mechanisms": {"items": [null]}}}',
+    ('{"evidence": {"auth_mechanisms": {"items": [{"evidence_status": '
+     '"observed_indicator"}]}}}'),
+])
+def test_invalid_protocol_cache_is_not_reused(payload):
+    assert not aca._cached_protocol_evidence_available(payload)
+
+
+def test_changed_protocol_cache_runs_fresh_analysis(monkeypatch):
+    response = DummyResp(200, {}, '<form><input type="password"></form>')
+    request = Mock(return_value=response)
+    monkeypatch.setattr(aca, "_http_request", request)
+    mechanisms = aca._analyze_auth_mechanisms("https://target.test", [], "auto")
+    artifact_path = Path(resolve_operation_artifact_path(mechanisms[0]["response_evidence"]["artifact_ref"]))
+    cached = json.dumps({"report": {"evidence": {"auth_mechanisms": {"items": mechanisms}}}})
+    artifact_path.write_text("changed response")
+    monkeypatch.setattr(aca, "get_cached_result", lambda *_args: cached)
+    discovery = Mock(return_value=[])
+    monkeypatch.setattr(aca, "_discover_auth_endpoints", discovery)
+    monkeypatch.setattr(aca, "_analyze_tokens_and_sessions", lambda *_args: {"tokens": []})
+    result = _loads(aca.auth_chain_analyzer("https://target.test"))
+    discovery.assert_called_once()
+    assert result["summary"]["observed_indicators"] == ["password_form"]
+    assert request.call_count == 2
+
+
+@pytest.mark.parametrize("field", ["url", "status_code", "body_sha256", "artifact_sha256"])
+def test_cache_record_metadata_must_match_saved_response(monkeypatch, field):
+    monkeypatch.setattr(aca, "_http_request", lambda *_args, **_kwargs: DummyResp(
+        200, {}, '<form><input type="password"></form>',
+    ))
+    mechanisms = aca._analyze_auth_mechanisms("https://target.test", [], "auto")
+    mechanisms[0]["response_evidence"][field] = "incorrect"
+    assert not aca._cached_protocol_evidence_available(json.dumps({
+        "evidence": {"auth_mechanisms": {"items": mechanisms}},
+    }))

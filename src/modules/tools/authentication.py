@@ -10,7 +10,7 @@ import re
 import time
 from base64 import b64encode, urlsafe_b64decode
 from binascii import Error as BinasciiError
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -27,6 +27,7 @@ from modules.tools.credentials import (
     CredentialAccessMode,
     _active_credential_for_access,
     _active_task_target_values,
+    _task_resolved_targets,
 )
 from modules.tools.memory import _get_database_store, _operation_id, active_credential_task
 from modules.tools.semantic_enum import normalize_semantic_enum
@@ -55,7 +56,8 @@ AUTHENTICATION_FLOW_KINDS = frozenset({
     "oauth2_client",
 })
 REGISTRATION_FLOW_KINDS = frozenset({"browser_registration", "api_registration"})
-AUTHENTICATION_FLOW_VERSION = 6
+AUTHENTICATION_FLOW_VERSION = 8
+REGISTRATION_FLOW_VERSION = 2
 _AUTHORIZATION_STORAGE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 _JWT_PATTERN = re.compile(
@@ -770,10 +772,57 @@ def record_authentication_flow(
 ) -> str:
     """Persist a secret-free observed authentication or registration flow for later same-target setup."""
 
+    return _record_authentication_flow(**locals())
+
+
+def _bound_flow_task_target_values(task_uid: str, operation_id: str, target: str, purpose: str) -> set[str]:
+    """Validate controller-owned discovery identity independently of other active tasks."""
+
+    diagnostic = "Flow discovery controller task context is invalid; changing tool arguments cannot repair it"
+    if operation_id != _operation_id():
+        raise ValueError(f"{diagnostic}: operation mismatch")
+    store = _get_database_store()
+    task = next((item for item in store.get_tasks(operation_id) if item.task_uid == task_uid), None)
+    if task is None or task.status != "active":
+        raise ValueError(f"{diagnostic}: assigned task is missing or inactive")
+    targets = set(_task_resolved_targets(store, operation_id, task))
+    if target.rstrip("/") not in {value.rstrip("/") for value in targets}:
+        raise ValueError(f"{diagnostic}: target is outside assigned task scope")
+    if purpose == "registration" and len(targets) != 1:
+        raise ValueError(f"{diagnostic}: registration requires one assigned task target")
+    return targets
+
+
+def _record_authentication_flow(
+    credential_id: str = "",
+    target: str = "",
+    kind: str = "",
+    login_url: str = "",
+    validation_url: str = "",
+    authorization_storage_key: str = "",
+    storage_header_bindings: list[dict[str, str]] | None = None,
+    request_format: str = "",
+    allowed_origins: list[str] | None = None,
+    purpose: str = "authentication",
+    roles: list[str] | None = None,
+    success_redirect_url: str = "",
+    identity_fields: list[str] | None = None,
+    required_fields: list[str] | None = None,
+    optional_fields: list[str] | None = None,
+    candidate_sink: Callable[[dict[str, Any]], None] | None = None,
+    task_uid: str = "",
+    operation_id: str = "",
+) -> str:
+    """Validate a flow, then stage it for review or persist it for legacy callers."""
+
     purpose = _normalize_authentication_enum(purpose, field_name="purpose")
     kind = _normalize_authentication_enum(kind, field_name="kind")
     request_format = _normalize_authentication_enum(request_format, field_name="request_format")
-    if purpose == "authentication":
+    if candidate_sink is not None:
+        if not task_uid or not operation_id or credential_id:
+            raise ValueError("Discovery staging requires controller task and operation bindings and no credential_id")
+        _bound_flow_task_target_values(task_uid, operation_id, target, purpose)
+    elif purpose == "authentication":
         if credential_id:
             _task, record, credential_id = _active_record(credential_id)
             target = str(record["target"]).rstrip("/")
@@ -784,7 +833,7 @@ def record_authentication_flow(
             if normalized_target not in {value.rstrip("/") for value in target_values}:
                 raise ValueError("authentication flow recording requires an active task target")
             target = normalized_target
-    else:
+    elif purpose == "registration":
         store = _get_database_store()
         _task, target_values = _active_task_target_values(store, _operation_id())
         if credential_id:
@@ -829,7 +878,7 @@ def record_authentication_flow(
         "target": target,
         "purpose": purpose,
         "kind": kind,
-        "flow_version": AUTHENTICATION_FLOW_VERSION,
+        "flow_version": AUTHENTICATION_FLOW_VERSION if purpose == "authentication" else REGISTRATION_FLOW_VERSION,
         "login_url": effective_login_url,
         "validation_url": validation_url if purpose == "authentication" else "",
         "authorization_storage_key": authorization_storage_key if purpose == "authentication" else "",
@@ -852,6 +901,10 @@ def record_authentication_flow(
             normalized_fields = sorted({str(value).strip() for value in values or [] if str(value).strip()})
             if normalized_fields:
                 descriptor[key] = normalized_fields
+    if candidate_sink is not None:
+        descriptor["provenance"] = "observed_flow_discovery"
+        candidate_sink(descriptor)
+        return json.dumps({"recorded": True, "staged": True, "flow": descriptor}, sort_keys=True)
     stored = _get_database_store().upsert_authentication_flow(_operation_id(), descriptor)
     return json.dumps({"recorded": True, "credential_id": credential_id, "flow": stored}, sort_keys=True)
 
@@ -865,8 +918,11 @@ def build_record_authentication_flow_tool(
     credential_id: str = "",
     roles: Iterable[str] = (),
     name: str = "record_authentication_flow",
+    candidate_sink: Callable[[dict[str, Any]], None] | None = None,
+    task_uid: str = "",
+    operation_id: str = "",
 ) -> Any:
-    """Build a controller-bound recorder that exposes only observed flow fields to an agent."""
+    """Bind observed fields; an optional controller sink stages the descriptor without persistence."""
 
     normalized_target = str(target).rstrip("/")
     normalized_purpose = _normalize_authentication_enum(str(purpose).strip(), field_name="purpose")
@@ -888,6 +944,13 @@ def build_record_authentication_flow_tool(
     if not str(name).strip():
         raise ValueError("name required when binding authentication flow recorder")
 
+    if candidate_sink is not None:
+        if not task_uid or not operation_id or normalized_credential_id:
+            raise ValueError("Discovery staging requires controller task and operation bindings and no credential_id")
+        _bound_flow_task_target_values(task_uid, operation_id, normalized_target, normalized_purpose)
+    elif task_uid or operation_id:
+        raise ValueError("Controller task bindings are supported only for discovery staging")
+
     def record_bound_authentication_flow(
         login_url: str,
         validation_url: str = "",
@@ -901,7 +964,7 @@ def build_record_authentication_flow_tool(
     ) -> str:
         """Persist one observed flow using controller-bound authentication context."""
 
-        return record_authentication_flow(
+        return _record_authentication_flow(
             credential_id=normalized_credential_id,
             target=normalized_target,
             kind=normalized_kind,
@@ -917,6 +980,9 @@ def build_record_authentication_flow_tool(
             identity_fields=identity_fields,
             required_fields=required_fields,
             optional_fields=optional_fields,
+            candidate_sink=candidate_sink,
+            task_uid=task_uid,
+            operation_id=operation_id,
         )
 
     if normalized_purpose == "authentication":
@@ -925,7 +991,10 @@ def build_record_authentication_flow_tool(
         ]
         properties = {
             "login_url": {"type": "string", "description": "Observed same-target login URL."},
-            "validation_url": {"type": "string", "description": "Observed same-target protected validation URL."},
+            "validation_url": {
+                "type": "string",
+                "description": "Observed same-target validation URL; leave empty during browser discovery.",
+            },
             "authorization_storage_key": {
                 "type": "string",
                 "description": "Legacy observed bearer-token storage key; never a token value.",
@@ -944,13 +1013,19 @@ def build_record_authentication_flow_tool(
                     "additionalProperties": False,
                 },
             },
-            "request_format": {"type": "string", "enum": ["", "json", "form"]},
+            "request_format": {
+                "type": "string", "enum": ["", "json", "form"],
+                "description": "Observed transport format; omit or leave empty when unknown for a browser flow.",
+            },
         }
     else:
         required = ["login_url"]
         properties = {
             "login_url": {"type": "string", "description": "Observed same-target registration URL."},
-            "request_format": {"type": "string", "enum": ["", "json", "form"]},
+            "request_format": {
+                "type": "string", "enum": ["", "json", "form"],
+                "description": "Observed transport format; omit or leave empty when unknown for a browser flow.",
+            },
             "success_redirect_url": {"type": "string", "description": "Observed same-target success redirect URL."},
             "identity_fields": {"type": "array", "items": {"type": "string"}},
             "required_fields": {"type": "array", "items": {"type": "string"}},
@@ -958,7 +1033,8 @@ def build_record_authentication_flow_tool(
         }
     record_bound_authentication_flow.__name__ = str(name).strip()
     record_bound_authentication_flow.__doc__ = (
-        "Persist one observed authentication flow. The controller bound target="
+        ("Stage one observed flow for controller review. " if candidate_sink else "Persist one observed flow. ")
+        + "The controller bound target="
         f"{normalized_target}, purpose={normalized_purpose}, and kind={normalized_kind}. "
         "Supply only the observed fields in this tool schema."
     )

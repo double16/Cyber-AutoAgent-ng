@@ -64,7 +64,14 @@ from modules.prompts.factory import (
     is_reportable_tool,
     safe_truncate,
 )
-from modules.tools.artifact_references import normalize_artifact_reference_token
+from modules.storage.workflow_json import StoredWorkflowDataError
+from modules.tools.artifact_references import (
+    extract_absolute_artifact_paths,
+    extract_artifact_references,
+    iter_artifact_reference_matches,
+    normalize_artifact_reference_token,
+    replace_artifact_references,
+)
 from modules.tools.memory import (
     OperationTarget,
     _artifact_path_from_ref,
@@ -120,14 +127,6 @@ _BUDGET_LABELS = {
     "tokens": "Tokens",
     "cost": "Cost (USD)",
 }
-_ARTIFACT_REFERENCE = re.compile(
-    r"(?<![A-Za-z0-9_:/.-])"
-    r"(?:artifact:(?:artifacts|outputs)/[A-Za-z0-9._~+/=-]+|"
-    r"artifact_id:[A-Za-z0-9._-]+|"
-    r"(?:artifacts|outputs)/[A-Za-z0-9._~+/=-]+)"
-    r"(?=$|[\s`\"'\])},;:])",
-    re.IGNORECASE,
-)
 _INVENTORY_ENDPOINT_ID = re.compile(r"\bendpoint-\d+\b")
 _INVENTORY_IDENTIFIER_FIELDS = frozenset(
     {
@@ -145,8 +144,7 @@ _INVENTORY_IDENTIFIER_FIELDS = frozenset(
     }
 )
 _GENERIC_PATH_REFERENCE = re.compile(
-    r"(?:artifact:(?:artifacts/)?[^\s\"'\])]+|"
-    r"(?:^|[\s\"'\[(])(?:/[^\s\"'\])]+|(?:artifacts?|outputs?)/[^\s\"'\])]+))",
+    r"(?:^|[\s\"'\[(])(?:artifacts?|outputs?)/[^\s\"'\])]+",
     re.IGNORECASE,
 )
 _EXCERPT_TOKEN = re.compile(r"[A-Za-z0-9_'-]{4,}")
@@ -333,7 +331,11 @@ def _has_artifact_reference(value: Any) -> bool:
     """Return whether free-form evidence text contains an artifact-like path."""
 
     if isinstance(value, str):
-        return bool(_GENERIC_PATH_REFERENCE.search(value))
+        return bool(
+            _artifact_references(value)
+            or extract_absolute_artifact_paths(value)
+            or _GENERIC_PATH_REFERENCE.search(value)
+        )
     if isinstance(value, dict):
         return any(_has_artifact_reference(item) for item in value.values())
     if isinstance(value, (list, tuple, set)):
@@ -342,17 +344,11 @@ def _has_artifact_reference(value: Any) -> bool:
 
 
 def _artifact_references(value: Any) -> set[str]:
-    references: set[str] = set()
-    if isinstance(value, str):
-        for match in _ARTIFACT_REFERENCE.finditer(value):
-            references.add(_normalize_artifact_reference(match.group(0)))
-    elif isinstance(value, dict):
-        for item in value.values():
-            references.update(_artifact_references(item))
-    elif isinstance(value, (list, tuple, set)):
-        for item in value:
-            references.update(_artifact_references(item))
-    return references
+    return {
+        _normalize_artifact_reference(reference)
+        for reference in extract_artifact_references(value, include_bare_paths=True)
+        if _is_report_artifact_reference(reference)
+    }
 
 
 def _omit_cross_operation_artifact_references(value: Any) -> tuple[Any, int]:
@@ -364,10 +360,10 @@ def _omit_cross_operation_artifact_references(value: Any) -> tuple[Any, int]:
     """
 
     if isinstance(value, str):
-        omitted = len(_ARTIFACT_REFERENCE.findall(value))
-        if not omitted:
-            return value, 0
-        return _ARTIFACT_REFERENCE.sub("[prior-operation artifact omitted]", value), omitted
+        return replace_artifact_references(
+            value, lambda _reference: "[prior-operation artifact omitted]", include_bare_paths=True,
+            accept_reference=_is_report_artifact_reference,
+        )
     if isinstance(value, dict):
         sanitized: dict[Any, Any] = {}
         omitted = 0
@@ -424,11 +420,20 @@ def _normalize_artifact_reference(reference: str) -> str:
     return normalized
 
 
+def _is_report_artifact_reference(reference: str) -> bool:
+    """Exclude prose labels while retaining explicit file paths and artifact IDs."""
+
+    normalized = _normalize_artifact_reference(reference)
+    payload = normalized.removeprefix("artifact:")
+    return "/" in payload or "." in payload
+
+
 def _artifact_reference_matches(value: str) -> list[tuple[str, str]]:
     """Return raw and normalized artifact references from one text value."""
     return [
-        (match.group(0), _normalize_artifact_reference(match.group(0)))
-        for match in _ARTIFACT_REFERENCE.finditer(value)
+        (match.raw, _normalize_artifact_reference(match.reference))
+        for match in iter_artifact_reference_matches(value, include_bare_paths=True)
+        if _is_report_artifact_reference(match.reference)
     ]
 
 
@@ -1244,7 +1249,11 @@ def _validate_report_consistency(
 ) -> list[str]:
     """Reconcile report summaries against their canonical workflow and evidence inputs."""
 
-    errors: list[str] = []
+    errors: list[str] = list(sections.get("workflow_storage_errors") or [])
+    if errors:
+        completion_status["assessment_complete"] = False
+        completion_status["workflow_complete"] = False
+        completion_status["incomplete_reason"] = "Workflow coverage is unavailable or partial due to damaged stored records."
     evidence = sections.get("raw_evidence", [])
     evidence = evidence if isinstance(evidence, list) else []
     verified_count = sum(1 for item in evidence if isinstance(item, dict) and item.get("category") == "finding")
@@ -1429,6 +1438,7 @@ def _canonical_report_data(sections: dict[str, Any]) -> dict[str, Any]:
         "completion_status": sections.get("completion_status") or {},
         "artifact_references": artifacts,
         "evidence_integrity_errors": sections.get("evidence_integrity_errors") or [],
+        "workflow_storage_errors": sections.get("workflow_storage_errors") or [],
         "execution_history": sections.get("execution_history") or "",
         "execution_history_rows": sections.get("execution_history_rows") or {},
         "credentials_used": sections.get("credentials_used") or [],
@@ -5433,8 +5443,17 @@ def build_report_sections(
         if not cross_operation:
             logger.info(f"Filtering evidence for current operation_id: {operation_id}")
 
-        operation_plan = memory_client.get_active_plan(operation_id=operation_id)
-        task_records = memory_client.list_tasks(operation_id=operation_id)
+        workflow_storage_errors = []
+        try:
+            operation_plan = memory_client.get_active_plan(operation_id=operation_id)
+        except StoredWorkflowDataError as error:
+            operation_plan = None
+            workflow_storage_errors.append(str(error))
+        try:
+            task_records = memory_client.list_tasks(operation_id=operation_id)
+        except StoredWorkflowDataError as error:
+            task_records = []
+            workflow_storage_errors.append(str(error))
         list_credential_usage = getattr(memory_client, "list_credential_usage", None)
         credential_usage = (
             list_credential_usage(operation_id=operation_id)
@@ -5891,6 +5910,12 @@ def build_report_sections(
             }
 
         # Build complete sections dictionary
+        execution_history = _format_execution_history(task_history_rows, acceptance_history_rows)
+        if workflow_storage_errors:
+            execution_history += (
+                "\n\nWorkflow coverage is unavailable or partial due to damaged stored records.\n"
+                + "\n".join(workflow_storage_errors)
+            )
         target_coverage = _format_target_coverage(operation_plan, task_records, evidence, target_values)
         attack_surface = _build_attack_surface(
             inventory_items,
@@ -5971,7 +5996,8 @@ def build_report_sections(
                 ),
                 "items": operation_tasks,
             },
-            "execution_history": _format_execution_history(task_history_rows, acceptance_history_rows),
+            "execution_history": execution_history,
+            "workflow_storage_errors": workflow_storage_errors,
             "execution_history_rows": {
                 "tasks": task_history_rows,
                 "acceptance": acceptance_history_rows,

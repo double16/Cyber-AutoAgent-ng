@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 from strands.types.exceptions import MaxTokensReachedException
 
@@ -804,13 +805,14 @@ def test_authentication_worker_uses_hints_for_on_demand_flow_discovery(monkeypat
         recovery_context={"phase_task_contract": {"workstream": "authenticated_credential_coverage"}},
     )
 
+    controller.state.store_task(task)
+    monkeypatch.setattr(controller, "_record_flow_discovery_gap", Mock())
     result = controller._run_authentication_agent(plan, task)
 
     assert result.status == "failed"
     assert result.reason == "no_usable_authentication_flow"
-    runner.assert_called_once()
-    assert "authentication_flow_hints" in runner.call_args.args[1]
-    assert runner.call_args.args[0] == "authentication_flow_discovery_agent"
+    runner.assert_not_called()
+    # Credential workers cannot run when discovery has no navigation capability.
 
 
 def test_authentication_discovery_endpoints_separate_navigation_from_protected_candidates(monkeypatch):
@@ -1010,6 +1012,9 @@ def test_controller_builds_target_scoped_attack_surface_context(monkeypatch):
 
 
 def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(monkeypatch):
+    from modules.tools import authentication
+
+    monkeypatch.setattr(authentication, "_bound_flow_task_target_values", Mock())
     plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
     controller = MultiAgentWorkflowController(
         runtime=_runtime(env_ints={"CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE": 7}),
@@ -1040,6 +1045,8 @@ def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(mo
     monkeypatch.setattr(controller, "_run_worker_agent", worker)
     monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
 
+    monkeypatch.setattr(controller, "_record_flow_discovery_gap", Mock())
+    controller.flow_discovery_cycles = 1
     controller._run_authentication_flow_discovery(
         plan,
         Task(
@@ -1073,9 +1080,9 @@ def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(mo
     } <= supplied_names
     assert "http_request" in supplied_names
     assert "shell" not in supplied_names
-    assert "saved HTML artifacts" in worker.call_args.args[1]
-    assert "search_artifact" in worker.call_args.args[1]
-    assert "full saved HTML" in worker.call_args.args[1]
+    assert "Observe the rendered page" in worker.call_args.args[1]
+    assert "specific gaps in browser observations" in worker.call_args.args[1]
+    assert "source-map artifacts" not in worker.call_args.args[1]
     assert "controller-bound recorder" in worker.call_args.args[1]
     assert "browser navigation is limited" in worker.call_args.args[1]
     assert "never load it with a browser tool" in worker.call_args.args[1]
@@ -1088,6 +1095,9 @@ def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(mo
 
 
 def test_authentication_flow_discovery_binds_hinted_kind_to_one_recorder(monkeypatch):
+    from modules.tools import authentication
+
+    monkeypatch.setattr(authentication, "_bound_flow_task_target_values", Mock())
     plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
@@ -1110,6 +1120,8 @@ def test_authentication_flow_discovery_binds_hinted_kind_to_one_recorder(monkeyp
     monkeypatch.setattr(controller, "_run_worker_agent", worker)
     monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
 
+    monkeypatch.setattr(controller, "_record_flow_discovery_gap", Mock())
+    controller.flow_discovery_cycles = 1
     controller._run_authentication_flow_discovery(
         plan,
         Task(
@@ -1121,7 +1133,7 @@ def test_authentication_flow_discovery_binds_hinted_kind_to_one_recorder(monkeyp
         ),
         setup,
         "https://target.test",
-        [_tool("browser_get_page_html")],
+        [_tool("browser_goto_url"), _tool("browser_get_page_html")],
     )
 
     supplied_names = [workflow_mod.get_tool_name(tool) for tool in worker.call_args.args[2]]
@@ -1249,6 +1261,7 @@ def test_authentication_setup_selects_one_validated_flow_per_target(monkeypatch)
         "validation_url": "https://target.test/account",
         "allowed_origins": ["https://target.test"],
         "provenance": "observed_flow_discovery",
+        "discovery_review": {"operation_id": "OP_TEST"},
     }
     store = SimpleNamespace(
         list_credentials=Mock(return_value=[
@@ -1521,7 +1534,7 @@ def test_authentication_worker_policy_requires_successful_context_tool(
     controller, _plan_value, task = _refresh_setup_controller(monkeypatch, ("first",))
     target = "https://target.test"
     credential = {"credential_id": "first", "credential_type": "username_password", "role": "member", "target": target}
-    flow = {"flow_id": "flow", "kind": flow_kind, "login_url": f"{target}/login"}
+    flow = {"flow_id": "flow", "kind": flow_kind, "login_url": f"{target}/login", "request_format": ""}
     setup = workflow_mod.AuthenticationSetupRequest(
         task_uid=task.task_uid, workstream="authenticated_credential_coverage", targets=(target,),
         allowed_origins=(target,), credentials=(credential,), authentication_flows=(flow,),
@@ -1542,6 +1555,10 @@ def test_authentication_worker_policy_requires_successful_context_tool(
     assert policy.required_tool_names == {expected_terminal_tool}
     assert policy.terminal_after_required_tools is True
     assert policy.require_successful_required_tools is True
+    if flow_kind.startswith("browser_"):
+        assert "unknown\ntransport details" in worker_runner.call_args.args[1]
+    else:
+        assert "resolves the selected flow" in worker_runner.call_args.args[1]
 
 
 @pytest.mark.parametrize(
@@ -6180,7 +6197,7 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
     assert controller._task_executor_persistence_tool_names(task) == {"store_observation"}
 
 
-def test_credential_provisioning_executor_binds_registration_flow_recorder():
+def test_credential_provisioning_executor_binds_registration_flow_recorder(monkeypatch):
     runtime = _runtime()
     runtime.optional_tools_list = [
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
@@ -6223,6 +6240,7 @@ def test_credential_provisioning_executor_binds_registration_flow_recorder():
         work_runner=work_runner,
     )
 
+    monkeypatch.setattr(controller, "_prepare_registration_discovery", lambda _plan, assigned: assigned)
     controller._run_task(_plan(), _plan().phases[0], task)
 
     schema = get_tool_spec(captured["recorder"])["inputSchema"]["json"]
@@ -7800,7 +7818,8 @@ def test_controller_resolves_planned_credential_provisioning_phase(monkeypatch):
     } == {1, 2}
 
 
-def test_credential_registration_uses_durable_descriptor_before_inventory_hints(monkeypatch):
+@pytest.mark.parametrize("stale_version", [0, 6, 7, None])
+def test_credential_registration_uses_durable_descriptor_before_inventory_hints(monkeypatch, stale_version):
     plan = OperationPlan(
         objective="Test",
         current_phase=1,
@@ -7817,14 +7836,14 @@ def test_credential_registration_uses_durable_descriptor_before_inventory_hints(
         list_authentication_flows=Mock(return_value=[
             {
                 "descriptor": {
-                    "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION - 1,
+                    "flow_version": stale_version,
                     "url": "https://target.test/old-register",
                     "roles": ["member"],
                 },
             },
             {
                 "descriptor": {
-                    "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+                    "flow_version": workflow_mod.REGISTRATION_FLOW_VERSION,
                     "url": "https://target.test/register",
                     "roles": ["member"],
                 },
@@ -7840,9 +7859,11 @@ def test_credential_registration_uses_durable_descriptor_before_inventory_hints(
         "target_id": "target-1",
         "url": "https://target.test/register",
         "roles": ("member",),
-        "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+        "flow_version": workflow_mod.REGISTRATION_FLOW_VERSION,
     }]
-    assert store.list_authentication_flows.call_args.kwargs == {"purpose": "registration"}
+    assert store.list_authentication_flows.call_args.kwargs == {
+        "purpose": "registration", "statuses": ("discovered", "validated"),
+    }
 
 
 def test_credential_provisioning_creates_one_task_per_missing_role_credential():
@@ -9245,6 +9266,7 @@ def test_executor_task_authentication_failure_follows_prompt_build_and_stops_exe
 
     monkeypatch.setattr(controller, "_build_task_prompt", build_prompt)
     monkeypatch.setattr(controller, "_run_authentication_agent", authenticate)
+    monkeypatch.setattr(controller, "_prepare_authentication_discovery", lambda _plan, item: item)
     monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda *_args: ["checkout_credential"])
     monkeypatch.setattr(
         workflow_mod,
@@ -15487,6 +15509,12 @@ def test_hypothesis_dependent_batches_cover_every_completed_hypothesis(monkeypat
         state_store=FakeState(plan, [hypothesis_task("hypothesis-1", "endpoint-1"), hypothesis_task("hypothesis-2", "endpoint-2")]),
         text_runner=lambda *_args: "{}",
     )
+    for producer in controller.state.tasks:
+        if producer.status == "done":
+            controller.state.patch_task(producer.task_uid, recovery_context_updates={
+                "hypothesis_output": {"artifact_ref": producer.evidence[0]},
+            })
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda *_args: SimpleNamespace())
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
     monkeypatch.setattr(
         controller,
@@ -15533,6 +15561,7 @@ def test_hypothesis_dependent_batches_record_gaps_and_use_covered_groups(monkeyp
         objective="Record a testable hypothesis",
         phase=2,
         status="done",
+        evidence=["artifact:artifacts/hypothesis-1.json"],
         acceptance=AcceptanceContract(
             mode="coverage",
             basis=AcceptanceBasis(
@@ -15555,6 +15584,12 @@ def test_hypothesis_dependent_batches_record_gaps_and_use_covered_groups(monkeyp
         state_store=FakeState(plan, [source]),
         text_runner=lambda *_args: "{}",
     )
+    for producer in controller.state.tasks:
+        if producer.status == "done":
+            controller.state.patch_task(producer.task_uid, recovery_context_updates={
+                "hypothesis_output": {"artifact_ref": producer.evidence[0]},
+            })
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda *_args: SimpleNamespace())
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
     monkeypatch.setattr(
         controller,
@@ -15781,6 +15816,12 @@ def test_hypothesis_inventory_binding_preserves_separate_manifest_item_ids(monke
     controller = MultiAgentWorkflowController(
         runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
     )
+    for producer in controller.state.tasks:
+        if producer.status == "done":
+            controller.state.patch_task(producer.task_uid, recovery_context_updates={
+                "hypothesis_output": {"artifact_ref": producer.evidence[0]},
+            })
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda *_args: SimpleNamespace())
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda value: value)
     monkeypatch.setattr(
         controller, "_load_controller_inventory_manifest",
@@ -17012,8 +17053,8 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
     builder_prompt = prompts_and_objects[1][0]
     creator_prompt = prompts_and_objects[4][0]
     phase_evaluator_prompt = prompts_and_objects[6][0]
-    assert "## Plan\nplan_overview[1]" in builder_prompt
-    assert "plan_phases[1]{id,title,status,criteria}:" in builder_prompt
+    assert "## Plan\n{" in builder_prompt
+    assert '"current_phase": 1' in builder_prompt
     assert "## Existing Tasks Across All Phases\ntask_phase_status_counts[1]" in creator_prompt
     assert "task_creation_relevant_tasks[1]" in creator_prompt
     assert "## Canonical task acceptance ledger\n[" in phase_evaluator_prompt
@@ -17122,7 +17163,7 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "Overlapping capabilities are allowed" in prompt
     assert "capability required by the task that supplied native tools do not provide" not in prompt
     assert "mandatory execution guardrail" in prompt
-    assert "plan_constraints[1]{constraint}:" in prompt
+    assert '"constraints": [' in prompt
     assert 'curl -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" <url>' in prompt
     assert "curl -sS -D - -o /dev/null <url>" in prompt
     assert "Do not rely on bare `curl -s <url>` as evidence" in prompt
@@ -19401,9 +19442,9 @@ def test_prompt_builder_context_includes_task_history():
     assert "preserve it as task-local durable context" in prompt
     assert "do not investigate or execute that follow-up work" in prompt
     assert "Python workflow will decide whether to create another task" not in prompt
-    assert "Worked" in prompt
-    assert "Blocked" in prompt
-    assert "requires credentials" in prompt
+    assert '"status_counts": {"active": 1, "blocked": 1, "done": 1}' in prompt
+    assert "Worked" not in prompt
+    assert "requires credentials" not in prompt
 
 
 def test_task_prompt_critic_approves_initial_draft():
@@ -21841,3 +21882,1694 @@ def test_provisioning_prompt_contains_structured_registration_binding_and_no_mem
     assert "`login_url` set to the controller-mapped `registration_url`" in builder
     assert "`login_url` parameter means the mapped `registration_url`" in critic
     assert "`record_authentication_flow.login_url` means the mapped `registration_url`" in revision
+
+
+@pytest.fixture
+def flow_discovery_case(tmp_path, monkeypatch):
+    from modules.tools import artifact as artifact_mod
+
+    task = Task("flow-review", "Map flow", "Map flow", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+        text_runner=lambda *_args: '{"approved": true, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]}',
+    )
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(artifact_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    path = tmp_path / "form.html"
+    path.write_text('<form><input name="username"><input name="password"></form>')
+    reference = f"artifact:{path}"
+    store = SimpleNamespace(upsert_authentication_flow=Mock(return_value={"flow_id": "approved-flow"}))
+    from modules.tools import authentication
+
+    store.get_tasks = lambda _operation: controller.state.tasks
+    store.get_plan = lambda _operation: replace(
+        _plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")],
+    )
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_TEST")
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    sinks = []
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="observe-form", tool_name="browser_get_page_html", success=True,
+        correctable=False, input_summary="assigned page", output_summary=reference, artifact_refs=(reference,),
+    )
+
+    def tool_factory(sink):
+        sinks.append(sink)
+        return [_tool("browser_goto_url")]
+
+    def actor(_role, _prompt, _tools, _system, _policy):
+        sinks[-1]({"target": "https://target.test", "login_url": "https://target.test/start", "kind": "browser_form"})
+        return workflow_mod.TaskExecutorCycleResult(text="mapped", outcomes=[outcome])
+
+    worker = Mock(side_effect=actor)
+    monkeypatch.setattr(controller, "_run_worker_agent", worker)
+    return controller, task, tool_factory, worker, store, reference
+
+
+def _shared_discovery_setup(task, **updates):
+    return workflow_mod.AuthenticationSetupRequest(**{
+        "task_uid": task.task_uid, "workstream": "test", "targets": ("https://target.test",),
+        "allowed_origins": ("https://target.test",),
+        "credentials": ({"credential_id": "opaque", "target": "https://target.test"},),
+        "discovery_endpoints": ({"role": "navigation", "url": "https://target.test/start", "method": "GET"},),
+        **updates,
+    })
+
+
+def _shared_flow(task, reference):
+    return {
+        "flow_id": "approved-flow", "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+        "kind": "browser_form", "login_url": "https://target.test/start", "validation_url": "",
+        "provenance": "observed_flow_discovery", "evidence_refs": [reference],
+        "discovery_review": {"operation_id": "OP_TEST", "task_uid": task.task_uid},
+    }
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_shared_discovery_reuses_success_or_failure_across_continuations(flow_discovery_case, monkeypatch, success):
+    controller, consumer, _factory, _worker, _store, reference = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+
+    def discover(_plan, child, setup, _target, _tools):
+        assert child.kind == "authentication_flow_discovery"
+        assert not setup.credentials
+        assert setup.task_uid == child.task_uid
+        return (_shared_flow(child, reference),) if success else ()
+
+    run = Mock(side_effect=discover)
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", run)
+    setup = _shared_discovery_setup(consumer)
+    first = controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    assert bool(first) == success
+    second_consumer = replace(consumer, task_uid="other-consumer")
+    controller.state.store_task(second_consumer)
+    resumed = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=controller.state,
+        text_runner=Mock(),
+    )
+    monkeypatch.setattr(resumed, "_authentication_attack_surface_context", lambda *_args: {})
+    monkeypatch.setattr(resumed, "_run_authentication_flow_discovery", run)
+    second = resumed._shared_authentication_flow_discovery(
+        _plan(), second_consumer, _shared_discovery_setup(second_consumer, credentials=()), "https://target.test", [],
+    )
+    assert second == first
+    assert run.call_count == 1
+    prerequisites = [task for task in controller.state.tasks if task.kind == "authentication_flow_discovery"]
+    assert len(prerequisites) == 1
+    child = prerequisites[0]
+    assert child.recovery_context["shared_discovery"]["consumers"] == [consumer.task_uid, second_consumer.task_uid]
+    assert child.status == ("done" if success else "partial_failure")
+    assert "opaque" not in json.dumps(child.recovery_context)
+    if success:
+        assert controller.state.acceptance_results[child.task_uid][0].status == "satisfied"
+    else:
+        updated = next(task for task in controller.state.tasks if task.task_uid == second_consumer.task_uid)
+        assert updated.recovery_context["authentication_discovery_gap"]["prerequisite_task_uid"] == child.task_uid
+        assert updated.evidence
+
+
+@pytest.mark.parametrize("change", ["input", "artifact", "missing", "reset", "model", "version", "schema", "contract"])
+def test_shared_discovery_retries_changed_inputs_or_explicit_reset(flow_discovery_case, monkeypatch, change):
+    controller, consumer, _factory, _worker, _store, reference = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    run = Mock(side_effect=lambda _plan, task, *_args: (
+        (_shared_flow(task, reference),) if change in {"artifact", "missing"} else ()
+    ))
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", run)
+    setup = _shared_discovery_setup(consumer)
+    controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    child = next(task for task in controller.state.tasks if task.kind == "authentication_flow_discovery")
+    tools = []
+    if change == "input":
+        setup = replace(setup, authentication_flow_hints=({"login_url": "https://target.test/changed"},))
+    elif change == "artifact":
+        Path(workflow_mod.resolve_operation_artifact_path(reference)).write_text("changed page")
+    elif change == "missing":
+        Path(workflow_mod.resolve_operation_artifact_path(reference)).unlink()
+    elif change == "reset":
+        controller.state.patch_task(child.task_uid, status="pending")
+    elif change == "model":
+        controller.runtime.config.model_id = "different-model"
+    elif change == "version":
+        monkeypatch.setattr(workflow_mod, "AUTHENTICATION_FLOW_VERSION", 999)
+    elif change == "contract":
+        monkeypatch.setattr(workflow_mod, "_FLOW_DISCOVERY_CONTRACT_REVISION", 999)
+    else:
+        tools = [_tool("browser_goto_url")]
+    controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", tools)
+    assert run.call_count == 2
+    children = [task for task in controller.state.tasks if task.kind == "authentication_flow_discovery"]
+    assert len(children) == (1 if change == "reset" else 2)
+    if change != "reset":
+        assert children[-1].recovery_context["shared_discovery"]["supersedes_prerequisite_uid"] == child.task_uid
+
+
+@pytest.mark.parametrize("failure", ["budget", "transient_exhausted"])
+def test_shared_discovery_interruption_and_terminal_failure(flow_discovery_case, monkeypatch, failure):
+    controller, consumer, _factory, _worker, _store, _reference = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    error = BudgetLimitReached("limit") if failure == "budget" else RuntimeError("provider retries exhausted")
+    run = Mock(side_effect=error)
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", run)
+    setup = _shared_discovery_setup(consumer)
+    if failure == "budget":
+        with pytest.raises(BudgetLimitReached):
+            controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+        child = next(task for task in controller.state.tasks if task.kind == "authentication_flow_discovery")
+        assert child.status == "active"
+        assert "authentication_discovery_gap" not in child.recovery_context
+        run.side_effect = None
+        run.return_value = ()
+    else:
+        controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    assert run.call_count == (2 if failure == "budget" else 1)
+
+
+def test_discovery_fingerprint_is_target_scoped_and_excludes_unrelated_inventory(flow_discovery_case, monkeypatch):
+    controller, consumer, _factory, _worker, _store, _reference = flow_discovery_case
+    context = {"endpoints": [
+        {"url": "https://target.test/start", "method": "GET", "status": 200},
+        {"url": "https://target.test/unrelated", "method": "GET", "status": 200},
+    ], "javascript": [{"url": "https://target.test/app.js", "source_ref": "artifact:manifest.json"}]}
+    manifest = {"items": [
+        {"value": "https://target.test/app.js", "attributes": {"technology": "client"}},
+        {"value": "https://target.test/unrelated", "attributes": {}},
+    ]}
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: context)
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", lambda *_args: (manifest, "unused"))
+    setup = _shared_discovery_setup(consumer)
+    first = controller._authentication_discovery_input(_plan(), consumer, setup, "https://TARGET.test:443/page", [])
+    context["endpoints"][1]["status"] = 404
+    manifest["items"][1]["attributes"]["irrelevant"] = "new observation"
+    assert first == controller._authentication_discovery_input(
+        _plan(), replace(consumer, task_uid="other"), replace(setup, workstream="other", credentials=()),
+        "https://target.test", [],
+    )
+    manifest["items"][0]["attributes"]["technology"] = "updated client"
+    assert first != controller._authentication_discovery_input(_plan(), consumer, setup, "https://target.test", [])
+    assert first != controller._authentication_discovery_input(_plan(), consumer, setup, "https://target.test:8443", [])
+
+
+def test_shared_approved_flow_lifecycle_and_artifact_gate(flow_discovery_case, monkeypatch):
+    controller, consumer, _factory, _worker, store, reference = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    records = []
+    store.list_authentication_flows = lambda *_args, **_kwargs: records
+
+    def discover(_plan, task, *_args):
+        flow = _shared_flow(task, reference)
+        records[:] = [{"flow_id": flow["flow_id"], "descriptor": flow}]
+        return (flow,)
+
+    run = Mock(side_effect=discover)
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", run)
+    setup = _shared_discovery_setup(consumer)
+    controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    assert controller._authentication_flow_descriptors(_plan(), consumer, setup.targets, statuses=("discovered",))
+    assert not controller._authentication_flow_descriptors(
+        _plan(), consumer, setup.targets, statuses=("discovered",), include_shared=False,
+    )
+    controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    assert run.call_count == 1
+    Path(workflow_mod.resolve_operation_artifact_path(reference)).write_text("changed observation")
+    assert not controller._authentication_flow_descriptors(_plan(), consumer, setup.targets, statuses=("discovered",))
+    controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    assert run.call_count == 2
+    records.clear()  # The database's eligible-status query no longer returns this flow.
+    controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    assert run.call_count == 3
+
+
+def test_discovery_prerequisite_runs_without_consumer_authentication(flow_discovery_case, monkeypatch):
+    controller, consumer, _factory, _worker, _store, _reference = flow_discovery_case
+    child = replace(consumer, kind="authentication_flow_discovery")
+    execute = Mock()
+    auth = Mock()
+    monkeypatch.setattr(controller, "_execute_authentication_discovery_prerequisite", execute)
+    monkeypatch.setattr(controller, "_run_authentication_agent", auth)
+    controller._run_task_in_trace(_plan(), _plan().phases[0], child)
+    execute.assert_called_once()
+    auth.assert_not_called()
+
+
+@pytest.mark.parametrize("approval", ["valid", "missing_digest", "changed", "foreign", "malformed"])
+def test_shared_discovery_resumes_persisted_approval(flow_discovery_case, monkeypatch, approval):
+    controller, consumer, _factory, _worker, store, reference = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    run = Mock(side_effect=lambda _plan, child, *_args: (_shared_flow(child, reference),))
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", run)
+    setup = _shared_discovery_setup(consumer)
+    flow = controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])[0]
+    child = next(task for task in controller.state.tasks if task.kind == "authentication_flow_discovery")
+    flow["discovery_review"]["approval_digests"] = child.recovery_context["shared_discovery"]["approval_digests"]
+    controller.state.patch_task(child.task_uid, status="active")
+    if approval == "missing_digest":
+        flow["discovery_review"].pop("approval_digests")
+    elif approval == "changed":
+        Path(workflow_mod.resolve_operation_artifact_path(reference)).write_text("changed page")
+    elif approval == "foreign":
+        flow["discovery_review"]["operation_id"] = "OP_PRIOR"
+    elif approval == "malformed":
+        flow["flow_version"] = -1
+    store.list_authentication_flows = lambda *_args, **_kwargs: [{"flow_id": flow["flow_id"], "descriptor": flow}]
+    result = controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    assert result
+    assert run.call_count == (1 if approval == "valid" else 2)
+
+
+def test_shared_discovery_rejects_foreign_approval(flow_discovery_case, monkeypatch):
+    controller, consumer, _factory, _worker, _store, reference = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", lambda *_args: (
+        _shared_flow(replace(consumer, task_uid="foreign-task"), reference),
+    ))
+    result = controller._shared_authentication_flow_discovery(
+        _plan(), consumer, _shared_discovery_setup(consumer), "https://target.test", [],
+    )
+    assert not result
+    assert next(task for task in controller.state.tasks if task.kind == "authentication_flow_discovery").status == "partial_failure"
+
+
+@pytest.mark.parametrize("retry", ["reset", "changed_inputs"])
+def test_shared_discovery_success_clears_current_gap_and_supersedes_obsolete_failure(flow_discovery_case, monkeypatch, retry):
+    controller, consumer, _factory, _worker, _store, reference = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    run = Mock(return_value=())
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", run)
+    setup = _shared_discovery_setup(consumer)
+    controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    failed = next(task for task in controller.state.tasks if task.kind == "authentication_flow_discovery")
+    assert next(task for task in controller.state.tasks if task.task_uid == consumer.task_uid).recovery_context[
+        "authentication_discovery_gap"
+    ]
+    if retry == "reset":
+        controller.state.patch_task(failed.task_uid, status="pending")
+    else:
+        setup = replace(setup, authentication_flow_hints=({"login_url": "https://target.test/start"},))
+    run.side_effect = lambda _plan, child, *_args: (_shared_flow(child, reference),)
+    result = controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    assert result
+    updated = next(task for task in controller.state.tasks if task.task_uid == consumer.task_uid)
+    assert updated.recovery_context["authentication_discovery_gap"] is None
+    child = next(task for task in controller.state.tasks
+                 if task.task_uid == updated.recovery_context["authentication_discovery_prerequisite_uid"])
+    assert child.recovery_context["authentication_discovery_gap"] is None
+    original = next(task for task in controller.state.tasks if task.task_uid == failed.task_uid)
+    assert original.status == ("done" if retry == "reset" else "replanned")
+    if retry == "changed_inputs":
+        assert original.evidence  # Historical gap diagnostics remain available for audit.
+
+
+def test_discovery_continuation_preserves_bound_tool_selection(flow_discovery_case, monkeypatch):
+    controller, consumer, _factory, _worker, _store, _reference = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    run = Mock(side_effect=BudgetLimitReached("interrupted"))
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", run)
+    with pytest.raises(BudgetLimitReached):
+        controller._shared_authentication_flow_discovery(
+            _plan(), consumer, _shared_discovery_setup(consumer), "https://target.test", [_tool("browser_goto_url")],
+        )
+    child = next(task for task in controller.state.tasks if task.kind == "authentication_flow_discovery")
+    run.side_effect = None
+    run.return_value = ()
+    controller._execute_authentication_discovery_prerequisite(
+        _plan(), child, [_tool("browser_goto_url"), _tool("http_request")],
+    )
+    assert [workflow_mod.get_tool_name(tool) for tool in run.call_args.args[-1]] == ["browser_goto_url"]
+
+
+@pytest.mark.parametrize("target,origin", [
+    ("https://TARGET.test:443/path", "https://target.test"),
+    ("http://[::1]:80/path", "http://[::1]"), ("http://target.test:bad", ""),
+    ("tcp://target.test:9000", ""), ("/workspace/src", ""), ("http://[invalid", ""),
+])
+def test_authentication_canonical_origin(target, origin):
+    assert MultiAgentWorkflowController._authentication_origin(target) == origin
+
+
+def _hypothesis_task(uid="producer", phase=1, status="done"):
+    return Task(
+        uid, "Hypotheses", "Develop safe tests", phase=phase, status=status,
+        acceptance=AcceptanceContract(mode="coverage", basis=AcceptanceBasis(
+            kind="snapshot", description="Frozen subject", source_refs=["artifact:form.html"],
+            snapshot_hash="subject-digest", item_ids=["subject"],
+        ), criteria=[AcceptanceCriterion(
+            id="future-tests", description="Develop testable hypotheses",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )]),
+    )
+
+
+def _publish_controller_hypotheses(controller, task):
+    from modules.tools.hypotheses import build_record_hypotheses_tool
+
+    def persist(binding):
+        controller.state.patch_task(task.task_uid, recovery_context_updates={
+            "hypothesis_output": binding, "hypothesis_operation_id": controller.runtime.operation_id,
+        })
+
+    tool = build_record_hypotheses_tool(task, controller.runtime.operation_id, workflow_mod._operation_output_root(), persist)
+    return json.loads(tool(subjects=[{
+        "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No safe probe in current scope",
+    }]))
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_hypothesis_repair_is_durable_and_preserves_historical_contract(flow_discovery_case, monkeypatch, valid):
+    controller, _consumer, _factory, _worker, _store, _reference = flow_discovery_case
+    original = _hypothesis_task()
+    controller.state.store_task(original)
+
+    def execute(_plan, _phase, repair):
+        if valid:
+            _publish_controller_hypotheses(controller, repair)
+        controller.state.patch_task(repair.task_uid, status="done" if valid else "partial_failure")
+
+    runner = Mock(side_effect=execute)
+    monkeypatch.setattr(controller, "_run_task", runner)
+    repair = controller._repair_hypothesis_producer(_plan(), _plan().phases[0], original)
+    repeated = controller._repair_hypothesis_producer(_plan(), _plan().phases[0], original)
+    assert repair.task_uid == repeated.task_uid
+    assert runner.call_count == 1
+    assert next(task for task in controller.state.tasks if task.task_uid == original.task_uid) == original
+    assert repair.acceptance.manifest_hash != original.acceptance.manifest_hash
+    assert any(req.kind == "hypothesis_set" for req in repair.acceptance.criteria[0].evidence_requirements)
+
+
+@pytest.mark.parametrize("case", ["valid", "foreign_snapshot", "failed_repair", "missing_producer"])
+def test_hypothesis_consumers_require_frozen_typed_outputs(flow_discovery_case, monkeypatch, case):
+    controller, _consumer, _factory, _worker, _store, _reference = flow_discovery_case
+    producer = _hypothesis_task()
+    controller.state.store_task(producer)
+    if case != "failed_repair":
+        binding = _publish_controller_hypotheses(controller, producer)
+    consumer = replace(_hypothesis_task("consumer", phase=2, status="active"), recovery_context={
+        "hypothesis_source_task_uids": ["missing" if case == "missing_producer" else producer.task_uid],
+        "hypothesis_source_artifact_refs": ["artifact:form.html"],
+    })
+    if case == "foreign_snapshot":
+        consumer = replace(consumer, acceptance=replace(consumer.acceptance, basis=replace(
+            consumer.acceptance.basis, snapshot_hash="different",
+        ), manifest_hash=""))
+    controller.state.store_task(consumer)
+    monkeypatch.setattr(controller, "_run_task", lambda _plan, _phase, task: controller.state.patch_task(
+        task.task_uid, status="partial_failure",
+    ))
+    result = controller._prepare_hypothesis_consumer(_plan(), consumer)
+    if case == "valid":
+        assert result.recovery_context["hypothesis_source_artifact_refs"] == [binding["artifact_ref"]]
+        index = result.recovery_context["hypothesis_index"][0]
+        assert index["item_id"] == "subject" and index["sha256"] == binding["sha256"]
+        assert index["hypothesis_ids"] == []
+        assert "hypothesis_subjects[1]" in controller._hypothesis_index_toon(result)
+        bindings = controller._hypothesis_consumer_bindings(result)
+        assert len(bindings) == 1
+        assert bindings[0][0] == binding["artifact_ref"]
+    else:
+        assert result is None
+        assert next(task for task in controller.state.tasks if task.task_uid == "consumer").status == "partial_failure"
+    assert controller._hypothesis_index_toon(None) == ""
+
+
+def test_hypothesis_bound_tools_and_direct_repair_dispatch(flow_discovery_case, monkeypatch):
+    controller, _consumer, _factory, _worker, _store, _reference = flow_discovery_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    tools = controller._resolve_task_executor_base_tools(_plan(), task, {"tools": []})
+    writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+    result = json.loads(writer(subjects=[{
+        "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No safe test",
+    }]))
+    updated = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
+    assert result["artifact_ref"] in updated.evidence
+    assert updated.recovery_context["hypothesis_output"]["sha256"] == result["sha256"]
+    consumer = replace(_hypothesis_task("consumer"), recovery_context={"hypothesis_source_task_uids": [task.task_uid]})
+    controller.state.patch_task(task.task_uid, status="done")
+    controller.state.store_task(consumer)
+    assert "read_hypotheses" in {
+        workflow_mod.get_tool_name(tool) for tool in controller._resolve_task_executor_base_tools(_plan(), consumer, {})
+    }
+    consumer = replace(consumer, recovery_context={
+        **consumer.recovery_context, "hypothesis_source_artifact_refs": [result["artifact_ref"]],
+    })
+    assert controller._task_evaluator_artifact_refs(consumer, []) == [result["artifact_ref"]]
+    assert consumer.evidence == []  # Review inputs do not become evidence that testing occurred.
+    legacy = _hypothesis_task("legacy", status="active")
+    controller.state.store_task(legacy)
+    repair = Mock()
+    monkeypatch.setattr(controller, "_repair_hypothesis_producer", repair)
+    controller._run_task_in_trace(_plan(), replace(_plan().phases[0], produces_hypotheses=True), legacy)
+    repair.assert_called_once()
+    assert next(item for item in controller.state.tasks if item.task_uid == "legacy").status == "replanned"
+
+
+def test_hypothesis_recovery_adapter_requires_bound_output(flow_discovery_case):
+    controller, _consumer, _factory, _worker, _store, reference = flow_discovery_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task())
+    controller.state.store_task(task)
+    assert not controller._recovery_evidence_satisfies_acceptance(task, [{"reference": reference}])
+    binding = _publish_controller_hypotheses(controller, task)
+    updated = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
+    assert controller._recovery_evidence_satisfies_acceptance(updated, [{"reference": binding["artifact_ref"]}])
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("reviews", [
+    [True], [False, True], [False, False, True], [False, False, False],
+])
+def test_flow_discovery_pairs_stop_on_approval_or_exhaustion(flow_discovery_case, monkeypatch, purpose, reviews):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    critic = Mock(side_effect=[
+        {"approved": approved, "feedback": [] if approved else ["Inspect the missing field"],
+         "supporting_evidence_refs": ["artifact:form.html"] if approved else []}
+        for approved in reviews
+    ])
+    monkeypatch.setattr(controller, "_run_json_text_agent", critic)
+    result = controller._run_flow_discovery_cycles(
+        task, "https://target.test", purpose, "Assigned mapping", factory, workflow_mod.AgentRunPolicy(),
+    )
+    assert worker.call_count == len(reviews)
+    assert critic.call_count == len(reviews)
+    assert bool(result) == reviews[-1]
+    if result:
+        store.upsert_authentication_flow.assert_called_once()
+        descriptor = store.upsert_authentication_flow.call_args.args[1]
+        assert descriptor["evidence_refs"] == ["artifact:form.html"]
+        assert descriptor["discovery_review"]["cycle"] == len(reviews)
+        assert store.upsert_authentication_flow.call_args.kwargs == {"status": "discovered"}
+    else:
+        store.upsert_authentication_flow.assert_not_called()
+        updated = controller.state.tasks[0]
+        assert updated.evidence
+        assert updated.recovery_context[f"{purpose}_discovery_gap"]["reason"] == "critic_rejected"
+    if len(reviews) > 1:
+        assert "Inspect the missing field" in worker.call_args_list[1].args[1]
+        assert "Reuse saved artifacts" in worker.call_args_list[1].args[1]
+    for call in critic.call_args_list:
+        assert call.args[0] == f"{purpose}_flow_discovery_critic"
+        assert call.kwargs["cycle_total"] == 3
+        tools = call.kwargs["tool_factory"]()
+        assert {workflow_mod.get_tool_name(item) for item in tools} == {"read_artifact", "search_artifact"}
+    events = controller.runtime.callback_handler.events
+    starts = [event for event in events if event.get("role") == f"{purpose}_flow_discovery_agent"
+              and event.get("status") == "started"]
+    assert [event["cycle"] for event in starts] == list(range(1, len(reviews) + 1))
+
+
+@pytest.mark.parametrize("value,expected", [(None, 3), (0, 1), (-2, 1), (1, 1), (5, 5)])
+def test_flow_discovery_cycle_configuration(value, expected):
+    runtime = _runtime(env_ints={} if value is None else {"CYBER_WORKFLOW_FLOW_DISCOVERY_CYCLES": value})
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()), text_runner=Mock(),
+    )
+    assert controller.flow_discovery_cycles == expected
+    controller.runtime.config_manager = None
+    assert controller._flow_discovery_cycle_count() == 3
+
+
+@pytest.mark.parametrize("failure", ["no_candidate", "no_artifact", "no_tools", "invalid_critic", "budget"])
+def test_flow_discovery_failure_never_persists_candidate(flow_discovery_case, monkeypatch, failure):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    if failure == "no_candidate":
+        worker.side_effect = None
+        worker.return_value = workflow_mod.TaskExecutorCycleResult("no usable flow", [])
+    if failure == "no_artifact":
+        monkeypatch.setattr(
+            workflow_mod, "resolve_operation_artifact_path", Mock(side_effect=ValueError("artifact unavailable")),
+        )
+    if failure == "no_tools":
+        factory = Mock(return_value=[])
+    if failure == "invalid_critic":
+        monkeypatch.setattr(controller, "_run_json_text_agent", Mock(side_effect=WorkflowInvariantError("bad JSON")))
+    if failure == "budget":
+        worker.side_effect = BudgetLimitReached("test budget")
+        with pytest.raises(BudgetLimitReached):
+            controller._run_flow_discovery_cycles(
+                task, "https://target.test", "authentication", "mapping", factory, workflow_mod.AgentRunPolicy(),
+            )
+    else:
+        assert not controller._run_flow_discovery_cycles(
+            task, "https://target.test", "authentication", "mapping", factory, workflow_mod.AgentRunPolicy(),
+        )
+        assert controller.state.tasks[0].evidence
+    store.upsert_authentication_flow.assert_not_called()
+
+
+def test_flow_discovery_critic_json_repairs_do_not_consume_actor_cycles(flow_discovery_case):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    controller.text_runner = Mock(side_effect=['not JSON', '{"approved": true, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]}'])
+    assert controller._run_flow_discovery_cycles(
+        task, "https://target.test", "authentication", "mapping", factory, workflow_mod.AgentRunPolicy(),
+    )
+    assert worker.call_count == 1
+    assert controller.text_runner.call_count == 2
+    store.upsert_authentication_flow.assert_called_once()
+
+
+def test_flow_discovery_navigation_rejects_unassigned_urls_and_submission_tools():
+    goto = Mock(return_value="observed")
+    goto.__name__ = "browser_goto_url"
+    goto.tool_spec = {"name": "browser_goto_url"}
+    tools = MultiAgentWorkflowController._flow_discovery_navigation_tools(
+        [goto, _tool("browser_perform_action"), _tool("browser_get_page_html")],
+        ("https://target.test/start",),
+    )
+    assert {workflow_mod.get_tool_name(item) for item in tools} == {"browser_goto_url", "browser_get_page_html"}
+    navigation = tools[0]
+    assert asyncio.run(navigation(url="https://target.test/start")) == "observed"
+    with pytest.raises(ValueError, match="assigned navigation"):
+        asyncio.run(navigation(url="https://target.test/protected"))
+    goto.assert_called_once()
+
+
+def test_registration_discovery_replaces_hints_and_reuses_mapping(flow_discovery_case, monkeypatch):
+    controller, _task, _factory, _worker, _store, reference = flow_discovery_case
+    tasks = controller._credential_provisioning_tasks(
+        1, "credential_provisioning", 2,
+        {"target": "https://target.test", "target_id": "target-1", "url": "https://target.test/register",
+         "roles": ("member",)}, {"member": 2},
+    )
+    tasks = [replace(task, status="active") for task in tasks]
+    for task in tasks:
+        controller.state.store_task(task)
+    mapped = {"target": "https://target.test", "url": "https://target.test/register", "roles": ["member"],
+              "required_fields": ["username", "password", "terms"], "evidence_refs": [reference],
+              "purpose": "registration", "kind": "browser_registration",
+              "login_url": "https://target.test/register", "flow_version": workflow_mod.REGISTRATION_FLOW_VERSION,
+              "discovery_review": {"operation_id": "OP_TEST", "purpose": "registration",
+                                   "task_uid": tasks[0].task_uid,
+                                   "approval_digests": {reference: hashlib.sha256(
+                                       Path(workflow_mod.resolve_operation_artifact_path(reference)).read_bytes()
+                                   ).hexdigest()}}}
+    loop = Mock(return_value=(mapped,))
+    monkeypatch.setattr(controller, "_run_flow_discovery_cycles", loop)
+    first = controller._prepare_registration_discovery(_plan(), tasks[0])
+    second = controller._prepare_registration_discovery(_plan(), tasks[1])
+    loop.assert_called_once()
+    assert first.recovery_context["conditional_phase"]["registration_flow"]["required_fields"] == mapped["required_fields"]
+    assert second.recovery_context["conditional_phase"]["registration_flow"]["evidence_refs"] == [reference]
+    assert "Do not submit a form" in loop.call_args.args[3]
+    tools = loop.call_args.args[4](Mock())
+    assert "checkout_credential" not in {workflow_mod.get_tool_name(item) for item in tools}
+
+
+def test_registration_discovery_failure_closes_task_with_gap(flow_discovery_case, monkeypatch):
+    controller, _task, _factory, _worker, store, _reference = flow_discovery_case
+    task = controller._credential_provisioning_tasks(
+        1, "credential_provisioning", 1,
+        {"target": "https://target.test", "target_id": "target-1", "url": "https://target.test/register",
+         "roles": ("member",)}, {"member": 1},
+    )[0]
+    controller.state.store_task(task)
+    assert controller._prepare_registration_discovery(_plan(), task) is None
+    updated = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
+    assert updated.status == "partial_failure"
+    store.upsert_authentication_flow.assert_not_called()
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+def test_real_discovery_recorders_pass_approved_mapping_to_credential_work(flow_discovery_case, monkeypatch, purpose):
+    from modules.tools import authentication
+
+    controller, task, _factory, worker, store, reference = flow_discovery_case
+    target = "https://target.test"
+    controller.state.store_task(replace(task, task_uid="active-consumer"))
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_TEST")
+    monkeypatch.setattr(authentication, "_active_task_target_values", lambda *_args: (task, {target}))
+    controller.runtime.optional_tools_list = [
+        _tool(name) for name in (
+            "browser_goto_url", "browser_get_page_html", "browser_perform_action", "checkout_credential", "http_request",
+        )
+    ]
+    binding = {"header_name": "X-Session", "storage_key": "session-key", "value_template": "{value}"}
+    from modules.handlers.tool_recovery import ToolOutcomeJournal
+
+    journal = ToolOutcomeJournal()
+    outcome = journal.append(
+        tool_use_id="map-form", tool_name="browser_get_page_html", success=True,
+        correctable=False, tool_input={}, output=f"HTML content saved to artifact: {reference.removeprefix('artifact:')}",
+    )
+
+    def actor(role, prompt, tools, _system, policy):
+        assert role == f"{purpose}_flow_discovery_agent"
+        assert "checkout_credential" not in {workflow_mod.get_tool_name(item) for item in tools}
+        assert "browser_perform_action" not in {workflow_mod.get_tool_name(item) for item in tools}
+        recorder = next(item for item in tools if workflow_mod.get_tool_name(item).startswith("record_"))
+        if purpose == "registration":
+            with pytest.raises(ValueError, match="assigned URL"):
+                recorder(login_url=f"{target}/other")
+            recorder(login_url=f"{target}/register", required_fields=["username", "password", "terms"])
+        else:
+            with pytest.raises(ValueError, match="protected validation"):
+                recorder(login_url=f"{target}/login", validation_url=f"{target}/protected")
+            with pytest.raises(ValueError, match="controller metadata"):
+                recorder(login_url=f"{target}/login", authorization_storage_key="invented-key")
+            recorder(login_url=f"{target}/login", storage_header_bindings=[binding])
+        store.upsert_authentication_flow.assert_not_called()
+        assert policy.max_model_turns == 32
+        return workflow_mod.TaskExecutorCycleResult("observed", [outcome])
+
+    worker.side_effect = actor
+    if purpose == "authentication":
+        setup = workflow_mod.AuthenticationSetupRequest(
+            task_uid=task.task_uid, workstream="authenticated_credential_coverage", targets=(target,),
+            allowed_origins=(target,), credentials=(),
+            authentication_flow_hints=({"kind": "browser_form", "login_url": f"{target}/login"},),
+            discovery_endpoints=({"role": "navigation", "url": f"{target}/login"},),
+            client_storage_header_bindings=(binding,),
+        )
+        result = controller._run_authentication_flow_discovery(
+            _plan(), task, setup, target, controller.runtime.optional_tools_list,
+        )
+        assert result[0]["validation_url"] == ""
+        assert result[0]["storage_header_bindings"] == [binding]
+    else:
+        registration_task = controller._credential_provisioning_tasks(
+            1, "credential_provisioning", 1,
+            {"target": target, "target_id": "target-1", "url": f"{target}/register", "roles": ("member",)},
+            {"member": 1},
+        )[0]
+        registration_task = replace(registration_task, status="active")
+        controller.state.store_task(registration_task)
+        result = controller._prepare_registration_discovery(_plan(), registration_task)
+        assert result.recovery_context["conditional_phase"]["registration_flow"]["required_fields"] == [
+            "password", "terms", "username",
+        ]
+    assert store.upsert_authentication_flow.call_count == 1
+    assert store.upsert_authentication_flow.call_args.args[1]["provenance"] == "observed_flow_discovery"
+
+
+@pytest.mark.parametrize("status", ["discovered", "validated"])
+@pytest.mark.parametrize("review_operation", [None, "OP_OLD", "OP_TEST"])
+@pytest.mark.parametrize("version", [workflow_mod.AUTHENTICATION_FLOW_VERSION, workflow_mod.AUTHENTICATION_FLOW_VERSION - 1])
+def test_stored_flow_requires_current_operation_review_before_execution(
+    flow_discovery_case, monkeypatch, status, review_operation, version,
+):
+    controller, task, _factory, _worker, store, _reference = flow_discovery_case
+    descriptor = {
+        "flow_id": "stored-flow", "kind": "browser_form", "flow_version": version,
+        "provenance": "observed_flow_discovery", "login_url": "https://target.test/login", "validation_url": "",
+        "discovery_review": {} if review_operation is None else {"operation_id": review_operation},
+    }
+    if status == "validated":
+        descriptor["validation_url"] = "https://target.test/account"
+    store.list_authentication_flows = Mock(return_value=[{"status": status, "descriptor": descriptor}])
+    flows = controller._authentication_flow_descriptors(
+        _plan(), task, ("https://target.test",), statuses=(status,),
+    )
+    assert bool(flows) == (review_operation == "OP_TEST" and version == workflow_mod.AUTHENTICATION_FLOW_VERSION)
+
+
+def test_discovery_treats_previous_operation_mapping_as_advisory(flow_discovery_case, monkeypatch):
+    controller, task, _factory, _worker, store, _reference = flow_discovery_case
+    descriptor = {
+        "target": "https://target.test", "kind": "browser_form", "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+        "provenance": "observed_flow_discovery", "login_url": "https://target.test/login", "validation_url": "",
+    }
+    store.list_authentication_flows = Mock(return_value=[
+        {"descriptor": {"kind": "invalid"}},
+        {"descriptor": descriptor, "discovered_operation_id": "OP_OLD"},
+    ])
+    loop = Mock(return_value=())
+    monkeypatch.setattr(controller, "_run_flow_discovery_cycles", loop)
+    setup = workflow_mod.AuthenticationSetupRequest(
+        task_uid=task.task_uid, workstream="authenticated_credential_coverage", targets=("https://target.test",),
+        allowed_origins=("https://target.test",), credentials=(),
+    )
+    controller._run_authentication_flow_discovery(
+        _plan(), task, setup, "https://target.test", [_tool("browser_goto_url")],
+    )
+    prompt = loop.call_args.args[3]
+    assert "OP_OLD" in prompt
+    assert "advisory only" in prompt
+    assert "navigation,https://target.test/login" in prompt
+    store.upsert_authentication_flow.assert_not_called()
+
+
+def test_registration_discovery_rejects_incomplete_assignment(flow_discovery_case):
+    controller, task, _factory, worker, store, _reference = flow_discovery_case
+    task = replace(task, recovery_context={"conditional_phase": {"kind": "credential_provisioning"}})
+    controller.state.store_task(task)
+    assert controller._prepare_registration_discovery(_plan(), task) is None
+    assert controller.state.tasks[0].status == "partial_failure"
+    assert controller.state.tasks[0].evidence
+    worker.assert_not_called()
+    store.upsert_authentication_flow.assert_not_called()
+
+
+def test_registration_discovery_runs_before_prompt_building(flow_discovery_case, monkeypatch):
+    controller, task, _factory, _worker, _store, _reference = flow_discovery_case
+    task = replace(task, recovery_context={"conditional_phase": {"kind": "credential_provisioning"}})
+    controller.state.store_task(task)
+    discovery = Mock(return_value=None)
+    builder = Mock()
+    monkeypatch.setattr(controller, "_run_controller_inventory_synthesis", lambda *_args: False)
+    monkeypatch.setattr(controller, "_run_controller_web_baseline", lambda *_args: False)
+    monkeypatch.setattr(controller, "_run_controller_web_authenticated_coverage", lambda *_args: False)
+    monkeypatch.setattr(controller, "_task_inventory_route_feedback", lambda *_args: [])
+    monkeypatch.setattr(controller, "_prepare_registration_discovery", discovery)
+    monkeypatch.setattr(controller, "_build_task_prompt", builder)
+    controller._run_task_in_trace(_plan(), _plan().phases[0], task)
+    discovery.assert_called_once_with(_plan(), task)
+    builder.assert_not_called()
+
+
+@pytest.mark.parametrize("target,login_path", [
+    ("http://192.168.253.101:3001", "/userlogin"),
+    ("https://target.test", "/signin"),
+    ("https://target.test", "/auth/entry?return=%2Fdashboard"),
+])
+@pytest.mark.parametrize("version", [6, 7])
+def test_authentication_discovery_can_navigate_new_login_route_after_version_bump(
+    flow_discovery_case, monkeypatch, target, login_path, version,
+):
+    controller, task, _factory, _worker, store, _reference = flow_discovery_case
+    store.get_plan = lambda _operation: replace(
+        _plan(), targets=[OperationTarget(target_id="target-1", value=target, type="network")],
+    )
+    login_url = f"{target}{login_path}"
+    store.list_authentication_flows = Mock(return_value=[{
+        "descriptor": {
+            "kind": "browser_form", "flow_version": version, "login_url": login_url,
+            "provenance": "observed_flow_discovery", "validation_url": "",
+        },
+        "discovered_operation_id": "OP_OLD",
+    }])
+    setup = workflow_mod.AuthenticationSetupRequest(
+        task_uid=task.task_uid, workstream="authenticated_credential_coverage", targets=(target,),
+        allowed_origins=(target,), credentials=(),
+        discovery_endpoints=(
+            {"role": "navigation", "url": target},
+            {"role": "validation_candidate", "url": f"{target}/api/profile"},
+        ),
+    )
+    loop = Mock(return_value=())
+    monkeypatch.setattr(controller, "_run_flow_discovery_cycles", loop)
+    goto = Mock(return_value="observed login form")
+    goto.__name__ = "browser_goto_url"
+    goto.tool_spec = {"name": "browser_goto_url"}
+    controller._run_authentication_flow_discovery(_plan(), task, setup, target, [goto])
+    tools = loop.call_args.args[4](Mock())
+    navigation = next(item for item in tools if workflow_mod.get_tool_name(item) == "browser_goto_url")
+    assert asyncio.run(navigation(url=login_url)) == "observed login form"
+    goto.assert_called_once_with(login_url)
+    for candidate in (f"{target}/api/profile", f"{target}/api/profile?probe=1#fragment"):
+        with pytest.raises(ValueError, match="protected validation candidate"):
+            asyncio.run(navigation(url=candidate))
+    with pytest.raises(ValueError, match="assigned target origin"):
+        asyncio.run(navigation(url="https://unrelated.test/login"))
+    goto.assert_called_once()
+    assert "starting points, not an exhaustive list" in loop.call_args.args[3]
+    assert f'"flow_version": {version}' in loop.call_args.args[3]
+    assert '"advisory_only": true' in loop.call_args.args[3]
+    assert f"navigation,{login_url.split('?')[0]}" in loop.call_args.args[3]
+    store.upsert_authentication_flow.assert_not_called()
+
+
+@pytest.mark.parametrize("url", [
+    "http://target.test/login", "https://target.test:8443/login", "https://other.test/login",
+    "file:///tmp/login.html", "javascript:alert(1)", "https://target.test:invalid/login",
+])
+def test_authentication_discovery_navigation_rejects_outside_origins_and_invalid_urls(url):
+    goto = Mock()
+    goto.__name__ = "browser_goto_url"
+    goto.tool_spec = {"name": "browser_goto_url"}
+    navigation = MultiAgentWorkflowController._flow_discovery_navigation_tools(
+        [goto], ("https://target.test",), allow_same_origin=True,
+    )[0]
+    with pytest.raises(ValueError, match="assigned target origin"):
+        asyncio.run(navigation(url=url))
+    goto.assert_not_called()
+
+
+def test_authentication_discovery_navigation_handles_async_browser_tools():
+    goto = AsyncMock(return_value="observed")
+    goto.__name__ = "browser_goto_url"
+    goto.tool_spec = {"name": "browser_goto_url"}
+    navigation = MultiAgentWorkflowController._flow_discovery_navigation_tools(
+        [goto], ("https://target.test",), allow_same_origin=True,
+    )[0]
+    assert asyncio.run(navigation(url="https://target.test/new-login")) == "observed"
+    goto.assert_awaited_once_with("https://target.test/new-login")
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("stage", ["actor", "critic"])
+def test_flow_discovery_transient_stage_retry_preserves_semantic_cycle(
+    flow_discovery_case, monkeypatch, purpose, stage,
+):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    original_actor = worker.side_effect
+
+    def actor(*args):
+        result = original_actor(*args)
+        if stage == "actor" and worker.call_count == 1:
+            raise TimeoutError("temporary transport failure")
+        return result
+
+    worker.side_effect = actor
+    approved = {"approved": True, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]}
+    critic = Mock(side_effect=[TimeoutError("temporary transport failure"), approved] if stage == "critic" else [approved])
+    monkeypatch.setattr(controller, "_run_json_text_agent", critic)
+    assert controller._run_flow_discovery_cycles(
+        task, "https://target.test", purpose, "Map", factory, workflow_mod.AgentRunPolicy(),
+    )
+    assert worker.call_count == (2 if stage == "actor" else 1)
+    assert critic.call_count == (2 if stage == "critic" else 1)
+    store.upsert_authentication_flow.assert_called_once()
+    descriptor = store.upsert_authentication_flow.call_args.args[1]
+    assert descriptor["discovery_review"]["cycle"] == 1
+    assert descriptor["evidence_refs"] == ["artifact:form.html"]
+    retries = [event for event in controller.runtime.callback_handler.events
+               if event.get("type") == "flow_discovery_retry"]
+    assert len(retries) == 1
+    assert retries[0]["stage"] == stage
+    assert retries[0]["attempt"] == 2
+    assert retries[0]["cycle"] == 1
+    assert retries[0]["error_type"] == "TimeoutError"
+    if stage == "critic":
+        assert critic.call_args_list[0].args[1] == critic.call_args_list[1].args[1]
+        first_tools = critic.call_args_list[0].kwargs["tool_factory"]()
+        second_tools = critic.call_args_list[1].kwargs["tool_factory"]()
+        assert first_tools[0] is not second_tools[0]
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("stage", ["actor", "critic"])
+@pytest.mark.parametrize("error,attempts", [
+    (TimeoutError("temporary"), 2), (ConnectionError("temporary"), 2),
+    (ValueError("bad scope"), 1), (WorkflowInvariantError("invalid JSON"), 1),
+    (RuntimeError("503 in prose is not a status"), 1), (BudgetLimitReached("budget"), 1),
+])
+def test_flow_discovery_stage_failure_is_bounded(flow_discovery_case, monkeypatch, purpose, stage, error, attempts):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    critic = Mock(return_value={"approved": True, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]})
+    failing = worker if stage == "actor" else critic
+    failing.side_effect = error
+    monkeypatch.setattr(controller, "_run_json_text_agent", critic)
+    if isinstance(error, BudgetLimitReached):
+        with pytest.raises(BudgetLimitReached):
+            controller._run_flow_discovery_cycles(
+                task, "https://target.test", purpose, "Map", factory, workflow_mod.AgentRunPolicy(),
+            )
+        assert not controller.state.tasks[0].evidence
+    else:
+        assert not controller._run_flow_discovery_cycles(
+            task, "https://target.test", purpose, "Map", factory, workflow_mod.AgentRunPolicy(),
+        )
+        gap = controller.state.tasks[0].recovery_context[f"{purpose}_discovery_gap"]
+        assert type(error).__name__ in gap["feedback"][0]
+        assert "temporary" not in gap["feedback"][0]
+    assert failing.call_count == attempts
+    store.upsert_authentication_flow.assert_not_called()
+
+
+@pytest.mark.parametrize("error,expected", [
+    (httpx.ReadTimeout("read timeout"), True),
+    (httpx.ConnectError("connection"), True),
+    (httpx.RemoteProtocolError("transport"), True),
+    (httpx.UnsupportedProtocol("bad URL"), False),
+    (PermissionError("permissions"), False),
+])
+def test_flow_discovery_transport_error_classification(error, expected):
+    assert MultiAgentWorkflowController._flow_discovery_error_is_transient(error) is expected
+
+
+@pytest.mark.parametrize("status,expected", [(429, True), (503, True), (401, False), (500, False), ("503", False)])
+@pytest.mark.parametrize("in_response", [True, False])
+def test_flow_discovery_http_error_classification(status, expected, in_response):
+    error = RuntimeError("message does not determine retry policy")
+    if in_response:
+        error.response = SimpleNamespace(status_code=status)
+    else:
+        error.status_code = status
+    assert MultiAgentWorkflowController._flow_discovery_error_is_transient(error) is expected
+
+
+@pytest.mark.parametrize("error", [ValueError("scope"), WorkflowInvariantError("configuration"),
+                                   PermissionError("permissions"), BudgetLimitReached("budget")])
+def test_flow_discovery_permanent_error_cannot_be_made_retryable_by_status(error):
+    error.status_code = 503
+    assert not MultiAgentWorkflowController._flow_discovery_error_is_transient(error)
+
+
+def test_flow_discovery_does_not_retry_persistence_errors(flow_discovery_case):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    store.upsert_authentication_flow.side_effect = TimeoutError("ambiguous write outcome")
+    assert not controller._run_flow_discovery_cycles(
+        task, "https://target.test", "authentication", "Map", factory, workflow_mod.AgentRunPolicy(),
+    )
+    worker.assert_called_once()
+    store.upsert_authentication_flow.assert_called_once()
+    assert "flow_discovery_persistence" in controller.state.tasks[0].recovery_context[
+        "authentication_discovery_gap"
+    ]["feedback"][0]
+    assert not any(event.get("type") == "flow_discovery_retry" for event in controller.runtime.callback_handler.events)
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("tool_name,success", [
+    ("read_artifact", True), ("search_artifact", True), ("record_authentication_flow", True),
+    ("memory_retrieve", True), ("browser_get_page_html", False),
+])
+def test_flow_discovery_advisory_evidence_cannot_replace_observation(
+    flow_discovery_case, monkeypatch, purpose, tool_name, success,
+):
+    controller, task, factory, worker, store, reference = flow_discovery_case
+    task = replace(task, evidence=[reference], acceptance=replace(
+        task.acceptance, manifest_hash="", basis=AcceptanceBasis(
+            kind="snapshot", description="Existing advisory artifact", source_refs=(reference,),
+        ),
+    ))
+    controller.state.store_task(task)
+    original_actor = worker.side_effect
+
+    def actor(*args):
+        result = original_actor(*args)
+        return replace(result, outcomes=[replace(result.outcomes[0], tool_name=tool_name, success=success)])
+
+    worker.side_effect = actor
+    critic = Mock()
+    monkeypatch.setattr(controller, "_run_json_text_agent", critic)
+    assert not controller._run_flow_discovery_cycles(
+        task, "https://target.test", purpose, "Map", factory, workflow_mod.AgentRunPolicy(),
+    )
+    assert worker.call_count == 3
+    critic.assert_not_called()
+    store.upsert_authentication_flow.assert_not_called()
+
+
+def test_flow_discovery_reuses_only_completed_observations_between_cycles(flow_discovery_case, monkeypatch, tmp_path):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    advisory = tmp_path / "advisory.html"
+    advisory.write_text("prior observation")
+    task = replace(task, evidence=[f"artifact:{advisory}"])
+    controller.state.store_task(task)
+    original_actor = worker.side_effect
+
+    def actor(*args):
+        result = original_actor(*args)
+        return result if worker.call_count == 1 else replace(result, outcomes=[])
+
+    worker.side_effect = actor
+    critic = Mock(side_effect=[{"approved": False, "feedback": ["Correct fields"]},
+                               {"approved": True, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]}])
+    monkeypatch.setattr(controller, "_run_json_text_agent", critic)
+    assert controller._run_flow_discovery_cycles(
+        task, "https://target.test", "authentication", "Map", factory, workflow_mod.AgentRunPolicy(),
+    )
+    descriptor = store.upsert_authentication_flow.call_args.args[1]
+    assert descriptor["evidence_refs"] == ["artifact:form.html"]
+    tools = critic.call_args.kwargs["tool_factory"]()
+    reader = tools[0]
+    assert "username" in reader(path="artifact:form.html")
+    with pytest.raises(RuntimeError, match="ARTIFACT_READ_POLICY_VIOLATION"):
+        reader(path=f"artifact:{advisory}")
+
+
+def test_flow_discovery_rejects_outside_operation_and_missing_artifacts(flow_discovery_case, tmp_path):
+    controller, _task, _factory, worker, _store, _reference = flow_discovery_case
+    outside = tmp_path.parent / "outside-discovery.html"
+    outside.write_text("outside operation")
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="observe", tool_name="http_request", success=True, correctable=False,
+        input_summary="target", output_summary="saved HTML",
+        artifact_refs=(f"artifact:{outside}", "artifact:missing.html", "artifact:form.html", "artifact:form.html"),
+    )
+    assert controller._flow_discovery_observation_refs([outcome]) == ["artifact:form.html"]
+    worker.assert_not_called()
+
+
+def test_legacy_registration_mapping_remains_advisory_for_discovery(flow_discovery_case, monkeypatch):
+    controller, _task, _factory, _worker, store, _reference = flow_discovery_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", "https://target.test", "network")])
+    legacy = {"flow_version": 1, "url": "https://target.test/register", "roles": ["member"]}
+    store.list_authentication_flows = Mock(return_value=[{
+        "descriptor": legacy, "discovered_operation_id": "OP_OLD",
+    }])
+    flows = controller._credential_registration_flows(plan, "registration", inventory_phase_ids=set())
+    assert flows[0]["advisory_only"] is True
+    tasks = controller._credential_provisioning_tasks(1, "credential_provisioning", 1, flows[0], {"member": 1})
+    task = tasks[0]
+    controller.state.store_task(task)
+    mapped = {"flow_version": workflow_mod.REGISTRATION_FLOW_VERSION, "login_url": legacy["url"]}
+    loop = Mock(return_value=(mapped,))
+    monkeypatch.setattr(controller, "_run_flow_discovery_cycles", loop)
+    reviewed = controller._prepare_registration_discovery(plan, task)
+    assert "OP_OLD" in loop.call_args.args[3]
+    assert '"advisory_only": true' in loop.call_args.args[3]
+    assert "advisory_only" not in reviewed.recovery_context["conditional_phase"]["registration_flow"]
+    assert reviewed.recovery_context["conditional_phase"]["registration_flow"]["flow_version"] == 2
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("failure", [None, TimeoutError, RuntimeError, BudgetLimitReached])
+def test_discovery_actor_artifact_synthesis_preserves_candidate_and_never_reruns_actor(
+    flow_discovery_case, purpose, failure,
+):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    original = worker.side_effect
+
+    def actor(*args):
+        result = original(*args)
+        result.artifact_limit_exhausted = True
+        result.artifact_limit_events = ({"tool": "search_artifact", "scope": "total", "used": 4, "allowed": 4},)
+        return result
+
+    worker.side_effect = actor
+    replies = [] if failure is None else [failure("temporary")]
+    replies.append("Synthesize observed map")
+    controller.text_runner = Mock(side_effect=[*replies, '{"approved": true, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]}'])
+    if failure is BudgetLimitReached:
+        with pytest.raises(BudgetLimitReached):
+            controller._run_flow_discovery_cycles(
+                task, "https://target.test", purpose, "Assigned", factory, workflow_mod.AgentRunPolicy(),
+            )
+        store.upsert_authentication_flow.assert_not_called()
+    else:
+        result = controller._run_flow_discovery_cycles(
+            task, "https://target.test", purpose, "Assigned", factory, workflow_mod.AgentRunPolicy(),
+        )
+        assert bool(result) == (failure is not RuntimeError)
+        if result:
+            assert result[0]["evidence_refs"] == ["artifact:form.html"]
+    assert worker.call_count == 1
+    assert controller.text_runner.call_args_list[0].args[2] == []
+    assert "Staged candidates" in controller.text_runner.call_args_list[0].args[1]
+    assert "browser_get_page_html" in controller.text_runner.call_args_list[0].args[1]
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("transport", [False, True])
+def test_discovery_critic_artifact_synthesis_keeps_tools_closed_through_retry_and_json_repair(
+    flow_discovery_case, purpose, transport,
+):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    error = workflow_mod.EvaluatorArtifactReadLimitExceeded("limit", [])
+    responses = [error]
+    if transport:
+        responses.append(TimeoutError("temporary"))
+    responses.extend(["bad JSON", '{"approved": true, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]}'])
+    controller.text_runner = Mock(side_effect=responses)
+    result = controller._run_flow_discovery_cycles(
+        task, "https://target.test", purpose, "Assigned", factory, workflow_mod.AgentRunPolicy(),
+    )
+    assert result
+    assert worker.call_count == 1
+    assert len(controller.text_runner.call_args_list[0].args[2]) == 2
+    assert all(call.args[2] == [] for call in controller.text_runner.call_args_list[1:])
+    store.upsert_authentication_flow.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", [TimeoutError, RuntimeError, BudgetLimitReached])
+def test_discovery_critic_synthesis_failure_does_not_reopen_tools(flow_discovery_case, failure):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    controller.text_runner = Mock(side_effect=[
+        workflow_mod.EvaluatorArtifactReadLimitExceeded("limit"), failure("failed"), failure("failed"),
+    ])
+    if failure is BudgetLimitReached:
+        with pytest.raises(BudgetLimitReached):
+            controller._run_flow_discovery_cycles(
+                task, "https://target.test", "authentication", "Assigned", factory, workflow_mod.AgentRunPolicy(),
+            )
+    else:
+        assert not controller._run_flow_discovery_cycles(
+            task, "https://target.test", "authentication", "Assigned", factory, workflow_mod.AgentRunPolicy(),
+        )
+    assert worker.call_count == 1
+    assert all(call.args[2] == [] for call in controller.text_runner.call_args_list[1:])
+    store.upsert_authentication_flow.assert_not_called()
+
+
+@pytest.mark.parametrize("missing", ["candidate", "observation"])
+def test_discovery_actor_synthesis_cannot_replace_missing_mapping_or_observation(flow_discovery_case, missing):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    original = worker.side_effect
+
+    def actor(*args):
+        if missing == "candidate":
+            result = workflow_mod.TaskExecutorCycleResult(text="", outcomes=[])
+        else:
+            result = original(*args)
+            result.outcomes = []
+        result.artifact_limit_exhausted = True
+        return result
+
+    worker.side_effect = actor
+    controller.text_runner = Mock(return_value="Invented map in synthesis prose")
+    assert not controller._run_flow_discovery_cycles(
+        task, "https://target.test", "authentication", "Assigned", factory, workflow_mod.AgentRunPolicy(),
+    )
+    assert worker.call_count == 3
+    assert all(call.args[2] == [] for call in controller.text_runner.call_args_list)
+    store.upsert_authentication_flow.assert_not_called()
+
+
+def test_discovery_critic_synthesis_exhausts_json_repair_without_reopening_tools(flow_discovery_case):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    controller.text_runner = Mock(side_effect=[
+        workflow_mod.EvaluatorArtifactReadLimitExceeded("limit"), *(["bad JSON"] * 10),
+    ])
+    assert not controller._run_flow_discovery_cycles(
+        task, "https://target.test", "registration", "Assigned", factory, workflow_mod.AgentRunPolicy(),
+    )
+    assert worker.call_count == 1
+    assert all(call.args[2] == [] for call in controller.text_runner.call_args_list[1:])
+    store.upsert_authentication_flow.assert_not_called()
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_default_discovery_runner_carries_returned_evidence_on_artifact_hard_stop(
+    flow_discovery_case, monkeypatch, structured,
+):
+    controller, _task, _factory, _worker, _store, _reference = flow_discovery_case
+    outcomes = [workflow_mod.ToolOutcome(
+        sequence=1, tool_use_id="read", tool_name="search_artifact", success=True,
+        correctable=False, input_summary="evidence", output_summary="observed input name=username",
+    )]
+    limits = [{"tool": "search_artifact", "scope": "total", "used": 4, "allowed": 4}]
+    agent = Mock()
+    agent._cyber_evaluator_artifact_read_limit_hook = SimpleNamespace(exhausted=True, limit_events=limits)
+    agent._cyber_callback_handler = SimpleNamespace(tool_outcome_journal=SimpleNamespace(entries=lambda: outcomes))
+    agent.return_value = SimpleNamespace(structured_output={"approved": True, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]})
+    monkeypatch.setattr(workflow_mod, "create_agent", Mock(return_value=agent))
+    with pytest.raises(workflow_mod.EvaluatorArtifactReadLimitExceeded) as caught:
+        if structured:
+            workflow_mod.default_structured_runner(controller.runtime)(
+                "authentication_flow_discovery_critic", "prompt", [], "system",
+                workflow_mod.WORKFLOW_OUTPUT_MODELS["authentication_flow_discovery_critic"],
+            )
+        else:
+            workflow_mod.default_text_runner(controller.runtime)(
+                "authentication_flow_discovery_critic", "prompt", [], "system",
+            )
+    assert caught.value.outcomes == outcomes
+    assert caught.value.limit_events == tuple(limits)
+    agent.cleanup.assert_called_once()
+
+
+def test_damaged_continuation_plan_does_not_trigger_plan_creation(monkeypatch):
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    state = FakeState(None)
+    monkeypatch.setattr(state, "get_plan", Mock(side_effect=StoredWorkflowDataError(
+        "plans", "OP_TEST", "OP_TEST", "plan_data"
+    )))
+    runner = Mock(side_effect=AssertionError("A damaged plan must not be replaced by the LLM"))
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+        text_runner=runner,
+    )
+    with pytest.raises(StoredWorkflowDataError):
+        controller._ensure_plan()
+    runner.assert_not_called()
+
+
+@pytest.mark.parametrize("outcome", ["success", "gap", "exception", "budget", "activation_error"])
+def test_shared_discovery_uses_real_state_transitions(flow_discovery_case, monkeypatch, outcome):
+    controller, consumer, _factory, _worker, _database, reference = flow_discovery_case
+    client = controller.state
+    monkeypatch.setattr(WorkflowStateStore, "client", property(lambda _store: client))
+    state = WorkflowStateStore("OP_TEST")
+    monkeypatch.setattr(state, "record_task_acceptance", client.record_task_acceptance)
+    controller.state = state
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    calls = []
+
+    def discover(_plan, child, *_args):
+        calls.append(child.task_uid)
+        assert state.list_tasks(status=["active"])[-1].kind == "authentication_flow_discovery"
+        if outcome in {"exception", "budget"}:
+            raise BudgetLimitReached("interrupted") if outcome == "budget" else RuntimeError("controller failure")
+        return (_shared_flow(child, reference),) if outcome == "success" else ()
+
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", discover)
+    if outcome == "activation_error":
+        monkeypatch.setattr(state, "activate_task", Mock(side_effect=RuntimeError("activation failed")))
+    setup = _shared_discovery_setup(consumer)
+    if outcome == "budget":
+        with pytest.raises(BudgetLimitReached):
+            controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+        child = next(item for item in state.list_tasks() if item.kind == "authentication_flow_discovery")
+        assert child.status == "active"
+        monkeypatch.setattr(controller, "_run_authentication_flow_discovery",
+                            lambda _plan, task, *_args: (_shared_flow(task, reference),))
+    result = controller._shared_authentication_flow_discovery(_plan(), consumer, setup, "https://target.test", [])
+    child = next(item for item in state.list_tasks() if item.kind == "authentication_flow_discovery")
+    assert child.status == ("done" if outcome in {"success", "budget"} else "partial_failure")
+    assert bool(result) == (outcome in {"success", "budget"})
+    second = replace(consumer, task_uid="consumer-two")
+    state.store_task(second)
+    controller._shared_authentication_flow_discovery(_plan(), second, replace(setup, task_uid=second.task_uid),
+                                                   "https://target.test", [])
+    assert len(calls) == (0 if outcome == "activation_error" else 1)
+    if outcome in {"gap", "exception"}:
+        changed = replace(setup, authentication_flow_hints=({"login_url": "https://target.test/changed"},))
+        controller._shared_authentication_flow_discovery(_plan(), consumer, changed, "https://target.test", [])
+        assert next(item for item in state.list_tasks() if item.task_uid == child.task_uid).status == "replanned"
+
+
+@pytest.mark.parametrize("outcome", ["success", "gap", "missing_credentials", "reused", "known_flow", "exception",
+                                    "budget", "not_required"])
+def test_observation_discovery_preflight_never_submits_credentials(flow_discovery_case, monkeypatch, outcome):
+    controller, consumer, _factory, _worker, _store, _reference = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names",
+                        lambda _task: [] if outcome == "not_required" else ["browser_goto_url"])
+    setup = _shared_discovery_setup(consumer, credentials=() if outcome == "missing_credentials" else (
+        {"credential_id": "opaque", "target": "https://target.test"},
+    ))
+    monkeypatch.setattr(controller, "_authentication_setup_request", lambda *_args: setup)
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: outcome == "reused")
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors",
+                        lambda *_args, **_kwargs: ({"flow_id": "known"},) if outcome == "known_flow" else ())
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    monkeypatch.setattr(controller, "_deterministic_auth_chain_mapping", lambda *_args: ((), ()))
+    login = Mock(side_effect=AssertionError("credential worker must run after prompt approval"))
+    monkeypatch.setattr(controller, "_run_authentication_agent", login)
+    discovery = Mock(return_value=({"flow_id": "reviewed"},) if outcome == "success" else ())
+    if outcome in {"exception", "budget"}:
+        discovery.side_effect = RuntimeError("unexpected") if outcome == "exception" else BudgetLimitReached("stop")
+    monkeypatch.setattr(controller, "_shared_authentication_flow_discovery", discovery)
+    if outcome == "budget":
+        with pytest.raises(BudgetLimitReached):
+            controller._prepare_authentication_discovery(_plan(), consumer)
+        assert consumer.status == "active"
+    else:
+        result = controller._prepare_authentication_discovery(_plan(), consumer)
+        assert (result is not None) == (outcome in {"success", "reused", "known_flow", "not_required"})
+        if result is None:
+            assert controller.state.tasks[0].status == "partial_failure"
+    login.assert_not_called()
+    assert discovery.call_count == (1 if outcome in {"success", "gap", "exception", "budget"} else 0)
+
+
+def test_terminal_discovery_gap_stops_before_consumer_prompt_cycles(flow_discovery_case, monkeypatch):
+    controller, consumer, *_rest = flow_discovery_case
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda _task: ["browser_goto_url"])
+    monkeypatch.setattr(controller, "_authentication_setup_request", lambda *_args: _shared_discovery_setup(consumer))
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: False)
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    monkeypatch.setattr(controller, "_deterministic_auth_chain_mapping", lambda *_args: ((), ()))
+    monkeypatch.setattr(controller, "_run_authentication_flow_discovery", Mock(return_value=()))
+    build = Mock(side_effect=AssertionError("blocked consumer prompt must not be built"))
+    monkeypatch.setattr(controller, "_build_task_prompt", build)
+    controller._run_task_in_trace(_plan(), _plan().phases[0], consumer)
+    build.assert_not_called()
+    current = next(item for item in controller.state.tasks if item.task_uid == consumer.task_uid)
+    assert current.status == "partial_failure"
+    assert current.recovery_context["authentication_discovery_gap"]["prerequisite_task_uid"]
+
+
+def test_required_prompt_overflow_stops_without_model_retry():
+    runner = Mock()
+    runtime = _runtime()
+    runtime.prompt_token_limit = 100
+    controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(_plan()), text_runner=runner)
+    with pytest.raises(TaskPromptBuildError, match="PROMPT_REQUIRED_INPUT_TOO_LARGE"):
+        controller._run_json_text_agent("task_prompt_builder", "required" * 1000, [], "system")
+    runner.assert_not_called()
+    assert sum(event.get("type") == "task_prompt_input_budget" for event in runtime.callback_handler.events) == 1
+
+
+@pytest.mark.parametrize("target", ["https://example.test:8080", "example.test:22", "/src/application"])
+def test_prompt_history_bounds_related_tasks_without_losing_contract(target):
+    assigned = Task("assigned", "Assess", f"Assess {target}", phase=1, status="active", acceptance=_acceptance())
+    related = Task("producer", "Producer", "Map", phase=1, status="done", status_reason="related evidence")
+    assigned = replace(assigned, acceptance=AcceptanceContract(
+        mode="outcome", criteria=assigned.acceptance.criteria, basis=AcceptanceBasis(
+            kind="snapshot", description="Assigned frozen subject", item_ids=["subject"],
+            source_refs=["artifact:inventory.json", "task:producer"],
+        ),
+    ))
+    unrelated = [Task(f"unrelated-{i}", "Unrelated", "Other work", phase=1, status="done",
+                      status_reason="huge unrelated context" * 500) for i in range(300)]
+    plan = _plan()
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(plan, [assigned, related, *unrelated]))
+    prompt = controller._task_prompt_builder_prompt(plan, plan.phases[0], assigned)
+    assert target in prompt and assigned.acceptance.criteria[0].description in prompt
+    assert "related evidence" in prompt
+    assert "huge unrelated context" not in prompt
+    assert len(controller._task_prompt_history_context(1, assigned)) < 1000
+
+
+def test_successful_discovery_precedes_prompt_and_credential_submission(flow_discovery_case, monkeypatch):
+    controller, consumer, *_rest = flow_discovery_case
+    order = []
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda _task: ["browser_goto_url"])
+    monkeypatch.setattr(controller, "_authentication_setup_request", lambda *_args: _shared_discovery_setup(consumer))
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: False)
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+    monkeypatch.setattr(controller, "_deterministic_auth_chain_mapping", lambda *_args: ((), ()))
+
+    def discover(*_args):
+        order.append("observation_discovery")
+        return ({"flow_id": "approved"},)
+
+    def prompt(*_args):
+        order.append("prompt_review")
+        return {"prompt": "Assess access", "tools": [], "shell_commands": []}
+
+    def login(*_args):
+        order.append("credential_submission")
+        return workflow_mod.AuthenticationSetupResult("failed", reason="validation_failed")
+
+    monkeypatch.setattr(controller, "_shared_authentication_flow_discovery", discover)
+    monkeypatch.setattr(controller, "_build_task_prompt", prompt)
+    monkeypatch.setattr(controller, "_run_authentication_agent", login)
+    controller._run_task_in_trace(_plan(), _plan().phases[0], consumer)
+    assert order == ["observation_discovery", "prompt_review", "credential_submission"]
+
+
+def test_prompt_plan_projection_keeps_only_assigned_targets():
+    targets = [OperationTarget("assigned", "https://assigned.test", "network"),
+               OperationTarget("other", "/unrelated/source", "filesystem")]
+    plan = OperationPlan("Assess both", current_phase=1, total_phases=1, targets=targets,
+                         phases=[PlanPhase(id=1, title="Assess", status="active")])
+    task = Task("task", "Assess assigned", "Assess assigned", phase=1, status="active",
+                target_scope="subset", target_ids=["assigned"])
+    context = MultiAgentWorkflowController._task_prompt_plan_context(plan, plan.phases[0], task)
+    assert "https://assigned.test" in context
+    assert "/unrelated/source" not in context
+    context = MultiAgentWorkflowController._task_prompt_plan_context(plan, plan.phases[0], replace(task, target_scope="all"))
+    assert "/unrelated/source" in context
+
+@pytest.mark.parametrize("candidate_count,with_artifacts,reason", [
+    (0, True, "no_candidate"), (2, True, "multiple_candidates"), (1, False, "missing_observation_artifacts"),
+])
+def test_flow_discovery_reports_prerequisite_failure_without_critic(
+    flow_discovery_case, monkeypatch, candidate_count, with_artifacts, reason,
+):
+    from modules.handlers.tool_recovery import ToolOutcomeJournal
+
+    controller, task, _factory, worker, _store, reference = flow_discovery_case
+    controller.flow_discovery_cycles = 1
+    events = []
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+    critic = Mock()
+    monkeypatch.setattr(controller, "_run_json_text_agent", critic)
+    journal = ToolOutcomeJournal()
+    outcome = journal.append(
+        tool_use_id="observe", tool_name="browser_get_page_html", success=True, correctable=False,
+        tool_input={}, output=f"HTML content saved to artifact: {reference.removeprefix('artifact:')}",
+    )
+    worker.side_effect = lambda *_args: workflow_mod.TaskExecutorCycleResult(
+        "mapped", [outcome] if with_artifacts else [],
+    )
+
+    def factory(sink):
+        for index in range(candidate_count):
+            sink({"kind": "browser_form", "login_url": f"https://target.test/login/{index}"})
+        return [_tool("browser_get_page_html")]
+
+    assert not controller._run_flow_discovery_cycles(
+        task, "https://target.test", "authentication", "map", factory, workflow_mod.AgentRunPolicy(),
+    )
+    critic.assert_not_called()
+    failure = next(event for event in events if event["type"] == "flow_discovery_prerequisite_failure")
+    assert failure["reason"] == reason
+    assert failure["candidate_count"] == candidate_count
+    assert failure["artifact_count"] == int(with_artifacts)
+    assert not any(event.get("outcome") == "revision_requested" for event in events)
+    assert controller.state.tasks[0].recovery_context["authentication_discovery_gap"]["reason"] == reason
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+def test_discovery_uses_production_recording_hooks_through_controller_session(
+    flow_discovery_case, monkeypatch, purpose,
+):
+    from contextlib import contextmanager
+
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    controller, task, _factory, worker, store, reference = flow_discovery_case
+    controller.state.store_task(replace(task, task_uid="active-consumer"))
+    target = "https://target.test"
+    created = []
+
+    @contextmanager
+    def session_factory(role, tools, _system):
+        agent = create_outcome_agent(monkeypatch, role, tools)
+        created.append(agent)
+
+        def run(_prompt, _policy):
+            journal = agent._cyber_callback_handler.tool_outcome_journal
+            assert "transport format" in _prompt
+            assert "specific gaps" in _prompt
+            assert "source-map artifacts" not in _prompt
+            snapshot = journal.snapshot()
+            artifact_path = reference.removeprefix("artifact:")
+            complete_tool_call(
+                agent, "browser_get_page_html", {}, f"HTML content saved to artifact: {artifact_path}",
+            )
+            for name in ("auxiliary.html", "duplicate.html"):
+                path = Path(artifact_path).with_name(name)
+                path.write_text("auxiliary observation" if name.startswith("auxiliary") else Path(artifact_path).read_text())
+                complete_tool_call(
+                    agent, "browser_get_page_html", {}, f"HTML content saved to artifact: {path}", tool_id=name,
+                )
+            recorder = next(tool for tool in tools if workflow_mod.get_tool_name(tool).startswith("record_"))
+            login_url = f"{target}/register" if purpose == "registration" else f"{target}/login"
+            for tool_id in ("first-record", "identical-record"):
+                fields = {"identity_fields": ["username"], "required_fields": ["username", "password"]}
+                result = recorder(login_url=login_url, **fields if purpose == "registration" else {})
+                complete_tool_call(agent, workflow_mod.get_tool_name(recorder), {"login_url": login_url},
+                                   result, tool_id=tool_id)
+            return workflow_mod.TaskExecutorCycleResult("mapped", journal.since(snapshot))
+
+        yield run
+        agent.cleanup()
+
+    controller.executor_session_factory = session_factory
+    critic = Mock(wraps=controller._run_json_text_agent)
+    monkeypatch.setattr(controller, "_run_json_text_agent", critic)
+    controller.runtime.optional_tools_list = [_tool("browser_get_page_html")]
+    if purpose == "authentication":
+        monkeypatch.setattr(controller, "_authentication_attack_surface_context", lambda *_args: {})
+        result = controller._shared_authentication_flow_discovery(
+            _plan(), task, _shared_discovery_setup(task, credentials=()),
+            target, controller.runtime.optional_tools_list,
+        )
+        assert result[0]["validation_url"] == ""
+        prerequisite = next(item for item in controller.state.tasks if item.kind == "authentication_flow_discovery")
+        assert prerequisite.status == "done"
+        assert result[0]["discovery_review"]["task_uid"] == prerequisite.task_uid
+    else:
+        registration = replace(controller._credential_provisioning_tasks(
+            1, "credential_provisioning", 1,
+            {"target": target, "target_id": "target-1", "url": f"{target}/register", "roles": ("member",)},
+            {"member": 1},
+        )[0], status="active")
+        controller.state.store_task(registration)
+        result = controller._prepare_registration_discovery(_plan(), registration)
+        assert result.recovery_context["conditional_phase"]["registration_flow"]["purpose"] == "registration"
+        binding = controller._registration_flow_context_prompt(result)
+        assert '"required_fields": [' in binding
+        assert "Unknown transport or redirect details do not block registration" in (
+            controller._credential_provisioning_execution_guidance()
+        )
+    worker.assert_not_called()
+    critic.assert_called_once()
+    store.upsert_authentication_flow.assert_called_once()
+    descriptor = store.upsert_authentication_flow.call_args.args[1]
+    assert descriptor["evidence_refs"] == ["artifact:form.html"]
+    assert descriptor["request_format"] == ""
+    assert descriptor["discovery_review"]["operation_id"] == "OP_TEST"
+    assert set(descriptor["discovery_review"]["approval_digests"]) == {"artifact:form.html"}
+    assert len(created[0]._cyber_callback_handler.tool_outcome_journal.entries()) == 5
+    candidate_prompt = critic.call_args.args[1].split("Candidate:\n", 1)[1].split("\nAuthorized observations", 1)[0]
+    assert "evidence_refs" not in json.loads(candidate_prompt)
+    assert "artifact:auxiliary.html" in critic.call_args.args[1]
+    assert "artifact:duplicate.html" in critic.call_args.args[1]
+    reader = critic.call_args.kwargs["tool_factory"]()[0]
+    assert "username" in reader(path=descriptor["evidence_refs"][0])
+
+
+@pytest.mark.parametrize("damage", ["operation", "purpose", "target", "url", "roles", "version", "missing", "changed"])
+def test_registration_discovery_cache_rejects_invalid_approvals(flow_discovery_case, damage):
+    controller, task, _factory, _worker, _store, reference = flow_discovery_case
+    path = Path(workflow_mod.resolve_operation_artifact_path(reference))
+    candidate = {
+        "target": "https://target.test", "login_url": "https://target.test/register",
+        "roles": ["member"], "purpose": "registration", "flow_version": workflow_mod.REGISTRATION_FLOW_VERSION,
+        "evidence_refs": [reference],
+        "discovery_review": {
+            "operation_id": "OP_TEST", "task_uid": task.task_uid, "purpose": "registration",
+            "approval_digests": {reference: hashlib.sha256(path.read_bytes()).hexdigest()},
+        },
+    }
+    args = (candidate, candidate["target"], candidate["login_url"], ("member",))
+    assert controller._registration_discovery_approval_valid(*args)
+    if damage == "operation":
+        candidate["discovery_review"]["operation_id"] = "OP_PRIOR"
+    elif damage == "purpose":
+        candidate["purpose"] = "authentication"
+    elif damage in {"target", "url", "roles", "version"}:
+        field = {"url": "login_url", "version": "flow_version"}.get(damage, damage)
+        candidate[field] = [] if damage == "roles" else "changed"
+    elif damage == "missing":
+        path.unlink()
+    else:
+        path.write_text("changed")
+    assert not controller._registration_discovery_approval_valid(*args)
+
+
+def test_registration_discovery_refreshes_invalid_cached_mapping(flow_discovery_case, monkeypatch):
+    controller, _task, _factory, _worker, _store, _reference = flow_discovery_case
+    target = "https://target.test"
+    url = f"{target}/register"
+    registration = replace(controller._credential_provisioning_tasks(
+        1, "credential_provisioning", 1,
+        {"target": target, "target_id": "target-1", "url": url, "roles": ("member",)}, {"member": 1},
+    )[0], status="active")
+    controller.state.store_task(registration)
+    key = (target, url, ("member",))
+    controller._registration_discovery_cache[key] = {"purpose": "registration"}
+    mapped = {"purpose": "registration", "login_url": url, "required_fields": ["username"]}
+    loop = Mock(return_value=(mapped,))
+    monkeypatch.setattr(controller, "_run_flow_discovery_cycles", loop)
+    result = controller._prepare_registration_discovery(_plan(), registration)
+    loop.assert_called_once()
+    assert result.recovery_context["conditional_phase"]["registration_flow"]["required_fields"] == ["username"]
+    assert controller._registration_discovery_cache[key] == mapped
+
+
+@pytest.mark.parametrize("configured, allowance", [(None, 16), (7, 7), (0, 1), (-3, 1)])
+@pytest.mark.parametrize("critic", [False, True])
+def test_flow_discovery_search_allowances(monkeypatch, tmp_path, configured, allowance, critic):
+    from modules.tools import artifact
+
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    for name in ("first.txt", "second.txt", "outside.txt"):
+        (tmp_path / name).write_text("needle\nneedle\n", encoding="utf-8")
+    refs = ["artifact:first.txt", "artifact:second.txt", "artifact:first.txt"] if critic else None
+    env = {} if configured is None else {"CYBER_WORKFLOW_FLOW_DISCOVERY_SEARCH_LIMIT": configured}
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints=env), budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()), text_runner=Mock(),
+    )
+    search = controller._flow_discovery_artifact_tools(refs)[1]
+    if critic:
+        with pytest.raises(RuntimeError, match="ARTIFACT_READ_POLICY_VIOLATION"):
+            search("artifact:outside.txt", search_pattern="needle")
+    for index in range(allowance):
+        # Empty matches and pagination both consume the same invocation allowance.
+        search("artifact:first.txt", search_pattern="absent" if index % 2 else "needle", match_offset=index)
+    if critic:
+        with pytest.raises(RuntimeError, match="ARTIFACT_PAGE_LIMIT_REACHED"):
+            search("artifact:first.txt", search_pattern="needle")
+        for _ in range(allowance):
+            search("artifact:second.txt", search_pattern="needle")
+    with pytest.raises(RuntimeError, match="ARTIFACT_TOTAL_READ_LIMIT_REACHED"):
+        search("artifact:second.txt", search_pattern="needle")
+    assert search.artifact_limit_state["allowed"] == allowance * (2 if critic else 1)
+    # Tool factories used by cycles and retries must create independent counters.
+    fresh = controller._flow_discovery_artifact_tools(refs)[1]
+    assert "needle" in fresh("artifact:first.txt", search_pattern="needle")
+
+
+def test_flow_discovery_empty_critic_scope_denies_search(monkeypatch, tmp_path):
+    from modules.tools import artifact
+
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    (tmp_path / "evidence.txt").write_text("needle", encoding="utf-8")
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()), text_runner=Mock(),
+    )
+    search = controller._flow_discovery_artifact_tools([])[1]
+    with pytest.raises(RuntimeError, match="ARTIFACT_READ_POLICY_VIOLATION"):
+        search("artifact:evidence.txt", search_pattern="needle")
+
+
+@pytest.mark.parametrize("selection", [None, [], "artifact:form.html", [7], [""], ["https://target.test"],
+                                       ["artifact:unobserved.html"], ["artifact:missing.html"]])
+def test_flow_discovery_rejects_invalid_evidence_selection(flow_discovery_case, tmp_path, selection):
+    controller, _task, _factory, _worker, _store, reference = flow_discovery_case
+    (tmp_path / "unobserved.html").write_text("not a recorded observation")
+    data = {"approved": True, "feedback": [], "supporting_evidence_refs": selection}
+    with pytest.raises(ValueError):
+        controller._validate_flow_discovery_critique(data, [reference])
+
+
+def test_flow_discovery_normalizes_and_deduplicates_supporting_selection(flow_discovery_case):
+    controller, _task, _factory, _worker, _store, reference = flow_discovery_case
+    data = {"approved": True, "feedback": [],
+            "supporting_evidence_refs": [reference, "artifact: form.html", "form.html"]}
+    controller._validate_flow_discovery_critique(data, [reference])
+    assert data["supporting_evidence_refs"] == ["artifact:form.html"]
+    controller._validate_flow_discovery_critique({"approved": False, "feedback": ["Observe fields"]}, [reference])
+
+
+@pytest.mark.parametrize("failure", ["deleted", "unreadable", "prior_operation"])
+def test_flow_discovery_selection_checks_current_artifact_availability(flow_discovery_case, monkeypatch, failure):
+    controller, _task, _factory, _worker, _store, reference = flow_discovery_case
+    path = Path(workflow_mod.resolve_operation_artifact_path(reference))
+    if failure == "deleted":
+        path.unlink()
+    elif failure == "unreadable":
+        monkeypatch.setattr(Path, "read_bytes", Mock(side_effect=OSError("unreadable")))
+    else:
+        reference = "artifact:../OP_OTHER/form.html"
+    with pytest.raises(ValueError):
+        controller._validate_flow_discovery_critique(
+            {"approved": True, "feedback": [], "supporting_evidence_refs": [reference]},
+            ["artifact:form.html"],
+        )
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("transport", ["json", "structured"])
+def test_flow_discovery_repairs_invalid_selection_in_critic_without_actor_revision(
+    flow_discovery_case, purpose, transport,
+):
+    controller, task, factory, worker, store, _reference = flow_discovery_case
+    invalid = {"approved": True, "feedback": [], "supporting_evidence_refs": ["artifact:unobserved.html"]}
+    valid = {"approved": True, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]}
+    if transport == "json":
+        runner = Mock(side_effect=[json.dumps(invalid), json.dumps(valid)])
+        controller.text_runner = runner
+    else:
+        def respond(_role, _prompt, _tools, _system, output_model):
+            return output_model.model_validate(invalid if runner.call_count == 1 else valid).model_dump(exclude_none=True)
+
+        runner = Mock(side_effect=respond)
+        controller.structured_runner = runner
+    assert controller._run_flow_discovery_cycles(
+        task, "https://target.test", purpose, "Map", factory, workflow_mod.AgentRunPolicy(),
+    )
+    assert runner.call_count == 2
+    assert worker.call_count == 1
+    assert "supporting_evidence" in runner.call_args.args[1]
+    assert store.upsert_authentication_flow.call_args.args[1]["evidence_refs"] == ["artifact:form.html"]
+    assert not any(event.get("outcome") == "revision_requested"
+                   for event in controller.runtime.callback_handler.events)
+
+
+@pytest.mark.parametrize("kind", ["browser_form", "browser_redirect", "browser_mfa", "browser_registration",
+                                  "api_form", "api_key", "oauth2_client"])
+def test_discovery_critic_requirements_follow_flow_kind(flow_discovery_case, kind):
+    controller, _task, _factory, _worker, _store, _reference = flow_discovery_case
+    purpose = "registration" if kind == "browser_registration" else "authentication"
+    candidate = {"kind": kind, "login_url": "https://target.test/start", "request_format": ""}
+    prompt = controller._flow_discovery_critic_prompt(purpose, "https://target.test", candidate, [], [])
+    if kind.startswith("browser_"):
+        assert "Unknown request format, submission endpoint, session details, and success redirect may be empty" in prompt
+        assert "A rendered form does not establish transport format" in prompt
+        assert "applicable rendered controls" in prompt
+    else:
+        assert "Check the observed URL, flow kind, request format, fields, and supported redirects" in prompt
+        assert "backend implementation analysis" not in prompt
+    assert "Reject unsupported claims" in prompt
+    assert "Map registration identity and required fields from the rendered form" in prompt

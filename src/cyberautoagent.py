@@ -2360,6 +2360,11 @@ def main():
                     callback = getattr(agent, "_cyber_callback_handler", None)
                     recovery_hook = getattr(agent, "_cyber_failure_recovery_hook", None)
                     journal = getattr(callback, "tool_outcome_journal", None)
+                    if role in {"authentication_flow_discovery_agent", "registration_flow_discovery_agent"}:
+                        recorder = getattr(agent, "_cyber_tool_outcome_recording_hook", None)
+                        if recorder is None or journal is None or recorder.journal is not journal:
+                            raise WorkflowInvariantError("Flow discovery requires its agent's outcome recorder")
+
 
                     def run_retained_executor(
                         prompt: str,
@@ -2397,6 +2402,14 @@ def main():
                         return TaskExecutorCycleResult(
                             text=result_message,
                             outcomes=outcomes,
+                            artifact_limit_exhausted=bool(
+                                getattr(getattr(agent, "_cyber_evaluator_artifact_read_limit_hook", None),
+                                        "exhausted", False)
+                            ),
+                            artifact_limit_events=tuple(
+                                getattr(getattr(agent, "_cyber_evaluator_artifact_read_limit_hook", None),
+                                        "limit_events", ())
+                            ),
                             recovery_required=bool(recovery_hook and recovery_hook.unresolved),
                             recovery_exhausted=bool(recovery_hook and recovery_hook.exhausted),
                             recovery_guidance=_recovery_guidance_with_failed_command_help(

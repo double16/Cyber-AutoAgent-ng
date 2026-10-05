@@ -135,6 +135,36 @@ The template has no model-selected optional tools or shell commands, and selects
 The controller emits `task_prompt_fallback` for that recovery. Only a valid critic response explicitly identifying a
 hard target-scope violation marks the active task `partial_failure` without invoking its executor or evaluator.
 
+Authentication and self-registration discovery each use a bounded actor/critic loop before credential execution.
+Discovery actors stage secret-free descriptors; fresh critics review controller-observed outcomes and saved artifacts.
+Only approved mappings are persisted as `discovered`; successful authentication alone promotes a mapping to `validated`.
+Descriptors use separate versions: `AUTHENTICATION_FLOW_VERSION = 8` and `REGISTRATION_FLOW_VERSION = 2`.
+Older descriptors require rediscovery; their entry URLs and inventory observations remain advisory discovery hints.
+Approval evidence consists only of canonical current-operation artifacts returned by successful discovery observation
+or retrieval tools. Existing task evidence and artifact reads cannot independently establish a fresh observation.
+Each actor or critic stage retries a transient timeout, connection failure, or HTTP 429/503 error once. Critic retries
+reuse the candidate and evidence without another actor run. These retries and JSON repairs do not consume semantic
+correction cycles. Permanent failures, exhausted JSON repairs, and persistence errors end discovery; budget exceptions
+propagate. Provider backoff handles delays; discovery adds no sleep.
+Registration mapping runs before provisioning prompt creation and is reused for the same operation, target, URL, and role.
+Rejected discovery feeds actionable corrections to a fresh actor. Exhaustion records a durable coverage gap and lets
+other assessment work continue. Discovery cannot submit forms or access credentials; critics can only read artifacts.
+Authentication discovery navigation entries are starting points. Discovery can follow observed login links and routes
+within the assigned target origin, including during continuation after a flow-version change. Known protected
+validation candidates remain excluded from browser navigation; registration discovery uses its exact assigned URL.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CYBER_WORKFLOW_FLOW_DISCOVERY_CYCLES` | `3` | Maximum actor/review pairs per discovery; minimum one. JSON retries are separate. |
+| `CYBER_WORKFLOW_FLOW_DISCOVERY_SEARCH_LIMIT` | `16` | Searches per discovery actor invocation or per distinct authorized artifact for critics; minimum one. |
+
+Artifact read and search allowances are independent and local to each discovery actor or critic invocation.
+Tool errors identify the exhausted allowance, its counts, and whether it applies across files or to one artifact.
+Changing a file, pattern, or page cannot restore an exhausted allowance. Repeated requests against exhausted
+access stop the tool loop. Discovery then synthesizes from returned evidence and staged candidates without tools;
+one transient retry and existing critic JSON repairs keep artifact access closed. Synthesis cannot create a new
+actor mapping, and critic approval still requires observation-backed evidence.
+
 Task execution then uses a second bounded actor/critic loop:
 
 ```mermaid
@@ -226,7 +256,40 @@ provenance-preserving snapshot for fan-out. A manifest is not valid proof for a 
 subject; that rejection occurs before ledger persistence. Prompt-memory selectors are advisory: stale IDs or indices
 are logged and dropped while valid selected context remains available to the executor.
 
-A testing phase that depends on hypotheses creates tasks only for inventory groups with completed hypothesis tasks.
+A testing phase that depends on hypotheses creates tasks only for inventory groups with completed, validated
+hypothesis deliverables. `record_hypotheses` publishes a `hypothesis_set_v1` artifact and a controller-owned digest
+binding. Python supplies the operation, producer, frozen snapshot, subject assignment, and hypothesis IDs. Every
+assigned subject must have testable hypotheses or a reasoned `no_testable_hypotheses` disposition. The contract is
+protocol-neutral: HTTP endpoints, network services, and source/filesystem subjects use the same reasoning fields.
+Current-operation supporting artifacts establish availability; the actor/critic review still evaluates their support.
+Research references remain advisory. Inventories, memory summaries, and completion prose do not satisfy the typed
+`hypothesis_set` acceptance requirement.
+
+Consumers receive only bound hypothesis output references, producer IDs, digests, and a compact subject index;
+supporting inventory inputs remain separate. `read_hypotheses` validates the binding and frozen assignment on every
+bounded subject read. Older producers without valid output get one deduplicated repair task per original producer
+and frozen contract. The original completed task and its acceptance ledger remain unchanged. Testing waits for
+validated repair output or records an explicit prerequisite coverage gap.
+
+The same fields describe each module's native actions; subject identity comes from the frozen inventory:
+
+| Subject | Attacker-controlled input/action | Safe test and control |
+|---------|----------------------------------|-----------------------|
+| HTTP endpoint | Query parameter | Compare a harmless probe response with an unchanged parameter control. |
+| Network service | Protocol frame field | Compare two bounded protocol exchanges and save both responses. |
+| Source/filesystem component | Data read from a configuration file | Trace the input to its consumer and compare isolated fixtures. |
+
+```mermaid
+flowchart LR
+    P[Assigned producer] --> W[record_hypotheses]
+    L[Legacy producer without valid output] --> R[Deduplicated repair]
+    R --> W
+    W --> V[Typed binding validation and semantic review]
+    V --> D[Completed producer]
+    D --> B[read_hypotheses for assigned subjects]
+    B --> T[Dependent testing]
+    R --> G[Explicit gap if repair fails]
+```
 The hypothesis phase persists its verified source inventory manifest in plan metadata before its execution cap check.
 On older plans, the controller reconstructs that binding from valid task assignments or a completed inventory
 producer. This lets the dependent phase measure missing coverage even when the hypothesis phase has no task records.
@@ -234,6 +297,77 @@ If a hypothesis phase reaches its cap before covering every group, the controlle
 continues testing covered groups, and reports the remaining coverage as an incomplete assessment. With no completed
 hypotheses, the dependent phase closes as a partial failure without creating generic testing tasks. If no verified
 source manifest is available, it records a prerequisite gap and also closes as a partial failure.
+
+Authentication discovery uses an `authentication_flow_discovery` prerequisite task in the existing phase, executed
+directly without consumer authentication. Its durable identity binds operation, canonical origin, assigned navigation
+and excluded validation candidates, relevant target evidence, hints, header bindings, flow versions, observable tool
+schemas, and discovery settings. Credentials, consumer IDs, workstreams, and unrelated endpoint observations do not
+affect that identity. Existing task metadata stores the fingerprint, dependents, approved flow descriptors, observation
+digests, and gap references; no separate database schema is required. Login, MFA, and session setup remain per consumer.
+
+Artifact reference syntax is normalized by shared helpers for tool journals, workflow evidence, reporting,
+conversation compaction, proof packs, and artifact access. Both `artifact:path` and `artifact: path` are
+accepted; quote paths containing spaces in prose. Structured reference values may retain path spaces.
+Extraction preserves original text spans for replacements and does not authorize files or establish support.
+Each caller retains operation scope, availability, provenance, and semantic checks.
+
+Every agent with an event handler has a passive tool-outcome recorder sharing that handler's journal.
+The recorder uses an explicit SDK priority to capture original results before reverse-ordered after-tool
+callbacks rewrite them. Executor recovery consumes the same normalization but does not append journal entries.
+Discovery sessions verify recorder identity before starting, and their snapshots expose only that run's outcomes.
+Identical normalized descriptors recorded repeatedly in one attempt are deduplicated; conflicting descriptors
+remain distinct. Registration cache reuse requires matching current-operation approval and unchanged artifacts,
+retaining the original review provenance.
+
+Browser discovery observes the assigned page and applicable controls, records a supported mapping, and
+finishes. Unknown transport format, submission endpoints, session details, and success redirects may remain
+empty; a rendered form does not prove its transport format. Artifact tools resolve specific observation
+gaps. Browser login and registration workers determine submission and session behavior during authorized
+interaction; API discovery retains its transport requirements.
+
+Discovery requires exactly one staged candidate and captured current-task observation artifacts before
+critic review. The critic receives the descriptor and authorized observations separately and selects
+`supporting_evidence_refs`. Extra observations and duplicate captures do not invalidate a supported mapping.
+Python normalizes and validates selected references against current-task observations, then persists only
+that selection and its approval digests. The actor recorder exposes observed fields; provenance remains
+controller-owned. Invalid critic selections use the existing structured-output repair path. Missing or multiple candidates and missing artifacts have distinct prerequisite diagnostics;
+critic revision events indicate an actual review rejection. The shared discovery fingerprint includes an
+internal contract revision, preventing reuse of gaps produced by older discovery contracts. Historical
+failed consumers still require the existing failed-task reset before execution resumes.
+
+Discovery recorders bind the assigned task UID and operation in Python, outside the model-visible schema.
+They validate that task's active status and resolved target scope before actor invocation and on each call,
+so an active discovery prerequisite can coexist with its active consumer. Credential access retains its
+requirement for exactly one active task.
+
+Before consumer prompt building, Python resolves required observation-only discovery. A terminal prerequisite gap
+closes the consumer with a linked coverage gap without invoking its prompt builder or critic. Discovery activation
+uses the normal active-task transition; setup and activation errors become durable diagnostic gaps. Login and
+credential validation still run after prompt approval. Continuing does not automatically reopen historical failures;
+use the existing failed-task reset when retrying them.
+
+Task prompt builders and critics receive a compact plan projection, applicable phase metadata, the assigned contract,
+and status counts with at most five related task summaries. Their initial requests and retries are measured using
+model-aware token estimates, including system instructions, tool/output schemas, and the current output allowance.
+Python aims for 80% of input capacity by reducing advisory history, memory candidates, and catalog descriptions in
+that order. Runtime tool names remain available, selected memory context and selected input schemas remain intact,
+and required scope and acceptance content are never truncated. An irreducible overflow produces a diagnostic before
+inference and uses the existing deterministic fallback where eligible.
+
+Authentication analysis keeps route classifications in `candidate_mechanisms` and response-backed structural
+indicators in `observed_indicators`. The legacy `summary.mechanisms` field includes only supported protocol
+indicators: structured OIDC/JWKS documents, SAML metadata/messages, JWT structure, or OAuth authorization redirects.
+Observed indicators link to saved response artifacts. Cached protocol observations are reused only when those
+responses are readable within the current operation and their body digests and response metadata still match.
+Cookies and password forms remain observed indicators without establishing a protocol or validated flow.
+Protocol step descriptions are hypothetical; executable flow approval and login validation remain separate.
+
+Identical inputs reuse both successful approvals and terminal failures across continuations. Changed inputs create a
+new prerequisite linked to its predecessor; an explicit failed-task reset makes the existing prerequisite eligible
+to run again. Superseded failures remain archived for audit, and successful retries clear the consumer's current gap.
+Missing or changed approval artifacts and ineligible flow lifecycle status invalidate reuse. Budget
+interruptions leave the prerequisite unfinished rather than caching a failure. Discovery keeps its existing actor/critic
+cycles (three by default), transient retry, JSON repair, and bounded artifact-access recovery.
 
 Web authentication coverage and web-recon access-context fan-out omit static asset routes only after a bounded,
 credential-free same-service GET confirms a 2xx response with a static media type. The controller records excluded

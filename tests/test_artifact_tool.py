@@ -519,6 +519,8 @@ def test_resolve_operation_artifact_path_accepts_canonical_and_absolute_referenc
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         assert resolve_operation_artifact_path("artifact:artifacts/evidence.txt") == str(artifact)
+        assert resolve_operation_artifact_path("artifact: artifacts/evidence.txt") == str(artifact)
+        assert resolve_operation_artifact_path("artifact_id: evidence.txt") == str(artifact)
         assert resolve_operation_artifact_path(str(artifact)) == str(artifact)
 
         with pytest.raises(ValueError, match="Artifact does not exist"):
@@ -1070,3 +1072,86 @@ def test_bounded_reader_requires_explicit_byte_page_for_large_artifact(tmp_path:
         assert "max_lines" in str(error.value)
         assert "'start_byte': 0" in reader("artifact:artifacts/minified.js", max_bytes=19_200)
         assert "proof" in reader("artifact:artifacts/evidence.txt")
+
+
+@pytest.mark.parametrize("scope", ["total", "artifact"])
+def test_artifact_search_limit_explains_scope_and_exposes_controller_state(tmp_path, scope):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("needle\n")
+    second.write_text("needle\n")
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        search = create_bounded_artifact_searcher(
+            max_searches=1 if scope == "total" else 3, max_searches_per_artifact=1,
+        )
+        search(path=str(first), search_pattern="needle")
+        with pytest.raises(RuntimeError) as caught:
+            search(path=str(second if scope == "total" else first), search_pattern="changed")
+        assert "1/1" in str(caught.value)
+        assert "cannot restore searches" in str(caught.value)
+        assert search.artifact_limit_state["scope"] == scope
+        if scope == "artifact":
+            assert "another allowed artifact" in str(caught.value)
+            assert "needle" in search(path=str(second), search_pattern="needle")
+            assert search.artifact_limit_state == {}
+        else:
+            assert "across all artifacts" in str(caught.value)
+
+
+@pytest.mark.parametrize("scope", ["total", "artifact"])
+def test_artifact_read_limit_guidance_explains_scope(tmp_path, scope):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("one\ntwo\nthree\n")
+    second.write_text("other\n")
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        read = create_bounded_artifact_reader(
+            max_reads=1 if scope == "total" else 3, max_reads_per_artifact=1, context_window_tokens=48_000,
+        )
+        read(path=str(first), start_line=1, max_lines=1)
+        guidance = read(path=str(second if scope == "total" else first), start_line=2, max_lines=1)
+        assert "1/1" in guidance
+        assert "cannot restore reads" in guidance
+        assert read.artifact_limit_state["scope"] == scope
+        if scope == "artifact":
+            assert "other" in read(path=str(second), start_line=1, max_lines=1)
+            assert read.artifact_limit_state == {}
+
+
+@pytest.mark.parametrize("name", ["read_artifact", "search_artifact"])
+def test_runtime_artifact_limits_keep_counts_and_controller_state(tmp_path, name):
+    from strands.hooks.events import AfterToolCallEvent
+
+    from modules.handlers.tool_recovery import EvaluatorArtifactReadLimitHook
+
+    path = tmp_path / "evidence.txt"
+    path.write_text("needle\nsecond\nthird\n")
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        item = (
+            create_bounded_artifact_searcher(max_searches=1)
+            if name == "search_artifact"
+            else create_bounded_artifact_reader(max_reads=1, context_window_tokens=48_000)
+        )
+        hook = EvaluatorArtifactReadLimitHook([item])
+
+        async def run():
+            for ordinal in range(3):
+                inputs = {"path": str(path)}
+                if name == "search_artifact":
+                    inputs["search_pattern"] = f"pattern-{ordinal}"
+                else:
+                    inputs.update(start_line=ordinal + 1, max_lines=1)
+                use = {"toolUseId": str(ordinal), "name": name, "input": inputs}
+                results = [result async for result in item.stream(use, {})]
+                event = AfterToolCallEvent(
+                    agent=None, selected_tool=item, tool_use=use, invocation_state={}, result=results[-1],
+                )
+                hook._after_tool(event)
+                if ordinal == 1:
+                    assert "1/1" in str(event.result)
+                    assert not hook.exhausted
+                if ordinal == 2:
+                    assert hook.exhausted
+                    assert event.invocation_state["request_state"]["stop_event_loop"]
+
+        asyncio.run(run())

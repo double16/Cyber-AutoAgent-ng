@@ -2979,7 +2979,8 @@ def test_create_tasks_binds_canonical_manifest_per_route_independent_of_context(
     assert all(task.acceptance.basis.source_refs == (canonical_manifest,) for task in route_tasks)
 
 
-def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_memory_client):
+@pytest.mark.parametrize("requires_hypotheses", [False, True])
+def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_memory_client, requires_hypotheses):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(
         objective="Assess inventory",
@@ -3006,6 +3007,7 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
     }))
     canonical_manifest = mod.canonical_artifact_reference(str(manifest))
     create_tool = mod.build_create_tasks_tool(
+        requires_hypotheses=requires_hypotheses,
         prompt_token_limit=48_000,
         coverage_item_ids={"endpoint-0", "endpoint-1"},
         expected_snapshot_ref=canonical_manifest,
@@ -3035,6 +3037,22 @@ def test_bound_create_tasks_tool_limits_snapshot_fanout_to_assigned_batch(fake_m
     assert all(task.title.startswith("Trust Boundary & Workflow Mapping: Assess endpoint") for task in store.tasks)
     assert all("Map authentication mechanisms" in task.objective for task in store.tasks)
     assert all("Trust Boundary & Workflow Mapping" in task.acceptance.criteria[0].description for task in store.tasks)
+    assert all(
+        any(req.kind == "hypothesis_set" for req in task.acceptance.criteria[0].evidence_requirements)
+        == requires_hypotheses for task in store.tasks
+    )
+
+
+def test_hypothesis_producer_requires_frozen_snapshot_before_persistence(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target", current_phase=1, total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Hypotheses", status="active", produces_hypotheses=True)],
+    )
+    proposal = task_proposal("Develop hypotheses", "Develop future tests", "hypotheses")
+    with pytest.raises(ValueError, match="require assigned frozen inventory"):
+        mod.build_create_tasks_submitter(requires_hypotheses=True)([proposal])
+    assert not store.tasks
 
 
 def test_bound_create_tasks_tool_rejects_preflight_batch_before_persisting(fake_memory_client):
@@ -6225,3 +6243,53 @@ def test_qdrant_memory_rejects_invalid_mode_and_missing_target():
     client.operation_id = "OP-current"
     with pytest.raises(ValueError, match="canonical OperationTarget"):
         mod.QdrantMemoryClient._scope_filter(client)
+
+
+def test_memory_client_propagates_damaged_plan_instead_of_returning_none(monkeypatch):
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    error = StoredWorkflowDataError("plans", "OP_TEST", "OP_TEST", "plan_data")
+    store = SimpleNamespace(get_plan=Mock(side_effect=error))
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    client = object.__new__(mod.QdrantMemoryClient)
+    with pytest.raises(StoredWorkflowDataError) as caught:
+        client.get_active_plan(operation_id="OP_TEST")
+    assert caught.value is error
+    store.get_plan.assert_called_once_with("OP_TEST")
+
+
+@pytest.mark.parametrize("damaged", [False, True])
+def test_sqlite_recovery_validates_candidate_before_installing(tmp_path, monkeypatch, damaged):
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    database = tmp_path / "source.db"
+    store = mod.SQLiteApplicationStore(str(database), "target")
+    plan = mod.OperationPlan(objective="Check scope", current_phase=1, total_phases=1,
+                             phases=[mod.PlanPhase(id=1, title="Inspect", status="active")])
+    store.store_plan("operation", plan)
+    with sqlite3.connect(database) as connection:
+        if damaged:
+            connection.execute("UPDATE plans SET plan_data='secret-value{'")
+            connection.commit()
+        sql = "\n".join(connection.iterdump())
+    original_bytes = database.read_bytes()
+    sidecar = Path(f"{database}-wal")
+    sidecar.write_bytes(b"preserved source sidecar")
+    original_run = mod.subprocess.run
+
+    def recover_command(args, **kwargs):
+        if args[-1] == ".recover":
+            return SimpleNamespace(returncode=0, stdout=sql)
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(mod.subprocess, "run", recover_command)
+    if damaged:
+        with pytest.raises(StoredWorkflowDataError, match="field=plan_data"):
+            store._recover_database()
+        assert database.read_bytes() == original_bytes
+        assert sidecar.read_bytes() == b"preserved source sidecar"
+    else:
+        assert store._recover_database() is True
+        assert not sidecar.exists()
+        assert store.get_plan("operation").objective == "Check scope"
+    assert not list(tmp_path.glob("source.recovered-*.db"))

@@ -34,6 +34,7 @@ from strands.types.exceptions import ContextWindowOverflowException
 from modules.config.models.dev_client import get_models_client
 from modules.config.models.factory import get_model_id_from_agent
 from modules.handlers.max_token_recovery import classify_max_token_output
+from modules.tools.artifact_references import extract_artifact_references
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +233,7 @@ def _compact_stale_tool_outputs(agent: Agent, preserve_recent: int) -> int:
         return 0
     stale_limit = max(0, len(messages) - max(1, preserve_recent))
     compacted = 0
-    reference_pattern = re.compile(r"\b(?:artifact|artifact_id|memory|finding):[^\s\],}\\\"]+")
+    reference_pattern = re.compile(r"\b(?:memory|finding):[^\s\],}\\\"]+")
     state_pattern = re.compile(
         r'"(?:task_uid|criterion_id|status|disposition|complete|replayed|memory_published)"\s*:\s*'
         r'(?:"[^\"]*"|true|false|null|-?\d+(?:\.\d+)?)'
@@ -260,7 +261,7 @@ def _compact_stale_tool_outputs(agent: Agent, preserve_recent: int) -> int:
                 else:
                     searchable_chunks.append(str(item))
             searchable = "\n".join(searchable_chunks)
-            references = list(dict.fromkeys(reference_pattern.findall(searchable)))
+            references = list(dict.fromkeys([*extract_artifact_references(result_content), *reference_pattern.findall(searchable)]))
             state = list(dict.fromkeys(state_pattern.findall(searchable)))
             summary = {
                 "compacted": True,
@@ -289,7 +290,7 @@ def _compact_failed_tool_outputs(agent: Agent, preserve_recent: int) -> int:
     if not isinstance(messages, list):
         return 0
     stale_limit = max(0, len(messages) - max(1, preserve_recent))
-    reference_pattern = re.compile(r"\b(?:artifact|artifact_id|memory|finding):[^\s\],}\\\"]+")
+    reference_pattern = re.compile(r"\b(?:memory|finding):[^\s\],}\\\"]+")
     compacted = 0
     for message in messages[:stale_limit]:
         content = message.get("content")
@@ -308,7 +309,7 @@ def _compact_failed_tool_outputs(agent: Agent, preserve_recent: int) -> int:
             rendered = _json_to_compact_str(result_content)
             if not rendered or len(rendered) <= STALE_TOOL_RESULT_THRESHOLD:
                 continue
-            references = list(dict.fromkeys(reference_pattern.findall(rendered)))
+            references = list(dict.fromkeys([*extract_artifact_references(result_content), *reference_pattern.findall(rendered)]))
             excerpt = " ".join(rendered.split())[:500]
             tool_result["content"] = [{
                 "json": {

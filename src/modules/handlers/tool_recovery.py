@@ -17,11 +17,12 @@ from strands.hooks import (
     AfterToolCallEvent,
     AfterToolsEvent,
     BeforeToolCallEvent,
+    HookOrder,
     HookProvider,
     HookRegistry,
 )
 
-from modules.tools.artifact_references import normalize_artifact_reference_token
+from modules.tools.artifact_references import extract_artifact_references
 from modules.tools.shell_provenance import shell_execution_provenance
 from modules.utils.redaction import redact
 
@@ -107,7 +108,11 @@ ARTIFACT_READ_OVERLAP_GUARD_MARKER = "ARTIFACT_READ_OVERLAP_GUARD"
 
 
 class EvaluatorArtifactReadLimitExceeded(RuntimeError):
-    """Raised after an evaluator ignores bounded artifact-read guidance twice."""
+    """Raised after a role ignores bounded artifact access guidance twice."""
+
+    def __init__(self, message: str, outcomes: list[Any] | None = None) -> None:
+        super().__init__(message)
+        self.outcomes = list(outcomes or [])
 
 
 def _bounded_text(value: Any, limit: int = 500) -> str:
@@ -162,36 +167,7 @@ def _result_success(result: Any, exception: Exception | None = None) -> bool:
 def _artifact_references(*values: Any) -> tuple[str, ...]:
     """Capture canonical artifact references from tool results before summaries are bounded."""
 
-    references = []
-
-    def add(reference: Any) -> None:
-        try:
-            value = normalize_artifact_reference_token(reference)
-        except (TypeError, ValueError):
-            return
-        if value and value not in references:
-            references.append(value)
-
-    def visit(value: Any, field_name: str = "") -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                visit(item, str(key).lower())
-            return
-        if isinstance(value, (list, tuple)):
-            for item in value:
-                visit(item, field_name)
-            return
-        text = str(value or "")
-        if field_name == "artifact_id" and text and not text.startswith("artifact_id:"):
-            add(f"artifact_id:{text}")
-        elif field_name in {"artifact", "artifact_ref"} and text.startswith(("artifact:", "artifact_id:")):
-            add(text)
-        for reference in re.findall(r"(?:artifact|artifact_id):[^\s,\\\]\}\)\"']+", text):
-            add(reference)
-
-    for value in values:
-        visit(value)
-    return tuple(references[:16])
+    return tuple(extract_artifact_references(*values)[:16])
 
 
 def _shell_executable(tool_input: dict[str, Any]) -> str:
@@ -512,10 +488,67 @@ class ToolOutcomeJournal:
         return list(self._entries)
 
 
+
+def _normalized_tool_outcome(event: AfterToolCallEvent, recovery_role: str = "normal") -> dict[str, Any]:
+    """Normalize an SDK tool result without mutating it or applying recovery policy."""
+
+    tool_use = event.tool_use
+    tool_name = str(tool_use.get("name", "unknown"))
+    tool_input = tool_use.get("input", {})
+    raw_output = _result_text(event.result)
+    output = raw_output
+    success = _result_success(event.result, event.exception)
+    if not success and _is_interpretable_curl_http_result(tool_name, tool_input, output):
+        success = True
+        status_code = _captured_http_status(output, allow_write_out_status=_uses_curl_write_out(tool_input))
+        output = f"{output}\nInterpretable curl response status captured: {status_code}"
+    startup_failure = (
+        not success and tool_name == "shell"
+        and any(pattern.search(output) for pattern in _STARTUP_FAILURE_PATTERNS)
+    )
+    finding_failure = tool_name == "store_finding" and any(
+        token in raw_output.lower() for token in ("evidence assertion", "marker", "validation failed", "field required")
+    )
+    correctable = tool_name != "record_task_acceptance" and not success and (
+        startup_failure or finding_failure or is_correctable_tool_failure(tool_name, tool_input, output)
+    )
+    if not success:
+        output = format_tool_repair_error(tool_name, raw_output)
+    return {
+        "tool_use_id": str(tool_use.get("toolUseId", tool_use.get("_toolUseId", ""))),
+        "tool_name": tool_name, "success": success, "correctable": correctable,
+        "tool_input": tool_input, "output": output, "raw_output": raw_output, "recovery_role": recovery_role,
+    }
+
+
+class ToolOutcomeRecordingHook(HookProvider):
+    """Passively record outcomes for every controller-owned role, independently of recovery."""
+
+    def __init__(
+        self, journal: ToolOutcomeJournal, recovery_role: Callable[[str], str] | None = None,
+    ) -> None:
+        self.journal = journal
+        self.recovery_role = recovery_role
+
+    def register_hooks(self, registry: HookRegistry) -> None:
+        registry.add_callback(AfterToolCallEvent, self._after_tool, order=HookOrder.SDK_FIRST)
+
+    def _after_tool(self, event: AfterToolCallEvent) -> None:
+        tool_id = str(event.tool_use.get("toolUseId", event.tool_use.get("_toolUseId", "")))
+        role = self.recovery_role(tool_id) if self.recovery_role is not None else "normal"
+        self.journal.append(**_normalized_tool_outcome(event, role))
+
+
 class EvaluatorArtifactReadLimitHook(HookProvider):
     """Stop a task evaluator that continues reading after its allowance is exhausted."""
 
-    def __init__(self) -> None:
+    def __init__(self, tools: Iterable[Any] = ()) -> None:
+        self.limit_states = {
+            item.tool_name: item.artifact_limit_state
+            for item in tools if hasattr(item, "artifact_limit_state")
+        }
+        self.blocked_limits: set[tuple[str, str, str]] = set()
+        self.limit_events: list[dict[str, Any]] = []
         self.blocked_attempts = 0
         self.exhausted = False
         self.page_limited_paths: set[str] = set()
@@ -525,7 +558,28 @@ class EvaluatorArtifactReadLimitHook(HookProvider):
         registry.add_callback(AfterToolCallEvent, self._after_tool)
 
     def _after_tool(self, event: AfterToolCallEvent) -> None:
-        if str(event.tool_use.get("name", "")) != "read_artifact":
+        tool_name = str(event.tool_use.get("name", ""))
+        if tool_name not in {"read_artifact", "search_artifact"}:
+            return
+        state = self.limit_states.get(tool_name, {})
+        if state:
+            key = (tool_name, state["scope"], state.get("path", ""))
+            self.limit_events.append({"tool": tool_name, **state})
+            if key not in self.blocked_limits:
+                self.blocked_limits.add(key)
+                return
+            self.exhausted = True
+            request_state = event.invocation_state.setdefault("request_state", {})
+            request_state["stop_event_loop"] = True
+            request_state[EVALUATOR_ARTIFACT_READ_LIMIT_EXHAUSTED_STATE_KEY] = {
+                "reason": "repeated_artifact_limit", "tool": tool_name,
+                "scope": state["scope"], "used": state["used"], "allowed": state["allowed"],
+            }
+            if isinstance(event.result, dict):
+                event.result["content"] = [{"text": (
+                    "ARTIFACT_READ_LIMIT_EXHAUSTED: Repeated request against exhausted artifact access. "
+                    "The controller is stopping this tool loop; finish from evidence already returned."
+                )}]
             return
         result_text = _result_text(event.result)
         if ARTIFACT_PAGE_LIMIT_REACHED_MARKER in result_text:
@@ -616,6 +670,7 @@ class EvaluatorArtifactReadLimitHook(HookProvider):
 
         tool_input = event.tool_use.get("input", {})
         path = str(tool_input.get("path", "")) if isinstance(tool_input, dict) else ""
+        path = f"{event.tool_use.get("name", "")}:{path}"
         if path not in self.page_limited_paths:
             self.page_limited_paths.add(path)
             message = (
@@ -686,6 +741,11 @@ class TaskFailureRecoveryHook(HookProvider):
         self._turn_completed_tool_ids: set[str] = set()
         self._turn_correction_results: list[bool] = []
         self._turn_policy_violation_recorded = False
+
+    def recovery_role_for(self, tool_id: str) -> str:
+        """Return invocation-local recovery metadata without consuming it."""
+
+        return self._recovery_roles.get(tool_id, "normal")
 
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(AfterModelCallEvent, self._after_model)
@@ -926,44 +986,22 @@ class TaskFailureRecoveryHook(HookProvider):
         if self._model_turn:
             self._turn_completed_tool_ids.add(tool_id)
         tool_input = tool_use.get("input", {})
-        raw_output = _result_text(event.result)
-        output = raw_output
-        success = _result_success(event.result, event.exception)
-        if not success and _is_interpretable_curl_http_result(tool_name, tool_input, output):
-            success = True
-            status_code = _captured_http_status(output, allow_write_out_status=_uses_curl_write_out(tool_input))
-            output = f"{output}\nInterpretable curl response status captured: {status_code}"
         role = self._recovery_roles.pop(tool_id, "normal")
+        normalized = _normalized_tool_outcome(event, role)
+        raw_output = normalized["raw_output"]
+        output = normalized["output"]
+        success = normalized["success"]
+        correctable = normalized["correctable"]
         startup_failure = (
-            not success
-            and tool_name == "shell"
-            and any(pattern.search(output) for pattern in _STARTUP_FAILURE_PATTERNS)
+            not success and tool_name == "shell"
+            and any(pattern.search(raw_output) for pattern in _STARTUP_FAILURE_PATTERNS)
         )
-        finding_submission_failure = tool_name == "store_finding" and any(
-            token in raw_output.lower() for token in ("evidence assertion", "marker", "validation failed", "field required")
-        )
-        correctable = tool_name != "record_task_acceptance" and not success and (
-            startup_failure or finding_submission_failure or is_correctable_tool_failure(tool_name, tool_input, output)
-        )
-        if not success:
-            output = format_tool_repair_error(tool_name, raw_output)
-            if output != raw_output and isinstance(event.result, dict):
-                event.result["content"] = [{"text": output}]
-                logger.info(
-                    "Tool repair diagnostic retained outside agent context: tool=%s raw_error=%s",
-                    tool_name,
-                    _bounded_text(raw_output, 2000),
-                )
-        self.journal.append(
-            tool_use_id=tool_id,
-            tool_name=tool_name,
-            success=success,
-            correctable=correctable,
-            tool_input=tool_input,
-            output=output,
-            raw_output=raw_output,
-            recovery_role=role,
-        )
+        if not success and output != raw_output and isinstance(event.result, dict):
+            event.result["content"] = [{"text": output}]
+            logger.info(
+                "Tool repair diagnostic retained outside agent context: tool=%s raw_error=%s",
+                tool_name, _bounded_text(raw_output, 2000),
+            )
 
         if startup_failure:
             executable = _shell_executable(tool_input) if tool_name == "shell" else ""

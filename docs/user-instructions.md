@@ -153,11 +153,14 @@ flowchart LR
 ### Comprehensive hypothesis testing
 
 When a plan places a hypothesis-producing phase before vulnerability discovery, the controller uses
-`hypothesis_dependent` task creation for the testing phase. It creates one route-scoped testing task for every completed
-hypothesis coverage group and records the source hypothesis task IDs and artifact references with each test task.
-Executors must assess every documented hypothesis in those source artifacts for the assigned group. If a hypothesis
-producer is failed, blocked, missing, or does not cover an assigned group, task creation stops with an explicit coverage
-error; the operation does not silently treat that group as tested.
+`hypothesis_dependent` task creation for the testing phase. It creates a subject-scoped testing task for every completed
+group with validated hypothesis output and records the producer IDs, artifact references, and digests with each task.
+Hypothesis producers use `record_hypotheses` for every assigned subject, supplying safe tests or an explicit reason
+that no testable hypothesis exists. This works for HTTP, network, and source/filesystem modules. Testing executors
+use bounded `read_hypotheses` access and assess every documented hypothesis for their assigned subjects. Older
+continuations repair missing typed output in a separate task while preserving completed historical contracts. If a
+producer fails, is blocked, is missing, or lacks valid output for an assigned group, the controller records that
+prerequisite coverage gap. Testing continues for covered groups; uncovered groups remain unassessed.
 
 ## Deployment modes
 
@@ -353,6 +356,39 @@ bounded flow. If discovery cannot identify a usable flow, credential authenticat
 coverage gap. The controller then runs one isolated worker per credential, so a missing flow or a rejected credential
 cannot cause that worker to try another identity. For same-origin API-form flows,
 `ensure_authenticated_context` resolves the controller-selected flow ID rather than searching the stored inventory.
+
+Authentication and self-registration discovery use up to three actor/critic pairs independently. Approval ends the
+loop early. Rejected mappings are corrected before another review; only approved mappings reach credential workers.
+Authentication discovery is shared through a durable prerequisite for identical operation, origin, and relevant inputs.
+Consumers reuse approved flows or terminal discovery gaps across continuations; credentials and session setup remain
+per task. Changed mapping inputs or unavailable approval evidence trigger fresh discovery. To retry an unchanged
+terminal gap, explicitly reset failed tasks with `--reset-failed`. Budget interruptions remain resumable unfinished work.
+An unresolved discovery records a coverage gap while other assessment work continues. Registration discovery inspects
+the assigned form before account creation; it does not submit the form or test credentials.
+Authentication discovery navigation entries are starting points. Discovery can follow observed login links and routes
+within the assigned target origin, including during continuation after a flow-version change. Known protected
+validation candidates remain excluded from browser navigation; registration discovery uses its exact assigned URL.
+Authentication descriptors use version 8 and registration descriptors use version 2. Older mappings require
+rediscovery before reuse; their entry URLs and inventory observations remain available as advisory discovery hints.
+Only artifacts returned by successful discovery observation or retrieval tools support mapping approval. Existing
+task evidence and artifact reads alone cannot establish a fresh observation. Each failed actor or critic stage gets
+one retry for transient timeout, connection, or HTTP 429/503 failures. Critic retries reuse the staged mapping and
+artifacts without repeating browser navigation. Stage retries and JSON repairs are separate from the three semantic
+cycles. Permanent failures and exhausted retries produce a coverage gap; budget exceptions propagate. Discovery
+adds no delay beyond existing provider backoff.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CYBER_WORKFLOW_FLOW_DISCOVERY_CYCLES` | `3` | Maximum actor/critic pairs per flow discovery, minimum one. |
+| `CYBER_WORKFLOW_FLOW_DISCOVERY_SEARCH_LIMIT` | `16` | Searches per discovery actor invocation or per distinct authorized artifact for critics; minimum one. |
+
+Artifact read and search allowances are independent and local to each discovery actor or critic invocation.
+Tool errors identify the exhausted allowance, its counts, and whether it applies across files or to one artifact.
+Changing a file, pattern, or page cannot restore an exhausted allowance. Repeated requests against exhausted
+access stop the tool loop. Discovery then synthesizes from returned evidence and staged candidates without tools;
+one transient retry and existing critic JSON repairs keep artifact access closed. Synthesis cannot create a new
+actor mapping, and critic approval still requires observation-backed evidence.
+
 For mapped self-registration, the provisioning worker fills the mapped identity fields and every visible required
 control in that same form, including required profile fields beyond username, password, and email. Optional controls
 remain untouched unless the flow or server validation requires them. A reusable synthetic profile is retained only in
@@ -432,3 +468,16 @@ stops the assessment before agents and tools start.
 | Bedrock requests fail | Verify AWS credentials and `AWS_REGION` |
 | Configuration is invalid | Review `~/.cyber-autoagent/config.json` and the active provider settings |
 | Assessment is rejected before starting | Review the target preflight event and authorization scope |
+
+### Damaged continuation state
+
+A continuation stops with `Invalid stored workflow data` when an existing plan or task cannot be
+validated. The message identifies the operation, record, and field; the controller does not create
+a replacement plan or retry unchanged malformed data. Empty optional task JSON fields use their
+existing empty defaults. A database that passes SQLite integrity checks can still contain malformed
+workflow values.
+
+Use the [workflow repair tool](../support/README.md#repair-workflow-statepy) to diagnose the operation
+and preview validated snapshot replacements. Stop database writers before applying repairs.
+Reports preserve available observations and explicitly mark workflow coverage as incomplete when
+stored workflow records are damaged.

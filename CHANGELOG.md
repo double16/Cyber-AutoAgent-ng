@@ -2,6 +2,10 @@
 
 ### Features
 
+- Add versioned, protocol-neutral hypothesis deliverables with controller-bound publication, typed acceptance,
+  subject-scoped reads, and deduplicated repair tasks for older continuations.
+- Share durable authentication discovery prerequisites across consumers and continuations for identical target
+  inputs, keeping credential login and session setup bound to each consumer.
 - Add credential store with typed login/API/OAuth credentials, lifecycle status history, exact
   resolved-target scoping, explicit aliases, agent checkout tools, password/TOTP generation, objective sanitization,
   authentication context for tasks/findings, interactive email-MFA handoff, operation-managed credential rotation,
@@ -9,6 +13,42 @@
 
 ### Fixes
 
+- Restore browser-led authentication and registration discovery: accept supported page mappings with unknown
+  transport details and defer submission behavior to authorized login and registration workers.
+
+- Let authentication and registration discovery critics select supporting artifacts from controller-owned
+  observations, preventing repeated actor corrections for evidence references the recorder cannot edit.
+
+- Give authentication and registration discovery a configurable 16-search allowance independent of read
+  pagination; scale critic search totals by distinct authorized artifacts.
+
+- Record tool outcomes for discovery actors and critics independently of executor failure recovery, so saved
+  observations reach review through production sessions. Deduplicate identical flow recordings and validate
+  registration cache approvals before reuse; invalidate discovery gaps from older outcome wiring.
+
+- Share artifact-reference parsing across discovery, evidence, reporting, and conversation compaction; accept
+  spaced browser artifact references so observed flows reach critic review. Distinguish discovery prerequisite
+  failures from critic rejection and invalidate shared gaps from the older discovery contract.
+
+- Bind authentication and registration discovery recorders to their assigned task so active consumer and
+  prerequisite tasks can coexist; distinguish missing and ambiguous credential task context in errors.
+
+- Activate shared authentication discovery through the supported task transition, persist controller failures as
+  reusable discovery gaps, and resolve observation prerequisites before consumer prompt review.
+- Bound task builder and critic context before inference, retaining assigned scope and acceptance contracts while
+  reducing unrelated history, advisory memories, and tool catalog descriptions.
+- Separate authentication route candidates and form/cookie indicators from structurally observed protocols;
+  invalidate older analyzer cache results that overstated protocol detection.
+
+- Validate stored workflow JSON, normalize empty optional task fields, and stop damaged continuations
+  with scoped diagnostics instead of silently creating replacement plans. Validate recovered SQLite
+  workflow records, provide an explicit backed-up repair tool, and retain available report evidence
+  while marking damaged workflow coverage incomplete.
+
+- Require validated hypothesis output before dependent testing; inventories and completion prose cannot substitute
+  for a hypothesis deliverable. Preserve historical acceptance contracts when repairing missing output.
+- Reuse terminal authentication discovery gaps until relevant inputs change or the prerequisite is explicitly reset;
+  invalidate approvals when their observation artifacts change or become unavailable.
 ## v0.10.0
 
 ### Features

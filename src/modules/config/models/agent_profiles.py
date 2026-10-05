@@ -25,6 +25,10 @@ class LLMRoleType(StrEnum):
     TASK_CREATOR = "task_creator"
     TASK_PROMPT_BUILDER = "task_prompt_builder"
     TASK_PROMPT_CRITIC = "task_prompt_critic"
+    AUTHENTICATION_FLOW_DISCOVERY_AGENT = "authentication_flow_discovery_agent"
+    AUTHENTICATION_FLOW_DISCOVERY_CRITIC = "authentication_flow_discovery_critic"
+    REGISTRATION_FLOW_DISCOVERY_AGENT = "registration_flow_discovery_agent"
+    REGISTRATION_FLOW_DISCOVERY_CRITIC = "registration_flow_discovery_critic"
     TASK_EXECUTOR = "task_executor"
     TASK_EVALUATOR = "task_evaluator"
     PHASE_EVALUATOR = "phase_evaluator"
@@ -154,6 +158,26 @@ DEFAULT_AGENT_PROFILES: dict[LLMRoleType, AgentModelSettings] = {
         max_tokens=8192,
     ),
     LLMRoleType.TASK_PROMPT_CRITIC: AgentModelSettings(
+        temperature=0.0,
+        reasoning_level=ReasoningLevel.MEDIUM,
+        max_tokens=4096,
+    ),
+    LLMRoleType.AUTHENTICATION_FLOW_DISCOVERY_AGENT: AgentModelSettings(
+        temperature=0.2,
+        reasoning_level=ReasoningLevel.MEDIUM,
+        max_tokens=8192,
+    ),
+    LLMRoleType.AUTHENTICATION_FLOW_DISCOVERY_CRITIC: AgentModelSettings(
+        temperature=0.0,
+        reasoning_level=ReasoningLevel.MEDIUM,
+        max_tokens=4096,
+    ),
+    LLMRoleType.REGISTRATION_FLOW_DISCOVERY_AGENT: AgentModelSettings(
+        temperature=0.2,
+        reasoning_level=ReasoningLevel.MEDIUM,
+        max_tokens=8192,
+    ),
+    LLMRoleType.REGISTRATION_FLOW_DISCOVERY_CRITIC: AgentModelSettings(
         temperature=0.0,
         reasoning_level=ReasoningLevel.MEDIUM,
         max_tokens=4096,

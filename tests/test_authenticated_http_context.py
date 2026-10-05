@@ -226,7 +226,7 @@ def test_registration_flow_recording_reuses_active_target_without_a_credential(t
     assert result["recorded"] is True
     descriptor = store.list_authentication_flows(target, purpose="registration")[0]["descriptor"]
     assert descriptor["url"] == f"{target}/register"
-    assert descriptor["flow_version"] == authentication.AUTHENTICATION_FLOW_VERSION
+    assert descriptor["flow_version"] == authentication.REGISTRATION_FLOW_VERSION
     assert descriptor["roles"] == ["member"]
     assert descriptor["identity_fields"] == ["email", "password"]
     assert descriptor["required_fields"] == ["firstName", "lastName"]
@@ -385,6 +385,45 @@ def test_bound_authentication_flow_recorder_omits_controller_owned_inputs(tmp_pa
     assert descriptor["storage_header_bindings"] == [{
         "header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"
     }]
+
+
+@pytest.mark.parametrize("purpose,kind", [
+    ("authentication", "browser_form"), ("registration", "browser_registration"),
+])
+@pytest.mark.parametrize("request_format", [None, "", "form"])
+def test_bound_flow_recorder_stages_validated_candidates_without_persistence(
+    tmp_path, monkeypatch, purpose, kind, request_format,
+):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
+    _activate_task(store, target)
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    candidates = []
+    recorder = authentication.build_record_authentication_flow_tool(
+        target=target, purpose=purpose, kind=kind, roles=("member",), candidate_sink=candidates.append,
+        task_uid="auth-task", operation_id="OP_AUTH",
+    )
+    assert "candidate_sink" not in get_tool_spec(recorder)["inputSchema"]["json"]["properties"]
+    schema = get_tool_spec(recorder)["inputSchema"]["json"]
+    assert "request_format" not in schema["required"]
+    assert schema["properties"]["request_format"]["enum"] == ["", "json", "form"]
+    assert "unknown for a browser flow" in schema["properties"]["request_format"]["description"]
+    fields = {} if request_format is None else {"request_format": request_format}
+    result = json.loads(recorder(login_url=f"{target}/start", **fields))
+    assert result["staged"] is True
+    assert candidates[0]["target"] == target
+    assert candidates[0]["purpose"] == purpose
+    assert candidates[0]["request_format"] == (request_format or "")
+    expected_version = (
+        authentication.AUTHENTICATION_FLOW_VERSION if purpose == "authentication"
+        else authentication.REGISTRATION_FLOW_VERSION
+    )
+    assert candidates[0]["flow_version"] == expected_version
+    assert not store.list_authentication_flows(target, purpose=purpose)
+    with pytest.raises(ValueError):
+        recorder(login_url="https://unrelated.test/start")
+    assert len(candidates) == 1
 
 
 def test_authentication_flow_rejects_storage_values_and_invalid_key_names(tmp_path, monkeypatch):
@@ -1521,7 +1560,7 @@ def test_registration_flow_records_same_target_success_redirect_only(tmp_path, m
 
     descriptor = store.list_authentication_flows(target, purpose="registration")[0]["descriptor"]
     assert descriptor["success_redirect_url"] == f"{target}/login"
-    assert descriptor["flow_version"] == authentication.AUTHENTICATION_FLOW_VERSION
+    assert descriptor["flow_version"] == authentication.REGISTRATION_FLOW_VERSION
     with pytest.raises(ValueError, match="credential target boundary"):
         authentication.record_authentication_flow(
             purpose="registration",
@@ -1824,3 +1863,118 @@ def test_authenticated_http_request_exchanges_hidden_oauth_context(tmp_path, mon
 
         assert response["status_code"] == 200
         assert response["body"] == '{"authorized":true}'
+
+
+@pytest.mark.parametrize("purpose,kind,expected_version", [
+    ("authentication", "browser_form", 8),
+    ("registration", "browser_registration", 2),
+])
+def test_flow_recording_uses_independent_purpose_versions(tmp_path, monkeypatch, purpose, kind, expected_version):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "versions.db"), target)
+    _activate_task(store, target)
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    authentication.record_authentication_flow(target=target, purpose=purpose, kind=kind, login_url=f"{target}/start")
+    descriptor = store.list_authentication_flows(target, purpose=purpose)[0]["descriptor"]
+    assert descriptor["flow_version"] == expected_version
+
+
+@pytest.mark.parametrize("version,expected", [(8, True), (7, False), (6, False), (2, False), (1, False), (None, False)])
+def test_authentication_flow_version_rejects_legacy_and_registration_versions(version, expected):
+    assert authentication._is_current_authentication_flow({"flow_version": version}) is expected
+
+
+@pytest.mark.parametrize("purpose,kind", [
+    ("authentication", "browser_form"), ("registration", "browser_registration"),
+])
+def test_discovery_recorder_uses_explicit_child_with_active_consumer(tmp_path, monkeypatch, purpose, kind):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
+    _activate_task(store, target)
+    child = Task("discovery", "Discovery", "Map flow", make_acceptance("discovery"), 1, "active")
+    store.store_task("OP_AUTH", child)
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    candidates = []
+    recorder = authentication.build_record_authentication_flow_tool(
+        target=target, purpose=purpose, kind=kind, candidate_sink=candidates.append,
+        task_uid=child.task_uid, operation_id="OP_AUTH",
+    )
+    schema = get_tool_spec(recorder)["inputSchema"]["json"]["properties"]
+    assert not {"task_uid", "operation_id", "candidate_sink"} & schema.keys()
+    assert json.loads(recorder(login_url=f"{target}/start"))["staged"]
+    assert len(candidates) == 1
+    assert not store.list_authentication_flows(target, purpose=purpose)
+    store.store_task("OP_AUTH", Task(
+        "discovery", "Discovery", "Map flow", make_acceptance("discovery"), 1, "done",
+    ))
+    with pytest.raises(ValueError, match="missing or inactive"):
+        recorder(login_url=f"{target}/start")
+    assert len(candidates) == 1
+    with pytest.raises(ValueError, match="multiple active tasks"):
+        store.store_task("OP_AUTH", child)
+        authentication.record_authentication_flow(
+            target=target, purpose=purpose, kind=kind, login_url=f"{target}/start",
+        )
+
+
+@pytest.mark.parametrize("overrides,message", [
+    ({"task_uid": ""}, "requires controller"),
+    ({"operation_id": ""}, "requires controller"),
+    ({"credential_id": "secret-id"}, "no credential_id"),
+    ({"task_uid": "missing"}, "missing or inactive"),
+    ({"operation_id": "OP_OTHER"}, "operation mismatch"),
+    ({"target": "https://other.test"}, "outside assigned task scope"),
+])
+def test_discovery_recorder_rejects_invalid_binding(tmp_path, monkeypatch, overrides, message):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
+    _activate_task(store, target)
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    arguments = dict(
+        target=target, purpose="authentication", kind="browser_form", candidate_sink=Mock(),
+        task_uid="auth-task", operation_id="OP_AUTH",
+    )
+    arguments.update(overrides)
+    with pytest.raises(ValueError, match=message):
+        authentication.build_record_authentication_flow_tool(**arguments)
+
+
+def test_discovery_binding_requires_staging_sink():
+    with pytest.raises(ValueError, match="only for discovery staging"):
+        authentication.build_record_authentication_flow_tool(
+            target="https://target.test", purpose="authentication", kind="browser_form",
+            task_uid="task", operation_id="OP_AUTH",
+        )
+
+
+def test_registration_discovery_requires_single_assigned_target(tmp_path, monkeypatch):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
+    _activate_task(store, target)
+    plan = store.get_plan("OP_AUTH")
+    plan.targets.append(OperationTarget(target_id="other", value="https://other.test", type="network"))
+    store.store_plan("OP_AUTH", plan)
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    with pytest.raises(ValueError, match="one assigned task target"):
+        authentication.build_record_authentication_flow_tool(
+            target=target, purpose="registration", kind="browser_registration",
+            task_uid="auth-task", operation_id="OP_AUTH", candidate_sink=Mock(),
+        )
+
+
+
+def test_credential_guard_reports_missing_active_task(tmp_path, monkeypatch):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
+    _activate_task(store, target)
+    store.store_task("OP_AUTH", Task("auth-task", "Auth", "Auth", make_acceptance("auth-task"), 1, "done"))
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    with pytest.raises(ValueError, match="no active task was found"):
+        authentication.record_authentication_flow(
+            target=target, purpose="authentication", kind="browser_form", login_url=f"{target}/login",
+        )

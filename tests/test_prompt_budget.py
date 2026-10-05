@@ -600,3 +600,21 @@ def test_budget_compactors_and_mapper_cover_invalid_and_noop_runtime_shapes(monk
     monkeypatch.setattr(cb, "PROMPT_TOKEN_FALLBACK_LIMIT", 0)
     assert cb._get_prompt_token_limit(types.SimpleNamespace(_prompt_token_limit=None, model=None)) is None
     monkeypatch.setattr(cb, "PROMPT_TOKEN_FALLBACK_LIMIT", old_fallback)
+
+
+@pytest.mark.parametrize("compactor", [
+    cb._compact_stale_tool_outputs, cb._compact_failed_tool_outputs,
+])
+@pytest.mark.parametrize("artifact,expected", [
+    ("/tmp/page.html", "artifact:/tmp/page.html"),
+    ("\"/tmp/page with spaces.html\"", "artifact:/tmp/page with spaces.html"),
+])
+def test_compaction_preserves_spaced_artifact_and_other_references(compactor, artifact, expected):
+    text = f"HTML content saved to artifact: {artifact} memory:one finding:two " + "x" * 10000
+    agent = types.SimpleNamespace(messages=[
+        {"content": [{"toolResult": {"status": "error", "content": [{"text": text}]}}]},
+        {"content": []},
+    ])
+    assert compactor(agent, preserve_recent=1) == 1
+    references = agent.messages[0]["content"][0]["toolResult"]["content"][0]["json"]["references"]
+    assert references == [expected, "memory:one", "finding:two"]

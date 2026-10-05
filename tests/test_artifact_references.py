@@ -147,3 +147,84 @@ def test_reference_input_hook_leaves_unrelated_or_already_valid_inputs_unchanged
     ArtifactReferenceInputNormalizationHook()._normalize_tool_input(event)
 
     assert event.tool_use is tool_use
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("artifact: /tmp/page.html", "artifact:/tmp/page.html"),
+    ("ARTIFACT_ID: page.html", "artifact_id:page.html"),
+    ('artifact: "/tmp/page with spaces.html"', "artifact:/tmp/page with spaces.html"),
+    ('"artifact: /tmp/page with spaces.html"', "artifact:/tmp/page with spaces.html"),
+    ("artifact:artifacts/page.html", "artifact:artifacts/page.html"),
+])
+def test_normalize_spaced_and_quoted_references_is_idempotent(raw, expected):
+    assert normalize_artifact_reference_token(raw) == expected
+    assert normalize_artifact_reference_token(expected) == expected
+
+
+@pytest.mark.parametrize("raw", ["artifact:", "artifact: ", "artifact_id: ", 'artifact:""', 'artifact:" "'])
+def test_normalize_rejects_empty_prefixed_references(raw):
+    with pytest.raises(ValueError, match="empty"):
+        normalize_artifact_reference_token(raw)
+
+
+def test_shared_extraction_preserves_structured_paths_and_deduplicates():
+    from modules.tools.artifact_references import extract_artifact_references
+
+    assert extract_artifact_references(
+        {"artifact_ref": "artifact: /tmp/one with spaces.html", "artifact_id": "page.html"},
+        ["HTML content saved to artifact: /tmp/one.html.", "artifact_id: page.html"],
+        {"ignored": 7},
+    ) == ["artifact:/tmp/one with spaces.html", "artifact_id:page.html", "artifact:/tmp/one.html"]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("HTML content saved to artifact: /tmp/page.html", ["artifact:/tmp/page.html"]),
+    ("Screenshot saved to artifact: /tmp/page.png", ["artifact:/tmp/page.png"]),
+    ("artifact:artifacts/a.txt, artifact_id: b.txt|artifact: artifacts/c.txt",
+     ["artifact:artifacts/a.txt", "artifact_id:b.txt", "artifact:artifacts/c.txt"]),
+    ('[artifact: "/tmp/one with spaces.html"]', ["artifact:/tmp/one with spaces.html"]),
+    ('See `artifact: artifacts/a b.txt`.', ["artifact:artifacts/a b.txt"]),
+    ("https://example.test/artifact:page.html", []),
+    ("artifact:\nartifact_id:", []),
+    ('"artifact: "', []),
+    ("memory:item finding:item", []),
+])
+def test_shared_text_extraction(text, expected):
+    from modules.tools.artifact_references import extract_artifact_references
+
+    assert extract_artifact_references(text) == expected
+
+
+def test_shared_match_spans_preserve_surrounding_punctuation():
+    from modules.tools.artifact_references import iter_artifact_reference_matches, replace_artifact_references
+
+    text = 'See artifact: artifacts/a.txt, then `artifact: "/tmp/a b.txt"`. Done.'
+    matches = list(iter_artifact_reference_matches(text))
+    assert len(matches) == 2
+    for match in matches:
+        assert text[match.start:match.end] == match.raw
+    replaced, count = replace_artifact_references(text, lambda reference: f"<{reference}>")
+    assert count == 2
+    assert replaced == "See <artifact:artifacts/a.txt>, then <artifact:/tmp/a b.txt>. Done."
+    assert replace_artifact_references("unchanged", lambda _: "bad") == ("unchanged", 0)
+
+
+def test_shared_extraction_supports_opt_in_legacy_paths_and_labels():
+    from modules.tools.artifact_references import extract_absolute_artifact_paths, extract_artifact_references
+
+    text = "artifacts/a.txt outputs/run/artifacts/b.txt artifact paths: /tmp/proof.txt"
+    assert extract_artifact_references(text) == []
+    assert extract_artifact_references(text, include_bare_paths=True, allow_legacy_labels=True) == [
+        "artifact:artifacts/a.txt", "artifact:outputs/run/artifacts/b.txt", "artifact:/tmp/proof.txt",
+    ]
+    assert extract_absolute_artifact_paths("Saved /tmp/a.txt.") == ["/tmp/a.txt"]
+    assert extract_artifact_references({"artifact_id": "", "artifact_ref": "artifact: "}) == []
+
+
+
+def test_legacy_proof_label_preserves_multiple_paths():
+    from modules.tools.artifact_references import extract_artifact_references
+
+    assert extract_artifact_references(
+        "artifact paths: /tmp/first.txt,/tmp/second.txt", allow_legacy_labels=True,
+    ) == ["artifact:/tmp/first.txt", "artifact:/tmp/second.txt"]

@@ -15,6 +15,7 @@ from src.modules.handlers.tool_recovery import (
     EvaluatorArtifactReadLimitHook,
     TaskFailureRecoveryHook,
     ToolOutcomeJournal,
+    ToolOutcomeRecordingHook,
     _input_fingerprint,
     _result_success,
     _result_text,
@@ -42,6 +43,14 @@ def _after(tool_id, name, tool_input, *, status, text):
         invocation_state={},
         result={"status": status, "toolUseId": tool_id, "content": [{"text": text}]},
     )
+
+
+
+def _dispatch_after(hook, event):
+    if isinstance(hook, TaskFailureRecoveryHook):
+        recorder = ToolOutcomeRecordingHook(hook.journal, hook.recovery_role_for)
+        recorder._after_tool(event)
+    hook._after_tool(event)
 
 
 def _model_turn(hook, *tool_ids):
@@ -72,7 +81,7 @@ def test_two_invalid_searches_in_one_model_turn_allow_corrected_next_turn():
         before = _before(tool_id, "search_artifact", tool_input)
         hook._before_tool(before)
         assert before.cancel_tool is False
-        hook._after_tool(_after(tool_id, "search_artifact", tool_input, status="error", text="context_lines must be between 0 and 10"))
+        _dispatch_after(hook, _after(tool_id, "search_artifact", tool_input, status="error", text="context_lines must be between 0 and 10"))
     _finish_turn(hook)
 
     assert hook.failure_category == "invalid_invocation"
@@ -85,7 +94,7 @@ def test_two_invalid_searches_in_one_model_turn_allow_corrected_next_turn():
         before = _before(tool_id, "search_artifact", corrected_input)
         hook._before_tool(before)
         assert before.cancel_tool is False
-        hook._after_tool(_after(tool_id, "search_artifact", corrected_input, status="success", text="match"))
+        _dispatch_after(hook, _after(tool_id, "search_artifact", corrected_input, status="success", text="match"))
     _finish_turn(hook)
 
     assert hook.unresolved is False
@@ -100,7 +109,7 @@ def test_failed_corrections_count_model_turns_and_mixed_success_recovers():
     failed_input = {"url": "http://target.test/bad"}
     _model_turn(hook, "original")
     hook._before_tool(_before("original", "http_request", failed_input))
-    hook._after_tool(_after("original", "http_request", failed_input, status="error", text="connection refused"))
+    _dispatch_after(hook, _after("original", "http_request", failed_input, status="error", text="connection refused"))
     _finish_turn(hook)
 
     for turn_index in (1, 2):
@@ -111,14 +120,14 @@ def test_failed_corrections_count_model_turns_and_mixed_success_recovers():
             before = _before(tool_id, "http_request", tool_input)
             hook._before_tool(before)
             assert before.cancel_tool is False
-            hook._after_tool(_after(tool_id, "http_request", tool_input, status="error", text="connection refused"))
+            _dispatch_after(hook, _after(tool_id, "http_request", tool_input, status="error", text="connection refused"))
         state = _finish_turn(hook)
         assert hook._correction_attempts == turn_index
         assert bool(state.get("request_state", {}).get("stop_event_loop")) is (turn_index == 2)
 
     mixed = TaskFailureRecoveryHook(ToolOutcomeJournal())
     _model_turn(mixed, "original")
-    mixed._after_tool(_after("original", "http_request", failed_input, status="error", text="connection refused"))
+    _dispatch_after(mixed, _after("original", "http_request", failed_input, status="error", text="connection refused"))
     _finish_turn(mixed)
     _model_turn(mixed, "failed", "succeeded")
     for tool_id, status in (("failed", "error"), ("succeeded", "success")):
@@ -126,7 +135,7 @@ def test_failed_corrections_count_model_turns_and_mixed_success_recovers():
         before = _before(tool_id, "http_request", tool_input)
         mixed._before_tool(before)
         assert before.cancel_tool is False
-        mixed._after_tool(_after(tool_id, "http_request", tool_input, status=status, text=status))
+        _dispatch_after(mixed, _after(tool_id, "http_request", tool_input, status=status, text=status))
     assert _finish_turn(mixed).get("request_state", {}) == {}
     assert mixed.unresolved is False
 
@@ -135,7 +144,7 @@ def test_repeated_policy_blocks_in_one_model_turn_count_once():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=2)
     failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
     _model_turn(hook, "original")
-    hook._after_tool(_after("original", "shell", failed_input, status="error", text="Could not open /missing.txt"))
+    _dispatch_after(hook, _after("original", "shell", failed_input, status="error", text="Could not open /missing.txt"))
     _finish_turn(hook)
 
     _model_turn(hook, "blocked-a", "blocked-b")
@@ -157,7 +166,7 @@ def test_repeated_policy_blocks_in_one_model_turn_count_once():
 def test_same_turn_failed_finding_still_blocks_dependent_acceptance():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     _model_turn(hook, "finding", "acceptance")
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("finding", "store_finding", {"claim": "candidate"}, status="error", text="evidence assertion required")
     )
     acceptance = _before("acceptance", "record_task_acceptance", {"results": []})
@@ -175,7 +184,7 @@ def test_prerequisite_failure_allows_independent_work_until_successful_correctio
         )
     }
 
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "failed",
             "shell",
@@ -195,7 +204,7 @@ def test_prerequisite_failure_allows_independent_work_until_successful_correctio
     diagnostic = _before("diagnostic", "shell", {"command": "find /usr/share/wordlists -type f"})
     hook._before_tool(diagnostic)
     assert diagnostic.cancel_tool is False
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "diagnostic",
             "shell",
@@ -212,7 +221,7 @@ def test_prerequisite_failure_allows_independent_work_until_successful_correctio
     correction = _before("correction", "shell", correction_input)
     hook._before_tool(correction)
     assert correction.cancel_tool is False
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("correction", "shell", correction_input, status="success", text="200 /login.php")
     )
     assert hook.unresolved is False
@@ -320,7 +329,7 @@ def test_evaluator_artifact_read_limit_hook_guides_once_then_stops():
         text=f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Artifact read limit reached (8)",
     )
 
-    hook._after_tool(first)
+    _dispatch_after(hook, first)
 
     assert hook.blocked_attempts == 1
     assert hook.exhausted is False
@@ -334,7 +343,7 @@ def test_evaluator_artifact_read_limit_hook_guides_once_then_stops():
         status="error",
         text=f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Artifact read limit reached (8)",
     )
-    hook._after_tool(second)
+    _dispatch_after(hook, second)
 
     assert hook.blocked_attempts == 2
     assert hook.exhausted is True
@@ -358,7 +367,7 @@ def test_evaluator_artifact_read_limit_hook_preserves_repeat_guard_reason():
         text=f"{ARTIFACT_READ_REPEAT_GUARD_MARKER}: Repeated artifact read guidance for duplicate_page",
     )
 
-    hook._after_tool(event)
+    _dispatch_after(hook, event)
 
     assert "ARTIFACT_READ_REPEAT_GUARD" in event.result["content"][0]["text"]
     assert "page is unavailable" not in event.result["content"][0]["text"]
@@ -373,7 +382,7 @@ def test_evaluator_artifact_read_limit_hook_guides_overlap_then_stops_repeat():
         status="error",
         text=f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: page overlaps returned content",
     )
-    hook._after_tool(first)
+    _dispatch_after(hook, first)
 
     assert hook.exhausted is False
     assert ARTIFACT_READ_OVERLAP_GUARD_MARKER in first.result["content"][0]["text"]
@@ -385,7 +394,7 @@ def test_evaluator_artifact_read_limit_hook_guides_overlap_then_stops_repeat():
         status="error",
         text=f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: page overlaps returned content",
     )
-    hook._after_tool(other)
+    _dispatch_after(hook, other)
 
     assert hook.exhausted is False
 
@@ -396,7 +405,7 @@ def test_evaluator_artifact_read_limit_hook_guides_overlap_then_stops_repeat():
         status="error",
         text=f"{ARTIFACT_READ_OVERLAP_GUARD_MARKER}: artifact is blocked",
     )
-    hook._after_tool(second)
+    _dispatch_after(hook, second)
 
     assert hook.exhausted is True
     assert second.invocation_state["request_state"]["stop_event_loop"] is True
@@ -412,7 +421,7 @@ def test_evaluator_artifact_page_limit_allows_another_artifact_then_stops_repeat
         text=f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact page limit reached (4)",
     )
 
-    hook._after_tool(first)
+    _dispatch_after(hook, first)
 
     assert hook.blocked_attempts == 0
     assert hook.exhausted is False
@@ -425,7 +434,7 @@ def test_evaluator_artifact_page_limit_allows_another_artifact_then_stops_repeat
         status="error",
         text=f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact page limit reached (4)",
     )
-    hook._after_tool(other)
+    _dispatch_after(hook, other)
 
     assert hook.exhausted is False
 
@@ -436,7 +445,7 @@ def test_evaluator_artifact_page_limit_allows_another_artifact_then_stops_repeat
         status="error",
         text=f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact page limit reached (4)",
     )
-    hook._after_tool(repeated)
+    _dispatch_after(hook, repeated)
 
     assert hook.exhausted is True
     assert repeated.invocation_state["request_state"] == {
@@ -451,7 +460,7 @@ def test_evaluator_artifact_page_limit_allows_another_artifact_then_stops_repeat
 def test_failed_corrections_exhaust_configured_allowance_without_blocking_independent_work():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "feroxbuster --not-an-option http://target"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed", "shell", failed_input, status="error", text="unknown option --not-an-option")
     )
     correction = _before("correction", "shell", {"command": "feroxbuster -u http://target"})
@@ -463,7 +472,7 @@ def test_failed_corrections_exhaust_configured_allowance_without_blocking_indepe
         status="error",
         text="timed out",
     )
-    hook._after_tool(failed_correction)
+    _dispatch_after(hook, failed_correction)
 
     assert hook.unresolved is True
     assert hook.exhausted is False
@@ -471,7 +480,7 @@ def test_failed_corrections_exhaust_configured_allowance_without_blocking_indepe
     second = _before("second", "shell", second_input)
     hook._before_tool(second)
     second_after = _after("second", "shell", second_input, status="error", text="timed out")
-    hook._after_tool(second_after)
+    _dispatch_after(hook, second_after)
     assert hook.exhausted is True
     assert second_after.invocation_state["request_state"]["stop_event_loop"] is True
     assert (
@@ -487,7 +496,7 @@ def test_failed_corrections_exhaust_configured_allowance_without_blocking_indepe
 def test_recovery_stops_at_configured_policy_violation_limit(limit):
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=limit)
     failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed", "shell", failed_input, status="error", text="Could not open /missing.txt")
     )
 
@@ -518,7 +527,7 @@ def test_failed_store_finding_requires_changed_submission_before_other_mutations
         "claim": "Vulnerability pages are accessible without authentication",
         "target": "http://target/vulnerabilities/sqli/",
     }
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "failed",
             "store_finding",
@@ -545,7 +554,7 @@ def test_failed_store_finding_requires_changed_submission_before_other_mutations
     correction = _before("correction", "store_finding", corrected_input)
     hook._before_tool(correction)
     assert correction.cancel_tool is False
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "correction",
             "store_finding",
@@ -565,7 +574,7 @@ def test_failed_store_finding_requires_changed_submission_before_other_mutations
 def test_read_artifact_failure_allows_one_changed_retry_then_requires_alternate_evidence():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"path": "artifact:artifacts/missing.txt"}
-    hook._after_tool(_after("failed", "read_artifact", failed_input, status="error", text="Artifact does not exist"))
+    _dispatch_after(hook, _after("failed", "read_artifact", failed_input, status="error", text="Artifact does not exist"))
 
     assert hook.failure_category == "artifact_unavailable"
     assert "at most one changed read_artifact or search_artifact call" in hook.recovery_guidance()
@@ -573,7 +582,7 @@ def test_read_artifact_failure_allows_one_changed_retry_then_requires_alternate_
     retry = _before("retry", "read_artifact", retry_input)
     hook._before_tool(retry)
     assert retry.cancel_tool is False
-    hook._after_tool(_after("retry", "read_artifact", retry_input, status="error", text="Artifact does not exist"))
+    _dispatch_after(hook, _after("retry", "read_artifact", retry_input, status="error", text="Artifact does not exist"))
 
     blocked = _before("blocked", "read_artifact", {"path": "artifact:artifacts/other.txt"})
     hook._before_tool(blocked)
@@ -581,14 +590,14 @@ def test_read_artifact_failure_allows_one_changed_retry_then_requires_alternate_
     alternate = _before("alternate", "http_request", {"url": "http://target/evidence"})
     hook._before_tool(alternate)
     assert alternate.cancel_tool is False
-    hook._after_tool(_after("alternate", "http_request", alternate.tool_use["input"], status="success", text="200 OK"))
+    _dispatch_after(hook, _after("alternate", "http_request", alternate.tool_use["input"], status="success", text="200 OK"))
     assert hook.unresolved is False
 
 
 def test_redirect_body_failure_blocks_repeated_browser_body_call_and_allows_http_fallback():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"url": "http://target/redirect"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "failed",
             "browser_get_page_html",
@@ -605,14 +614,14 @@ def test_redirect_body_failure_blocks_repeated_browser_body_call_and_allows_http
     fallback = _before("fallback", "http_request", {"url": "http://target/redirect"})
     hook._before_tool(fallback)
     assert fallback.cancel_tool is False
-    hook._after_tool(_after("fallback", "http_request", fallback.tool_use["input"], status="success", text="302 Location: /final"))
+    _dispatch_after(hook, _after("fallback", "http_request", fallback.tool_use["input"], status="success", text="302 Location: /final"))
     assert hook.unresolved is False
 
 
 def test_http_failure_requires_changed_request_or_alternate_method():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"url": "http://target/invalid"}
-    hook._after_tool(_after("failed", "http_request", failed_input, status="error", text="connection refused"))
+    _dispatch_after(hook, _after("failed", "http_request", failed_input, status="error", text="connection refused"))
 
     assert hook.failure_category == "repeated_http_failure"
     assert "Do not repeat the identical request" in hook.recovery_guidance()
@@ -624,7 +633,7 @@ def test_http_failure_requires_changed_request_or_alternate_method():
 def test_shell_failure_requires_changed_command_or_capability_alternate():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"command": "curl --bad-option http://target"}
-    hook._after_tool(_after("failed", "shell", failed_input, status="error", text="invalid option --bad-option"))
+    _dispatch_after(hook, _after("failed", "shell", failed_input, status="error", text="invalid option --bad-option"))
 
     assert hook.failure_category == "repeated_shell_failure"
     assert "Do not repeat the identical command" in hook.recovery_guidance()
@@ -637,7 +646,7 @@ def test_store_finding_missing_artifact_is_a_structured_correctable_failure():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=2)
     failed_input = {"title": "Candidate", "artifacts": []}
 
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "failed",
             "store_finding",
@@ -664,7 +673,7 @@ def test_failed_finding_submission_blocks_acceptance_until_changed_store_succeed
         status="error",
         text="At least one evidence assertion is required",
     )
-    hook._after_tool(failed)
+    _dispatch_after(hook, failed)
 
     assert hook.finding_submission_repair_active is True
     assert "STORE_FINDING_REPAIR_MISSING_EVIDENCE_ASSERTIONS" in _result_text(failed.result)
@@ -677,7 +686,7 @@ def test_failed_finding_submission_blocks_acceptance_until_changed_store_succeed
     artifact_read = _before("read", "read_artifact", {"path": "artifacts/evidence.txt"})
     hook._before_tool(artifact_read)
     assert artifact_read.cancel_tool is False
-    hook._after_tool(_after("read", "read_artifact", artifact_read.tool_use["input"], status="success", text="proof"))
+    _dispatch_after(hook, _after("read", "read_artifact", artifact_read.tool_use["input"], status="success", text="proof"))
 
     corrected = {
         **failed_input,
@@ -686,14 +695,14 @@ def test_failed_finding_submission_blocks_acceptance_until_changed_store_succeed
     retry = _before("retry", "store_finding", corrected)
     hook._before_tool(retry)
     assert retry.cancel_tool is False
-    hook._after_tool(_after("retry", "store_finding", corrected, status="success", text="finding:123"))
+    _dispatch_after(hook, _after("retry", "store_finding", corrected, status="success", text="finding:123"))
     assert hook.finding_submission_repair_active is False
 
 
 def test_missing_marker_requires_artifact_read_before_changed_finding_retry():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"title": "Candidate", "artifacts": ["artifacts/evidence.txt"], "evidence_assertions": []}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "failed",
             "store_finding",
@@ -761,14 +770,14 @@ def test_acceptance_errors_return_specific_repair_instructions(raw, expected):
 def test_non_shell_failed_correction_exhausts_recovery():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"tasks": "not-a-list"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed", "create_tasks", failed_input, status="error", text="validation error: input should be a list")
     )
 
     correction = _before("correction", "create_tasks", {"tasks": [{"title": "Only title changed"}]})
     hook._before_tool(correction)
     assert correction.cancel_tool is False
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "correction",
             "create_tasks",
@@ -785,7 +794,7 @@ def test_non_shell_failed_correction_exhausts_recovery():
     hook._before_tool(retry)
     assert retry.cancel_tool is False
     retry_failure = _after("retry", "create_tasks", retry_input, status="error", text="validation error")
-    hook._after_tool(retry_failure)
+    _dispatch_after(hook, retry_failure)
     assert hook.exhausted is True
     assert STORE_FINDING_RECOVERY_EXHAUSTED_STATE_KEY not in retry_failure.invocation_state["request_state"]
 
@@ -793,7 +802,7 @@ def test_non_shell_failed_correction_exhausts_recovery():
 def test_exhausted_store_finding_correction_requests_stop_for_current_invocation():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10, max_corrections=1)
     failed_input = {"title": "Candidate", "artifacts": ["artifacts/evidence.txt"]}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "failed",
             "store_finding",
@@ -816,7 +825,7 @@ def test_exhausted_store_finding_correction_requests_stop_for_current_invocation
         status="error",
         text="evidence assertion marker was not found in artifact:artifacts/evidence.txt",
     )
-    hook._after_tool(correction_failure)
+    _dispatch_after(hook, correction_failure)
 
     request_state = correction_failure.invocation_state["request_state"]
     assert hook.exhausted is True
@@ -835,7 +844,7 @@ def test_exhausted_store_finding_correction_requests_stop_for_current_invocation
 def test_blocked_store_finding_recovery_requests_stop_for_current_invocation():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=1)
     failed_input = {"title": "Candidate", "artifacts": []}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "failed",
             "store_finding",
@@ -871,25 +880,25 @@ def test_finding_validation_corrections_survive_shell_inspection_and_stop_on_fin
         status="error",
         text=validation_error,
     )
-    hook._after_tool(first_failure)
+    _dispatch_after(hook, first_failure)
     assert "FINDING_VALIDATION_REPAIR" in _result_text(first_failure.result)
     assert "same exposure in a fresh artifact" in _result_text(first_failure.result)
     assert "exact-validator-secret" in _result_text(first_failure.result)
 
     shell_one = _before("shell-1", "shell", {"command": "curl -sS http://target/first"})
     hook._before_tool(shell_one)
-    hook._after_tool(_after("shell-1", "shell", shell_one.tool_use["input"], status="success", text="first.json"))
+    _dispatch_after(hook, _after("shell-1", "shell", shell_one.tool_use["input"], status="success", text="first.json"))
     assert hook.unresolved is True
 
     second_input = {"outcome": "confirmed", "evidence_artifacts": ["artifact:artifacts/second.json"]}
     second = _before("validation-2", "record_finding_validation", second_input)
     hook._before_tool(second)
     assert second.cancel_tool is False
-    hook._after_tool(_after("validation-2", "record_finding_validation", second_input, status="error", text=validation_error))
+    _dispatch_after(hook, _after("validation-2", "record_finding_validation", second_input, status="error", text=validation_error))
 
     shell_two = _before("shell-2", "shell", {"command": "curl -sS http://target/second"})
     hook._before_tool(shell_two)
-    hook._after_tool(_after("shell-2", "shell", shell_two.tool_use["input"], status="success", text="second.json"))
+    _dispatch_after(hook, _after("shell-2", "shell", shell_two.tool_use["input"], status="success", text="second.json"))
     assert hook.unresolved is True
 
     final_input = {"outcome": "confirmed", "evidence_artifacts": ["artifact:artifacts/final.json"]}
@@ -897,7 +906,7 @@ def test_finding_validation_corrections_survive_shell_inspection_and_stop_on_fin
     hook._before_tool(final)
     assert final.cancel_tool is False
     final_failure = _after("validation-3", "record_finding_validation", final_input, status="error", text=validation_error)
-    hook._after_tool(final_failure)
+    _dispatch_after(hook, final_failure)
 
     assert hook.exhausted is True
     assert final_failure.invocation_state["request_state"]["stop_event_loop"] is True
@@ -914,7 +923,7 @@ def test_finding_validation_corrections_survive_shell_inspection_and_stop_on_fin
 def test_shell_correction_allows_different_executable_and_requires_changed_input():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal(), max_policy_violations=10)
     failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed", "shell", failed_input, status="error", text="Could not open /missing.txt")
     )
 
@@ -926,7 +935,7 @@ def test_shell_correction_allows_different_executable_and_requires_changed_input
     different_executable = _before("curl", "shell", {"command": "curl http://target"})
     hook._before_tool(different_executable)
     assert different_executable.cancel_tool is False
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "curl",
             "shell",
@@ -937,7 +946,7 @@ def test_shell_correction_allows_different_executable_and_requires_changed_input
     )
     assert hook.unresolved is False
 
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed-again", "shell", failed_input, status="error", text="Could not open /missing.txt")
     )
     corrected = _before("corrected", "shell", {"command": "feroxbuster -u http://target -w /valid.txt"})
@@ -949,7 +958,7 @@ def test_shell_validation_failure_without_executable_accepts_valid_changed_corre
     journal = ToolOutcomeJournal()
     hook = TaskFailureRecoveryHook(journal, max_policy_violations=10)
     failed_input = {}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "failed",
             "shell",
@@ -975,7 +984,7 @@ def test_shell_validation_failure_without_executable_accepts_valid_changed_corre
     correction = _before("correction", "shell", correction_input)
     hook._before_tool(correction)
     assert correction.cancel_tool is False
-    hook._after_tool(_after("correction", "shell", correction_input, status="success", text="login"))
+    _dispatch_after(hook, _after("correction", "shell", correction_input, status="success", text="login"))
 
     assert hook.unresolved is False
     assert [outcome.recovery_role for outcome in journal.entries()] == ["normal", "correction"]
@@ -1091,7 +1100,7 @@ def test_startup_dependency_failure_quarantines_only_failed_executable():
         quarantined_executables=shared_quarantine,
     )
     failed_input = {"command": "dirsearch -u http://target"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "failed",
             "shell",
@@ -1126,7 +1135,7 @@ def test_startup_dependency_failure_quarantines_only_failed_executable():
 def test_missing_prerequisite_allows_creation_before_retry():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "scanner -w /missing/words.txt http://target"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed", "shell", failed_input, status="error", text="No such file or directory: words.txt")
     )
 
@@ -1134,7 +1143,7 @@ def test_missing_prerequisite_allows_creation_before_retry():
     create = _before("create", "python_repl", create_input)
     hook._before_tool(create)
     assert create.cancel_tool is False
-    hook._after_tool(_after("create", "python_repl", create_input, status="success", text="created"))
+    _dispatch_after(hook, _after("create", "python_repl", create_input, status="success", text="created"))
 
     corrected_input = {"command": "scanner -w /tmp/words.txt http://target"}
     corrected = _before("corrected", "shell", corrected_input)
@@ -1148,7 +1157,7 @@ def test_failed_diagnostic_shell_command_does_not_start_recovery(executable):
     hook = TaskFailureRecoveryHook(journal)
     tool_input = {"command": f"{executable} /missing"}
 
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "diagnostic",
             "shell",
@@ -1185,7 +1194,7 @@ def test_wrapped_diagnostic_shell_command_does_not_start_recovery(command):
     tool_input = {"command": command}
 
     assert is_correctable_tool_failure("shell", tool_input, "No such file or directory") is False
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("diagnostic", "shell", tool_input, status="error", text="No such file or directory")
     )
 
@@ -1196,7 +1205,7 @@ def test_failed_diagnostic_during_recovery_preserves_original_failure():
     journal = ToolOutcomeJournal()
     hook = TaskFailureRecoveryHook(journal)
     failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed", "shell", failed_input, status="error", text="Could not open /missing.txt")
     )
     original_fingerprint = hook.failed_input_fingerprint
@@ -1205,7 +1214,7 @@ def test_failed_diagnostic_during_recovery_preserves_original_failure():
     diagnostic = _before("diagnostic", "shell", diagnostic_input)
     hook._before_tool(diagnostic)
     assert diagnostic.cancel_tool is False
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("diagnostic", "shell", diagnostic_input, status="error", text="No such file or directory")
     )
 
@@ -1221,7 +1230,7 @@ def test_failed_diagnostic_during_recovery_preserves_original_failure():
     correction = _before("correction", "shell", correction_input)
     hook._before_tool(correction)
     assert correction.cancel_tool is False
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("correction", "shell", correction_input, status="success", text="200 /login.php")
     )
     assert hook.unresolved is False
@@ -1232,7 +1241,7 @@ def test_curl_header_status_is_interpretable_even_when_shell_status_is_error():
     hook = TaskFailureRecoveryHook(journal)
     tool_input = {"command": "curl --fail -sS -D - -o /dev/null http://target/robots.txt"}
 
-    hook._after_tool(
+    _dispatch_after(hook,
         _after(
             "curl-404",
             "shell",
@@ -1256,7 +1265,7 @@ def test_curl_write_out_status_is_interpretable_even_when_shell_status_is_error(
         "command": 'curl --fail -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" http://target/robots.txt'
     }
 
-    hook._after_tool(_after("curl-404", "shell", tool_input, status="error", text="404 http://target/robots.txt"))
+    _dispatch_after(hook, _after("curl-404", "shell", tool_input, status="error", text="404 http://target/robots.txt"))
 
     outcome = journal.entries()[0]
     assert outcome.success is True
@@ -1270,7 +1279,7 @@ def test_silent_curl_without_captured_status_is_not_reclassified_as_evidence():
     hook = TaskFailureRecoveryHook(journal)
     tool_input = {"command": "curl -s http://target/robots.txt"}
 
-    hook._after_tool(_after("curl-silent", "shell", tool_input, status="error", text=""))
+    _dispatch_after(hook, _after("curl-silent", "shell", tool_input, status="error", text=""))
 
     outcome = journal.entries()[0]
     assert outcome.success is False
@@ -1310,7 +1319,7 @@ def test_outcome_helpers_cover_schema_variants_and_journal_slices():
 def test_recovery_allows_multiple_diagnostics_and_two_corrections():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "feroxbuster --bad http://target"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed", "shell", failed_input, status="error", text="invalid argument --bad")
     )
 
@@ -1332,7 +1341,7 @@ def test_recovery_allows_multiple_diagnostics_and_two_corrections():
 def test_recovery_guidance_includes_optional_failed_command_help():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "feroxbuster --bad http://target"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed", "shell", failed_input, status="error", text="invalid argument --bad")
     )
 
@@ -1348,14 +1357,14 @@ def test_recovery_guidance_includes_optional_failed_command_help():
 def test_recovery_allows_read_only_diagnostics_and_unrelated_shell():
     hook = TaskFailureRecoveryHook(ToolOutcomeJournal())
     failed_input = {"command": "feroxbuster -u http://target -w /missing.txt"}
-    hook._after_tool(
+    _dispatch_after(hook,
         _after("failed", "shell", failed_input, status="error", text="no such file or directory")
     )
 
     read_artifact = _before("read", "read_artifact", {"path": "artifacts/error.txt"})
     hook._before_tool(read_artifact)
     assert read_artifact.cancel_tool is False
-    hook._after_tool(_after("read", "read_artifact", read_artifact.tool_use["input"], status="success", text="log"))
+    _dispatch_after(hook, _after("read", "read_artifact", read_artifact.tool_use["input"], status="success", text="log"))
 
     retrieve = _before("retrieve", "memory_retrieve", {"query": "wordlists"})
     hook._before_tool(retrieve)
@@ -1368,3 +1377,38 @@ def test_recovery_allows_read_only_diagnostics_and_unrelated_shell():
     diagnostic = _before("diagnostic", "shell", {"command": "which feroxbuster"})
     hook._before_tool(diagnostic)
     assert diagnostic.cancel_tool is False
+
+
+@pytest.mark.parametrize("name", ["read_artifact", "search_artifact"])
+@pytest.mark.parametrize("scope", ["total", "artifact"])
+def test_artifact_limit_hook_uses_controller_state_and_stops_only_repeated_limit(name, scope):
+    state = {"scope": scope, "used": 4, "allowed": 4}
+    if scope == "artifact":
+        state["path"] = "/canonical/one"
+    other_name = "read_artifact" if name == "search_artifact" else "search_artifact"
+    other_state = {}
+    hook = EvaluatorArtifactReadLimitHook([
+        SimpleNamespace(tool_name=name, artifact_limit_state=state),
+        SimpleNamespace(tool_name=other_name, artifact_limit_state=other_state),
+    ])
+    first = _after("one", name, {"path": "alias"}, status="error", text="limit guidance with counts")
+    _dispatch_after(hook, first)
+    assert not hook.exhausted
+    assert first.result["content"][0]["text"] == "limit guidance with counts"
+    other = _after("other", other_name, {}, status="success", text="content")
+    _dispatch_after(hook, other)
+    assert not hook.exhausted
+    second = _after("two", name, {"path": "different alias"}, status="error", text="limit")
+    _dispatch_after(hook, second)
+    assert hook.exhausted
+    assert second.invocation_state["request_state"]["stop_event_loop"]
+    assert len(hook.limit_events) == 2
+
+
+def test_search_limit_hook_supports_legacy_marker_results():
+    hook = EvaluatorArtifactReadLimitHook()
+    for ordinal in (1, 2):
+        event = _after(str(ordinal), "search_artifact", {}, status="error",
+                       text=f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Search limit reached")
+        _dispatch_after(hook, event)
+        assert hook.exhausted == (ordinal == 2)

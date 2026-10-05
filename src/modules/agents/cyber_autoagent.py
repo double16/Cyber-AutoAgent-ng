@@ -70,6 +70,7 @@ from modules.handlers.terminal_tool import TerminalToolHook
 from modules.handlers.tool_recovery import (
     EvaluatorArtifactReadLimitHook,
     TaskFailureRecoveryHook,
+    ToolOutcomeRecordingHook,
 )
 from modules.handlers.tool_repeat_guard import (
     DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
@@ -1167,8 +1168,11 @@ def create_agent(
     agent_hooks = list(runtime.hooks) if runtime.hooks else []
     failure_recovery_hook = None
     evaluator_artifact_read_limit_hook = None
-    if agent_type == "task_evaluator":
-        evaluator_artifact_read_limit_hook = EvaluatorArtifactReadLimitHook()
+    if agent_type in {
+        "task_evaluator", "authentication_flow_discovery_agent", "registration_flow_discovery_agent",
+        "authentication_flow_discovery_critic", "registration_flow_discovery_critic",
+    }:
+        evaluator_artifact_read_limit_hook = EvaluatorArtifactReadLimitHook(tools or [])
         agent_hooks.append(evaluator_artifact_read_limit_hook)
     if agent_type == "task_executor" and isinstance(callback_handler, AgentEventHandler):
         max_policy_violations = runtime.config_manager.getenv_int(
@@ -1201,11 +1205,22 @@ def create_agent(
             efficiency_callback=callback_handler.record_efficiency_event,
         )
         agent_hooks.append(failure_recovery_hook)
+    outcome_recording_hook = None
+    if isinstance(callback_handler, AgentEventHandler):
+        outcome_recording_hook = ToolOutcomeRecordingHook(
+            callback_handler.tool_outcome_journal,
+            recovery_role=failure_recovery_hook.recovery_role_for if failure_recovery_hook is not None else None,
+        )
+        # Capture original results before recovery or presentation hooks can rewrite them.
+        agent_hooks.insert(0, outcome_recording_hook)
     if agent_type == "task_executor":
         agent_hooks.append(TerminalToolHook(agent_type))
 
     tool_executor = runtime.tool_executor
-    if agent_type == "task_executor":
+    if agent_type in {
+        "task_executor", "authentication_flow_discovery_agent", "registration_flow_discovery_agent",
+        "authentication_flow_discovery_critic", "registration_flow_discovery_critic",
+    }:
         tool_executor = SequentialToolExecutor()
     elif agent_type in _FAIL_FAST_TOOL_ROLES:
         tool_executor = FailFastSequentialToolExecutor()
@@ -1256,6 +1271,8 @@ def create_agent(
         agent._cyber_agent_name = agent_kwargs["name"]
         agent._cyber_agent_type = agent_type or getattr(callback_handler, "agent_type", "agent")
         agent._cyber_callback_handler = callback_handler
+        if outcome_recording_hook is not None:
+            agent._cyber_tool_outcome_recording_hook = outcome_recording_hook
         if failure_recovery_hook is not None:
             agent._cyber_failure_recovery_hook = failure_recovery_hook
         if evaluator_artifact_read_limit_hook is not None:

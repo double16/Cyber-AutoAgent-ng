@@ -356,7 +356,12 @@ and column positions, and uses `next_match_offset` to page through additional ma
 accepts 0 through 10 surrounding lines on each side of a match (default 2); zero returns only the matching line.
 Task-executor tool recovery counts corrected calls by model response, so several calls emitted together consume one
 correction attempt. Report and other read-only
-agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation). A task evaluator may read
+agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation). Authentication and registration
+discovery searches instead use `CYBER_WORKFLOW_FLOW_DISCOVERY_SEARCH_LIMIT` (default 16): actors receive
+that many searches total, while critics receive that many per distinct authorized artifact and a total
+scaled by the artifact count. Each invocation, including retries and later cycles, gets fresh counters.
+Search output remains bounded; searches with no matches consume allowance. Discovery artifact reads
+retain their existing pagination limits. A task evaluator may read
 only controller-authorized task evidence and frozen acceptance artifacts. It receives up to
 `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE` pages per artifact (default four), with its total derived from the
 number of distinct authorized artifacts; each evaluator page is limited to 200 lines and 5% of the resolved input

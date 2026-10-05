@@ -9,6 +9,7 @@ from typing import Any
 
 from strands import tool
 
+from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.tools.memory import _artifact_path_from_ref, _operation_output_root
 
 ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER = "ARTIFACT_TOTAL_READ_LIMIT_REACHED"
@@ -112,6 +113,7 @@ def resolve_operation_artifact_path(path: str) -> str:
     fall back to the operation output directory itself.
     """
 
+    path = normalize_artifact_reference_token(path)
     root = os.path.realpath(_operation_output_root())
     if str(path).startswith(("artifact:", "artifact_id:")):
         resolved = _resolved_operation_path(_artifact_path_from_ref(path), root)
@@ -135,7 +137,7 @@ def _resolve_operation_directory_path(path: str) -> str | None:
     """Resolve an existing in-scope directory supplied to the artifact reader."""
 
     root = os.path.realpath(_operation_output_root())
-    text = str(path or "").strip()
+    text = normalize_artifact_reference_token(path)
     if text.startswith("artifact_id:"):
         artifact_id = text.split(":", 1)[1]
         if not artifact_id or artifact_id != os.path.basename(artifact_id):
@@ -685,6 +687,7 @@ def create_bounded_artifact_searcher(
     )
     calls = 0
     searches_by_path: dict[str, int] = {}
+    limit_state: dict[str, Any] = {}
 
     @tool(name="search_artifact", inputSchema=_SEARCH_ARTIFACT_INPUT_SCHEMA)
     def search_artifact(
@@ -698,6 +701,7 @@ def create_bounded_artifact_searcher(
         """Search an entire allowed artifact and return bounded matching context."""
 
         nonlocal calls
+        limit_state.clear()
         root = os.path.realpath(_operation_output_root())
         directory = _resolve_operation_directory_path(path)
         if directory is not None:
@@ -719,12 +723,24 @@ def create_bounded_artifact_searcher(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
             )
         if calls >= max_searches:
-            raise RuntimeError(f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Search limit reached")
+            limit_state.update(scope="total", used=calls, allowed=max_searches)
+            raise RuntimeError(
+                f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: search_artifact has used {calls}/{max_searches} "
+                "searches across all artifacts for this invocation. Changing files, patterns, or pagination "
+                "cannot restore searches. Use already-returned evidence or another available tool."
+            )
         if (
             max_searches_per_artifact is not None
             and searches_by_path.get(resolved, 0) >= max_searches_per_artifact
         ):
-            raise RuntimeError(f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact search limit reached")
+            limit_state.update(scope="artifact", path=resolved, used=searches_by_path[resolved],
+                               allowed=max_searches_per_artifact)
+            raise RuntimeError(
+                f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: search_artifact has used "
+                f"{searches_by_path[resolved]}/{max_searches_per_artifact} searches for this artifact. "
+                "Changing patterns or pagination cannot restore searches for it. "
+                "Use already-returned evidence, another allowed artifact, or another available tool."
+            )
         try:
             result = _search_artifact(
                 resolved,
@@ -741,6 +757,7 @@ def create_bounded_artifact_searcher(
         searches_by_path[resolved] = searches_by_path.get(resolved, 0) + 1
         return result
 
+    search_artifact.artifact_limit_state = limit_state
     return search_artifact
 
 
@@ -782,6 +799,7 @@ def create_bounded_artifact_reader(
     }
     calls = 0
     reads_by_path: dict[str, int] = {}
+    limit_state: dict[str, Any] = {}
     seen_pages: set[tuple[Any, ...]] = set()
     returned_ranges: dict[tuple[str, str], list[tuple[int, int]]] = {}
     guided_requests: set[tuple[str, tuple[Any, ...]]] = set()
@@ -843,6 +861,7 @@ def create_bounded_artifact_reader(
         """Read a bounded current-operation artifact with line or byte paging."""
 
         nonlocal calls
+        limit_state.clear()
         try:
             resolved = resolve_operation_artifact_path(path)
         except (OSError, TypeError, ValueError) as error:
@@ -993,18 +1012,25 @@ def create_bounded_artifact_reader(
                 f"This byte page is within {ARTIFACT_NEARBY_BYTE_PAGE_GAP} bytes of content already returned.",
             )
         if calls >= max_reads:
+            limit_state.update(scope="total", used=calls, allowed=max_reads)
             return guide_once(
                 resolved,
                 page,
                 "evaluator_read_budget_exhausted",
-                f"The evaluator-wide successful-read budget ({max_reads}) is exhausted.",
+                f"read_artifact has used {calls}/{max_reads} reads across all artifacts for this invocation. "
+                "Changing files or pagination cannot restore reads. "
+                "Use already-returned evidence or another available tool.",
             )
         if max_reads_per_artifact is not None and reads_by_path.get(resolved, 0) >= max_reads_per_artifact:
+            limit_state.update(scope="artifact", path=resolved, used=reads_by_path[resolved],
+                               allowed=max_reads_per_artifact)
             return guide_once(
                 resolved,
                 page,
                 "artifact_page_budget_exhausted",
-                f"This artifact has reached its successful-page budget ({max_reads_per_artifact}).",
+                f"read_artifact has used {reads_by_path[resolved]}/{max_reads_per_artifact} reads for this artifact. "
+                "Changing pagination cannot restore reads for it. "
+                "Use already-returned evidence, another allowed artifact, or another available tool.",
             )
         calls += 1
         reads_by_path[resolved] = reads_by_path.get(resolved, 0) + 1
@@ -1019,4 +1045,5 @@ def create_bounded_artifact_reader(
 
     bounded_read_artifact.__name__ = "read_artifact"
     bounded_read_artifact._cyber_context_reduction_state = reduction_state
+    bounded_read_artifact.artifact_limit_state = limit_state
     return bounded_read_artifact

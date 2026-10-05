@@ -627,7 +627,12 @@ def _active_task_target_values(store: Any, operation_id: str) -> tuple[Any, set[
 
     active_task = active_credential_task(store, operation_id)
     if active_task is None:
-        raise ValueError("an active task is required for credential access")
+        active_count = sum(task.status == "active" for task in store.get_tasks(operation_id))
+        if active_count > 1:
+            raise ValueError(
+                "credential access requires exactly one active task; multiple active tasks make task context ambiguous"
+            )
+        raise ValueError("credential access requires an active task; no active task was found")
     target_values = set(_task_resolved_targets(store, operation_id, active_task))
     if not target_values:
         raise ValueError("active task does not have a resolved target scope")

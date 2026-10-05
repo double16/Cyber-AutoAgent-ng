@@ -8,7 +8,7 @@ from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent
 from strands.types._events import ToolResultEvent
 from strands.types.tools import AgentTool
 
-from modules.handlers.tool_recovery import TaskFailureRecoveryHook, ToolOutcomeJournal
+from modules.handlers.tool_recovery import TaskFailureRecoveryHook, ToolOutcomeJournal, ToolOutcomeRecordingHook
 from modules.handlers.tool_repeat_guard import (
     DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
     DEFAULT_TOOL_REPEAT_THRESHOLD,
@@ -100,6 +100,7 @@ def _run_combined_after(recovery_hook, repeat_hook, before_event, result, cancel
     """Run after callbacks in Strands' reverse callback order."""
 
     event = _after(before_event, result, cancel_message=cancel_message)
+    ToolOutcomeRecordingHook(recovery_hook.journal, recovery_hook.recovery_role_for)._after_tool(event)
     recovery_hook._after_tool(event)
     repeat_hook._after_tool(event)
     return event

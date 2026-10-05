@@ -4035,3 +4035,57 @@ def test_cli_main_workflow_runner_omits_policy_message_when_no_agent_final_text(
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("missing_recorder", [False, True])
+def test_cli_discovery_session_reads_production_recording_hook(
+    monkeypatch, tmp_path, purpose, missing_recorder,
+):
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    callback = CliCallback()
+    placeholder = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, placeholder, callback)
+    role = f"{purpose}_flow_discovery_agent"
+    created = []
+
+    def construct(**kwargs):
+        agent = create_outcome_agent(monkeypatch, kwargs["agent_type"], kwargs["tools"])
+        if missing_recorder:
+            del agent._cyber_tool_outcome_recording_hook
+        created.append(agent)
+        return agent
+
+    monkeypatch.setattr(cyberautoagent, "create_agent", construct)
+
+    def run_agent(**kwargs):
+        complete_tool_call(
+            kwargs["agent"], "browser_get_page_html", {}, "HTML content saved to artifact: artifacts/login.html",
+        )
+        return cyberautoagent.AgentRunResult("discovery_done", "mapped")
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", run_agent)
+    monkeypatch.setattr(cyberautoagent.sys, "argv", [
+        "cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60",
+        "--provider", "ollama",
+    ])
+
+    def run_workflow():
+        factory = config_manager.workflow_controller.call_args.kwargs["executor_session_factory"]
+        if missing_recorder:
+            with pytest.raises(cyberautoagent.WorkflowInvariantError, match="outcome recorder"):
+                with factory(role, [], "system"):
+                    pytest.fail("discovery must not start")
+            return
+        with factory(role, [], "system") as execute:
+            first = execute("map", cyberautoagent.AgentRunPolicy())
+            second = execute("correct", cyberautoagent.AgentRunPolicy())
+            assert len(first.outcomes) == len(second.outcomes) == 1
+            assert first.outcomes[0].artifact_refs == ("artifact:artifacts/login.html",)
+            assert len(execute.live_outcomes()) == 2
+            assert not first.recovery_required
+
+    config_manager.workflow.run.side_effect = run_workflow
+    cyberautoagent.main()
+    created[0].cleanup.assert_called_once()

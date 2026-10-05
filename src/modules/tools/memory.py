@@ -96,7 +96,13 @@ from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
 from modules.storage import SQLiteMigrationRunner
 from modules.storage.credential_encryption import CredentialEncryptionError, CredentialPayloadCipher
+from modules.storage.workflow_json import (
+    StoredWorkflowDataError,
+    decode_workflow_json,
+    validate_workflow_model,
+)
 from modules.tools.artifact_references import (
+    extract_artifact_references,
     normalize_artifact_reference_token,
     split_delimited_reference_values,
 )
@@ -213,6 +219,7 @@ DISCOVERY_PROCEDURE_LIMIT_KEYS = (
     "max_depth",
 )
 EvidenceRequirementKind = Literal[
+    "hypothesis_set",
     "artifact",
     "inventory_manifest",
     "durable_evidence",
@@ -515,6 +522,7 @@ class EvidenceRequirement:
 
     def __post_init__(self) -> None:
         if self.kind not in (
+            "hypothesis_set",
             "artifact",
             "inventory_manifest",
             "durable_evidence",
@@ -1846,12 +1854,31 @@ class SQLiteApplicationStore:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             if self._sqlite_integrity_check(str(recovered_path)).lower() != "ok":
                 return False
+            self._validate_workflow_records(str(recovered_path))
             for suffix in ("-wal", "-shm", "-journal"):
                 Path(f"{source}{suffix}").unlink(missing_ok=True)
             os.replace(recovered_path, source)
             return True
         finally:
             recovered_path.unlink(missing_ok=True)
+
+    @classmethod
+    def _validate_workflow_records(cls, db_path: str) -> None:
+        """Check recovered plan/task semantics before installing a candidate database."""
+
+        store = object.__new__(cls)
+        store.db_path = db_path
+        store.read_only = True
+        store._lock = threading.RLock()
+        with closing(store._connect()) as connection:
+            operations = connection.execute(
+                "SELECT logical_target, operation_id FROM plans UNION "
+                "SELECT logical_target, operation_id FROM tasks"
+            ).fetchall()
+        for logical_target, operation_id in operations:
+            store.logical_target = logical_target
+            store.get_plan(operation_id)
+            store.get_tasks(operation_id)
 
     def _replace_with_fresh_database(self) -> None:
         """Create and atomically install a fresh migrated database after failed recovery."""
@@ -2980,7 +3007,7 @@ class SQLiteApplicationStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"Unknown operation plan: {operation_id}")
-            plan = OperationPlan.from_obj(json.loads(row[0]))
+            plan = self._decode_plan(row[0], operation_id)
             known_phase_ids = {phase.id for phase in plan.phases}
             unknown_phase_ids = sorted(set(updates) - known_phase_ids)
             if unknown_phase_ids:
@@ -3012,6 +3039,45 @@ class SQLiteApplicationStore:
             )
         return patched
 
+    @staticmethod
+    def _decode_plan(raw: Any, operation_id: str) -> OperationPlan:
+        identity = dict(table="plans", operation_id=operation_id, record_id=operation_id, field="plan_data")
+        value = decode_workflow_json(raw, dict, **identity)
+        if (
+            not isinstance(value.get("objective"), str)
+            or type(value.get("current_phase")) is not int
+            or ("assessment_complete" in value and type(value["assessment_complete"]) is not bool)
+            or (
+                "total_phases" in value
+                and (
+                    type(value["total_phases"]) is not int
+                    or not isinstance(value.get("phases"), list)
+                    or value["total_phases"] != len(value["phases"])
+                )
+            )
+        ):
+            raise StoredWorkflowDataError(**identity)
+        return validate_workflow_model(OperationPlan.from_obj, value, **identity)
+
+    @staticmethod
+    def _decode_task_field(raw: Any, field: str, operation_id: str, task_uid: str) -> Any:
+        expected_type = dict if field in {"acceptance_contract", "recovery_context", "auth_context"} else list
+        value = decode_workflow_json(
+            raw, expected_type, table="tasks", operation_id=operation_id, record_id=task_uid,
+            field=field, optional=field != "acceptance_contract",
+        )
+        if field == "acceptance_contract":
+            return validate_workflow_model(
+                AcceptanceContract.from_obj, value, table="tasks", operation_id=operation_id,
+                record_id=task_uid, field=field,
+            )
+        if field == "auth_context":
+            return validate_workflow_model(
+                _normalize_auth_context, value, table="tasks", operation_id=operation_id,
+                record_id=task_uid, field=field,
+            )
+        return value
+
     def get_plan(self, operation_id: str) -> OperationPlan | None:
         """Retrieve a plan by operation_id."""
         with self._lock, closing(self._connect()) as conn, conn:
@@ -3021,7 +3087,7 @@ class SQLiteApplicationStore:
             )
             row = cursor.fetchone()
             if row:
-                return OperationPlan.from_obj(json.loads(row[0]))
+                return self._decode_plan(row[0], operation_id)
         return None
 
     def store_task(self, operation_id: str, task: Task):
@@ -3128,25 +3194,50 @@ class SQLiteApplicationStore:
             evidence = (
                 list(dict.fromkeys(str(item) for item in evidence_replacement if str(item)))
                 if evidence_replacement is not None
-                else list(json.loads(row[6] or "[]"))
+                else list(self._decode_task_field(row[6], "evidence", operation_id, task_uid))
             )
             if evidence_replacement is None:
                 for reference in additions:
                     if reference not in evidence:
                         evidence.append(reference)
-            recovery_context = dict(json.loads(row[12] or "{}"))
+            recovery_context = dict(self._decode_task_field(row[12], "recovery_context", operation_id, task_uid))
             for key in removals:
                 recovery_context.pop(key, None)
             recovery_context.update(updates)
             next_auth_context = (
                 _normalize_auth_context(auth_context)
                 if auth_context is not None
-                else _normalize_auth_context(json.loads(row[13] or "{}"))
+                else _normalize_auth_context(self._decode_task_field(row[13], "auth_context", operation_id, task_uid))
             )
             now = datetime.now().isoformat()
-            next_phase = int(phase) if phase is not None else int(row[3])
+            next_phase = int(phase) if phase is not None else row[3]
             next_status = str(status) if status is not None else str(row[4])
             next_reason = str(status_reason) if status_reason is not None else str(row[5] or "")
+            try:
+                patched_task = Task(
+                    title=row[0],
+                    objective=row[1],
+                    acceptance=self._decode_task_field(row[2], "acceptance_contract", operation_id, task_uid),
+                    phase=next_phase,
+                    status=next_status,
+                    status_reason=next_reason,
+                    evidence=evidence,
+                    task_uid=task_uid,
+                    created_at=row[7],
+                    updated_at=now,
+                    kind=row[8] or "standard",
+                    reference_id=row[9],
+                    replacement_of=row[10],
+                    supersedes_criteria=self._decode_task_field(row[11], "supersedes_criteria", operation_id, task_uid),
+                    recovery_context=recovery_context,
+                    auth_context=next_auth_context,
+                    target_scope=row[14] or "all",
+                    target_ids=self._decode_task_field(row[15], "target_ids", operation_id, task_uid),
+                )
+            except StoredWorkflowDataError:
+                raise
+            except (TypeError, ValueError):
+                raise StoredWorkflowDataError("tasks", operation_id, task_uid, "record") from None
             conn.execute(
                 "UPDATE tasks SET phase = ?, status = ?, status_reason = ?, evidence = ?, "
                 "recovery_context = ?, auth_context = ?, updated_at = ? "
@@ -3164,26 +3255,7 @@ class SQLiteApplicationStore:
                     task_uid,
                 ),
             )
-        return Task(
-            title=row[0],
-            objective=row[1],
-            acceptance=AcceptanceContract.from_obj(json.loads(row[2])),
-            phase=next_phase,
-            status=next_status,
-            status_reason=next_reason,
-            evidence=evidence,
-            task_uid=task_uid,
-            created_at=row[7],
-            updated_at=now,
-            kind=row[8] or "standard",
-            reference_id=row[9],
-            replacement_of=row[10],
-            supersedes_criteria=json.loads(row[11] or "[]"),
-            recovery_context=recovery_context,
-            auth_context=next_auth_context,
-            target_scope=row[14] or "all",
-            target_ids=json.loads(row[15] or "[]"),
-        )
+        return patched_task
 
     def get_tasks(self, operation_id: str) -> list[Task]:
         """Retrieve all tasks for an operation."""
@@ -3197,28 +3269,32 @@ class SQLiteApplicationStore:
                 (self.logical_target, operation_id),
             )
             for row in cursor:
-                tasks.append(
-                    Task(
+                try:
+                    task = Task(
                         title=row[0],
                         objective=row[1],
-                        acceptance=AcceptanceContract.from_obj(json.loads(row[2])),
+                        acceptance=self._decode_task_field(row[2], "acceptance_contract", operation_id, row[7]),
                         phase=row[3],
                         status=row[4],
                         status_reason=row[5],
-                        evidence=json.loads(row[6]),
+                        evidence=self._decode_task_field(row[6], "evidence", operation_id, row[7]),
                         task_uid=row[7],
                         created_at=row[8],
                         updated_at=row[9],
                         kind=row[10] or "standard",
                         reference_id=row[11],
                         replacement_of=row[12],
-                        supersedes_criteria=json.loads(row[13] or "[]"),
-                        recovery_context=json.loads(row[14] or "{}"),
-                        auth_context=json.loads(row[15] or "{}"),
+                        supersedes_criteria=self._decode_task_field(row[13], "supersedes_criteria", operation_id, row[7]),
+                        recovery_context=self._decode_task_field(row[14], "recovery_context", operation_id, row[7]),
+                        auth_context=self._decode_task_field(row[15], "auth_context", operation_id, row[7]),
                         target_scope=row[16] or "all",
-                        target_ids=json.loads(row[17] or "[]"),
+                        target_ids=self._decode_task_field(row[17], "target_ids", operation_id, row[7]),
                     )
-                )
+                except StoredWorkflowDataError:
+                    raise
+                except (TypeError, ValueError):
+                    raise StoredWorkflowDataError("tasks", operation_id, str(row[7]), "record") from None
+                tasks.append(task)
         return tasks
 
     def reset_failed_work(self, operation_id: str) -> tuple[OperationPlan, int, int]:
@@ -3237,7 +3313,7 @@ class SQLiteApplicationStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"Unknown operation plan: {operation_id}")
-            plan = OperationPlan.from_obj(json.loads(row[0]))
+            plan = self._decode_plan(row[0], operation_id)
             failed_tasks = conn.execute(
                 "SELECT task_uid, phase, status, status_reason FROM tasks "
                 "WHERE logical_target = ? AND operation_id = ? AND status IN ('partial_failure', 'blocked')",
@@ -3317,7 +3393,7 @@ class SQLiteApplicationStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"Unknown operation plan: {operation_id}")
-            plan = OperationPlan.from_obj(json.loads(row[0]))
+            plan = self._decode_plan(row[0], operation_id)
             known_phase_ids = {int(phase.id) for phase in plan.phases}
             unknown_phase_ids = sorted(set(requested_phase_ids) - known_phase_ids)
             if unknown_phase_ids:
@@ -4297,7 +4373,6 @@ def normalize_confidence(conf_val: Any, cap_to: float | None = None) -> str:
     return f"{num:.1f}%"
 
 
-_RE_PROOF_PACK_FILE_PATTERN = re.compile(r"artifact(?:\s+paths?)?:\s*(\S+)", re.IGNORECASE)
 
 
 def _proof_pack_path_from_value(value: Any) -> str:
@@ -4306,6 +4381,7 @@ def _proof_pack_path_from_value(value: Any) -> str:
     reference = str(value or "").strip()
     if not reference:
         raise ValueError("proof-pack path is required")
+    reference = normalize_artifact_reference_token(reference)
     if reference.startswith(("artifact:", "artifact_id:")):
         return _artifact_path_from_ref(reference)
 
@@ -4347,8 +4423,7 @@ def _has_valid_proof_pack(finding: Any) -> bool:
                     pass
                 else:
                     return True
-                matches = _RE_PROOF_PACK_FILE_PATTERN.findall(e_str)
-                file_paths = [path.strip() for paths in matches for path in paths.split(",")]
+                file_paths = extract_artifact_references(e_str, allow_legacy_labels=True)
                 for path in file_paths:
                     try:
                         _proof_pack_path_from_value(path)
@@ -8157,7 +8232,11 @@ def _canonical_inventory_url(value: str, registered_target: str | None) -> str:
 def _task_evidence_artifact_paths(task: Task) -> set[str]:
     paths = set()
     for evidence in task.evidence:
-        raw_path = str(evidence).removeprefix("artifact:")
+        try:
+            reference = normalize_artifact_reference_token(evidence)
+        except (TypeError, ValueError):
+            continue
+        raw_path = reference.removeprefix("artifact:")
         root = _operation_output_root()
         candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root, raw_path)
         resolved = os.path.realpath(candidate)
@@ -8950,6 +9029,7 @@ def _create_tasks_from_proposals(
     coverage_item_ids: set[str] | None = None,
     hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
     hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    requires_hypotheses: bool = False,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -9350,6 +9430,17 @@ def _create_tasks_from_proposals(
                 })
                 if source_artifact_refs:
                     group_planning_context["hypothesis_source_artifact_refs"] = source_artifact_refs
+            if requires_hypotheses:
+                if group_acceptance.basis.kind != "snapshot" or not group_acceptance.basis.item_ids:
+                    raise ValueError("hypothesis producers require assigned frozen inventory subjects")
+                group_planning_context["hypothesis_operation_id"] = _operation_id()
+                group_acceptance = replace(
+                    group_acceptance, manifest_hash="", criteria=tuple(
+                        replace(criterion, evidence_requirements=(
+                            *criterion.evidence_requirements, EvidenceRequirement(kind="hypothesis_set"),
+                        )) for criterion in group_acceptance.criteria
+                    ),
+                )
             group_identity = _frozen_task_identity(
                 group_title,
                 group_objective,
@@ -9479,6 +9570,7 @@ def build_create_tasks_submitter(
     coverage_item_ids: set[str] | None = None,
     hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
     hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    requires_hypotheses: bool = False,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -9513,6 +9605,7 @@ def build_create_tasks_submitter(
                 coverage_item_ids=coverage_item_ids,
                 hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
                 hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
+                requires_hypotheses=requires_hypotheses,
                 expected_snapshot_ref=expected_snapshot_ref,
                 phase_title=phase_title,
                 phase_objective=phase_objective,
@@ -9543,6 +9636,7 @@ def build_create_tasks_tool(
     coverage_item_ids: set[str] | None = None,
     hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
     hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    requires_hypotheses: bool = False,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -9564,6 +9658,7 @@ def build_create_tasks_tool(
         coverage_item_ids=coverage_item_ids,
         hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
         hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
+        requires_hypotheses=requires_hypotheses,
         expected_snapshot_ref=expected_snapshot_ref,
         phase_title=phase_title,
         phase_objective=phase_objective,
@@ -9653,6 +9748,19 @@ def _validate_acceptance_result_evidence(
         else:
             raise _acceptance_evidence_reference_error()
     for requirement in criterion.evidence_requirements:
+        if requirement.kind == "hypothesis_set":
+            from modules.tools.hypotheses import load_hypothesis_set
+
+            matching = 0
+            for reference in references:
+                try:
+                    load_hypothesis_set(reference, task, _operation_id())
+                except (OSError, TypeError, ValueError):
+                    continue
+                matching += 1
+            if matching < requirement.min_count:
+                raise ValueError("Publish a bound hypothesis_set with record_hypotheses before acceptance")
+            continue
         if requirement.kind == "inventory_manifest":
             matching = 0
             rejected = []
@@ -11051,11 +11159,7 @@ class QdrantMemoryClient:
         """
         op_id = _operation_id(operation_id)
 
-        try:
-            return _get_database_store().get_plan(op_id)
-        except Exception as e:
-            logger.error(f"Error retrieving active plan: {e}")
-            return None
+        return _get_database_store().get_plan(op_id)
 
     def _select_latest_by_uid(
             self, entries: list[dict[str, Any]], uid_key: str

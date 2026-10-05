@@ -685,6 +685,10 @@ def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
     ("agent_type", "uses_fail_fast_executor"),
     [
         ("task_evaluator", True),
+        ("authentication_flow_discovery_agent", False),
+        ("registration_flow_discovery_agent", False),
+        ("authentication_flow_discovery_critic", False),
+        ("registration_flow_discovery_critic", False),
         ("plan_critic", True),
         ("task_prompt_critic", True),
         ("task_executor", False),
@@ -732,10 +736,10 @@ def test_create_agent_assigns_fail_fast_executor_to_configured_roles(
     )
 
     kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
-    if agent_type == "task_evaluator":
+    if agent_type == "task_evaluator" or "flow_discovery" in agent_type:
         assert agent._cyber_evaluator_artifact_read_limit_hook in kwargs["hooks"]
         assert agent._cyber_evaluator_artifact_read_limit_hook.exhausted is False
-    if agent_type == "task_executor":
+    if agent_type == "task_executor" or "flow_discovery" in agent_type:
         assert isinstance(kwargs["tool_executor"], SequentialToolExecutor)
     elif uses_fail_fast_executor:
         assert isinstance(kwargs["tool_executor"], FailFastSequentialToolExecutor)
@@ -1212,3 +1216,39 @@ def test_create_agent_runtime_resources_handles_degraded_integrations(monkeypatc
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("role", [
+    "authentication_flow_discovery_agent", "registration_flow_discovery_agent",
+    "authentication_flow_discovery_critic", "registration_flow_discovery_critic",
+    "task_evaluator", "task_executor", "source_module_agent",
+])
+def test_production_agents_record_sdk_tool_outcomes_once(monkeypatch, role):
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    agent = create_outcome_agent(monkeypatch, role)
+    journal = agent._cyber_callback_handler.tool_outcome_journal
+    assert agent._cyber_tool_outcome_recording_hook.journal is journal
+    assert hasattr(agent, "_cyber_failure_recovery_hook") == (role == "task_executor")
+    snapshot = journal.snapshot()
+    complete_tool_call(
+        agent, "browser_get_page_html", {}, "HTML content saved to artifact: artifacts/login.html",
+    )
+    outcomes = journal.since(snapshot)
+    assert len(outcomes) == 1
+    assert outcomes[0].success
+    assert outcomes[0].artifact_refs == ("artifact:artifacts/login.html",)
+    assert journal.since(journal.snapshot()) == []
+
+
+def test_production_outcome_recording_precedes_recovery_rewrites(monkeypatch):
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    agent = create_outcome_agent(monkeypatch, "task_executor")
+    text = "service target is outside the assigned task boundary"
+    event = complete_tool_call(agent, "shell", {"command": "cat /missing.txt"}, text, status="error")
+    outcome = agent._cyber_callback_handler.tool_outcome_journal.entries()[0]
+    assert outcome.raw_output_summary == text
+    assert not outcome.success
+    assert event.result["content"][0]["text"] != text
+    assert len(agent._cyber_callback_handler.tool_outcome_journal.entries()) == 1

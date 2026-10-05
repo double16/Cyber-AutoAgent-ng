@@ -691,3 +691,112 @@ def test_sqlite_application_store_model_metrics_are_target_scoped_and_validated(
             "2026-08-06T12:00:00.000001+00:00",
             [_model_metric_row(correction_categories={"max_token_exhaustion": 2})],
         )
+
+
+@pytest.mark.parametrize("field", ["evidence", "supersedes_criteria", "target_ids", "recovery_context", "auth_context"])
+@pytest.mark.parametrize("raw", [None, "", " \n"])
+def test_task_optional_json_defaults_are_consistent_for_reads_and_patches(tmp_path, field, raw):
+    store = SQLiteApplicationStore(str(tmp_path / "optional.db"), "target")
+    task = Task(task_uid="task", title="Task", objective="Check scope", phase=1, status="pending",
+                acceptance=make_acceptance())
+    store.store_task("operation", task)
+    with closing(store._connect()) as connection, connection:
+        connection.execute(f"UPDATE tasks SET {field}=?", (raw,))
+    loaded = store.get_tasks("operation")[0]
+    assert getattr(loaded, field) == ({} if field.endswith("context") else [])
+    patched = store.patch_task("operation", "task", status="active")
+    assert getattr(patched, field) == getattr(loaded, field)
+
+
+@pytest.mark.parametrize("field,raw", [
+    ("evidence", "secret-value{"), ("evidence", '{}'), ("evidence", '[1]'),
+    ("acceptance_contract", '{}'), ("recovery_context", '[]'), ("auth_context", '[]'),
+    ("supersedes_criteria", 'null'), ("target_ids", '{}'),
+])
+def test_task_invalid_json_has_scoped_diagnostic_and_no_retry(tmp_path, monkeypatch, field, raw):
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    store = SQLiteApplicationStore(str(tmp_path / "bad.db"), "target")
+    store.store_task("operation", Task(task_uid="task", title="Task", objective="Check scope", phase=1,
+                                       status="pending", acceptance=make_acceptance()))
+    with closing(store._connect()) as connection, connection:
+        connection.execute(f"UPDATE tasks SET {field}=?", (raw,))
+    monkeypatch.setattr(store, "_recover_runtime_database", lambda _error: pytest.fail("JSON must not trigger recovery"))
+    with pytest.raises(StoredWorkflowDataError) as caught:
+        store.get_tasks("operation")
+    assert caught.value.field == field
+    assert caught.value.record_id == "task"
+    assert "secret-value" not in str(caught.value)
+
+
+def test_task_invalid_scalar_has_typed_diagnostic(tmp_path):
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    store = SQLiteApplicationStore(str(tmp_path / "bad-scalar.db"), "target")
+    store.store_task("operation", Task(task_uid="task", title="Task", objective="Check scope", phase=1,
+                                       status="pending", acceptance=make_acceptance()))
+    with closing(store._connect()) as connection, connection:
+        connection.execute("UPDATE tasks SET phase=0")
+    with pytest.raises(StoredWorkflowDataError, match="field=record"):
+        store.get_tasks("operation")
+
+
+@pytest.mark.parametrize("raw", ['secret-value{', '{}', '[]'])
+def test_invalid_plan_is_present_and_damaged(tmp_path, raw):
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    store = SQLiteApplicationStore(str(tmp_path / "bad-plan.db"), "target")
+    with closing(store._connect()) as connection, connection:
+        connection.execute("INSERT INTO operations VALUES ('target', 'operation', 'now')")
+        connection.execute("INSERT INTO plans (logical_target, operation_id, plan_data) VALUES (?, ?, ?)",
+                           ("target", "operation", raw))
+    with pytest.raises(StoredWorkflowDataError, match="field=plan_data"):
+        store.get_plan("operation")
+    assert store.get_plan("missing") is None
+    with pytest.raises(StoredWorkflowDataError):
+        store._validate_workflow_records(store.db_path)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("objective", 123), ("current_phase", "1"), ("current_phase", True),
+    ("assessment_complete", "false"), ("total_phases", 2), ("total_phases", True), ("phases", {}),
+])
+def test_stored_plan_rejects_coercions_that_can_change_workflow_control(field, value):
+    import json
+
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    plan = OperationPlan(objective="Check scope", current_phase=1, total_phases=1,
+                         phases=[PlanPhase(id=1, title="Inspect", status="active")]).to_dict()
+    plan[field] = value
+    with pytest.raises(StoredWorkflowDataError, match="field=plan_data"):
+        SQLiteApplicationStore._decode_plan(json.dumps(plan), "operation")
+
+
+def test_patching_damaged_acceptance_is_rejected_before_committing(tmp_path):
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    store = SQLiteApplicationStore(str(tmp_path / "bad-patch.db"), "target")
+    store.store_task("operation", Task(task_uid="task", title="Task", objective="Check scope", phase=1,
+                                       status="pending", acceptance=make_acceptance()))
+    with closing(store._connect()) as connection, connection:
+        connection.execute("UPDATE tasks SET acceptance_contract='broken'")
+    with pytest.raises(StoredWorkflowDataError, match="field=acceptance_contract"):
+        store.patch_task("operation", "task", status="done")
+    with closing(store._connect()) as connection:
+        assert connection.execute("SELECT status FROM tasks").fetchone()[0] == "pending"
+
+
+@pytest.mark.parametrize("field,value", [("title", ""), ("phase", "invalid-number")])
+def test_patching_invalid_task_scalar_rolls_back_with_scoped_error(tmp_path, field, value):
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    store = SQLiteApplicationStore(str(tmp_path / "bad-scalar-patch.db"), "target")
+    store.store_task("operation", Task(task_uid="task", title="Task", objective="Check scope", phase=1,
+                                       status="pending", acceptance=make_acceptance()))
+    with closing(store._connect()) as connection, connection:
+        connection.execute(f"UPDATE tasks SET {field}=?", (value,))
+    with pytest.raises(StoredWorkflowDataError, match="field=record"):
+        store.patch_task("operation", "task", status="done")
+    with closing(store._connect()) as connection:
+        assert connection.execute("SELECT status FROM tasks").fetchone()[0] == "pending"

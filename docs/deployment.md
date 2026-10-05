@@ -375,6 +375,7 @@ export CYBER_CONTEXT_WINDOW_FALLBACKS='[
 | `CYBER_WORKFLOW_TASK_EXECUTION_CYCLES`             | Maximum normal executor passes per task                    | No (default: `3`, minimum `1`)                                  |
 | `CYBER_TASK_EVALUATOR_MAX_CORRECTIONS`             | Extra executor passes for actionable evaluator feedback    | No (default: `1`, minimum `0`)                                  |
 | `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE`     | Successful pages per authorized evaluator evidence artifact | No (default: `4`, minimum `1`; 200 lines per page)              |
+| `CYBER_WORKFLOW_FLOW_DISCOVERY_SEARCH_LIMIT` | Searches per discovery actor invocation or per authorized critic artifact | No (default: `16`, minimum `1`) |
 | `CYBER_SECLISTS_DIR`                               | Absolute SecLists root for wordlist-consuming tools        | No (common locations; container default: `/usr/share/seclists`) |
 | `CYBER_REPORT_REFINEMENT_CYCLES`                   | Critic-guided revision cycles per generated report section | No (default: `2`; `0` disables)                                 |
 | `CYBER_REPORT_EVIDENCE_GROUPING`                   | Merge corroborating evidence into canonical report findings | No (default: `false`)                                            |
