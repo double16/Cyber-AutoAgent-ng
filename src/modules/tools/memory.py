@@ -2229,9 +2229,9 @@ class SQLiteApplicationStore:
         if (
             purpose == "authentication"
             and descriptor.get("flow_version") is not None
-            and descriptor.get("provenance") != "observed_flow_discovery"
+            and descriptor.get("provenance") != "observed_worker_flow"
         ):
-            raise ValueError("authentication flow descriptor requires observed discovery provenance")
+            raise ValueError("authentication flow descriptor requires observed worker provenance")
         now = datetime.now().isoformat()
         evidence_refs = descriptor.get("evidence_refs") if isinstance(descriptor.get("evidence_refs"), list) else []
         payload = dict(descriptor)
@@ -2243,6 +2243,8 @@ class SQLiteApplicationStore:
                 "evidence_refs, discovered_operation_id, status, created_at, updated_at, last_validated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(flow_id) DO UPDATE SET descriptor = excluded.descriptor, evidence_refs = excluded.evidence_refs, "
+                "target = excluded.target, purpose = excluded.purpose, flow_kind = excluded.flow_kind, "
+                "discovered_operation_id = excluded.discovered_operation_id, "
                 "status = excluded.status, updated_at = excluded.updated_at, last_validated_at = excluded.last_validated_at",
                 (
                     flow_id, self.logical_target, target, purpose, str(payload.get("kind") or ""),

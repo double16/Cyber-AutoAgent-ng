@@ -349,45 +349,34 @@ available, the controller records an authenticated coverage gap without launchin
 authorization tokens remain only in an operation-memory context and are discarded on controller restart. The task
 executor receives no checkout, MFA, cookie-extraction, token-extraction, or token-preparation tools; it receives
 `authenticated_http_request` only after the controller has a valid context.
-The controller selects one reusable, validated target-scoped authentication-flow descriptor before checking out
-credentials. When none exists, it tries one observed discovered candidate at a time, retiring a candidate that fails
-context validation; only after no candidate remains does a credential-free discovery worker map and record one
-bounded flow. If discovery cannot identify a usable flow, credential authentication is skipped and recorded as a flow
-coverage gap. The controller then runs one isolated worker per credential, so a missing flow or a rejected credential
-cannot cause that worker to try another identity. For same-origin API-form flows,
-`ensure_authenticated_context` resolves the controller-selected flow ID rather than searching the stored inventory.
+The controller runs one worker per selected credential. A completed current-version flow is supplied as a starting
+point. If no flow exists, the worker uses assigned navigation hints and discovers the steps while logging in.
+It may correct an existing mapping when the application changes. The selected credential remains fixed; a definitive
+rejection ends that attempt. Username/password workers can use browser login or an observed API form.
 
-Authentication and self-registration discovery use up to three actor/critic pairs independently. Approval ends the
-loop early. Rejected mappings are corrected before another review; only approved mappings reach credential workers.
-Authentication discovery is shared through a durable prerequisite for identical operation, origin, and relevant inputs.
-Consumers reuse approved flows or terminal discovery gaps across continuations; credentials and session setup remain
-per task. Changed mapping inputs or unavailable approval evidence trigger fresh discovery. To retry an unchanged
-terminal gap, explicitly reset failed tasks with `--reset-failed`. Budget interruptions remain resumable unfinished work.
-An unresolved discovery records a coverage gap while other assessment work continues. Registration discovery inspects
-the assigned form before account creation; it does not submit the form or test credentials.
-Authentication discovery navigation entries are starting points. Discovery can follow observed login links and routes
-within the assigned target origin, including during continuation after a flow-version change. Known protected
-validation candidates remain excluded from browser navigation; registration discovery uses its exact assigned URL.
-Authentication descriptors use version 8 and registration descriptors use version 2. Older mappings require
-rediscovery before reuse; their entry URLs and inventory observations remain available as advisory discovery hints.
-Only artifacts returned by successful discovery observation or retrieval tools support mapping approval. Existing
-task evidence and artifact reads alone cannot establish a fresh observation. Each failed actor or critic stage gets
-one retry for transient timeout, connection, or HTTP 429/503 failures. Critic retries reuse the staged mapping and
-artifacts without repeating browser navigation. Stage retries and JSON repairs are separate from the three semantic
-cycles. Permanent failures and exhausted retries produce a coverage gap; budget exceptions propagate. Discovery
-adds no delay beyond existing provider backoff.
+Provisioning workers likewise follow the registration entry point and its observed connected steps, including
+multi-page forms and verification. They retain the same identity and browser progress during correction. A flow
+records ordered URLs, actions, and field names without submitted values. A pending verification or failed account
+creation does not publish a completed registration flow.
+
+Dedicated authentication and registration critics review each worker's staged mapping against current-task evidence.
+The default is three worker/critic cycles. JSON repair and one transient critic retry are separate from those cycles.
+Only functional success plus critic approval publishes a reusable mapping. Once login or account creation succeeds,
+correction tools are restricted to observations and metadata recording; they cannot repeat submission or login.
+If review remains unresolved, the controller records a mapping coverage gap and preserves the successful context
+or registered credential. Registration task evaluation remains separate from flow review.
+
+Authentication descriptors use version 9 and registration descriptors use version 3. There is no compatibility path
+for older contracts or standalone discovery agents. Browser capture consumes staged header-binding metadata;
+it does not require a persisted flow ID.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CYBER_WORKFLOW_FLOW_DISCOVERY_CYCLES` | `3` | Maximum actor/critic pairs per flow discovery, minimum one. |
-| `CYBER_WORKFLOW_FLOW_DISCOVERY_SEARCH_LIMIT` | `16` | Searches per discovery actor invocation or per distinct authorized artifact for critics; minimum one. |
+| `CYBER_WORKFLOW_FLOW_REFINEMENT_CYCLES` | `3` | Maximum worker/flow-critic pairs per attempt; minimum one. |
+| `CYBER_WORKFLOW_FLOW_REFINEMENT_SEARCH_LIMIT` | `16` | Searches per worker invocation or per distinct authorized artifact for critics; minimum one. |
 
-Artifact read and search allowances are independent and local to each discovery actor or critic invocation.
-Tool errors identify the exhausted allowance, its counts, and whether it applies across files or to one artifact.
-Changing a file, pattern, or page cannot restore an exhausted allowance. Repeated requests against exhausted
-access stop the tool loop. Discovery then synthesizes from returned evidence and staged candidates without tools;
-one transient retry and existing critic JSON repairs keep artifact access closed. Synthesis cannot create a new
-actor mapping, and critic approval still requires observation-backed evidence.
+Artifact errors explain the exhausted read or search allowance. Critics synthesize from returned evidence when
+access is exhausted; JSON repair and transient retry keep artifact access closed.
 
 For mapped self-registration, the provisioning worker fills the mapped identity fields and every visible required
 control in that same form, including required profile fields beyond username, password, and email. Optional controls
@@ -396,14 +385,14 @@ the task-local context for bounded validation-repair retries; secret-free field 
 descriptor for later operations.
 Attack-surface mapping supplies secret-free navigation, protected-resource, and JavaScript header-binding hints.
 Those endpoints are not executable authority and do not identify a flow start. When no reusable descriptor is
-available, the discovery worker must observe a start-to-validation relationship before recording a target-scoped
-descriptor, and the controller validates it before reuse. Later operations for the same canonical target can reuse a
+available, the login worker observes the start-to-validation relationship during its assigned interaction before
+staging a target-scoped descriptor. The controller publishes it only after functional success and critic approval. Later operations for the same canonical target can reuse a
 validated descriptor. For username/password API forms, the worker can establish a context directly from the recorded
 mapped pair. Username/password browser, redirect, and MFA flows must complete in the shared browser and then capture
 cookies and any observed named browser-storage bearer token internally. The flow descriptor records only the storage
 key name, never its value. Its validation URL must succeed for the bound credential role; 401, 403, and 404 responses
 reject the context. Browser flows cannot fall back to direct HTTP form login. Authentication and registration flow
-descriptors are versioned; descriptors from older flow contracts are ignored and rediscovered. The authentication
+descriptors are versioned; only the current contract is accepted. The authentication
 worker also has scoped shell access for commands targeting only mapped authentication origins. No session material is
 persisted in SQLite, artifacts, reports, or task text. If a
 multi-credential setup is only partially successful, the executor is bound only to the credential IDs whose opaque

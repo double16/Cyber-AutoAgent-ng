@@ -19,7 +19,7 @@ from typing import Any, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 import requests
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from strands import tool
 
 from modules.tools.credentials import (
@@ -56,8 +56,8 @@ AUTHENTICATION_FLOW_KINDS = frozenset({
     "oauth2_client",
 })
 REGISTRATION_FLOW_KINDS = frozenset({"browser_registration", "api_registration"})
-AUTHENTICATION_FLOW_VERSION = 8
-REGISTRATION_FLOW_VERSION = 2
+AUTHENTICATION_FLOW_VERSION = 9
+REGISTRATION_FLOW_VERSION = 3
 _AUTHORIZATION_STORAGE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 _HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,128}$")
 _JWT_PATTERN = re.compile(
@@ -665,39 +665,6 @@ def _stored_api_form_flow(target: str, flow_id: str) -> dict[str, Any]:
     return candidates[0][1]
 
 
-def _stored_browser_flow(target: str, flow_id: str) -> dict[str, Any]:
-    """Return the controller-selected browser flow for one exact credential target."""
-
-    candidates = []
-    for stored in _get_database_store().list_authentication_flows(
-        target, purpose="authentication", statuses=("discovered", "validated")
-    ):
-        if str(stored.get("flow_id") or "") != flow_id:
-            continue
-        descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
-        if not _is_current_authentication_flow(descriptor):
-            continue
-        if str(descriptor.get("kind") or "") not in {"browser_form", "browser_redirect", "browser_mfa"}:
-            continue
-        login_url = str(descriptor.get("login_url") or "").strip()
-        if not login_url or not _credential_target_url_contains(target, login_url, label="stored login_url"):
-            continue
-        candidates.append(descriptor)
-    if len(candidates) != 1:
-        raise ValueError("the selected browser authentication flow is unavailable for this credential target")
-    return candidates[0]
-
-
-def _capture_storage_header_bindings(target: str, flow_id: str) -> list[dict[str, str]]:
-    """Resolve canonical browser capture bindings from the selected flow."""
-
-    flow = _stored_browser_flow(target, flow_id)
-    return _normalize_storage_header_bindings(
-        flow.get("storage_header_bindings") if isinstance(flow.get("storage_header_bindings"), list) else [],
-        str(flow.get("authorization_storage_key") or ""),
-    )
-
-
 def _store_context(
     task: Any,
     record: dict[str, Any],
@@ -769,6 +736,7 @@ def record_authentication_flow(
     identity_fields: list[str] | None = None,
     required_fields: list[str] | None = None,
     optional_fields: list[str] | None = None,
+    steps: list[dict[str, Any]] | None = None,
 ) -> str:
     """Persist a secret-free observed authentication or registration flow for later same-target setup."""
 
@@ -776,9 +744,9 @@ def record_authentication_flow(
 
 
 def _bound_flow_task_target_values(task_uid: str, operation_id: str, target: str, purpose: str) -> set[str]:
-    """Validate controller-owned discovery identity independently of other active tasks."""
+    """Validate controller-owned worker identity independently of other active tasks."""
 
-    diagnostic = "Flow discovery controller task context is invalid; changing tool arguments cannot repair it"
+    diagnostic = "Flow worker controller task context is invalid; changing tool arguments cannot repair it"
     if operation_id != _operation_id():
         raise ValueError(f"{diagnostic}: operation mismatch")
     store = _get_database_store()
@@ -791,6 +759,52 @@ def _bound_flow_task_target_values(task_uid: str, operation_id: str, target: str
     if purpose == "registration" and len(targets) != 1:
         raise ValueError(f"{diagnostic}: registration requires one assigned task target")
     return targets
+
+
+class FlowStep(BaseModel):
+    """Secret-free metadata for one observed step, never replay inputs."""
+
+    model_config = ConfigDict(extra="forbid")
+    url: str
+    action: Literal["navigation", "form_submission", "redirect", "verification"]
+    field_names: list[str] = Field(default_factory=list)
+
+
+def _normalize_flow_steps(
+    target: str,
+    steps: list[dict[str, Any]] | None,
+    allowed_origins: list[str],
+) -> list[dict[str, Any]]:
+    normalized = []
+    aliases = {"navigate": "navigation", "submit": "form_submission", "verify": "verification"}
+    for raw in steps or []:
+        value = dict(raw)
+        action = str(value.get("action") or "").strip().lower()
+        value["action"] = aliases.get(action, action)
+        step = FlowStep.model_validate(value)
+        scope = target
+        if not _credential_target_url_contains(target, step.url, label="step url"):
+            scope = next(
+                (
+                    origin
+                    for origin in allowed_origins
+                    if not _credential_target_url_contains(origin, target, label="step target")
+                    and _credential_target_url_contains(origin, step.url, label="step url")
+                ),
+                target,
+            )
+        step.url = _safe_flow_descriptor_url(scope, step.url, label="step url")
+        if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:\[\]-]{0,127}", name) for name in step.field_names):
+            raise ValueError("flow steps accept field names, never submitted values")
+        normalized.append(step.model_dump())
+    return normalized
+
+
+_FLOW_STEPS_SCHEMA = {
+    "type": "array",
+    "description": "Ordered observed steps; clean URLs and field names only, never submitted values or secrets.",
+    "items": FlowStep.model_json_schema(),
+}
 
 
 def _record_authentication_flow(
@@ -809,6 +823,7 @@ def _record_authentication_flow(
     identity_fields: list[str] | None = None,
     required_fields: list[str] | None = None,
     optional_fields: list[str] | None = None,
+    steps: list[dict[str, Any]] | None = None,
     candidate_sink: Callable[[dict[str, Any]], None] | None = None,
     task_uid: str = "",
     operation_id: str = "",
@@ -820,7 +835,7 @@ def _record_authentication_flow(
     request_format = _normalize_authentication_enum(request_format, field_name="request_format")
     if candidate_sink is not None:
         if not task_uid or not operation_id or credential_id:
-            raise ValueError("Discovery staging requires controller task and operation bindings and no credential_id")
+            raise ValueError("Worker staging requires controller task and operation bindings and no credential_id")
         _bound_flow_task_target_values(task_uid, operation_id, target, purpose)
     elif purpose == "authentication":
         if credential_id:
@@ -887,9 +902,10 @@ def _record_authentication_flow(
         "request_format": request_format,
         "allowed_origins": list(dict.fromkeys([f"{urlsplit(target).scheme}://{urlsplit(target).netloc}", *normalized_origins])),
         "evidence_refs": [],
+        "steps": _normalize_flow_steps(target, steps, normalized_origins),
     }
     if purpose == "authentication":
-        descriptor["provenance"] = "observed_flow_discovery"
+        descriptor["provenance"] = "observed_worker_flow"
     if purpose == "registration":
         descriptor["roles"] = sorted({str(role).strip() for role in roles or ["user"] if str(role).strip()})
         descriptor["success_redirect_url"] = success_redirect_url
@@ -902,7 +918,7 @@ def _record_authentication_flow(
             if normalized_fields:
                 descriptor[key] = normalized_fields
     if candidate_sink is not None:
-        descriptor["provenance"] = "observed_flow_discovery"
+        descriptor["provenance"] = "observed_worker_flow"
         candidate_sink(descriptor)
         return json.dumps({"recorded": True, "staged": True, "flow": descriptor}, sort_keys=True)
     stored = _get_database_store().upsert_authentication_flow(_operation_id(), descriptor)
@@ -946,10 +962,9 @@ def build_record_authentication_flow_tool(
 
     if candidate_sink is not None:
         if not task_uid or not operation_id or normalized_credential_id:
-            raise ValueError("Discovery staging requires controller task and operation bindings and no credential_id")
-        _bound_flow_task_target_values(task_uid, operation_id, normalized_target, normalized_purpose)
+            raise ValueError("Worker staging requires controller task and operation bindings and no credential_id")
     elif task_uid or operation_id:
-        raise ValueError("Controller task bindings are supported only for discovery staging")
+        raise ValueError("Controller task bindings are supported only for worker staging")
 
     def record_bound_authentication_flow(
         login_url: str,
@@ -961,6 +976,7 @@ def build_record_authentication_flow_tool(
         identity_fields: list[str] | None = None,
         required_fields: list[str] | None = None,
         optional_fields: list[str] | None = None,
+        steps: list[dict[str, Any]] | None = None,
     ) -> str:
         """Persist one observed flow using controller-bound authentication context."""
 
@@ -980,6 +996,7 @@ def build_record_authentication_flow_tool(
             identity_fields=identity_fields,
             required_fields=required_fields,
             optional_fields=optional_fields,
+            steps=steps,
             candidate_sink=candidate_sink,
             task_uid=task_uid,
             operation_id=operation_id,
@@ -993,7 +1010,7 @@ def build_record_authentication_flow_tool(
             "login_url": {"type": "string", "description": "Observed same-target login URL."},
             "validation_url": {
                 "type": "string",
-                "description": "Observed same-target validation URL; leave empty during browser discovery.",
+                "description": "Observed same-target validation URL; empty until browser login yields a validated request.",
             },
             "authorization_storage_key": {
                 "type": "string",
@@ -1028,9 +1045,16 @@ def build_record_authentication_flow_tool(
             },
             "success_redirect_url": {"type": "string", "description": "Observed same-target success redirect URL."},
             "identity_fields": {"type": "array", "items": {"type": "string"}},
-            "required_fields": {"type": "array", "items": {"type": "string"}},
-            "optional_fields": {"type": "array", "items": {"type": "string"}},
+            "required_fields": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Fields proven required by rendered constraints or observed validation; unknowns omitted.",
+            },
+            "optional_fields": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Fields proven optional; absence of required markers alone does not prove optionality.",
+            },
         }
+    properties["steps"] = _FLOW_STEPS_SCHEMA
     record_bound_authentication_flow.__name__ = str(name).strip()
     record_bound_authentication_flow.__doc__ = (
         ("Stage one observed flow for controller review. " if candidate_sink else "Persist one observed flow. ")
@@ -1160,23 +1184,22 @@ def ensure_authenticated_context(
             "type": "object",
             "properties": {
                 "credential_id": {"type": "string"},
-                "flow_id": {"type": "string"},
+                "storage_header_bindings": {"type": "array", "items": {"type": "object"}},
                 "validation_url": {"type": "string"},
             },
-            "required": ["credential_id", "flow_id", "validation_url"],
+            "required": ["credential_id", "storage_header_bindings", "validation_url"],
             "additionalProperties": False,
         }
     },
 )
 async def capture_browser_authenticated_context(
     credential_id: str,
-    flow_id: str,
+    storage_header_bindings: list[dict[str, str]],
     validation_url: str,
 ) -> str:
     """Capture an authentication agent's browser session into an opaque HTTP context.
 
-    This tool is intentionally available only to the authentication agent. The required flow ID selects the
-    controller-recorded browser flow; unauthenticated tasks never invoke this tool. It copies same-origin cookies plus
+    Python binds staged header metadata for the authentication agent. It copies same-origin cookies plus
     the flow's declared browser-storage-derived headers into operation memory. Observed same-origin request headers
     take precedence for matching declared names. Neither values nor cookies are returned to the agent or persisted to
     workflow state.
@@ -1188,7 +1211,7 @@ async def capture_browser_authenticated_context(
     target = str(record["target"]).rstrip("/")
     if not _credential_target_url_contains(target, validation_url, label="validation_url"):
         raise ValueError("validation URL must share the credential target origin")
-    bindings = _capture_storage_header_bindings(target, str(flow_id or "").strip())
+    bindings = _normalize_storage_header_bindings(storage_header_bindings)
     session = requests.Session()
     headers: dict[str, str] = {}
     async with get_browser() as browser:

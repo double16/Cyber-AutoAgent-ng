@@ -4047,7 +4047,7 @@ def test_cli_discovery_session_reads_production_recording_hook(
     callback = CliCallback()
     placeholder = CallableCliAgent()
     config_manager = _patch_cli_common(monkeypatch, tmp_path, placeholder, callback)
-    role = f"{purpose}_flow_discovery_agent"
+    role = "authentication_agent"
     created = []
 
     def construct(**kwargs):
@@ -4089,3 +4089,60 @@ def test_cli_discovery_session_reads_production_recording_hook(
     config_manager.workflow.run.side_effect = run_workflow
     cyberautoagent.main()
     created[0].cleanup.assert_called_once()
+
+
+@pytest.mark.parametrize("tool_name", ["browser_context", "api_context", "unrelated", ""])
+def test_run_policy_accepts_any_successful_required_tool(tool_name):
+    policy = cyberautoagent.AgentRunPolicy(
+        required_tool_names={"browser_context", "api_context"}, required_tool_match="any", min_tool_calls=1,
+    )
+    handler = SimpleNamespace(
+        tool_counts={tool_name: 1} if tool_name else {},
+        successful_tool_completions={(tool_name, "call")} if tool_name else set(),
+    )
+    expected = tool_name in policy.required_tool_names
+    assert cyberautoagent._required_tools_satisfied(handler, policy) is expected
+    assert cyberautoagent._successful_required_tools_satisfied(handler, policy, 0) is expected
+    handler.successful_tool_completions = set()
+    assert not cyberautoagent._successful_required_tools_satisfied(handler, policy, 0)
+
+
+def test_run_policy_rejects_unknown_required_tool_match():
+    with pytest.raises(ValueError, match="required_tool_match"):
+        cyberautoagent.AgentRunPolicy(required_tool_match="unknown")
+
+
+@pytest.mark.parametrize("reason", ["worker_done", "credential_rejected"])
+@pytest.mark.parametrize("reported", [False, True])
+def test_controller_terminal_reason_survives_sdk_limits_and_successful_tool_status(monkeypatch, reason, reported):
+    from modules.handlers.terminal_tool import TerminalToolHook
+
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    ready = {"reason": None}
+    policy = cyberautoagent.AgentRunPolicy(
+        required_tool_names={"capture"}, terminal_after_required_tools=True,
+        require_successful_required_tools=True, terminal_reason="worker_done", terminal_message="Worker completed",
+        terminal_check=lambda: ready["reason"],
+    )
+
+    class PolicyAgent:
+        def __init__(self):
+            self.messages = []
+            self._cyber_terminal_tool_hook = TerminalToolHook("worker")
+
+        def __call__(self, _message, **kwargs):
+            assert self._cyber_terminal_tool_hook.policy is policy
+            assert kwargs["limits"]["turns"] == policy.max_model_turns
+            ready["reason"] = reason
+            return SimpleNamespace(
+                metrics=None, stop_reason="limit_turns",
+                state={"policy_terminal": {"reason": reason}} if reported else {},
+            )
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+    result = _run_agent_helper(PolicyAgent(), callback, run_policy=policy)
+    assert result.reason == reason
+    assert result.message == ("Worker completed" if reason == "worker_done" else reason)

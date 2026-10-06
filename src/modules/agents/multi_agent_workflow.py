@@ -43,7 +43,7 @@ import sqlite3
 import sys
 import uuid
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -59,6 +59,7 @@ from opentelemetry import context as otel_context
 from opentelemetry import trace as otel_trace
 from pydantic import BaseModel, ValidationError
 from strands import tool as strands_tool
+from strands.types._events import ToolResultEvent
 from strands.types.exceptions import MaxTokensReachedException
 
 from modules.agents.cyber_autoagent import (
@@ -115,15 +116,18 @@ from modules.tools.artifact_references import (
 from modules.tools.auth_chain_analyzer import auth_chain_analyzer
 from modules.tools.authentication import (
     AUTH_CONTEXT_REFRESH_REQUIRED_ERROR,
-    AUTHENTICATION_FLOW_KINDS,
     AUTHENTICATION_FLOW_VERSION,
     REGISTRATION_FLOW_VERSION,
+    _credential_target_url_contains,
     _normalize_storage_header_bindings,
     authenticated_http_request,
     authentication_attempt_result,
     authentication_context_is_valid,
     authentication_context_validation_url,
     build_record_authentication_flow_tool,
+    capture_browser_authenticated_context,
+    ensure_authenticated_context,
+    establish_credential_authenticated_context,
     record_browser_authentication_attempt,
 )
 from modules.tools.browser import reset_authentication_browser_session
@@ -415,6 +419,9 @@ class TaskExecutorCycleResult:
 
     text: str
     outcomes: list[ToolOutcome]
+    reason: str = ""
+    message: str = ""
+    details: dict[str, Any] | None = None
     artifact_limit_exhausted: bool = False
     artifact_limit_events: tuple[dict[str, Any], ...] = ()
     recovery_required: bool = False
@@ -430,7 +437,6 @@ class TaskExecutorCycleResult:
 
 
 FINDING_OBSERVATION_REPAIR_CONFIDENCE = 0.90
-_FLOW_DISCOVERY_CONTRACT_REVISION = 5
 _VOLATILE_OPERATION_ARTIFACT_PATH_PATTERN = re.compile(
     r"(?:/app/)?outputs/[^\s'\"]+/[^\s'\"]+/artifacts/[^\s'\"]+",
     re.IGNORECASE,
@@ -1272,10 +1278,10 @@ class AuthenticationSetupRequest:
         """Render only actionable, secret-free details for a single credential worker."""
 
         credential = self.credentials[0]
-        flow = self.authentication_flows[0]
+        flow = self.authentication_flows[0] if self.authentication_flows else {}
         header_names = [
             str(binding.get("header_name") or "")
-            for binding in flow.get("storage_header_bindings") or []
+            for binding in _effective_storage_header_bindings(flow, self.client_storage_header_bindings)
             if isinstance(binding, dict) and binding.get("header_name")
         ]
         return (
@@ -1328,15 +1334,28 @@ class AuthenticationWorkerResult:
         )
 
 
-def _bind_single_choice_tool(original: Any, fixed_arguments: dict[str, Any]) -> Any:
+def _effective_storage_header_bindings(
+    flow: dict[str, Any], controller_bindings: Iterable[dict[str, str]] = (),
+) -> tuple[dict[str, str], ...]:
+    """Prefer current controller mappings; staged omissions cannot erase known requirements."""
+    return tuple(deepcopy(list(controller_bindings) or flow.get("storage_header_bindings") or []))
+
+
+def _bind_single_choice_tool(
+    original: Any, fixed_arguments: dict[str, Any], *, required: bool = False,
+) -> Any:
     """Remove controller-selected arguments from an agent-facing tool schema."""
 
     specification = get_tool_spec(original)
     if not specification or not isinstance(specification.get("inputSchema"), dict):
+        if required:
+            raise WorkflowInvariantError("Required controller tool binding has no input schema")
         return original
     schema = deepcopy(specification["inputSchema"].get("json") or {})
     properties = schema.get("properties")
     if not isinstance(properties, dict) or not all(name in properties for name in fixed_arguments):
+        if required:
+            raise WorkflowInvariantError("Required controller tool binding has missing parameters")
         return original
     for name in fixed_arguments:
         properties.pop(name)
@@ -1378,11 +1397,35 @@ def _bind_single_choice_tool(original: Any, fixed_arguments: dict[str, Any]) -> 
     bound_tool.__annotations__ = {
         parameter.name: parameter.annotation for parameter in remaining_parameters
     }
-    return strands_tool(
+    decorated = strands_tool(
         bound_tool,
         name=name,
         inputSchema={"json": schema},
     )
+    original_stream = decorated.stream
+
+    async def strict_stream(
+        tool_use: dict[str, Any], invocation_state: dict[str, Any], **kwargs: Any,
+    ) -> AsyncIterator[Any]:
+        # Strands rebuilds its input model with extra=ignore. Check raw arguments
+        # before that model can silently discard a controller-binding override.
+        raw_input = tool_use.get("input", {})
+        unknown = raw_input.keys() - properties.keys() if isinstance(raw_input, dict) else set()
+        if unknown or not isinstance(raw_input, dict):
+            error = ValueError(
+                "Unknown or controller-bound tool arguments: " + ", ".join(sorted(unknown))
+                if unknown else "Tool input must be an object"
+            )
+            yield ToolResultEvent({
+                "toolUseId": str(tool_use.get("toolUseId", "")), "status": "error",
+                "content": [{"text": str(error)}],
+            }, exception=error)
+            return
+        async for event in original_stream(tool_use, invocation_state, **kwargs):
+            yield event
+
+    decorated.stream = strict_stream
+    return decorated
 
 class MultiAgentWorkflowController:
     """Run the assessment as many short-lived role agents coordinated by Python."""
@@ -1433,8 +1476,8 @@ class MultiAgentWorkflowController:
         self.plan_refinement_iterations = self._plan_refinement_iteration_count()
         self.task_prompt_refinement_iterations = self._task_prompt_refinement_iteration_count()
         self.task_execution_cycles = self._task_execution_cycle_count()
-        self.flow_discovery_cycles = self._flow_discovery_cycle_count()
-        self._registration_discovery_cache: dict[tuple[str, str, tuple[str, ...]], dict[str, Any]] = {}
+        self.flow_refinement_cycles = self._flow_refinement_cycle_count()
+        self._worker_flow_attempts: dict[str, dict[str, Any]] = {}
         self._can_reopen_completed_plan = True
         self._crossed_checkpoints: set[int] = set()
         self._emitted_started_task_uids: set[str] = set()
@@ -2055,11 +2098,11 @@ class MultiAgentWorkflowController:
             return max(1, config_manager.getenv_int("CYBER_WORKFLOW_TASK_EXECUTION_CYCLES", 3))
         return 2
 
-    def _flow_discovery_cycle_count(self) -> int:
-        """Bound each flow discovery independently, including its first actor/review pair."""
+    def _flow_refinement_cycle_count(self) -> int:
+        """Bound worker flow refinement, including its first actor/review pair."""
 
         manager = self.runtime.config_manager
-        return max(1, manager.getenv_int("CYBER_WORKFLOW_FLOW_DISCOVERY_CYCLES", 3)) if manager else 3
+        return max(1, manager.getenv_int("CYBER_WORKFLOW_FLOW_REFINEMENT_CYCLES", 3)) if manager else 3
 
     def _task_creator_correction_count(self) -> int:
         config_manager = self.runtime.config_manager
@@ -3112,7 +3155,7 @@ class MultiAgentWorkflowController:
         if callable(list_flows):
             for target, target_id in target_ids.items():
                 stored_flows = sorted(
-                    list_flows(target, purpose="registration", statuses=("discovered", "validated")),
+                    list_flows(target, purpose="registration", statuses=("validated",)),
                     key=lambda stored: (
                         not isinstance(stored.get("descriptor"), dict)
                         or stored["descriptor"].get("flow_version") != REGISTRATION_FLOW_VERSION
@@ -3121,7 +3164,7 @@ class MultiAgentWorkflowController:
                 for stored in stored_flows:
                     descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
                     version = descriptor.get("flow_version")
-                    if type(version) is not int or not 0 < version <= REGISTRATION_FLOW_VERSION:
+                    if version != REGISTRATION_FLOW_VERSION:
                         continue
                     url = str(descriptor.get("url") or descriptor.get("login_url") or "").strip()
                     roles = tuple(sorted({
@@ -3139,8 +3182,6 @@ class MultiAgentWorkflowController:
                             "roles": roles,
                             "flow_version": descriptor.get("flow_version"),
                         }
-                        if version != REGISTRATION_FLOW_VERSION:
-                            flow["advisory_only"] = True
                         if stored.get("discovered_operation_id"):
                             flow["origin_operation_id"] = stored["discovered_operation_id"]
                         provenance = str(descriptor.get("provenance") or "")
@@ -4492,62 +4533,6 @@ class MultiAgentWorkflowController:
             updated_task = self.state.mark_task(task, "partial_failure", reason)
             self._emit_task_done(updated_task)
 
-    def _prepare_authentication_discovery(self, plan: OperationPlan, task: Task) -> Task | None:
-        """Resolve observation-only authentication prerequisites before consumer prompt work."""
-
-        selected_names = self._authentication_agent_tool_names(task)
-        if not selected_names:
-            return task
-        try:
-            setup = self._authentication_setup_request(plan, task)
-            if not setup.credentials:
-                reason = "no_eligible_credentials"
-            else:
-                tools = [tool for tool in self.runtime.optional_tools_list
-                         if get_tool_name(tool) in selected_names]
-                core_tools = self.runtime.core_tools_list or self.runtime.tools_list
-                tools.extend(tool for tool in core_tools if get_tool_name(tool) == "shell")
-                reason = ""
-                for target in setup.targets:
-                    credentials = [item for item in setup.credentials if item["target"] == target]
-                    if credentials and all(authentication_context_is_valid(
-                        self.runtime.operation_id, target, item["credential_id"],
-                    ) for item in credentials):
-                        continue
-                    flows = self._authentication_flow_descriptors(
-                        plan, task, (target,), statuses=("discovered", "validated"), include_shared=False,
-                    )
-                    if flows:
-                        continue
-                    _flows, bindings = self._deterministic_auth_chain_mapping(
-                        target, self._authentication_attack_surface_context(plan, task, target),
-                    )
-                    with scoped_shell_command_validator(
-                        lambda commands: self._validate_authentication_shell_commands(
-                            plan, task, setup.allowed_origins, commands,
-                        )
-                    ):
-                        flows = self._shared_authentication_flow_discovery(
-                            plan, task, replace(setup, client_storage_header_bindings=bindings), target, tools,
-                        )
-                    if not flows:
-                        reason = "no_usable_authentication_flow"
-                        break
-        except BudgetLimitReached:
-            raise
-        except Exception as error:
-            self._log_workflow("authentication discovery preflight failed task=%s reason=%s",
-                               self._task_label(task), type(error).__name__)
-            reason = "discovery_preflight_error"
-        if reason:
-            self._record_authentication_setup(task, AuthenticationSetupResult("failed", reason=reason))
-            current = next(item for item in self.state.list_tasks() if item.task_uid == task.task_uid)
-            updated = self.state.mark_task(
-                current, "partial_failure", f"Authenticated coverage gap: discovery prerequisite unavailable ({reason}).",
-            )
-            self._emit_task_done(updated)
-            return None
-        return next(item for item in self.state.list_tasks() if item.task_uid == task.task_uid)
 
     def _prepare_task_authentication(self, plan: OperationPlan, task: Task) -> Task | None:
         """Validate credentials and establish opaque auth state immediately before task execution."""
@@ -4613,10 +4598,8 @@ class MultiAgentWorkflowController:
             )[:1]
             if not flows:
                 flows = self._authentication_flow_descriptors(
-                    plan, task, (target,), statuses=("validated", "discovered")
+                    plan, task, (target,)
                 )[:1]
-            if not flows:
-                return {"credential_id": credential_id, "status": "unavailable", "reason": "no_authentication_flow"}
             selected_names = set(self._authentication_agent_tool_names(task))
             tools = [
                 item for item in self.runtime.optional_tools_list
@@ -4676,8 +4659,7 @@ class MultiAgentWorkflowController:
         tools = build_role_tools(
             self.runtime, selected_optional_tool_names=selected, include_create_tasks=False,
         )
-        if any(req.kind == "hypothesis_set" for criterion in task.acceptance.criteria
-               for req in criterion.evidence_requirements):
+        if self._is_hypothesis_producer(task):
             def persist_hypotheses(binding: dict[str, Any]) -> None:
                 self.state.patch_task(
                     task.task_uid, evidence_additions=[binding["artifact_ref"]],
@@ -4701,15 +4683,27 @@ class MultiAgentWorkflowController:
             registration_flow = conditional.get("registration_flow", {}) if isinstance(conditional, dict) else {}
             registration_target = str(registration_flow.get("target") or "").rstrip("/")
             registration_roles = registration_flow.get("roles", [])
+            slot = conditional.get("credential_slot", {})
+            assigned_role = str(slot.get("role") or "") if isinstance(slot, dict) else ""
+            if not assigned_role and isinstance(registration_roles, list) and len(registration_roles) == 1:
+                assigned_role = str(registration_roles[0])
+            if not registration_target or not assigned_role or registration_roles != [assigned_role]:
+                raise WorkflowInvariantError("Provisioning requires one task-bound target and credential role")
+            tools = [
+                _bind_single_choice_tool(
+                    item, {"target": registration_target, "role": assigned_role, "origin": "registered"}, required=True,
+                ) if get_tool_name(item) == "store_credential" else item
+                for item in tools
+            ]
             tools = [item for item in tools if get_tool_name(item) != "record_authentication_flow"]
             if registration_target:
-                tools.append(build_record_authentication_flow_tool(
-                    target=registration_target,
-                    purpose="registration",
-                    kind="browser_registration",
-                    allowed_origins=(registration_target,),
-                    roles=registration_roles if isinstance(registration_roles, list) else (),
+                roles = tuple(sorted(registration_roles)) if isinstance(registration_roles, list) else ()
+                attempt = self._worker_flow_attempt(task, registration_target, "registration", roles)
+                tools.append(self._worker_flow_recorder(
+                    task, registration_target, "registration", "browser_registration", attempt, roles,
                 ))
+                tools.extend(self._flow_refinement_artifact_tools())
+
         if self._authentication_agent_tool_names(task):
             tools = self._executor_tools_without_authentication_material(tools, task)
             if "authenticated_http_request" in {get_tool_name(item) for item in tools}:
@@ -4732,17 +4726,6 @@ class MultiAgentWorkflowController:
         return tools
 
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
-        if task.kind == "authentication_flow_discovery":
-            self._execute_authentication_discovery_prerequisite(plan, task, self.runtime.optional_tools_list)
-            return
-        if phase.produces_hypotheses and not any(
-            req.kind == "hypothesis_set" for criterion in task.acceptance.criteria
-            for req in criterion.evidence_requirements
-        ):
-            self._repair_hypothesis_producer(plan, phase, task)
-            if task.status != "done":
-                self.state.mark_task(task, "replanned", "Replaced by typed hypothesis deliverable repair.")
-            return
         if phase.task_creation_mode == "hypothesis_dependent":
             task = self._prepare_hypothesis_consumer(plan, task)
             if task is None:
@@ -4783,12 +4766,14 @@ class MultiAgentWorkflowController:
             self._emit_task_done(updated_task)
             return
         if self._is_credential_provisioning_task(task):
-            task = self._prepare_registration_discovery(plan, task)
-            if task is None:
-                return
-        task = self._prepare_authentication_discovery(plan, task)
-        if task is None:
-            return
+            flow = task.recovery_context["conditional_phase"]["registration_flow"]
+            attempt = self._worker_flow_attempt(task, str(flow["target"]).rstrip("/"), "registration",
+                                                tuple(sorted(flow.get("roles") or ())))
+            if attempt["existing"]:
+                task = self.state.patch_task(task.task_uid, recovery_context_updates={"conditional_phase": {
+                    **task.recovery_context["conditional_phase"],
+                    "registration_flow": {**flow, **attempt["existing"]},
+                }})
         prompt_memory_records = (
             []
             if self._is_credential_provisioning_task(task)
@@ -5505,6 +5490,41 @@ class MultiAgentWorkflowController:
                 )
                 max_token_synthesis_cycle = max_token_synthesis_recovery_active
                 cycle_tools = tools if closure_tools is None else closure_tools
+                registration_attempt = None
+                registration_policy = None
+                if self._is_credential_provisioning_task(task):
+                    registration_flow = task.recovery_context["conditional_phase"]["registration_flow"]
+                    registration_target = str(registration_flow["target"]).rstrip("/")
+                    registration_roles = tuple(sorted(registration_flow.get("roles") or ()))
+                    registration_attempt = self._worker_flow_attempt(
+                        task, registration_target, "registration", registration_roles,
+                    )
+
+                    def registration_succeeded(outcomes: list[ToolOutcome]) -> bool:
+                        return self._registered_worker_success(task, registration_target, registration_roles, outcomes)
+
+                    def registration_terminal() -> str | None:
+                        live = active_live_outcomes_reader() if active_live_outcomes_reader is not None else []
+                        return "registration_worker_done" if registration_succeeded([*tool_outcomes, *live]) else None
+
+                    registration_attempt["success_check"] = registration_succeeded
+                    registration_attempt["worker_objective"] = task.objective
+                    registration_policy = replace(
+                        task_policy, required_tool_names={"store_credential"},
+                        terminal_reason="registration_worker_done", terminal_check=registration_terminal,
+                        terminal_message="Task-bound registered identity stored",
+                        recovery_next_action="Complete the assigned registration and store its credential once.",
+                    )
+                    if registration_attempt["reviewed"] or registration_succeeded(tool_outcomes):
+                        cycle_tools = [
+                            item for item in cycle_tools
+                            if get_tool_name(item) in {
+                                "read_artifact", "search_artifact", "browser_observe_page", "browser_get_page_html",
+                                "record_task_acceptance", "store_observation", "store_knowledge",
+                            } | registration_attempt.get("recorder_names", set())
+                        ]
+                    else:
+                        current_policy = registration_policy
                 observation_scope = (
                     _PROMPT_MEMORY_SCOPE_OPERATION_FACT
                     if cycle == 1 and current_policy is task_policy
@@ -5529,6 +5549,14 @@ class MultiAgentWorkflowController:
                 worker_result = run_executor(cycle_prompt, current_policy, cycle_tools)
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
+                if registration_attempt is not None:
+                    tool_outcomes.extend(self._refine_worker_flow(
+                        task, registration_target, "registration", registration_attempt, tool_outcomes,
+                        lambda prompt, chosen: run_executor(
+                            prompt, self._worker_flow_repair_policy(registration_policy, registration_attempt, chosen),
+                            chosen,
+                        ), tools,
+                    ))
                 if synthesis_repair_cycle:
                     evaluator_synthesis_repair_active = False
                 if max_token_synthesis_cycle:
@@ -9592,7 +9620,6 @@ Return JSON exactly: {response_schema}.
         targets: tuple[str, ...],
         *,
         statuses: tuple[str, ...] = ("validated",),
-        include_shared: bool = True,
     ) -> tuple[dict[str, Any], ...]:
         """Load current, observed authentication flows for explicit lifecycle states."""
 
@@ -9607,25 +9634,6 @@ Return JSON exactly: {response_schema}.
                     canonicalize_credential_target(target), purpose="authentication", statuses=statuses
                 ):
                     raw_flow = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
-                    review = raw_flow.get("discovery_review") or {}
-                    if review.get("operation_id") != self.runtime.operation_id:
-                        continue
-                    prerequisite = next((item for item in self.state.list_tasks()
-                                         if item.task_uid == review.get("task_uid")
-                                         and item.kind == "authentication_flow_discovery"), None)
-                    if prerequisite is not None:
-                        if not include_shared:
-                            continue
-                        data = prerequisite.recovery_context.get("shared_discovery", {})
-                        try:
-                            if prerequisite.status != "done" or not data.get("approval_digests"):
-                                raise ValueError("shared approval unavailable")
-                            for reference, digest in data["approval_digests"].items():
-                                content = Path(resolve_operation_artifact_path(reference)).read_bytes()
-                                if hashlib.sha256(content).hexdigest() != digest:
-                                    raise ValueError("shared approval artifact changed")
-                        except (OSError, TypeError, ValueError):
-                            continue
                     flow = self._normalized_authentication_flow(
                         raw_flow,
                         target_origins,
@@ -9655,6 +9663,26 @@ Return JSON exactly: {response_schema}.
                 references.extend(result.evidence_refs)
         hints: list[dict[str, Any]] = []
         seen: set[str] = set()
+        targets = tuple(self._task_executable_target_values(plan, task))
+        target_origins = {self._authentication_origin(target) for target in targets}
+
+        def add_hint(hint: dict[str, Any]) -> None:
+            hint["login_url"] = self._authentication_discovery_endpoint_url(hint.get("login_url"), target_origins)
+            hint["validation_url"] = self._authentication_discovery_endpoint_url(
+                hint.get("validation_url"), target_origins,
+            )
+            for field in ("login_url", "validation_url"):
+                if hint[field] and not any(
+                    _credential_target_url_contains(target, hint[field], label="discovery hint") for target in targets
+                ):
+                    hint[field] = ""
+            if not hint["login_url"] and not hint["validation_url"]:
+                return
+            key = json.dumps(hint, sort_keys=True)
+            if key not in seen:
+                seen.add(key)
+                hints.append(hint)
+
         for raw_reference in references:
             try:
                 manifest, _snapshot_hash = self._load_controller_inventory_manifest(plan, str(raw_reference))
@@ -9664,6 +9692,9 @@ Return JSON exactly: {response_schema}.
                 if not isinstance(item, dict) or item.get("kind") != "workflow":
                     continue
                 attributes = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
+                route = attributes.get("client_route")
+                if isinstance(route, dict) and route.get("classification") == "authentication":
+                    add_hint({"kind": "", "login_url": route.get("url"), "advisory_only": True})
                 raw_flow = attributes.get("authentication_flow_hint") or attributes.get("authentication_flow")
                 if not isinstance(raw_flow, dict):
                     continue
@@ -9675,10 +9706,16 @@ Return JSON exactly: {response_schema}.
                     "authorization_storage_key": str(raw_flow.get("authorization_storage_key") or "").strip(),
                     "storage_header_bindings": raw_flow.get("storage_header_bindings") or [],
                 }
-                key = json.dumps(hint, sort_keys=True)
-                if key not in seen:
-                    seen.add(key)
-                    hints.append(hint)
+                add_hint(hint)
+        list_flows = getattr(_get_database_store(), "list_authentication_flows", None)
+        if callable(list_flows):
+            for target in targets:
+                for row in list_flows(target, purpose="registration", statuses=("validated",)):
+                    descriptor = row.get("descriptor") or {}
+                    if descriptor.get("flow_version") == REGISTRATION_FLOW_VERSION:
+                        add_hint({
+                            "kind": "", "login_url": descriptor.get("success_redirect_url"), "advisory_only": True,
+                        })
         return tuple(hints)
 
     @staticmethod
@@ -9688,6 +9725,8 @@ Return JSON exactly: {response_schema}.
         try:
             parsed = urlparse(str(value or "").strip())
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return ""
+            if parsed.username is not None or parsed.password is not None:
                 return ""
             parsed.port
         except ValueError:
@@ -9711,6 +9750,10 @@ Return JSON exactly: {response_schema}.
 
         def add(role: str, value: Any, method: str = "GET", status: int | None = None) -> None:
             url = self._authentication_discovery_endpoint_url(value, target_origins)
+            if url and not any(
+                _credential_target_url_contains(target, url, label="discovery endpoint") for target in targets
+            ):
+                return
             key = (role, url)
             if not url or key in seen:
                 return
@@ -9724,7 +9767,7 @@ Return JSON exactly: {response_schema}.
             add("navigation", target)
         for hint in authentication_flow_hints:
             kind = str(hint.get("kind") or "").strip()
-            if kind in {"browser_form", "browser_redirect", "browser_mfa"}:
+            if kind in {"", "browser_form", "browser_redirect", "browser_mfa"}:
                 add("navigation", hint.get("login_url"))
             add("validation_candidate", hint.get("validation_url"))
 
@@ -9838,7 +9881,7 @@ Return JSON exactly: {response_schema}.
         raw_bindings = raw_flow.get("storage_header_bindings")
         if flow_version != AUTHENTICATION_FLOW_VERSION:
             return None
-        if raw_flow.get("provenance") != "observed_flow_discovery":
+        if raw_flow.get("provenance") != "observed_worker_flow":
             return None
         if kind not in {
             "api_form", "browser_form", "browser_redirect", "browser_mfa", "api_key", "oauth2_client"
@@ -9872,6 +9915,7 @@ Return JSON exactly: {response_schema}.
             if origin
         )
         return {
+            **deepcopy(raw_flow),
             "flow_id": str(raw_flow.get("flow_id") or "").strip(),
             "kind": kind,
             "flow_version": flow_version,
@@ -9891,7 +9935,7 @@ Return JSON exactly: {response_schema}.
 
         targets = tuple(self._task_executable_target_values(plan, task))
         validated_flows = self._authentication_flow_descriptors(
-            plan, task, targets, statuses=("validated",), include_shared=False,
+            plan, task, targets, statuses=("validated",),
         )
         authentication_flows = tuple(
             flow
@@ -10117,13 +10161,11 @@ Return JSON exactly: {response_schema}.
         """Expose only relevant tools and bind this worker's credential and flow."""
 
         credential_type = str(credential.get("credential_type") or "")
-        flow_kind = str(flow.get("kind") or "")
         credential_id = str(credential["credential_id"])
-        flow_id = str(flow["flow_id"])
-        browser_flow = flow_kind in {"browser_form", "browser_redirect", "browser_mfa"}
+        flow_id = str(flow.get("flow_id") or "")
         mailbox_id = ""
         allowed = {"checkout_credential", "shell"}
-        if credential_type == "username_password" and browser_flow:
+        if credential_type == "username_password":
             allowed.update({
                 "browser_goto_url", "browser_observe_page", "browser_get_page_html",
                 "browser_take_screenshot", "browser_perform_action", "capture_browser_authenticated_context",
@@ -10140,7 +10182,7 @@ Return JSON exactly: {response_schema}.
                 allowed.add("generate_mfa_code")
             elif mfa_type == "email":
                 allowed.update({"begin_email_mfa_retrieval", "request_mfa_code", "retrieve_email_mfa_code"})
-        elif credential_type == "username_password" and flow_kind == "api_form":
+        if credential_type == "username_password":
             allowed.add("ensure_authenticated_context")
         elif credential_type in {"api_key", "oauth2_client"}:
             allowed.add("establish_credential_authenticated_context")
@@ -10163,8 +10205,10 @@ Return JSON exactly: {response_schema}.
                 })
             if name == "begin_email_mfa_retrieval" and mailbox_id:
                 fixed = {"mailbox_credential_id": mailbox_id}
-            if name in {"ensure_authenticated_context", "capture_browser_authenticated_context"}:
+            if name == "ensure_authenticated_context":
                 fixed["flow_id"] = flow_id
+            if name == "capture_browser_authenticated_context":
+                fixed["storage_header_bindings"] = flow.get("storage_header_bindings") or []
             if name == "ensure_authenticated_context":
                 fixed.update({
                     "login_url": "", "validation_url": "", "request_format": "", "additional_fields": None,
@@ -10196,11 +10240,256 @@ Return JSON exactly: {response_schema}.
                 return "The shell command was not executed because its URL is outside the mapped authentication origins."
         return None
 
-    def _flow_discovery_artifact_tools(self, references: list[str] | None = None) -> list[Any]:
-        """Create fresh bounded readers for one discovery actor or critic."""
+    def _worker_flow_attempt(
+        self,
+        task: Task,
+        target: str,
+        purpose: str,
+        roles: tuple[str, ...] = (),
+        kinds: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Keep publication metadata separate from functional worker success."""
+
+        key = f"{task.task_uid}|{target}|{purpose}|{','.join(roles)}|{','.join(kinds)}"
+        if key not in self._worker_flow_attempts:
+            list_flows = getattr(_get_database_store(), "list_authentication_flows", None)
+            rows = list_flows(target, purpose=purpose, statuses=("validated",)) if callable(list_flows) else []
+            existing = next(
+                (
+                    row["descriptor"]
+                    for row in rows
+                    if row["descriptor"].get("flow_version")
+                    == (AUTHENTICATION_FLOW_VERSION if purpose == "authentication" else REGISTRATION_FLOW_VERSION)
+                    and (purpose != "registration" or tuple(row["descriptor"].get("roles") or ()) == roles)
+                    and (not kinds or row["descriptor"].get("kind") in kinds)
+                ),
+                None,
+            )
+            self._worker_flow_attempts[key] = {
+                "candidate": None,
+                "existing": deepcopy(existing),
+                "reviewed": False,
+                "successful": False,
+            }
+        return self._worker_flow_attempts[key]
+
+    def _worker_flow_recorder(
+        self,
+        task: Task,
+        target: str,
+        purpose: str,
+        kind: str,
+        attempt: dict[str, Any],
+        roles: tuple[str, ...] = (),
+        name: str = "record_authentication_flow",
+        allowed_origins: tuple[str, ...] = (),
+    ) -> Any:
+        def stage(candidate: dict[str, Any]) -> None:
+            candidate = deepcopy(candidate)
+            candidate.pop("evidence_refs", None)
+            if purpose == "authentication":
+                candidate["storage_header_bindings"] = list(_effective_storage_header_bindings(
+                    candidate, attempt.get("controller_bindings", ()),
+                ))
+            if attempt["existing"]:
+                candidate["flow_id"] = attempt["existing"]["flow_id"]
+            attempt["candidate"] = candidate
+
+        attempt.setdefault("recorder_names", set()).add(name)
+        recorder = build_record_authentication_flow_tool(
+            target=target,
+            purpose=purpose,
+            kind=kind,
+            allowed_origins=allowed_origins or (self._authentication_origin(target),),
+            roles=roles,
+            candidate_sink=stage,
+            task_uid=task.task_uid,
+            operation_id=self.runtime.operation_id,
+            name=name,
+        )
+        if purpose == "authentication" and attempt.get("controller_bindings"):
+            recorder = _bind_single_choice_tool(
+                recorder,
+                {"storage_header_bindings": list(attempt["controller_bindings"]), "authorization_storage_key": ""},
+                required=True,
+            )
+        return recorder
+
+    @staticmethod
+    def _worker_flow_repair_policy(
+        policy: AgentRunPolicy, attempt: dict[str, Any], tools: list[Any],
+    ) -> AgentRunPolicy:
+        """Keep functional repairs bounded and end metadata repairs after staging."""
+        if not attempt["successful"]:
+            return policy
+        names = attempt.get("recorder_names", set()) & {get_tool_name(item) for item in tools}
+        return replace(
+            policy, required_tool_names=names, required_tool_match="any", terminal_check=None,
+            terminal_after_required_tools=True, require_successful_required_tools=True,
+            terminal_reason="worker_flow_metadata_staged", terminal_message="Flow metadata staged for critic review",
+            recovery_objective="Repair only the completed worker's observed flow metadata.",
+            recovery_next_action="Record the corrected flow using an available flow recorder.",
+        )
+
+    def _registered_worker_success(
+        self, task: Task, target: str, roles: tuple[str, ...], outcomes: list[ToolOutcome]
+    ) -> bool:
+        """Require durable registration from this task's successful credential-storage call."""
+
+        for outcome in outcomes:
+            if not outcome.success or outcome.tool_name != "store_credential":
+                continue
+            try:
+                payload = extract_json_object(outcome.raw_output_summary or outcome.output_summary)
+                if payload.get("stored") is not True or not isinstance(payload.get("credential"), dict):
+                    continue
+                record = _get_database_store().get_credential(str(payload["credential"].get("credential_id") or ""))
+                if (
+                    record
+                    and record["origin"] == "registered"
+                    and record["target"] == target
+                    and record["role"] in roles
+                    and record["status"] not in {"invalid", "revoked", "retired"}
+                ):
+                    return True
+            except (ValueError, KeyError, TypeError):
+                continue
+        return False
+
+    def _refine_worker_flow(
+        self,
+        task: Task,
+        target: str,
+        purpose: str,
+        attempt: dict[str, Any],
+        outcomes: list[ToolOutcome],
+        repair: Callable[[str, list[Any]], Any],
+        tools: list[Any],
+    ) -> list[ToolOutcome]:
+        """Review a successful worker's mapping without replaying its successful submission."""
+
+        if attempt["reviewed"]:
+            return []
+        attempt["reviewed"] = True
+        role = f"{purpose}_flow_critic"
+        context = {"task_uid": task.task_uid, "target": target, "purpose": purpose}
+        added: list[ToolOutcome] = []
+        feedback = ["Record the completed observed flow and its ordered steps."]
+        repair_tools = [
+            tool
+            for tool in tools
+            if get_tool_name(tool)
+            in {
+                "read_artifact",
+                "search_artifact",
+                "browser_observe_page",
+                "browser_get_page_html",
+            }
+            or get_tool_name(tool) in attempt.get("recorder_names", set())
+        ]
+        for cycle in range(1, self.flow_refinement_cycles + 1):
+            if callable(attempt.get("success_check")):
+                attempt["successful"] = attempt["success_check"]([*outcomes, *added])
+            if callable(attempt.get("stop_check")) and attempt["stop_check"]():
+                break
+            candidate = attempt["candidate"]
+            if candidate and attempt.get("validation_url"):
+                candidate["validation_url"] = attempt["validation_url"]
+            references = self._artifact_refs_from_tool_outcomes([*outcomes, *added])
+            try:
+                if candidate and references:
+                    critique = self._run_flow_refinement_stage(
+                        lambda: self._run_json_text_agent(
+                            role,
+                            self._flow_refinement_critic_prompt(
+                                purpose, target, candidate, [*outcomes, *added], feedback
+                            )
+                            + f"\nController-confirmed functional success: {attempt['successful']}",
+                            [],
+                            "Review the completed flow against current-task execution evidence. Never perform actions.",
+                            data_validator=lambda data: self._validate_flow_refinement_critique(data, references),
+                            tool_factory=lambda: self._flow_refinement_artifact_tools(references),
+                            cycle=cycle,
+                            cycle_total=self.flow_refinement_cycles,
+                            evaluator_fallback_context=context,
+                        ),
+                        role,
+                        "critic",
+                        cycle,
+                        context,
+                    )
+                    if critique["approved"] and attempt["successful"]:
+                        self._validate_flow_refinement_critique(critique, references)
+                        published = deepcopy(candidate)
+                        published["evidence_refs"] = critique["supporting_evidence_refs"]
+                        published["worker_review"] = {
+                            "operation_id": self.runtime.operation_id,
+                            "task_uid": task.task_uid,
+                            "purpose": purpose,
+                            "cycle": cycle,
+                            "approval_digests": {
+                                ref: hashlib.sha256(Path(resolve_operation_artifact_path(ref)).read_bytes()).hexdigest()
+                                for ref in published["evidence_refs"]
+                            },
+                        }
+                        stored = _get_database_store().upsert_authentication_flow(
+                            self.runtime.operation_id,
+                            published,
+                            status="validated",
+                        )
+                        attempt["existing"] = {**published, "flow_id": stored["flow_id"]}
+                        self._emit_workflow_event(
+                            {"type": "flow_refinement_review", **context, "outcome": "approved", "cycle": cycle}
+                        )
+                        return added
+                    feedback = critique["feedback"] or ["Complete the assigned functional action before publication."]
+                if cycle < self.flow_refinement_cycles:
+                    instruction = (
+                        "The functional action already succeeded. Repair only flow metadata and supporting evidence; "
+                        "do not create another account, resubmit, or log in again. Continue from the current browser.\n"
+                        if attempt["successful"]
+                        else "Continue the assigned attempt from the current browser step. Keep the same credential or "
+                        "registration identity. Check prior outcomes before submitting; "
+                        "never repeat a successful action.\n"
+                    )
+                    prompt = (
+                        instruction
+                        + "Worker objective: " + str(attempt.get("worker_objective") or task.objective) + "\n"
+                        + str(attempt.get("worker_context") or "") + "\n"
+                        + json.dumps({"candidate": candidate, "corrections": feedback})
+                        + self._tool_outcome_section([*outcomes, *added])
+                    )
+                    result = self._executor_cycle_result(
+                        repair(prompt, repair_tools if attempt["successful"] else tools)
+                    )
+                    added.extend(result.outcomes)
+                    attempt["last_worker_reason"] = result.reason
+                    self._log_workflow(
+                        "flow worker repair finished task=%s purpose=%s cycle=%s outcome=%s",
+                        task.task_uid, purpose, cycle, result.reason or "worker_result_unavailable",
+                    )
+            except BudgetLimitReached:
+                raise
+            except Exception as error:
+                feedback = [f"Flow review failed: {type(error).__name__}"]
+                break
+        self.state.patch_task(
+            task.task_uid,
+            recovery_context_updates={
+                f"{purpose}_flow_gap": {
+                    "reason": "mapping_not_approved",
+                    "feedback": feedback,
+                }
+            },
+        )
+        self._emit_workflow_event({"type": "flow_refinement_review", **context, "outcome": "coverage_gap"})
+        return added
+
+    def _flow_refinement_artifact_tools(self, references: list[str] | None = None) -> list[Any]:
+        """Create fresh bounded readers for one worker or flow critic."""
 
         pages = max(1, self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4))
-        searches = max(1, self.runtime.config_manager.getenv_int("CYBER_WORKFLOW_FLOW_DISCOVERY_SEARCH_LIMIT", 16))
+        searches = max(1, self.runtime.config_manager.getenv_int("CYBER_WORKFLOW_FLOW_REFINEMENT_SEARCH_LIMIT", 16))
         authorized_count = len(set(references)) if references is not None else 1
         scope = {"allowed_artifact_refs": references} if references is not None else {}
         return [
@@ -10220,182 +10509,9 @@ Return JSON exactly: {response_schema}.
             ),
         ]
 
-    def _run_flow_discovery_cycles(
-        self,
-        task: Task,
-        target: str,
-        purpose: str,
-        prompt: str,
-        tool_factory: Callable[[Callable[[dict[str, Any]], None]], list[Any]],
-        policy: AgentRunPolicy,
-    ) -> tuple[dict[str, Any], ...]:
-        """Stage observed candidates and persist only a reviewed, artifact-backed mapping."""
-
-        actor_role = f"{purpose}_flow_discovery_agent"
-        critic_role = f"{purpose}_flow_discovery_critic"
-        candidates: list[dict[str, Any]] = []
-        outcomes: list[ToolOutcome] = []
-        feedback: list[str] = []
-        gap_reason = "no_approved_flow"
-        context = {"purpose": purpose, "target": target, "task_uid": task.task_uid}
-        system_prompt = "Discover only one secret-free target-scoped flow. Never submit forms or use credentials."
-        for cycle in range(1, self.flow_discovery_cycles + 1):
-            active_role = actor_role
-            previous_candidates = deepcopy(candidates)
-            candidates = []
-            actor_prompt = prompt
-            if previous_candidates or feedback:
-                actor_prompt += (
-                    "\n\nPrior candidate (unapproved):\n"
-                    + json.dumps(previous_candidates, sort_keys=True)
-                    + "\nCritic corrections:\n"
-                    + json.dumps(feedback)
-                    + self._tool_outcome_section(outcomes)
-                    + "\nCorrect only this mapped flow. Reuse saved artifacts; do not widen scope."
-                )
-            try:
-                def run_actor() -> TaskExecutorCycleResult:
-                    candidates.clear()
-                    def stage_candidate(candidate: dict[str, Any]) -> None:
-                        normalized = deepcopy(candidate)
-                        normalized.pop("evidence_refs", None)
-                        # Evidence and review metadata are assigned by the controller after observation.
-                        identity = {key: value for key, value in normalized.items()
-                                    if key not in {"evidence_refs", "discovery_review"}}
-                        if not any(identity == {key: value for key, value in existing.items()
-                                                if key not in {"evidence_refs", "discovery_review"}}
-                                   for existing in candidates):
-                            candidates.append(normalized)
-
-                    tools = tool_factory(stage_candidate)
-                    if not any(get_tool_name(item) in {
-                        "browser_goto_url", "browser_get_page_html", "browser_observe_page", "http_request",
-                    } for item in tools):
-                        raise WorkflowInvariantError("flow discovery has no observation or retrieval capability")
-                    with self._task_executor_session(actor_role, tools, system_prompt) as actor:
-                        result = self._executor_cycle_result(actor(actor_prompt, policy))
-                    if result.artifact_limit_exhausted:
-                        self._emit_discovery_artifact_synthesis(
-                            actor_role, cycle, context, result.artifact_limit_events,
-                        )
-                        synthesis_prompt = (
-                            actor_prompt + self._tool_outcome_section(result.outcomes)
-                            + "\nStaged candidates:\n" + json.dumps(candidates, sort_keys=True)
-                            + "\nArtifact access is closed. Finish from returned evidence without tools. "
-                            "Do not create or change a mapping; report unresolved gaps."
-                        )
-                        result.text = self._run_discovery_artifact_synthesis(
-                            lambda: self.text_runner(actor_role, synthesis_prompt, [], system_prompt),
-                            actor_role, cycle, context,
-                        )
-                    return result
-
-                result = self._run_flow_discovery_stage(run_actor, actor_role, "actor", cycle, context)
-                outcomes.extend(result.outcomes)
-                references = self._flow_discovery_observation_refs(outcomes)
-                if len(candidates) != 1 or not references:
-                    reason = (
-                        "no_candidate" if not candidates else
-                        "multiple_candidates" if len(candidates) != 1 else "missing_observation_artifacts"
-                    )
-                    gap_reason = reason
-                    feedback = [{
-                        "no_candidate": "No flow candidate was staged. Record one observed descriptor.",
-                        "multiple_candidates": "Multiple flow candidates were staged. Record exactly one.",
-                        "missing_observation_artifacts": (
-                            "A flow was staged, but no current-task observation artifacts were captured."
-                        ),
-                    }[reason]]
-                    self._emit_workflow_event({
-                        "type": "flow_discovery_prerequisite_failure", **context, "reason": reason,
-                        "candidate_count": len(candidates), "artifact_count": len(references),
-                        "cycle": cycle, "cycle_total": self.flow_discovery_cycles,
-                    })
-                else:
-                    active_role = critic_role
-                    critique = self._run_flow_discovery_stage(
-                        lambda: self._run_json_text_agent(
-                            critic_role,
-                            self._flow_discovery_critic_prompt(purpose, target, candidates[0], outcomes, feedback)
-                            + "\nController discovery assignment:\n" + prompt,
-                            [],
-                            "Review observed flow mapping only. Tool success and readable artifacts establish "
-                            "availability only; assess whether their contents support the descriptor.",
-                            data_validator=lambda data: self._validate_flow_discovery_critique(data, references),
-                            tool_factory=lambda: self._flow_discovery_artifact_tools(references),
-                            cycle=cycle,
-                            cycle_total=self.flow_discovery_cycles,
-                            evaluator_fallback_context=context,
-                        ),
-                        critic_role, "critic", cycle, context,
-                    )
-                    if critique["approved"]:
-                        candidate = candidates[0]
-                        self._validate_flow_discovery_critique(critique, references)
-                        candidate["evidence_refs"] = critique["supporting_evidence_refs"]
-                        candidate["discovery_review"] = {
-                            "operation_id": self.runtime.operation_id, "task_uid": task.task_uid,
-                            "purpose": purpose, "cycle": cycle,
-                            "approval_digests": {
-                                reference: hashlib.sha256(
-                                    Path(resolve_operation_artifact_path(reference)).read_bytes()
-                                ).hexdigest() for reference in candidate["evidence_refs"]
-                            },
-                        }
-                        active_role = "flow_discovery_persistence"
-                        stored = _get_database_store().upsert_authentication_flow(
-                            self.runtime.operation_id, candidate, status="discovered"
-                        )
-                        self._emit_workflow_event({
-                            "type": "flow_discovery_review", **context, "outcome": "approved",
-                            "cycle": cycle, "cycle_total": self.flow_discovery_cycles,
-                        })
-                        return ({**candidate, "flow_id": stored["flow_id"]},)
-                    gap_reason = "critic_rejected"
-                    feedback = list(critique["feedback"])
-            except BudgetLimitReached:
-                raise
-            except Exception as error:
-                gap_reason = "discovery_stage_error"
-                feedback = [f"Flow discovery failed in {active_role}: {type(error).__name__}"]
-                self._emit_workflow_event({
-                    "type": "flow_discovery_failure", **context, "role": active_role,
-                    "cycle": cycle, "cycle_total": self.flow_discovery_cycles,
-                    "error_type": type(error).__name__,
-                })
-                break
-            self._record_efficiency_correction("flow_discovery_critic_cycle")
-            if active_role == critic_role:
-                self._emit_workflow_event({
-                    "type": "flow_discovery_review", **context, "outcome": "revision_requested",
-                    "cycle": cycle, "cycle_total": self.flow_discovery_cycles,
-                })
-        self._record_flow_discovery_gap(task, target, purpose, feedback, reason=gap_reason)
-        return ()
 
     @staticmethod
-    def _flow_discovery_observation_refs(outcomes: list[ToolOutcome]) -> list[str]:
-        """Select canonical artifacts from successful discovery observations, never advisory reads."""
-
-        observation_tools = {
-            "browser_goto_url", "browser_get_page_html", "browser_observe_page",
-            "browser_take_screenshot", "http_request",
-        }
-        references = set()
-        for outcome in outcomes:
-            if not outcome.success or outcome.tool_name not in observation_tools:
-                continue
-            for reference in outcome.artifact_refs:
-                try:
-                    canonical = canonical_artifact_reference(reference)
-                    resolve_operation_artifact_path(canonical)
-                except (OSError, TypeError, ValueError):
-                    continue
-                references.add(canonical)
-        return sorted(references)
-
-    @staticmethod
-    def _flow_discovery_error_is_transient(error: Exception) -> bool:
+    def _flow_refinement_error_is_transient(error: Exception) -> bool:
         """Classify transport failures by type or explicit HTTP status, without parsing messages."""
 
         if isinstance(error, (BudgetLimitReached, WorkflowInvariantError, ValueError, PermissionError)):
@@ -10408,7 +10524,7 @@ Return JSON exactly: {response_schema}.
             status = getattr(getattr(error, "response", None), "status_code", None)
         return isinstance(status, int) and status in {429, 503}
 
-    def _run_flow_discovery_stage(
+    def _run_flow_refinement_stage(
         self, run: Callable[[], Any], role: str, stage: str, cycle: int, context: dict[str, Any],
     ) -> Any:
         """Retry one transient actor or critic failure without consuming a semantic correction cycle."""
@@ -10417,7 +10533,7 @@ Return JSON exactly: {response_schema}.
             if stage == "actor":
                 self._emit_workflow_activity(
                     role, "started", attempt=attempt, attempt_total=2,
-                    cycle=cycle, cycle_total=self.flow_discovery_cycles, context=context,
+                    cycle=cycle, cycle_total=self.flow_refinement_cycles, context=context,
                 )
             try:
                 result = run()
@@ -10426,44 +10542,44 @@ Return JSON exactly: {response_schema}.
             except Exception as error:
                 self._emit_workflow_activity(
                     role, "failed", attempt=attempt, attempt_total=2,
-                    cycle=cycle, cycle_total=self.flow_discovery_cycles, context=context,
+                    cycle=cycle, cycle_total=self.flow_refinement_cycles, context=context,
                 )
-                if attempt == 2 or not self._flow_discovery_error_is_transient(error):
+                if attempt == 2 or not self._flow_refinement_error_is_transient(error):
                     raise
-                self._record_efficiency_correction("flow_discovery_transient_retry")
+                self._record_efficiency_correction("flow_refinement_transient_retry")
                 self._emit_workflow_event({
-                    "type": "flow_discovery_retry", **context, "stage": stage, "role": role,
-                    "cycle": cycle, "cycle_total": self.flow_discovery_cycles,
+                    "type": "flow_refinement_retry", **context, "stage": stage, "role": role,
+                    "cycle": cycle, "cycle_total": self.flow_refinement_cycles,
                     "attempt": attempt + 1, "attempt_total": 2, "error_type": type(error).__name__,
                 })
                 continue
             if stage == "actor":
                 self._emit_workflow_activity(
                     role, "completed", attempt=attempt, attempt_total=2,
-                    cycle=cycle, cycle_total=self.flow_discovery_cycles, context=context,
+                    cycle=cycle, cycle_total=self.flow_refinement_cycles, context=context,
                 )
             return result
 
-    def _emit_discovery_artifact_synthesis(
+    def _emit_refinement_artifact_synthesis(
         self, role: str, cycle: int | None, context: dict[str, Any],
         limit_events: Iterable[dict[str, Any]],
     ) -> None:
         for event in limit_events:
             self._emit_workflow_event({
-                "type": "flow_discovery_artifact_limit", **context, "role": role, "cycle": cycle,
+                "type": "flow_refinement_artifact_limit", **context, "role": role, "cycle": cycle,
                 **{key: event[key] for key in ("tool", "scope", "used", "allowed") if key in event},
             })
         self._emit_workflow_event({
-            "type": "flow_discovery_artifact_synthesis", **context, "role": role, "cycle": cycle,
+            "type": "flow_refinement_artifact_synthesis", **context, "role": role, "cycle": cycle,
         })
 
-    def _run_discovery_artifact_synthesis(
+    def _run_refinement_artifact_synthesis(
         self, run: Callable[[], Any], role: str, cycle: int | None, context: dict[str, Any],
     ) -> Any:
-        """Retry transport once with artifact access closed, never restarting discovery."""
+        """Retry transport once with artifact access closed, never repeating a successful worker action."""
 
         try:
-            return self._run_flow_discovery_stage(run, role, "synthesis", cycle, context)
+            return self._run_flow_refinement_stage(run, role, "synthesis", cycle, context)
         except BudgetLimitReached:
             raise
         except Exception as error:
@@ -10471,7 +10587,7 @@ Return JSON exactly: {response_schema}.
                 f"Artifact synthesis failed: {type(error).__name__}"
             ) from error
 
-    def _flow_discovery_critic_prompt(
+    def _flow_refinement_critic_prompt(
         self,
         purpose: str,
         target: str,
@@ -10498,29 +10614,33 @@ Extra observations and duplicate captures alone are not reasons to reject a supp
 Rejection feedback must identify incorrect observed fields or missing observations the actor can correct.
 Check target scope. {mapping_requirements}
 Inventory hints do not prove a usable flow. HTTP status and tool success alone cannot prove support.
-Browser authentication mappings leave validation URL empty; the credential worker derives it later.
+Authentication mappings must include the controller-validated URL from this successful login.
 Storage header bindings must match controller-supplied metadata, never guessed JavaScript behavior.
-Map registration identity and required fields from the rendered form without creating an account.
-Unobserved success redirects may be empty. Do not require successful login or registration.
+Review registration fields and ordered steps against account-creation evidence.
+Step field_names are observed controls; filling a field does not prove it required or optional.
+Required fields need rendered constraints or observed validation; unknown requiredness is unclassified.
+Missing required markers do not prove optionality. Do not repeat registration to classify fields.
+For multi-step flows, require the observed step order and transitions; never infer unobserved steps.
+Unknown redirects may be empty. Confirm that the evidence supports the successful login or registration.
 Reject unsupported claims, missing fields, and unrelated-target or prior-operation evidence.
-Candidate:
+Candidate from successful worker execution:
 {json.dumps({key: value for key, value in candidate.items() if key != "evidence_refs"}, sort_keys=True)}
 Authorized observations (availability does not establish support):
-{json.dumps(self._flow_discovery_observation_refs(outcomes))}
+{json.dumps(self._artifact_refs_from_tool_outcomes(outcomes))}
 Prior corrections:
 {json.dumps(feedback)}
 {self._tool_outcome_section(outcomes)}
 """
 
-    def _validate_flow_discovery_critique(self, data: dict[str, Any], references: list[str]) -> None:
+    def _validate_flow_refinement_critique(self, data: dict[str, Any], references: list[str]) -> None:
         """Validate semantic evidence selection against controller-owned observations."""
 
-        self._validate_critique(data, "flow discovery critic")
+        self._validate_critique(data, "flow critic")
         selected = data.get("supporting_evidence_refs", [])
         if not isinstance(selected, list) or any(not isinstance(ref, str) or not ref.strip() for ref in selected):
             raise ValueError("supporting_evidence_refs must be a list of non-empty artifact references")
         if data["approved"] and not selected:
-            raise ValueError("Flow discovery approval requires supporting_evidence_refs from authorized observations")
+            raise ValueError("Flow approval requires supporting_evidence_refs from authorized observations")
         allowed = {canonical_artifact_reference(ref) for ref in references}
         normalized = []
         for ref in selected:
@@ -10535,590 +10655,6 @@ Prior corrections:
                 normalized.append(canonical)
         data["supporting_evidence_refs"] = normalized
 
-    def _record_flow_discovery_gap(
-        self, task: Task, target: str, purpose: str, feedback: list[str], *, reason: str = "no_approved_flow",
-    ) -> None:
-        """Retain a durable, redacted diagnostic without publishing a rejected candidate."""
-
-        from modules.utils.redaction import redact
-
-        key = hashlib.sha256(f"{task.task_uid}|{target}|{purpose}".encode()).hexdigest()[:16]
-        path = Path(_operation_output_root()) / "artifacts" / "flow_discovery" / f"{key}-gap.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        diagnostic = {
-            "task_uid": task.task_uid, "target": target, "purpose": purpose,
-            "reason": reason, "feedback": feedback,
-        }
-        path.write_text(json.dumps(redact(diagnostic), sort_keys=True), encoding="utf-8")
-        reference = f"artifact:{path}"
-        self.state.patch_task(
-            task.task_uid, evidence_additions=[reference],
-            recovery_context_updates={f"{purpose}_discovery_gap": diagnostic},
-        )
-        self._emit_workflow_event({
-            "type": "flow_discovery_review", "outcome": "coverage_gap",
-            "task_uid": task.task_uid, "target": target, "purpose": purpose, "evidence_refs": [reference],
-        })
-
-    def _registration_discovery_approval_valid(
-        self, candidate: dict[str, Any], target: str, url: str, roles: tuple[str, ...],
-    ) -> bool:
-        """Reuse registration mappings only while their current-operation approval is intact."""
-
-        review = candidate.get("discovery_review") or {}
-        digests = review.get("approval_digests") or {}
-        if (
-            review.get("operation_id") != self.runtime.operation_id
-            or review.get("purpose") != "registration" or not review.get("task_uid")
-            or candidate.get("purpose") != "registration"
-            or candidate.get("flow_version") != REGISTRATION_FLOW_VERSION
-            or candidate.get("target") != target or candidate.get("login_url") != url
-            or tuple(sorted(candidate.get("roles") or ())) != roles
-            or not digests or set(candidate.get("evidence_refs") or ()) != set(digests)
-        ):
-            return False
-        try:
-            return all(hashlib.sha256(Path(resolve_operation_artifact_path(reference)).read_bytes()).hexdigest() == digest
-                       for reference, digest in digests.items())
-        except (OSError, TypeError, ValueError):
-            return False
-
-    def _prepare_registration_discovery(self, plan: OperationPlan, task: Task) -> Task | None:
-        """Map the assigned registration before prompt review or account creation."""
-
-        conditional = task.recovery_context.get("conditional_phase", {})
-        flow = conditional.get("registration_flow", {})
-        target = str(flow.get("target") or "")
-        url = str(flow.get("url") or "")
-        roles = tuple(sorted(flow.get("roles") or ()))
-        if not url or len(roles) != 1 or not self._authentication_origin(target):
-            self._record_flow_discovery_gap(task, target, "registration", ["Incomplete registration assignment"])
-            updated = self.state.patch_task(
-                task.task_uid, status="partial_failure", status_reason="Registration discovery coverage gap",
-            )
-            self._emit_task_done(updated)
-            return None
-        cache_key = (target, url, roles)
-        candidate = self._registration_discovery_cache.get(cache_key)
-        if candidate is not None and not self._registration_discovery_approval_valid(candidate, target, url, roles):
-            del self._registration_discovery_cache[cache_key]
-            candidate = None
-        if candidate is None:
-            origin = self._authentication_origin(target)
-            prompt = f"""Map only the assigned self-registration page {url} for target {target}.
-Observe the rendered form; record its route and observed identity, required, and optional fields, then finish.
-Leave unknown request format and success redirect empty; a rendered form does not prove transport format.
-Do not submit a form, fill secrets, create accounts, log in, or test protected endpoints.
-Use the controller-bound recorder. The legacy login_url argument carries the registration URL.
-Record a success redirect only if observed; otherwise leave it empty. Roles are controller-bound.
-Inventory field hints are advisory only:
-{json.dumps(flow, sort_keys=True)}
-Use saved artifacts only to resolve specific gaps in the browser observations.
-"""
-
-            def tool_factory(sink: Callable[[dict[str, Any]], None]) -> list[Any]:
-                def assigned_candidate(candidate: dict[str, Any]) -> None:
-                    if candidate["login_url"] != url:
-                        raise ValueError("registration discovery must record the assigned URL")
-                    sink(candidate)
-
-                names = {
-                    "browser_goto_url", "browser_observe_page", "browser_get_page_html",
-                    "browser_take_screenshot", "http_request",
-                }
-                tools = [item for item in self.runtime.optional_tools_list if get_tool_name(item) in names]
-                tools = self._authentication_agent_tools(tools, (origin,), ())
-                tools = self._flow_discovery_navigation_tools(tools, (url,))
-                tools.extend(self._flow_discovery_artifact_tools())
-                tools.append(build_record_authentication_flow_tool(
-                    target=target, purpose="registration", kind="browser_registration",
-                    allowed_origins=(origin,), roles=roles, candidate_sink=assigned_candidate,
-                    task_uid=task.task_uid, operation_id=self.runtime.operation_id,
-                ))
-                return tools
-
-            mapped = self._run_flow_discovery_cycles(
-                task, target, "registration", prompt, tool_factory,
-                AgentRunPolicy(
-                    min_tool_calls=1, actionless_mode="required_tool", max_actionless_calls=1,
-                    max_agent_calls=8, max_model_turns=32,
-                    terminal_reason="registration_flow_discovery_done",
-                ),
-            )
-            if not mapped:
-                updated = self.state.patch_task(
-                    task.task_uid, status="partial_failure", status_reason="Registration discovery coverage gap",
-                )
-                self._emit_task_done(updated)
-                return None
-            candidate = mapped[0]
-            self._registration_discovery_cache[cache_key] = candidate
-        reviewed_flow = {**flow, **candidate}
-        reviewed_flow.pop("advisory_only", None)
-        reviewed_flow.pop("origin_operation_id", None)
-        return self.state.patch_task(task.task_uid, recovery_context_updates={
-            "conditional_phase": {**conditional, "registration_flow": reviewed_flow},
-        })
-
-    @staticmethod
-    def _flow_discovery_navigation_tools(
-        tools: list[Any],
-        urls: tuple[str, ...],
-        *,
-        allow_same_origin: bool = False,
-        blocked_urls: tuple[str, ...] = (),
-    ) -> list[Any]:
-        """Scope authentication exploration by origin and registration mapping by exact URL."""
-
-        origins = {MultiAgentWorkflowController._authentication_origin(url) for url in urls}
-        origins.discard("")
-        blocked = {
-            MultiAgentWorkflowController._authentication_discovery_endpoint_url(url, origins)
-            for url in blocked_urls
-        }
-        blocked.discard("")
-
-        def bind_navigation(original: Any) -> Any:
-            @strands_tool(name="browser_goto_url")
-            async def browser_goto_url(url: str) -> Any:
-                """Navigate within the controller's discovery scope without probing protected candidates."""
-
-                if allow_same_origin:
-                    normalized = MultiAgentWorkflowController._authentication_discovery_endpoint_url(url, origins)
-                    if not normalized:
-                        raise ValueError("flow discovery navigation is outside the assigned target origin")
-                    if normalized in blocked:
-                        raise ValueError("flow discovery cannot navigate to a protected validation candidate")
-                elif url not in urls:
-                    raise ValueError("flow discovery navigation must use an assigned navigation URL")
-                result = original(url)
-                return await result if inspect.isawaitable(result) else result
-
-            return browser_goto_url
-
-        return [
-            bind_navigation(item) if get_tool_name(item) == "browser_goto_url" else item
-            for item in tools if get_tool_name(item) != "browser_perform_action"
-        ]
-
-    def _authentication_discovery_input(
-        self, plan: OperationPlan, task: Task, setup: AuthenticationSetupRequest, target: str, tools: list[Any],
-    ) -> dict[str, Any]:
-        from modules.config.models.agent_profiles import get_agent_settings_registry
-
-        origin = self._authentication_origin(target)
-        endpoint_values = tuple(sorted(
-            (dict(item) for item in setup.discovery_endpoints
-             if self._authentication_origin(str(item.get("url") or "")) == origin),
-            key=lambda item: json.dumps(item, sort_keys=True),
-        ))
-        hints = tuple(sorted(
-            (dict(item) for item in setup.authentication_flow_hints
-             if not item.get("login_url") or self._authentication_origin(item["login_url"]) == origin),
-            key=lambda item: json.dumps(item, sort_keys=True),
-        ))
-        assignment = {
-            "task_uid": "", "workstream": "authentication_flow_discovery", "targets": [origin],
-            "allowed_origins": [origin], "credentials": [], "authentication_flows": [],
-            "authentication_flow_hints": hints, "discovery_endpoints": endpoint_values,
-            "client_storage_header_bindings": setup.client_storage_header_bindings,
-        }
-        context = self._authentication_attack_surface_context(plan, task, origin)
-        assigned_urls = {item["url"] for item in endpoint_values}
-        evidence = [
-            {key: item.get(key) for key in ("url", "method", "status")}
-            for item in context.get("endpoints", []) if item.get("url") in assigned_urls
-        ]
-        for item in context.get("javascript", []):
-            reference = item.get("source_ref", "")
-            try:
-                manifest, _digest = self._load_controller_inventory_manifest(plan, reference)
-                content = json.dumps([
-                    entry for entry in manifest.get("items", []) if entry.get("value") == item.get("url")
-                ], sort_keys=True).encode()
-            except (OSError, TypeError, ValueError):
-                continue
-            evidence.append({"url": item.get("url"), "sha256": hashlib.sha256(content).hexdigest()})
-        stored = []
-        list_flows = getattr(_get_database_store(), "list_authentication_flows", None)
-        if callable(list_flows):
-            stored = [item.get("descriptor") for item in list_flows(
-                origin, purpose="authentication", statuses=("discovered", "validated"),
-            ) if not any(
-                task.kind == "authentication_flow_discovery"
-                and task.task_uid == (item.get("descriptor", {}).get("discovery_review") or {}).get("task_uid")
-                for task in self.state.list_tasks()
-            )]
-        observable_names = {
-            "browser_goto_url", "browser_get_page_html", "browser_observe_page", "browser_take_screenshot",
-            "http_request", "browser_get_network_calls", "browser_evaluate_js",
-        }
-        schemas = [{**(get_tool_spec(item) or {}), "name": get_tool_name(item)}
-                   for item in tools if get_tool_name(item) in observable_names]
-        return {
-            "operation_id": self.runtime.operation_id, "origin": origin, "assignment": assignment,
-            "evidence": sorted(evidence, key=lambda item: json.dumps(item, sort_keys=True)),
-            "stored_hints": sorted(stored, key=lambda item: json.dumps(item, sort_keys=True)),
-            "tool_schemas": sorted(schemas, key=lambda item: json.dumps(item, sort_keys=True)),
-            "discovery_contract_revision": _FLOW_DISCOVERY_CONTRACT_REVISION,
-            "flow_version": AUTHENTICATION_FLOW_VERSION,
-            "registration_flow_version": REGISTRATION_FLOW_VERSION,
-            "cycles": self.flow_discovery_cycles,
-            "model": getattr(self.runtime.config, "model_id", None),
-            "provider": getattr(self.runtime.config, "provider", None),
-            "role_settings": {role: get_agent_settings_registry().get_settings(role).to_dict() for role in (
-                "authentication_flow_discovery_agent", "authentication_flow_discovery_critic",
-            )},
-            "artifact_pages": self.runtime.config_manager.getenv_int("CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE", 4),
-            "output_chars": self._artifact_router_max_chars(),
-        }
-
-    def _shared_authentication_flow_discovery(
-        self, plan: OperationPlan, task: Task, setup: AuthenticationSetupRequest, target: str, tools: list[Any],
-    ) -> tuple[dict[str, Any], ...]:
-        inputs = self._authentication_discovery_input(plan, task, setup, target, tools)
-        fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
-        candidates = [item for item in self.state.list_tasks()
-                      if item.kind == "authentication_flow_discovery" and item.status != "replanned"
-                      and item.recovery_context.get("shared_discovery", {}).get("operation_id")
-                      == self.runtime.operation_id]
-        prerequisite = next((item for item in reversed(candidates) if item.reference_id == fingerprint), None)
-        if prerequisite is not None and prerequisite.status == "done":
-            data = prerequisite.recovery_context["shared_discovery"]
-            try:
-                if not data["approval_digests"]:
-                    raise ValueError("approval artifact digests unavailable")
-                for reference, digest in data["approval_digests"].items():
-                    content = Path(resolve_operation_artifact_path(reference)).read_bytes()
-                    if hashlib.sha256(content).hexdigest() != digest:
-                        raise ValueError("approval artifact changed")
-                if not data["flows"] or any(not self._normalized_authentication_flow(
-                    flow, {inputs["origin"]}, allow_provisional=True,
-                ) for flow in data["flows"]):
-                    raise ValueError("approved flow is no longer eligible")
-                list_flows = getattr(_get_database_store(), "list_authentication_flows", None)
-                if callable(list_flows):
-                    eligible_ids = {item["flow_id"] for item in list_flows(
-                        inputs["origin"], purpose="authentication", statuses=("discovered", "validated"),
-                    )}
-                    if any(flow.get("flow_id") not in eligible_ids for flow in data["flows"]):
-                        raise ValueError("approved flow lifecycle no longer permits reuse")
-            except (OSError, KeyError, TypeError, ValueError):
-                self._emit_workflow_event({
-                    "type": "authentication_discovery_prerequisite", "outcome": "invalidated",
-                    "task_uid": prerequisite.task_uid, "consumer_task_uid": task.task_uid,
-                })
-                prerequisite = None
-        if prerequisite is None:
-            prior = next((item for item in reversed(candidates)
-                          if item.recovery_context["shared_discovery"].get("origin") == inputs["origin"]), None)
-            prerequisite = Task(
-                task_uid=str(uuid.uuid4()), title="Discover authentication flow",
-                objective="Map one reviewed authentication flow without submitting credentials.",
-                phase=task.phase, status="pending", kind="authentication_flow_discovery",
-                reference_id=fingerprint, target_scope=task.target_scope, target_ids=task.target_ids,
-                acceptance=AcceptanceContract(
-                    mode="outcome", basis=AcceptanceBasis(
-                        kind="snapshot", description="Target-scoped authentication discovery",
-                        source_refs=list(task.acceptance.basis.source_refs),
-                    ), criteria=[AcceptanceCriterion(
-                        id="review-flow", description="Record a reviewed flow or explicit discovery gap.",
-                        evidence_requirements=[EvidenceRequirement(kind="artifact")],
-                    )],
-                ),
-                recovery_context={"shared_discovery": {
-                    "operation_id": self.runtime.operation_id, "origin": inputs["origin"],
-                    "fingerprint": fingerprint, "assignment": inputs["assignment"],
-                    "consumers": [], "flows": [], "approval_digests": {},
-                    "tool_names": [schema["name"] for schema in inputs["tool_schemas"]],
-                    "supersedes_prerequisite_uid": prior.task_uid if prior else None,
-                }},
-            )
-            self.state.store_task(prerequisite)
-            if prior is not None and prior.status in {"partial_failure", "blocked"}:
-                self.state.patch_task(
-                    prior.task_uid, status="replanned",
-                    status_reason="Superseded by changed authentication discovery inputs.",
-                )
-            self._emit_workflow_event({
-                "type": "authentication_discovery_prerequisite", "outcome": "created",
-                "task_uid": prerequisite.task_uid, "consumer_task_uid": task.task_uid,
-                "supersedes_prerequisite_uid": prior.task_uid if prior else None,
-            })
-        data = dict(prerequisite.recovery_context["shared_discovery"])
-        data["consumers"] = sorted({*data.get("consumers", []), task.task_uid})
-        prerequisite = self.state.patch_task(prerequisite.task_uid, recovery_context_updates={"shared_discovery": data})
-        self.state.patch_task(task.task_uid, recovery_context_updates={
-            "authentication_discovery_prerequisite_uid": prerequisite.task_uid,
-            "authentication_discovery_gap": None,
-        })
-        if prerequisite.status in {"pending", "active"}:
-            self._execute_authentication_discovery_prerequisite(plan, prerequisite, tools)
-            prerequisite = next(item for item in self.state.list_tasks() if item.task_uid == prerequisite.task_uid)
-        else:
-            self._emit_workflow_event({
-                "type": "authentication_discovery_prerequisite", "outcome": "reused",
-                "task_uid": prerequisite.task_uid, "consumer_task_uid": task.task_uid,
-            })
-        if prerequisite.status != "done":
-            gap = prerequisite.recovery_context.get("authentication_discovery_gap", {})
-            self.state.patch_task(task.task_uid, evidence_additions=prerequisite.evidence,
-                                  recovery_context_updates={"authentication_discovery_gap": {
-                                      **gap, "prerequisite_task_uid": prerequisite.task_uid,
-                                  }})
-            return ()
-        return tuple(prerequisite.recovery_context["shared_discovery"]["flows"])
-
-    def _execute_authentication_discovery_prerequisite(
-        self, plan: OperationPlan, prerequisite: Task, tools: list[Any],
-    ) -> None:
-        data = dict(prerequisite.recovery_context["shared_discovery"])
-        try:
-            prerequisite = self.state.activate_task(prerequisite)
-            self._emit_task_started(prerequisite)
-            setup = AuthenticationSetupRequest(**{**data["assignment"], "task_uid": prerequisite.task_uid})
-            if "tool_names" in data:
-                tools = [tool for tool in tools if get_tool_name(tool) in data["tool_names"]]
-            # Recover an approval persisted just before an interruption, without another actor invocation.
-            flows = ()
-            list_flows = getattr(_get_database_store(), "list_authentication_flows", None)
-            if callable(list_flows):
-                for record in list_flows(data["origin"], purpose="authentication", statuses=("discovered", "validated")):
-                    descriptor = record.get("descriptor") or {}
-                    review = descriptor.get("discovery_review") or {}
-                    if (review.get("operation_id") != self.runtime.operation_id
-                            or review.get("task_uid") != prerequisite.task_uid
-                            or not review.get("approval_digests")
-                            or not self._normalized_authentication_flow(descriptor, {data["origin"]}, allow_provisional=True)):
-                        continue
-                    try:
-                        valid = all(hashlib.sha256(Path(resolve_operation_artifact_path(reference)).read_bytes()).hexdigest()
-                                    == digest for reference, digest in review["approval_digests"].items())
-                    except (OSError, TypeError, ValueError):
-                        valid = False
-                    if valid:
-                        flows = ({**descriptor, "flow_id": record["flow_id"]},)
-                        break
-            if not flows:
-                flows = self._run_authentication_flow_discovery(plan, prerequisite, setup, data["origin"], tools)
-        except BudgetLimitReached:
-            raise
-        except Exception as error:
-            self._record_flow_discovery_gap(prerequisite, data["origin"], "authentication", [type(error).__name__])
-            flows = ()
-        digests = {}
-        try:
-            for flow in flows:
-                review = flow.get("discovery_review") or {}
-                if (review.get("operation_id") != self.runtime.operation_id
-                        or review.get("task_uid") != prerequisite.task_uid
-                        or not self._normalized_authentication_flow(flow, {data["origin"]}, allow_provisional=True)):
-                    raise ValueError("flow requires current-task approval")
-                if not flow.get("evidence_refs"):
-                    raise ValueError("approved flow requires observation evidence")
-                for reference in flow["evidence_refs"]:
-                    canonical = canonical_artifact_reference(reference)
-                    digests[canonical] = hashlib.sha256(
-                        Path(resolve_operation_artifact_path(canonical)).read_bytes()
-                    ).hexdigest()
-                    expected = review.get("approval_digests", {}).get(canonical)
-                    if expected is not None and expected != digests[canonical]:
-                        raise ValueError("reviewed observation artifact changed")
-            if flows and not digests:
-                raise ValueError("approved discovery requires saved observation evidence")
-        except (OSError, TypeError, ValueError):
-            flows = ()
-            self._record_flow_discovery_gap(prerequisite, data["origin"], "authentication", ["approval_artifact_unavailable"])
-        if not flows and not next(
-            item for item in self.state.list_tasks() if item.task_uid == prerequisite.task_uid
-        ).recovery_context.get("authentication_discovery_gap"):
-            self._record_flow_discovery_gap(prerequisite, data["origin"], "authentication", ["no_approved_flow"])
-        if flows:
-            self.state.record_task_acceptance(prerequisite, {
-                "status": "satisfied", "disposition": "observation",
-                "summary": "Actor/critic review approved this target's observation-backed authentication flow.",
-                "evidence_refs": list(digests),
-            })
-        prerequisite = self.state.patch_task(
-            prerequisite.task_uid, status="done" if flows else "partial_failure",
-            status_reason="Shared flow approved." if flows else "Shared authentication discovery gap.",
-            recovery_context_updates={
-                "shared_discovery": {**data, "flows": list(flows), "approval_digests": digests},
-                **({"authentication_discovery_gap": None} if flows else {}),
-            },
-        )
-        self._emit_workflow_event({
-            "type": "authentication_discovery_prerequisite", "outcome": "completed" if flows else "coverage_gap",
-            "task_uid": prerequisite.task_uid,
-        })
-        self._emit_task_done(prerequisite)
-
-    def _run_authentication_flow_discovery(
-        self,
-        plan: OperationPlan,
-        task: Task,
-        setup: AuthenticationSetupRequest,
-        target: str,
-        tools: list[Any],
-    ) -> tuple[dict[str, Any], ...]:
-        """Discover one target-scoped authentication flow without exposing a credential."""
-
-        target_origin = self._authentication_origin(target)
-        target_setup = replace(
-            setup,
-            targets=(target,),
-            credentials=(),
-            authentication_flows=(),
-            authentication_flow_hints=tuple(
-                hint for hint in setup.authentication_flow_hints
-                if not hint.get("login_url")
-                or self._authentication_origin(str(hint["login_url"])) == target_origin
-            ),
-            discovery_endpoints=tuple(
-                endpoint
-                for endpoint in setup.discovery_endpoints
-                if self._authentication_origin(str(endpoint.get("url") or "")) == target_origin
-            ),
-        )
-        store = _get_database_store()
-        list_flows = getattr(store, "list_authentication_flows", None)
-        stored_hint = None
-        if callable(list_flows):
-            for stored in list_flows(target, purpose="authentication", statuses=("discovered", "validated")):
-                descriptor = stored.get("descriptor") or {}
-                if not isinstance(descriptor, dict):
-                    continue
-                version = descriptor.get("flow_version")
-                if type(version) is not int or not 0 < version <= AUTHENTICATION_FLOW_VERSION:
-                    continue
-                if self._normalized_authentication_flow(
-                    {**descriptor, "flow_version": AUTHENTICATION_FLOW_VERSION},
-                    {target_origin}, allow_provisional=True,
-                ):
-                    stored_hint = {
-                        "descriptor": descriptor,
-                        "origin_operation_id": stored.get("discovered_operation_id"),
-                        "advisory_only": True,
-                    }
-                    login_url = str(descriptor["login_url"])
-                    target_setup = replace(
-                        target_setup,
-                        authentication_flow_hints=(*target_setup.authentication_flow_hints, descriptor),
-                        discovery_endpoints=(*target_setup.discovery_endpoints, {
-                            "role": "navigation", "url": login_url, "method": "GET",
-                        }),
-                    )
-                    break
-
-        def tool_factory(sink: Callable[[dict[str, Any]], None]) -> list[Any]:
-            def observed_candidate(candidate: dict[str, Any]) -> None:
-                if candidate["kind"] in {"browser_form", "browser_mfa", "browser_redirect"}:
-                    if candidate["validation_url"]:
-                        raise ValueError("browser discovery cannot record a protected validation URL")
-                expected_bindings = {
-                    json.dumps(binding, sort_keys=True) for binding in target_setup.client_storage_header_bindings
-                }
-                if any(
-                    json.dumps(binding, sort_keys=True) not in expected_bindings
-                    for binding in candidate["storage_header_bindings"]
-                ):
-                    raise ValueError("discovery storage bindings must come from controller metadata")
-                sink(candidate)
-
-            discovery_names = {
-                "browser_goto_url", "browser_observe_page", "browser_get_page_html", "browser_take_screenshot",
-                "browser_perform_action", "http_request",
-            }
-            discovery_tools = [tool for tool in tools if get_tool_name(tool) in discovery_names]
-            hinted_kinds = tuple(dict.fromkeys(
-                str(hint.get("kind") or "")
-                for hint in target_setup.authentication_flow_hints
-                if str(hint.get("kind") or "") in AUTHENTICATION_FLOW_KINDS
-                and (
-                    not str(hint.get("login_url") or "")
-                    or self._authentication_origin(str(hint.get("login_url") or ""))
-                    == self._authentication_origin(target)
-                )
-            ))
-            recorder_kinds = hinted_kinds or ("browser_form", "browser_mfa", "browser_redirect")
-            for kind in recorder_kinds:
-                recorder_name = (
-                    "record_authentication_flow"
-                    if len(recorder_kinds) == 1
-                    else f"record_{kind}_authentication_flow"
-                )
-                discovery_tools.append(build_record_authentication_flow_tool(
-                    target=target,
-                    purpose="authentication",
-                    kind=kind,
-                    allowed_origins=target_setup.allowed_origins,
-                    name=recorder_name,
-                    candidate_sink=observed_candidate,
-                    task_uid=task.task_uid, operation_id=self.runtime.operation_id,
-                ))
-            discovery_tools.extend(self._flow_discovery_artifact_tools())
-            discovery_tools = self._authentication_agent_tools(discovery_tools, target_setup.allowed_origins, ())
-            navigation_urls = tuple(
-                str(endpoint["url"]) for endpoint in target_setup.discovery_endpoints
-                if endpoint.get("role") == "navigation"
-            ) or (target,)
-            blocked_urls = tuple(
-                str(endpoint["url"]) for endpoint in target_setup.discovery_endpoints
-                if endpoint.get("role") == "validation_candidate"
-            )
-            return self._flow_discovery_navigation_tools(
-                discovery_tools, (target, *navigation_urls), allow_same_origin=True, blocked_urls=blocked_urls,
-            )
-
-        prompt = f"""You are the controller-owned authentication-flow discovery worker. This is bounded target mapping,
-not assessment and not credential authentication.
-
-{target_setup.to_toon()}
-
-Discover one usable authentication flow for the supplied target only. The controller supplied
-`authentication_discovery_endpoints`: browser navigation is limited to the supplied target origin.
-Entries whose role is `navigation` are starting points, not an exhaustive list of allowed URLs.
-Follow observed same-origin login links and routes while mapping this flow.
-Entries whose role is `validation_candidate` are untrusted references only. Never record them as the
-final validation URL; never load it with a browser tool.
-Observe the rendered page to identify the login URL, applicable controls, and flow kind, then record and finish.
-For browser flows, leave unknown request format, submission endpoint, and session details unspecified.
-A rendered form does not establish transport format. Record login metadata with an empty validation URL;
-the credential worker will
-authenticate and discover the final validation URL from authenticated HAR traffic. Do not test protected endpoints in
-this phase.
-The controller may supply deterministic `client_storage_header_bindings` extracted from same-origin JavaScript. Attach
-those exact bindings to the recorded browser flow when they match the observed flow; do not scan, execute, or infer
-JavaScript header behavior yourself. Never record a token value. The controller captures those values once after login
-and reuses them for later authenticated requests.
-Use saved artifacts only to resolve specific gaps in browser observations. Do not investigate backend submission
-behavior for a browser mapping. Use
-`http_request` only for read-only GET or HEAD retrieval of same-origin static pages or resources; do not submit forms
-or send credential-bearing headers. Do not check out credentials, request MFA, capture sessions, test protected
-endpoints, create findings, or search credentials or the environment. Reuse saved browser artifacts instead of
-repeatedly navigating to the same URL. Record the
-observed secret-free descriptor with the controller-bound recorder whose fixed kind matches the observed flow. Supply
-only the observed fields in that recorder's schema. If a usable flow cannot be identified, finish without trying
-credentials or inventing URLs.
-
-Stored mapping and origin are advisory only. Re-observe with current-task artifacts before recording:
-{json.dumps(stored_hint, sort_keys=True)}
-"""
-        policy = AgentRunPolicy(
-            min_tool_calls=1,
-            allow_text_final_after_tools=True,
-            actionless_mode="required_tool",
-            max_actionless_calls=1,
-            max_agent_calls=8,
-            max_model_turns=32,
-            terminal_reason="authentication_flow_discovery_done",
-            terminal_message="Authentication flow discovery completed",
-            recovery_objective=task.objective,
-            recovery_next_action="Record one target-scoped authentication flow or report that none was observed.",
-        )
-        return self._run_flow_discovery_cycles(
-            task, target, "authentication", prompt, tool_factory, policy,
-        )
 
     def _deterministic_auth_chain_mapping(
         self,
@@ -11168,27 +10704,117 @@ Stored mapping and origin are advisory only. Re-observe with current-task artifa
         """Establish one credential's opaque context without credential fallback."""
 
         target = str(credential["target"])
-        allowed_origins = tuple(dict.fromkeys((
-            self._authentication_origin(target),
-            *(origin for flow in flows for origin in flow.get("allowed_origins", [])),
-        )))
+        kinds = (
+            ("browser_form", "browser_redirect", "browser_mfa", "api_form")
+            if credential["credential_type"] == "username_password"
+            else (credential["credential_type"],)
+        )
+        flows = tuple(flow for flow in flows if flow.get("kind") in kinds)
+        attempt = self._worker_flow_attempt(task, target, "authentication", kinds=kinds)
+        # A new credential attempt shares the reusable mapping, not review state or browser context.
+        attempt["reviewed"] = False
+        attempt["successful"] = False
+        attempt["candidate"] = None
+        if attempt["existing"]:
+            flows = (attempt["existing"],)
+        attempt["controller_bindings"] = _effective_storage_header_bindings(
+            flows[0] if flows else {}, setup.client_storage_header_bindings,
+        )
+        flows = tuple({**flow, "storage_header_bindings": list(attempt["controller_bindings"])} for flow in flows)
+        allowed_origins = tuple(
+            dict.fromkeys(
+                (
+                    self._authentication_origin(target),
+                    *(origin for flow in flows for origin in flow.get("allowed_origins", [])),
+                )
+            )
+        )
         credential_setup = replace(
             setup,
             targets=(target,),
             allowed_origins=allowed_origins,
             credentials=(credential,),
             authentication_flows=flows,
+            client_storage_header_bindings=attempt["controller_bindings"],
         )
-        worker_tools = self._authentication_agent_tools(tools, credential_setup.allowed_origins, flows)
-        worker_tools = self._authentication_credential_worker_tools(worker_tools, credential, flows[0])
+        worker_tools = self._authentication_agent_tools(tools, credential_setup.allowed_origins, ())
+        worker_tools = self._authentication_credential_worker_tools(worker_tools, credential, flows[0] if flows else {})
+        worker_tools = [
+            tool
+            for tool in worker_tools
+            if get_tool_name(tool)
+            not in {
+                "capture_browser_authenticated_context",
+                "ensure_authenticated_context",
+                "establish_credential_authenticated_context",
+            }
+        ]
+        worker_tools.extend(self._flow_refinement_artifact_tools())
+        worker_tools.extend(
+            self._worker_flow_recorder(
+                task,
+                target,
+                "authentication",
+                kind,
+                attempt,
+                name=f"record_{kind}_authentication_flow",
+                allowed_origins=credential_setup.allowed_origins,
+            )
+            for kind in kinds
+        )
+
+        def selected_flow() -> dict[str, Any]:
+            return attempt["candidate"] or (flows[0] if flows else {})
+
+        if credential["credential_type"] == "username_password":
+
+            @strands_tool(name="capture_browser_authenticated_context")
+            async def capture_context(validation_url: str) -> str:
+                """Validate this credential's browser context; Python binds observed header metadata."""
+                flow = selected_flow()
+                bindings = _effective_storage_header_bindings(flow, attempt["controller_bindings"])
+                return await capture_browser_authenticated_context(
+                    credential_id=credential["credential_id"],
+                    storage_header_bindings=list(bindings),
+                    validation_url=validation_url,
+                )
+
+            @strands_tool(name="ensure_authenticated_context")
+            def establish_api_context() -> str:
+                """Authenticate this credential using its staged API mapping."""
+                flow = selected_flow()
+                if flow.get("kind") != "api_form":
+                    raise ValueError("Record the observed api_form mapping before API authentication")
+                return ensure_authenticated_context(
+                    credential_id=credential["credential_id"],
+                    login_url=flow["login_url"],
+                    validation_url=flow["validation_url"],
+                    request_format=flow.get("request_format") or "",
+                )
+
+            worker_tools.extend([capture_context, establish_api_context])
+        else:
+
+            @strands_tool(name="establish_credential_authenticated_context")
+            def establish_key_context(validation_url: str = "") -> str:
+                """Validate this selected key or OAuth credential against an observed endpoint."""
+                observed_url = validation_url or str(selected_flow().get("validation_url") or "")
+                return establish_credential_authenticated_context(
+                    credential_id=credential["credential_id"],
+                    validation_url=observed_url,
+                )
+
+            worker_tools.append(establish_key_context)
         flow_kinds = {str(flow.get("kind") or "") for flow in flows}
-        browser_flow_kinds = {"browser_form", "browser_mfa", "browser_redirect"}
         credential_type = str(credential.get("credential_type") or "")
-        browser_flow = credential_type == "username_password" and bool(flow_kinds & browser_flow_kinds)
+        browser_flow = credential_type == "username_password"
         terminal_tool_name = (
-            "establish_credential_authenticated_context" if credential_type in {"api_key", "oauth2_client"}
-            else "ensure_authenticated_context" if flow_kinds == {"api_form"}
-            else "capture_browser_authenticated_context" if browser_flow
+            "establish_credential_authenticated_context"
+            if credential_type in {"api_key", "oauth2_client"}
+            else "ensure_authenticated_context"
+            if flow_kinds == {"api_form"}
+            else "capture_browser_authenticated_context"
+            if browser_flow
             else ""
         )
         if browser_flow:
@@ -11201,8 +10827,15 @@ Stored mapping and origin are advisory only. Re-observe with current-task artifa
                     credential["credential_id"],
                     self._short(error),
                 )
-                return AuthenticationWorkerResult(False)
-        if browser_flow:
+                if flow_kinds != {"api_form"}:
+                    return AuthenticationWorkerResult(False)
+                worker_tools = [
+                    tool
+                    for tool in worker_tools
+                    if not get_tool_name(tool).startswith("browser_")
+                    and get_tool_name(tool) != "capture_browser_authenticated_context"
+                ]
+        if browser_flow and flow_kinds != {"api_form"}:
             flow_instructions = """Complete the supplied login flow through the observed browser controls; unknown
 transport details in the mapping do not block browser login. Determine submission and session behavior during
 this authorized interaction. After authentication, inspect same-origin HAR
@@ -11211,24 +10844,64 @@ required header; use its exact URL as the validation_url for `capture_browser_au
 not satisfy a required header. Reject a 401/403 response, inventory candidate, or navigation success flag as proof.
 """
         elif credential_type == "username_password" and flow_kinds == {"api_form"}:
-            flow_instructions = "Call `ensure_authenticated_context` with no arguments; it resolves the selected flow."
+            flow_instructions = (
+                "Call `ensure_authenticated_context` with no arguments; it uses the staged or existing flow."
+            )
         else:
             flow_instructions = (
                 "Call `establish_credential_authenticated_context` with no arguments; the controller supplies "
-                "the selected validation URL."
+                "the selected validation URL when known; supply an observed URL otherwise."
             )
         prompt = f"""You are the controller-owned authentication worker. Establish an opaque context for this one
 credential and target. Check out the controller-selected credential using `checkout_credential` with no arguments.
 
 {credential_setup.credential_worker_toon()}
+{credential_setup.to_toon()}
 
 {flow_instructions}
-Do not discover or switch credentials or flows. A credential rejection or validation failure ends this worker. Never
+Use the existing flow as a starting point, or discover the entry point from the assigned hints. Follow observed
+in-scope steps, update incorrect flow metadata, and record the completed flow before context capture when possible.
+Keep the selected credential fixed. A definitive credential rejection ends this worker. Never
 expose session material or secret values in text, artifacts, observations, or task acceptance.
 """
+        terminal_tools = (
+            {"capture_browser_authenticated_context", "ensure_authenticated_context"}
+            if credential_type == "username_password"
+            else {terminal_tool_name}
+        )
+        def succeeded(_outcomes: list[ToolOutcome]) -> bool:
+            valid = authentication_context_is_valid(self.runtime.operation_id, target, credential["credential_id"])
+            if valid:
+                attempt["validation_url"] = authentication_context_validation_url(
+                    self.runtime.operation_id,
+                    target,
+                    credential["credential_id"],
+                )
+            return valid
+
+        attempt["success_check"] = succeeded
+        attempt["stop_check"] = lambda: (
+            (
+                authentication_attempt_result(
+                    self.runtime.operation_id,
+                    target,
+                    credential["credential_id"],
+                )
+                or {}
+            ).get("outcome")
+            == "credential_rejected"
+        )
+        def terminal_check() -> str | None:
+            if attempt["stop_check"]():
+                return "credential_rejected"
+            return "authentication_credential_worker_done" if succeeded([]) else None
+
+        attempt["worker_objective"] = "Establish authentication only for the selected credential and target."
+        attempt["worker_context"] = credential_setup.credential_worker_toon() + "\n" + credential_setup.to_toon()
         policy = AgentRunPolicy(
             min_tool_calls=1,
-            required_tool_names={terminal_tool_name} if terminal_tool_name else (),
+            required_tool_names=terminal_tools,
+            required_tool_match="any",
             terminal_after_required_tools=bool(terminal_tool_name),
             require_successful_required_tools=bool(terminal_tool_name),
             allow_text_final_after_tools=False,
@@ -11238,17 +10911,42 @@ expose session material or secret values in text, artifacts, observations, or ta
             max_model_turns=24,
             terminal_reason="authentication_credential_worker_done",
             terminal_message="Credential authentication worker completed bounded context setup",
-            recovery_objective=task.objective,
+            recovery_objective=attempt["worker_objective"],
             recovery_next_action="Establish the opaque authenticated context for the supplied credential.",
+            terminal_check=terminal_check,
         )
-        run_result = self._run_worker_agent(
+        with self._task_executor_session(
             "authentication_agent",
-            prompt,
             worker_tools,
-            "Perform only bounded authentication setup for the supplied credential. Secret values must not appear.",
-            policy,
+            "Perform only the assigned credential's authentication and flow recording.",
+        ) as actor:
+            run_result = actor(prompt, policy)
+            outcomes = self._executor_cycle_result(run_result).outcomes
+
+            if succeeded(outcomes):
+                validation_url = authentication_context_validation_url(
+                    self.runtime.operation_id,
+                    target,
+                    credential["credential_id"],
+                )
+                attempt["successful"] = True
+                attempt["validation_url"] = validation_url
+                candidate = attempt["candidate"]
+                if candidate:
+                    candidate["validation_url"] = validation_url
+            self._refine_worker_flow(
+                task,
+                target,
+                "authentication",
+                attempt,
+                outcomes,
+                lambda text, chosen: actor(text, self._worker_flow_repair_policy(policy, attempt, chosen), chosen),
+                worker_tools,
+            )
+        terminal_reason = (
+            policy.terminal_reason if succeeded(outcomes)
+            else str(attempt.get("last_worker_reason") or getattr(run_result, "reason", ""))
         )
-        terminal_reason = str(getattr(run_result, "reason", ""))
         outcome = (
             "required_tool_succeeded"
             if terminal_tool_name and terminal_reason == policy.terminal_reason
@@ -11270,41 +10968,6 @@ expose session material or secret values in text, artifacts, observations, or ta
         )
         return AuthenticationWorkerResult(True, terminal_reason, tool_names)
 
-    def _mark_authentication_flows_validated(
-        self, target: str, flows: tuple[dict[str, Any], ...], validation_url: str
-    ) -> None:
-        """Promote only the flow that produced a validated opaque context."""
-
-        store = _get_database_store()
-        list_flows = getattr(store, "list_authentication_flows", None)
-        upsert = getattr(store, "upsert_authentication_flow", None)
-        if not callable(list_flows) or not callable(upsert):
-            return
-        expected_ids = {str(flow.get("flow_id") or "") for flow in flows}
-        for stored in list_flows(canonicalize_credential_target(target), purpose="authentication"):
-            if str(stored.get("flow_id") or "") not in expected_ids:
-                continue
-            descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
-            descriptor = dict(descriptor)
-            descriptor["validation_url"] = validation_url
-            upsert(self.runtime.operation_id, descriptor, status="validated")
-
-    def _mark_authentication_flows_invalid(self, target: str, flows: tuple[dict[str, Any], ...]) -> None:
-        """Retire only the discovered flow that failed its bounded setup attempt."""
-
-        store = _get_database_store()
-        list_flows = getattr(store, "list_authentication_flows", None)
-        upsert = getattr(store, "upsert_authentication_flow", None)
-        if not callable(list_flows) or not callable(upsert):
-            return
-        expected_ids = {str(flow.get("flow_id") or "") for flow in flows}
-        for stored in list_flows(
-            canonicalize_credential_target(target), purpose="authentication", statuses=("discovered",)
-        ):
-            if str(stored.get("flow_id") or "") not in expected_ids:
-                continue
-            descriptor = stored.get("descriptor") if isinstance(stored.get("descriptor"), dict) else {}
-            upsert(self.runtime.operation_id, descriptor, status="invalid")
 
     def _schedule_invalid_credential_replacement(
         self,
@@ -11470,12 +11133,6 @@ expose session material or secret values in text, artifacts, observations, or ta
             )
             for target in setup.targets
         }
-        flow_status_by_target = {
-            target: "validated" if flows_by_target[target] else ""
-            for target in setup.targets
-        }
-        bindings_by_target: dict[str, tuple[dict[str, str], ...]] = {}
-        discovery_attempted_targets: set[str] = set()
         try:
             with scoped_shell_command_validator(
                 lambda commands: self._validate_authentication_shell_commands(
@@ -11484,40 +11141,19 @@ expose session material or secret values in text, artifacts, observations, or ta
             ):
                 for target in setup.targets:
                     if not flows_by_target[target]:
-                        discovered_flows = self._authentication_flow_descriptors(
-                            plan, task, (target,), statuses=("discovered",), include_shared=False,
-                        )
-                        if discovered_flows:
-                            flows_by_target[target] = discovered_flows[:1]
-                            flow_status_by_target[target] = "discovered"
-                    if not flows_by_target[target]:
-                        _mapped_flows, mapped_bindings = self._deterministic_auth_chain_mapping(
-                            target,
-                            self._authentication_attack_surface_context(plan, task, target),
-                        )
-                        bindings_by_target[target] = mapped_bindings
-                        self._log_workflow(
-                            "running authentication flow discovery task=%s target=%s",
-                            self._task_label(task),
-                            target,
-                        )
-                        flows_by_target[target] = self._shared_authentication_flow_discovery(
-                            plan,
-                            task,
-                            replace(setup, client_storage_header_bindings=bindings_by_target.get(target, ())),
-                            target,
-                            tools,
-                        )
-                        discovery_attempted_targets.add(target)
-                        flows_by_target[target] = flows_by_target[target][:1]
-                        if flows_by_target[target]:
-                            flow_status_by_target[target] = "discovered"
-                if any(not flows_by_target[target] for target in setup.targets):
-                    return self._record_authentication_setup(
-                        task,
-                        AuthenticationSetupResult("failed", reason="no_usable_authentication_flow"),
-                        setup,
-                    )
+                        flows_by_target[target] = self._authentication_flow_descriptors(plan, task, (target,))[:1]
+                bindings_by_target = {}
+                for target in setup.targets:
+                    known = flows_by_target[target]
+                    bindings = tuple(known[0].get("storage_header_bindings") or ()) if known else ()
+                    if not known:
+                        try:
+                            bindings = self._deterministic_auth_chain_mapping(
+                                target, self._authentication_attack_surface_context(plan, task, target),
+                            )[1]
+                        except (AttributeError, TypeError, ValueError, OSError):
+                            bindings = ()
+                    bindings_by_target[target] = bindings
                 worker_runs: dict[str, int] = {}
                 refreshable_ids = set(valid_ids)
                 worker_ran = False
@@ -11544,7 +11180,8 @@ expose session material or secret values in text, artifacts, observations, or ta
                                 worker_runs[credential_id],
                             )
                             worker_result = self._run_authentication_credential_worker(
-                                task, setup, credential, flows_by_target[target], tools
+                                task, replace(setup, client_storage_header_bindings=bindings_by_target[target]),
+                                credential, flows_by_target[target], tools
                             )
                             if not worker_result.browser_session_ready:
                                 return self._record_authentication_setup(
@@ -11562,10 +11199,6 @@ expose session material or secret values in text, artifacts, observations, or ta
                                         AuthenticationSetupResult("failed", reason="missing_validation_url"),
                                         setup,
                                     )
-                                self._mark_authentication_flows_validated(
-                                    target, flows_by_target[target], validation_url
-                                )
-                                flow_status_by_target[target] = "validated"
                                 refreshable_ids.add(credential_id)
                                 self._log_workflow(
                                     "authentication credential refresh task=%s credential=%s result=valid attempt=%s/2",
@@ -11602,8 +11235,7 @@ expose session material or secret values in text, artifacts, observations, or ta
                                     setup,
                                 )
                             if (
-                                flow_status_by_target[target] == "validated"
-                                and worker_result.stalled_before_login
+                                worker_result.stalled_before_login
                                 and attempt is None
                                 and worker_runs[credential_id] < 2
                             ):
@@ -11619,35 +11251,7 @@ expose session material or secret values in text, artifacts, observations, or ta
                                 "attempt=%s/2",
                                 self._task_label(task), credential_id, worker_runs[credential_id],
                             )
-                            if flow_status_by_target[target] != "discovered":
-                                break
-                            self._mark_authentication_flows_invalid(target, flows_by_target[target])
-                            discovered_flows = self._authentication_flow_descriptors(
-                                plan, task, (target,), statuses=("discovered",)
-                            )
-                            if discovered_flows:
-                                flows_by_target[target] = discovered_flows[:1]
-                                continue
-                            if target in discovery_attempted_targets:
-                                return self._record_authentication_setup(
-                                    task, AuthenticationSetupResult("failed", reason="no_usable_authentication_flow"), setup
-                                )
-                            self._log_workflow(
-                                "running authentication flow discovery task=%s target=%s",
-                                self._task_label(task), target,
-                            )
-                            flows_by_target[target] = self._run_authentication_flow_discovery(
-                                plan,
-                                task,
-                                replace(setup, client_storage_header_bindings=bindings_by_target.get(target, ())),
-                                target,
-                                tools,
-                            )[:1]
-                            discovery_attempted_targets.add(target)
-                            if not flows_by_target[target]:
-                                return self._record_authentication_setup(
-                                    task, AuthenticationSetupResult("failed", reason="no_usable_authentication_flow"), setup
-                                )
+                            break
                     valid_ids = tuple(
                         credential["credential_id"]
                         for credential in setup.credentials
@@ -11806,6 +11410,16 @@ expose session material or secret values in text, artifacts, observations, or ta
             spec["memory_ids"] = memory_ids
         return spec
 
+    @staticmethod
+    def _is_hypothesis_producer(task: Task) -> bool:
+        """Identify producers from their frozen deliverable requirements."""
+
+        return any(
+            requirement.kind == "hypothesis_set"
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.evidence_requirements
+        )
+
     def _repair_hypothesis_producer(self, plan: OperationPlan, phase: PlanPhase, original: Task) -> Task:
         """Deduplicate a repair without rewriting the historical producer's frozen contract."""
 
@@ -11829,7 +11443,8 @@ expose session material or secret values in text, artifacts, observations, or ta
                 "type": "hypothesis_repair", "task_uid": repair.task_uid, "producer_task_uid": original.task_uid,
             })
         if repair.status in {"pending", "active"}:
-            repair = self.state.mark_task(repair, "active", "Repairing missing typed hypothesis output.")
+            if repair.status == "pending":
+                repair = self._activate_task(repair)
             self._run_task(plan, phase, repair)
             repair = next(task for task in self.state.list_tasks() if task.task_uid == repair.task_uid)
         return repair
@@ -11838,7 +11453,8 @@ expose session material or secret values in text, artifacts, observations, or ta
         ids = task.recovery_context.get("hypothesis_source_task_uids", [])
         bindings = []
         for producer in self.state.list_tasks():
-            if producer.task_uid not in ids or producer.status != "done":
+            if (producer.task_uid not in ids or producer.status != "done"
+                    or not self._is_hypothesis_producer(producer)):
                 continue
             if producer.acceptance.basis.snapshot_hash != task.acceptance.basis.snapshot_hash:
                 continue
@@ -11856,7 +11472,7 @@ expose session material or secret values in text, artifacts, observations, or ta
         index = []
         for uid in ids:
             producer = next((item for item in self.state.list_tasks() if item.task_uid == uid), None)
-            if producer is None:
+            if producer is None or not self._is_hypothesis_producer(producer):
                 continue
             binding = producer.recovery_context.get("hypothesis_output") or {}
             try:
@@ -13363,6 +12979,8 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                 candidate_snapshot_refs.append(reference)
             for task in self.state.list_tasks(phase=candidate_source_phase):
                 if phase.task_creation_mode == "hypothesis_dependent":
+                    if not self._is_hypothesis_producer(task):
+                        continue
                     if task.status not in {"active", "pending", "done", "partial_failure", "blocked"}:
                         continue
                     basis = task.acceptance.basis
@@ -14526,7 +14144,7 @@ Classify persisted finding `{finding_uid}`.
 Target preflight context (deterministic data):
 {json.dumps(preflight_context, ensure_ascii=False)}
 
-Candidate:
+Candidate from successful worker execution:
 {json.dumps(prompt_candidate, ensure_ascii=False)}
 
 Catalog candidates:
@@ -14917,7 +14535,7 @@ Allowed evidence references:
         legacy_fallback_active = structured_runner is None or fallback_key in self._structured_output_fallback_registry()
         schema_retry_limit = 1 if role == "task_evaluator" else self.json_retries
         maximum_attempts = 1 + self.json_retries + schema_retry_limit + 1
-        if role in {"authentication_flow_discovery_critic", "registration_flow_discovery_critic"}:
+        if role in {"authentication_flow_critic", "registration_flow_critic"}:
             maximum_attempts += 2
         for attempt in range(maximum_attempts):
             activity_attempt = attempt + 1
@@ -14978,11 +14596,11 @@ Allowed evidence references:
                 )
                 raise TaskPromptBuildError(str(error), repairable=True, failure_source="prompt_input_capacity") from error
             except EvaluatorArtifactReadLimitExceeded as error:
-                if role in {"authentication_flow_discovery_critic", "registration_flow_discovery_critic"}:
+                if role in {"authentication_flow_critic", "registration_flow_critic"}:
                     if artifact_synthesis_active:
-                        raise WorkflowInvariantError("Artifact access reopened during discovery synthesis") from error
+                        raise WorkflowInvariantError("Artifact access reopened during flow synthesis") from error
                     artifact_synthesis_active = True
-                    self._emit_discovery_artifact_synthesis(
+                    self._emit_refinement_artifact_synthesis(
                         role, cycle, evaluator_fallback_context or {}, getattr(error, "limit_events", ()),
                     )
                     current_prompt = (
@@ -15113,14 +14731,14 @@ Allowed evidence references:
                 raise
             except Exception as error:
                 if not artifact_synthesis_active or role not in {
-                    "authentication_flow_discovery_critic", "registration_flow_discovery_critic",
+                    "authentication_flow_critic", "registration_flow_critic",
                 }:
                     raise
-                if artifact_synthesis_transient_retries == 0 and self._flow_discovery_error_is_transient(error):
+                if artifact_synthesis_transient_retries == 0 and self._flow_refinement_error_is_transient(error):
                     artifact_synthesis_transient_retries += 1
-                    self._record_efficiency_correction("flow_discovery_transient_retry")
+                    self._record_efficiency_correction("flow_refinement_transient_retry")
                     self._emit_workflow_event({
-                        "type": "flow_discovery_retry", **(evaluator_fallback_context or {}),
+                        "type": "flow_refinement_retry", **(evaluator_fallback_context or {}),
                         "role": role, "stage": "synthesis", "cycle": cycle,
                         "attempt": 2, "attempt_total": 2, "error_type": type(error).__name__,
                     })
@@ -16024,12 +15642,14 @@ while planning.
             "required_fields": [str(field) for field in flow.get("required_fields", []) if str(field)],
             "optional_fields": [str(field) for field in flow.get("optional_fields", []) if str(field)],
             "success_redirect_url": str(flow.get("success_redirect_url") or ""),
+            "steps": flow.get("steps") or [],
         }
         return (
             "## Controller-owned registration flow (authoritative)\n"
             "Use this exact target, route, and role. These metadata fields are secret-free bindings; do not replace "
             "them with prior memories or inferred routes. Live-form inspection may confirm or refine same-form field "
-            "requirements, but may not change the target, registration URL, or role.\n"
+            "requirements. Follow observed connected registration steps within assigned origins; preserve the entry "
+            "point, target, and role, and update the completed flow when changes are required.\n"
             f"```json\n{json.dumps(descriptor, indent=2, sort_keys=True)}\n```"
         )
 
@@ -16043,7 +15663,7 @@ while planning.
                 "artifacts, acceptance summaries, findings, or prose."
             ),
             (
-                "- Use browser tools only for the mapped registration route and its immediate same-origin result. "
+                "- Use browser tools for the registration entry point and observed connected same-origin steps. "
                 "Unknown transport or redirect details do not block registration; determine them during the "
                 "authorized form interaction. "
                 "Client-side inspection is authorized when it helps complete or diagnose that flow: rendered DOM, "
@@ -16131,9 +15751,6 @@ while planning.
         referenced = {ref.removeprefix("task:") for ref in task.acceptance.basis.source_refs
                       if ref.startswith("task:")}
         referenced.update(task.recovery_context.get("hypothesis_source_task_uids", []))
-        prerequisite_uid = task.recovery_context.get("authentication_discovery_prerequisite_uid")
-        if prerequisite_uid:
-            referenced.add(prerequisite_uid)
         relevant = [item for item in tasks if item.task_uid in referenced or (
             set(item.acceptance.basis.item_ids) & set(task.acceptance.basis.item_ids)
         )]
@@ -16351,8 +15968,8 @@ Shell command selection guidance:
         hypothesis_guidance = self._hypothesis_phase_guidance(phase)
         provisioning_critic_guidance = """
 For credential-provisioning tasks, browser navigation, form interaction, client-side DOM/JavaScript/state inspection,
-same-session cookie inspection, rendered HTML, and screenshots are in scope only for the mapped registration route and
-its immediate same-origin result. Do not reject those capabilities as scope expansion. Reject any draft that requires
+same-session cookie inspection, rendered HTML, and screenshots are in scope for the registration entry
+point and its observed connected same-origin steps. Reject any draft that requires
 finding storage, credential checkout or status changes, unrelated routes, enumeration, or vulnerability testing. Shell
 commands are allowed only when directly supporting the mapped registration flow or its immediate same-origin result.
 The controller-bound `record_authentication_flow` is an authorized secret-free metadata handoff for this task, even

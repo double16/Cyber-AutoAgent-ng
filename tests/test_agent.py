@@ -685,10 +685,8 @@ def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
     ("agent_type", "uses_fail_fast_executor"),
     [
         ("task_evaluator", True),
-        ("authentication_flow_discovery_agent", False),
-        ("registration_flow_discovery_agent", False),
-        ("authentication_flow_discovery_critic", False),
-        ("registration_flow_discovery_critic", False),
+                ("authentication_flow_critic", False),
+        ("registration_flow_critic", False),
         ("plan_critic", True),
         ("task_prompt_critic", True),
         ("task_executor", False),
@@ -736,10 +734,10 @@ def test_create_agent_assigns_fail_fast_executor_to_configured_roles(
     )
 
     kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
-    if agent_type == "task_evaluator" or "flow_discovery" in agent_type:
+    if agent_type == "task_evaluator" or "flow_critic" in agent_type:
         assert agent._cyber_evaluator_artifact_read_limit_hook in kwargs["hooks"]
         assert agent._cyber_evaluator_artifact_read_limit_hook.exhausted is False
-    if agent_type == "task_executor" or "flow_discovery" in agent_type:
+    if agent_type in {"task_executor", "authentication_agent"} or "flow_critic" in agent_type:
         assert isinstance(kwargs["tool_executor"], SequentialToolExecutor)
     elif uses_fail_fast_executor:
         assert isinstance(kwargs["tool_executor"], FailFastSequentialToolExecutor)
@@ -1219,8 +1217,8 @@ if __name__ == "__main__":
 
 
 @pytest.mark.parametrize("role", [
-    "authentication_flow_discovery_agent", "registration_flow_discovery_agent",
-    "authentication_flow_discovery_critic", "registration_flow_discovery_critic",
+    "authentication_agent",
+    "authentication_flow_critic", "registration_flow_critic",
     "task_evaluator", "task_executor", "source_module_agent",
 ])
 def test_production_agents_record_sdk_tool_outcomes_once(monkeypatch, role):

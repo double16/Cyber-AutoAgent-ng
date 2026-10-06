@@ -190,7 +190,7 @@ def test_current_authentication_flow_record_requires_observed_discovery_provenan
     target = "https://target.test"
     store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
 
-    with pytest.raises(ValueError, match="observed discovery provenance"):
+    with pytest.raises(ValueError, match="observed worker provenance"):
         store.upsert_authentication_flow(
             "OP_AUTH",
             {
@@ -367,7 +367,7 @@ def test_bound_authentication_flow_recorder_omits_controller_owned_inputs(tmp_pa
     schema = get_tool_spec(recorder)["inputSchema"]["json"]
 
     assert set(schema["properties"]) == {
-        "login_url", "validation_url", "authorization_storage_key", "storage_header_bindings", "request_format"
+        "login_url", "validation_url", "authorization_storage_key", "storage_header_bindings", "request_format", "steps"
     }
     assert schema["required"] == ["login_url"]
     result = json.loads(recorder(
@@ -1025,12 +1025,11 @@ def test_browser_capture_preserves_cookie_expiry_from_browser_or_har(
         return "captured"
 
     monkeypatch.setattr(authentication, "_active_record", lambda _id: (object(), {"target": target}, "credential"))
-    monkeypatch.setattr(authentication, "_capture_storage_header_bindings", lambda *_args: [])
     monkeypatch.setattr(authentication, "_store_context", store_context)
     monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
 
     assert asyncio.run(
-        authentication.capture_browser_authenticated_context("credential", "flow", validation_url)
+        authentication.capture_browser_authenticated_context("credential", [], validation_url)
     ) == "captured"
     assert captured["expires"] == now + expected_seconds
 
@@ -1039,8 +1038,6 @@ def test_browser_capture_preserves_cookie_expiry_from_browser_or_har(
 def test_browser_capture_rejects_invalid_validation_evidence(failure, monkeypatch):
     target = "https://target.test"
     validation_url = f"{target}/protected"
-    binding = {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"}
-
     class Request:
         url = validation_url
 
@@ -1075,20 +1072,27 @@ def test_browser_capture_rejects_invalid_validation_evidence(failure, monkeypatc
             return await function()
 
     monkeypatch.setattr(authentication, "_active_record", lambda _id: (object(), {"target": target}, "credential"))
-    monkeypatch.setattr(authentication, "_capture_storage_header_bindings", lambda *_args: [binding])
     monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
 
     if failure == "wrong_origin":
         with pytest.raises(ValueError, match="share the credential target origin"):
             asyncio.run(authentication.capture_browser_authenticated_context(
-                "credential", "flow", "https://other.test/protected"
+                "credential", [], "https://other.test/protected"
             ))
     elif failure == "missing_header":
         with pytest.raises(ValueError, match="required credentials"):
-            asyncio.run(authentication.capture_browser_authenticated_context("credential", "flow", validation_url))
+            asyncio.run(authentication.capture_browser_authenticated_context(
+                "credential",
+                [{"header_name": "Authorization", "storage_key": "token", "value_template": "{value}"}],
+                validation_url,
+            ))
     else:
         with pytest.raises(ValueError, match="invalid result"):
-            asyncio.run(authentication.capture_browser_authenticated_context("credential", "flow", validation_url))
+            asyncio.run(authentication.capture_browser_authenticated_context(
+                "credential",
+                [{"header_name": "Authorization", "storage_key": "token", "value_template": "{value}"}],
+                validation_url,
+            ))
 
 
 def test_context_validation_logs_request_exception_type(caplog):
@@ -1193,7 +1197,7 @@ def test_capture_browser_context_uses_named_storage_token_for_validation(tmp_pat
         checkout_credential(credential["credential_id"], "authenticated coverage")
         set_task_auth_context([credential["credential_id"]])
         validation_url = f"{target}/tenants/tenant-a/records/1"
-        flow = store.upsert_authentication_flow(
+        store.upsert_authentication_flow(
             "OP_AUTH",
             {
                 "target": target,
@@ -1205,7 +1209,7 @@ def test_capture_browser_context_uses_named_storage_token_for_validation(tmp_pat
                 "storage_header_bindings": [
                     {"header_name": "Authorization", "storage_key": "token", "value_template": "{value}"}
                 ],
-                "provenance": "observed_flow_discovery",
+                "provenance": "observed_worker_flow",
             },
             status="discovered",
         )
@@ -1248,7 +1252,9 @@ def test_capture_browser_context_uses_named_storage_token_for_validation(tmp_pat
         ready = json.loads(
             asyncio.run(
                 authentication.capture_browser_authenticated_context(
-                    credential["credential_id"], flow["flow_id"], validation_url
+                    credential["credential_id"],
+                    [{"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"}],
+                    validation_url,
                 )
             )
         )
@@ -1279,7 +1285,7 @@ def test_capture_browser_context_prefers_observed_raw_authorization_header(tmp_p
     monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "OP_AUTH")
     checkout_credential(credential["credential_id"], "authenticated coverage")
     set_task_auth_context([credential["credential_id"]])
-    flow = store.upsert_authentication_flow(
+    store.upsert_authentication_flow(
         "OP_AUTH",
         {
             "target": target,
@@ -1292,7 +1298,7 @@ def test_capture_browser_context_prefers_observed_raw_authorization_header(tmp_p
                 {"header_name": "Authorization", "storage_key": "token", "value_template": "{value}"},
                 {"header_name": "X-Session", "storage_key": "session_id", "value_template": "{value}"},
             ],
-            "provenance": "observed_flow_discovery",
+            "provenance": "observed_worker_flow",
         },
         status="discovered",
     )
@@ -1342,7 +1348,8 @@ def test_capture_browser_context_prefers_observed_raw_authorization_header(tmp_p
     result = asyncio.run(
         authentication.capture_browser_authenticated_context(
             credential["credential_id"],
-            flow["flow_id"],
+            [{"header_name": "Authorization", "storage_key": "token", "value_template": "{value}"},
+             {"header_name": "X-Session", "storage_key": "session_id", "value_template": "{value}"}],
             f"{target}/api/session",
         )
     )
@@ -1351,40 +1358,13 @@ def test_capture_browser_context_prefers_observed_raw_authorization_header(tmp_p
     assert captured == {"Authorization": "raw-jwt-value", "X-Session": "observed-session"}
 
 
-def test_capture_browser_context_resolves_bindings_from_selected_flow(tmp_path, monkeypatch):
-    target = "https://target.test"
-    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
-    _activate_task(store, target)
-    flow = store.upsert_authentication_flow(
-        "OP_AUTH",
-        {
-            "target": target,
-            "purpose": "authentication",
-            "kind": "browser_form",
-            "flow_version": authentication.AUTHENTICATION_FLOW_VERSION,
-            "login_url": f"{target}/login",
-            "validation_url": "",
-            "storage_header_bindings": [
-                {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"}
-            ],
-            "provenance": "observed_flow_discovery",
-        },
-        status="discovered",
-    )
-    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
-
-    assert authentication._capture_storage_header_bindings(target, flow["flow_id"]) == [
-        {"header_name": "Authorization", "storage_key": "token", "value_template": "Bearer {value}"}
-    ]
-    with pytest.raises(ValueError, match="unavailable"):
-        authentication._capture_storage_header_bindings(target, "missing-flow")
 
 
 def test_capture_browser_context_runtime_schema_requires_controller_flow():
     schema = get_tool_spec(authentication.capture_browser_authenticated_context)["inputSchema"]["json"]
 
-    assert schema["required"] == ["credential_id", "flow_id", "validation_url"]
-    assert set(schema["properties"]) == {"credential_id", "flow_id", "validation_url"}
+    assert schema["required"] == ["credential_id", "storage_header_bindings", "validation_url"]
+    assert set(schema["properties"]) == {"credential_id", "storage_header_bindings", "validation_url"}
 
 
 def test_capture_browser_context_rejects_403_har_validation(monkeypatch):
@@ -1432,22 +1412,12 @@ def test_capture_browser_context_rejects_403_har_validation(monkeypatch):
             return await function()
 
     monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
-    monkeypatch.setattr(
-        authentication,
-        "_stored_browser_flow",
-        lambda *_args: {
-            "storage_header_bindings": [
-                {"header_name": "Authorization", "storage_key": "token", "value_template": "{value}"}
-            ],
-            "authorization_storage_key": "",
-        },
-    )
 
     with pytest.raises(ValueError, match="successful browser request"):
         asyncio.run(
             authentication.capture_browser_authenticated_context(
                 "credential",
-                "flow-1",
+                [],
                 f"{target}/api/protected",
             )
         )
@@ -1505,21 +1475,20 @@ def test_cookie_only_browser_capture_requires_successful_request_with_session_co
             return await function()
 
     monkeypatch.setattr(authentication, "_active_record", lambda _id: (Task(), {"target": target}, "credential"))
-    monkeypatch.setattr(authentication, "_capture_storage_header_bindings", lambda *_args: [])
     monkeypatch.setattr(authentication, "_store_context", lambda *_args: "captured")
     monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
 
     if accepted:
         assert asyncio.run(
             authentication.capture_browser_authenticated_context(
-                "credential", "flow-1", f"{target}/api/protected"
+                "credential", [], f"{target}/api/protected"
             )
         ) == "captured"
     else:
         with pytest.raises(ValueError, match="successful browser request"):
             asyncio.run(
                 authentication.capture_browser_authenticated_context(
-                    "credential", "flow-1", f"{target}/api/protected"
+                    "credential", [], f"{target}/api/protected"
                 )
             )
 
@@ -1610,7 +1579,7 @@ def test_authenticated_http_request_reuses_hidden_bearer_context(tmp_path, monke
                 "login_url": f"{target}/login",
                 "validation_url": f"{target}/tenants/tenant-a/records/1",
                 "request_format": "json",
-                "provenance": "observed_flow_discovery",
+                "provenance": "observed_worker_flow",
             },
             status="validated",
         )
@@ -1707,7 +1676,7 @@ def test_authenticated_http_request_accepts_controller_authorization_for_reused_
                 "login_url": f"{target}/login",
                 "validation_url": f"{target}/tenants/tenant-a/records/1",
                 "request_format": "json",
-                "provenance": "observed_flow_discovery",
+                "provenance": "observed_worker_flow",
             },
             status="validated",
         )
@@ -1866,8 +1835,8 @@ def test_authenticated_http_request_exchanges_hidden_oauth_context(tmp_path, mon
 
 
 @pytest.mark.parametrize("purpose,kind,expected_version", [
-    ("authentication", "browser_form", 8),
-    ("registration", "browser_registration", 2),
+    ("authentication", "browser_form", 9),
+    ("registration", "browser_registration", 3),
 ])
 def test_flow_recording_uses_independent_purpose_versions(tmp_path, monkeypatch, purpose, kind, expected_version):
     target = "https://target.test"
@@ -1880,7 +1849,9 @@ def test_flow_recording_uses_independent_purpose_versions(tmp_path, monkeypatch,
     assert descriptor["flow_version"] == expected_version
 
 
-@pytest.mark.parametrize("version,expected", [(8, True), (7, False), (6, False), (2, False), (1, False), (None, False)])
+@pytest.mark.parametrize("version,expected", [
+    (9, True), (8, False), (7, False), (6, False), (2, False), (1, False), (None, False),
+])
 def test_authentication_flow_version_rejects_legacy_and_registration_versions(version, expected):
     assert authentication._is_current_authentication_flow({"flow_version": version}) is expected
 
@@ -1939,11 +1910,11 @@ def test_discovery_recorder_rejects_invalid_binding(tmp_path, monkeypatch, overr
     )
     arguments.update(overrides)
     with pytest.raises(ValueError, match=message):
-        authentication.build_record_authentication_flow_tool(**arguments)
+        authentication.build_record_authentication_flow_tool(**arguments)(login_url=f"{target}/login")
 
 
 def test_discovery_binding_requires_staging_sink():
-    with pytest.raises(ValueError, match="only for discovery staging"):
+    with pytest.raises(ValueError, match="only for worker staging"):
         authentication.build_record_authentication_flow_tool(
             target="https://target.test", purpose="authentication", kind="browser_form",
             task_uid="task", operation_id="OP_AUTH",
@@ -1963,7 +1934,7 @@ def test_registration_discovery_requires_single_assigned_target(tmp_path, monkey
         authentication.build_record_authentication_flow_tool(
             target=target, purpose="registration", kind="browser_registration",
             task_uid="auth-task", operation_id="OP_AUTH", candidate_sink=Mock(),
-        )
+        )(login_url=f"{target}/signup")
 
 
 

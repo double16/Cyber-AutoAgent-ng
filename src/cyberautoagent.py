@@ -94,6 +94,7 @@ from modules.handlers.max_token_recovery import (
 )
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.terminal_tool import (
+    POLICY_TERMINAL_STATE_KEY,
     TERMINAL_TOOL_COMPLETED_STATE_KEY,
     TERMINAL_TOOL_REJECTED_STATE_KEY,
 )
@@ -756,7 +757,8 @@ def _required_tools_satisfied(
     )
     if tool_total_count < run_policy.min_tool_calls:
         return False
-    return all(int(tool_counts.get(name, 0) or 0) > 0 for name in run_policy.required_tool_names)
+    matches = (int(tool_counts.get(name, 0) or 0) > 0 for name in run_policy.required_tool_names)
+    return any(matches) if run_policy.required_tool_match == "any" else all(matches)
 
 
 def _successful_required_tools_satisfied(
@@ -774,6 +776,8 @@ def _successful_required_tools_satisfied(
     journal = getattr(callback_handler, "tool_outcome_journal", None)
     if journal is not None and hasattr(journal, "since"):
         successful.update(outcome.tool_name for outcome in journal.since(baseline) if outcome.success)
+    if run_policy.required_tool_match == "any":
+        return bool(run_policy.required_tool_names & successful)
     return run_policy.required_tool_names.issubset(successful)
 
 
@@ -836,6 +840,9 @@ def run_agent_until_terminal_state(
     outcome_journal = getattr(agent_callback_handler, "tool_outcome_journal", None)
     outcome_baseline = outcome_journal.snapshot() if outcome_journal is not None else 0
     completion_baseline = set(getattr(agent_callback_handler, "successful_tool_completions", set()) or set())
+    terminal_hook = getattr(agent, "_cyber_terminal_tool_hook", None)
+    if terminal_hook is not None:
+        terminal_hook.configure(run_policy)
 
     while not interrupted:
         if agent_call_count >= run_policy.max_agent_calls:
@@ -866,6 +873,16 @@ def run_agent_until_terminal_state(
             process_agent_metrics(agent_callback_handler, result)
 
             result_state = getattr(result, "state", {})
+            policy_terminal = result_state.get(POLICY_TERMINAL_STATE_KEY) if isinstance(result_state, dict) else None
+            terminal_reason = (
+                policy_terminal.get("reason") if isinstance(policy_terminal, dict)
+                else run_policy.terminal_check() if run_policy.terminal_check is not None else None
+            )
+            if terminal_reason:
+                return AgentRunResult(
+                    terminal_reason,
+                    run_policy.terminal_message if terminal_reason == run_policy.terminal_reason else terminal_reason,
+                )
             terminal_tool_completed = (
                 result_state.get(TERMINAL_TOOL_COMPLETED_STATE_KEY)
                 if isinstance(result_state, dict)
@@ -878,6 +895,7 @@ def run_agent_until_terminal_state(
             if (
                 run_policy.require_successful_required_tools
                 and run_policy.terminal_after_required_tools
+                and run_policy.terminal_check is None
                 and _successful_required_tools_satisfied(
                     agent_callback_handler, run_policy, outcome_baseline, completion_baseline
                 )
@@ -1022,7 +1040,9 @@ def run_agent_until_terminal_state(
                         else:
                             break
 
-                    required_tools = ", ".join(sorted(run_policy.required_tool_names))
+                    required_tools = (" or " if run_policy.required_tool_match == "any" else ", ").join(
+                        sorted(run_policy.required_tool_names)
+                    )
                     if run_policy.actionless_mode == "task_progress":
                         completion_instruction = (
                             f"Treat the required completion tool(s) ({required_tools}) as completion conditions, not "
@@ -1053,7 +1073,9 @@ def run_agent_until_terminal_state(
                         "Attempting to redirect model again because no tool calls were detected in last execution loop."
                     )
                     if run_policy.actionless_mode == "task_progress":
-                        required_tools = ", ".join(sorted(run_policy.required_tool_names))
+                        required_tools = (" or " if run_policy.required_tool_match == "any" else ", ").join(
+                            sorted(run_policy.required_tool_names)
+                        )
                         completion_instruction = (
                             f"Use the required completion tool(s) ({required_tools}) only when their prerequisites "
                             "are complete."
@@ -1066,7 +1088,9 @@ def run_agent_until_terminal_state(
                             f"evidence. {completion_instruction} Do not provide more analysis."
                         )
                     elif not run_policy.allow_text_final_after_tools:
-                        required_tools = ", ".join(sorted(run_policy.required_tool_names)) or "an available tool"
+                        required_tools = (" or " if run_policy.required_tool_match == "any" else ", ").join(
+                            sorted(run_policy.required_tool_names)
+                        ) or "an available tool"
                         current_message += (
                             "**MANDATORY ACTION**: A text-only response cannot complete this role. "
                             f"Call {required_tools} now using its registered schema. Do not provide more analysis."
@@ -2360,10 +2384,10 @@ def main():
                     callback = getattr(agent, "_cyber_callback_handler", None)
                     recovery_hook = getattr(agent, "_cyber_failure_recovery_hook", None)
                     journal = getattr(callback, "tool_outcome_journal", None)
-                    if role in {"authentication_flow_discovery_agent", "registration_flow_discovery_agent"}:
+                    if role == "authentication_agent":
                         recorder = getattr(agent, "_cyber_tool_outcome_recording_hook", None)
                         if recorder is None or journal is None or recorder.journal is not journal:
-                            raise WorkflowInvariantError("Flow discovery requires its agent's outcome recorder")
+                            raise WorkflowInvariantError("Worker requires its agent's outcome recorder")
 
 
                     def run_retained_executor(
@@ -2402,6 +2426,9 @@ def main():
                         return TaskExecutorCycleResult(
                             text=result_message,
                             outcomes=outcomes,
+                            reason=run_result.reason,
+                            message=run_result.message,
+                            details=run_result.details,
                             artifact_limit_exhausted=bool(
                                 getattr(getattr(agent, "_cyber_evaluator_artifact_read_limit_hook", None),
                                         "exhausted", False)

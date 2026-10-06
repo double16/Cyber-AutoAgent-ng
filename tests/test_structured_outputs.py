@@ -151,12 +151,12 @@ def test_structured_output_dict_accepts_models_and_dicts_but_rejects_text():
         structured_output_dict("complete")
 
 
-@pytest.mark.parametrize("role", ["authentication_flow_discovery_critic", "registration_flow_discovery_critic"])
+@pytest.mark.parametrize("role", ["authentication_flow_critic", "registration_flow_critic"])
 def test_flow_discovery_critique_schema_advertises_supporting_selection(role):
-    from modules.agents.structured_outputs import WORKFLOW_OUTPUT_MODELS, FlowDiscoveryCritiqueOutput
+    from modules.agents.structured_outputs import WORKFLOW_OUTPUT_MODELS, FlowCritiqueOutput
 
     model = WORKFLOW_OUTPUT_MODELS[role]
-    assert model is FlowDiscoveryCritiqueOutput
+    assert model is FlowCritiqueOutput
     assert "supporting_evidence_refs" in model.model_json_schema()["properties"]
     value = model(approved=True, feedback=[], supporting_evidence_refs=["artifact:form.html"])
     assert structured_output_dict(value)["supporting_evidence_refs"] == ["artifact:form.html"]

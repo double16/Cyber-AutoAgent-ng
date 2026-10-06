@@ -296,6 +296,11 @@ recorded. Once the atomic ledger passes structural validation, one short-lived s
 Python may later reconcile a failed or blocked task to `superseded` when explicitly linked replacement tasks resolve
 all of its criteria.
 
+Hypothesis producers are identified by the frozen `hypothesis_set` evidence requirement. Sharing a
+hypothesis-producing phase or inventory snapshot does not make a validation task a producer. Missing or invalid
+producer output uses a deduplicated repair task: pending repairs are activated, active repairs resume, and terminal
+repairs are not rerun. The original producer contract remains unchanged.
+
 For a task scoped to one frozen endpoint, an inventory manifest is supporting scope context only: it cannot close the
 task by itself. The acceptance submission may retain that context alongside one or more route-specific artifacts (for
 example, the captured response or a task-local hypothesis artifact). Endpoint recovery guidance lists the
@@ -356,11 +361,12 @@ and column positions, and uses `next_match_offset` to page through additional ma
 accepts 0 through 10 surrounding lines on each side of a match (default 2); zero returns only the matching line.
 Task-executor tool recovery counts corrected calls by model response, so several calls emitted together consume one
 correction attempt. Report and other read-only
-agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation). Authentication and registration
-discovery searches instead use `CYBER_WORKFLOW_FLOW_DISCOVERY_SEARCH_LIMIT` (default 16): actors receive
-that many searches total, while critics receive that many per distinct authorized artifact and a total
-scaled by the artifact count. Each invocation, including retries and later cycles, gets fresh counters.
-Search output remains bounded; searches with no matches consume allowance. Discovery artifact reads
+agents use `CYBER_WORKFLOW_ARTIFACT_READ_LIMIT` (default four reads per agent invocation). Authentication and provisioning
+worker searches instead use `CYBER_WORKFLOW_FLOW_REFINEMENT_SEARCH_LIMIT` (default 16): workers receive
+that many searches total, while flow critics receive that many per distinct authorized artifact and a total
+scaled by the artifact count. New worker attempts and critic invocations receive fresh counters; repairs within
+a worker retain its allowance. Synthesis after exhaustion keeps artifact access closed.
+Search output remains bounded; searches with no matches consume allowance. Worker artifact reads
 retain their existing pagination limits. A task evaluator may read
 only controller-authorized task evidence and frozen acceptance artifacts. It receives up to
 `CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE` pages per artifact (default four), with its total derived from the

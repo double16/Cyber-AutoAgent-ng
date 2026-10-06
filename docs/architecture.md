@@ -135,35 +135,19 @@ The template has no model-selected optional tools or shell commands, and selects
 The controller emits `task_prompt_fallback` for that recovery. Only a valid critic response explicitly identifying a
 hard target-scope violation marks the active task `partial_failure` without invoking its executor or evaluator.
 
-Authentication and self-registration discovery each use a bounded actor/critic loop before credential execution.
-Discovery actors stage secret-free descriptors; fresh critics review controller-observed outcomes and saved artifacts.
-Only approved mappings are persisted as `discovered`; successful authentication alone promotes a mapping to `validated`.
-Descriptors use separate versions: `AUTHENTICATION_FLOW_VERSION = 8` and `REGISTRATION_FLOW_VERSION = 2`.
-Older descriptors require rediscovery; their entry URLs and inventory observations remain advisory discovery hints.
-Approval evidence consists only of canonical current-operation artifacts returned by successful discovery observation
-or retrieval tools. Existing task evidence and artifact reads cannot independently establish a fresh observation.
-Each actor or critic stage retries a transient timeout, connection failure, or HTTP 429/503 error once. Critic retries
-reuse the candidate and evidence without another actor run. These retries and JSON repairs do not consume semantic
-correction cycles. Permanent failures, exhausted JSON repairs, and persistence errors end discovery; budget exceptions
-propagate. Provider backoff handles delays; discovery adds no sleep.
-Registration mapping runs before provisioning prompt creation and is reused for the same operation, target, URL, and role.
-Rejected discovery feeds actionable corrections to a fresh actor. Exhaustion records a durable coverage gap and lets
-other assessment work continue. Discovery cannot submit forms or access credentials; critics can only read artifacts.
-Authentication discovery navigation entries are starting points. Discovery can follow observed login links and routes
-within the assigned target origin, including during continuation after a flow-version change. Known protected
-validation candidates remain excluded from browser navigation; registration discovery uses its exact assigned URL.
+Login and provisioning workers discover flows while completing their assigned action. Dedicated flow critics
+review staged metadata and current-task evidence; only successful, approved flows are persisted. The worker keeps
+its browser progress and identity across corrections. Successful login or registration remains usable if metadata
+review cannot approve a reusable mapping. See [credential workers](#credential-workers) for the execution sequence.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CYBER_WORKFLOW_FLOW_DISCOVERY_CYCLES` | `3` | Maximum actor/review pairs per discovery; minimum one. JSON retries are separate. |
-| `CYBER_WORKFLOW_FLOW_DISCOVERY_SEARCH_LIMIT` | `16` | Searches per discovery actor invocation or per distinct authorized artifact for critics; minimum one. |
+| `CYBER_WORKFLOW_FLOW_REFINEMENT_CYCLES` | `3` | Maximum worker/flow-critic pairs per attempt; minimum one. JSON retries are separate. |
+| `CYBER_WORKFLOW_FLOW_REFINEMENT_SEARCH_LIMIT` | `16` | Searches per worker invocation or per distinct authorized artifact for critics; minimum one. |
 
-Artifact read and search allowances are independent and local to each discovery actor or critic invocation.
-Tool errors identify the exhausted allowance, its counts, and whether it applies across files or to one artifact.
-Changing a file, pattern, or page cannot restore an exhausted allowance. Repeated requests against exhausted
-access stop the tool loop. Discovery then synthesizes from returned evidence and staged candidates without tools;
-one transient retry and existing critic JSON repairs keep artifact access closed. Synthesis cannot create a new
-actor mapping, and critic approval still requires observation-backed evidence.
+Artifact errors explain the exhausted read or search allowance. Critics synthesize from returned evidence when
+access is exhausted; JSON repair and one transient retry keep artifact access closed. Approval still requires
+current-task evidence selected by the critic. These retries do not consume semantic correction cycles.
 
 Task execution then uses a second bounded actor/critic loop:
 
@@ -298,53 +282,57 @@ continues testing covered groups, and reports the remaining coverage as an incom
 hypotheses, the dependent phase closes as a partial failure without creating generic testing tasks. If no verified
 source manifest is available, it records a prerequisite gap and also closes as a partial failure.
 
-Authentication discovery uses an `authentication_flow_discovery` prerequisite task in the existing phase, executed
-directly without consumer authentication. Its durable identity binds operation, canonical origin, assigned navigation
-and excluded validation candidates, relevant target evidence, hints, header bindings, flow versions, observable tool
-schemas, and discovery settings. Credentials, consumer IDs, workstreams, and unrelated endpoint observations do not
-affect that identity. Existing task metadata stores the fingerprint, dependents, approved flow descriptors, observation
-digests, and gap references; no separate database schema is required. Login, MFA, and session setup remain per consumer.
+### Credential workers
 
-Artifact reference syntax is normalized by shared helpers for tool journals, workflow evidence, reporting,
-conversation compaction, proof packs, and artifact access. Both `artifact:path` and `artifact: path` are
-accepted; quote paths containing spaces in prose. Structured reference values may retain path spaces.
-Extraction preserves original text spans for replacements and does not authorize files or establish support.
-Each caller retains operation scope, availability, provenance, and semantic checks.
+Authentication and provisioning workers discover flows during authorized interaction. There is no separate
+observation-only discovery prerequisite. A current-version completed flow is supplied as a starting point;
+otherwise, the worker uses target-scoped entry-point hints. Workers may correct the mapping and follow observed
+connected steps within assigned origins, while retaining the selected credential or registration identity.
 
-Every agent with an event handler has a passive tool-outcome recorder sharing that handler's journal.
-The recorder uses an explicit SDK priority to capture original results before reverse-ordered after-tool
-callbacks rewrite them. Executor recovery consumes the same normalization but does not append journal entries.
-Discovery sessions verify recorder identity before starting, and their snapshots expose only that run's outcomes.
-Identical normalized descriptors recorded repeatedly in one attempt are deduplicated; conflicting descriptors
-remain distinct. Registration cache reuse requires matching current-operation approval and unchanged artifacts,
-retaining the original review provenance.
+Worker-bound recorders stage secret-free descriptors, including ordered `steps` with observed routes, action kinds,
+and field names. Python binds the task and operation and checks active task scope on recording. Browser context
+capture uses staged header metadata instead of requiring a persisted flow ID. Credential access still requires
+one active task, and credentials and session values are never included in reusable descriptors.
 
-Browser discovery observes the assigned page and applicable controls, records a supported mapping, and
-finishes. Unknown transport format, submission endpoints, session details, and success redirects may remain
-empty; a rendered form does not prove its transport format. Artifact tools resolve specific observation
-gaps. Browser login and registration workers determine submission and session behavior during authorized
-interaction; API discovery retains its transport requirements.
+Dedicated `authentication_flow_critic` and `registration_flow_critic` agents review current-task observations and
+select `supporting_evidence_refs`. Python validates their selection and computes approval digests. Authentication
+publication requires a validated opaque context; registration publication requires a successful credential-storage
+call whose durable metadata confirms a registered credential for the assigned target and role. Only approved,
+successful flows are stored as validated records. Corrections update an applicable existing record instead of
+creating duplicate unreviewed descriptors. Authentication version 9 and registration version 3 are accepted;
+older versions and discovery settings have no compatibility path.
 
-Discovery requires exactly one staged candidate and captured current-task observation artifacts before
-critic review. The critic receives the descriptor and authorized observations separately and selects
-`supporting_evidence_refs`. Extra observations and duplicate captures do not invalidate a supported mapping.
-Python normalizes and validates selected references against current-task observations, then persists only
-that selection and its approval digests. The actor recorder exposes observed fields; provenance remains
-controller-owned. Invalid critic selections use the existing structured-output repair path. Missing or multiple candidates and missing artifacts have distinct prerequisite diagnostics;
-critic revision events indicate an actual review rejection. The shared discovery fingerprint includes an
-internal contract revision, preventing reuse of gaps produced by older discovery contracts. Historical
-failed consumers still require the existing failed-task reset before execution resumes.
+The worker and flow critic use up to three cycles. Corrections continue from the browser and retained outcomes.
+Every functional repair retains its worker run policy. Invocation-local tool hooks check controller-owned
+completion after each result and cancel remaining queued calls before execution. Login ends at a validated
+context or definitive credential rejection; provisioning ends when the task-bound registered credential is
+durably stored. Metadata repairs end at flow staging, returning control to the critic. Terminal reasons survive
+the executor result boundary and appear in worker completion logs.
+After functional success, the controller supplies only observation, artifact, and flow-recording tools for repairs,
+preventing another login or account creation. A definitive credential rejection stops the attempt. Exhausted flow
+review retains functional credentials and contexts and records a mapping gap; provisioning task evaluation remains
+separate. Unknown transport details may remain empty for browser mappings, while multi-step mappings retain their
+observed sequence.
+Classified inventory authentication routes and validated registration redirects are scoped navigation hints,
+without inferred flow kinds or authentication proof. Current controller header mappings take precedence over
+stored mappings and are shared by prompts, flow staging, and context capture. Provisioning storage binds target,
+role, and registered origin in Python. Registration step field names describe observed controls; required and
+optional classifications need supporting evidence, with unknown classifications omitted.
+Every agent event handler has a passive outcome recorder sharing its journal. SDK priority captures original
+results before recovery callbacks rewrite them. Worker sessions expose task-local outcome snapshots, and the
+controller retains those outcomes across review corrections.
 
-Discovery recorders bind the assigned task UID and operation in Python, outside the model-visible schema.
-They validate that task's active status and resolved target scope before actor invocation and on each call,
-so an active discovery prerequisite can coexist with its active consumer. Credential access retains its
-requirement for exactly one active task.
+```mermaid
+flowchart LR
+    F[Current flow or entry-point hints] --> W[Login or provisioning worker]
+    W --> S[Functional success and staged mapping]
+    S --> C[Dedicated flow critic]
+    C -->|Corrections| R[Resume current attempt]
+    R --> W
+    C -->|Approved and successful| P[Persist or update validated flow]
+    C -->|Exhausted| G[Mapping gap; retain functional result]
+```
 
-Before consumer prompt building, Python resolves required observation-only discovery. A terminal prerequisite gap
-closes the consumer with a linked coverage gap without invoking its prompt builder or critic. Discovery activation
-uses the normal active-task transition; setup and activation errors become durable diagnostic gaps. Login and
-credential validation still run after prompt approval. Continuing does not automatically reopen historical failures;
-use the existing failed-task reset when retrying them.
 
 Task prompt builders and critics receive a compact plan projection, applicable phase metadata, the assigned contract,
 and status counts with at most five related task summaries. Their initial requests and retries are measured using
@@ -707,8 +695,8 @@ Each refresh outcome is recorded as a secret-safe operation event with the task 
 
 Each credential worker receives one selected credential and flow. Its checkout and context tools bind those fixed
 identifiers, while browser capture still requires the URL observed in authenticated HAR traffic. The worker prompt
-contains the login route and required header names, without discovery candidates or internal flow metadata. Flow
-discovery runs separately and receives the mapping hints it needs.
+contains the existing login route, required header names, and assigned navigation hints. It discovers missing
+steps during login and updates the mapping after functional success and dedicated critic approval.
 
 The controller requires at least 10 minutes of known authentication-material lifetime when assigning a context to a
 new task. HTTP validation still probes the protected route when less time remains. An active task may use a context

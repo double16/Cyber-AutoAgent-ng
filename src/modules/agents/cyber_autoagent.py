@@ -1169,8 +1169,8 @@ def create_agent(
     failure_recovery_hook = None
     evaluator_artifact_read_limit_hook = None
     if agent_type in {
-        "task_evaluator", "authentication_flow_discovery_agent", "registration_flow_discovery_agent",
-        "authentication_flow_discovery_critic", "registration_flow_discovery_critic",
+        "task_evaluator", "authentication_agent",
+        "authentication_flow_critic", "registration_flow_critic",
     }:
         evaluator_artifact_read_limit_hook = EvaluatorArtifactReadLimitHook(tools or [])
         agent_hooks.append(evaluator_artifact_read_limit_hook)
@@ -1213,13 +1213,13 @@ def create_agent(
         )
         # Capture original results before recovery or presentation hooks can rewrite them.
         agent_hooks.insert(0, outcome_recording_hook)
-    if agent_type == "task_executor":
-        agent_hooks.append(TerminalToolHook(agent_type))
+    terminal_tool_hook = TerminalToolHook(agent_type)
+    agent_hooks.append(terminal_tool_hook)
 
     tool_executor = runtime.tool_executor
     if agent_type in {
-        "task_executor", "authentication_flow_discovery_agent", "registration_flow_discovery_agent",
-        "authentication_flow_discovery_critic", "registration_flow_discovery_critic",
+        "task_executor", "authentication_agent",
+        "authentication_flow_critic", "registration_flow_critic",
     }:
         tool_executor = SequentialToolExecutor()
     elif agent_type in _FAIL_FAST_TOOL_ROLES:
@@ -1271,6 +1271,7 @@ def create_agent(
         agent._cyber_agent_name = agent_kwargs["name"]
         agent._cyber_agent_type = agent_type or getattr(callback_handler, "agent_type", "agent")
         agent._cyber_callback_handler = callback_handler
+        agent._cyber_terminal_tool_hook = terminal_tool_hook
         if outcome_recording_hook is not None:
             agent._cyber_tool_outcome_recording_hook = outcome_recording_hook
         if failure_recovery_hook is not None:

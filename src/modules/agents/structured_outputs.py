@@ -86,7 +86,7 @@ class CritiqueOutput(StrictStructuredOutput):
     repairable: bool | None = None
 
 
-class FlowDiscoveryCritiqueOutput(CritiqueOutput):
+class FlowCritiqueOutput(CritiqueOutput):
     supporting_evidence_refs: list[str] = Field(default_factory=list)
 
 
@@ -188,8 +188,8 @@ WORKFLOW_OUTPUT_MODELS: dict[str, type[BaseModel]] = {
     "task_creator": TaskProposalBatchOutput,
     "plan_creator": PlanOutput,
     "plan_critic": CritiqueOutput,
-    "authentication_flow_discovery_critic": FlowDiscoveryCritiqueOutput,
-    "registration_flow_discovery_critic": FlowDiscoveryCritiqueOutput,
+    "authentication_flow_critic": FlowCritiqueOutput,
+    "registration_flow_critic": FlowCritiqueOutput,
     "task_prompt_builder": TaskPromptOutput,
     "task_prompt_critic": CritiqueOutput,
     "task_phase_classifier": TaskPhaseClassificationOutput,
