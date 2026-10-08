@@ -1,5 +1,6 @@
 """Test unified precedence order for model capabilities."""
 
+import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +19,35 @@ from modules.config.models.capabilities import (
     get_model_pricing,
     wrap_model_with_fallback,
 )
+from modules.config.models.dev_client import ModelsDevClient
+
+
+@pytest.fixture
+def moonshot_catalog_client(tmp_path, monkeypatch):
+    """Provide historical test metadata without network or user-cache dependencies."""
+    catalog = {
+        "moonshotai": {
+            "models": {
+                "kimi-k2-thinking": {
+                    "limit": {"context": 262144, "output": 262144},
+                    "cost": {"input": 0.6, "output": 2.5},
+                }
+            }
+        }
+    }
+    client = ModelsDevClient(cache_dir=tmp_path / "cache")
+    client.snapshot_file = tmp_path / "models_snapshot.json"
+    client.snapshot_file.write_text(json.dumps(catalog))
+    monkeypatch.setenv("DEV_CLIENT_OFFLINE", "true")
+    monkeypatch.setattr(capabilities_module, "get_models_client", lambda: client)
+    get_model_input_limit.cache_clear()
+    get_model_pricing.cache_clear()
+    try:
+        yield client
+    finally:
+        get_model_input_limit.cache_clear()
+        get_model_pricing.cache_clear()
+        client.get_model_info.cache_clear()
 
 
 class TestCapabilitiesPrecedence:
@@ -118,11 +148,10 @@ class TestCapabilitiesPrecedence:
 class TestTokenLimitPrecedence:
     """Validate models.dev used for token limits."""
 
-    def test_moonshot_context_limit_from_models_dev(self):
+    def test_moonshot_context_limit_from_models_dev(self, moonshot_catalog_client):
         """Verify context limit retrieved from models.dev."""
         limit = get_model_input_limit("moonshot/kimi-k2-thinking")
-        assert limit is not None
-        assert limit > 200000, "Kimi K2 should have large context window"
+        assert limit == 262144
 
     def test_azure_gpt5_context_limit(self):
         """Verify GPT-5 context limit from models.dev."""
@@ -185,7 +214,7 @@ class TestPricingSupport:
         assert input_cost > 0, "Should have input cost"
         assert output_cost > 0, "Should have output cost"
 
-    def test_get_pricing_for_moonshot(self):
+    def test_get_pricing_for_moonshot(self, moonshot_catalog_client):
         """Verify pricing for Moonshot models."""
         pricing = get_model_pricing("moonshot/kimi-k2-thinking")
         assert pricing is not None
@@ -197,6 +226,18 @@ class TestPricingSupport:
         """Verify unknown model returns None."""
         pricing = get_model_pricing("unknown/fake-model")
         assert pricing is None
+
+
+def test_missing_direct_provider_model_does_not_use_other_provider_metadata(moonshot_catalog_client):
+    client = moonshot_catalog_client
+    catalog = json.loads(client.snapshot_file.read_text())
+    model = catalog["moonshotai"]["models"].pop("kimi-k2-thinking")
+    catalog["other-provider"] = {"models": {"kimi-k2-thinking": model}}
+    client.snapshot_file.write_text(json.dumps(catalog))
+
+    assert client.get_model_info("other-provider/kimi-k2-thinking") is not None
+    assert get_model_input_limit("moonshot/kimi-k2-thinking") is None
+    assert get_model_pricing("moonshot/kimi-k2-thinking") is None
 
 
 class TestPrecedenceOrder:
