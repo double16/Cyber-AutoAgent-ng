@@ -1802,3 +1802,76 @@ def test_authentication_stops_failed_recovery_and_records_capture_reason(worker_
     assert gap["stop_reason"] == "functional_recovery_failed"
     assert gap["feedback"] == [reason]
     assert gap["reviews"] == 0
+
+
+@pytest.mark.parametrize("kind", ["browser_form", "browser_redirect", "browser_mfa"])
+def test_browser_flow_replay_excludes_previous_identity_verification(kind):
+    steps = [
+        {"action": "navigation", "url": "https://target.test/login"},
+        {"action": "form_submission", "url": "https://target.test/login", "field_names": ["🔑"]},
+        {"action": "redirect", "url": "https://target.test/home"},
+        {"action": "verification", "url": "https://target.test/users/previous/photo"},
+    ]
+    flow = {"kind": kind, "steps": steps, "validation_url": steps[-1]["url"]}
+    setup = workflow.AuthenticationSetupRequest(
+        "task", "authentication", ("https://target.test",), ("https://target.test",),
+        ({"credential_type": "username_password"},), (flow,),
+    )
+    prompt = setup.credential_worker_toon()
+    assert "previous" not in prompt
+    assert "navigation" in prompt and "form_submission" in prompt and "redirect" in prompt
+    assert "🔑" in prompt
+    assert flow["steps"] == steps and flow["validation_url"] == steps[-1]["url"]
+    normalized = workflow._normalize_authentication_verification(flow, "https://target.test/users/current/photo")
+    assert normalized["steps"][:-1] == steps[:-1]
+    assert normalized["steps"][-1]["url"] == normalized["validation_url"]
+    assert workflow._normalize_authentication_verification(normalized, normalized["validation_url"]) == normalized
+
+
+@pytest.mark.parametrize("kind", ["api_key", "oauth2_client", "browser_registration"])
+def test_verification_normalization_preserves_non_browser_authentication_steps(kind):
+    flow = {"kind": kind, "validation_url": "https://target.test/check", "steps": [
+        {"action": "verification", "url": "https://target.test/check"},
+    ]}
+    assert workflow._normalize_authentication_verification(flow) == flow
+    assert workflow._normalize_authentication_verification(flow, "https://target.test/new")["steps"] == flow["steps"]
+
+
+@pytest.mark.parametrize("repair_required", [False, True])
+def test_authentication_review_and_persistence_use_current_verification(worker_case, repair_required):
+    controller, task, store, target, outcome = worker_case
+    attempt = controller._worker_flow_attempt(task, target, "authentication")
+    recorder = controller._worker_flow_recorder(task, target, "authentication", "browser_form", attempt)
+
+    def record_old_verification():
+        recorder(login_url=target + "/login", steps=[
+            {"action": "verification", "url": target + "/users/previous/photo"},
+            {"action": "verification", "url": target + "/users/previous/photo"},
+        ])
+
+    record_old_verification()
+    attempt.update(successful=True, validation_url=target + "/users/current/photo")
+    review_count = 0
+
+    def critique(_role, prompt, _tools, _system):
+        nonlocal review_count
+        assert "/users/previous/photo" not in prompt
+        assert "/users/current/photo" in prompt
+        review_count += 1
+        return json.dumps(
+            {"approved": False, "feedback": ["Repair metadata"]}
+            if repair_required and review_count == 1 else approval()
+        )
+
+    controller.text_runner.side_effect = critique
+
+    def repair(_prompt, _tools):
+        record_old_verification()
+        return workflow.TaskExecutorCycleResult("metadata repaired", [])
+
+    controller._refine_worker_flow(task, target, "authentication", attempt, [outcome], repair, [recorder])
+    row = store.list_authentication_flows(target, purpose="authentication")[0]
+    assert row["descriptor"]["steps"] == [{
+        "action": "verification", "url": target + "/users/current/photo", "field_names": [],
+    }]
+    assert row["descriptor"]["validation_url"] == target + "/users/current/photo"

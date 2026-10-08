@@ -794,3 +794,17 @@ steps during login and updates the mapping after functional success and dedicate
 The controller requires at least 10 minutes of known authentication-material lifetime when assigning a context to a
 new task. HTTP validation still probes the protected route when less time remains. An active task may use a context
 that passes that probe until the material expires; known-expired material cannot be used for an endpoint request.
+
+
+### Browser authentication verification and partial network evidence
+
+Reusable browser login instructions omit historical verification steps. After a successful login,
+the controller sets the flow's validation URL and verification step from the current credential's
+validated execution before critic review and persistence. Navigation, form submission, and redirect
+steps remain available for multi-step login. Registration and API credential validation keep their
+existing behavior; prior execution evidence remains historical context.
+
+Browser network HAR responses include `_body_capture_status` (`available`, `unavailable`, or
+`timeout`), also shown in previews. Missing response bodies preserve request metadata, status,
+headers, redirects, and HAR indices. An empty available body has size zero; an unavailable body has
+unknown size. Metadata availability does not establish authentication or vulnerability conclusions.

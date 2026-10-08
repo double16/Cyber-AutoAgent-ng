@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import builtins
 import contextlib
 import contextvars
 import csv
@@ -29,6 +30,7 @@ from playwright.async_api import (
     Response,
     TimeoutError,
 )
+from playwright.async_api import Error as PlaywrightError
 from pymitter import EventEmitter
 from six import StringIO
 from stagehand import Stagehand, StagehandConfig, StagehandPage
@@ -1270,19 +1272,27 @@ class BrowserService(EventEmitter):
                                     {"name": cookie[0], "value": cookie[1].value}
                                 )
 
-                    with suppress(asyncio.TimeoutError):
-                        async with asyncio.timeout(
-                                60
-                        ):  # Wait for up to 60 seconds for the response body to be available
+                    har_entry_response["_body_capture_status"] = "unavailable"
+                    try:
+                        async with asyncio.timeout(60):
                             content = await response.body()
-                            har_entry_response["bodySize"] = len(content)
-                            content_type = all_response_headers.get("content-type", "")
-                            har_entry_response["content"] = form_har_body(
-                                content_type, content
-                            )
+                        har_entry_response["bodySize"] = len(content)
+                        content_type = all_response_headers.get("content-type", "")
+                        har_entry_response["content"] = form_har_body(content_type, content)
+                        har_entry_response["_body_capture_status"] = "available"
+                    except builtins.TimeoutError:
+                        har_entry_response["_body_capture_status"] = "timeout"
+                    except PlaywrightError as error:
+                        if "No resource with given identifier found" in str(error):
+                            logger.debug("Browser response body is no longer available")
+                        else:
+                            logger.exception("Could not retrieve browser response body")
+                    except Exception:
+                        logger.exception("Could not retrieve browser response body")
 
                     simplified_response = [
                         f"Status Code: `{response.status}`",
+                        f"Body Capture: `{har_entry_response["_body_capture_status"]}`",
                     ]
                     if formatted_response_headers := format_headers(
                             all_response_headers
@@ -1310,6 +1320,7 @@ class BrowserService(EventEmitter):
                         "path": parsed_url.path or "/",
                         "status": response.status if response else "n/a",
                         "bytes": body_size,
+                        "body_status": har_entry.get("response", {}).get("_body_capture_status", "unavailable"),
                     }
                 )
 
@@ -1337,7 +1348,7 @@ class BrowserService(EventEmitter):
 
         toon_section = format_toon_table(
             "network_calls",
-            ["#", "method", "host", "path", "status", "bytes"],
+            ["#", "method", "host", "path", "status", "bytes", "body_status"],
             summary_rows[:_TOON_PREVIEW_LIMIT],
         )
         segments = [

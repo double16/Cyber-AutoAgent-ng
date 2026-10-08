@@ -1232,6 +1232,25 @@ class WorkflowStateStore:
         return self.store_plan(plan)
 
 
+def _normalize_authentication_verification(
+    flow: dict[str, Any], validation_url: str | None = None,
+) -> dict[str, Any]:
+    """Separate reusable browser steps from the current credential's verification."""
+
+    normalized = dict(flow)
+    if flow.get("kind") not in {"browser_form", "browser_redirect", "browser_mfa"}:
+        if validation_url is not None:
+            normalized["validation_url"] = validation_url
+        return normalized
+    normalized["steps"] = [
+        dict(step) for step in flow.get("steps") or [] if step.get("action") != "verification"
+    ]
+    normalized["validation_url"] = validation_url or ""
+    if validation_url:
+        normalized["steps"].append({"action": "verification", "url": validation_url, "field_names": []})
+    return normalized
+
+
 @dataclass(frozen=True)
 class AuthenticationSetupRequest:
     """Controller-owned, secret-safe input for one bounded authentication worker."""
@@ -1290,6 +1309,7 @@ class AuthenticationSetupRequest:
 
         credential = self.credentials[0]
         flow = self.authentication_flows[0] if self.authentication_flows else {}
+        replay_flow = _normalize_authentication_verification(flow)
         header_names = [
             str(binding.get("header_name") or "")
             for binding in _effective_storage_header_bindings(flow, self.client_storage_header_bindings)
@@ -1305,7 +1325,7 @@ class AuthenticationSetupRequest:
                 str(flow.get("login_url") or ""),
                 "|".join(header_names),
             ))
-            + "\nobserved_flow_steps: " + json.dumps(flow.get("steps") or [], ensure_ascii=False)
+            + "\nobserved_flow_steps: " + json.dumps(replay_flow.get("steps") or [], ensure_ascii=False)
         )
 
 
@@ -10853,7 +10873,9 @@ Return JSON exactly: {response_schema}.
             successful_before_repair = attempt["successful"]
             candidate = attempt["candidate"]
             if candidate and attempt["successful"] and purpose == "authentication":
-                candidate["validation_url"] = attempt.get("validation_url") or ""
+                candidate.update(_normalize_authentication_verification(
+                    candidate, attempt.get("validation_url") or "",
+                ))
             references = self._worker_flow_references(task, target, purpose, attempt, [*outcomes, *added])
             try:
                 if (
@@ -10915,7 +10937,9 @@ Return JSON exactly: {response_schema}.
                     attempt["last_worker_reason"] = recorded.reason
                 candidate = attempt["candidate"]
                 if candidate and attempt["successful"] and purpose == "authentication":
-                    candidate["validation_url"] = attempt.get("validation_url") or ""
+                    candidate.update(_normalize_authentication_verification(
+                        candidate, attempt.get("validation_url") or "",
+                    ))
                 references = self._worker_flow_references(task, target, purpose, attempt, [*outcomes, *added])
                 if not candidate or not references:
                     stop_reason = "candidate_or_evidence_unavailable"
@@ -11521,7 +11545,7 @@ expose session material or secret values in text, artifacts, observations, or ta
                 attempt["validation_url"] = validation_url
                 candidate = attempt["candidate"]
                 if candidate:
-                    candidate["validation_url"] = validation_url
+                    candidate.update(_normalize_authentication_verification(candidate, validation_url))
                 self._persist_worker_completion(task, WorkerCompletion(
                     operation_id=self.runtime.operation_id, task_uid=task.task_uid, purpose="authentication",
                     target=target, role=str(credential.get("role") or ""), credential_id=credential["credential_id"],
