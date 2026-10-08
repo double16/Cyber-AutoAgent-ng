@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -11,10 +12,11 @@ import time
 from base64 import b64encode, urlsafe_b64decode
 from binascii import Error as BinasciiError
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from http.cookies import SimpleCookie
+from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
 
@@ -29,7 +31,7 @@ from modules.tools.credentials import (
     _active_task_target_values,
     _task_resolved_targets,
 )
-from modules.tools.memory import _get_database_store, _operation_id, active_credential_task
+from modules.tools.memory import _get_database_store, _operation_id, _operation_output_root, active_credential_task
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.utils.redaction import redact, register_runtime_secret
 
@@ -44,6 +46,8 @@ class _AuthenticationContext:
     validation_url: str
     flow_validation_url: str | None = None
     validation_marker: str = ""
+    validation_proof: dict[str, Any] = field(default_factory=dict)
+    validation_evidence_ref: str = ""
 
 
 _CONTEXTS: dict[tuple[str, str, str], _AuthenticationContext] = {}
@@ -66,6 +70,7 @@ _JWT_PATTERN = re.compile(
     r"(?![A-Za-z0-9_-])"
 )
 _AUTH_EXPIRY_WINDOW_SECONDS = 600
+_BROWSER_VALIDATION_CANDIDATE_LIMIT = 8
 AUTH_CONTEXT_REFRESH_REQUIRED_ERROR = (
     "AUTH_CONTEXT_REFRESH_REQUIRED: authenticated context is stale; request controller refresh for this "
     "credential before retrying the request"
@@ -312,6 +317,9 @@ def _safe_context(context: _AuthenticationContext, status: str) -> str:
             "target": context.target,
             "status": status,
             "authentication_ready": status == "valid",
+            "validation_url": context.flow_validation_url or "",
+            "credential_header_names": sorted(context.headers),
+            "evidence_refs": [context.validation_evidence_ref] if context.validation_evidence_ref else [],
         },
         sort_keys=True,
     )
@@ -636,7 +644,7 @@ def authentication_attempt_result(operation_id: str, target: str, credential_id:
     """Return the controller-readable, secret-free result of a login attempt."""
 
     result = _AUTHENTICATION_ATTEMPTS.get(_context_key(operation_id, target, credential_id))
-    return dict(result) if result is not None else None
+    return {key: value for key, value in result.items() if key != "capture_failure"} if result is not None else None
 
 
 def record_browser_authentication_attempt(
@@ -664,7 +672,7 @@ def record_browser_authentication_attempt(
             "status": status,
             "evidence_refs": [receipt["evidence_ref"]] if receipt.get("evidence_ref") else [],
         }
-        _AUTHENTICATION_ATTEMPTS[_context_key(operation_id, target, credential_id)] = result
+        _AUTHENTICATION_ATTEMPTS.setdefault(_context_key(operation_id, target, credential_id), {}).update(result)
         return dict(result)
     return None
 
@@ -727,6 +735,20 @@ def _store_context(
         descriptor_url if descriptor_url == validation_url or _prove_authenticated_context(replay) else ""
     )
     operation_id = _operation_id()
+    if context.validation_proof:
+        proof_path = Path(_operation_output_root()) / "artifacts" / f"authentication_validation_{time.time_ns()}.json"
+        proof_path.parent.mkdir(parents=True, exist_ok=True)
+        proof = {
+            **context.validation_proof,
+            "validation_url": descriptor_url,
+            "reusable_validation_url": context.flow_validation_url,
+            "credential_header_names": sorted(headers),
+            "cookie_names": sorted(cookie.name for cookie in session.cookies),
+        }
+        proof_path.write_text(
+            json.dumps({key: redact(value) for key, value in proof.items()}, sort_keys=True), encoding="utf-8",
+        )
+        context.validation_evidence_ref = f"artifact:{proof_path}"
     _CONTEXTS[_context_key(operation_id, target, credential_id)] = context
     _get_database_store().record_credential_usage(
         operation_id, credential_id, task_uid=task.task_uid, outcome="succeeded"
@@ -747,14 +769,25 @@ def _prove_authenticated_context(context: _AuthenticationContext) -> bool:
         return False
     if not 200 <= authenticated.status_code < 300:
         return False
+    context.validation_proof = {
+        "anonymous_status": anonymous.status_code,
+        "authenticated_status": authenticated.status_code,
+    }
     if anonymous.status_code in {401, 403}:
+        context.validation_proof["proof_method"] = "anonymous_access_denied"
         return True
     anonymous_url = str(getattr(anonymous, "url", "") or "")
     authenticated_url = str(getattr(authenticated, "url", "") or "")
     if anonymous_url and authenticated_url and anonymous_url != authenticated_url:
-        return _credential_target_url_contains(context.target, authenticated_url, label="authenticated response URL")
+        supported = _credential_target_url_contains(context.target, authenticated_url, label="authenticated response URL")
+        if supported:
+            context.validation_proof["proof_method"] = "different_response_destination"
+        return supported
     marker = context.validation_marker
-    return bool(marker and marker in authenticated.text and marker not in anonymous.text)
+    supported = bool(marker and marker in authenticated.text and marker not in anonymous.text)
+    if supported:
+        context.validation_proof["proof_method"] = "authenticated_only_marker"
+    return supported
 
 
 @tool(
@@ -1205,6 +1238,9 @@ async def capture_browser_authenticated_context(
     observed_names = _normalize_request_header_names(request_header_names)
     session = requests.Session()
     headers: dict[str, str] = {}
+    requested_url = validation_url
+    candidates: list[tuple[str, dict[str, str]]] = []
+    candidate_requests: list[int] = []
     async with get_browser() as browser:
         async def capture() -> tuple[
             list[dict[str, Any]],
@@ -1249,18 +1285,24 @@ async def capture_browser_authenticated_context(
                     if not isinstance(status_code, int) or not 200 <= status_code < 300:
                         continue
                     matching_request_found = True
+                    candidate_requests.append(id(request))
                     selected_url = str(request.url).split("#", 1)[0]
                     observed_headers = {
                         name: normalized_headers[name]
                         for name in wanted_headers
                         if name in normalized_headers
                     }
-                    break
+                    if not any(url == selected_url for url, _ in candidates):
+                        candidates.append((selected_url, observed_headers))
+                    if len(candidates) >= _BROWSER_VALIDATION_CANDIDATE_LIMIT:
+                        break
                 if not matching_request_found:
                     raise ValueError(
-                        "No successful same-target browser GET request matched the validation URL and required "
+                        "AUTH_CAPTURE_REQUEST_MISSING: No successful same-target browser GET request matched "
+                        "the validation URL and required "
                         "credentials. Perform a normal signed-in browser action, then capture without a URL. "
-                        f"Required header names: {', '.join(sorted(wanted_headers)) or 'none (session cookies required)'}."
+                        f"Required header names: {', '.join(sorted(wanted_headers)) or 'none configured'}. "
+                        "Record observed credential headers if cookies are insufficient."
                     )
                 storage_values: dict[str, str] = {}
                 storage_keys = sorted({binding["storage_key"] for binding in bindings})
@@ -1301,21 +1343,66 @@ async def capture_browser_authenticated_context(
             path=str(cookie.get("path") or "/"),
             expires=int(expiry) if _finite_timestamp(expiry) is not None else None,
         )
-    for binding in bindings:
-        header_name = binding["header_name"]
-        observed_value = observed_headers.get(header_name.lower(), "")
-        if observed_value:
-            headers[header_name] = observed_value
+    fingerprint = hashlib.sha256(json.dumps({
+        "task": task.task_uid, "url": requested_url, "marker": validation_marker, "candidates": candidates,
+        "cookies": [(cookie.name, cookie.value, cookie.domain, cookie.path, cookie.expires) for cookie in session.cookies],
+        "storage": storage_values, "bindings": bindings,
+        "requests": candidate_requests,
+    }, sort_keys=True).encode()).hexdigest()
+    failures = _AUTHENTICATION_ATTEMPTS.setdefault(
+        _context_key(_operation_id(), target, credential_id), {},
+    )
+    failure_key = "capture_failure"
+    if failures.get(failure_key) == fingerprint:
+        raise ValueError(
+            "AUTH_CAPTURE_NEW_EVIDENCE_REQUIRED: this capture already failed with the same requests and "
+            "session material. Perform a new signed-in action that requests protected data, or correct "
+            "the validation URL, marker, or recorded credential header names before retrying."
+        )
+    failures[failure_key] = fingerprint
+    session.close()
+    last_error = None
+    for selected_url, observed_headers in candidates:
+        headers = {}
+        for binding in bindings:
+            header_name = binding["header_name"]
+            observed_value = observed_headers.get(header_name.lower(), "")
+            if observed_value:
+                headers[header_name] = observed_value
+                continue
+            storage_value = str(storage_values.get(binding["storage_key"], "")).strip()
+            if not storage_value:
+                raise ValueError(f"browser storage key for {header_name} was not available after authentication")
+            headers[header_name] = binding["value_template"].replace("{value}", storage_value)
+        for name in observed_names:
+            headers[name] = observed_headers[name.lower()]
+        candidate_session = requests.Session()
+        candidate_session.cookies.update(session.cookies)
+        try:
+            result = _store_context(
+                task, record, credential_id, candidate_session, headers, {}, selected_url, validation_marker,
+            )
+        except ValueError as error:
+            candidate_session.close()
+            if str(error) not in {
+                "authentication validation failed",
+                "authenticated response was not distinguished from the anonymous response",
+            }:
+                raise
+            last_error = error
             continue
-        storage_value = str(storage_values.get(binding["storage_key"], "")).strip()
-        if not storage_value:
-            raise ValueError(f"browser storage key for {header_name} was not available after authentication")
-        headers[header_name] = binding["value_template"].replace("{value}", storage_value)
-    for name in observed_names:
-        headers[name] = observed_headers[name.lower()]
-    if "Authorization" not in headers and observed_headers.get("authorization"):
-        headers["Authorization"] = observed_headers["authorization"]
-    return _store_context(task, record, credential_id, session, headers, {}, validation_url, validation_marker)
+        failures.pop(failure_key, None)
+        return result
+    failure_code = (
+        "AUTH_CAPTURE_REPLAY_FAILED" if str(last_error) == "authentication validation failed"
+        else "AUTH_CAPTURE_PROOF_FAILED"
+    )
+    raise ValueError(
+        f"{failure_code}: {last_error}. Tried {len(candidates)} distinct observed requests. "
+        "Rendered SPA pages may return identical anonymous HTML; use an observed protected data endpoint "
+        "and the application's recorded credential headers, or an authenticated-only response marker."
+    )
+
 
 
 @tool(name="establish_credential_authenticated_context")

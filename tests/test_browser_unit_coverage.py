@@ -930,6 +930,58 @@ async def test_llm_json_patch_handles_empty_and_non_list_choices_without_rewriti
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("artifacts_enabled", [True, False])
+async def test_navigation_preserves_rendered_page_before_next_interaction(monkeypatch, tmp_path, artifacts_enabled):
+    events = []
+
+    class Page:
+        async def goto(self, url):
+            events.append(("goto", url))
+
+        async def content(self):
+            events.append("snapshot")
+            return '<form><input name="identity 👤"></form>'
+
+        async def observe(self, _instruction):
+            events.append("observe")
+            return [SimpleNamespace(description="Login controls")]
+
+    class Browser:
+        artifacts_dir = str(tmp_path) if artifacts_enabled else None
+        page_domain = "example.com"
+        page = Page()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        @asynccontextmanager
+        async def timeout(self):
+            yield
+
+        @asynccontextmanager
+        async def interaction_context_capture(self, **_kwargs):
+            yield SimpleNamespace(summarize=AsyncMock(return_value="Network observations"))
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+    monkeypatch.setattr(mod, "get_browser", Browser)
+    result = await mod.browser_goto_url("https://example.com/login")
+    assert "Login controls" in result and "Network observations" in result
+    saved = list(tmp_path.glob("browser_page_*.html"))
+    if artifacts_enabled:
+        assert events == [("goto", "https://example.com/login"), "snapshot", "observe"]
+        assert len(saved) == 1 and str(saved[0]) in result
+        assert "identity 👤" in saved[0].read_text()
+    else:
+        assert events == [("goto", "https://example.com/login"), "observe"]
+        assert not saved
+
+
+@pytest.mark.asyncio
 async def test_browser_goto_url_uses_http_fallback_after_non_retriable_navigation_error(monkeypatch, tmp_path):
     class Timeout:
         async def __aenter__(self):

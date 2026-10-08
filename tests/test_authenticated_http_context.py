@@ -8,6 +8,7 @@ import time
 from base64 import urlsafe_b64encode
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -1076,7 +1077,7 @@ def test_browser_capture_preserves_cookie_expiry_from_browser_or_har(
         captured["expires"] = next(iter(session.cookies)).expires
         return "captured"
 
-    monkeypatch.setattr(authentication, "_active_record", lambda _id: (object(), {"target": target}, "credential"))
+    monkeypatch.setattr(authentication, "_active_record", lambda _id: (SimpleNamespace(task_uid="task"), {"target": target}, "credential"))
     monkeypatch.setattr(authentication, "_store_context", store_context)
     monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
 
@@ -1123,7 +1124,7 @@ def test_browser_capture_rejects_invalid_validation_evidence(failure, monkeypatc
         async def run_in_browser_loop(self, function):
             return await function()
 
-    monkeypatch.setattr(authentication, "_active_record", lambda _id: (object(), {"target": target}, "credential"))
+    monkeypatch.setattr(authentication, "_active_record", lambda _id: (SimpleNamespace(task_uid="task"), {"target": target}, "credential"))
     monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
 
     if failure == "wrong_origin":
@@ -1834,7 +1835,9 @@ def test_flow_steps_reject_submitted_value_properties():
     assert authentication._normalize_flow_labels(None, label="fields") == []
 
 
-@pytest.mark.parametrize("mode", ["header", "cookie", "missing", "explicit", "post", "foreign", "403"])
+@pytest.mark.parametrize("mode", [
+    "header", "cookie", "missing", "explicit", "post", "foreign", "403", "fallback", "limit", "unexpected",
+])
 def test_browser_capture_selects_latest_authenticated_get_without_har_search(mode, monkeypatch):
     target = "https://target.test"
     cookies = [{"name": "session", "value": "sensitive", "domain": "target.test", "path": "/", "expires": 9999999999}]
@@ -1890,8 +1893,20 @@ def test_browser_capture_selects_latest_authenticated_get_without_har_search(mod
     browser.context = SimpleNamespace(cookies=read_cookies)
     browser.page = SimpleNamespace(evaluate=read_storage)
     monkeypatch.setattr("modules.tools.browser.get_browser", lambda: browser)
-    monkeypatch.setattr(authentication, "_active_record", lambda *_args: (object(), {"target": target}, "credential"))
+    monkeypatch.setattr(authentication, "_active_record", lambda *_args: (SimpleNamespace(task_uid="task"), {"target": target}, "credential"))
     capture = Mock(return_value="captured")
+    monkeypatch.setattr(authentication, "_AUTHENTICATION_ATTEMPTS", {})
+    if mode == "fallback":
+        browser.recent_requests.insert(1, Request(f"{target}/public", headers=headers))
+        capture.side_effect = [ValueError("authentication validation failed"), "captured"]
+    elif mode == "limit":
+        browser.recent_requests = [
+            Request(f"{target}/resource/{index}", headers=headers) for index in range(12)
+        ]
+        browser.recent_requests.append(browser.recent_requests[-1])
+        capture.side_effect = ValueError("authenticated response was not distinguished from the anonymous response")
+    elif mode == "unexpected":
+        capture.side_effect = ValueError("invalid session metadata")
     monkeypatch.setattr(authentication, "_store_context", capture)
     url = candidate.url if mode == "explicit" else ""
     if mode in {"missing", "post", "foreign", "403"}:
@@ -1899,6 +1914,10 @@ def test_browser_capture_selects_latest_authenticated_get_without_har_search(mod
             asyncio.run(authentication.capture_browser_authenticated_context("credential", bindings, url))
         assert "sensitive" not in str(error.value)
         capture.assert_not_called()
+    elif mode in {"limit", "unexpected"}:
+        with pytest.raises(ValueError, match="AUTH_CAPTURE_PROOF_FAILED" if mode == "limit" else "invalid session"):
+            asyncio.run(authentication.capture_browser_authenticated_context("credential", bindings, url))
+        assert capture.call_count == (8 if mode == "limit" else 1)
     else:
         assert asyncio.run(authentication.capture_browser_authenticated_context("credential", bindings, url)) == "captured"
         assert capture.call_args.args[-2] == candidate.url
@@ -2005,3 +2024,117 @@ def test_establish_context_rejects_public_validation_response(tmp_path, monkeypa
         with pytest.raises(ValueError, match="not distinguished from the anonymous response"):
             authentication.establish_credential_authenticated_context(validation_url=f"{target}/openapi.json")
         assert ("OP_AUTH", target, credential["credential_id"]) not in authentication._CONTEXTS
+
+
+@pytest.mark.parametrize("transport", ["cookie", "X-Session", "Tauser", "combined"])
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("automatic", [False, True])
+def test_browser_capture_proves_data_request_after_public_spa(
+    tmp_path, monkeypatch, transport, explicit, automatic,
+):
+    with running_authentication_app() as (target, _state):
+        header_name = "X-Session" if transport == "combined" else transport
+        use_headers = transport != "cookie"
+        use_cookies = transport in {"cookie", "combined"}
+        request_headers = {header_name.lower(): "opaque-session"} if use_headers else {}
+        if use_cookies:
+            request_headers["cookie"] = "session=opaque-session"
+        cookies = [{
+            "name": "session", "value": "opaque-session", "domain": "127.0.0.1",
+            "path": "/", "expires": 9999999999,
+        }] if use_cookies else []
+
+        class Request:
+            method = "GET"
+
+            def __init__(self, path):
+                self.url = target + path
+
+            async def all_headers(self):
+                return request_headers
+
+            async def response(self):
+                return SimpleNamespace(status=200)
+
+        class Browser:
+            recent_requests = [Request("/session-data"), Request("/spa")]
+            context = SimpleNamespace(cookies=AsyncMock(return_value=cookies))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            @asynccontextmanager
+            async def timeout(self):
+                yield
+
+            async def run_in_browser_loop(self, function):
+                return await function()
+
+        browser = Browser()
+        monkeypatch.setattr("modules.tools.browser.get_browser", lambda: browser)
+        monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_CAPTURE")
+        monkeypatch.setattr(authentication, "_operation_output_root", lambda: str(tmp_path))
+        monkeypatch.setattr(authentication, "_AUTHENTICATION_ATTEMPTS", {})
+        monkeypatch.setattr(authentication, "_CONTEXTS", {})
+        monkeypatch.setattr(authentication, "_active_record", lambda *_args: (
+            SimpleNamespace(task_uid="task"), {"target": target}, "credential",
+        ))
+        monkeypatch.setattr(authentication, "_get_database_store", lambda: SimpleNamespace(
+            record_credential_usage=Mock(),
+        ))
+        names = [header_name] if use_headers else []
+        if explicit:
+            with pytest.raises(ValueError, match="AUTH_CAPTURE_PROOF_FAILED"):
+                asyncio.run(authentication.capture_browser_authenticated_context(
+                    "credential", [], target + "/spa", request_header_names=names,
+                ))
+            with pytest.raises(ValueError, match="AUTH_CAPTURE_NEW_EVIDENCE_REQUIRED"):
+                asyncio.run(authentication.capture_browser_authenticated_context(
+                    "credential", [], target + "/spa", request_header_names=names,
+                ))
+            # A newly observed request permits a new attempt, but still cannot prove the public shell.
+            browser.recent_requests.append(Request("/spa"))
+            with pytest.raises(ValueError, match="AUTH_CAPTURE_PROOF_FAILED"):
+                asyncio.run(authentication.capture_browser_authenticated_context(
+                    "credential", [], target + "/spa", request_header_names=names,
+                ))
+        async def capture():
+            return await authentication.capture_browser_authenticated_context(
+                "credential", [], request_header_names=names,
+            )
+
+        if automatic:
+            from strands import tool
+
+            from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+
+            captured = []
+
+            async def capture_completion():
+                captured.append(await capture())
+
+            @tool
+            async def browser_perform_action(action: str) -> str:
+                """Perform the final login action."""
+                return "Signed-in page displayed"
+
+            bound = MultiAgentWorkflowController._authentication_browser_capture_tool(
+                browser_perform_action, capture_completion,
+            )
+            assert asyncio.run(bound(action="submit login")) == "Signed-in page displayed"
+            result = json.loads(captured[0])
+        else:
+            result = json.loads(asyncio.run(capture()))
+        assert result["status"] == "valid"
+        assert result["validation_url"] == target + "/session-data"
+        assert result["credential_header_names"] == names
+        proof = json.loads(Path(result["evidence_refs"][0].removeprefix("artifact:")).read_text())
+        assert proof["proof_method"] == "anonymous_access_denied"
+        assert proof["anonymous_status"] == 401
+        assert proof["authenticated_status"] == 200
+        assert proof["credential_header_names"] == names
+        assert proof["cookie_names"] == (["session"] if use_cookies else [])
+        assert "opaque-session" not in json.dumps(proof)

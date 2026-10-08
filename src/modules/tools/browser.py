@@ -1704,8 +1704,8 @@ async def browser_goto_url(url: str):
         - Browser state persists across calls.
         - Browser tools share a single browser instance and should be treated as
           sequential and stateful.
-        - Navigation automatically captures relevant browser artifacts such as
-          network traffic, console logs, dialogs, and downloads.
+        - Navigation saves the rendered page before subsequent interactions and returns its artifact reference.
+        - Navigation also captures network traffic, console logs, dialogs, and downloads.
         - Large artifacts may be saved to disk; inspect only relevant portions
           with shell tools.
         - If a HAR artifact is returned, extract only needed entries, for
@@ -1847,6 +1847,7 @@ async def browser_goto_url(url: str):
                 ) as interaction_context:
                     async with browser.timeout():
                         await browser.page.goto(url)
+                    snapshot = await _save_rendered_page(browser)
 
                     async with browser.timeout():
                         observations = "\n".join(
@@ -1857,7 +1858,7 @@ async def browser_goto_url(url: str):
                                 )
                         )
                     summary = await interaction_context.summarize()
-                    return f"<observations>\n{observations}\n</observations>\n{summary}"
+                    return f"<observations>\n{observations}\n</observations>\n{snapshot}\n{summary}"
 
             return await browser.run_in_browser_loop(_impl)
 
@@ -1904,6 +1905,19 @@ async def browser_goto_url(url: str):
         return await _http_fallback("retry attempts exhausted")
 
 
+async def _save_rendered_page(browser: BrowserService) -> str:
+    """Save the current DOM before another interaction can replace it."""
+
+    if not browser.artifacts_dir:
+        return ""
+    async with browser.timeout():
+        page_html = await browser.page.content()
+    html_artifact_file = os.path.join(browser.artifacts_dir, f"browser_page_{time.time_ns()}.html")
+    with open(html_artifact_file, "w", encoding="utf-8") as artifact:
+        artifact.write(page_html)
+    return f"HTML content saved to artifact: {html_artifact_file}"
+
+
 @tool
 async def browser_get_page_html() -> str:
     """
@@ -1924,18 +1938,7 @@ async def browser_get_page_html() -> str:
     """
     logger.info("browser_get_page_html")
     async with get_browser() as browser:
-        async def _impl():
-            async with browser.timeout():
-                return await browser.page.content()
-
-        page_html = await browser.run_in_browser_loop(_impl)
-        html_artifact_file = os.path.join(
-            browser.artifacts_dir, f"browser_page_{time.time_ns()}.html"
-        )
-        with open(html_artifact_file, "w", encoding="utf-8") as f:
-            f.write(page_html)
-        logger.info("browser_get_page_html: %s", html_artifact_file)
-        return f"HTML content saved to artifact: {html_artifact_file}"
+        return await browser.run_in_browser_loop(lambda: _save_rendered_page(browser))
 
 
 @tool

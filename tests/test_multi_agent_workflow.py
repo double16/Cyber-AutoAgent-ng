@@ -544,6 +544,8 @@ def test_executor_filter_grants_registered_future_checkout_consumer(monkeypatch)
 
 
 def test_controller_runs_privileged_authentication_worker_with_separate_tool_bundle(monkeypatch):
+    from modules.tools.browser import browser_goto_url, browser_perform_action
+
     available_names = {
         "authenticated_http_request",
         "capture_browser_authenticated_context",
@@ -561,7 +563,9 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
         "browser_evaluate_js",
     }
     runtime = _runtime()
-    runtime.optional_tools_list = [_tool(name) for name in available_names]
+    browser_tools = {"browser_goto_url": browser_goto_url, "browser_perform_action": browser_perform_action}
+    runtime.optional_tools_list = [browser_tools[name] if name in browser_tools else _tool(name)
+                                   for name in available_names]
     calls = []
 
     def runner(role, prompt, tools, system_prompt, policy):

@@ -138,7 +138,13 @@ hard target-scope violation marks the active task `partial_failure` without invo
 Login and provisioning workers discover flows while completing their assigned action. Dedicated flow critics
 review staged metadata and current-task evidence; only successful, approved flows are persisted. The worker keeps
 its browser progress and identity across corrections. Successful login or registration remains usable if metadata
-review cannot approve a reusable mapping. Initial metadata recording precedes up to three critic reviews,
+review cannot approve a reusable mapping. Authentication recovery permits one additional functional worker
+pass before recording a gap.
+Browser capture tries up to eight distinct observed credential-bearing GET requests and requires an
+anonymous/authenticated difference. Repeated failed capture inputs require new browser evidence or corrected
+metadata. Successful capture saves a secret-free proof artifact; controller validation supersedes earlier
+recorder output in flow reviews. Session freshness remains checked before reuse and requests.
+Initial metadata recording precedes up to three critic reviews,
 with repairs between rejected reviews. After functional success, repairs use only observation and recording
 tools. Review events and persisted gaps include the review count and stopping reason; a completed identity
 or session does not imply an approved reusable flow. See [credential workers](#credential-workers) for the execution sequence.
@@ -285,6 +291,50 @@ continues testing covered groups, and reports the remaining coverage as an incom
 hypotheses, the dependent phase closes as a partial failure without creating generic testing tasks. If no verified
 source manifest is available, it records a prerequisite gap and also closes as a partial failure.
 
+### Authentication design goals and decisions
+
+This section records the rationale for credential workers and flow review. Future changes should preserve
+these goals and use the credential-worker tests as regression checks.
+
+- **Discover through execution.** Provisioning and login workers learn the complete flow while performing
+  their assigned action, including multi-step forms. An existing flow is a starting point that can be corrected.
+  Separate discovery agents cannot reliably establish that an account was created or a session works.
+- **Separate completion, freshness, and mapping approval.** Successful account creation or login is a durable
+  fact; session freshness determines whether requests may run; critic approval determines whether a reusable
+  mapping may be published. Metadata rejection or expiry during review must not repeat a successful action.
+  Historical login completion must never substitute for a fresh session.
+- **Keep proof and provenance in Python.** The controller binds task scope and credentials, correlates outcomes,
+  saves validation proof, and checks critic references. HTTP success and readable artifacts establish availability,
+  not authentication. Reusable HTTP contexts require a credential-dependent difference from anonymous access.
+  Visible signed-in SPA controls alone do not prove that replaying their public HTML route authenticates requests.
+  Login workers attempt context capture after successful browser navigation and actions. Incomplete capture
+  allows multi-step interaction to continue; successful validation stops further authentication actions.
+  Navigation saves the rendered DOM, and reviews retain cumulative current-task evidence across worker sessions.
+- **Persist instructions independently of artifacts.** SQLite flow descriptors survive across operations.
+  Loading a validated flow does not require its original files. Historical references and approval digests
+  are excluded from replay instructions and cannot authorize current proof; Qdrant memories remain advisory.
+  Reuse requires live execution with current-operation evidence. Approved repairs update the existing flow;
+  unsuccessful repairs preserve the previously validated descriptor.
+- **Support application-defined credentials.** Cookies, arbitrary named headers, and configured storage bindings
+  may be used together; token formats are not restricted to JWT. User-provided API keys and header values use
+  direct validation, with no login or self-registration requirement.
+- **Preserve credential isolation.** Each worker uses one selected credential or generated registration identity
+  throughout retries. Completion and proof from one account cannot establish another account's session.
+  Tasks use one account unless their declared comparison requires two independent accounts and sessions.
+- **Review the applicable contract.** Critics review the bound recorder's editable fields and observed evidence.
+  Controller validation supersedes earlier recorder output and cannot be repaired by an actor. Browser labels
+  may contain Unicode or emojis; backend payload names are not mandatory. Unknown transport details remain
+  empty, and requiredness needs rendered constraints or observed validation.
+  `request_header_names` describes credential transport on authenticated requests, including headers first used
+  after login. It is not limited to login-submission headers. Controller-proven header names are authoritative.
+- **Bound recovery without weakening proof.** Context capture tries at most eight distinct observed requests.
+  Identical failed capture inputs require new relevant browser evidence or corrected metadata before replay.
+  Authentication gets one functional recovery pass; completed flows get three critic reviews by default.
+  After success, actors receive only observation and recording tools, preventing repeated login or registration.
+- **Keep model guidance concise.** Tool errors explain missing evidence, failed replay, and indistinguishable
+  responses. Python performs deterministic selection and bookkeeping; agents reason about observed application
+  behavior. Avoid target-specific paths, fixed header assumptions, and expanding prompts with incident details.
+
 ### Credential workers
 
 Authentication and provisioning workers discover flows during authorized interaction. There is no separate
@@ -299,14 +349,17 @@ one active task, and credentials and session values are never included in reusab
 
 Dedicated `authentication_flow_critic` and `registration_flow_critic` agents review current-task observations and
 select `supporting_evidence_refs`. Python validates their selection and computes approval digests. Authentication
-publication requires a validated opaque context; registration publication requires a successful credential-storage
-call whose durable metadata confirms a registered credential for the assigned target and role. Only approved,
+publication requires completed opaque-context validation, even if that context expires during metadata review;
+registration publication requires a successful credential-storage call whose durable metadata confirms a
+registered credential for the assigned target and role. Only approved,
 successful flows are stored as validated records. Corrections update an applicable existing record instead of
 creating duplicate unreviewed descriptors. Authentication version 10 and registration version 4 are accepted;
 older versions and discovery settings have no compatibility path.
 
-The worker and flow critic use up to three cycles. Corrections continue from the browser and retained outcomes.
-Every functional repair retains its worker run policy. Invocation-local tool hooks check controller-owned
+After functional completion, the flow critic performs up to three reviews, with metadata repairs between
+rejections. Initial recording does not consume a review. Authentication permits one functional recovery pass
+after an unsuccessful initial worker; failed recovery records a gap without invoking a flow critic.
+Corrections continue from the browser and retained outcomes. Every functional repair retains its worker run policy. Invocation-local tool hooks check controller-owned
 completion after each result and cancel remaining queued calls before execution. Login ends at a validated
 context or definitive credential rejection; provisioning ends when the task-bound registered credential is
 durably stored. Metadata repairs end at flow staging, returning control to the critic. Terminal reasons survive

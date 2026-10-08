@@ -1,5 +1,6 @@
 """Worker-owned flow review, publication, and continuation invariants."""
 
+import asyncio
 import json
 from contextlib import contextmanager
 from dataclasses import replace
@@ -56,6 +57,124 @@ def worker_case(tmp_path, monkeypatch):
 
 def approval(reference="artifact:observed.html"):
     return {"approved": True, "feedback": [], "supporting_evidence_refs": [reference]}
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+def test_flow_replay_survives_deleted_origin_evidence(worker_case, tmp_path, purpose):
+    controller, task, store, target, observed = worker_case
+    origin = tmp_path / "old-operation"
+    origin.mkdir()
+    evidence = origin / "form.html"
+    evidence.write_text("<form></form>")
+    descriptor = {
+        "target": target, "purpose": purpose,
+        "kind": "browser_form" if purpose == "authentication" else "browser_registration",
+        "flow_version": (authentication.AUTHENTICATION_FLOW_VERSION if purpose == "authentication"
+                         else authentication.REGISTRATION_FLOW_VERSION),
+        "login_url": f"{target}/signup", "roles": ["member"],
+        "evidence_refs": [str(evidence)], "worker_review": {"artifact_digests": {str(evidence): "old"}},
+        "provenance": "observed_worker_flow",
+    }
+    saved = store.upsert_authentication_flow("OLD_OPERATION", descriptor, status="validated")
+    evidence.unlink()
+    origin.rmdir()
+    task = replace(task, recovery_context={"conditional_phase": {"registration_flow": {
+        "url": f"{target}/signup",
+    }}})
+    attempt = controller._worker_flow_attempt(task, target, purpose, ("member",))
+    assert attempt["existing"]["flow_id"] == saved["flow_id"]
+    replay = controller._flow_replay_descriptor(attempt["existing"])
+    assert replay["login_url"] == descriptor["login_url"]
+    assert "evidence_refs" not in replay and "worker_review" not in replay
+    assert not attempt["successful"]
+    assert controller._worker_flow_references(task, target, purpose, attempt, []) == []
+    assert controller._worker_flow_references(task, target, purpose, attempt, [observed]) == [
+        "artifact:observed.html",
+    ]
+    assert controller._worker_flow_references(task, target, purpose, attempt, []) == ["artifact:observed.html"]
+    with pytest.raises(ValueError):
+        controller._validate_flow_refinement_critique(approval(str(evidence)), attempt["evidence_refs"])
+
+
+@pytest.mark.parametrize("result", ["observed", {"status": "success"}, {"status": "error"}])
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_browser_capture_wrapper_preserves_schema_and_multistep_progress(result, incomplete):
+    @tool
+    async def interaction(action: str = "continue") -> dict | str:
+        """Perform the next observed interaction."""
+        return result
+
+    capture = AsyncMock(side_effect=ValueError("Login not complete") if incomplete else None)
+    bound = workflow.MultiAgentWorkflowController._authentication_browser_capture_tool(interaction, capture)
+    assert workflow.get_tool_spec(bound) == workflow.get_tool_spec(interaction)
+    assert asyncio.run(bound(action="continue")) == result
+    assert capture.await_count == (0 if isinstance(result, dict) and result["status"] == "error" else 1)
+
+
+def test_browser_capture_wrapper_preserves_interaction_errors():
+    @tool
+    def interaction() -> str:
+        """Fail the requested interaction."""
+        raise RuntimeError("Navigation failed")
+
+    capture = AsyncMock()
+    bound = workflow.MultiAgentWorkflowController._authentication_browser_capture_tool(interaction, capture)
+    with pytest.raises(RuntimeError, match="Navigation failed"):
+        asyncio.run(bound())
+    capture.assert_not_awaited()
+
+
+def test_worker_automatically_captures_and_stops_browser_actions(worker_case, monkeypatch):
+    controller, task, _store, target, _observed = worker_case
+    credential = {"credential_id": "selected", "credential_type": "username_password",
+                  "target": target, "role": "member"}
+    ready = {"value": False}
+    monkeypatch.setattr(workflow, "reset_authentication_browser_session", AsyncMock())
+    monkeypatch.setattr(workflow, "authentication_context_is_valid", lambda *_args: ready["value"])
+    monkeypatch.setattr(workflow, "authentication_attempt_result", lambda *_args: {})
+
+    async def capture(**_arguments):
+        ready["value"] = True
+        return json.dumps({"status": "valid", "validation_url": f"{target}/private",
+                           "credential_header_names": ["x-session"], "evidence_refs": ["artifact:observed.html"]})
+
+    monkeypatch.setattr(workflow, "capture_browser_authenticated_context", capture)
+
+    @tool
+    async def browser_perform_action(action: str) -> str:
+        """Perform an observed browser action."""
+        return "HTML content saved to artifact: observed.html"
+
+    @contextmanager
+    def factory(_role, tools, _system):
+        agent = create_outcome_agent(monkeypatch, "authentication_agent", tools)
+
+        def run(_prompt, policy):
+            agent._cyber_terminal_tool_hook.configure(policy)
+            bound = next(item for item in tools if workflow.get_tool_name(item) == "browser_perform_action")
+            result = asyncio.run(bound(action="submit login"))
+            event = complete_tool_call(agent, "browser_perform_action", {"action": "submit login"}, result)
+            assert event.invocation_state["request_state"]["policy_terminal"]["reason"] == (
+                "authentication_credential_worker_done"
+            )
+            return workflow.TaskExecutorCycleResult(
+                "captured", agent._cyber_callback_handler.tool_outcome_journal.entries(),
+            )
+
+        yield run
+
+    controller.executor_session_factory = factory
+    # Inspect the functional handoff independently of the metadata-only repair session.
+    monkeypatch.setattr(controller, "_refine_worker_flow", lambda *_args, **_kwargs: [])
+    setup = workflow.AuthenticationSetupRequest(task.task_uid, "authentication", (target,), (target,), (credential,))
+    result = controller._run_authentication_credential_worker(task, setup, credential, (), [browser_perform_action])
+    assert result.browser_session_ready
+    attempt = controller._worker_flow_attempt(task, target, "authentication", kinds=(
+        "browser_form", "browser_redirect", "browser_mfa",
+    ))
+    assert attempt["functional_completed"]
+    assert attempt["validation_metadata"]["credential_header_names"] == ["x-session"]
+    assert controller._worker_completions(task)[0].credential_id == "selected"
 
 
 @pytest.fixture
@@ -324,9 +443,10 @@ def test_worker_critic_corrections_resume_without_repeating_success(worker_case,
 
     def repair(prompt, tools):
         names = {workflow.get_tool_name(item) for item in tools}
-        assert ("browser_perform_action" in names) is not success
+        assert ("browser_perform_action" in names) is not attempt["successful"]
         assert (
-            "same credential or registration identity" in prompt if not success else "do not create another" in prompt
+            "same credential or registration identity" in prompt
+            if not attempt["successful"] else "do not create another" in prompt
         )
         recorder(login_url=f"{target}/start", steps=[{"url": f"{target}/final", "action": "submit"}])
         attempt["successful"] = True
@@ -334,7 +454,7 @@ def test_worker_critic_corrections_resume_without_repeating_success(worker_case,
 
     repair = Mock(side_effect=repair)
     controller._refine_worker_flow(task, target, purpose, attempt, [outcome], repair, [recorder, submission])
-    assert repair.call_count == 1
+    assert repair.call_count == (2 if not success and purpose == "authentication" else 1)
     row = store.list_authentication_flows(target, purpose=purpose)[0]
     assert row["descriptor"]["steps"][0]["action"] == "form_submission"
     assert row["descriptor"]["worker_review"]["cycle"] == 2
@@ -364,9 +484,10 @@ def test_failed_flow_review_does_not_publish_or_remove_functional_state(worker_c
     gap = controller.state.list_tasks()[0].recovery_context["authentication_flow_gap"]
     assert gap["stop_reason"] == (
         "candidate_or_evidence_unavailable" if cause == "no_candidate" else
+        "functional_recovery_failed" if cause == "no_success" else
         "review_error" if cause in {"exception", "bad_evidence"} else "review_limit_reached"
     )
-    assert gap["reviews"] == (0 if cause == "no_candidate" else 1 if cause in {"exception", "bad_evidence"} else 3)
+    assert gap["reviews"] == (0 if cause in {"no_candidate", "no_success"} else 1 if cause in {"exception", "bad_evidence"} else 3)
     assert attempt["successful"] == (cause != "no_success")
     assert repair.call_count <= controller.flow_refinement_cycles - (cause != "no_candidate")
 
@@ -906,10 +1027,10 @@ def test_login_repair_preserves_policy_and_returns_to_critic(worker_case, monkey
     controller.executor_session_factory = factory
     setup = workflow.AuthenticationSetupRequest(task.task_uid, "authentication", (target,), (target,), (credential,))
     controller._run_authentication_credential_worker(task, setup, credential, (), [])
-    assert len(policies) == (4 if state == "recoverable" else 2)
+    assert len(policies) == 2
     rows = store.list_authentication_flows(target)
     assert bool(rows) is (state == "success")
-    assert controller.text_runner.call_count == (0 if state == "rejected" else 1 if state == "success" else 3)
+    assert controller.text_runner.call_count == (1 if state == "success" else 0)
 
 
 @pytest.mark.parametrize("classification", ["authentication", "registration", "unknown"])
@@ -1525,3 +1646,159 @@ def test_flow_review_counts_actual_reviews_and_stops_metadata_repairs(
         gap = controller.state.list_tasks()[0].recovery_context["registration_flow_gap"]
         assert gap["reviews"] == limit and gap["stop_reason"] == "review_limit_reached"
         assert not attempt.get("mapping_approved")
+
+
+def test_flow_critic_receives_authoritative_validation_proof(worker_case):
+    controller, _task, _store, target, outcome = worker_case
+    candidate = {
+        "kind": "browser_form", "login_url": target + "/login",
+        "validation_url": target + "/earlier", "request_header_names": ["Tauser"],
+    }
+    metadata = {"validation_url": target + "/verified", "evidence_refs": ["artifact:proof.json"]}
+    prompt = controller._flow_refinement_critic_prompt(
+        "authentication", target, candidate, [outcome], [],
+        validation_metadata=metadata, authorized_references=["artifact:proof.json"],
+    )
+    assert target + "/verified" in prompt
+    assert target + "/earlier" not in prompt
+    assert "artifact:proof.json" in prompt
+    assert "supersedes earlier recorder output" in prompt
+
+
+@pytest.mark.parametrize("kind", ["username_password", "api_key"])
+def test_completed_authentication_mapping_review_survives_session_expiry(worker_case, monkeypatch, kind):
+    controller, task, store, target, outcome = worker_case
+    credential = {"credential_id": "selected", "credential_type": kind, "target": target, "role": "member"}
+    monkeypatch.setattr(workflow, "reset_authentication_browser_session", AsyncMock())
+    monkeypatch.setattr(workflow, "authentication_context_is_valid", lambda *_args: False)
+    monkeypatch.setattr(workflow, "authentication_attempt_result", lambda *_args: None)
+    capture_result = json.dumps({
+        "status": "valid", "validation_url": target + "/verified", "evidence_refs": ["artifact:observed.html"],
+    })
+    browser_capture = AsyncMock(return_value=capture_result)
+    key_capture = Mock(return_value=capture_result)
+    monkeypatch.setattr(workflow, "capture_browser_authenticated_context", browser_capture)
+    monkeypatch.setattr(workflow, "establish_credential_authenticated_context", key_capture)
+    controller.text_runner.side_effect = [
+        json.dumps({"approved": False, "feedback": ["Record the observed field labels"]}),
+        json.dumps(approval()),
+    ]
+    runs = []
+
+    @contextmanager
+    def factory(_role, tools, _system):
+        def run(prompt, _policy, chosen=None):
+            selected = chosen or tools
+            runs.append(prompt)
+            recorder = next(item for item in selected if workflow.get_tool_name(item).startswith("record_"))
+            recorder(
+                login_url=target + "/login",
+                **({"validation_url": target + "/verified"} if kind == "api_key" else {}),
+            )
+            if any(workflow.get_tool_name(item) in {
+                "capture_browser_authenticated_context", "establish_credential_authenticated_context",
+            } for item in tools):
+                capture = next(item for item in tools if workflow.get_tool_name(item) in {
+                    "capture_browser_authenticated_context", "establish_credential_authenticated_context",
+                })
+                if kind == "username_password":
+                    import asyncio
+
+                    asyncio.run(capture())
+                else:
+                    capture(validation_url=target + "/verified")
+                assert controller.state.list_tasks()[0].recovery_context["worker_completions"]
+            else:
+                assert "do not create another account" in prompt
+                assert not any(workflow.get_tool_name(item) == "browser_perform_action" for item in selected)
+            return workflow.TaskExecutorCycleResult("completed", [outcome], reason="completed")
+
+        yield run
+
+    controller.executor_session_factory = factory
+    setup = workflow.AuthenticationSetupRequest(task.task_uid, "authentication", (target,), (target,), (credential,))
+    controller._run_authentication_credential_worker(task, setup, credential, (), [])
+    assert len(runs) == 2
+    assert browser_capture.call_count + key_capture.call_count == 1
+    descriptor = store.list_authentication_flows(target)[0]["descriptor"]
+    assert descriptor["validation_url"] == target + "/verified"
+    assert descriptor["worker_review"]["reviews"] == 2
+    retained = controller.state.list_tasks()[0].recovery_context["worker_completions"]
+    completion = WorkerCompletion.from_dict(next(iter(retained.values())))
+    assert completion.evidence_refs == ("artifact:observed.html",)
+    assert completion.mapping_approved
+    # Historical completion cannot satisfy fresh session requirements.
+    assert controller._worker_completions(task) == []
+    # A new credential must establish its own context, rather than inherit completed validation.
+    controller.text_runner.side_effect = None
+    controller.text_runner.return_value = json.dumps(approval())
+    second = {**credential, "credential_id": "second"}
+    controller._run_authentication_credential_worker(
+        task, replace(setup, credentials=(second,)), second, (), [],
+    )
+    assert len(runs) == 3
+    assert browser_capture.call_count + key_capture.call_count == 2
+    assert len(controller.state.list_tasks()[0].recovery_context["worker_completions"]) == 2
+
+
+def test_controller_validation_proof_is_retained_with_published_mapping(worker_case):
+    controller, task, store, target, outcome = worker_case
+    proof = Path(workflow._operation_output_root()) / "validation.json"
+    proof.write_text(json.dumps({"proof_method": "anonymous_access_denied"}))
+    attempt = controller._worker_flow_attempt(task, target, "authentication")
+    recorder = controller._worker_flow_recorder(task, target, "authentication", "browser_form", attempt)
+    recorder(login_url=target + "/login")
+    attempt["successful"] = True
+    attempt["validation_url"] = target + "/verified"
+    attempt["validation_metadata"] = {
+        "validation_url": target + "/verified", "evidence_refs": [f"artifact:{proof}"],
+    }
+    controller.text_runner.return_value = json.dumps(approval())
+    controller._refine_worker_flow(
+        task, target, "authentication", attempt, [outcome], Mock(), [recorder],
+    )
+    descriptor = store.list_authentication_flows(target)[0]["descriptor"]
+    assert set(descriptor["evidence_refs"]) == {"artifact:observed.html", "artifact:validation.json"}
+    assert set(descriptor["worker_review"]["approval_digests"]) == set(descriptor["evidence_refs"])
+
+
+@pytest.mark.parametrize("kind", ["username_password", "api_key"])
+def test_authentication_stops_failed_recovery_and_records_capture_reason(worker_case, monkeypatch, kind):
+    controller, task, store, target, outcome = worker_case
+    credential = {"credential_id": "selected", "credential_type": kind, "target": target, "role": "member"}
+    monkeypatch.setattr(workflow, "reset_authentication_browser_session", AsyncMock())
+    monkeypatch.setattr(workflow, "authentication_context_is_valid", lambda *_args: False)
+    monkeypatch.setattr(workflow, "authentication_attempt_result", lambda *_args: None)
+    reason = "AUTH_CAPTURE_PROOF_FAILED: public and authenticated responses are identical"
+    monkeypatch.setattr(workflow, "capture_browser_authenticated_context", AsyncMock(side_effect=ValueError(reason)))
+    monkeypatch.setattr(workflow, "establish_credential_authenticated_context", Mock(side_effect=ValueError(reason)))
+    runs = []
+
+    @contextmanager
+    def factory(_role, tools, _system):
+        def run(prompt, _policy):
+            runs.append(prompt)
+            capture = next(item for item in tools if workflow.get_tool_name(item) in {
+                "capture_browser_authenticated_context", "establish_credential_authenticated_context",
+            })
+            with pytest.raises(ValueError, match="AUTH_CAPTURE_PROOF_FAILED"):
+                if kind == "username_password":
+                    import asyncio
+
+                    asyncio.run(capture())
+                else:
+                    capture(validation_url=target + "/public")
+            return workflow.TaskExecutorCycleResult("failed", [outcome], reason="stalled")
+
+        yield run
+
+    controller.executor_session_factory = factory
+    setup = workflow.AuthenticationSetupRequest(task.task_uid, "authentication", (target,), (target,), (credential,))
+    controller._run_authentication_credential_worker(task, setup, credential, (), [])
+    assert len(runs) == 2
+    controller.text_runner.assert_not_called()
+    assert not store.list_authentication_flows(target)
+    gap = controller.state.list_tasks()[0].recovery_context["authentication_flow_gap"]
+    assert gap["stop_reason"] == "functional_recovery_failed"
+    assert gap["feedback"] == [reason]
+    assert gap["reviews"] == 0

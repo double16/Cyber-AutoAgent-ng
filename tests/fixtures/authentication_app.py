@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 
@@ -128,6 +129,18 @@ def create_authentication_app(state: AuthenticationFixtureState) -> FastAPI:
         if authorization != f"Basic {expected}":
             raise HTTPException(status_code=401, detail="invalid client")
         return {"access_token": "fixture-access-token", "token_type": "Bearer", "expires_in": 300}
+
+    @app.get("/spa", response_class=HTMLResponse)
+    def spa():
+        return "<!doctype html><main id=app>Same public application shell</main>"
+
+    @app.get("/session-data")
+    def session_data(request: Request):
+        header = request.headers.get("x-session") or request.headers.get("tauser")
+        cookie = request.cookies.get("session")
+        if header != "opaque-session" and cookie != "opaque-session":
+            raise HTTPException(status_code=401, detail="session required")
+        return {"account": "alice"}
 
     @app.get("/api-key")
     def api_key(x_api_key: str | None = Header(default=None)):
