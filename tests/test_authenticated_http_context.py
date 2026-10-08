@@ -9,17 +9,24 @@ from base64 import urlsafe_b64encode
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from modules.handlers.utils import get_tool_spec
-from modules.tools import authentication
+from modules.tools import authentication, credentials
 from modules.tools.credentials import checkout_credential, set_task_auth_context
 from modules.tools.memory import OperationPlan, OperationTarget, PlanPhase, SQLiteApplicationStore, Task
 from modules.utils.redaction import REDACTED, redact_text
 from tests.fixtures.authentication_app import running_authentication_app
 from tests.helpers.acceptance import make_acceptance
+
+
+@pytest.fixture
+def assume_context_proven(monkeypatch):
+    """Isolate proof only in unit tests focused on other context behavior."""
+
+    monkeypatch.setattr(authentication, "_prove_authenticated_context", lambda _context: True)
 
 
 def _activate_task(store: SQLiteApplicationStore, target: str) -> None:
@@ -58,13 +65,75 @@ def test_credential_target_url_scope_uses_parsed_origin_and_path(candidate, expe
     assert authentication._credential_target_url_contains("https://target.test/app", candidate, label="URL") is expected
 
 
-def test_authenticated_http_request_can_disable_redirects_for_controller(monkeypatch):
+@pytest.mark.parametrize("anonymous_status,anonymous_body,marker,expected", [
+    (401, "denied", "", True),
+    (200, "public", "", False),
+    (200, "public", "account:alice", True),
+    (200, "account:alice", "account:alice", False),
+])
+def test_context_proof_requires_a_credential_dependent_response(
+    monkeypatch, anonymous_status, anonymous_body, marker, expected,
+):
+    target = "https://target.test"
+    anonymous_session = Mock()
+    anonymous_session.get.return_value = SimpleNamespace(
+        status_code=anonymous_status, headers={}, text=anonymous_body, url=f"{target}/private",
+    )
+    credential_session = Mock()
+    credential_session.get.return_value = SimpleNamespace(
+        status_code=200, headers={}, text="account:alice", url=f"{target}/private",
+    )
+    monkeypatch.setattr(authentication.requests, "Session", lambda: anonymous_session)
+    context = authentication._AuthenticationContext(
+        target, "credential", credential_session, {"X-Session": "opaque"}, {}, f"{target}/private",
+        validation_marker=marker,
+    )
+
+    assert authentication._prove_authenticated_context(context) is expected
+
+
+def test_scoped_authenticated_redirect_rejects_a_foreign_origin():
+    session = Mock()
+    session.get.return_value = SimpleNamespace(
+        status_code=302, headers={"Location": "https://elsewhere.test/private"}, text="",
+    )
+
+    with pytest.raises(ValueError, match="outside the credential target boundary"):
+        authentication._scoped_request(session, "https://target.test", "GET", "https://target.test/private")
+    session.get.assert_called_once()
+
+
+def test_context_proof_accepts_credential_dependent_same_target_redirect(monkeypatch):
+    target = "https://target.test"
+    anonymous = Mock()
+    anonymous.get.return_value = SimpleNamespace(status_code=200, headers={}, text="login", url=f"{target}/login")
+    authenticated = Mock()
+    authenticated.get.return_value = SimpleNamespace(
+        status_code=200, headers={}, text="dashboard", url=f"{target}/dashboard",
+    )
+    monkeypatch.setattr(authentication.requests, "Session", lambda: anonymous)
+    context = authentication._AuthenticationContext(
+        target, "credential", authenticated, {"Tauser": "opaque"}, {}, f"{target}/private",
+    )
+
+    assert authentication._prove_authenticated_context(context)
+
+
+def test_request_header_names_accept_arbitrary_valid_names_and_reject_duplicates():
+    assert authentication._normalize_request_header_names(["X-Session", "Tauser"]) == ["X-Session", "Tauser"]
+    with pytest.raises(ValueError, match="distinct"):
+        authentication._normalize_request_header_names(["Tauser", "tauser"])
+    with pytest.raises(ValueError, match="valid HTTP header"):
+        authentication._normalize_request_header_names(["Bad Header"])
+
+
+def test_authenticated_http_request_can_disable_redirects_for_controller(monkeypatch, assume_context_proven):
     target = "https://target.test"
     credential_id = "credential-1"
     session = Mock()
     session.headers = {}
     session.cookies = []
-    session.request.return_value = SimpleNamespace(status_code=302, headers={"Location": "/login"}, text="")
+    session.get.return_value = SimpleNamespace(status_code=302, headers={"Location": "/login"}, text="")
     context = authentication._AuthenticationContext(
         target, credential_id, session, {"Authorization": "Bearer hidden"}, {}, f"{target}/private",
     )
@@ -83,7 +152,23 @@ def test_authenticated_http_request_can_disable_redirects_for_controller(monkeyp
     ))
 
     assert response["status_code"] == 302
-    assert session.request.call_args.kwargs["allow_redirects"] is False
+    assert session.get.call_args.kwargs["allow_redirects"] is False
+
+
+def test_authenticated_request_protects_arbitrary_credential_header(monkeypatch):
+    target = "https://target.test"
+    credential_id = "credential"
+    context = authentication._AuthenticationContext(
+        target, credential_id, Mock(headers={}, cookies=[]), {"Tauser": "opaque"}, {}, f"{target}/private",
+    )
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    monkeypatch.setattr(authentication, "_active_record", lambda *_args, **_kwargs: (
+        SimpleNamespace(task_uid="task"), {"target": target}, credential_id,
+    ))
+    monkeypatch.setitem(authentication._CONTEXTS, ("OP_AUTH", target, credential_id), context)
+
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        authentication.authenticated_http_request("GET", f"{target}/private", headers={"tauser": "caller"})
 
 
 def test_browser_login_receipt_marks_only_mapped_401_as_credential_rejected(monkeypatch):
@@ -250,7 +335,7 @@ def test_authentication_flow_discovery_records_active_target_without_a_credentia
         authentication.record_authentication_flow(
             target=target,
             purpose="authentication",
-            kind="api_form",
+            kind="browser_form",
             login_url=f"{target}/login",
             validation_url=f"{target}/protected",
             request_format="json",
@@ -276,19 +361,17 @@ def test_authentication_enum_schemas_advertise_canonical_values_and_accept_synon
         authentication.AUTHENTICATION_FLOW_KINDS | authentication.REGISTRATION_FLOW_KINDS
     )
     assert properties["request_format"]["enum"] == ["", "json", "form"]
-    ensure_schema = get_tool_spec(authentication.ensure_authenticated_context)["inputSchema"]["json"]
-    assert ensure_schema["properties"]["request_format"]["enum"] == ["", "json", "form"]
     runtime_input = authentication.record_authentication_flow._metadata.validate_input(
-        {"target": target, "purpose": "login", "kind": "API form", "request_format": "application/json"}
+        {"target": target, "purpose": "login", "kind": "web form", "request_format": "application/json"}
     )
     assert runtime_input["purpose"] == "login"
-    assert runtime_input["kind"] == "API form"
+    assert runtime_input["kind"] == "web form"
 
     result = json.loads(
         authentication.record_authentication_flow(
             target=target,
             purpose="login",
-            kind="API form",
+            kind="web form",
             login_url=f"{target}/login",
             validation_url=f"{target}/protected",
             request_format="application/json",
@@ -297,7 +380,7 @@ def test_authentication_enum_schemas_advertise_canonical_values_and_accept_synon
     descriptor = store.list_authentication_flows(target, purpose="authentication")[0]["descriptor"]
     assert result["recorded"] is True
     assert descriptor["purpose"] == "authentication"
-    assert descriptor["kind"] == "api_form"
+    assert descriptor["kind"] == "browser_form"
     assert descriptor["request_format"] == "json"
 
 
@@ -345,7 +428,7 @@ def test_browser_flow_requires_final_validation_url_for_non_provisional_record(t
         authentication.record_authentication_flow(
             target=target,
             purpose="authentication",
-            kind="api_form",
+            kind="api_key",
             login_url=f"{target}/login",
         )
 
@@ -367,7 +450,8 @@ def test_bound_authentication_flow_recorder_omits_controller_owned_inputs(tmp_pa
     schema = get_tool_spec(recorder)["inputSchema"]["json"]
 
     assert set(schema["properties"]) == {
-        "login_url", "validation_url", "authorization_storage_key", "storage_header_bindings", "request_format", "steps"
+        "login_url", "validation_url", "authorization_storage_key", "storage_header_bindings",
+        "request_header_names", "request_format", "steps"
     }
     assert schema["required"] == ["login_url"]
     result = json.loads(recorder(
@@ -573,15 +657,18 @@ def test_jwt_at_ten_minute_boundary_still_validates_http(monkeypatch):
     assert calls == ["requested"]
 
 
-@pytest.mark.parametrize("remaining, request_succeeds", [(104, True), (-1, False)])
-def test_request_validates_near_expiry_but_rejects_expired_material(monkeypatch, remaining, request_succeeds):
+@pytest.mark.parametrize("remaining, request_succeeds", [(104, False), (599, False), (600, True), (601, True),
+                                                        (0, False), (-1, False)])
+def test_reuse_and_requests_enforce_expiry_safety_window(
+    monkeypatch, remaining, request_succeeds, assume_context_proven,
+):
     now = int(time.time())
     target = "https://target.test"
     credential_id = "credential-1"
     session = Mock()
     session.headers = {}
     session.cookies = []
-    session.get.return_value = SimpleNamespace(status_code=204)
+    session.get.return_value = SimpleNamespace(status_code=204, headers={}, text="")
     session.request.return_value = SimpleNamespace(status_code=200, headers={}, text="ok")
     context = authentication._AuthenticationContext(
         target, credential_id, session, {"Authorization": _jwt_with_exp(now + remaining)}, {},
@@ -598,57 +685,21 @@ def test_request_validates_near_expiry_but_rejects_expired_material(monkeypatch,
     monkeypatch.setitem(authentication._CONTEXTS, ("OP_AUTH", target, credential_id), context)
 
     assert authentication._validate(context) is True
-    assert authentication.authentication_context_is_valid("OP_AUTH", target, credential_id) is False
+    assert authentication.authentication_context_is_valid("OP_AUTH", target, credential_id) is request_succeeds
     if request_succeeds:
-        assert json.loads(authentication.authenticated_http_request("GET", f"{target}/protected"))["status_code"] == 200
-        session.request.assert_called_once()
+        assert json.loads(authentication.authenticated_http_request("GET", f"{target}/protected"))["status_code"] == 204
+        assert session.get.call_count >= 2
     else:
         with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
             authentication.authenticated_http_request("GET", f"{target}/protected")
-        session.request.assert_not_called()
+        assert session.get.call_count >= 1
 
 
-def test_ensure_authenticated_context_refreshes_near_expiry_material(monkeypatch):
-    now = int(time.time())
-    target = "https://target.test"
-    credential_id = "credential-1"
-    old_session = Mock(headers={}, cookies=[])
-    old_session.get.return_value = SimpleNamespace(status_code=204)
-    old_context = authentication._AuthenticationContext(
-        target, credential_id, old_session, {"Authorization": _jwt_with_exp(now + 104)}, {},
-        f"{target}/protected",
-    )
-    new_session = Mock(headers={}, cookies=[])
-    new_session.post.return_value = SimpleNamespace(
-        status_code=200, headers={}, json=lambda: {"access_token": _jwt_with_exp(now + 3600)},
-    )
-    new_session.get.return_value = SimpleNamespace(status_code=204)
-    store = SimpleNamespace(record_credential_usage=Mock())
-    monkeypatch.setattr(authentication.time, "time", lambda: now)
-    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
-    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
-    monkeypatch.setattr(authentication, "_active_record", lambda *_args, **_kwargs: (
-        SimpleNamespace(task_uid="coverage-task"),
-        {"target": target, "credential_type": "username_password", "payload": {
-            "username": "alice", "password": "secret",
-        }},
-        credential_id,
-    ))
-    monkeypatch.setattr(authentication.requests, "Session", lambda: new_session)
-    monkeypatch.setitem(authentication._CONTEXTS, ("OP_AUTH", target, credential_id), old_context)
-
-    result = json.loads(authentication.ensure_authenticated_context(
-        credential_id, login_url=f"{target}/login", validation_url=f"{target}/protected",
-    ))
-
-    assert result["authentication_ready"] is True
-    new_session.post.assert_called_once()
-    assert authentication._CONTEXTS[("OP_AUTH", target, credential_id)].session is new_session
-    assert authentication.authentication_context_is_valid("OP_AUTH", target, credential_id) is True
 
 
 @pytest.mark.parametrize("placement", ["header", "query", "cookie_jwt", "cookie_expiry"])
-def test_known_expired_material_is_rejected_after_validation(placement, monkeypatch):
+@pytest.mark.parametrize("remaining", [-1, 0, 104, 599])
+def test_known_expiring_material_requires_refresh_after_validation(placement, remaining, monkeypatch):
     now = int(time.time())
     target = "https://target.test"
     session = authentication.requests.Session()
@@ -657,13 +708,13 @@ def test_known_expired_material_is_rejected_after_validation(placement, monkeypa
     headers = {}
     params = {}
     if placement == "header":
-        headers["Authorization"] = _jwt_with_exp(now - 1)
+        headers["Tauser"] = _jwt_with_exp(now + remaining)
     elif placement == "query":
-        params["access_token"] = _jwt_with_exp(now - 1)
+        params["access_token"] = _jwt_with_exp(now + remaining)
     elif placement == "cookie_jwt":
-        session.cookies.set("sid", _jwt_with_exp(now - 1), domain="target.test", path="/")
+        session.cookies.set("sid", _jwt_with_exp(now + remaining), domain="target.test", path="/")
     else:
-        session.cookies.set("sid", "opaque", domain="target.test", path="/", expires=now - 1)
+        session.cookies.set("sid", "opaque", domain="target.test", path="/", expires=now + remaining)
     context = authentication._AuthenticationContext(
         target, "credential-1", session, headers, params, f"{target}/protected",
     )
@@ -677,10 +728,11 @@ def test_known_expired_material_is_rejected_after_validation(placement, monkeypa
     ))
     monkeypatch.setitem(authentication._CONTEXTS, ("OP_AUTH", target, "credential-1"), context)
 
+    assert authentication.authentication_context_is_valid("OP_AUTH", target, "credential-1") is False
     with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
         authentication.authenticated_http_request("GET", f"{target}/protected", "credential-1")
 
-    session.get.assert_called_once()
+    assert session.get.call_count == 2
     session.request.assert_not_called()
 
 
@@ -778,7 +830,7 @@ def test_expiring_cookie_outside_domain_or_scheme_is_ignored(domain, secure, val
     monkeypatch.setattr(session, "get", get)
     monkeypatch.setattr(authentication.time, "time", lambda: now)
     context = authentication._AuthenticationContext(
-        "https://target.test", "credential", session, {}, {}, validation_url
+        validation_url.removesuffix("/protected"), "credential", session, {}, {}, validation_url
     )
 
     assert authentication._validate(context) is True
@@ -1020,7 +1072,7 @@ def test_browser_capture_preserves_cookie_expiry_from_browser_or_har(
 
     captured = {}
 
-    def store_context(_task, _record, _credential_id, session, _headers, _params, _url):
+    def store_context(_task, _record, _credential_id, session, _headers, _params, _url, _marker=""):
         captured["expires"] = next(iter(session.cookies)).expires
         return "captured"
 
@@ -1126,50 +1178,8 @@ def test_missing_authenticated_context_logs_reason(caplog):
     assert "reason=context_missing" in caplog.text
 
 
-def test_stale_api_form_flow_is_not_reused(monkeypatch):
-    monkeypatch.setattr(
-        authentication,
-        "_get_database_store",
-        lambda: type("Store", (), {
-            "list_authentication_flows": lambda _self, _target, purpose="authentication", **_kwargs: [{
-                "status": "validated",
-                "descriptor": {
-                    "kind": "api_form",
-                    "flow_version": authentication.AUTHENTICATION_FLOW_VERSION - 1,
-                    "login_url": "https://target.test/login",
-                    "validation_url": "https://target.test/account",
-                },
-            }]
-        })(),
-    )
-
-    with pytest.raises(ValueError, match="selected api_form"):
-        authentication._stored_api_form_flow("https://target.test", "stale-flow")
 
 
-def test_selected_api_form_flow_does_not_query_sibling_descriptors(monkeypatch):
-    selected = {
-        "kind": "api_form",
-        "flow_version": authentication.AUTHENTICATION_FLOW_VERSION,
-        "login_url": "https://target.test/login-v2",
-        "validation_url": "https://target.test/account",
-    }
-    monkeypatch.setattr(
-        authentication,
-        "_get_database_store",
-        lambda: type("Store", (), {
-            "list_authentication_flows": lambda _self, *_args, **_kwargs: [
-                {
-                    "flow_id": "old-flow",
-                    "status": "validated",
-                    "descriptor": {**selected, "login_url": "https://target.test/login-v1"},
-                },
-                {"flow_id": "selected-flow", "status": "discovered", "descriptor": selected},
-            ]
-        })(),
-    )
-
-    assert authentication._stored_api_form_flow("https://target.test", "selected-flow") == selected
 
 
 def test_capture_browser_context_uses_named_storage_token_for_validation(tmp_path, monkeypatch):
@@ -1338,7 +1348,7 @@ def test_capture_browser_context_prefers_observed_raw_authorization_header(tmp_p
 
     captured: dict[str, str] = {}
 
-    def store_context(_task, _record, _credential_id, _session, headers, _params, _validation_url):
+    def store_context(_task, _record, _credential_id, _session, headers, _params, _validation_url, _marker=""):
         captured.update(headers)
         return "captured"
 
@@ -1363,8 +1373,13 @@ def test_capture_browser_context_prefers_observed_raw_authorization_header(tmp_p
 def test_capture_browser_context_runtime_schema_requires_controller_flow():
     schema = get_tool_spec(authentication.capture_browser_authenticated_context)["inputSchema"]["json"]
 
-    assert schema["required"] == ["credential_id", "storage_header_bindings", "validation_url"]
-    assert set(schema["properties"]) == {"credential_id", "storage_header_bindings", "validation_url"}
+    assert schema["required"] == ["credential_id", "storage_header_bindings"]
+    assert set(schema["properties"]) == {
+        "credential_id", "storage_header_bindings", "request_header_names", "validation_url", "validation_marker"
+    }
+    authentication.capture_browser_authenticated_context._metadata.validate_input({
+        "credential_id": "credential", "storage_header_bindings": [],
+    })
 
 
 def test_capture_browser_context_rejects_403_har_validation(monkeypatch):
@@ -1413,7 +1428,7 @@ def test_capture_browser_context_rejects_403_har_validation(monkeypatch):
 
     monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
 
-    with pytest.raises(ValueError, match="successful browser request"):
+    with pytest.raises(ValueError, match="successful same-target browser GET request"):
         asyncio.run(
             authentication.capture_browser_authenticated_context(
                 "credential",
@@ -1485,7 +1500,7 @@ def test_cookie_only_browser_capture_requires_successful_request_with_session_co
             )
         ) == "captured"
     else:
-        with pytest.raises(ValueError, match="successful browser request"):
+        with pytest.raises(ValueError, match="successful same-target browser GET request"):
             asyncio.run(
                 authentication.capture_browser_authenticated_context(
                     "credential", [], f"{target}/api/protected"
@@ -1539,77 +1554,6 @@ def test_registration_flow_records_same_target_success_redirect_only(tmp_path, m
         )
 
 
-def test_authenticated_http_request_reuses_hidden_bearer_context(tmp_path, monkeypatch):
-    with running_authentication_app() as (target, _state):
-        store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
-        _activate_task(store, target)
-        credential = store.store_credential(
-            "OP_AUTH",
-            {
-                "credential_type": "username_password",
-                "target": target,
-                "role": "member",
-                "payload": {"username": "alice", "password": "alice-password"},
-                "origin": "provided",
-                "management_policy": "user",
-                "status": "unknown",
-            },
-        )
-        monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
-        monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
-        monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
-        monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "OP_AUTH")
-        authentication._CONTEXTS.clear()
-
-        checkout_credential(credential["credential_id"], "authenticated coverage")
-        set_task_auth_context([credential["credential_id"]])
-        with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED") as error:
-            authentication.authenticated_http_request(
-                "GET", f"{target}/tenants/tenant-a/records/2", credential["credential_id"]
-            )
-        assert "request controller refresh" in str(error.value)
-        assert "ensure_authenticated_context" not in str(error.value)
-        stored_flow = store.upsert_authentication_flow(
-            "OP_AUTH",
-            {
-                "target": target,
-                "purpose": "authentication",
-                "kind": "api_form",
-                "flow_version": authentication.AUTHENTICATION_FLOW_VERSION,
-                "login_url": f"{target}/login",
-                "validation_url": f"{target}/tenants/tenant-a/records/1",
-                "request_format": "json",
-                "provenance": "observed_worker_flow",
-            },
-            status="validated",
-        )
-        ready = json.loads(
-            authentication.ensure_authenticated_context(
-                "",
-                flow_id=stored_flow["flow_id"],
-            )
-        )
-
-        assert ready["authentication_ready"] is True
-        assert authentication.authentication_context_is_valid("OP_AUTH", target, credential["credential_id"])
-        response = json.loads(
-            authentication.authenticated_http_request(
-                "GET", f"{target}/tenants/tenant-a/records/2"
-            )
-        )
-        assert response["status_code"] == 200
-        assert response["body"] == '{"tenant":"tenant-a","record_id":"2","requested_by":"alice"}'
-        monkeypatch.setattr(authentication, "_validate", lambda _context: False)
-        with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
-            authentication.authenticated_http_request(
-                "GET", f"{target}/tenants/tenant-a/records/2", credential["credential_id"]
-            )
-        with pytest.raises(ValueError, match="managed"):
-            authentication.authenticated_http_request(
-                "GET", f"{target}/tenants/tenant-a/records/2", credential["credential_id"],
-                headers={"Authorization": "Bearer caller-supplied"},
-            )
-        assert authentication.authentication_context_is_valid("OP_AUTH", f"{target}/other", credential["credential_id"]) is False
 
 
 def test_authenticated_http_request_reports_missing_controller_authorization(tmp_path, monkeypatch):
@@ -1642,122 +1586,8 @@ def test_authenticated_http_request_reports_missing_controller_authorization(tmp
         authentication.authenticated_http_request("GET", f"{target}/account")
 
 
-def test_authenticated_http_request_accepts_controller_authorization_for_reused_context(tmp_path, monkeypatch):
-    with running_authentication_app() as (target, _state):
-        store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
-        _activate_task(store, target)
-        credential = store.store_credential(
-            "OP_AUTH",
-            {
-                "credential_type": "username_password",
-                "target": target,
-                "role": "member",
-                "payload": {"username": "alice", "password": "alice-password"},
-                "origin": "provided",
-                "management_policy": "user",
-                "status": "unknown",
-            },
-        )
-        monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
-        monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
-        monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
-        monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "OP_AUTH")
-        authentication._CONTEXTS.clear()
-
-        checkout_credential(credential["credential_id"], "authenticated coverage")
-        set_task_auth_context([credential["credential_id"]])
-        stored_flow = store.upsert_authentication_flow(
-            "OP_AUTH",
-            {
-                "target": target,
-                "purpose": "authentication",
-                "kind": "api_form",
-                "flow_version": authentication.AUTHENTICATION_FLOW_VERSION,
-                "login_url": f"{target}/login",
-                "validation_url": f"{target}/tenants/tenant-a/records/1",
-                "request_format": "json",
-                "provenance": "observed_worker_flow",
-            },
-            status="validated",
-        )
-        authentication.ensure_authenticated_context("", flow_id=stored_flow["flow_id"])
-        store.patch_task("OP_AUTH", "auth-task", status="done")
-        store.store_task(
-            "OP_AUTH",
-            Task("reused-auth-task", "Reused auth", "Use the validated context", make_acceptance("reused-auth-task"), 1, "active"),
-        )
-        store.authorize_credential_for_task(
-            "OP_AUTH",
-            credential["credential_id"],
-            "reused-auth-task",
-            "reused_authenticated_context",
-        )
-
-        with pytest.raises(ValueError, match="checked out by the active task"):
-            authentication.ensure_authenticated_context(
-                credential["credential_id"], flow_id=stored_flow["flow_id"]
-            )
-        with pytest.raises(ValueError, match="checked out by the active task"):
-            authentication.establish_credential_authenticated_context(
-                credential["credential_id"], f"{target}/tenants/tenant-a/records/1"
-            )
-
-        get_credential = store.get_credential
-        payload_reads = []
-
-        def recorded_get_credential(credential_id, *, include_payload=False):
-            payload_reads.append(include_payload)
-            return get_credential(credential_id, include_payload=include_payload)
-
-        monkeypatch.setattr(store, "get_credential", recorded_get_credential)
-        response = json.loads(
-            authentication.authenticated_http_request(
-                "GET", f"{target}/tenants/tenant-a/records/2", credential["credential_id"]
-            )
-        )
-
-        assert response["status_code"] == 200
-        assert payload_reads and not any(payload_reads)
-        assert store.credential_ids_selected_by_task("OP_AUTH", "reused-auth-task") == set()
-        assert store.credential_ids_authorized_by_task("OP_AUTH", "reused-auth-task") == {
-            credential["credential_id"]
-        }
 
 
-def test_authenticated_context_rejects_unsuccessful_login(tmp_path, monkeypatch):
-    with running_authentication_app() as (target, _state):
-        store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
-        _activate_task(store, target)
-        credential = store.store_credential(
-            "OP_AUTH",
-            {
-                "credential_type": "username_password",
-                "target": target,
-                "role": "member",
-                "payload": {"username": "alice", "password": "wrong"},
-                "origin": "provided",
-                "management_policy": "user",
-                "status": "unknown",
-            },
-        )
-        monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
-        monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
-        monkeypatch.setattr("modules.tools.credentials._get_database_store", lambda: store)
-        monkeypatch.setattr("modules.tools.credentials._operation_id", lambda: "OP_AUTH")
-        authentication._CONTEXTS.clear()
-        checkout_credential(credential["credential_id"], "authenticated coverage")
-        set_task_auth_context([credential["credential_id"]])
-
-        with pytest.raises(ValueError, match="rejected"):
-            authentication.ensure_authenticated_context(
-                credential["credential_id"],
-                login_url=f"{target}/login",
-                validation_url=f"{target}/tenants/tenant-a/records/1",
-            )
-        attempt = authentication.authentication_attempt_result("OP_AUTH", target, credential["credential_id"])
-        assert attempt is not None
-        assert attempt["outcome"] == "credential_rejected"
-        assert attempt["status"] == 401
 
 
 def test_authenticated_http_request_uses_hidden_api_key_context(tmp_path, monkeypatch):
@@ -1794,6 +1624,12 @@ def test_authenticated_http_request_uses_hidden_api_key_context(tmp_path, monkey
         assert ready["authentication_ready"] is True
         assert response["status_code"] == 200
         assert response["body"] == '{"authorized":true}'
+
+        context = authentication._CONTEXTS[("OP_AUTH", target, credential["credential_id"])]
+        context.validation_url = f"{target}/openapi.json"
+        assert not authentication.authentication_context_is_valid("OP_AUTH", target, credential["credential_id"])
+        with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
+            authentication.authenticated_http_request("GET", f"{target}/api-key")
 
 
 def test_authenticated_http_request_exchanges_hidden_oauth_context(tmp_path, monkeypatch):
@@ -1835,8 +1671,8 @@ def test_authenticated_http_request_exchanges_hidden_oauth_context(tmp_path, mon
 
 
 @pytest.mark.parametrize("purpose,kind,expected_version", [
-    ("authentication", "browser_form", 9),
-    ("registration", "browser_registration", 3),
+    ("authentication", "browser_form", authentication.AUTHENTICATION_FLOW_VERSION),
+    ("registration", "browser_registration", authentication.REGISTRATION_FLOW_VERSION),
 ])
 def test_flow_recording_uses_independent_purpose_versions(tmp_path, monkeypatch, purpose, kind, expected_version):
     target = "https://target.test"
@@ -1850,7 +1686,8 @@ def test_flow_recording_uses_independent_purpose_versions(tmp_path, monkeypatch,
 
 
 @pytest.mark.parametrize("version,expected", [
-    (9, True), (8, False), (7, False), (6, False), (2, False), (1, False), (None, False),
+    (authentication.AUTHENTICATION_FLOW_VERSION, True), (9, False), (8, False),
+    (7, False), (6, False), (2, False), (1, False), (None, False),
 ])
 def test_authentication_flow_version_rejects_legacy_and_registration_versions(version, expected):
     assert authentication._is_current_authentication_flow({"flow_version": version}) is expected
@@ -1949,3 +1786,222 @@ def test_credential_guard_reports_missing_active_task(tmp_path, monkeypatch):
         authentication.record_authentication_flow(
             target=target, purpose="authentication", kind="browser_form", login_url=f"{target}/login",
         )
+
+
+@pytest.mark.parametrize("labels", [
+    ["Email Address", "🔐 Password", "名前", "e\u0301", "a/b? [field]", "value@example.test", "  literal label  "],
+    ["", "👩🏽‍💻", "line\nbreak", "x" * 256, "same label", "same label"],
+])
+def test_flow_labels_preserve_unicode_through_runtime_schema_and_storage(labels, tmp_path, monkeypatch):
+    target = "https://target.test"
+    store = SQLiteApplicationStore(str(tmp_path / "auth.db"), target)
+    _activate_task(store, target)
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    recorder = authentication.build_record_authentication_flow_tool(
+        target=target, purpose="registration", kind="browser_registration",
+    )
+    args = {
+        "login_url": f"{target}/signup",
+        "identity_fields": labels, "required_fields": labels, "optional_fields": labels,
+        "steps": [
+            {"url": f"{target}/signup", "action": "navigation"},
+            {"url": f"{target}/signup", "action": "form_submission", "field_names": labels},
+            {"url": f"{target}/confirm", "action": "verification", "field_names": ["✅ Code"]},
+        ],
+    }
+    validated = recorder._metadata.validate_input(args)
+    recorder(**validated)
+    flow = store.list_authentication_flows(target, purpose="registration")[0]["descriptor"]
+    assert flow["steps"][1]["field_names"] == labels
+    assert flow["steps"][2]["field_names"] == ["✅ Code"]
+    for name in ("identity_fields", "required_fields", "optional_fields"):
+        assert flow[name] == labels
+
+
+@pytest.mark.parametrize("values", ["label", [1], [None], {"label": "value"}])
+def test_flow_labels_reject_non_string_structure(values):
+    with pytest.raises(ValueError, match="observed label strings"):
+        authentication._normalize_flow_labels(values, label="identity_fields")
+
+
+def test_flow_steps_reject_submitted_value_properties():
+    with pytest.raises(ValueError, match="Extra inputs"):
+        authentication._normalize_flow_steps("https://target.test", [{
+            "url": "https://target.test/signup", "action": "form_submission",
+            "field_names": ["🔐 Password"], "values": {"password": "secret"},
+        }], [])
+    assert authentication._normalize_flow_labels(None, label="fields") == []
+
+
+@pytest.mark.parametrize("mode", ["header", "cookie", "missing", "explicit", "post", "foreign", "403"])
+def test_browser_capture_selects_latest_authenticated_get_without_har_search(mode, monkeypatch):
+    target = "https://target.test"
+    cookies = [{"name": "session", "value": "sensitive", "domain": "target.test", "path": "/", "expires": 9999999999}]
+    bindings = [] if mode == "cookie" else [
+        {"header_name": "Authorization", "storage_key": "token", "value_template": "{value}"},
+    ]
+
+    class Request:
+        def __init__(self, url, method="GET", status=200, headers=None):
+            self.url, self.method, self.status = url, method, status
+            self.headers = headers or {}
+
+        async def all_headers(self):
+            return self.headers
+
+        async def response(self):
+            return SimpleNamespace(status=self.status)
+
+    headers = {"cookie": "session=sensitive"} if mode == "cookie" else {"authorization": "sensitive"}
+    candidate = Request(f"{target}/private?view=recent", headers=headers)
+    if mode == "missing":
+        candidate.headers = {}
+    if mode == "post":
+        candidate.method = "POST"
+    if mode == "foreign":
+        candidate.url = "https://other.test/private"
+    if mode == "403":
+        candidate.status = 403
+
+    class Browser:
+        recent_requests = [candidate, Request(f"{target}/login", "POST", headers=headers)]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        @asynccontextmanager
+        async def timeout(self):
+            yield
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+    async def read_cookies(_urls):
+        return cookies
+
+    async def read_storage(_script, _keys):
+        return {"token": "sensitive"}
+
+    browser = Browser()
+    browser.context = SimpleNamespace(cookies=read_cookies)
+    browser.page = SimpleNamespace(evaluate=read_storage)
+    monkeypatch.setattr("modules.tools.browser.get_browser", lambda: browser)
+    monkeypatch.setattr(authentication, "_active_record", lambda *_args: (object(), {"target": target}, "credential"))
+    capture = Mock(return_value="captured")
+    monkeypatch.setattr(authentication, "_store_context", capture)
+    url = candidate.url if mode == "explicit" else ""
+    if mode in {"missing", "post", "foreign", "403"}:
+        with pytest.raises(ValueError, match="normal signed-in browser action") as error:
+            asyncio.run(authentication.capture_browser_authenticated_context("credential", bindings, url))
+        assert "sensitive" not in str(error.value)
+        capture.assert_not_called()
+    else:
+        assert asyncio.run(authentication.capture_browser_authenticated_context("credential", bindings, url)) == "captured"
+        assert capture.call_args.args[-2] == candidate.url
+        if mode != "cookie":
+            assert capture.call_args.args[4] == {"Authorization": "sensitive"}
+
+
+@pytest.mark.parametrize("header_name", ["X-Session", "Tauser"])
+def test_browser_capture_uses_observed_named_header_without_storage_key(header_name, monkeypatch):
+    target = "https://target.test"
+
+    class Request:
+        url = f"{target}/private"
+        method = "GET"
+
+        async def all_headers(self):
+            return {header_name.lower(): "opaque-session"}
+
+        async def response(self):
+            return SimpleNamespace(status=200)
+
+    class Browser:
+        recent_requests = [Request()]
+        context = SimpleNamespace(cookies=AsyncMock(return_value=[]))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        @asynccontextmanager
+        async def timeout(self):
+            yield
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+    monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
+    monkeypatch.setattr(authentication, "_active_record", lambda *_args: (
+        SimpleNamespace(task_uid="task"), {"target": target}, "credential",
+    ))
+    captured = Mock(return_value="captured")
+    monkeypatch.setattr(authentication, "_store_context", captured)
+
+    assert asyncio.run(authentication.capture_browser_authenticated_context(
+        "credential", [], request_header_names=[header_name],
+    )) == "captured"
+    assert captured.call_args.args[4] == {header_name: "opaque-session"}
+
+
+@pytest.mark.parametrize("reusable", [True, False])
+def test_context_keeps_exact_runtime_url_and_only_validated_query_free_mapping(reusable, monkeypatch):
+    target = "https://target.test"
+    exact = f"{target}/private?view=required"
+    store = SimpleNamespace(record_credential_usage=Mock())
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_QUERY")
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_validate", lambda context: context.validation_url == exact or reusable)
+    monkeypatch.setattr(authentication, "_prove_authenticated_context", lambda context: context.validation_url == exact or reusable)
+    result = authentication._store_context(
+        SimpleNamespace(task_uid="task"), {"target": target}, "credential", authentication.requests.Session(),
+        {"Authorization": "secret"}, {}, exact,
+    )
+    assert "view=required" not in result
+    context = authentication._CONTEXTS[("OP_QUERY", target, "credential")]
+    assert context.validation_url == exact
+    assert authentication.authentication_context_validation_url("OP_QUERY", target, "credential") == (
+        f"{target}/private" if reusable else ""
+    )
+    authentication._CONTEXTS.pop(("OP_QUERY", target, "credential"))
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://target.test/private", "https://target.test/private"),
+    ("https://target.test/private?secret=value", ""),
+    ("https://target.test/private#fragment", ""),
+])
+def test_unclassified_context_never_exposes_query_in_flow_metadata(url, expected, monkeypatch):
+    monkeypatch.setitem(authentication._CONTEXTS, ("OP_META", "https://target.test", "credential"),
+                        authentication._AuthenticationContext(
+                            "https://target.test", "credential", authentication.requests.Session(), {}, {}, url,
+                        ))
+    assert authentication.authentication_context_validation_url("OP_META", "https://target.test", "credential") == expected
+    assert authentication.authentication_context_validation_url("OP_META", "https://target.test", "missing") == ""
+
+
+@pytest.mark.parametrize("header_name", ["X-Session", "Tauser"])
+def test_establish_context_rejects_public_validation_response(tmp_path, monkeypatch, header_name):
+    with running_authentication_app() as (target, _state):
+        store = SQLiteApplicationStore(str(tmp_path / "public.db"), target)
+        _activate_task(store, target)
+        credential = store.store_credential("OP_AUTH", {
+            "credential_type": "api_key", "target": target, "role": "member",
+            "payload": {"api_key": "opaque-fixture-value", "placement": "header", "name": header_name},
+            "origin": "provided", "management_policy": "user", "status": "unknown",
+        })
+        for module in (authentication, credentials):
+            monkeypatch.setattr(module, "_get_database_store", lambda: store)
+            monkeypatch.setattr(module, "_operation_id", lambda: "OP_AUTH")
+        authentication._CONTEXTS.clear()
+        checkout_credential(credential["credential_id"], "validate credential")
+        set_task_auth_context([credential["credential_id"]])
+        with pytest.raises(ValueError, match="not distinguished from the anonymous response"):
+            authentication.establish_credential_authenticated_context(validation_url=f"{target}/openapi.json")
+        assert ("OP_AUTH", target, credential["credential_id"]) not in authentication._CONTEXTS

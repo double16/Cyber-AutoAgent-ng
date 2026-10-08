@@ -76,6 +76,12 @@ from modules.agents.structured_outputs import (
     is_structured_output_unavailable,
     structured_output_dict,
 )
+from modules.agents.worker_completion import WorkerCompletion
+from modules.authentication_requirements import (
+    AuthenticationRequirement,
+    AuthenticationSelectionError,
+    select_authentication_credentials,
+)
 from modules.config.taxonomy_catalog import (
     get_taxonomy_catalog,
     validate_taxonomy_mappings,
@@ -119,6 +125,7 @@ from modules.tools.authentication import (
     AUTHENTICATION_FLOW_VERSION,
     REGISTRATION_FLOW_VERSION,
     _credential_target_url_contains,
+    _normalize_request_header_names,
     _normalize_storage_header_bindings,
     authenticated_http_request,
     authentication_attempt_result,
@@ -126,7 +133,6 @@ from modules.tools.authentication import (
     authentication_context_validation_url,
     build_record_authentication_flow_tool,
     capture_browser_authenticated_context,
-    ensure_authenticated_context,
     establish_credential_authenticated_context,
     record_browser_authentication_attempt,
 )
@@ -178,6 +184,7 @@ from modules.tools.memory import (
     finding_validation_submitted,
     get_memory_client,
     inventory_manifest_contract_text,
+    merge_workstream_procedure_methods,
     objective_validation_outcome,
     objective_validation_submitted,
     resolve_operation_targets,
@@ -1235,6 +1242,7 @@ class AuthenticationSetupRequest:
     authentication_flow_hints: tuple[dict[str, Any], ...] = ()
     discovery_endpoints: tuple[dict[str, Any], ...] = ()
     client_storage_header_bindings: tuple[dict[str, str], ...] = ()
+    comparison: str = "none"
 
     def to_toon(self) -> str:
         hint_rows = "\n".join(
@@ -1294,6 +1302,7 @@ class AuthenticationSetupRequest:
                 str(flow.get("login_url") or ""),
                 "|".join(header_names),
             ))
+            + "\nobserved_flow_steps: " + json.dumps(flow.get("steps") or [], ensure_ascii=False)
         )
 
 
@@ -3008,11 +3017,20 @@ class MultiAgentWorkflowController:
             if phase.id < before_phase_id and phase.status == "done"
         }
         providers = {workstream: set() for workstream in required_workstreams}
+        partial_provider_phases = set()
+        for phase in plan.phases:
+            if phase.id >= before_phase_id or phase.id in completed_phases:
+                continue
+            contract = self._phase_task_contract(phase)
+            if contract is not None and contract.allow_partial_synthesis:
+                tasks = current_workflow_tasks(self.state.list_tasks(phase=phase.id))
+                if self._contract_synthesis_output_ready(contract, tasks):
+                    partial_provider_phases.add(phase.id)
         for phase in completed_phases.values():
             for workstream in required_workstreams.intersection(phase.provided_workstreams):
                 providers[workstream].add(phase.id)
         for task in self.state.list_tasks(status=["done"]):
-            if task.phase not in completed_phases:
+            if task.phase not in completed_phases and task.phase not in partial_provider_phases:
                 continue
             workstream = self._task_planning_workstream(task)
             if workstream in providers:
@@ -3181,6 +3199,8 @@ class MultiAgentWorkflowController:
                             "url": url,
                             "roles": roles,
                             "flow_version": descriptor.get("flow_version"),
+                            "flow_id": stored.get("flow_id"),
+                            "steps": deepcopy(descriptor.get("steps") or []),
                         }
                         if stored.get("discovered_operation_id"):
                             flow["origin_operation_id"] = stored["discovered_operation_id"]
@@ -3263,10 +3283,13 @@ class MultiAgentWorkflowController:
         return {
             role: max(
                 0,
-                identities_per_role - sum(
-                    record.get("status") in {"unknown", "valid"} and record.get("role") == role
+                identities_per_role - len({
+                    str(record.get("account_label") or record.get("credential_id") or "")
                     for record in records
-                ),
+                    if record.get("status") in {"unknown", "valid"}
+                    and record.get("role") == role
+                    and record.get("origin") == "registered"
+                }),
             )
             for role in flow["roles"]
         }
@@ -3340,6 +3363,8 @@ class MultiAgentWorkflowController:
                                 "identity_fields": list(flow.get("identity_fields") or []),
                                 "required_fields": list(flow.get("required_fields") or []),
                                 "optional_fields": list(flow.get("optional_fields") or []),
+                                "steps": deepcopy(flow.get("steps") or []),
+                                "flow_id": flow.get("flow_id"),
                             },
                             "identities_per_role": identities_per_role,
                             "credential_deficits": {role: 1},
@@ -3439,7 +3464,7 @@ class MultiAgentWorkflowController:
             failed_synthesis.sort(key=lambda task: task.created_at or "")
             if not failed_synthesis:
                 continue
-            if self._repair_failed_inventory_synthesis(plan, failed_synthesis[0], contract_tasks):
+            if self._repair_failed_inventory_synthesis(plan, failed_synthesis[0]):
                 self._reconcile_contract_prerequisite_phase(plan, owner_phase.id)
                 return True
         return False
@@ -3448,55 +3473,19 @@ class MultiAgentWorkflowController:
         self,
         plan: OperationPlan,
         synthesis_task: Task,
-        contract_tasks: list[Task],
     ) -> bool:
-        """Record one valid inherited or converted inventory manifest for a failed synthesis task."""
+        """Recover through an active replacement using the normal synthesis path."""
 
-        missing = self._missing_acceptance_criteria(
-            synthesis_task,
-            self.state.list_task_acceptance_results(synthesis_task.task_uid),
-        )
-        if len(missing) != 1 or len(synthesis_task.target_ids) != 1:
+        owner_phase = next((phase for phase in plan.phases if phase.id == synthesis_task.phase), None)
+        if owner_phase is None:
             return False
-        evidence_refs = self._contract_inventory_evidence_refs(contract_tasks)
-        manifest_ref = self._convert_contract_inventory_evidence(
-            plan,
-            synthesis_task,
-            evidence_refs,
-        )
-        if manifest_ref is None:
+        replacement = self._create_contract_prerequisite_replacement_task(synthesis_task)
+        if replacement is None:
             return False
-        payload = {
-            "status": "satisfied",
-            "disposition": "observation",
-            "summary": "Controller recovered the contracted inventory manifest from retained recon evidence.",
-            "evidence_refs": [manifest_ref],
-        }
-        try:
-            self.state.record_task_acceptance(synthesis_task, payload)
-        except (TypeError, ValueError) as error:
-            self._log_workflow(
-                "contract inventory repair acceptance rejected task=%s error=%s",
-                self._task_label(synthesis_task),
-                self._short(error),
-            )
-            return False
-        updated = self.state.mark_task(
-            synthesis_task,
-            "done",
-            "Controller recorded a validated inventory manifest from retained recon evidence.",
-        )
-        self._emit_task_done(updated)
-        self._emit_workflow_event(
-            {
-                "type": "contract_inventory_repair",
-                "task_uid": updated.task_uid,
-                "phase": updated.phase,
-                "manifest_ref": manifest_ref,
-                "outcome": "recovered",
-            }
-        )
-        return True
+        if replacement.status == "pending":
+            replacement = self._activate_task(replacement)
+        self._run_controller_inventory_synthesis(plan, owner_phase, replacement)
+        return next(task for task in self.state.list_tasks() if task.task_uid == replacement.task_uid).status == "done"
 
     def _contract_inventory_evidence_refs(self, contract_tasks: list[Task]) -> list[str]:
         """Return unique artifact evidence retained by one contracted producer workstream."""
@@ -3555,19 +3544,29 @@ class MultiAgentWorkflowController:
 
         context = task.recovery_context.get("phase_task_contract")
         dependencies = context.get("depends_on_workstreams") if isinstance(context, dict) else []
-        dependency_workstreams = {str(value) for value in dependencies if str(value).strip()}
+        dependency_workstreams = {str(value) for value in dependencies or [] if str(value).strip()}
+        if not dependency_workstreams:
+            dependency_workstreams = set(contract.mapping_workstreams)
         mapping_tasks = [
             candidate
-            for candidate in self.state.list_tasks(phase=phase.id)
+            for candidate in current_workflow_tasks(self.state.list_tasks(phase=phase.id))
             if self._task_planning_role(candidate) == "mapping"
+            and candidate.status != "superseded"
+            and self._task_matches_phase_task_contract(candidate, contract)
             and self._task_planning_workstream(candidate) in dependency_workstreams
         ]
         completed_workstreams = {
-            self._task_planning_workstream(candidate)
-            for candidate in mapping_tasks
-            if candidate.status == "done"
+            workstream for workstream in dependency_workstreams
+            if any(self._task_planning_workstream(candidate) == workstream for candidate in mapping_tasks)
+            and all(
+                candidate.status == "done" for candidate in mapping_tasks
+                if self._task_planning_workstream(candidate) == workstream
+            )
         }
-        if completed_workstreams != dependency_workstreams:
+        pending = any(candidate.status in {"active", "pending"} for candidate in mapping_tasks)
+        if pending or (
+            completed_workstreams != dependency_workstreams and not contract.allow_partial_synthesis
+        ):
             missing = sorted(dependency_workstreams - completed_workstreams)
             updated = self.state.mark_task(
                 task,
@@ -3587,7 +3586,22 @@ class MultiAgentWorkflowController:
 
         target_id = task.target_ids[0]
         target = next((item.value for item in plan.targets if item.target_id == target_id), "")
-        evidence_refs = self._contract_inventory_evidence_refs(mapping_tasks)
+        mapping_coverage = [
+            {
+                "workstream": workstream,
+                "complete": workstream in completed_workstreams,
+                "tasks": [
+                    {"task_uid": candidate.task_uid, "status": candidate.status, "reason": candidate.status_reason}
+                    for candidate in mapping_tasks
+                    if self._task_planning_workstream(candidate) == workstream
+                ],
+            }
+            for workstream in sorted(dependency_workstreams)
+        ]
+        evidence_refs = list(dict.fromkeys([
+            *self._contract_inventory_evidence_refs(mapping_tasks),
+            *(reference for reference in task.evidence if reference.startswith("artifact:")),
+        ]))
         input_fingerprint = self._inventory_synthesis_input_fingerprint(evidence_refs)
         previous_attempt = task.recovery_context.get("controller_inventory_synthesis")
         if (
@@ -3619,6 +3633,7 @@ class MultiAgentWorkflowController:
                 output_file,
                 target_id=target_id,
                 target=target,
+                mapping_coverage=mapping_coverage,
             )
             manifest_ref = str(result["artifact_ref"])
             self._load_controller_inventory_manifest(plan, manifest_ref)
@@ -4122,35 +4137,6 @@ class MultiAgentWorkflowController:
             return canonical
         return None
 
-    def _convert_contract_inventory_evidence(
-        self,
-        plan: OperationPlan,
-        synthesis_task: Task,
-        evidence_refs: list[str],
-    ) -> str | None:
-        """Consolidate retained recon evidence into one validated inventory manifest."""
-
-        target_id = synthesis_task.target_ids[0]
-        output_file = f"artifacts/contract_recovery/{synthesis_task.task_uid}-inventory_manifest.json"
-        target = next((item.value for item in plan.targets if item.target_id == target_id), "")
-        try:
-            result = consolidate_recon_artifacts(
-                evidence_refs,
-                output_file,
-                target_id=target_id,
-                target=target,
-            )
-            manifest_ref = str(result["artifact_ref"])
-            self._load_controller_inventory_manifest(plan, manifest_ref)
-            return manifest_ref
-        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-            self._log_workflow(
-                "contract inventory consolidation failed task=%s error=%s",
-                self._task_label(synthesis_task),
-                self._short(error, 240),
-            )
-            return None
-
     def _reconcile_contract_prerequisite_phase(self, plan: OperationPlan, phase_id: int) -> None:
         """Mark a repaired earlier phase done without advancing the currently active phase."""
 
@@ -4412,7 +4398,9 @@ class MultiAgentWorkflowController:
                 continue
             if getattr(proposal, "task_role", "") == "synthesis":
                 continue
-            methods = list(getattr(proposal, "methods", []) or [])
+            methods = merge_workstream_procedure_methods(
+                getattr(proposal, "methods", []) or [], getattr(proposal, "workstream", ""), contract,
+            )
             if not methods:
                 raise ValueError("task_preflight:execution_capability: procedure proposal has no declared method")
             unavailable = []
@@ -4725,7 +4713,58 @@ class MultiAgentWorkflowController:
             tools = bound_tools
         return tools
 
+    def _replace_missing_procedure_methods(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> bool:
+        """Queue one corrected continuation task without changing its frozen parent contract."""
+
+        procedure = task.acceptance.basis.procedure
+        context = task.recovery_context.get("phase_task_contract")
+        contract = self._phase_task_contract(phase)
+        if procedure is None or contract is None or not isinstance(context, dict):
+            return False
+        if context.get("module") != contract.module or context.get("phase_id") != contract.phase_id:
+            return False
+        workstream = self._task_planning_workstream(task)
+        if not contract.required_methods_by_workstream.get(workstream):
+            return False
+        methods = merge_workstream_procedure_methods(
+            procedure.methods, workstream, contract,
+            self._task_execution_targets(plan, task),
+        )
+        if set(methods) == set(canonical_procedure_methods(procedure.methods, self._task_execution_targets(plan, task))):
+            return False
+        trigger = "required_procedure_methods"
+        replacement = next((candidate for candidate in self.state.list_tasks()
+                            if candidate.replacement_of == task.task_uid
+                            and candidate.recovery_context.get("trigger") == trigger
+                            and candidate.acceptance.basis.procedure is not None
+                            and tuple(candidate.acceptance.basis.procedure.methods) == tuple(methods)), None)
+        if replacement is None:
+            acceptance = replace(
+                task.acceptance,
+                basis=replace(task.acceptance.basis, procedure=replace(procedure, methods=tuple(methods))),
+                criteria=tuple(replace(criterion, execution_requirements=tuple(
+                    replace(requirement, description=(
+                        f"Produce execution evidence for {', '.join(methods)} against {requirement.subject_ref}."
+                    )) for requirement in criterion.execution_requirements
+                )) for criterion in task.acceptance.criteria),
+                frozen_at="", manifest_hash="",
+            )
+            recovery_context = {key: value for key, value in task.recovery_context.items() if key not in {
+                "execution_evidence_receipts", "controller_execution_evidence", "execution_receipt_producers",
+                "inherited_execution_receipts", "procedure_methods",
+            }}
+            replacement = replace(
+                task, task_uid=str(uuid.uuid4()), acceptance=acceptance, status="pending", status_reason=None,
+                replacement_of=task.task_uid, supersedes_criteria=[criterion.id for criterion in task.acceptance.criteria],
+                recovery_context={**recovery_context, "trigger": trigger, "procedure_methods": methods},
+            )
+            self.state.store_task(replacement)
+        self._queue_replacement_task(task, replacement, trigger)
+        return True
+
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
+        if self._replace_missing_procedure_methods(plan, phase, task):
+            return
         if phase.task_creation_mode == "hypothesis_dependent":
             task = self._prepare_hypothesis_consumer(plan, task)
             if task is None:
@@ -4839,6 +4878,10 @@ class MultiAgentWorkflowController:
                         outcomes.append(outcome)
             return self._resolve_controller_execution_evidence(plan, current_task, criterion, outcomes)
 
+        def reconcile_worker_acceptance(current_task: Task, payload: dict[str, Any]) -> dict[str, Any]:
+            live = active_live_outcomes_reader() if active_live_outcomes_reader is not None else []
+            return self._registration_acceptance_payload(current_task, [*tool_outcomes, *live]) or payload
+
         tools = self._resolve_task_executor_base_tools(plan, task, prompt_spec)
         reviewed_tools = prompt_spec.get("_reviewed_tool_names")
         if reviewed_tools is not None and sorted(get_tool_name(item) for item in tools) != reviewed_tools:
@@ -4864,6 +4907,8 @@ class MultiAgentWorkflowController:
                     task.task_uid,
                     task,
                     execution_evidence_resolver=resolve_acceptance_execution_evidence,
+                    **({"acceptance_reconciler": reconcile_worker_acceptance}
+                       if self._is_credential_provisioning_task(task) else {}),
                 )
                 tools.append(acceptance_tool)
         execution_prompt = str(prompt_spec.get("prompt") or task.objective)
@@ -4899,19 +4944,7 @@ class MultiAgentWorkflowController:
                 "target endpoint.\n"
                 + finding_context
             )
-        if task.recovery_context:
-            recovery_context = task.recovery_context
-            execution_prompt += (
-                "\n\n## Recovery Contract (Controller-owned)\n"
-                f"Original objective: {recovery_context.get('original_objective', task.objective)}\n"
-                f"Recovery trigger: {recovery_context.get('trigger', 'bounded recovery')}\n"
-                "Unresolved acceptance work: "
-                + ", ".join(recovery_context.get("unresolved_criteria", []))
-                + "\nRequired procedure methods: "
-                + ", ".join(recovery_context.get("procedure_methods", []))
-                + "\nContinue the original phase-specific objective. Do not substitute generic mapping, "
-                "artifact reading, or unrelated exploration for the unresolved acceptance work.\n"
-            )
+        execution_prompt += self._recovery_contract_guidance(task)
         evidence_refs = list(task.evidence)
         for result in self.state.list_task_acceptance_results(task.task_uid):
             evidence_refs.extend(result.evidence_refs)
@@ -4948,6 +4981,8 @@ class MultiAgentWorkflowController:
                 self._tool_names(tools),
                 selected_shell_commands,
                 plan=plan,
+                execution_state=self._controller_execution_state(task),
+                task_policy=self._task_policy_guidance(task),
             )
             + "\n\n"
             + self._tool_selection_policy()
@@ -5432,13 +5467,19 @@ class MultiAgentWorkflowController:
                     if missing_acceptance_recovery_active
                     else task_policy
                 )
+                execution_state = self._controller_execution_state(task)
+                execution_repair = bool(execution_state["unresolved_requirement_ids"]) and (
+                    acceptance_recovery_active or missing_acceptance_recovery_active
+                )
+                if execution_repair:
+                    current_policy = task_policy
                 closure_tools = (
                     [
                         tool
                         for tool in tools
                         if get_tool_name(tool) in current_policy.recovery_allowed_tool_names
                     ]
-                    if (
+                    if not execution_repair and (
                         acceptance_recovery_active
                         or missing_acceptance_recovery_active
                         or evidence_prerequisite_recovery_active
@@ -5501,7 +5542,12 @@ class MultiAgentWorkflowController:
                     )
 
                     def registration_succeeded(outcomes: list[ToolOutcome]) -> bool:
-                        return self._registered_worker_success(task, registration_target, registration_roles, outcomes)
+                        completion = self._registered_worker_completion(
+                            task, registration_target, registration_roles, outcomes,
+                        )
+                        if completion is not None:
+                            self._persist_worker_completion(task, completion)
+                        return completion is not None
 
                     def registration_terminal() -> str | None:
                         live = active_live_outcomes_reader() if active_live_outcomes_reader is not None else []
@@ -5542,13 +5588,22 @@ class MultiAgentWorkflowController:
                         cycle_tool_names,
                         cycle_shell_commands,
                         plan=plan,
+                        execution_state=execution_state,
+                        task_policy=self._task_policy_guidance(task),
                     )
                     + "\n\n"
                     + self._tool_selection_policy()
                 )
-                worker_result = run_executor(cycle_prompt, current_policy, cycle_tools)
+                completed_payload = self._registration_acceptance_payload(task, tool_outcomes)
+                worker_result = (
+                    TaskExecutorCycleResult(text="Registration already completed; reconcile retained acceptance.", outcomes=[])
+                    if completed_payload is not None
+                    else run_executor(cycle_prompt, current_policy, cycle_tools)
+                )
                 cycle_result = self._executor_cycle_result(worker_result)
                 tool_outcomes.extend(cycle_result.outcomes)
+                for criterion in task.acceptance.criteria:
+                    self._resolve_controller_execution_evidence(plan, task, criterion, tool_outcomes)
                 if registration_attempt is not None:
                     tool_outcomes.extend(self._refine_worker_flow(
                         task, registration_target, "registration", registration_attempt, tool_outcomes,
@@ -5563,6 +5618,21 @@ class MultiAgentWorkflowController:
                     max_token_synthesis_recovery_active = False
                 task = self._retain_task_artifact_evidence(task, tool_outcomes)
                 self._emit_model_claim_conflicts(task, cycle_result.text, cycle_result.outcomes)
+                if registration_attempt is not None and acceptance_tool is not None:
+                    completed_payload = self._registration_acceptance_payload(task, tool_outcomes, registration_attempt)
+                    if completed_payload is not None and self._missing_acceptance_criteria(
+                        task, self.state.list_task_acceptance_results(task.task_uid),
+                    ):
+                        self._replay_controller_acceptance(task, acceptance_tool, completed_payload)
+                    acceptance_results = self.state.list_task_acceptance_results(task.task_uid)
+                    if completed_payload is not None and not self._missing_acceptance_criteria(task, acceptance_results):
+                        self._validate_executor_follow_up_phases(plan, phase, existing_task_uids)
+                        decision = self._evaluate_task(
+                            plan, phase, task, self._worker_context_summary(cycle_result.text), tool_outcomes,
+                            acceptance_results, cycle=cycle, cycle_total=maximum_actor_cycles,
+                        )
+                        if decision.status == "done":
+                            break
                 deferred_acceptance_failure_ids: set[str] = set()
                 if execution_prerequisite_recovery_active or output_prerequisite_recovery_active:
                     for criterion in task.acceptance.criteria:
@@ -7379,6 +7449,13 @@ class MultiAgentWorkflowController:
             )
             + " Do not broaden scope or add criteria."
         )
+        execution_state = self._controller_execution_state(task)
+        if execution_state["unresolved_requirement_ids"]:
+            completion_instruction = (
+                "Complete only the unresolved execution requirements against their frozen subjects, preserve "
+                "qualifying artifacts, then submit the required terminal result. Do not repeat resolved work "
+                "or broaden scope."
+            )
         if evaluator_instructions:
             evaluator_section = f"\nEvaluator corrective guidance:\n{evaluator_instructions}\n"
             required_tool_section = ""
@@ -7406,6 +7483,7 @@ Missing criterion: {criteria}
 Durable evidence ledger:
 {evidence_ledger}
 {required_tool_section}{evaluator_section}
+{self._worker_completion_section(task)}
 
 {completion_instruction}{finding_instruction}
 {loop_section}
@@ -7454,6 +7532,7 @@ Assigned objective: {task.objective}
 Frozen acceptance criteria: {criteria}
 Durable evidence ledger:
 {evidence_ledger}
+{self._worker_completion_section(task)}
 
 Evaluator corrective guidance:
 {evaluator_instructions}
@@ -7581,9 +7660,15 @@ describe record_task_acceptance.
             )
             for item in recovery_evidence
         )
+        execution_state = self._controller_execution_state(task)
+        recovery_instruction = (
+            "Complete only the unresolved execution requirements against their frozen subjects and preserve "
+            "qualifying artifacts before recording acceptance. Do not repeat resolved work or broaden scope."
+            if execution_state["unresolved_requirement_ids"]
+            else "Do not repeat discovery, scanning, testing, or prior shell commands. Use only retained evidence."
+        )
         return f"""## Required Terminal Acceptance Recovery
-The normal task cycles ended without a record_task_acceptance call. Do not repeat discovery, scanning, testing, or
-prior shell commands.
+The normal task cycles ended without a record_task_acceptance call. {recovery_instruction}
 
 Assigned objective: {task.objective}
 {self._executable_target_scope_text(plan, task)}
@@ -7591,7 +7676,7 @@ Missing criterion: {criteria}
 Durable evidence ledger:
 {evidence_ledger}
 
-Use only this evidence. If the frozen criterion requires an observation or memory reference, call the appropriate
+If the frozen criterion requires an observation or memory reference, call the appropriate
 storage tool exactly once first. Then call record_task_acceptance exactly once using only canonical references returned
 by the storage tool or listed above. Do not add criteria or broaden scope.
 """
@@ -9210,6 +9295,7 @@ Return exactly one decision for each candidate.
                             len(repair_feedback),
                         )
                         active_role = "task_prompt_builder"
+                        original_spec = prompt_spec
                         prompt_spec = self._run_json_text_agent(
                             "task_prompt_builder",
                             self._task_prompt_bounded_repair_prompt(
@@ -9220,6 +9306,8 @@ Return exactly one decision for each candidate.
                             cycle=iteration + 1,
                             cycle_total=cycle_total + 1,
                         )
+                        if deterministic_scope_violation:
+                            prompt_spec = self._preserve_scope_repair_selections(original_spec, prompt_spec)
                         prompt_spec = self._normalize_task_prompt_spec(
                             self._filter_repairable_shell_selections(prompt_spec), task, memory_records
                         )
@@ -9280,6 +9368,7 @@ Return exactly one decision for each candidate.
                     len(critique["feedback"]),
                 )
                 active_role = "task_prompt_builder"
+                original_spec = prompt_spec
                 prompt_spec = self._run_json_text_agent(
                     "task_prompt_builder",
                     self._task_prompt_revision_prompt(
@@ -9290,6 +9379,8 @@ Return exactly one decision for each candidate.
                     cycle=iteration + 1,
                     cycle_total=cycle_total,
                 )
+                if deterministic_scope_violation:
+                    prompt_spec = self._preserve_scope_repair_selections(original_spec, prompt_spec)
                 prompt_spec = self._normalize_task_prompt_spec(prompt_spec, task, memory_records)
         except Exception as error:
             if (
@@ -9418,6 +9509,12 @@ Return exactly one decision for each candidate.
         else:
             suffix = "unavailable"
         return f"{source}_{suffix}"
+
+    @staticmethod
+    def _preserve_scope_repair_selections(original: dict[str, Any], repaired: dict[str, Any]) -> dict[str, Any]:
+        """Restrict a deterministic scope repair to prompt text."""
+
+        return {**original, "prompt": repaired.get("prompt", original["prompt"])}
 
     def _filter_repairable_shell_selections(self, prompt_spec: dict[str, Any]) -> dict[str, Any]:
         """Drop unavailable shell selections during the one bounded repair pass."""
@@ -9884,11 +9981,11 @@ Return JSON exactly: {response_schema}.
         if raw_flow.get("provenance") != "observed_worker_flow":
             return None
         if kind not in {
-            "api_form", "browser_form", "browser_redirect", "browser_mfa", "api_key", "oauth2_client"
+            "browser_form", "browser_redirect", "browser_mfa", "api_key", "oauth2_client"
         }:
             return None
         browser_kind = kind in {"browser_form", "browser_redirect", "browser_mfa"}
-        if not validation_url and not (allow_provisional and browser_kind):
+        if not validation_url and not browser_kind:
             return None
         login_url = login_url or validation_url if kind in {"api_key", "oauth2_client"} else login_url
         if (
@@ -9903,6 +10000,7 @@ Return JSON exactly: {response_schema}.
             storage_header_bindings = _normalize_storage_header_bindings(
                 raw_bindings if isinstance(raw_bindings, list) else [], authorization_storage_key
             )
+            request_header_names = _normalize_request_header_names(raw_flow.get("request_header_names"))
         except ValueError:
             return None
         raw_origins = raw_flow.get("allowed_origins")
@@ -9923,6 +10021,7 @@ Return JSON exactly: {response_schema}.
             "validation_url": validation_url,
             "authorization_storage_key": authorization_storage_key,
             "storage_header_bindings": storage_header_bindings,
+            "request_header_names": request_header_names,
             "allowed_origins": list(dict.fromkeys((self._authentication_origin(login_url), *allowed_origins))),
         }
 
@@ -9930,10 +10029,14 @@ Return JSON exactly: {response_schema}.
         self,
         plan: OperationPlan,
         task: Task,
+        *,
+        excluded_credential_ids: tuple[str, ...] = (),
     ) -> AuthenticationSetupRequest:
         """Build target and credential metadata without exposing payload values to the worker."""
 
-        targets = tuple(self._task_executable_target_values(plan, task))
+        targets = tuple(
+            target.rstrip("/") or target for target in self._task_executable_target_values(plan, task)
+        )
         validated_flows = self._authentication_flow_descriptors(
             plan, task, targets, statuses=("validated",),
         )
@@ -9978,7 +10081,10 @@ Return JSON exactly: {response_schema}.
                 "credential_id": str(record.get("credential_id") or ""),
                 "credential_type": str(record.get("credential_type") or ""),
                 "role": str(record.get("role") or ""),
-                "target": str(record.get("target") or target).rstrip("/"),
+                "account_label": str(record.get("account_label") or ""),
+                "tenant_label": str(record.get("tenant_label") or ""),
+                "status": str(record.get("status") or ""),
+                "target": target,
             }
             for target in targets
             for record in store.list_credentials(
@@ -9986,10 +10092,25 @@ Return JSON exactly: {response_schema}.
                 target=canonicalize_credential_target(target),
             )
             if str(record.get("credential_id") or "")
-            and (not requested_ids or str(record.get("credential_id")) in requested_ids)
+            and str(record.get("credential_id")) not in excluded_credential_ids
+        )
+        raw_requirement = task.recovery_context.get("authentication_requirement", {})
+        requirement = AuthenticationRequirement.model_validate(raw_requirement)
+        if not requirement.roles and task.auth_context.get("roles"):
+            requirement = requirement.model_copy(update={"roles": list(task.auth_context["roles"])})
+        binding = task.recovery_context.get("validation_auth_context", {})
+        frozen_ids = binding.get("credential_ids", ()) if isinstance(binding, dict) else ()
+        credentials = select_authentication_credentials(
+            credentials, targets, requirement,
+            is_valid=lambda record: authentication_context_is_valid(
+                self.runtime.operation_id, record["target"], record["credential_id"],
+            ),
+            preferred_ids=requested_ids,
+            frozen_ids=frozen_ids,
         )
         return AuthenticationSetupRequest(
             task_uid=task.task_uid,
+            comparison=requirement.comparison,
             workstream=self._task_planning_workstream(task),
             targets=targets,
             allowed_origins=allowed_origins,
@@ -10036,6 +10157,7 @@ Return JSON exactly: {response_schema}.
             "targets": list(setup.targets) if setup else [],
             "credential_ids": list(credential_ids),
             "credential_count": len(credential_ids),
+            "comparison": setup.comparison if setup else "none",
         })
         self._log_workflow(
             "authentication setup task=%s status=%s credentials=%s reason=%s",
@@ -10074,8 +10196,6 @@ Return JSON exactly: {response_schema}.
 
         flow_kinds = {str(flow.get("kind") or "") for flow in authentication_flows}
         allowed_tool_names = {get_tool_name(item) for item in tools}
-        if flow_kinds and "api_form" not in flow_kinds:
-            allowed_tool_names.discard("ensure_authenticated_context")
         if flow_kinds and not flow_kinds & {"browser_form", "browser_redirect", "browser_mfa"}:
             allowed_tool_names -= {
                 "browser_goto_url", "browser_observe_page", "browser_get_page_html",
@@ -10162,7 +10282,6 @@ Return JSON exactly: {response_schema}.
 
         credential_type = str(credential.get("credential_type") or "")
         credential_id = str(credential["credential_id"])
-        flow_id = str(flow.get("flow_id") or "")
         mailbox_id = ""
         allowed = {"checkout_credential", "shell"}
         if credential_type == "username_password":
@@ -10182,8 +10301,6 @@ Return JSON exactly: {response_schema}.
                 allowed.add("generate_mfa_code")
             elif mfa_type == "email":
                 allowed.update({"begin_email_mfa_retrieval", "request_mfa_code", "retrieve_email_mfa_code"})
-        if credential_type == "username_password":
-            allowed.add("ensure_authenticated_context")
         elif credential_type in {"api_key", "oauth2_client"}:
             allowed.add("establish_credential_authenticated_context")
         bound = []
@@ -10195,7 +10312,7 @@ Return JSON exactly: {response_schema}.
             if name == "checkout_credential":
                 fixed = {"credential_id": credential_id, "purpose": "authentication setup"}
             elif name in {
-                "ensure_authenticated_context", "capture_browser_authenticated_context",
+                "capture_browser_authenticated_context",
                 "establish_credential_authenticated_context", "generate_mfa_code", "request_mfa_code",
             }:
                 fixed = {"credential_id": credential_id}
@@ -10205,14 +10322,8 @@ Return JSON exactly: {response_schema}.
                 })
             if name == "begin_email_mfa_retrieval" and mailbox_id:
                 fixed = {"mailbox_credential_id": mailbox_id}
-            if name == "ensure_authenticated_context":
-                fixed["flow_id"] = flow_id
             if name == "capture_browser_authenticated_context":
                 fixed["storage_header_bindings"] = flow.get("storage_header_bindings") or []
-            if name == "ensure_authenticated_context":
-                fixed.update({
-                    "login_url": "", "validation_url": "", "request_format": "", "additional_fields": None,
-                })
             if name == "establish_credential_authenticated_context" and flow.get("validation_url"):
                 fixed["validation_url"] = str(flow["validation_url"])
             bound.append(_bind_single_choice_tool(item, fixed) if fixed else item)
@@ -10256,11 +10367,15 @@ Return JSON exactly: {response_schema}.
             rows = list_flows(target, purpose=purpose, statuses=("validated",)) if callable(list_flows) else []
             existing = next(
                 (
-                    row["descriptor"]
+                    {**row["descriptor"], "flow_id": row.get("flow_id")}
                     for row in rows
                     if row["descriptor"].get("flow_version")
                     == (AUTHENTICATION_FLOW_VERSION if purpose == "authentication" else REGISTRATION_FLOW_VERSION)
-                    and (purpose != "registration" or tuple(row["descriptor"].get("roles") or ()) == roles)
+                    and (purpose != "registration" or (
+                        tuple(row["descriptor"].get("roles") or ()) == roles
+                        and str(row["descriptor"].get("login_url") or "")
+                        == str(task.recovery_context.get("conditional_phase", {}).get("registration_flow", {}).get("url") or "")
+                    ))
                     and (not kinds or row["descriptor"].get("kind") in kinds)
                 ),
                 None,
@@ -10271,6 +10386,13 @@ Return JSON exactly: {response_schema}.
                 "reviewed": False,
                 "successful": False,
             }
+            completed = next((item for item in self._worker_completions(task)
+                              if item.purpose == purpose and item.target == target
+                              and (not roles or item.role in roles)), None)
+            if completed is not None:
+                self._worker_flow_attempts[key]["successful"] = True
+                if completed.mapping_approved and existing and existing.get("flow_id") == completed.flow_id:
+                    self._worker_flow_attempts[key].update(reviewed=True, mapping_approved=True)
         return self._worker_flow_attempts[key]
 
     def _worker_flow_recorder(
@@ -10313,6 +10435,9 @@ Return JSON exactly: {response_schema}.
                 {"storage_header_bindings": list(attempt["controller_bindings"]), "authorization_storage_key": ""},
                 required=True,
             )
+        attempt["reviewable_fields"] = sorted(
+            ((get_tool_spec(recorder) or {}).get("inputSchema") or {}).get("json", {}).get("properties", {})
+        )
         return recorder
 
     @staticmethod
@@ -10336,6 +10461,71 @@ Return JSON exactly: {response_schema}.
     ) -> bool:
         """Require durable registration from this task's successful credential-storage call."""
 
+        return self._registered_worker_completion(task, target, roles, outcomes) is not None
+
+    def _worker_completions(self, task: Task) -> list[WorkerCompletion]:
+        """Restore controller facts only while their referenced credential/context remains usable."""
+
+        current = next((item for item in self.state.list_tasks() if item.task_uid == task.task_uid), task)
+        retained = current.recovery_context.get("worker_completions", {})
+        if not isinstance(retained, dict):
+            return []
+        completions = []
+        for value in retained.values():
+            try:
+                completion = WorkerCompletion.from_dict(value)
+                if completion.operation_id != self.runtime.operation_id or completion.task_uid != task.task_uid:
+                    continue
+                if completion.purpose == "registration":
+                    record = _get_database_store().get_credential(completion.credential_id)
+                    if not self._registered_credential_matches(record, completion.target, (completion.role,)):
+                        continue
+                elif not authentication_context_is_valid(
+                    completion.operation_id, completion.target, completion.credential_id,
+                ):
+                    continue
+                completions.append(completion)
+            except (ValueError, KeyError, TypeError):
+                continue
+        return completions
+
+    @staticmethod
+    def _registered_credential_matches(record: Any, target: str, roles: tuple[str, ...]) -> bool:
+        return bool(
+            record and record["origin"] == "registered" and record["target"] == target
+            and record["role"] in roles and record["status"] not in {"invalid", "revoked", "retired"}
+        )
+
+    def _persist_worker_completion(self, task: Task, completion: WorkerCompletion) -> None:
+        current = next((item for item in self.state.list_tasks() if item.task_uid == task.task_uid), task)
+        existing = current.recovery_context.get("worker_completions")
+        retained = dict(existing) if isinstance(existing, dict) else {}
+        key = f"{completion.purpose}:{completion.credential_id}"
+        value = completion.to_dict()
+        if retained.get(key) != value:
+            retained[key] = value
+            self.state.patch_task(task.task_uid, recovery_context_updates={"worker_completions": retained})
+
+    def _worker_completion_section(self, task: Task) -> str:
+        completions = self._worker_completions(task)
+        if not completions:
+            return ""
+        fields = ("purpose", "target", "role", "credential_id", "functional_success", "mapping_approved", "flow_id")
+        rows = [",".join(sanitize_toon_value(completion.to_dict()[field]) for field in fields)
+                for completion in completions]
+        return (
+            "\n## Controller-confirmed worker completion\n"
+            f"completions[{len(rows)}]{{{','.join(fields)}}}:\n"
+            + "\n".join(f"  {row}" for row in rows) + "\n"
+            + "Evidence: " + ", ".join(dict.fromkeys(ref for item in completions for ref in item.evidence_refs)) + "\n"
+        )
+
+    def _registered_worker_completion(
+        self, task: Task, target: str, roles: tuple[str, ...], outcomes: list[ToolOutcome],
+    ) -> WorkerCompletion | None:
+        for completion in self._worker_completions(task):
+            if completion.purpose == "registration" and completion.target == target and completion.role in roles:
+                return completion
         for outcome in outcomes:
             if not outcome.success or outcome.tool_name != "store_credential":
                 continue
@@ -10344,17 +10534,55 @@ Return JSON exactly: {response_schema}.
                 if payload.get("stored") is not True or not isinstance(payload.get("credential"), dict):
                     continue
                 record = _get_database_store().get_credential(str(payload["credential"].get("credential_id") or ""))
-                if (
-                    record
-                    and record["origin"] == "registered"
-                    and record["target"] == target
-                    and record["role"] in roles
-                    and record["status"] not in {"invalid", "revoked", "retired"}
-                ):
-                    return True
+                if self._registered_credential_matches(record, target, roles):
+                    references = set(self._artifact_refs_from_tool_outcomes([outcome]))
+                    submitted_refs = (outcome.structured_input or {}).get("evidence_refs", [])
+                    for reference in extract_artifact_references(json.dumps(submitted_refs)):
+                        references.add(canonical_artifact_reference(reference))
+                    return WorkerCompletion(
+                        operation_id=self.runtime.operation_id, task_uid=task.task_uid, purpose="registration",
+                        target=target, role=record["role"], credential_id=payload["credential"]["credential_id"],
+                        producer_id=outcome.tool_use_id,
+                        evidence_refs=tuple(sorted(references)),
+                    )
             except (ValueError, KeyError, TypeError):
                 continue
-        return False
+        return None
+
+    def _registration_acceptance_payload(
+        self, task: Task, outcomes: list[ToolOutcome], attempt: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Translate task-local provisioning proof into canonical acceptance before publication."""
+
+        if not self._is_credential_provisioning_task(task):
+            return None
+        flow = task.recovery_context["conditional_phase"]["registration_flow"]
+        completion = self._registered_worker_completion(
+            task, str(flow["target"]).rstrip("/"), tuple(flow["roles"]), outcomes,
+        )
+        if completion is None:
+            return None
+        if attempt is not None:
+            completion = replace(
+                completion, mapping_approved=bool(attempt.get("mapping_approved")),
+                flow_id=str((attempt.get("existing") or {}).get("flow_id") or ""),
+            )
+        self._persist_worker_completion(task, completion)
+        if not completion.evidence_refs:
+            return None
+        return {
+            "status": "satisfied", "disposition": "observation",
+            "summary": (
+                f"Registered identity persisted for role {completion.role} on {completion.target}; "
+                f"credential_id={completion.credential_id}. "
+                + ("Registration flow mapping approved." if completion.mapping_approved else
+                   "Registration succeeded; reusable flow mapping is not yet approved.")
+                + (f" Flow review stopped: {attempt['review_stop_reason']}; "
+                   f"reviews={attempt['review_count']}."
+                   if attempt and attempt.get("review_stop_reason") else "")
+            ),
+            "evidence_refs": list(completion.evidence_refs),
+        }
 
     def _refine_worker_flow(
         self,
@@ -10374,6 +10602,8 @@ Return JSON exactly: {response_schema}.
         role = f"{purpose}_flow_critic"
         context = {"task_uid": task.task_uid, "target": target, "purpose": purpose}
         added: list[ToolOutcome] = []
+        reviews = 0
+        stop_reason = "review_limit_reached"
         feedback = ["Record the completed observed flow and its ordered steps."]
         repair_tools = [
             tool
@@ -10391,19 +10621,83 @@ Return JSON exactly: {response_schema}.
             if callable(attempt.get("success_check")):
                 attempt["successful"] = attempt["success_check"]([*outcomes, *added])
             if callable(attempt.get("stop_check")) and attempt["stop_check"]():
+                stop_reason = "functional_attempt_stopped"
                 break
+            successful_before_repair = attempt["successful"]
             candidate = attempt["candidate"]
-            if candidate and attempt.get("validation_url"):
-                candidate["validation_url"] = attempt["validation_url"]
-            references = self._artifact_refs_from_tool_outcomes([*outcomes, *added])
+            if candidate and attempt["successful"] and purpose == "authentication":
+                candidate["validation_url"] = attempt.get("validation_url") or ""
+            references = sorted(set(self._artifact_refs_from_tool_outcomes([*outcomes, *added])) | {
+                ref for completion in self._worker_completions(task)
+                if completion.purpose == purpose and completion.target == target for ref in completion.evidence_refs
+            })
             try:
+                if cycle > 1 or not candidate or not references:
+                    instruction = (
+                        "The functional action already succeeded. Repair only flow metadata and supporting evidence; "
+                        "do not create another account, resubmit, or log in again. Continue from the current browser.\n"
+                        if attempt["successful"]
+                        else "Continue the assigned attempt from the current browser step. Keep the same credential or "
+                        "registration identity. Check prior outcomes before submitting; "
+                        "never repeat a successful action.\n"
+                    )
+                    prompt = (
+                        instruction
+                        + "Worker objective: " + str(attempt.get("worker_objective") or task.objective) + "\n"
+                        + str(attempt.get("worker_context") or "") + "\n"
+                        + json.dumps({"candidate": candidate, "corrections": feedback})
+                        + self._tool_outcome_section([*outcomes, *added])
+                        + self._worker_completion_section(task)
+                    )
+                    result = self._executor_cycle_result(self._run_flow_refinement_stage(
+                        lambda: repair(prompt, repair_tools if attempt["successful"] else tools),
+                        f"{purpose}_flow_actor", "actor", cycle, context,
+                    ))
+                    added.extend(result.outcomes)
+                    attempt["last_worker_reason"] = result.reason
+                    self._log_workflow(
+                        "flow worker repair finished task=%s purpose=%s cycle=%s outcome=%s",
+                        task.task_uid, purpose, cycle, result.reason or "worker_result_unavailable",
+                    )
+                if callable(attempt.get("success_check")):
+                    attempt["successful"] = attempt["success_check"]([*outcomes, *added])
+                if callable(attempt.get("stop_check")) and attempt["stop_check"]():
+                    stop_reason = "functional_attempt_stopped"
+                    break
+                if attempt["successful"] and not successful_before_repair and not attempt["candidate"]:
+                    # Functional recovery completed without a mapping; stage metadata before its first review.
+                    recording_prompt = (
+                        "The functional action already succeeded. Repair only flow metadata and supporting evidence; "
+                        "do not create another account, resubmit, or log in again.\n"
+                        + self._tool_outcome_section([*outcomes, *added])
+                        + self._worker_completion_section(task)
+                    )
+                    recorded = self._executor_cycle_result(self._run_flow_refinement_stage(
+                        lambda: repair(recording_prompt, repair_tools),
+                        f"{purpose}_flow_actor", "actor", cycle, context,
+                    ))
+                    added.extend(recorded.outcomes)
+                    attempt["last_worker_reason"] = recorded.reason
+                candidate = attempt["candidate"]
+                if candidate and attempt["successful"] and purpose == "authentication":
+                    candidate["validation_url"] = attempt.get("validation_url") or ""
+                references = sorted(set(self._artifact_refs_from_tool_outcomes([*outcomes, *added])) | {
+                    ref for completion in self._worker_completions(task)
+                    if completion.purpose == purpose and completion.target == target for ref in completion.evidence_refs
+                })
+                if not candidate or not references:
+                    stop_reason = "candidate_or_evidence_unavailable"
+                    break
                 if candidate and references:
+                    reviews += 1
                     critique = self._run_flow_refinement_stage(
                         lambda: self._run_json_text_agent(
                             role,
                             self._flow_refinement_critic_prompt(
-                                purpose, target, candidate, [*outcomes, *added], feedback
+                                purpose, target, candidate, [*outcomes, *added], feedback,
+                                reviewable_fields=attempt.get("reviewable_fields"),
                             )
+                            + self._worker_completion_section(task)
                             + f"\nController-confirmed functional success: {attempt['successful']}",
                             [],
                             "Review the completed flow against current-task execution evidence. Never perform actions.",
@@ -10426,7 +10720,7 @@ Return JSON exactly: {response_schema}.
                             "operation_id": self.runtime.operation_id,
                             "task_uid": task.task_uid,
                             "purpose": purpose,
-                            "cycle": cycle,
+                            "cycle": cycle, "reviews": reviews, "stop_reason": "approved",
                             "approval_digests": {
                                 ref: hashlib.sha256(Path(resolve_operation_artifact_path(ref)).read_bytes()).hexdigest()
                                 for ref in published["evidence_refs"]
@@ -10437,52 +10731,44 @@ Return JSON exactly: {response_schema}.
                             published,
                             status="validated",
                         )
+                        attempt["review_count"] = reviews
+                        attempt["review_stop_reason"] = "approved"
+                        attempt["mapping_approved"] = True
                         attempt["existing"] = {**published, "flow_id": stored["flow_id"]}
                         self._emit_workflow_event(
-                            {"type": "flow_refinement_review", **context, "outcome": "approved", "cycle": cycle}
+                            {
+                                "type": "flow_refinement_review", **context, "outcome": "approved", "cycle": cycle,
+                                "functional_success": True, "reviews": reviews, "stop_reason": "approved",
+                            }
                         )
                         return added
                     feedback = critique["feedback"] or ["Complete the assigned functional action before publication."]
-                if cycle < self.flow_refinement_cycles:
-                    instruction = (
-                        "The functional action already succeeded. Repair only flow metadata and supporting evidence; "
-                        "do not create another account, resubmit, or log in again. Continue from the current browser.\n"
-                        if attempt["successful"]
-                        else "Continue the assigned attempt from the current browser step. Keep the same credential or "
-                        "registration identity. Check prior outcomes before submitting; "
-                        "never repeat a successful action.\n"
-                    )
-                    prompt = (
-                        instruction
-                        + "Worker objective: " + str(attempt.get("worker_objective") or task.objective) + "\n"
-                        + str(attempt.get("worker_context") or "") + "\n"
-                        + json.dumps({"candidate": candidate, "corrections": feedback})
-                        + self._tool_outcome_section([*outcomes, *added])
-                    )
-                    result = self._executor_cycle_result(
-                        repair(prompt, repair_tools if attempt["successful"] else tools)
-                    )
-                    added.extend(result.outcomes)
-                    attempt["last_worker_reason"] = result.reason
-                    self._log_workflow(
-                        "flow worker repair finished task=%s purpose=%s cycle=%s outcome=%s",
-                        task.task_uid, purpose, cycle, result.reason or "worker_result_unavailable",
-                    )
             except BudgetLimitReached:
                 raise
             except Exception as error:
+                stop_reason = "review_error"
                 feedback = [f"Flow review failed: {type(error).__name__}"]
                 break
+        if stop_reason == "review_limit_reached" and reviews == 0:
+            stop_reason = "candidate_or_evidence_unavailable"
+        attempt["review_count"] = reviews
+        attempt["review_stop_reason"] = stop_reason
         self.state.patch_task(
             task.task_uid,
             recovery_context_updates={
                 f"{purpose}_flow_gap": {
                     "reason": "mapping_not_approved",
+                    "reviews": reviews, "stop_reason": stop_reason,
+                    "functional_success": attempt["successful"],
                     "feedback": feedback,
                 }
             },
         )
-        self._emit_workflow_event({"type": "flow_refinement_review", **context, "outcome": "coverage_gap"})
+        self._emit_workflow_event({
+            "type": "flow_refinement_review", **context, "outcome": "coverage_gap",
+            "functional_success": attempt["successful"], "reviews": reviews, "stop_reason": stop_reason,
+            "feedback": feedback,
+        })
         return added
 
     def _flow_refinement_artifact_tools(self, references: list[str] | None = None) -> list[Any]:
@@ -10594,9 +10880,28 @@ Return JSON exactly: {response_schema}.
         candidate: dict[str, Any],
         outcomes: list[ToolOutcome],
         feedback: list[str],
+        reviewable_fields: list[str] | None = None,
     ) -> str:
         """Keep semantic mapping review distinct from subsequent credential validation."""
 
+        if reviewable_fields is None:
+            recorder = build_record_authentication_flow_tool(
+                target=target, purpose=purpose, kind=candidate["kind"],
+            )
+            reviewable_fields = sorted(get_tool_spec(recorder)["inputSchema"]["json"]["properties"])
+        observed = {key: value for key, value in candidate.items() if key in reviewable_fields}
+        controller_metadata = (
+            "Controller-bound storage metadata: " + json.dumps({
+                key: candidate[key] for key in ("storage_header_bindings", "authorization_storage_key")
+                if key in candidate and key not in reviewable_fields
+            }) if purpose == "authentication" else ""
+        )
+        header_requirements = (
+            "Registration has no authentication header metadata to review."
+            if purpose == "registration" else
+            "request_header_names lists observed credential headers, not all HTTP headers. "
+            "Storage header bindings must match controller-supplied metadata."
+        )
         browser_flow = candidate.get("kind") in {
             "browser_form", "browser_redirect", "browser_mfa", "browser_registration",
         }
@@ -10607,24 +10912,29 @@ Return JSON exactly: {response_schema}.
             if browser_flow else
             "Check the observed URL, flow kind, request format, fields, and supported redirects."
         )
-        return f"""Review the observed {purpose} flow for {target} against its cited artifacts.
+        return f"""Review the observed {purpose} {candidate.get("kind", "")} flow for {target} against cited artifacts.
 Return JSON with approved (boolean), feedback (list), and supporting_evidence_refs (list).
 Select supporting references from the authorized observations below; approval requires at least one.
 Extra observations and duplicate captures alone are not reasons to reject a supported mapping.
 Rejection feedback must identify incorrect observed fields or missing observations the actor can correct.
 Check target scope. {mapping_requirements}
 Inventory hints do not prove a usable flow. HTTP status and tool success alone cannot prove support.
-Authentication mappings must include the controller-validated URL from this successful login.
-Storage header bindings must match controller-supplied metadata, never guessed JavaScript behavior.
+Use the controller-validated reusable URL when available; an empty URL is allowed when only the
+exact runtime request validated. Do not substitute a login submission URL for a validated resource.
+{header_requirements}
+{controller_metadata}
+Reviewable recorder fields: {json.dumps(reviewable_fields)}
 Review registration fields and ordered steps against account-creation evidence.
-Step field_names are observed controls; filling a field does not prove it required or optional.
+Browser fields preserve evidenced control labels or names, including Unicode and emojis;
+backend payload keys are not mandatory. Step field_names preserve observed labels. Do not accept empty field
+lists when the cited form evidence identifies controls. Filling a field does not establish requiredness.
 Required fields need rendered constraints or observed validation; unknown requiredness is unclassified.
 Missing required markers do not prove optionality. Do not repeat registration to classify fields.
 For multi-step flows, require the observed step order and transitions; never infer unobserved steps.
 Unknown redirects may be empty. Confirm that the evidence supports the successful login or registration.
 Reject unsupported claims, missing fields, and unrelated-target or prior-operation evidence.
 Candidate from successful worker execution:
-{json.dumps({key: value for key, value in candidate.items() if key != "evidence_refs"}, sort_keys=True)}
+{json.dumps(observed, sort_keys=True)}
 Authorized observations (availability does not establish support):
 {json.dumps(self._artifact_refs_from_tool_outcomes(outcomes))}
 Prior corrections:
@@ -10704,8 +11014,13 @@ Prior corrections:
         """Establish one credential's opaque context without credential fallback."""
 
         target = str(credential["target"])
+        current_task = next((item for item in self.state.list_tasks() if item.task_uid == task.task_uid), task)
+        attempts = dict(current_task.recovery_context.get("authentication_worker_attempts") or {})
+        previous = attempts.get(credential["credential_id"], {})
+        if previous.get("target") == target and previous.get("status") == "exhausted":
+            return AuthenticationWorkerResult(True, "authentication_attempt_exhausted", frozenset())
         kinds = (
-            ("browser_form", "browser_redirect", "browser_mfa", "api_form")
+            ("browser_form", "browser_redirect", "browser_mfa")
             if credential["credential_type"] == "username_password"
             else (credential["credential_type"],)
         )
@@ -10713,6 +11028,8 @@ Prior corrections:
         attempt = self._worker_flow_attempt(task, target, "authentication", kinds=kinds)
         # A new credential attempt shares the reusable mapping, not review state or browser context.
         attempt["reviewed"] = False
+        attempt["mapping_approved"] = False
+        attempt["last_worker_reason"] = ""
         attempt["successful"] = False
         attempt["candidate"] = None
         if attempt["existing"]:
@@ -10745,7 +11062,6 @@ Prior corrections:
             if get_tool_name(tool)
             not in {
                 "capture_browser_authenticated_context",
-                "ensure_authenticated_context",
                 "establish_credential_authenticated_context",
             }
         ]
@@ -10769,30 +11085,19 @@ Prior corrections:
         if credential["credential_type"] == "username_password":
 
             @strands_tool(name="capture_browser_authenticated_context")
-            async def capture_context(validation_url: str) -> str:
-                """Validate this credential's browser context; Python binds observed header metadata."""
+            async def capture_context(validation_url: str = "", validation_marker: str = "") -> str:
+                """Capture after login; Python selects a successful request and binds required headers."""
                 flow = selected_flow()
                 bindings = _effective_storage_header_bindings(flow, attempt["controller_bindings"])
                 return await capture_browser_authenticated_context(
                     credential_id=credential["credential_id"],
                     storage_header_bindings=list(bindings),
+                    request_header_names=list(flow.get("request_header_names") or []),
                     validation_url=validation_url,
+                    validation_marker=validation_marker,
                 )
 
-            @strands_tool(name="ensure_authenticated_context")
-            def establish_api_context() -> str:
-                """Authenticate this credential using its staged API mapping."""
-                flow = selected_flow()
-                if flow.get("kind") != "api_form":
-                    raise ValueError("Record the observed api_form mapping before API authentication")
-                return ensure_authenticated_context(
-                    credential_id=credential["credential_id"],
-                    login_url=flow["login_url"],
-                    validation_url=flow["validation_url"],
-                    request_format=flow.get("request_format") or "",
-                )
-
-            worker_tools.extend([capture_context, establish_api_context])
+            worker_tools.append(capture_context)
         else:
 
             @strands_tool(name="establish_credential_authenticated_context")
@@ -10805,14 +11110,11 @@ Prior corrections:
                 )
 
             worker_tools.append(establish_key_context)
-        flow_kinds = {str(flow.get("kind") or "") for flow in flows}
         credential_type = str(credential.get("credential_type") or "")
         browser_flow = credential_type == "username_password"
         terminal_tool_name = (
             "establish_credential_authenticated_context"
             if credential_type in {"api_key", "oauth2_client"}
-            else "ensure_authenticated_context"
-            if flow_kinds == {"api_form"}
             else "capture_browser_authenticated_context"
             if browser_flow
             else ""
@@ -10827,26 +11129,16 @@ Prior corrections:
                     credential["credential_id"],
                     self._short(error),
                 )
-                if flow_kinds != {"api_form"}:
-                    return AuthenticationWorkerResult(False)
-                worker_tools = [
-                    tool
-                    for tool in worker_tools
-                    if not get_tool_name(tool).startswith("browser_")
-                    and get_tool_name(tool) != "capture_browser_authenticated_context"
-                ]
-        if browser_flow and flow_kinds != {"api_form"}:
+                return AuthenticationWorkerResult(False)
+        if browser_flow:
             flow_instructions = """Complete the supplied login flow through the observed browser controls; unknown
 transport details in the mapping do not block browser login. Determine submission and session behavior during
-this authorized interaction. After authentication, inspect same-origin HAR
-requests from a bounded number of normal browser actions. Select a request with a 2xx response and every declared
-required header; use its exact URL as the validation_url for `capture_browser_authenticated_context`. Cookies alone do
-not satisfy a required header. Reject a 401/403 response, inventory candidate, or navigation success flag as proof.
+this authorized interaction. After login, call `capture_browser_authenticated_context` with no arguments.
+Python selects and validates an observed request carrying the required credentials. If capture reports missing
+evidence, perform a normal signed-in browser action and retry capture. Record observed controls and ordered steps;
+flow metadata may leave validation_url empty because Python supplies it after successful context validation.
+If the same URL returns HTTP 200 anonymously, supply a non-secret response marker that appears only when signed in.
 """
-        elif credential_type == "username_password" and flow_kinds == {"api_form"}:
-            flow_instructions = (
-                "Call `ensure_authenticated_context` with no arguments; it uses the staged or existing flow."
-            )
         else:
             flow_instructions = (
                 "Call `establish_credential_authenticated_context` with no arguments; the controller supplies "
@@ -10860,12 +11152,13 @@ credential and target. Check out the controller-selected credential using `check
 
 {flow_instructions}
 Use the existing flow as a starting point, or discover the entry point from the assigned hints. Follow observed
-in-scope steps, update incorrect flow metadata, and record the completed flow before context capture when possible.
+in-scope steps and capture the authenticated context. Record observed controls and ordered flow steps;
+leave unknown validation metadata empty until Python supplies it.
 Keep the selected credential fixed. A definitive credential rejection ends this worker. Never
 expose session material or secret values in text, artifacts, observations, or task acceptance.
 """
         terminal_tools = (
-            {"capture_browser_authenticated_context", "ensure_authenticated_context"}
+            {"capture_browser_authenticated_context"}
             if credential_type == "username_password"
             else {terminal_tool_name}
         )
@@ -10934,7 +11227,12 @@ expose session material or secret values in text, artifacts, observations, or ta
                 candidate = attempt["candidate"]
                 if candidate:
                     candidate["validation_url"] = validation_url
-            self._refine_worker_flow(
+                self._persist_worker_completion(task, WorkerCompletion(
+                    operation_id=self.runtime.operation_id, task_uid=task.task_uid, purpose="authentication",
+                    target=target, role=str(credential.get("role") or ""), credential_id=credential["credential_id"],
+                    evidence_refs=tuple(self._artifact_refs_from_tool_outcomes(outcomes)),
+                ))
+            outcomes.extend(self._refine_worker_flow(
                 task,
                 target,
                 "authentication",
@@ -10942,7 +11240,7 @@ expose session material or secret values in text, artifacts, observations, or ta
                 outcomes,
                 lambda text, chosen: actor(text, self._worker_flow_repair_policy(policy, attempt, chosen), chosen),
                 worker_tools,
-            )
+            ))
         terminal_reason = (
             policy.terminal_reason if succeeded(outcomes)
             else str(attempt.get("last_worker_reason") or getattr(run_result, "reason", ""))
@@ -10966,17 +11264,38 @@ expose session material or secret values in text, artifacts, observations, or ta
             if isinstance(tool_counts, dict)
             else None
         )
+        functional_success = succeeded(outcomes)
+        if functional_success:
+            self._persist_worker_completion(task, WorkerCompletion(
+                operation_id=self.runtime.operation_id, task_uid=task.task_uid, purpose="authentication",
+                target=target, role=str(credential.get("role") or ""), credential_id=credential["credential_id"],
+                evidence_refs=tuple(self._artifact_refs_from_tool_outcomes(outcomes)),
+                flow_id=str((attempt.get("existing") or {}).get("flow_id") or ""),
+                mapping_approved=bool(attempt.get("mapping_approved")),
+            ))
+        rejected = bool(attempt["stop_check"]())
+        attempts[credential["credential_id"]] = {
+            "target": target,
+            "status": "established" if functional_success else "exhausted" if rejected else "retryable",
+            "reason": terminal_reason,
+        }
+        self.state.patch_task(task.task_uid, recovery_context_updates={"authentication_worker_attempts": attempts})
+        self._emit_workflow_event({
+            "type": "authentication_worker_completion", "task_uid": task.task_uid,
+            "credential_id": credential["credential_id"], "target": target,
+            "context_validated": functional_success,
+            "mapping_approved": bool(attempt.get("mapping_approved")),
+            "reviews": attempt.get("review_count", 0),
+            "review_stop_reason": attempt.get("review_stop_reason", "already_reviewed"),
+            "outcome": "established" if functional_success else "coverage_gap",
+        })
         return AuthenticationWorkerResult(True, terminal_reason, tool_names)
 
 
-    def _schedule_invalid_credential_replacement(
-        self,
-        plan: OperationPlan,
-        task: Task,
-        credential: dict[str, str],
-        attempt: dict[str, Any],
-    ) -> bool:
-        """Invalidate one rejected credential and queue its separate same-role registration task."""
+    def _invalidate_rejected_credential(
+        self, task: Task, credential: dict[str, str], attempt: dict[str, Any],
+    ) -> None:
+        """Retire rejected login material even when another account satisfies the task."""
 
         credential_id = credential["credential_id"]
         target = credential["target"]
@@ -11008,6 +11327,19 @@ expose session material or secret values in text, artifacts, observations, or ta
             "flow_login_url": attempt.get("login_url"),
             "evidence_refs": evidence_refs,
         })
+    def _schedule_invalid_credential_replacement(
+        self,
+        plan: OperationPlan,
+        task: Task,
+        credential: dict[str, str],
+        attempt: dict[str, Any],
+    ) -> bool:
+        """Invalidate one rejected credential and queue its separate same-role registration task."""
+
+        credential_id = credential["credential_id"]
+        target = credential["target"]
+        role = credential["role"]
+        self._invalidate_rejected_credential(task, credential, attempt)
         for candidate in self.state.list_tasks(status=["active", "pending"]):
             replacement = candidate.recovery_context.get("credential_replacement", {})
             if isinstance(replacement, dict) and replacement.get("invalid_credential_id") == credential_id:
@@ -11062,14 +11394,41 @@ expose session material or secret values in text, artifacts, observations, or ta
         })
         return True
 
-    def _run_authentication_agent(self, plan: OperationPlan, task: Task) -> AuthenticationSetupResult:
+    def _retry_authentication_selection(
+        self, plan: OperationPlan, task: Task, failed_ids: tuple[str, ...],
+        excluded_ids: tuple[str, ...], replacement_round: int,
+    ) -> AuthenticationSetupResult | None:
+        """Try one alternate selection; frozen evidence bindings must never be substituted."""
+
+        if replacement_round or task.recovery_context.get("validation_auth_context"):
+            return None
+        excluded = tuple(dict.fromkeys((*excluded_ids, *failed_ids)))
+        try:
+            self._authentication_setup_request(plan, task, excluded_credential_ids=excluded)
+        except AuthenticationSelectionError:
+            return None
+        return self._run_authentication_agent(
+            plan, task, excluded_credential_ids=excluded, replacement_round=1,
+        )
+
+    def _run_authentication_agent(
+        self, plan: OperationPlan, task: Task, *,
+        excluded_credential_ids: tuple[str, ...] = (), replacement_round: int = 0,
+    ) -> AuthenticationSetupResult:
         """Establish or refresh opaque auth state before task execution."""
 
         selected_names = self._authentication_agent_tool_names(task)
         if not selected_names:
             return self._record_authentication_setup(task, AuthenticationSetupResult("not_required"))
         try:
-            setup = self._authentication_setup_request(plan, task)
+            setup = (
+                self._authentication_setup_request(plan, task, excluded_credential_ids=excluded_credential_ids)
+                if excluded_credential_ids else self._authentication_setup_request(plan, task)
+            )
+        except AuthenticationSelectionError as error:
+            return self._record_authentication_setup(
+                task, AuthenticationSetupResult("unavailable", reason=str(error)),
+            )
         except Exception as error:
             self._log_workflow(
                 "authentication credential lookup failed task=%s reason=%s",
@@ -11190,15 +11549,6 @@ expose session material or secret values in text, artifacts, observations, or ta
                                     setup,
                                 )
                             if authentication_context_is_valid(self.runtime.operation_id, target, credential_id):
-                                validation_url = authentication_context_validation_url(
-                                    self.runtime.operation_id, target, credential_id
-                                )
-                                if not validation_url:
-                                    return self._record_authentication_setup(
-                                        task,
-                                        AuthenticationSetupResult("failed", reason="missing_validation_url"),
-                                        setup,
-                                    )
                                 refreshable_ids.add(credential_id)
                                 self._log_workflow(
                                     "authentication credential refresh task=%s credential=%s result=valid attempt=%s/2",
@@ -11219,6 +11569,12 @@ expose session material or secret values in text, artifacts, observations, or ta
                                     if attempt is not None:
                                         break
                             if attempt and attempt.get("outcome") == "credential_rejected":
+                                alternate = self._retry_authentication_selection(
+                                    plan, task, (credential_id,), excluded_credential_ids, replacement_round,
+                                )
+                                if alternate is not None:
+                                    self._invalidate_rejected_credential(task, credential, attempt)
+                                    return alternate
                                 scheduled = self._schedule_invalid_credential_replacement(
                                     plan, task, credential, attempt
                                 )
@@ -11277,7 +11633,14 @@ expose session material or secret values in text, artifacts, observations, or ta
                 AuthenticationSetupResult("failed", reason="worker_error"),
                 setup,
             )
-        refreshed_setup = self._authentication_setup_request(plan, task)
+        failed_ids = tuple(credential_id for credential_id in credential_ids if credential_id not in valid_ids)
+        if failed_ids:
+            alternate = self._retry_authentication_selection(
+                plan, task, failed_ids, excluded_credential_ids, replacement_round,
+            )
+            if alternate is not None:
+                return alternate
+        refreshed_setup = setup
         valid_ids = tuple(
             credential["credential_id"]
             for credential in setup.credentials
@@ -11289,7 +11652,7 @@ expose session material or secret values in text, artifacts, observations, or ta
             AuthenticationSetupResult("established", valid_ids)
             if len(valid_ids) == len(credential_ids)
             else AuthenticationSetupResult(
-                "partial" if valid_ids else "failed", valid_ids, "context_validation_failed"
+                "failed", valid_ids, "context_validation_failed"
             )
         )
         return self._record_authentication_setup(task, result, refreshed_setup)
@@ -11355,10 +11718,63 @@ expose session material or secret values in text, artifacts, observations, or ta
         return (
             "- Locate in-scope JavaScript bundles already exposed by the assigned target and call "
             "`client_bundle_inventory` for each relevant bundle. Persist both its extraction artifact and its "
-            "validated inventory manifest as task evidence. Treat every extracted SPA route as an endpoint. "
-            "Preserve self-registration routes as inventory workflows; do not attempt account registration in this "
-            "mapping task."
+            "validated inventory manifest as task evidence."
         )
+
+    def _task_policy_guidance(self, task: Task) -> str:
+        """Render the same module-owned task policy for builders, critics, and workers."""
+
+        lines = [
+            "## Task Policy (Controller-owned)",
+            self._workspace_access_guidance(),
+            ("Acquire missing source data within declared capabilities and scope. Reuse complete artifacts returned "
+             "by tools directly; save source data only when it has not already been persisted. Derive transformed "
+             "inputs from the complete saved source and retain its reference. Acquisition alone is not "
+             "security-control testing and does not establish complete analysis."),
+        ]
+        procedure = task.acceptance.basis.procedure
+        if procedure is not None:
+            lines.append("Required procedure capabilities: " + ", ".join(procedure.methods) + ".")
+        module = str(getattr(self.runtime.config, "module", "") or "")
+        if re.fullmatch(r"[a-zA-Z0-9_-]+", module):
+            policy_path = Path(__file__).resolve().parent.parent / "operation_plugins" / module / "task_policy.md"
+            if policy_path.is_file():
+                lines.append(policy_path.read_text(encoding="utf-8").strip())
+        bundle_guidance = self._client_bundle_execution_guidance_for_task(task)
+        if bundle_guidance:
+            lines.append(bundle_guidance)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _workspace_access_guidance() -> str:
+        """Keep generated target restrictions separate from workspace permissions."""
+
+        return (
+            "Target access follows module policy and explicit user restrictions. Operation artifacts and tooling "
+            "are workspace resources, not target access. Do not invent a blanket workspace prohibition from a "
+            "target-access restriction."
+        )
+
+    @staticmethod
+    def _recovery_contract_guidance(task: Task) -> str:
+        """Render recovery only for an explicit controller recovery trigger."""
+
+        context = task.recovery_context
+        trigger = context.get("trigger")
+        if trigger not in {"contract_prerequisite_recovery", "required_procedure_methods", "bounded_reasoning_loop"}:
+            return ""
+        lines = [
+            "\n\n## Recovery Contract (Controller-owned)",
+            f"Original objective: {context.get('original_objective') or task.objective}",
+            f"Recovery trigger: {trigger}",
+        ]
+        for key, label in (
+            ("unresolved_criteria", "Unresolved acceptance work"),
+            ("procedure_methods", "Required procedure capabilities"),
+        ):
+            if context.get(key):
+                lines.append(f"{label}: " + ", ".join(context[key]))
+        return "\n".join(lines) + "\n"
 
     def _emit_task_memory_selection_filter(
         self,
@@ -11721,6 +12137,28 @@ applicability or a finding, and published proof of concepts must not be executed
             "error": self._short(error, 500),
         })
 
+    def _controller_execution_state(self, task: Task) -> dict[str, Any]:
+        """Report validated receipt coverage independently of terminal acceptance."""
+
+        required_ids = [
+            requirement.id
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        ]
+        current_task = next(
+            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid), task,
+        )
+        receipts = current_task.recovery_context.get("execution_evidence_receipts") or {}
+        resolved_ids = sorted(requirement_id for requirement_id in required_ids if receipts.get(requirement_id))
+        unresolved_ids = sorted(set(required_ids) - set(resolved_ids))
+        return {
+            "authoritative": True,
+            "status": "incomplete" if unresolved_ids else "satisfied",
+            "required_requirement_ids": required_ids,
+            "resolved_requirement_ids": resolved_ids,
+            "unresolved_requirement_ids": unresolved_ids,
+        }
+
     def _controller_execution_gate_status(
         self,
         task: Task,
@@ -11728,21 +12166,11 @@ applicability or a finding, and published proof of concepts must not be executed
     ) -> tuple[bool, list[str]]:
         """Return whether persisted controller receipts resolve every frozen execution requirement."""
 
-        required_ids = [
-            requirement.id
-            for criterion in task.acceptance.criteria
-            for requirement in criterion.execution_requirements
-        ]
+        execution_state = self._controller_execution_state(task)
+        required_ids = execution_state["required_requirement_ids"]
         if not required_ids or self._missing_acceptance_criteria(task, acceptance_results):
             return False, required_ids
-        current_task = next(
-            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
-            task,
-        )
-        receipts = dict(
-            current_task.recovery_context.get("execution_evidence_receipts") or {}
-        )
-        return set(required_ids).issubset(receipts), required_ids
+        return not execution_state["unresolved_requirement_ids"], required_ids
 
     def _incomplete_execution_gate_decision(self, task: Task) -> WorkflowDecision:
         """Return the controller-owned repair decision for an incomplete gate."""
@@ -13924,7 +14352,15 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
             f"- Submit at least {contract.min_mapping_tasks} distinct `task_role: \"mapping\"` proposals.\n"
             f"- Each mapping proposal must set exactly one `workstream` from: {mapping_workstreams}.\n"
             "- Mapping proposals must leave `depends_on_workstreams` empty; do not combine workstreams in one task."
-            f"{synthesis}{direct_exception}\n"
+            f"{synthesis}{direct_exception}"
+            + "".join(
+                f"\n- Required procedure methods for `{workstream}`: {', '.join(methods)}."
+                for workstream, methods in contract.required_methods_by_workstream.items()
+            ) + "".join(
+                f"\n- `{workstream}` requires an explicit authentication_requirement.comparison "
+                "(account, role, or tenant)."
+                for workstream in sorted(contract.authentication_comparison_workstreams)
+            ) + "\n"
         )
 
     def _should_evaluate_phase(self, phase: PlanPhase) -> bool:
@@ -15513,6 +15949,8 @@ Output only the revised plan:
 The following policy is trusted module guidance. Use it to shape plan phases and measurable criteria; do not execute it
 while planning.
 
+{self._workspace_access_guidance()}
+
 {policy}"""
 
     @staticmethod
@@ -15704,10 +16142,9 @@ while planning.
                 "coverage gap with `store_observation`; never invent an account, bypass controls, or create a finding."
             ),
             (
-                "- Treat a same-target redirect from the mapped registration route to its mapped login route as "
-                "registration success unless the resulting page shows a concrete registration error. Immediately store "
-                "the generated credential, then record that redirect as `success_redirect_url` in the registration "
-                "flow descriptor. A redirect to another origin is not itself registration success."
+                "- A redirect alone does not confirm account creation. Store the credential only after an explicit "
+                "account-created response or a successful login with the generated identity. Preserve the confirming "
+                "page or response as evidence. Record `success_redirect_url` only when observed."
             ),
             (
                 "- After observing the mapped form, call the controller-bound `record_authentication_flow` with "
@@ -15823,7 +16260,7 @@ while planning.
             if provisioning_task
             else ""
         )
-        client_bundle_guidance = self._client_bundle_execution_guidance_for_task(task)
+        task_policy_guidance = self._task_policy_guidance(task)
         core_tools = self.runtime.core_tools_list
         if provisioning_task:
             core_tools = [
@@ -15873,6 +16310,8 @@ and any coverage gap. Include an unauthenticated baseline or authenticated compa
 The controller establishes authentication after prompt approval; do not ask the executor to perform that setup.
 Apply cookie and Authorization header restrictions only when the assigned operation or target constraints specify them.
 Do not turn phase-wide criteria or generic finding policy into additional work for this task.
+Select tools by relevant capabilities and scoped invocation; a reconnaissance tool supporting crawling is valid
+for a bounded crawl even when it offers additional capabilities.
 
 The generated prompt must instruct the task-executor agent:
 - Execute only the assigned task objective below.
@@ -15885,7 +16324,7 @@ The generated prompt must instruct the task-executor agent:
   requires ID binding.
 {credential_guidance}
 {registration_flow_context}
-{client_bundle_guidance}
+{task_policy_guidance}
 - If an assigned target is an explicit `scheme://host:port` URL or `host:port` netloc, preserve that exact host and port boundary.
   Do not convert it to a host-only target or treat it as authorization to enumerate other ports on the same host.
 - Treat every applicable plan constraint as a mandatory execution guardrail. Python appends its authoritative text
@@ -15901,7 +16340,7 @@ The generated prompt must instruct the task-executor agent:
 - Require every acceptance summary to state the concrete result or negative result. Successful acceptance publishes
   those summaries and evidence references as one operation observation for later tasks.
 - Use actual registered tool calls for actions. Do not simulate calls with pseudo-syntax, Python snippets, or narrated
-  `<call:...>` blocks. The controller-owned executor contract supplies the terminal acceptance protocol; include only
+  `<call:...>` blocks. Python appends task policy and the terminal acceptance protocol; include only
   criterion-specific evidence and result requirements here.
 {persistence_guidance}
 {swarm_guidance}
@@ -15965,6 +16404,7 @@ Shell command selection guidance:
         memory_records: list[dict[str, Any]] | None = None,
     ) -> str:
         acceptance_requirement = self._task_terminal_protocol_summary(task)
+        task_policy_guidance = self._task_policy_guidance(task)
         hypothesis_guidance = self._hypothesis_phase_guidance(phase)
         provisioning_critic_guidance = """
 For credential-provisioning tasks, browser navigation, form interaction, client-side DOM/JavaScript/state inspection,
@@ -15998,11 +16438,13 @@ Approve only when the draft:
 {("- preserves every requirement in the Hypothesis-Generation Guidance when present; and" if hypothesis_guidance else "")}
 {provisioning_critic_guidance}
 
-Python appends the frozen acceptance contract, evidence requirements, persistence rules, and terminal protocol after
+Python appends task policy, the frozen acceptance contract, evidence requirements, and terminal protocol after
 the reviewed dynamic prompt. It also appends the operation constraints shown below. Do not reject a draft for omitting
 or not restating those controller-owned requirements, even when the plan describes them as mandatory guardrails.
 Reject only if its task-specific guidance contradicts them or broadens/narrows the frozen manifest.
 Review required actions against the assigned task and acceptance contract, not phase-wide criteria for other tasks.
+Successful acquisition alone does not establish complete analysis. Incomplete processing requires a coverage gap;
+zero extracted items or failed optional formatting alone do not establish failure or workflow unavailability.
 The controller establishes authentication after prompt approval. A required unauthenticated baseline remains executor
 work, using an unauthenticated request method. Cookie and Authorization header restrictions apply only where the
 assigned operation or target constraints specify them. Do not require finding work for a coverage-only task.
@@ -16023,9 +16465,13 @@ overlap, appear redundant, include both a native tool and a shell command for th
 selections than the executor may ultimately use, or omit an overlapping alternative. There is no single-tool,
 exclusivity, or minimal-selection requirement. Reject a selection only when it has no reasonable relationship to the
 task.
+Judge a tool by its relevant capabilities and scoped invocation; additional capabilities alone do not make it
+inappropriate. A reconnaissance tool supporting crawling is valid for a bounded crawl task.
 
 ## Controller-Appended Terminal Protocol
 {acceptance_requirement}
+
+{task_policy_guidance}
 
 ## Controller-Appended Operation Constraints
 {plan.constraints_to_toon()}
@@ -16206,7 +16652,10 @@ Finding-verification tasks are controller-owned. Do not propose tasks for this p
 """
         hypothesis_guidance = self._hypothesis_phase_guidance(phase)
         return f"""Create durable task records for the assessment plan. Your only action is one successful
-structured task-proposal payload. Do not execute, validate, scan, inspect, browse, shell out, or gather evidence. Stop
+structured task-proposal payload. Declare `authentication_requirement` with required `roles` and
+`comparison` (none, account, role, tenant). Ordinary authenticated and unauthenticated/authenticated checks use
+none; explicit comparisons declare their kind. The controller selects the required identities.
+Do not execute, validate, scan, inspect, browse, shell out, or gather evidence. Stop
 immediately after returning the payload.
 
 Create cohesive, independently completable tasks with exactly one acceptance criterion. Prioritize actionable work
@@ -16626,6 +17075,7 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 
 ## Frozen acceptance results
 {acceptance_result_section}
+{self._worker_completion_section(task)}
 
 ## Controller execution-gate status
 {execution_gate_section}
@@ -16889,6 +17339,8 @@ Do not return `continue` merely because work is incomplete when the task history
         selected_shell_commands: list[dict[str, Any]] | None = None,
         *,
         plan: OperationPlan | None = None,
+        execution_state: dict[str, Any] | None = None,
+        task_policy: str = "",
     ) -> str:
         """Return the controller-owned execution boundary shared by all modules."""
 
@@ -17010,15 +17462,19 @@ Do not return `continue` merely because work is incomplete when the task history
             if task is not None and task.kind == "finding_validation"
             else ""
         )
+        resolved_requirement_ids = set((execution_state or {}).get("resolved_requirement_ids", []))
+        unresolved_requirements = task is not None and any(
+            requirement.id not in resolved_requirement_ids
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
+        )
         execution_evidence_methodology = (
             "\n\n## Execution Evidence Prerequisite\n"
-            "If the frozen acceptance contract includes execution_requirements, execute the declared method against "
-            "the frozen subject and preserve its concrete result as a current-operation artifact. The controller "
+            "Execute only unresolved declared capabilities against their frozen subjects and preserve concrete "
+            "results as current-operation artifacts. The controller "
             "matches that task-local tool outcome to the requirement automatically when record_task_acceptance is "
             "called. Raw commands, memories, and unsupported claims are not execution evidence."
-            if task is not None and any(
-                criterion.execution_requirements for criterion in task.acceptance.criteria
-            )
+            if unresolved_requirements
             else ""
         )
         execution_requirement_providers = MultiAgentWorkflowController._execution_requirement_provider_guidance(
@@ -17026,6 +17482,12 @@ Do not return `continue` merely because work is incomplete when the task history
             tool_names,
             selected_shell_commands or [],
             targets=MultiAgentWorkflowController._task_execution_targets(plan, task),
+            resolved_requirement_ids=resolved_requirement_ids,
+        )
+        execution_state_guidance = (
+            "\n\n## Controller Execution Proof State\n" + json.dumps(execution_state, sort_keys=True)
+            if execution_state is not None and execution_state["required_requirement_ids"]
+            else ""
         )
         return f"""## Task Executor Contract (Controller-owned)
 Execute only the assigned task objective. The objective is one single assigned task unit named by the acceptance
@@ -17057,7 +17519,8 @@ perform them.{finding_submission_methodology}{finding_validation_methodology}{ex
 {credential_guidance}
 Opaque credential IDs are references, not secret values. Use only controller-validated task-authorized IDs in tool
 calls and durable evidence when the frozen acceptance requires credential-ID binding. Never expose secret values.
-{execution_requirement_providers}
+{task_policy}
+{execution_state_guidance}{execution_requirement_providers}
 {MultiAgentWorkflowController._hypothesis_index_toon(task)}"""
 
     @classmethod
@@ -17068,11 +17531,15 @@ calls and durable evidence when the frozen acceptance requires credential-ID bin
         selected_shell_commands: list[dict[str, Any]],
         *,
         targets: list[OperationTarget] | None = None,
+        resolved_requirement_ids: set[str] | None = None,
     ) -> str:
         """Render task-local execution providers from the supplied invocation tools only."""
 
+        resolved_ids = resolved_requirement_ids or set()
         if task is None or not any(
-            criterion.execution_requirements for criterion in task.acceptance.criteria
+            requirement.id not in resolved_ids
+            for criterion in task.acceptance.criteria
+            for requirement in criterion.execution_requirements
         ):
             return ""
 
@@ -17106,13 +17573,15 @@ calls and durable evidence when the frozen acceptance requires credential-ID bin
 
         lines = [
             "## Execution Requirements and Available Providers (Controller-owned)",
-            ("Create qualifying task-local proof for every frozen execution requirement against its frozen subject. "
+            ("Create qualifying task-local proof for unresolved execution requirements against their frozen subjects. "
             "For each declared capability, choose any one suitable supplied provider; do not execute every listed "
             "provider. A listed provider qualifies only after a successful task-local invocation against the frozen "
             "subject with the required durable output."),
         ]
         for criterion in task.acceptance.criteria:
             for requirement in criterion.execution_requirements:
+                if requirement.id in resolved_ids:
+                    continue
                 lines.append(f"\nFrozen subject: `{requirement.subject_ref}`")
                 for capability in capabilities:
                     providers = [
@@ -18827,18 +19296,11 @@ tools and durable evidence before relying on it."""
     def _controller_execution_gate_section(self, task: Task, acceptance_results: list[Any]) -> str:
         """Render persisted execution-receipt state for evaluator reconciliation."""
 
-        satisfied, required_ids = self._controller_execution_gate_status(task, acceptance_results)
-        current_task = next(
-            (item for item in self.state.list_tasks() if item.task_uid == task.task_uid),
-            task,
-        )
-        receipts = dict(current_task.recovery_context.get("execution_evidence_receipts") or {})
+        satisfied, _required_ids = self._controller_execution_gate_status(task, acceptance_results)
+        execution_state = self._controller_execution_state(task)
         return json.dumps(
             {
-                "authoritative": True,
-                "status": "satisfied" if satisfied else "incomplete",
-                "required_requirement_ids": required_ids,
-                "resolved_requirement_ids": sorted(set(required_ids).intersection(receipts)),
+                **execution_state,
                 "historical_rejections_do_not_override_current_status": satisfied,
             },
             indent=2,

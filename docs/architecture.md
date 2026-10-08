@@ -138,11 +138,14 @@ hard target-scope violation marks the active task `partial_failure` without invo
 Login and provisioning workers discover flows while completing their assigned action. Dedicated flow critics
 review staged metadata and current-task evidence; only successful, approved flows are persisted. The worker keeps
 its browser progress and identity across corrections. Successful login or registration remains usable if metadata
-review cannot approve a reusable mapping. See [credential workers](#credential-workers) for the execution sequence.
+review cannot approve a reusable mapping. Initial metadata recording precedes up to three critic reviews,
+with repairs between rejected reviews. After functional success, repairs use only observation and recording
+tools. Review events and persisted gaps include the review count and stopping reason; a completed identity
+or session does not imply an approved reusable flow. See [credential workers](#credential-workers) for the execution sequence.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CYBER_WORKFLOW_FLOW_REFINEMENT_CYCLES` | `3` | Maximum worker/flow-critic pairs per attempt; minimum one. JSON retries are separate. |
+| `CYBER_WORKFLOW_FLOW_REFINEMENT_CYCLES` | `3` | Maximum flow-critic reviews per attempt; minimum one. Initial recording does not consume a review. JSON retries are separate. |
 | `CYBER_WORKFLOW_FLOW_REFINEMENT_SEARCH_LIMIT` | `16` | Searches per worker invocation or per distinct authorized artifact for critics; minimum one. |
 
 Artifact errors explain the exhausted read or search allowance. Critics synthesize from returned evidence when
@@ -299,7 +302,7 @@ select `supporting_evidence_refs`. Python validates their selection and computes
 publication requires a validated opaque context; registration publication requires a successful credential-storage
 call whose durable metadata confirms a registered credential for the assigned target and role. Only approved,
 successful flows are stored as validated records. Corrections update an applicable existing record instead of
-creating duplicate unreviewed descriptors. Authentication version 9 and registration version 3 are accepted;
+creating duplicate unreviewed descriptors. Authentication version 10 and registration version 4 are accepted;
 older versions and discovery settings have no compatibility path.
 
 The worker and flow critic use up to three cycles. Corrections continue from the browser and retained outcomes.
@@ -313,6 +316,26 @@ preventing another login or account creation. A definitive credential rejection 
 review retains functional credentials and contexts and records a mapping gap; provisioning task evaluation remains
 separate. Unknown transport details may remain empty for browser mappings, while multi-step mappings retain their
 observed sequence.
+Task proposals declare `authentication_requirement` separately from established `auth_context`:
+`{"comparison": "none", "roles": ["member"]}` requests one account per assigned target and required role.
+The default is `none` with no role filter, which selects one eligible account per assigned target.
+An unauthenticated baseline adds no credential requirement. Explicit `account`, `role`, or `tenant` comparisons
+select a qualifying pair from recorded identity metadata; distinct credential IDs alone do not prove distinct accounts.
+The web authorization comparison workstream requires an explicit comparison kind through its module contract:
+`planning.phase_task_contracts[].authentication_comparison_workstreams` lists workstreams requiring a pair.
+Python persists requirements during task fan-out, prefers valid sessions, and authenticates only selected identities.
+Session reuse and authenticated requests enforce a 600-second safety window for known JWT and cookie expiry.
+Material with less than 600 seconds remaining requires refresh; unknown expiry still requires behavioral validation.
+One alternate selection is allowed after failed setup; frozen finding-replay credentials are never substituted.
+The two-account provisioning pool remains available without logging both accounts in for every task.
+
+The controller stores secret-free completion facts in SQLite-backed task recovery context: credential identity,
+task and operation provenance, supporting artifacts, and separate functional and mapping states. Registration
+acceptance is recorded directly from a successful task-local storage result and the matching persisted credential.
+A module-specific reconciliation callback corrects contradictory acceptance submissions before publication to
+memory. Fresh continuations and evaluators receive these facts without rereading registration artifacts. Restored
+facts are checked against current credential or authenticated-context state. A successful login proves only its
+credential setup, not unrelated criteria of its parent task; mapping failures remain separate from functional success.
 Classified inventory authentication routes and validated registration redirects are scoped navigation hints,
 without inferred flow kinds or authentication proof. Current controller header mappings take precedence over
 stored mappings and are shared by prompts, flow staging, and context capture. Provisioning storage binds target,

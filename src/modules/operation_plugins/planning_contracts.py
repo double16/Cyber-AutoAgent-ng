@@ -8,7 +8,7 @@ model-authored titles or objectives.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,9 @@ class PhaseTaskContract:
     registration_attribute: str = ""
     identities_per_role: int = 0
     exclude_public_static_assets: bool = False
+    required_methods_by_workstream: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    allow_partial_synthesis: bool = False
+    authentication_comparison_workstreams: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -284,9 +287,39 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
     )
     if not normalized_controller_workstreams.issubset(normalized_workstreams):
         raise ValueError(f"controller_mapping_workstreams must be declared mapping workstreams for {module}")
+    comparison_workstreams = raw.get("authentication_comparison_workstreams", [])
+    if not isinstance(comparison_workstreams, list) or not all(
+        isinstance(item, str) and item.strip() for item in comparison_workstreams
+    ):
+        raise ValueError(f"authentication_comparison_workstreams is invalid for {module}")
+    normalized_comparisons = _normalize_declared_workstreams(
+        comparison_workstreams, module, "authentication_comparison_workstreams",
+    )
+    if not normalized_comparisons.issubset(normalized_workstreams):
+        raise ValueError(f"authentication comparisons must be declared mapping workstreams for {module}")
+    raw_methods = raw.get("required_methods_by_workstream", {})
+    if not isinstance(raw_methods, dict):
+        raise ValueError(f"required_methods_by_workstream must be an object for {module}")
+    required_methods = {}
+    for workstream, methods in raw_methods.items():
+        if not isinstance(workstream, str):
+            raise ValueError(f"required methods need a declared workstream for {module}")
+        normalized_workstream = normalize_workstream_identifier(workstream)
+        if normalized_workstream not in normalized_workstreams or normalized_workstream in required_methods:
+            raise ValueError(f"required methods need a unique declared workstream for {module}")
+        if not isinstance(methods, list) or not methods or not all(
+            isinstance(method, str) and method.strip() for method in methods
+        ):
+            raise ValueError(f"required methods must be a non-empty string list for {module}")
+        required_methods[normalized_workstream] = tuple(dict.fromkeys(method.strip() for method in methods))
     synthesis_workstream = raw.get("synthesis_workstream")
     synthesis_output_kind = raw.get("synthesis_output_kind", "artifact")
     synthesis_execution = raw.get("synthesis_execution")
+    allow_partial_synthesis = raw.get("allow_partial_synthesis", False)
+    if not isinstance(allow_partial_synthesis, bool):
+        raise ValueError(f"allow_partial_synthesis must be a boolean for {module}")
+    if allow_partial_synthesis and mode != "fanout_with_synthesis":
+        raise ValueError(f"allow_partial_synthesis requires fanout_with_synthesis for {module}")
     if mode == "fanout_with_synthesis":
         if not isinstance(synthesis_workstream, str) or not synthesis_workstream.strip():
             raise ValueError(f"synthesis_workstream is required for {module}")
@@ -332,6 +365,9 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         allow_direct_single_step=allow_direct,
         direct_single_step_workstreams=normalized_direct_workstreams,
         exclude_public_static_assets=exclude_public_static_assets,
+        authentication_comparison_workstreams=normalized_comparisons,
+        required_methods_by_workstream=required_methods,
+        allow_partial_synthesis=allow_partial_synthesis,
     )
 
 

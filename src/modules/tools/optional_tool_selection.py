@@ -22,7 +22,6 @@ _SUPPORTED_EVIDENCE_KINDS = frozenset(
 )
 CREDENTIAL_OPTIONAL_TOOL_NAMES = frozenset({
     "authenticated_http_request", "refresh_authenticated_context", "capture_browser_authenticated_context",
-    "ensure_authenticated_context",
     "record_authentication_flow",
     "establish_credential_authenticated_context",
     "store_credential", "query_credentials", "checkout_credential", "exchange_oauth2_client_credentials",
@@ -37,7 +36,6 @@ CredentialToolAccessMode = Literal["context", "checkout"]
 # it is offered only alongside a task-authorized checkout consumer.
 _AUTHENTICATION_TOOL_ACCESS_MODES: dict[str, CredentialToolAccessMode] = {
     "authenticated_http_request": "context",
-    "ensure_authenticated_context": "checkout",
     "capture_browser_authenticated_context": "checkout",
     "establish_credential_authenticated_context": "checkout",
     "record_authentication_flow": "checkout",
@@ -110,7 +108,6 @@ AUTHENTICATION_AGENT_BROWSER_TOOL_NAMES = (
 # endpoints, or rotate/store credentials.
 AUTHENTICATION_AGENT_CREDENTIAL_TOOL_NAMES = (
     "checkout_credential",
-    "ensure_authenticated_context",
     "capture_browser_authenticated_context",
     "establish_credential_authenticated_context",
     "record_authentication_flow",

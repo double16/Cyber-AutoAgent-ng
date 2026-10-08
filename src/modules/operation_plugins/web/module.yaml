@@ -43,9 +43,14 @@ planning:
         - bounded_crawl
         - client_side_api
         - auth_workflow
+      required_methods_by_workstream:
+        entrypoint_technology: [request, analyze]
+        auth_workflow: [request, analyze]
+        client_side_api: [request, analyze]
       synthesis_workstream: inventory_synthesis
       synthesis_output_kind: inventory_manifest
       synthesis_execution: controller
+      allow_partial_synthesis: true
     - phase_id: 2
       mode: controller_owned
       controller_owned_phase_kind: credential_provisioning
@@ -62,6 +67,7 @@ planning:
         - unauthenticated_baseline
         - authenticated_credential_coverage
         - authorization_comparison
+      authentication_comparison_workstreams: [authorization_comparison]
       controller_mapping_workstreams:
         - unauthenticated_baseline
         - authenticated_credential_coverage

@@ -285,6 +285,10 @@ def test_task_service_scope_violations_enforces_assigned_scheme_host_and_port_on
         "Request custom-scheme://service.example:4280/api?mode=read and retain artifact:/tmp/evidence.json.",
     ) == []
     assert mod.task_service_scope_violations(plan, task, "Check service.example:4280/status.") == []
+    assert mod.task_service_scope_violations(
+        plan, task, "Preserve scheme://host:port, scheme://host, protocol://host:port and host:port notation."
+    ) == []
+    assert mod.task_service_scope_violations(plan, task, "Request custom-scheme://service.example:invalid/")
 
     violations = mod.task_service_scope_violations(
         plan,
@@ -1841,6 +1845,7 @@ def test_create_tasks_tool_schema_is_flat_and_controller_owned():
 
     assert task_schema["required"] == ["title", "objective", "criteria"]
     assert set(task_schema["properties"]) == {
+        "authentication_requirement",
         "title",
         "objective",
         "basis_description",
@@ -2156,6 +2161,7 @@ def test_create_tasks_preserves_explicit_replacement_lineage(fake_memory_client)
         ),
         phase=1,
         status="partial_failure",
+        recovery_context={"authentication_requirement": {"comparison": "account", "roles": ["member"]}},
     )
     store.tasks.append(parent)
 
@@ -2184,6 +2190,9 @@ def test_create_tasks_preserves_explicit_replacement_lineage(fake_memory_client)
             "replacement_of": "parent-task",
             "supersedes_criteria": ["unknown-criterion"],
         }])
+
+
+    assert replacement.recovery_context["authentication_requirement"] == parent.recovery_context["authentication_requirement"]
 
 
 def test_create_tasks_rejects_unknown_replacement_parent(fake_memory_client):
@@ -3776,6 +3785,45 @@ def test_bound_acceptance_tool_normalizes_aliases_before_validation(fake_memory_
     assert recorded.disposition == "no_vulnerability"
 
 
+@pytest.mark.parametrize("target", ["https://target.test", "tcp://target.test:9000", "/workspace/source"])
+@pytest.mark.parametrize("reconcile", [True, False])
+def test_acceptance_reconciliation_is_protocol_neutral_and_precedes_publication(fake_memory_client, target, reconcile):
+    _client, store = fake_memory_client
+    manifest = _write_inventory_manifest()
+    task = mod.Task("reconciled", "Assess", "Assess assigned subject", make_acceptance("reconciled"), 1, "active",
+                    recovery_context={"subject": target})
+    store.store_task("op1", task)
+    calls = []
+
+    def reconciler(current, payload):
+        calls.append((current.task_uid, current.recovery_context["subject"]))
+        assert payload["summary"] == "Actor result"
+        return {**payload, "summary": "Controller result"} if reconcile else payload
+
+    result = mod.build_record_task_acceptance_tool(task.task_uid, acceptance_reconciler=reconciler)(
+        status="satisfied", disposition="observation", summary="Actor result", evidence_refs=[f"artifact:{manifest}"],
+    )
+    assert json.loads(result)["complete"] is True
+    recorded = store.get_acceptance_results("op1", task.task_uid)[0]
+    assert recorded.summary == ("Controller result" if reconcile else "Actor result")
+    assert calls == [(task.task_uid, target)]
+
+
+def test_acceptance_reconciliation_failure_does_not_publish(fake_memory_client):
+    _client, store = fake_memory_client
+    task = mod.Task("reconcile-failed", "Assess", "Assess", make_acceptance("reconcile-failed"), 1, "active")
+    store.store_task("op1", task)
+
+    def reject(_task, _payload):
+        raise ValueError("Completion proof unavailable")
+
+    with pytest.raises(ValueError, match="Completion proof unavailable"):
+        mod.build_record_task_acceptance_tool(task.task_uid, acceptance_reconciler=reject)(
+            status="satisfied", disposition="observation", summary="Actor result", evidence_refs=["artifact:missing"],
+        )
+    assert store.get_acceptance_results("op1", task.task_uid) == []
+
+
 def test_acceptance_artifact_is_snapshotted_to_task_owned_storage(fake_memory_client, monkeypatch):
     _client, store = fake_memory_client
     snapshot_logs = []
@@ -4282,6 +4330,7 @@ def test_bound_create_tasks_tool_exposes_strict_controller_owned_schema(fake_mem
     task_schema = schema["$defs"]["TaskProposal"]
     assert "limits" not in task_schema["required"]
     assert set(task_schema["properties"]) == {
+        "authentication_requirement",
         "title",
         "objective",
         "basis_description",
@@ -6293,3 +6342,85 @@ def test_sqlite_recovery_validates_candidate_before_installing(tmp_path, monkeyp
         assert not sidecar.exists()
         assert store.get_plan("operation").objective == "Check scope"
     assert not list(tmp_path.glob("source.recovered-*.db"))
+
+
+@pytest.mark.parametrize("target_type,target", [("network", "https://target.test"),
+                                                ("network", "ssh://target.test"),
+                                                ("filesystem", "/repo/project")])
+def test_task_proposal_authentication_requirement_survives_compilation(fake_memory_client, target_type, target):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess authorized target", current_phase=1, total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value=target, type=target_type)],
+    )
+    proposal = task_proposal("Authenticated check", "Inspect assigned target", "auth-check")
+    proposal["authentication_requirement"] = {"comparison": "account", "roles": ["member"]}
+    Draft202012Validator(mod._TASK_PROPOSAL_INPUT_SCHEMA["json"]).validate({"tasks": [proposal]})
+    mod.create_tasks([proposal])
+    assert store.tasks[0].recovery_context["authentication_requirement"] == proposal["authentication_requirement"]
+
+
+@pytest.mark.parametrize("requirement", [{"comparison": "invented"}, {"roles": [""]}, {"count": 2}])
+def test_task_proposal_rejects_invalid_authentication_requirements(requirement):
+    proposal = task_proposal("Check", "Inspect assigned target", "auth-check")
+    proposal["authentication_requirement"] = requirement
+    with pytest.raises(ValidationError):
+        mod.TaskProposal.model_validate(proposal)
+
+
+def test_task_proposal_schema_advertises_authentication_requirement():
+    schema = mod._TASK_PROPOSAL_INPUT_SCHEMA["json"]["$defs"]["TaskProposal"]["properties"]
+    assert schema["authentication_requirement"]["properties"]["comparison"]["enum"] == [
+        "none", "account", "role", "tenant",
+    ]
+
+
+@pytest.mark.parametrize("comparison", ["none", "account"])
+def test_module_comparison_requirement_is_enforced_before_task_publication(fake_memory_client, comparison):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(objective="Assess target", current_phase=1, total_phases=1,
+                                   phases=[mod.PlanPhase(id=1, title="Assessment", status="active")])
+    contract = PhaseTaskContract(module="fixture", phase_id=1, mode="fanout", min_mapping_tasks=1,
+                                 mapping_workstreams=frozenset({"authorization"}),
+                                 authentication_comparison_workstreams=frozenset({"authorization"}))
+    proposal = task_proposal("Compare accounts", "Compare authorized identities", "compare")
+    proposal.update(workstream="authorization", authentication_requirement={"comparison": comparison})
+    submit = mod.build_create_tasks_tool(phase_task_contract=contract)
+    if comparison == "none":
+        with pytest.raises(ValueError, match="explicit authentication comparison"):
+            submit(tasks=[proposal])
+        assert store.tasks == []
+    else:
+        submit(tasks=[proposal])
+        assert store.tasks[0].recovery_context["authentication_requirement"]["comparison"] == "account"
+
+
+def test_snapshot_fanout_retains_distinct_authentication_requirements(fake_memory_client):
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Assess target", current_phase=1, total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Assessment", status="active")],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = _write_inventory_manifest()
+    common = {"title": "Check assigned identity boundary", "objective": "Check assigned identity boundary",
+              "methods": [], "snapshot_refs": [f"artifact:{manifest}"], "target_ids": ["target-1"],
+              "criteria": [{"description": "Capture assigned identity boundary evidence"}]}
+    requirements = [{"comparison": "none", "roles": ["member"]},
+                    {"comparison": "account", "roles": ["member"]}]
+    mod.create_tasks([{**common, "authentication_requirement": requirement} for requirement in requirements])
+    assert [task.recovery_context["authentication_requirement"] for task in store.tasks] == requirements
+    first = store.tasks[0]
+    store.tasks[0] = replace(first, status="done")
+    reference = f"artifact:{manifest}"
+    store.acceptance_results[first.task_uid] = [mod.AcceptanceResult(
+        criterion_id=first.acceptance.criteria[0].id, status="assessed_negative", disposition="no_vulnerability",
+        summary="Single identity checked", evidence_refs=(reference,),
+        coverage=tuple(mod.CoverageResult(item_id=item_id, status="assessed_negative", evidence_refs=(reference,))
+                       for item_id in first.acceptance.basis.item_ids),
+    )]
+    store.tasks = store.tasks[:1]
+    result = json.loads(mod.create_tasks([{**common, "authentication_requirement": requirements[1]}]))
+    assert result["created_count"] == 1
+    assert store.tasks[-1].recovery_context["authentication_requirement"] == requirements[1]

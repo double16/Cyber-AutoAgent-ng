@@ -332,6 +332,20 @@ def _parse_auth_chain(text: str) -> list[dict[str, Any]]:
     return records
 
 
+def classify_client_route(path: str) -> str:
+    """Distinguish concrete web paths from patterns, templates, and syntax fragments."""
+
+    if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+        return "fragment"
+    if "${" in path or re.search(r"(?:^|/):[A-Za-z_]", path):
+        return "template"
+    if "*" in path.split("?", 1)[0]:
+        return "pattern"
+    if any(character in path for character in "<>\\\n\r\t") or path.split("?", 1)[0] in {"/$", "/$^"}:
+        return "fragment"
+    return "concrete"
+
+
 def _parse_client_bundle_inventory(text: str) -> list[dict[str, Any]]:
     """Normalize the client_bundle_inventory extraction artifact."""
 
@@ -353,7 +367,7 @@ def _parse_client_bundle_inventory(text: str) -> list[dict[str, Any]]:
 
     records = [_record(target)]
     for path in [*api_paths, *spa_routes]:
-        if not isinstance(path, str) or not path.startswith("/"):
+        if classify_client_route(path) != "concrete":
             continue
         records.append(_record(urljoin(target.rstrip("/") + "/", path.lstrip("/"))))
     return records
@@ -382,7 +396,7 @@ def client_bundle_workflows(
 
     workflows = []
     for route in routes:
-        if not isinstance(route, str) or not route.startswith("/"):
+        if classify_client_route(route) != "concrete":
             continue
         normalized_route = route.split("?", 1)[0].casefold()
         url = urljoin(target.rstrip("/") + "/", route.lstrip("/"))
@@ -888,6 +902,31 @@ def _canonicalize_inventory_manifest_source(
             raise ValueError(f"inventory_manifest source item {item_id} attributes must be an object")
         item.setdefault("attributes", {})
     normalized["schema_version"] = 1
+    excluded_ids = set()
+    retained = []
+    candidates = normalized.setdefault("route_candidates", [])
+    if not isinstance(candidates, list):
+        raise ValueError("inventory_manifest route_candidates must be a list")
+    for item in items:
+        attributes = item["attributes"]
+        client_route = attributes.get("client_route")
+        registration = attributes.get("registration")
+        route = client_route.get("url") if isinstance(client_route, dict) else None
+        if not route and isinstance(registration, dict):
+            route = registration.get("url")
+        if item["kind"] == "endpoint":
+            route = item["value"]
+        parsed = urlparse(str(route or ""))
+        classification = classify_client_route(parsed.path) if parsed.scheme in {"http", "https"} else "concrete"
+        if classification != "concrete":
+            excluded_ids.add(item["id"])
+            if classification != "fragment":
+                candidates.append({"value": route, "classification": classification})
+        else:
+            retained.append(item)
+    normalized["items"] = [
+        item for item in retained if item["attributes"].get("endpoint_id") not in excluded_ids
+    ]
     return normalized
 
 
@@ -949,6 +988,16 @@ def _read_inventory_source(
         technologies=technologies,
         parameters=parameters,
     )
+    if normalized_format == "client_bundle_inventory":
+        payload = _json_values(text)[0]
+        manifest["route_candidates"] = [
+            {"value": route, "classification": classify_client_route(route)}
+            for route in [*payload["api_paths"], *payload["spa_routes"]]
+            if classify_client_route(route) in {"pattern", "template"}
+        ]
+        for candidate in payload.get("route_candidates", []):
+            if candidate not in manifest["route_candidates"]:
+                manifest["route_candidates"].append(candidate)
     if not manifest["items"]:
         raise ValueError("Recon output produced no in-scope inventory items")
     return source_ref, normalized_format, manifest
@@ -993,8 +1042,16 @@ def _merge_inventory_manifests(sources: Iterable[tuple[str, dict[str, Any]]]) ->
     gaps: list[Any] = []
     source_count = 0
     candidate_count = 0
+    route_candidates = []
+    mapping_coverage = []
     for source_ref, manifest in sources:
         source_count += 1
+        for candidate in manifest.get("route_candidates", []):
+            if candidate not in route_candidates:
+                route_candidates.append(candidate)
+        for coverage in manifest.get("mapping_coverage", []):
+            if coverage not in mapping_coverage:
+                mapping_coverage.append(coverage)
         for gap in manifest.get("unassessed_gaps", []):
             if gap not in gaps:
                 gaps.append(gap)
@@ -1022,6 +1079,8 @@ def _merge_inventory_manifests(sources: Iterable[tuple[str, dict[str, Any]]]) ->
         "schema_version": 1,
         "items": items,
         "unassessed_gaps": gaps,
+        "route_candidates": route_candidates,
+        "mapping_coverage": mapping_coverage,
         "extraction": {
             "source_artifact_count": source_count,
             "candidate_count": candidate_count,
@@ -1036,6 +1095,7 @@ def consolidate_recon_artifacts(
     *,
     target_id: str = "target-1",
     target: str = "",
+    mapping_coverage: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create one validated inventory manifest from supported operation artifacts.
 
@@ -1060,6 +1120,14 @@ def consolidate_recon_artifacts(
         processed.append((source_ref, manifest))
         processed_details.append({"source_artifact": source_ref, "source_format": _source_format})
     manifest = _merge_inventory_manifests(processed)
+    if mapping_coverage is not None:
+        manifest["mapping_coverage"] = mapping_coverage
+        manifest["unassessed_gaps"].extend(
+            f"Mapping workstream {coverage['workstream']} is incomplete: "
+            + ("; ".join(str(task.get("reason") or task["status"]) for task in coverage["tasks"])
+               or "no terminal provider evidence")
+            for coverage in mapping_coverage if not coverage["complete"]
+        )
     result = write_inventory_manifest(output_file, manifest)
     result.update(
         {

@@ -692,3 +692,100 @@ The task system now combines durable state with multi-agent execution:
 - `create_tasks` remains available for durable work capture.
 - Phase terminal states are explicit: `done`, `partial_failure`, and `blocked`. Task terminal states additionally
   include `superseded` for resolved replacement lineage.
+
+
+### Large tool-result artifact handoff
+
+Successfully externalized text and JSON results return the complete saved artifact reference, artifact ID, and
+size without a body preview. Result status, tool-use metadata, and small sibling content blocks remain available.
+Agents reuse the saved artifact directly; source data needs saving only when a tool has not already persisted it.
+Transformations read the complete saved source and retain its reference. Small results pass through unchanged.
+If persistence is unavailable, bounded inline output retains its explicit truncation warning and does not claim
+that a complete artifact exists. The shared router applies this behavior to HTTP, network, filesystem, and
+runtime-added tools.
+
+Code-owned tools can declare bounded excerpts with `bounded_inline_result(tool)` after the tool decorator.
+The router reads this declaration from the SDK's selected tool object, never from tool arguments or results.
+Declared results remain inline through the normal maximum character ceiling even when larger than the artifact
+threshold. Results exceeding that ceiling retain normal externalization or truncation behavior. Both ordinary
+and bounded artifact read/search factories declare this policy; it applies to workers, critics, evaluators,
+and recovery readers. No extra character allowance is granted. Serialized response budgets include metadata;
+readers fall back to byte pages for oversized lines and preserve UTF-8 boundaries and advancing byte offsets.
+An unusable response budget produces an explicit error rather than a stalled empty page.
+
+A shared before-tool guard still blocks string arguments containing an entire exact recorded preview and returns
+its complete artifact reference. Reference-only results do not create preview records.
+Preview records live in `artifacts/.preview_copies/`, use atomic writes, and survive operation continuations.
+The guard reads one record at a time without retaining an in-memory preview collection. Partial excerpts and
+rewritten previews are outside this guard's detection scope. Successful acquisition alone does not establish
+complete analysis: incomplete processing requires a coverage gap, while zero extracted items or failed optional
+formatting alone do not establish failure or workflow unavailability.
+
+
+### Source acquisition for analysis
+
+Module phase contracts may declare `required_methods_by_workstream`. The web module declares `request` and
+`analyze` for `client_side_api`, allowing workers to save missing source data before analysis. Requirements are
+merged before acceptance contracts are frozen and checked against runtime capabilities. Other modules default
+to no additional methods and may declare their own protocol-appropriate requirements.
+
+Acquiring source data within the declared methods and target scope is discovery preparation, rather than
+security-control testing. Workers process complete saved artifacts. Continuations with missing required methods
+receive a linked replacement task; the original frozen contract remains unchanged.
+
+### Partial inventory and crawl prompt repair
+
+The web mapping contract enables `allow_partial_synthesis`; other module contracts default to `false`.
+After all dependent mapping tasks are terminal, the controller consolidates available evidence into a non-empty
+validated inventory even when a workstream failed. The manifest contains `mapping_coverage` entries with each
+workstream's completion state, task IDs, statuses, and failure reasons. Incomplete workstreams also appear in
+`unassessed_gaps`. Synthesis can succeed while the mapping phase remains incomplete. Later phases consume this
+frozen snapshot without treating its gaps as completed work; provisioning can use its registration workflows.
+
+Inventory recovery creates and activates a linked replacement before recording acceptance. The original frozen
+contract remains unchanged. Empty or invalid inventories still block dependent work.
+
+Scope-only prompt repairs preserve selected tools, shell commands, and memories. Explanatory notation such as
+`scheme://host:port` does not assert an executable target. Concrete addresses remain subject to scope validation.
+Tools are selected by relevant capabilities and scoped invocation: `specialized_recon_orchestrator` is appropriate
+for bounded crawling even though it offers other reconnaissance capabilities.
+
+Web bundle extraction retains wildcard routes and unresolved templates in `route_candidates` metadata. They do
+not become actionable endpoints or workflows; syntax fragments are discarded. The same classification applies
+when consolidating saved extraction results and inventory fragments.
+## Consistent task policy and recovery
+
+The prompt builder, critic, and executor receive the same controller-owned task policy. Module task policies
+distinguish target access from the operation workspace and preserve inventory outputs without authorizing
+adjacent investigation. Explicit user restrictions remain authoritative. Web reconnaissance continues to use
+supplied test credentials, prohibits automatic registration, and limits verification to authorized read-only work.
+
+Execution proof and terminal acceptance are separate. Validated controller receipts resolve execution requirements
+even when acceptance is missing. Acceptance repair uses retained evidence; execution repair permits only unresolved
+requirements against frozen subjects. Artifacts alone do not resolve execution proof. Recovery sections require an
+explicit controller recovery trigger rather than unrelated planning metadata.
+
+
+### Worker authentication and registration completion
+
+Browser workers call `capture_browser_authenticated_context` after login; `validation_url` is optional.
+Python selects the most recent successful same-target GET containing the required headers, or matching
+session cookies for cookie-only authentication, and validates the captured context by replay. If no such
+request is available, the error asks for a normal signed-in browser action. Login submissions and visible
+signed-in state alone do not validate reusable context. API and other credential workers retain their
+existing authentication paths.
+
+The exact runtime validation URL stays in sensitive operation context. Reusable flow descriptors contain
+only a query-free validation URL that independently validates, or an empty URL. An empty descriptor URL
+therefore does not mean the runtime context is unavailable. Observed control labels retain their original
+Unicode text, including spaces, punctuation, and emojis; submitted values are forbidden step properties.
+
+Successful registration credential storage is task-local evidence even when the credential has shared
+scope. Functional success and flow mapping approval are separate outcomes: a mapping repair must not
+create another account or repeat login. Critics check observed controls and ordered transitions; unknown
+field requiredness remains unclassified. A mapping gap records whether the functional action succeeded.
+
+Authentication workers retain exhausted attempts in task recovery metadata by target and credential.
+The operation and task scope come from the durable task record. Re-entry and continuation cannot restart
+an exhausted identical attempt, but may try another eligible credential. The default remains three
+actor/critic cycles. Valid contexts can still be refreshed when required.

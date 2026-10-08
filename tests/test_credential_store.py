@@ -404,6 +404,30 @@ def test_typed_payload_validation_rejects_incomplete_and_unsafe_mailbox_configur
         validate_credential_payload("bearer", {"token": "secret"})
 
 
+def test_api_credential_accepts_multiple_opaque_named_headers():
+    assert validate_credential_payload("api_key", {
+        "headers": {"X-Session": "opaque-value", "Tauser": "another-value"},
+    }) == {"headers": {"X-Session": "opaque-value", "Tauser": "another-value"}}
+
+
+@pytest.mark.parametrize("headers,match", [
+    ({"X-Session": "value", "x-session": "another"}, "unique"),
+    ({"Bad Header": "value"}, "header name"),
+    ({"Tauser": "value\r\nInjected: bad"}, "header value"),
+    ({}, "nonempty"),
+])
+def test_api_credential_rejects_unsafe_header_sets(headers, match):
+    with pytest.raises(ValueError, match=match):
+        validate_credential_payload("api_key", {"headers": headers})
+
+
+def test_single_api_key_header_rejects_unsafe_name_and_value():
+    with pytest.raises(ValueError, match="header name"):
+        validate_credential_payload("api_key", {"api_key": "secret", "name": "Bad Header"})
+    with pytest.raises(ValueError, match="header value"):
+        validate_credential_payload("api_key", {"api_key": "secret", "name": "Tauser", "prefix": "bad\n"})
+
+
 def test_objective_credentials_are_extracted_and_sanitized_before_agent_use():
     sanitized, drafts = extract_objective_credentials(
         "Assess app. username=alice password=secret-value email=bob@example.test password=email-secret "
@@ -1740,12 +1764,12 @@ def test_idor_login_contexts_reject_unplanned_unbound_and_cross_origin_pairs(tmp
         )
 
     set_task_auth_context([left["credential_id"], right["credential_id"]])
-    with pytest.raises(ValueError, match="planned account, role, or tenant"):
-        build_checked_out_idor_login_contexts(
-            [left["credential_id"], right["credential_id"]],
-            "https://app.example.test/api",
-            "https://app.example.test/login",
-        )
+    contexts = build_checked_out_idor_login_contexts(
+        [left["credential_id"], right["credential_id"]],
+        "https://app.example.test/api",
+        "https://app.example.test/login",
+    )
+    assert {item["credential_id"] for item in contexts} == {left["credential_id"], right["credential_id"]}
     with pytest.raises(ValueError, match="login_url must share"):
         build_checked_out_idor_login_contexts(
             [left["credential_id"], right["credential_id"]],

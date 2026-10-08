@@ -91,6 +91,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 from strands import tool
 
+from modules.authentication_requirements import AuthenticationRequirement
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
@@ -6739,6 +6740,7 @@ class TaskProposalCriterion(_StrictTaskWireModel):
 class TaskProposal(_StrictTaskWireModel):
     """Small model-facing task proposal compiled into an immutable acceptance contract by Python."""
 
+    authentication_requirement: AuthenticationRequirement = Field(default_factory=AuthenticationRequirement)
     title: str = Field(min_length=1)
     objective: str = Field(min_length=1, validation_alias=AliasChoices("objective", "description"))
     basis_description: str | None = Field(default=None, description="Finite boundary; defaults to objective")
@@ -6958,6 +6960,10 @@ class TaskProposal(_StrictTaskWireModel):
 
 
 _TASK_PROPOSAL_FIELD_CORRECTIONS = {
+    "authentication_requirement": (
+        'object with comparison (none, account, role, tenant) and roles array',
+        '"authentication_requirement":{"comparison":"none","roles":["member"]}',
+    ),
     "title": ('non-empty string', '"title":"Assess login"'),
     "objective": ('non-empty string', '"objective":"Test the assigned login route"'),
     "basis_description": ('non-empty string when supplied', '"basis_description":"Bounded login assessment"'),
@@ -7144,6 +7150,7 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                 ],
                 "required": ["title", "objective", "criteria"],
                 "properties": {
+                    "authentication_requirement": AuthenticationRequirement.model_json_schema(),
                     "title": {"type": "string", "minLength": 1},
                     "objective": {"type": "string", "minLength": 1},
                     "basis_description": {"type": ["string", "null"]},
@@ -7494,6 +7501,8 @@ def _explicit_service_references(
     url_matches = list(_EXPLICIT_SERVICE_URL_REFERENCE_PATTERN.finditer(text or ""))
     for match in url_matches:
         reference = match.group(0).rstrip(".,;:)]}")
+        if reference.lower() in {"scheme://host:port", "scheme://host", "protocol://host:port"}:
+            continue
         if reference and reference not in seen:
             references.append(reference)
             seen.add(reference)
@@ -8407,7 +8416,22 @@ def _proposal_procedure_methods(
     _validate_synthesis_execution_model(proposal, phase_task_contract)
     if _is_supported_controller_synthesis(proposal, phase_task_contract):
         return ["controller_synthesis"]
-    return proposal.methods
+    return merge_workstream_procedure_methods(proposal.methods, proposal.workstream, phase_task_contract)
+
+
+def merge_workstream_procedure_methods(
+    methods: Iterable[str],
+    workstream: str,
+    contract: Any | None,
+    targets: Iterable[OperationTarget] = (),
+) -> list[str]:
+    """Apply only the active module's explicitly declared workstream requirements."""
+
+    requirements = getattr(contract, "required_methods_by_workstream", {})
+    required = requirements.get(workstream, ())
+    if not required:
+        return list(methods)
+    return canonical_procedure_methods([*methods, *required], targets)
 
 
 def canonical_procedure_methods(
@@ -8483,7 +8507,9 @@ def _proposal_execution_requirements(
     selected_targets = [target for target in plan.targets if target.target_id in selected_ids]
     routes = _procedure_proposal_endpoint_routes(proposal, selected_targets)
     subjects = routes or [f"target:{target_id}" for target_id in selected_ids]
-    canonical_methods = canonical_procedure_methods(proposal.methods, selected_targets)
+    canonical_methods = canonical_procedure_methods(
+        _proposal_procedure_methods(proposal, phase_task_contract), selected_targets
+    )
     method_text = ", ".join(dict.fromkeys(canonical_methods))
     return tuple(
         ExecutionRequirement(
@@ -9073,6 +9099,11 @@ def _create_tasks_from_proposals(
 
         proposals = normalize_contract_bound_task_proposals(proposals)
         validate_phase_task_proposals(phase_task_contract, proposals)
+        proposals = [
+            proposal.model_copy(update={"methods": _proposal_procedure_methods(proposal, phase_task_contract)})
+            if proposal.inferred_basis_kind == "procedure" and proposal.task_role != "synthesis" else proposal
+            for proposal in proposals
+        ]
     if proposal_preflight_validator is not None:
         proposal_preflight_validator(proposals)
     if coverage_item_ids is not None:
@@ -9161,6 +9192,12 @@ def _create_tasks_from_proposals(
             parent = next((task for task in existing_tasks if task.task_uid == replacement_of), None)
             if parent is None:
                 raise ValueError(f"replacement_of references unknown task {replacement_of}")
+            if "authentication_requirement" not in proposal.model_fields_set:
+                proposal = proposal.model_copy(update={
+                    "authentication_requirement": AuthenticationRequirement.model_validate(
+                        parent.recovery_context.get("authentication_requirement", {}),
+                    ),
+                })
             if parent.phase != current_phase:
                 raise ValueError("replacement task must remain in the parent task's phase")
             if parent.status not in {"partial_failure", "blocked"}:
@@ -9184,7 +9221,14 @@ def _create_tasks_from_proposals(
         selected_targets = [
             target for target in plan.targets if not target_ids or target.target_id in set(target_ids)
         ]
-        planning_context = {}
+        planning_context = {"authentication_requirement": proposal.authentication_requirement.model_dump()}
+        if (
+            phase_task_contract is not None
+            and proposal.workstream in phase_task_contract.authentication_comparison_workstreams
+            and proposal.authentication_requirement.comparison == "none"
+            and not validation_auth_binding
+        ):
+            raise ValueError("comparison workstream requires an explicit authentication comparison kind")
         if proposal_preflight_validator is not None:
             planning_context["task_preflight_validated"] = True
         if phase_task_contract is not None:
@@ -9231,7 +9275,9 @@ def _create_tasks_from_proposals(
                 )
             manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
             completed_ids = _completed_coverage_item_ids(
-                existing_tasks,
+                [task for task in existing_tasks if AuthenticationRequirement.model_validate(
+                    task.recovery_context.get("authentication_requirement", {}),
+                ) == proposal.authentication_requirement],
                 snapshot_hash,
                 current_phase,
                 coverage_family,
@@ -9462,6 +9508,9 @@ def _create_tasks_from_proposals(
                     task.phase,
                     _task_coverage_family(task),
                 ) == group_identity
+                and AuthenticationRequirement.model_validate(
+                    task.recovery_context.get("authentication_requirement", {})
+                ) == proposal.authentication_requirement
                 for task in [*existing_tasks, *staged_tasks]
                 if task.status in {"active", "pending", "done"}
             ):
@@ -9486,6 +9535,9 @@ def _create_tasks_from_proposals(
                     task.target_ids,
                     _task_coverage_family(task),
                 ) == cross_phase_identity
+                and AuthenticationRequirement.model_validate(
+                    task.recovery_context.get("authentication_requirement", {})
+                ) == proposal.authentication_requirement
                 for task in [*existing_tasks, *staged_tasks]
                 if task.status in {"active", "pending", "done"}
             ):
@@ -10344,6 +10396,7 @@ def build_record_task_acceptance_tool(
     task_uid: str,
     task: Task | None = None,
     execution_evidence_resolver: Callable[[Task, AcceptanceCriterion], dict[str, list[str]]] | None = None,
+    acceptance_reconciler: Callable[[Task, dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Any:
     """Build a model-facing acceptance tool bound to one controller-selected task."""
 
@@ -10428,11 +10481,20 @@ def build_record_task_acceptance_tool(
     ) -> str:
         status = _normalize_acceptance_status_alias(status)
         disposition = _normalize_acceptance_disposition_alias(disposition)
-        evidence_refs = split_delimited_reference_values(evidence_refs, allow_delimited_strings=True)
         current_task = next(
             (item for item in _get_database_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
             task,
         )
+        if acceptance_reconciler is not None:
+            payload = acceptance_reconciler(current_task, {
+                "status": status, "disposition": disposition, "summary": summary, "evidence_refs": evidence_refs,
+            })
+            status, disposition, summary, evidence_refs = (
+                payload["status"], payload["disposition"], payload["summary"], payload["evidence_refs"]
+            )
+        status = _normalize_acceptance_status_alias(status)
+        disposition = _normalize_acceptance_disposition_alias(disposition)
+        evidence_refs = split_delimited_reference_values(evidence_refs, allow_delimited_strings=True)
         receipts = _task_execution_receipts(current_task, criterion)
         if execution_evidence_resolver is not None:
             resolved = execution_evidence_resolver(current_task, criterion)

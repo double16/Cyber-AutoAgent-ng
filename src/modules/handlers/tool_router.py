@@ -15,16 +15,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from strands.hooks import AfterToolCallEvent, HookProvider  # type: ignore
+from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider  # type: ignore
 from strands.types.tools import ToolResultContent
 
 from modules.handlers import sanitize_target_name
+from modules.handlers.preview_copy import PreviewCopyGuard
+from modules.tools.tool_result_policy import has_bounded_inline_result
 
 logger = logging.getLogger(__name__)
 
 
 class ToolRouterHook(HookProvider):
-    """AfterToolCall hook that truncates and externalizes large results.
+    """Externalize large results and return references instead of body previews.
 
     SDK Contract:
     - AfterToolCallEvent: Can ONLY write to result (must REPLACE, not mutate)
@@ -48,6 +50,7 @@ class ToolRouterHook(HookProvider):
             self._artifact_dir = None
         self._artifact_threshold = artifact_threshold or 10000
         self._artifact_count = 0
+        self._preview_copy_guard = PreviewCopyGuard(self._artifact_dir)
         # Thread safety for artifact counting
         self._artifact_lock = threading.Lock()
         if self._artifact_threshold > self._max_result_chars:
@@ -55,6 +58,7 @@ class ToolRouterHook(HookProvider):
 
     def register_hooks(self, registry) -> None:  # type: ignore[no-untyped-def]
         registry.add_callback(AfterToolCallEvent, self._truncate_large_results_async)
+        registry.add_callback(BeforeToolCallEvent, self._preview_copy_guard.before_tool)
 
     def _artifact_reference(self, artifact_path: Path) -> str:
         """Return a stable reference relative to the operation output directory."""
@@ -80,6 +84,7 @@ class ToolRouterHook(HookProvider):
             return
 
         tool_name = getattr(event, "tool_use", {}).get("name", "unknown")
+        bounded_inline = has_bounded_inline_result(getattr(event, "selected_tool", None))
 
         result = getattr(event, "result", None)
         if not result or not isinstance(result, dict):
@@ -158,7 +163,7 @@ class ToolRouterHook(HookProvider):
                 logger.debug("processing tool output type %s", file_type)
                 raw_val = block.get(file_type)
 
-                # Normalize to string for size checks and previews
+                # Normalize to string for persistence and size checks
                 if isinstance(raw_val, bytes):
                     text = raw_val.decode(encoding="utf-8", errors="ignore")
                 elif isinstance(raw_val, str):
@@ -168,6 +173,8 @@ class ToolRouterHook(HookProvider):
 
                 original_size = len(text)
                 needs_externalization = original_size > self._artifact_threshold
+                if bounded_inline and original_size <= self._max_result_chars:
+                    needs_externalization = False
                 needs_truncation = original_size > self._max_result_chars
 
                 # If no action needed and we don't already have a summary to emit, preserve original block unchanged
@@ -199,7 +206,7 @@ class ToolRouterHook(HookProvider):
                             "[Tool output too large for full inline; artifact persistence disabled]"
                         )
 
-                # Decide inline preview size
+                # Bound inline fallback when persistence is unavailable
                 truncate_target = self._max_result_chars
                 actual_truncated_size = min(truncate_target, original_size)
 
@@ -224,12 +231,9 @@ class ToolRouterHook(HookProvider):
                     artifact_ref = self._artifact_reference(artifact_path)
                     summary_lines.extend(
                         [
-                            (f"[Tool output: {original_size:,} chars | Inline: {len(snippet):,} chars | "
-                            f"Artifact ID: artifact_id:{artifact_path.name} | Artifact ref: {artifact_ref}]"),
-                            "",
-                            snippet,
-                            "",
                             f"[Complete output: {artifact_ref}]",
+                            (f"[Tool output: {original_size:,} chars | "
+                            f"Artifact ID: artifact_id:{artifact_path.name} | Artifact ref: {artifact_ref}]"),
                         ]
                     )
                 else:

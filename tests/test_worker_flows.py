@@ -10,8 +10,9 @@ import pytest
 from strands import tool
 
 from modules.agents import multi_agent_workflow as workflow
+from modules.agents.worker_completion import WorkerCompletion
 from modules.config.types import BudgetConfig
-from modules.handlers.tool_recovery import ToolOutcomeJournal
+from modules.handlers.tool_recovery import ToolOutcome, ToolOutcomeJournal
 from modules.tools import artifact, authentication, credentials, memory
 from modules.tools.memory import SQLiteApplicationStore
 from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
@@ -57,12 +58,217 @@ def approval(reference="artifact:observed.html"):
     return {"approved": True, "feedback": [], "supporting_evidence_refs": [reference]}
 
 
+@pytest.fixture
+def registered_case(worker_case):
+    controller, _old_task, store, target, observed = worker_case
+    task = controller._credential_provisioning_tasks(1, "credential_provisioning", 1, {
+        "target": target, "target_id": "target", "url": f"{target}/signup", "roles": ["member"],
+    }, {"member": 1})[0]
+    task = replace(task, status="active")
+    controller.state.tasks = [task]
+    store.store_task("OP_AUTH", task)
+    record = store.store_credential("OP_AUTH", {
+        "credential_id": "registered", "target": target, "role": "member", "origin": "registered",
+        "credential_type": "username_password", "management_policy": "operation", "status": "unknown",
+        "operation_id": None, "payload": {"username": "new-user", "password": "internal-secret"},
+    })
+    stored = ToolOutcome(
+        sequence=2, tool_use_id="repair-store", tool_name="store_credential", success=True, correctable=False,
+        input_summary="artifact:observed.html", output_summary=json.dumps({"stored": True, "credential": record}),
+        artifact_refs=("artifact:observed.html",),
+    )
+    return controller, task, store, target, observed, stored
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_registration_completion_survives_controller_reload_and_mapping_failure(registered_case, approved):
+    controller, task, store, target, _observed, stored = registered_case
+    payload = controller._registration_acceptance_payload(task, [stored], {
+        "mapping_approved": approved, "existing": {"flow_id": "reviewed-flow"} if approved else None,
+    })
+    assert payload["status"] == "satisfied"
+    assert "Registered identity persisted" in payload["summary"]
+    assert "not yet approved" in payload["summary"] if not approved else "mapping approved" in payload["summary"]
+    retained = controller.state.tasks[0]
+    store.store_task("OP_AUTH", retained)
+    reloaded = workflow.MultiAgentWorkflowController(
+        runtime=controller.runtime, budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(store.get_plan("OP_AUTH"), store.get_tasks("OP_AUTH")),
+    )
+    assert reloaded._registration_acceptance_payload(task, []) == payload
+    assert "internal-secret" not in json.dumps(retained.recovery_context)
+    assert "new-user" not in json.dumps(retained.recovery_context)
+    prompt = reloaded._worker_completion_section(task)
+    assert "registered" in prompt and "registration" in prompt
+    completion = reloaded._worker_completions(task)[0]
+    assert completion.producer_id == "repair-store"
+    assert completion.mapping_approved is approved
+    assert completion.target == target
+
+
+@pytest.mark.parametrize("mutation", [
+    {"origin": "found"}, {"target": "https://other.test"}, {"role": "other"},
+    {"status": "revoked"}, {"status": "retired"}, {"status": "invalid"},
+])
+def test_registration_completion_revalidates_persisted_credential(registered_case, monkeypatch, mutation):
+    controller, task, store, _target, _observed, stored = registered_case
+    assert controller._registration_acceptance_payload(task, [stored])
+    original = store.get_credential("registered")
+    monkeypatch.setattr(store, "get_credential", lambda _id: {**original, **mutation})
+    assert controller._registration_acceptance_payload(task, []) is None
+
+
+def test_registration_requires_task_local_storage_not_http_or_existing_credential(registered_case):
+    controller, task, _store, target, observed, stored = registered_case
+    assert controller._registration_acceptance_payload(task, [observed]) is None
+    assert controller._registered_worker_completion(task, target, ("member",), []) is None
+    for changed in (
+        replace(stored, success=False), replace(stored, output_summary='{"stored":false}'),
+        replace(stored, output_summary="not JSON"), replace(stored, output_summary='{"stored":true,"credential":null}'),
+        replace(stored, output_summary='{"stored":true,"credential":{"credential_id":"missing"}}'),
+    ):
+        assert controller._registration_acceptance_payload(task, [changed]) is None
+    missing_evidence = replace(stored, artifact_refs=(), input_summary="")
+    assert controller._registration_acceptance_payload(task, [missing_evidence]) is None
+    assert controller._registered_worker_success(task, target, ("member",), [missing_evidence])
+
+
+def test_registration_completion_uses_full_structured_storage_arguments(registered_case):
+    controller, task, _store, _target, _observed, stored = registered_case
+    stored = replace(stored, input_summary="truncated input", artifact_refs=(),
+                     structured_input={"evidence_refs": ["artifact:observed.html"]})
+    payload = controller._registration_acceptance_payload(task, [stored])
+    assert payload["evidence_refs"] == ["artifact:observed.html"]
+
+
+def test_missing_credential_and_malformed_completion_state_do_not_prove_success(registered_case, monkeypatch):
+    controller, task, store, _target, _observed, stored = registered_case
+    controller.state.patch_task(task.task_uid, recovery_context_updates={"worker_completions": []})
+    assert controller._worker_completions(task) == []
+    controller.state.patch_task(task.task_uid, recovery_context_updates={"worker_completions": {}})
+    assert controller._registration_acceptance_payload(task, [stored])
+    monkeypatch.setattr(store, "get_credential", lambda _id: None)
+    assert controller._worker_completions(task) == []
+
+
+def test_registration_gap_is_corrected_before_acceptance_publication(registered_case, monkeypatch):
+    controller, task, store, _target, _observed, stored = registered_case
+    published = []
+    monkeypatch.setattr(memory, "_record_task_acceptance", lambda uid, results: published.extend(results) or "ok")
+    bound = memory.build_record_task_acceptance_tool(
+        task.task_uid, task,
+        acceptance_reconciler=lambda current, payload: controller._registration_acceptance_payload(current, [stored])
+        or payload,
+    )
+    bound(status="satisfied", disposition="observation", summary="No registered identity persisted",
+          evidence_refs=["artifact:missing.html"])
+    assert len(published) == 1
+    assert "Registered identity persisted" in published[0].summary
+    assert "No registered identity" not in published[0].summary
+    assert published[0].evidence_refs == ("artifact:observed.html",)
+    assert store.get_credential("registered")["operation_id"] is None
+
+
+@pytest.mark.parametrize("changed", [
+    {"operation_id": "earlier"}, {"task_uid": "other-task"}, {"purpose": "unknown"},
+    {"evidence_refs": "artifact:observed.html"}, {"producer_id": ""}, {"functional_success": False},
+    {"mapping_approved": "true"}, {"role": None}, {"extra": "unknown"}, {"target": ""},
+    {"evidence_refs": [None]}, {"credential_id": 1},
+])
+def test_invalid_or_foreign_completion_cannot_close_task(registered_case, changed):
+    controller, task, _store, target, _observed, _stored = registered_case
+    completion = WorkerCompletion("OP_AUTH", task.task_uid, "registration", target, "member", "registered",
+                                  ("artifact:observed.html",), "repair-store")
+    controller.state.patch_task(task.task_uid, recovery_context_updates={
+        "worker_completions": {"registration:registered": {**completion.to_dict(), **changed}},
+    })
+    assert controller._worker_completions(task) == []
+    assert controller._worker_completion_section(task) == ""
+
+
+def test_authentication_completion_is_revalidated_without_closing_parent(worker_case, monkeypatch):
+    controller, task, _store, target, _observed = worker_case
+    completion = WorkerCompletion("OP_AUTH", task.task_uid, "authentication", target, "member", "selected")
+    assert WorkerCompletion.from_dict(completion.to_dict()) == completion
+    controller._persist_worker_completion(task, completion)
+    monkeypatch.setattr(workflow, "authentication_context_is_valid", lambda *_args: True)
+    assert controller._worker_completions(task) == [completion]
+    assert controller._registration_acceptance_payload(task, []) is None
+    monkeypatch.setattr(workflow, "authentication_context_is_valid", lambda *_args: False)
+    assert controller._worker_completions(task) == []
+
+
+@pytest.mark.parametrize("value", [None, [], {"incomplete": True}])
+def test_worker_completion_rejects_invalid_records(value):
+    with pytest.raises(ValueError):
+        WorkerCompletion.from_dict(value)
+
+
+@pytest.mark.parametrize("historical_failure", [True, False])
+def test_provisioning_repair_storage_closes_acceptance_without_another_actor(
+    registered_case, monkeypatch, historical_failure,
+):
+    controller, task, _store, target, observed, stored = registered_case
+    plan = controller.state.plan
+    controller.state.acceptance_complete = False
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Register once", "tools": []})
+    monkeypatch.setattr(controller, "_prepare_task_authentication", lambda _plan, selected: selected)
+    monkeypatch.setattr(controller, "_task_prompt_scope_feedback", lambda *_args: [])
+    monkeypatch.setattr(controller, "_task_inventory_route_feedback", lambda *_args: [])
+    monkeypatch.setattr(controller, "_resolve_task_executor_base_tools", lambda *_args: [])
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: approval())
+
+    def publish(uid, results):
+        controller.state.acceptance_results[uid] = results
+        return "acceptance published"
+
+    monkeypatch.setattr(memory, "_record_task_acceptance", publish)
+    actors = []
+
+    def actor(_role, _prompt, _tools, _system, _policy):
+        actors.append(_prompt)
+        assert len(actors) <= 2, "Acceptance must not start another actor after successful repair"
+        attempt = controller._worker_flow_attempt(task, target, "registration", ("member",))
+        if len(actors) == 1:
+            recorder = controller._worker_flow_recorder(task, target, "registration", "browser_registration", attempt,
+                                                       ("member",))
+            recorder(login_url=f"{target}/signup", steps=[{"action": "form_submission", "url": f"{target}/signup"}])
+            return workflow.TaskExecutorCycleResult(text="Submitted registration", outcomes=[observed],
+                                                   recovery_required=historical_failure)
+        return workflow.TaskExecutorCycleResult(text="Stored registered identity", outcomes=[stored])
+
+    controller.work_runner = actor
+    monkeypatch.setattr(controller, "_evaluate_task", lambda *_args, **_kwargs: workflow.WorkflowDecision(
+        status="done", reason="Registered identity persisted",
+    ))
+    controller._run_task_in_trace(plan, plan.phases[0], task)
+    assert len(actors) == 2
+    result = controller.state.list_task_acceptance_results(task.task_uid)[0]
+    assert "Registered identity persisted" in result.summary
+    assert "mapping approved" in result.summary
+    assert controller.state.tasks[0].status == "done"
+    # A controller reload must close an omitted acceptance result without another browser actor or flow review.
+    controller.state.acceptance_results.clear()
+    reloaded = workflow.MultiAgentWorkflowController(
+        runtime=controller.runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=controller.state,
+    )
+    for name in ("_build_task_prompt", "_prepare_task_authentication", "_task_prompt_scope_feedback",
+                 "_task_inventory_route_feedback", "_resolve_task_executor_base_tools", "_evaluate_task"):
+        monkeypatch.setattr(reloaded, name, getattr(controller, name))
+    reloaded.work_runner = Mock(side_effect=AssertionError("Completed registration must not be repeated"))
+    reloaded._run_task_in_trace(plan, plan.phases[0], task)
+    reloaded.work_runner.assert_not_called()
+    assert "Registered identity persisted" in reloaded.state.list_task_acceptance_results(task.task_uid)[0].summary
+
+
 @pytest.mark.parametrize("purpose", ["authentication", "registration"])
 @pytest.mark.parametrize("existing", [False, True])
 def test_completed_worker_flow_is_published_once_or_updates_existing(worker_case, purpose, existing):
     controller, task, store, target, outcome = worker_case
     roles = ("member",) if purpose == "registration" else ()
     kind = "browser_registration" if purpose == "registration" else "browser_form"
+    if purpose == "registration":
+        task = replace(task, recovery_context={"conditional_phase": {"registration_flow": {"url": f"{target}/start"}}})
     recorder_attempt = controller._worker_flow_attempt(task, target, purpose, roles)
     recorder = controller._worker_flow_recorder(task, target, purpose, kind, recorder_attempt, roles)
     recorder(login_url=f"{target}/start", steps=[{"url": f"{target}/start", "action": "navigation"}])
@@ -72,7 +278,7 @@ def test_completed_worker_flow_is_published_once_or_updates_existing(worker_case
         controller._worker_flow_attempts.clear()
         recorder_attempt = controller._worker_flow_attempt(task, target, purpose, roles)
         recorder = controller._worker_flow_recorder(task, target, purpose, kind, recorder_attempt, roles)
-        recorder(login_url=f"{target}/changed")
+        recorder(login_url=f"{target}/start" if purpose == "registration" else f"{target}/changed")
         assert recorder_attempt["candidate"]["flow_id"] == stored["flow_id"]
     recorder_attempt["successful"] = True
     controller.text_runner.return_value = json.dumps(approval())
@@ -85,7 +291,7 @@ def test_completed_worker_flow_is_published_once_or_updates_existing(worker_case
     assert descriptor["worker_review"]["task_uid"] == task.task_uid
     assert descriptor["evidence_refs"] == ["artifact:observed.html"]
     assert set(descriptor["worker_review"]["approval_digests"]) == set(descriptor["evidence_refs"])
-    assert descriptor["login_url"].endswith("changed" if existing else "start")
+    assert descriptor["login_url"].endswith("changed" if existing and purpose == "authentication" else "start")
     controller._refine_worker_flow(task, target, purpose, recorder_attempt, [outcome], repair, [recorder])
     repair.assert_not_called()
     controller.text_runner.assert_called_once()
@@ -155,8 +361,14 @@ def test_failed_flow_review_does_not_publish_or_remove_functional_state(worker_c
     assert not store.list_authentication_flows(target)
     assert controller.state.tasks[0].status == "active"
     assert "authentication_flow_gap" in controller.state.tasks[0].recovery_context
+    gap = controller.state.list_tasks()[0].recovery_context["authentication_flow_gap"]
+    assert gap["stop_reason"] == (
+        "candidate_or_evidence_unavailable" if cause == "no_candidate" else
+        "review_error" if cause in {"exception", "bad_evidence"} else "review_limit_reached"
+    )
+    assert gap["reviews"] == (0 if cause == "no_candidate" else 1 if cause in {"exception", "bad_evidence"} else 3)
     assert attempt["successful"] == (cause != "no_success")
-    assert repair.call_count <= controller.flow_refinement_cycles - 1
+    assert repair.call_count <= controller.flow_refinement_cycles - (cause != "no_candidate")
 
 
 @pytest.mark.parametrize("error", [TimeoutError, ConnectionError])
@@ -237,7 +449,7 @@ def test_login_worker_without_flow_records_and_reviews_using_production_hooks(
         [{"url": "https://target.test/step?token=secret", "action": "navigation"}],
         [{"url": "https://target.test/step", "action": "arbitrary"}],
         [{"url": "https://target.test/step", "action": "submit", "values": {"password": "secret"}}],
-        [{"url": "https://target.test/step", "action": "submit", "field_names": ["value@example.test"]}],
+        [{"url": "https://target.test/step", "action": "submit", "field_names": [123]}],
     ],
 )
 def test_recorded_steps_reject_secrets_unknown_actions_and_scope_expansion(worker_case, steps):
@@ -405,33 +617,6 @@ def test_flow_refinement_config_has_no_discovery_fallback(worker_case):
     assert controller._flow_refinement_cycle_count() == 3
 
 
-@pytest.mark.parametrize("kind", ["api_form", "browser_form"])
-def test_existing_username_password_flow_keeps_both_login_methods_available(worker_case, kind):
-    controller, _task, _store, _target, _outcome = worker_case
-
-    @tool(name="browser_goto_url")
-    def navigate(url: str) -> str:
-        """Navigate to an observed login step."""
-        return url
-
-    @tool(name="ensure_authenticated_context")
-    def api_login(
-        credential_id: str,
-        flow_id: str,
-        login_url: str,
-        validation_url: str,
-        request_format: str,
-        additional_fields: dict | None,
-    ) -> str:
-        """Establish an API login context."""
-        return credential_id
-
-    tools = controller._authentication_credential_worker_tools(
-        [navigate, api_login],
-        {"credential_id": "credential", "credential_type": "username_password"},
-        {"kind": kind, "flow_id": "flow"},
-    )
-    assert {workflow.get_tool_name(item) for item in tools} == {"browser_goto_url", "ensure_authenticated_context"}
 
 
 @pytest.mark.parametrize("credential_type", ["api_key", "oauth2_client"])
@@ -494,7 +679,7 @@ def test_worker_step_runtime_schema_advertises_canonical_actions(worker_case):
     assert attempt["candidate"]["steps"][0]["action"] == "navigation"
 
 
-@pytest.mark.parametrize("kind", ["api_key", "oauth2_client", "browser_form", "api_form"])
+@pytest.mark.parametrize("kind", ["api_key", "oauth2_client", "browser_form"])
 def test_login_mapping_reuse_selects_an_applicable_credential_method(worker_case, kind):
     controller, task, store, target, _outcome = worker_case
     store.upsert_authentication_flow(
@@ -510,8 +695,8 @@ def test_login_mapping_reuse_selects_an_applicable_credential_method(worker_case
         },
         status="validated",
     )
-    attempt = controller._worker_flow_attempt(task, target, "authentication", kinds=("browser_form", "api_form"))
-    assert bool(attempt["existing"]) == (kind in {"browser_form", "api_form"})
+    attempt = controller._worker_flow_attempt(task, target, "authentication", kinds=("browser_form",))
+    assert bool(attempt["existing"]) == (kind == "browser_form")
 
 
 @pytest.mark.parametrize("authorized", [False, True])
@@ -557,39 +742,6 @@ def test_missing_functional_completion_never_publishes_an_approved_mapping(worke
     assert controller.state.tasks[0].status == "active"
 
 
-def test_api_form_worker_can_run_when_browser_reset_is_unavailable(worker_case, monkeypatch):
-    controller, task, _store, target, _outcome = worker_case
-    credential = {
-        "credential_id": "selected",
-        "credential_type": "username_password",
-        "target": target,
-        "role": "member",
-    }
-    flow = {"kind": "api_form", "login_url": f"{target}/login", "validation_url": f"{target}/protected"}
-    monkeypatch.setattr(
-        workflow, "reset_authentication_browser_session", AsyncMock(side_effect=RuntimeError("no browser"))
-    )
-    monkeypatch.setattr(controller, "_refine_worker_flow", Mock(return_value=[]))
-    monkeypatch.setattr(workflow, "authentication_context_is_valid", lambda *_args: False)
-    monkeypatch.setattr(workflow, "authentication_attempt_result", lambda *_args: None)
-
-    def run(_role, _prompt, tools, _system, _policy):
-        names = {workflow.get_tool_name(tool) for tool in tools}
-        assert "ensure_authenticated_context" in names
-        assert "capture_browser_authenticated_context" not in names
-        assert not any(name.startswith("browser_") for name in names)
-        return workflow.TaskExecutorCycleResult("API setup", [])
-
-    controller.work_runner = run
-    setup = workflow.AuthenticationSetupRequest(
-        task_uid=task.task_uid,
-        workstream="authentication",
-        targets=(target,),
-        allowed_origins=(target,),
-        credentials=(credential,),
-        authentication_flows=(flow,),
-    )
-    assert controller._run_authentication_credential_worker(task, setup, credential, (flow,), []).browser_session_ready
 
 
 def test_flow_step_does_not_expand_path_boundary_through_target_origin(worker_case):
@@ -754,10 +906,10 @@ def test_login_repair_preserves_policy_and_returns_to_critic(worker_case, monkey
     controller.executor_session_factory = factory
     setup = workflow.AuthenticationSetupRequest(task.task_uid, "authentication", (target,), (target,), (credential,))
     controller._run_authentication_credential_worker(task, setup, credential, (), [])
-    assert len(policies) == (3 if state == "recoverable" else 2)
+    assert len(policies) == (4 if state == "recoverable" else 2)
     rows = store.list_authentication_flows(target)
     assert bool(rows) is (state == "success")
-    assert controller.text_runner.call_count == (0 if state == "rejected" else 1 if state == "success" else 2)
+    assert controller.text_runner.call_count == (0 if state == "rejected" else 1 if state == "success" else 3)
 
 
 @pytest.mark.parametrize("classification", ["authentication", "registration", "unknown"])
@@ -873,7 +1025,7 @@ def test_registration_requiredness_is_separate_from_observed_controls(worker_cas
     )
     assert attempt["candidate"].get("required_fields", []) == required_fields
     prompt = controller._flow_refinement_critic_prompt("registration", target, attempt["candidate"], [outcome], [])
-    assert "filling a field does not prove" in prompt
+    assert "Filling a field does not establish requiredness" in prompt
     assert "Missing required markers do not prove optionality" in prompt
     assert "Do not repeat registration to classify fields" in prompt
 
@@ -1017,7 +1169,9 @@ def test_browser_capture_uses_known_headers_with_or_without_staged_flow(worker_c
     capture.assert_awaited_once_with(
         credential_id="selected",
         storage_header_bindings=list(bindings),
+        request_header_names=[],
         validation_url=f"{target}/protected",
+        validation_marker="",
     )
 
 
@@ -1128,3 +1282,246 @@ def test_authentication_navigation_hints_preserve_path_scope(worker_case, monkey
         ({"kind": "", "login_url": target + "/unassigned/login"},),
     )
     assert [entry["url"] for entry in endpoints] == [scoped]
+
+
+@pytest.fixture
+def production_registered_case(registered_case, monkeypatch):
+    """Exercise the production wrapper with durable SQLite state and no task-list attribute."""
+    from types import SimpleNamespace
+
+    controller, task, store, target, observed, stored = registered_case
+
+    def list_tasks(phase=None, status=None):
+        return [item for item in store.get_tasks("OP_AUTH")
+                if (phase is None or item.phase == phase) and (not status or item.status in status)]
+
+    client = SimpleNamespace(
+        list_tasks=list_tasks,
+        patch_task=lambda **kwargs: store.patch_task("OP_AUTH", **kwargs),
+        get_active_plan=lambda **_kwargs: store.get_plan("OP_AUTH"),
+        list_finding_records=lambda: store.list_findings("OP_AUTH"),
+        list_task_acceptance_results=lambda uid: store.list_task_acceptance_results("OP_AUTH", uid),
+    )
+    monkeypatch.setattr(workflow, "get_memory_client", lambda **_kwargs: client)
+    controller.state = workflow.WorkflowStateStore("OP_AUTH")
+    return controller, task, store, target, observed, stored
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_completion_reload_through_production_state_store(production_registered_case, approved):
+    controller, task, store, _target, _observed, stored = production_registered_case
+    assert not hasattr(controller.state, "tasks")
+    payload = controller._registration_acceptance_payload(task, [stored], {
+        "mapping_approved": approved, "existing": {"flow_id": "reviewed"} if approved else None,
+    })
+    reloaded = workflow.MultiAgentWorkflowController(
+        runtime=controller.runtime, budget=BudgetConfig(max_duration_minutes=60),
+        state_store=workflow.WorkflowStateStore("OP_AUTH"),
+    )
+    assert reloaded._registration_acceptance_payload(task, []) == payload
+    assert reloaded._worker_completions(task)[0].mapping_approved is approved
+    assert store.get_tasks("OP_AUTH")[-1].recovery_context.get("worker_completions")
+
+
+@pytest.mark.parametrize("changed", [{"operation_id": "foreign"}, {"task_uid": "other"},
+                                    {"purpose": "unknown"}, {"functional_success": False}])
+def test_invalid_completion_with_production_state_store(production_registered_case, changed):
+    controller, task, store, target, _observed, _stored = production_registered_case
+    completion = WorkerCompletion("OP_AUTH", task.task_uid, "registration", target, "member", "registered",
+                                  ("artifact:observed.html",), "store")
+    store.patch_task("OP_AUTH", task.task_uid, recovery_context_updates={
+        "worker_completions": {"registration:registered": {**completion.to_dict(), **changed}},
+    })
+    assert controller._worker_completions(task) == []
+
+
+def test_unusable_completion_with_production_state_store(production_registered_case):
+    controller, task, store, _target, _observed, stored = production_registered_case
+    assert controller._registration_acceptance_payload(task, [stored])
+    store.record_credential_status("OP_AUTH", "registered", "invalid", "operation", "Rejected credential", [])
+    assert controller._worker_completions(task) == []
+
+
+def test_missing_task_completion_fallback_and_stale_task_precedence(production_registered_case):
+    controller, task, store, target, _observed, _stored = production_registered_case
+    completion = WorkerCompletion("OP_AUTH", task.task_uid, "registration", target, "member", "registered",
+                                  ("artifact:observed.html",), "store")
+    stale = task
+    controller._persist_worker_completion(task, completion)
+    assert "worker_completions" not in stale.recovery_context
+    assert controller._worker_completions(stale) == [completion]
+    controller._persist_worker_completion(stale, replace(completion, purpose="authentication"))
+    current = next(item for item in store.get_tasks("OP_AUTH") if item.task_uid == task.task_uid)
+    assert set(current.recovery_context["worker_completions"]) == {
+        "registration:registered", "authentication:registered",
+    }
+    missing = replace(task, task_uid="not-persisted", recovery_context={
+        "worker_completions": {"registration:registered": replace(completion, task_uid="not-persisted").to_dict()},
+    })
+    assert controller._worker_completions(missing) == [replace(completion, task_uid="not-persisted")]
+
+
+@pytest.mark.parametrize("target,target_type", [("https://target.test", "network"),
+                                               ("ssh://target.test", "network"), ("/repo/project", "filesystem")])
+def test_evaluator_without_completions_uses_production_state_store(production_registered_case, monkeypatch,
+                                                                  target, target_type):
+    controller, _task, store, _target, _observed, _stored = production_registered_case
+    plan = store.get_plan("OP_AUTH")
+    ordinary = store.get_tasks("OP_AUTH")[0]
+    plan = replace(plan, targets=[memory.OperationTarget("target", target, target_type)])
+    monkeypatch.setattr(controller, "_memory_summary", lambda *_args, **_kwargs: "")
+    prompt = controller._task_evaluator_prompt(plan, plan.phases[0], ordinary)
+    assert isinstance(prompt, str)
+    assert controller._worker_completion_section(ordinary) == ""
+
+
+@pytest.mark.parametrize("persisted", [True, False])
+def test_authentication_attempt_reload_uses_production_state_store(production_registered_case, persisted):
+    controller, task, store, target, _observed, _stored = production_registered_case
+    store.patch_task("OP_AUTH", task.task_uid, recovery_context_updates={
+        "authentication_worker_attempts": {"registered": {"target": target, "status": "exhausted"}},
+    })
+    if not persisted:
+        task = replace(task, task_uid="missing-task", recovery_context={
+            "authentication_worker_attempts": {"registered": {"target": target, "status": "exhausted"}},
+        })
+    controller.state = workflow.WorkflowStateStore("OP_AUTH")
+    credential = {"credential_id": "registered", "target": target, "role": "member",
+                  "credential_type": "username_password"}
+    setup = workflow.AuthenticationSetupRequest(task.task_uid, "authentication", (target,), (target,), (credential,))
+    result = controller._run_authentication_credential_worker(task, setup, credential, (), [])
+    assert result.terminal_reason == "authentication_attempt_exhausted"
+    assert result.browser_session_ready
+
+
+def test_controller_does_not_access_state_tasks_attribute():
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(workflow.MultiAgentWorkflowController))
+    forbidden = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+                 and node.attr == "tasks" and isinstance(node.value, ast.Attribute) and node.value.attr == "state"]
+    assert forbidden == [], "Use the state-store list_tasks() interface"
+
+
+def test_retryable_authentication_attempt_reloads_from_sqlite(production_registered_case, monkeypatch):
+    controller, task, store, target, _observed, _stored = production_registered_case
+    credential = {"credential_id": "registered", "credential_type": "username_password",
+                  "role": "member", "target": target}
+    setup = workflow.AuthenticationSetupRequest(task.task_uid, "authentication", (target,), (target,), (credential,))
+    monkeypatch.setattr(workflow, "reset_authentication_browser_session", AsyncMock())
+    monkeypatch.setattr(workflow, "authentication_context_is_valid", lambda *_args: False)
+    runner = Mock(return_value=type("Result", (), {"reason": "stalled", "details": {"tool_call_counts": {"shell": 24}}})())
+    monkeypatch.setattr(controller, "_run_worker_agent", runner)
+    controller._run_authentication_credential_worker(task, setup, credential, (), [])
+    persisted = next(item for item in store.get_tasks("OP_AUTH") if item.task_uid == task.task_uid)
+    assert persisted.recovery_context["authentication_worker_attempts"]["registered"]["status"] == "retryable"
+    assert "authentication_worker_attempts" not in task.recovery_context
+    database_path = store.db_path
+    # Store methods close their own connections; a new instance reloads durable state.
+    reopened = SQLiteApplicationStore(database_path, target)
+    from types import SimpleNamespace
+
+    client = SimpleNamespace(
+        list_tasks=lambda **_kwargs: reopened.get_tasks("OP_AUTH"),
+        patch_task=lambda **kwargs: reopened.patch_task("OP_AUTH", **kwargs),
+    )
+    monkeypatch.setattr(workflow, "get_memory_client", lambda **_kwargs: client)
+    monkeypatch.setattr(workflow, "_get_database_store", lambda: reopened)
+    reloaded = workflow.MultiAgentWorkflowController(
+        runtime=controller.runtime, budget=BudgetConfig(max_duration_minutes=60),
+        state_store=workflow.WorkflowStateStore("OP_AUTH"),
+    )
+    runner.reset_mock()
+    reads = Mock(wraps=reloaded.state.list_tasks)
+    monkeypatch.setattr(reloaded.state, "list_tasks", reads)
+    monkeypatch.setattr(reloaded, "_run_worker_agent", runner)
+    result = reloaded._run_authentication_credential_worker(task, setup, credential, (), [])
+    reads.assert_called()
+    assert result.terminal_reason != "authentication_attempt_exhausted"
+    assert runner.call_count == 2
+    second = {**credential, "credential_id": "second"}
+    reloaded._run_authentication_credential_worker(task, replace(setup, credentials=(second,)), second, (), [])
+    assert runner.call_count == 4
+    latest = next(item for item in reopened.get_tasks("OP_AUTH") if item.task_uid == task.task_uid)
+    assert set(latest.recovery_context["authentication_worker_attempts"]) == {"registered", "second"}
+
+
+@pytest.mark.parametrize("purpose", ["registration", "authentication"])
+def test_flow_critic_uses_bound_recorder_contract(worker_case, purpose):
+    controller, task, _store, target, outcome = worker_case
+    kind = "browser_registration" if purpose == "registration" else "browser_form"
+    attempt = controller._worker_flow_attempt(task, target, purpose)
+    recorder = controller._worker_flow_recorder(task, target, purpose, kind, attempt)
+    values = {"login_url": f"{target}/start", "steps": [{
+        "url": f"{target}/start", "action": "form_submission", "field_names": ["First name 👤", "🔐"],
+    }]}
+    if purpose == "authentication":
+        values["request_header_names"] = ["X-Session", "Tauser"]
+    else:
+        values["identity_fields"] = ["First name 👤"]
+    recorder(**values)
+    fields = workflow.get_tool_spec(recorder)["inputSchema"]["json"]["properties"]
+    assert set(attempt["reviewable_fields"]) == set(fields)
+    candidate = {**attempt["candidate"], "worker_review": {"internal": True}, "flow_id": "internal"}
+    prompt = controller._flow_refinement_critic_prompt(
+        purpose, target, candidate, [outcome], [], reviewable_fields=attempt["reviewable_fields"],
+    )
+    projected = json.loads(prompt.split("Candidate from successful worker execution:\n")[1].split("\nAuthorized")[0])
+    assert set(projected) <= set(fields)
+    assert "worker_review" not in projected and "flow_id" not in projected
+    assert "backend payload keys are not mandatory" in prompt
+    if purpose == "registration":
+        assert "request_header_names" not in prompt
+        assert projected["identity_fields"] == ["First name 👤"]
+    else:
+        assert projected["request_header_names"] == ["X-Session", "Tauser"]
+        assert "not all HTTP headers" in prompt
+
+
+@pytest.mark.parametrize("initial_candidate", [False, True])
+@pytest.mark.parametrize("limit,approved_at", [(1, 1), (1, None), (3, 3), (3, None)])
+def test_flow_review_counts_actual_reviews_and_stops_metadata_repairs(
+    worker_case, monkeypatch, initial_candidate, limit, approved_at,
+):
+    controller, task, store, target, outcome = worker_case
+    controller.flow_refinement_cycles = limit
+    attempt = controller._worker_flow_attempt(task, target, "registration")
+    recorder = controller._worker_flow_recorder(task, target, "registration", "browser_registration", attempt)
+    if initial_candidate:
+        recorder(login_url=f"{target}/signup")
+    attempt["successful"] = True
+    critiques = []
+
+    def critique(*_args, **_kwargs):
+        critiques.append(True)
+        return {"approved": len(critiques) == approved_at, "feedback": ["Correct observed label"],
+                "supporting_evidence_refs": ["artifact:observed.html"]}
+
+    monkeypatch.setattr(controller, "_run_json_text_agent", critique)
+
+    @tool(name="browser_perform_action")
+    def submit_again():
+        raise AssertionError("Successful registration cannot be repeated")
+
+    def repair(prompt, tools):
+        assert "do not create another account, resubmit, or log in again" in prompt
+        assert "browser_perform_action" not in {workflow.get_tool_name(item) for item in tools}
+        recorder(login_url=f"{target}/signup", identity_fields=["Email 📧"])
+        return workflow.TaskExecutorCycleResult("recorded", [], reason="worker_flow_metadata_staged")
+
+    repairs = Mock(side_effect=repair)
+    events = []
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+    controller._refine_worker_flow(task, target, "registration", attempt, [outcome], repairs, [recorder, submit_again])
+    assert len(critiques) == (approved_at or limit)
+    assert repairs.call_count == (not initial_candidate) + (approved_at or limit) - 1
+    assert bool(store.list_authentication_flows(target, purpose="registration")) is (approved_at is not None)
+    review = next(event for event in reversed(events) if event["type"] == "flow_refinement_review")
+    assert review["reviews"] == len(critiques)
+    assert review["functional_success"]
+    assert review["stop_reason"] == ("approved" if approved_at else "review_limit_reached")
+    if approved_at is None:
+        gap = controller.state.list_tasks()[0].recovery_context["registration_flow_gap"]
+        assert gap["reviews"] == limit and gap["stop_reason"] == "review_limit_reached"
+        assert not attempt.get("mapping_approved")

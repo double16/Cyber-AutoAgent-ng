@@ -18,6 +18,19 @@ def _operation_root(monkeypatch, tmp_path: Path) -> None:
     )
 
 
+def test_bundle_extraction_separates_patterns_and_templates_from_concrete_routes():
+    extracted = bundle_tool._bundle_inventory(
+        '\"/userlogin\";\"/usersignup\";\"/*\";\"/${user}/login\";\"/:id/signup\";\"/$\";\"/>\";',
+        "https://target.test",
+    )
+    assert extracted["spa_routes"] == ["/userlogin", "/usersignup"]
+    assert extracted["route_candidates"] == [
+        {"value": "/*", "classification": "pattern"},
+        {"value": "/${user}/login", "classification": "template"},
+        {"value": "/:id/signup", "classification": "template"},
+    ]
+
+
 def test_client_bundle_inventory_exposes_required_runtime_schema():
     schema = get_tool_spec(bundle_tool.client_bundle_inventory)["inputSchema"]["json"]
 

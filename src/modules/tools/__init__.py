@@ -4,7 +4,6 @@ from modules.tools.artifact import create_artifact_reader, create_artifact_searc
 from modules.tools.authentication import (
     authenticated_http_request,
     capture_browser_authenticated_context,
-    ensure_authenticated_context,
     establish_credential_authenticated_context,
     record_authentication_flow,
 )
@@ -109,7 +108,6 @@ __all__ = [
     "create_inventory_item_reader",
     "create_tasks",
     "discover_mcp_tools",
-    "ensure_authenticated_context",
     "establish_credential_authenticated_context",
     "fail_credential_rotation",
     "generate_mfa_code",

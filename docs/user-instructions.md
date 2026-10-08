@@ -283,7 +283,7 @@ read independently by an unrelated task.
 Credentials created by an operation can be rotated by the agent when the authorized flow supports it; rotation creates
 a new credential record and retires the old one instead of overwriting history. User-provided credential payloads are
 never changed by an agent. Before an authenticated request, a controller-owned authentication worker checks out only
-the controller-selected credential, completes the mapped browser/API/MFA flow, and validates an opaque session or
+the controller-selected credential, completes the mapped browser/MFA flow or applies a supplied API credential, and validates an opaque session or
 authorization context. The controller binds that context to the task only after validation succeeds; normal task
 executors receive the opaque authenticated-request tool, never credential lookup, raw session material, or a shell for
 authentication. Failed setup becomes an explicit coverage gap and cannot be retried by searching memory, files, or the
@@ -352,7 +352,7 @@ executor receives no checkout, MFA, cookie-extraction, token-extraction, or toke
 The controller runs one worker per selected credential. A completed current-version flow is supplied as a starting
 point. If no flow exists, the worker uses assigned navigation hints and discovers the steps while logging in.
 It may correct an existing mapping when the application changes. The selected credential remains fixed; a definitive
-rejection ends that attempt. Username/password workers can use browser login or an observed API form.
+rejection ends that attempt. Username/password workers use the observed browser flow.
 
 Provisioning workers likewise follow the registration entry point and its observed connected steps, including
 multi-page forms and verification. They retain the same identity and browser progress during correction. A flow
@@ -366,13 +366,13 @@ correction tools are restricted to observations and metadata recording; they can
 If review remains unresolved, the controller records a mapping coverage gap and preserves the successful context
 or registered credential. Registration task evaluation remains separate from flow review.
 
-Authentication descriptors use version 9 and registration descriptors use version 3. There is no compatibility path
+Authentication descriptors use version 10 and registration descriptors use version 4. There is no compatibility path
 for older contracts or standalone discovery agents. Browser capture consumes staged header-binding metadata;
 it does not require a persisted flow ID.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CYBER_WORKFLOW_FLOW_REFINEMENT_CYCLES` | `3` | Maximum worker/flow-critic pairs per attempt; minimum one. |
+| `CYBER_WORKFLOW_FLOW_REFINEMENT_CYCLES` | `3` | Maximum flow-critic reviews per attempt; minimum one. Initial recording does not consume a review. |
 | `CYBER_WORKFLOW_FLOW_REFINEMENT_SEARCH_LIMIT` | `16` | Searches per worker invocation or per distinct authorized artifact for critics; minimum one. |
 
 Artifact errors explain the exhausted read or search allowance. Critics synthesize from returned evidence when
@@ -387,11 +387,10 @@ Attack-surface mapping supplies secret-free navigation, protected-resource, and 
 Those endpoints are not executable authority and do not identify a flow start. When no reusable descriptor is
 available, the login worker observes the start-to-validation relationship during its assigned interaction before
 staging a target-scoped descriptor. The controller publishes it only after functional success and critic approval. Later operations for the same canonical target can reuse a
-validated descriptor. For username/password API forms, the worker can establish a context directly from the recorded
-mapped pair. Username/password browser, redirect, and MFA flows must complete in the shared browser and then capture
-cookies and any observed named browser-storage bearer token internally. The flow descriptor records only the storage
-key name, never its value. Its validation URL must succeed for the bound credential role; 401, 403, and 404 responses
-reject the context. Browser flows cannot fall back to direct HTTP form login. Authentication and registration flow
+validated descriptor. Username/password browser, redirect, and MFA flows complete in the shared browser and then capture
+cookies and observed credential headers internally. Header names can be recorded without a browser storage key;
+values stay in the opaque context. The validation response must differ meaningfully from an anonymous response;
+HTTP success alone does not establish authentication. Authentication and registration flow
 descriptors are versioned; only the current contract is accepted. The authentication
 worker also has scoped shell access for commands targeting only mapped authentication origins. No session material is
 persisted in SQLite, artifacts, reports, or task text. If a
@@ -399,6 +398,9 @@ multi-credential setup is only partially successful, the executor is bound only 
 contexts validated; the remaining IDs are reported as coverage gaps.
 OAuth2 client credentials and configured API keys use the same opaque context: the worker exchanges or applies the
 stored credential internally, validates the protected route, and exposes only the authenticated request wrapper.
+User supplied API credentials can contain `values.headers` such as
+`{"X-Session":"opaque-value","Tauser":"other-value"}`. Header names and values are used as supplied; a JWT or
+`Authorization` header is not required. API credentials do not have registration or username/password login flows.
 For IDOR specialist replay that needs two authenticated sessions, agents use the planned comparison pair's checked-out
 credential IDs directly with the observed login field names. The specialist builds only task-local login contexts,
 requires the login endpoint to share the resolved target origin, and records credential use by ID instead of accepting

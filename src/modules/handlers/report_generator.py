@@ -223,6 +223,14 @@ def _write_redacted_report_text(path: str, content: Any) -> None:
         report_file.write(redact_text(content))
 
 
+def _redact_objective_candidate(value: Any) -> str:
+    """Hide a candidate value while retaining a braced format cue in the report."""
+
+    candidate = str(value or "")
+    match = re.fullmatch(r"([^{}]+\{)[^{}]+(\})", candidate)
+    return f"{match.group(1)}[REDACTED]{match.group(2)}" if match else "[REDACTED]"
+
+
 def _write_redacted_report_json(path: str, payload: Any) -> None:
     """Write a report JSON artifact after recursively redacting secret-bearing fields."""
 
@@ -4576,7 +4584,7 @@ Finding narrative context:
                         f"- **Validator:** {metadata.get('validator', 'Not recorded')}",
                         f"- **Reason:** {metadata.get('validation_reason') or metadata.get('summary') or 'Not recorded'}",
                         "",
-                        f"**Candidate:** `{metadata.get('candidate_value') or item.get('content', '')}`",
+                        f"**Candidate:** `{_redact_objective_candidate(metadata.get('candidate_value') or item.get('content', ''))}`",
                         "",
                         "**Evidence artifacts:**",
                         *(f"- `{artifact}`" for artifact in artifacts if artifact),

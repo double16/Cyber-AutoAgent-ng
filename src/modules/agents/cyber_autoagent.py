@@ -65,6 +65,7 @@ from modules.handlers.conversation_budget import (
     register_conversation_manager,
 )
 from modules.handlers.credential_usage import CredentialUsageHook
+from modules.handlers.preview_copy import PreviewCopyGuard
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.terminal_tool import TerminalToolHook
 from modules.handlers.tool_recovery import (
@@ -94,7 +95,6 @@ from modules.tools.auth_chain_analyzer import auth_chain_analyzer
 from modules.tools.authentication import (
     authenticated_http_request,
     capture_browser_authenticated_context,
-    ensure_authenticated_context,
     establish_credential_authenticated_context,
     record_authentication_flow,
 )
@@ -657,7 +657,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     optional_tools_list = [
         recon_output_to_inventory_manifest,
         authenticated_http_request, capture_browser_authenticated_context, establish_credential_authenticated_context,
-        ensure_authenticated_context, record_authentication_flow,
+        record_authentication_flow,
         store_credential, query_credentials, checkout_credential, exchange_oauth2_client_credentials,
         set_task_auth_context, mark_credential_status, plan_access_control_comparisons,
         plan_authenticated_coverage, prepare_api_key_authentication, prepare_login_form_authentication,
@@ -902,6 +902,10 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         artifacts_dir=paths.get("artifacts"),
         artifact_threshold=artifact_threshold,
     ) if sdk_context_manager is None else None
+    preview_copy_guard = (
+        PreviewCopyGuard(Path(paths["artifacts"]) if paths.get("artifacts") else None)
+        if tool_router_hook is None else None
+    )
 
     # hooks to include in agents, order is important
     hooks: list[HookProvider] = list(
@@ -912,6 +916,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
                 artifact_reference_input_normalization_hook,
                 tool_repeat_guard_hook,
                 tool_router_hook,
+                preview_copy_guard,
                 react_hooks,
                 credential_usage_hook,
                 prompt_budget_hook,
@@ -926,6 +931,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
                 artifact_reference_input_normalization_hook,
                 tool_repeat_guard_hook,
                 tool_router_hook,
+                preview_copy_guard,
                 react_hooks,
                 credential_usage_hook,
                 prompt_budget_hook,

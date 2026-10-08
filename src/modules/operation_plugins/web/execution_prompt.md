@@ -25,7 +25,7 @@ mapping, prioritized hypothesis testing, exploitation validation, and impact dem
   that matters to the claimed impact.
 - After attack-surface mapping, establish the unauthenticated baseline for each applicable authentication workflow.
   Query and check out only target-scoped credential-store entries, bind their task authentication context, and compare
-  each eligible account or role. For authorized account, role, or tenant comparisons, use the store-backed IDOR path;
+  only the identities required by the assigned task. For authorized account, role, or tenant comparisons, use the store-backed IDOR path;
   never pass raw credentials to an agent tool.
 - A normal public sign-up flow may be used to create a test account when it is in the resolved target scope and no
   operation constraint prohibits the state change. Store a successful account as reusable `registered` credentials

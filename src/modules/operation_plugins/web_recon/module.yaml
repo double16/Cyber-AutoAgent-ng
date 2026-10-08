@@ -45,6 +45,12 @@ planning:
         - access_context_session
         - workflow_high_value_areas
         - safe_read_only_verification
+      required_methods_by_workstream:
+        service_entrypoints: [request, analyze]
+        technology_trust_boundary: [request, analyze]
+        access_context_session: [request, analyze]
+        workflow_high_value_areas: [request, analyze]
+        safe_read_only_verification: [request, analyze]
       synthesis_workstream: inventory_synthesis
       synthesis_output_kind: inventory_manifest
       synthesis_execution: controller
@@ -56,3 +62,7 @@ planning:
         - unauthenticated_posture
         - authenticated_access_coverage
         - read_only_authorization_comparison
+      required_methods_by_workstream:
+        unauthenticated_posture: [request, analyze]
+        authenticated_access_coverage: [request, analyze]
+        read_only_authorization_comparison: [request, analyze]

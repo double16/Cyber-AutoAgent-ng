@@ -40,7 +40,7 @@ graph TD
 
 | Layer | Component                        | Trigger               | Action                                  |
 |-------|----------------------------------|-----------------------|-----------------------------------------|
-| 0     | ToolRouterHook                   | Output > 10KB         | Externalize to artifact, inject preview |
+| 0     | ToolRouterHook                   | Output > 10KB         | Externalize; return reference and metadata |
 | 1     | LargeToolResultMapper            | Tool result > 10KB    | Compress with metadata                  |
 | 2     | SlidingWindowConversationManager | Messages > window     | Remove oldest (preserve tool pairs)     |
 | 3     | SummarizingConversationManager   | Layer 2 overflow      | LLM-based summarization                 |
@@ -113,9 +113,16 @@ Intercepts tool execution events to manage output sizes before conversation inte
 | **Artifact Retention**   | 100 most recent per session                 |
 
 **Responsibilities**:
-- Truncate oversized tool outputs with size metadata
+- Bound inline output when artifact persistence is unavailable
 - Externalize large outputs to timestamped artifact files
-- Inject inline preview (4KB head) for immediate LLM context
+- Return complete artifact references, IDs, and sizes without inline body previews
+- Preserve small sibling content blocks and result metadata
+
+Workers reuse the returned artifact directly for processing. For direct inspection, request bounded excerpts
+with artifact read or search tools rather than reconstructing source data from tool messages. These tools
+carry a code-owned bounded-inline declaration: their excerpts bypass the lower artifact threshold but stay
+within the normal maximum character ceiling, including pagination metadata. The router honors declarations
+on registered tool objects, so runtime tools can opt in without tool-name exceptions.
 
 ### PromptBudgetHook
 

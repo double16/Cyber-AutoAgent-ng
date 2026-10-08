@@ -1,6 +1,7 @@
 """Read-only access to artifacts produced by the current operation."""
 
 import ast
+import codecs
 import os
 import re
 from collections.abc import Iterable, Mapping
@@ -11,6 +12,7 @@ from strands import tool
 
 from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.tools.memory import _artifact_path_from_ref, _operation_output_root
+from modules.tools.tool_result_policy import bounded_inline_result
 
 ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER = "ARTIFACT_TOTAL_READ_LIMIT_REACHED"
 ARTIFACT_PAGE_LIMIT_REACHED_MARKER = "ARTIFACT_PAGE_LIMIT_REACHED"
@@ -94,6 +96,15 @@ def resolve_tool_result_max_chars(
     except (TypeError, ValueError):
         return computed
     return configured if configured > 0 else computed
+
+
+def _complete_utf8_prefix(content: bytes, *, final: bool = False) -> bytes:
+    """Defer incomplete trailing UTF-8 characters to the next byte page."""
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    decoder.decode(content, final=final)
+    pending, _ = decoder.getstate()
+    return content[:-len(pending)] if pending else content
 
 
 def _resolved_operation_path(candidate: str, root: str) -> str:
@@ -290,7 +301,14 @@ def _read_artifact_with_limit(
         lines.pop()
         payload = payload_for(lines)
     if max_output_chars is not None and original_line_count and not lines:
-        raise ValueError("artifact reader output limit is too small for one complete line")
+        return _read_artifact_bytes(
+            resolved,
+            selected_start_byte,
+            max_bytes,
+            max_output_chars=max_output_chars,
+            page_start_line=start_line,
+            page_max_lines=max_lines,
+        )
     if max_output_chars is not None and len(str(payload)) > max_output_chars:
         raise ValueError("artifact reader output limit is too small for result metadata")
     return str(payload)
@@ -351,7 +369,10 @@ def _read_artifact_bytes(
             line_end = newline + 1
         content_end = line_end
 
-    content = byte_page[content_start:content_end]
+    content = _complete_utf8_prefix(
+        byte_page[content_start:content_end], final=start_byte + content_end >= byte_size
+    )
+    had_content = content_end > content_start
 
     def payload_for(page_content: bytes) -> dict[str, Any]:
         page_end = content_start + len(page_content)
@@ -393,23 +414,25 @@ def _read_artifact_bytes(
         lower, upper = 0, len(content)
         while lower < upper:
             midpoint = (lower + upper + 1) // 2
-            candidate = payload_for(content[:midpoint])
+            candidate = payload_for(_complete_utf8_prefix(content[:midpoint]))
             if len(str(candidate)) <= max_output_chars:
                 lower = midpoint
             else:
                 upper = midpoint - 1
-        content = content[:lower]
+        content = _complete_utf8_prefix(content[:lower])
         payload = payload_for(content)
         if content and payload["next_start_byte"] is not None:
             payload["truncated"] = True
             payload["truncation_reason"] = "output_limit_reached"
             while content and len(str(payload)) > max_output_chars:
-                content = content[:-1]
+                content = _complete_utf8_prefix(content[:-1])
                 payload = payload_for(content)
                 payload["truncated"] = True
                 payload["truncation_reason"] = "output_limit_reached"
     if max_output_chars is not None and len(str(payload)) > max_output_chars:
         raise ValueError("artifact reader output limit is too small for result metadata")
+    if had_content and not content:
+        raise ValueError("artifact reader output/page limit is too small for metadata plus one complete character")
     return str(payload)
 
 
@@ -629,7 +652,7 @@ def create_artifact_reader(context_window_tokens: int, *, max_output_chars: int 
                 return _directory_read_guidance(directory, root, max_output_chars)
             raise
 
-    return read_artifact
+    return bounded_inline_result(read_artifact)
 
 
 def create_artifact_searcher(*, max_output_chars: int | None = None) -> Any:
@@ -659,7 +682,7 @@ def create_artifact_searcher(*, max_output_chars: int | None = None) -> Any:
             max_output_chars=max_output_chars,
         )
 
-    return search_artifact
+    return bounded_inline_result(search_artifact)
 
 
 def create_bounded_artifact_searcher(
@@ -758,7 +781,7 @@ def create_bounded_artifact_searcher(
         return result
 
     search_artifact.artifact_limit_state = limit_state
-    return search_artifact
+    return bounded_inline_result(search_artifact)
 
 
 def create_bounded_artifact_reader(
@@ -835,6 +858,8 @@ def create_bounded_artifact_reader(
             payload = ast.literal_eval(record["result"])
             payload["compression_recovery"] = True
             payload["compression_recovery_epoch"] = epoch
+            if max_output_chars is not None and len(str(payload)) > max_output_chars:
+                raise ValueError("artifact reader output limit is too small for compression recovery metadata")
             replayed_epochs.setdefault(state_key, set()).add(epoch)
             return str(payload)
         return None
@@ -848,7 +873,10 @@ def create_bounded_artifact_reader(
                 f"{ARTIFACT_READ_REPEAT_GUARD_MARKER}: Repeated artifact read guidance for {reason}"
             )
         guided_requests.add(key)
-        return _bounded_read_guidance(resolved, os.path.realpath(_operation_output_root()), reason, message)
+        result = _bounded_read_guidance(resolved, os.path.realpath(_operation_output_root()), reason, message)
+        if max_output_chars is not None and len(result) > max_output_chars:
+            raise ValueError("artifact reader output limit is too small for read guidance metadata")
+        return result
 
     @tool(name="read_artifact")
     def bounded_read_artifact(
@@ -943,6 +971,10 @@ def create_bounded_artifact_reader(
             if byte_mode
             else (resolved, start_line, max_lines)
         )
+        # Leave room for replay metadata when context-reduction recovery is enabled.
+        page_output_chars = max_output_chars
+        if page_output_chars is not None and context_reduction_state is not None:
+            page_output_chars -= 80 + len(str(reduction_epoch()))
         try:
             result = (
                 _read_artifact_bytes(
@@ -951,7 +983,7 @@ def create_bounded_artifact_reader(
                     max_bytes,
                     start_line,
                     byte_max_lines,
-                    max_output_chars,
+                    page_output_chars,
                 )
                 if byte_mode
                 else _read_artifact_with_limit(
@@ -959,7 +991,7 @@ def create_bounded_artifact_reader(
                     start_line,
                     max_lines,
                     resolved_max_bytes,
-                    max_output_chars,
+                    page_output_chars,
                 )
             )
         except ValueError as error:
@@ -1046,4 +1078,4 @@ def create_bounded_artifact_reader(
     bounded_read_artifact.__name__ = "read_artifact"
     bounded_read_artifact._cyber_context_reduction_state = reduction_state
     bounded_read_artifact.artifact_limit_state = limit_state
-    return bounded_read_artifact
+    return bounded_inline_result(bounded_read_artifact)

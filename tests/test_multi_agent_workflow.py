@@ -53,6 +53,8 @@ from modules.tools.optional_tool_selection import (
     CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES,
 )
 
+_REAL_REFINE_WORKER_FLOW = MultiAgentWorkflowController._refine_worker_flow
+
 
 @pytest.fixture(autouse=True)
 def isolate_worker_flow_review(monkeypatch):
@@ -447,35 +449,6 @@ async def test_bound_browser_capture_retains_observed_url_and_selected_ids():
         await bound(flow_id="other-flow", validation_url="https://target.test/verified")
 
 
-@pytest.mark.asyncio
-async def test_authentication_credential_worker_tools_filter_and_bind_selected_flow():
-    @workflow_mod.strands_tool(name="ensure_authenticated_context")
-    def ensure_authenticated_context(
-        credential_id: str, flow_id: str, login_url: str = "", validation_url: str = "",
-        request_format: str = "", additional_fields: dict[str, str] | None = None,
-    ) -> str:
-        assert not any((login_url, validation_url, request_format, additional_fields))
-        return f"{credential_id}:{flow_id}"
-
-    @workflow_mod.strands_tool(name="checkout_credential")
-    def checkout_credential(credential_id: str, purpose: str) -> str:
-        return credential_id
-
-    tools = MultiAgentWorkflowController._authentication_credential_worker_tools(
-        [ensure_authenticated_context, checkout_credential, _tool("record_authentication_flow")],
-        {"credential_id": "credential-1", "credential_type": "username_password"},
-        {"flow_id": "flow-1", "kind": "api_form"},
-    )
-
-    by_name = {workflow_mod.get_tool_name(item): item for item in tools}
-    assert set(by_name) == {"ensure_authenticated_context", "checkout_credential"}
-    assert by_name["ensure_authenticated_context"].tool_spec["inputSchema"]["json"]["properties"] == {}
-    assert by_name["ensure_authenticated_context"]._metadata.input_model.model_fields == {}
-    events = [event async for event in by_name["ensure_authenticated_context"].stream({
-        "toolUseId": "api-context", "name": "ensure_authenticated_context", "input": {},
-    }, {})]
-    assert events[-1]["tool_result"]["status"] == "success"
-    assert events[-1]["tool_result"]["content"] == [{"text": "credential-1:flow-1"}]
 
 
 def test_authentication_worker_hides_standalone_totp_arguments(monkeypatch):
@@ -533,7 +506,6 @@ def test_authenticated_executor_filter_preserves_shell_but_excludes_credential_m
             "authenticated_http_request",
             "checkout_credential",
             "generate_mfa_code",
-            "ensure_authenticated_context",
             "capture_browser_authenticated_context",
             "browser_get_cookies",
             "browser_evaluate_js",
@@ -563,7 +535,7 @@ def test_executor_filter_grants_registered_future_checkout_consumer(monkeypatch)
     )
     tools = [_tool(name) for name in (
         "future_auth_consumer", "checkout_credential", "authenticated_http_request",
-        "ensure_authenticated_context", "browser_get_cookies", "shell",
+        "browser_get_cookies", "shell",
     )]
 
     filtered = MultiAgentWorkflowController._executor_tools_without_authentication_material(tools, task)
@@ -576,7 +548,6 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
         "authenticated_http_request",
         "capture_browser_authenticated_context",
             "establish_credential_authenticated_context",
-            "ensure_authenticated_context",
             "checkout_credential",
             "generate_mfa_code",
             "query_credentials",
@@ -664,7 +635,7 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
     assert "shell" in tool_names
     assert "ensure_authenticated_context" not in tool_names
     assert policy.max_agent_calls == 12
-    assert policy.required_tool_names == {"capture_browser_authenticated_context", "ensure_authenticated_context"}
+    assert policy.required_tool_names == {"capture_browser_authenticated_context"}
     assert policy.required_tool_match == "any"
     assert policy.terminal_after_required_tools is True
     assert policy.require_successful_required_tools is True
@@ -969,7 +940,7 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
         text_runner=lambda role, prompt, tools, system_prompt, policy: calls.append((role, prompt)),
     )
     controller.runtime.optional_tools_list = [_tool(name) for name in {
-        "checkout_credential", "ensure_authenticated_context", "record_authentication_flow",
+        "checkout_credential", "capture_browser_authenticated_context", "record_authentication_flow",
     }]
     monkeypatch.setattr(
         workflow_mod,
@@ -983,7 +954,7 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
         controller,
         "_authentication_flow_descriptors",
         lambda *_args, **_kwargs: ({
-            "flow_id": "flow-1", "kind": "api_form", "login_url": "https://target.test/login",
+            "flow_id": "flow-1", "kind": "browser_form", "login_url": "https://target.test/login",
             "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
             "validation_url": "https://target.test/account", "allowed_origins": ["https://target.test"],
         },),
@@ -997,6 +968,7 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
         recovery_context={"phase_task_contract": {"workstream": "authenticated_credential_coverage"}},
     )
 
+    controller.state.store_task(task)
     controller._run_authentication_agent(plan, task)
 
     assert [role for role, _prompt in calls] == ["authentication_agent", "authentication_agent"]
@@ -1073,7 +1045,7 @@ def test_authentication_setup_selects_one_validated_flow_per_target(monkeypatch)
         state_store=FakeState(plan),
     )
     descriptor = {
-        "kind": "api_form",
+        "kind": "browser_form",
         "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
         "login_url": "https://target.test/login",
         "validation_url": "https://target.test/account",
@@ -1183,7 +1155,12 @@ def _refresh_setup_controller(monkeypatch, credential_ids=("first", "second")):
         },),
     )
     monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda _task: ("checkout_credential",))
-    monkeypatch.setattr(controller, "_authentication_setup_request", lambda *_args: setup)
+    def select_setup(*_args, excluded_credential_ids=()):
+        if excluded_credential_ids:
+            raise workflow_mod.AuthenticationSelectionError("comparison_credentials_unavailable")
+        return setup
+
+    monkeypatch.setattr(controller, "_authentication_setup_request", select_setup)
     monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
         authorize_credential_for_task=Mock(),
     ))
@@ -1342,7 +1319,6 @@ def test_prompt_review_uses_actual_authentication_recovery_tool_catalog(monkeypa
     [
         ("browser_form", "capture_browser_authenticated_context"),
         ("browser_mfa", "capture_browser_authenticated_context"),
-        ("api_form", "ensure_authenticated_context"),
     ],
 )
 def test_authentication_worker_policy_requires_successful_context_tool(
@@ -1474,7 +1450,8 @@ def test_authentication_setup_caps_repair_at_two_worker_runs(monkeypatch):
 
     result = controller._run_authentication_agent(plan, task)
 
-    assert result.status == "partial"
+    assert result.status == "failed"
+    assert result.ready is False
     assert result.credential_ids == ("second",)
     assert calls == ["first", "second", "first"]
 
@@ -1537,7 +1514,7 @@ def test_authentication_refresh_accepts_valid_capture_even_if_worker_stalls(monk
     worker_call.assert_called_once()
 
 
-def test_authentication_refresh_requires_validation_url_after_capture(monkeypatch):
+def test_authentication_refresh_accepts_valid_context_without_reusable_mapping_url(monkeypatch):
     controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
     valid = {"first": False}
     monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, cid: valid[cid])
@@ -1551,8 +1528,7 @@ def test_authentication_refresh_requires_validation_url_after_capture(monkeypatc
 
     result = controller._run_authentication_agent(plan, task)
 
-    assert result.status == "failed"
-    assert result.reason == "missing_validation_url"
+    assert result.status == "established"
 
 
 def test_authentication_refresh_does_not_retry_rejected_credential(monkeypatch):
@@ -1730,27 +1706,24 @@ def test_authentication_discovery_http_request_is_read_only_and_same_origin():
         scoped("GET", "https://other.test/login")
 
 
-def test_authentication_worker_tool_bundle_allows_http_login_only_for_mapped_api_forms():
+@pytest.mark.parametrize("kind,expected", [
+    ("browser_form", {"browser_goto_url", "checkout_credential"}),
+    ("api_key", {"checkout_credential"}),
+])
+def test_authentication_worker_tool_bundle_uses_browser_only_for_browser_flows(kind, expected):
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=FakeState(_plan()),
     )
-    tools = [_tool("ensure_authenticated_context"), _tool("browser_goto_url")]
+    tools = [_tool("checkout_credential"), _tool("browser_goto_url")]
 
     browser_tools = controller._authentication_agent_tools(
         tools,
         ("https://target.test",),
-        ({"kind": "browser_form"},),
+        ({"kind": kind},),
     )
-    api_tools = controller._authentication_agent_tools(
-        tools,
-        ("https://target.test",),
-        ({"kind": "api_form"},),
-    )
-
-    assert {workflow_mod.get_tool_name(tool) for tool in browser_tools} == {"browser_goto_url"}
-    assert {workflow_mod.get_tool_name(tool) for tool in api_tools} == {"ensure_authenticated_context"}
+    assert {workflow_mod.get_tool_name(tool) for tool in browser_tools} == expected
 
 
 def test_default_text_runner_cleans_role_agent(monkeypatch):
@@ -5892,6 +5865,7 @@ def test_controller_requires_available_metadata_selected_optional_tools():
 
 def test_controller_injects_bundle_inventory_for_client_side_api_workstream():
     runtime = _runtime()
+    runtime.config.module = "web"
     runtime.optional_tools_list = [_tool("client_bundle_inventory")]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -5915,7 +5889,7 @@ def test_controller_injects_bundle_inventory_for_client_side_api_workstream():
     )} >= {"client_bundle_inventory"}
     guidance = controller._client_bundle_execution_guidance_for_task(task)
     assert "client_bundle_inventory" in guidance
-    assert "do not attempt account registration" in guidance
+    assert "Registration discovery belongs to the assigned provisioning worker" in controller._task_policy_guidance(task)
 
 
 def test_credential_provisioning_executor_receives_interactive_browser_tools_only():
@@ -6748,11 +6722,12 @@ def test_contract_prerequisite_repairs_failed_synthesis_from_retained_recon_evid
     def consolidate(source_artifacts, output_file, **kwargs):
         assert source_artifacts == ["artifact:artifacts/katana_output.txt"]
         converted.append(kwargs)
-        assert output_file == "artifacts/contract_recovery/failed-synthesis-inventory_manifest.json"
+        assert output_file.startswith("artifacts/inventory_synthesis/")
         return {
             "artifact_ref": "artifact:artifacts/contract_recovery/inventory_manifest.json",
             "item_count": 1,
             "skipped_artifacts": [],
+            "processed_artifacts": [],
         }
 
     def load_manifest(_plan, reference):
@@ -6762,15 +6737,29 @@ def test_contract_prerequisite_repairs_failed_synthesis_from_retained_recon_evid
 
     monkeypatch.setattr(workflow_mod, "consolidate_recon_artifacts", consolidate)
     monkeypatch.setattr(controller, "_load_controller_inventory_manifest", load_manifest)
+    original_record = state.record_task_acceptance
+
+    def record_active(task, payload):
+        assert next(item for item in state.tasks if item.task_uid == task.task_uid).status == "active"
+        assert task.task_uid != failed_synthesis.task_uid
+        return original_record(task, payload)
+
+    monkeypatch.setattr(state, "record_task_acceptance", record_active)
 
     assert controller._repair_failed_contract_prerequisites(plan, plan.phases[1]) is True
-    assert converted == [{"target_id": "target-1", "target": ""}]
+    assert converted[0]["target_id"] == "target-1"
+    assert converted[0]["mapping_coverage"]
     repaired = next(task for task in state.tasks if task.task_uid == "failed-synthesis")
-    assert repaired.status == "done"
-    assert state.acceptance_results[repaired.task_uid][0].evidence_refs == (
+    assert repaired.status != "done"
+    replacement = next(task for task in state.tasks if task.replacement_of == repaired.task_uid)
+    assert replacement.status == "done"
+    assert state.acceptance_results[replacement.task_uid][0].evidence_refs == (
         "artifact:artifacts/contract_recovery/inventory_manifest.json",
     )
     assert [phase.status for phase in state.plan.phases] == ["done", "active"]
+    assert controller._repair_failed_contract_prerequisites(state.plan, state.plan.phases[1]) is False
+    assert len([task for task in state.tasks if task.replacement_of == repaired.task_uid]) == 1
+    assert repaired.acceptance == failed_synthesis.acceptance
 
 
 def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(monkeypatch):
@@ -6853,7 +6842,13 @@ def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(m
         (
             ["artifact:artifacts/katana.json"],
             "artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
-            {"target_id": "target-1", "target": "https://target.test"},
+            {
+                "target_id": "target-1", "target": "https://target.test",
+                "mapping_coverage": [{
+                    "workstream": "bounded_crawl", "complete": True,
+                    "tasks": [{"task_uid": "crawl", "status": "done", "reason": None}],
+                }],
+            },
         )
     ]
     completed = next(task for task in state.tasks if task.task_uid == "synthesis")
@@ -6876,6 +6871,118 @@ def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(m
         "manifest_ref": "artifact:artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
         "item_count": 2,
     } in runtime.callback_handler.events
+
+
+@pytest.mark.parametrize(("mapping_status", "allow_partial", "expected_status"), [
+    ("done", True, "done"), ("partial_failure", True, "done"),
+    ("blocked", True, "done"), ("pending", True, "blocked"),
+    ("partial_failure", False, "blocked"),
+])
+def test_inventory_synthesis_partial_policy_and_provider_gate(
+    monkeypatch, mapping_status, allow_partial, expected_status,
+):
+    plan = OperationPlan(
+        objective="assess", current_phase=2, total_phases=2,
+        phases=[PlanPhase(id=1, title="Mapping", status="partial_failure"),
+                PlanPhase(id=2, title="Provision", status="active")],
+        targets=[OperationTarget("target-1", "https://target.test", "network")],
+    )
+    context = {"module": "web", "phase_id": 1}
+    mapping = Task(
+        task_uid="crawl", title="Crawl", objective="Crawl scoped routes", phase=1, status=mapping_status,
+        status_reason="Crawl gap" if mapping_status != "done" else None,
+        evidence=["artifact:artifacts/routes.json"],
+        recovery_context={"phase_task_contract": {**context, "task_role": "mapping", "workstream": "bounded_crawl"}},
+    )
+    auth = Task(
+        task_uid="auth", title="Auth", objective="Map authentication", phase=1, status="done",
+        recovery_context={"phase_task_contract": {**context, "task_role": "mapping", "workstream": "auth_workflow"}},
+    )
+    synthesis = Task(
+        task_uid="synthesis", title="Inventory", objective="Consolidate", phase=1,
+        status="active", target_ids=["target-1"],
+        acceptance=_acceptance("inventory"),
+        recovery_context={"phase_task_contract": {
+            **context, "task_role": "synthesis", "workstream": "inventory_synthesis",
+            "depends_on_workstreams": ["bounded_crawl", "auth_workflow"],
+        }},
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    archived = replace(mapping, task_uid="old-crawl", status="superseded")
+    state = FakeState(plan, tasks=[archived, mapping, auth, synthesis], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+    )
+    contract = replace(controller._phase_task_contract(plan.phases[0]), allow_partial_synthesis=allow_partial)
+    monkeypatch.setattr(controller, "_phase_task_contract", lambda _phase: contract)
+    calls = []
+
+    def consolidate(*_args, **kwargs):
+        calls.append(kwargs)
+        return {"artifact_ref": "artifact:artifacts/inventory.json", "item_count": 1,
+                "skipped_artifacts": [], "processed_artifacts": []}
+
+    monkeypatch.setattr(workflow_mod, "consolidate_recon_artifacts", consolidate)
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", lambda *_args, **_kwargs: (
+        {"items": [{"kind": "workflow"}]}, "hash",
+    ))
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    controller._run_controller_inventory_synthesis(plan, plan.phases[0], synthesis)
+    assert next(task for task in state.tasks if task.task_uid == "synthesis").status == expected_status
+    assert state.plan.phases[0].status == ("done" if mapping_status == "done" else "partial_failure")
+    providers = controller._completed_provider_workstreams(
+        plan, 2, frozenset({"inventory_synthesis", "auth_workflow"}),
+    )
+    if expected_status == "done":
+        assert calls[0]["mapping_coverage"][1]["complete"] is (mapping_status == "done")
+        assert len(calls[0]["mapping_coverage"][1]["tasks"]) == 1
+        assert providers == {"inventory_synthesis": {1}, "auth_workflow": {1}}
+    else:
+        assert calls == []
+        assert providers == {"inventory_synthesis": set(), "auth_workflow": set()}
+
+
+@pytest.mark.parametrize("iterations", [1, 2])
+def test_scope_only_prompt_repairs_preserve_crawl_selections(monkeypatch, iterations):
+    plan = _plan()
+    plan = replace(plan, targets=[OperationTarget("target-1", "http://target.test:3001", "network")])
+    task = Task(
+        task_uid="active", title="Crawl", objective="Crawl", phase=1, status="active",
+        target_scope="subset", target_ids=["target-1"],
+    )
+    drafts = iter([
+        {"prompt": "Crawl http://other.test:3001", "tools": ["specialized_recon_orchestrator"],
+         "shell_commands": ["katana"], "memory_ids": ["memory-1"]},
+        {"prompt": "Crawl http://target.test:3001", "tools": [], "shell_commands": [], "memory_ids": []},
+    ])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": iterations}),
+        budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, tasks=[task]),
+    )
+    monkeypatch.setattr(controller, "_normalize_task_prompt_spec", lambda spec, *_args: spec)
+    monkeypatch.setattr(controller, "_filter_repairable_shell_selections", lambda spec: spec)
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda role, *_args, **_kwargs: (
+        next(drafts) if role == "task_prompt_builder" else {"approved": True, "feedback": []}
+    ))
+    spec = controller._build_task_prompt(plan, plan.phases[0], task)
+    assert spec["tools"] == ["specialized_recon_orchestrator"]
+    assert spec["shell_commands"] == ["katana"]
+    assert spec["memory_ids"] == ["memory-1"]
+    assert spec["prompt"] == "Crawl http://target.test:3001"
+    critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, spec)
+    assert "additional capabilities alone do not make it" in critic
+
+
+@pytest.mark.parametrize("prompt", [
+    "Acquire http://target.test:3001/source", "Enumerate service.test:4280", "Read artifact:artifacts/source.txt",
+])
+def test_scope_repair_selection_preservation_is_protocol_neutral(prompt):
+    original = {"prompt": prompt, "tools": ["runtime_tool"], "shell_commands": ["runtime_command"]}
+    repaired = {"prompt": "Corrected target boundary", "tools": [], "shell_commands": []}
+    result = MultiAgentWorkflowController._preserve_scope_repair_selections(original, repaired)
+    assert result == {**original, "prompt": repaired["prompt"]}
+    assert original["prompt"] == prompt
 
 
 def test_controller_baseline_redirect_handler_allows_in_scope_redirects():
@@ -7585,6 +7692,8 @@ def test_credential_registration_uses_durable_descriptor_before_inventory_hints(
         "url": "https://target.test/register",
         "roles": ("member",),
         "flow_version": workflow_mod.REGISTRATION_FLOW_VERSION,
+        "flow_id": None,
+        "steps": [],
     }]
     assert store.list_authentication_flows.call_args.kwargs == {
         "purpose": "registration", "statuses": ("validated",),
@@ -7920,9 +8029,9 @@ def test_credential_flow_deficits_require_two_usable_credentials_per_role(monkey
         state_store=FakeState(None),
     )
     records = [
-        {"role": "user", "status": "valid"},
-        {"role": "user", "status": "unknown"},
-        {"role": "admin", "status": "invalid"},
+        {"role": "user", "status": "valid", "origin": "registered", "account_label": "alice"},
+        {"role": "user", "status": "unknown", "origin": "registered", "account_label": "bob"},
+        {"role": "admin", "status": "invalid", "origin": "registered", "account_label": "carol"},
     ]
     monkeypatch.setattr(
         workflow_mod,
@@ -8008,7 +8117,7 @@ def test_web_inventory_synthesis_does_not_retry_unchanged_failed_inputs(monkeypa
     )
 
 
-def test_contract_prerequisite_does_not_replace_failed_synthesis_when_conversion_is_unavailable(monkeypatch):
+def test_contract_prerequisite_failed_recovery_is_not_repeated_without_new_inputs(monkeypatch):
     plan = OperationPlan(
         objective="assess",
         current_phase=2,
@@ -8049,7 +8158,10 @@ def test_contract_prerequisite_does_not_replace_failed_synthesis_when_conversion
     )
 
     assert controller._repair_failed_contract_prerequisites(plan, plan.phases[1]) is False
-    assert controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is not None
+    assert controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is None
+    replacements = [task for task in controller.state.tasks if task.replacement_of == failed_synthesis.task_uid]
+    assert len(replacements) == 1
+    assert replacements[0].status == "partial_failure"
 
 
 def test_contract_prerequisite_blocks_dependent_task_creation_for_ambiguous_failed_synthesis(monkeypatch):
@@ -8436,6 +8548,100 @@ def _execution_requirement_task(methods, requirements):
             ],
         ),
     )
+
+
+@pytest.mark.parametrize("resolved", [(), ("first",), ("first", "second")])
+@pytest.mark.parametrize("method,subject", [("request", "/"), ("connect", "host:22"), ("read", "source.py")])
+def test_execution_proof_state_is_independent_of_acceptance(resolved, method, subject):
+    task = _execution_requirement_task([method], [
+        ExecutionRequirement("first", "Produce first proof", subject),
+        ExecutionRequirement("second", "Produce second proof", subject + "-other"),
+    ])
+    stored = replace(task, recovery_context={
+        "execution_evidence_receipts": {key: ["artifact:proof.txt"] for key in resolved},
+        "inherited_execution_receipts": {key: {"parent_task_uid": "parent"} for key in resolved},
+    })
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[stored], acceptance_complete=False),
+    )
+    state = controller._controller_execution_state(task)
+    assert state["resolved_requirement_ids"] == list(resolved)
+    assert state["unresolved_requirement_ids"] == sorted({"first", "second"} - set(resolved))
+    assert state["status"] == ("satisfied" if len(resolved) == 2 else "incomplete")
+    assert controller._controller_execution_gate_status(task, [])[0] is False
+    contract = controller._task_executor_contract(task, {"http_request"}, execution_state=state)
+    assert ("## Execution Evidence Prerequisite" in contract) is (len(resolved) < 2)
+    providers = contract.split("## Execution Requirements and Available Providers", 1)
+    assert (len(providers) == 2) is (len(resolved) < 2)
+    if len(providers) == 2:
+        assert (f"Frozen subject: `{subject}`" in providers[1]) is ("first" not in resolved)
+
+
+@pytest.mark.parametrize("receipt", [None, [], ["artifact:proof.txt"]])
+def test_continuation_instructions_follow_execution_proof(receipt):
+    task = _execution_requirement_task(["request"], [ExecutionRequirement("proof", "Request root", "/")])
+    task = replace(task, evidence=["artifact:proof.txt"], recovery_context={
+        "execution_evidence_receipts": {"proof": receipt} if receipt is not None else {},
+    })
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    evidence = [{"reference": "artifact:proof.txt", "source": "task_evidence"}]
+    compact = controller._task_executor_critic_guidance(
+        _plan(), task, ["criterion-1"], evidence, next_cycle=2,
+    )
+    missing = controller._missing_acceptance_recovery_prompt(_plan(), task, ["criterion-1"], evidence)
+    if receipt:
+        assert "Do not perform network discovery" in compact
+        assert "Do not repeat discovery" in missing
+        assert "Complete only the unresolved execution requirements" not in compact + missing
+    else:
+        assert "Complete only the unresolved execution requirements" in compact
+        assert "Complete only the unresolved execution requirements" in missing
+        assert "Do not perform network discovery" not in compact
+        assert "Do not repeat discovery" not in missing
+
+
+@pytest.mark.parametrize("trigger", [None, "unknown", "bounded_reasoning_loop", "required_procedure_methods",
+                                    "contract_prerequisite_recovery"])
+def test_recovery_contract_requires_a_recognized_trigger(trigger):
+    task = replace(_execution_requirement_task(["analyze"], []), recovery_context={
+        "phase_task_contract": {"workstream": "mapping"}, "trigger": trigger,
+        "unresolved_criteria": [], "procedure_methods": [],
+    })
+    prompt = MultiAgentWorkflowController._recovery_contract_guidance(task)
+    assert bool(prompt) is (trigger not in {None, "unknown"})
+    assert "Unresolved acceptance work:" not in prompt
+    assert "Required procedure capabilities:" not in prompt
+    task = replace(task, recovery_context={**task.recovery_context,
+                                          "unresolved_criteria": ["criterion-1"], "procedure_methods": ["read"]})
+    prompt = MultiAgentWorkflowController._recovery_contract_guidance(task)
+    if trigger not in {None, "unknown"}:
+        assert "Unresolved acceptance work: criterion-1" in prompt
+        assert "Required procedure capabilities: read" in prompt
+
+
+@pytest.mark.parametrize("module", ["web", "web_recon", "code_security", "unknown_module", "../web", ""])
+def test_task_policy_is_shared_by_prompt_roles(module):
+    task = _execution_requirement_task(["analyze"], [])
+    runtime = _runtime()
+    runtime.config.module = module
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan(), tasks=[task]),
+    )
+    policy = controller._task_policy_guidance(task)
+    builder = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+    critic = controller._task_prompt_critic_prompt(_plan(), _plan().phases[0], task, {"prompt": "Map", "tools": []})
+    executor = controller._task_executor_contract(task, set(), task_policy=policy)
+    for prompt in (builder, critic, executor):
+        assert policy in prompt
+        assert "Do not invent a blanket workspace prohibition" in prompt
+    assert ("preserve endpoints, concrete routes, and workflows" in policy) is (module in {"web", "web_recon"})
+    assert ("do not automatically register accounts" in policy) is (module == "web_recon")
+    runtime.termination_policy = "Map only."
+    assert controller._workspace_access_guidance() in controller._module_termination_policy_section()
 
 
 def test_task_executor_contract_lists_only_matching_execution_requirement_providers(monkeypatch):
@@ -10737,7 +10943,11 @@ def test_task_executor_recovers_in_same_session_and_evaluator_receives_authorita
         "enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)"
     )
     assert captured["executor_prompts"][0].endswith(
-        controller._task_executor_contract(state.tasks[0], {"store_finding"})
+        controller._task_executor_contract(
+            state.tasks[0], {"store_finding"},
+            execution_state=controller._controller_execution_state(state.tasks[0]),
+            task_policy=controller._task_policy_guidance(state.tasks[0]),
+        )
         + "\n\n"
         + controller._tool_selection_policy()
     )
@@ -11439,7 +11649,11 @@ def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval
 
     assert executor_calls[0].startswith("enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)")
     assert executor_calls[0].endswith(
-        controller._task_executor_contract(state.tasks[0], {"store_finding"})
+        controller._task_executor_contract(
+            state.tasks[0], {"store_finding"},
+            execution_state=controller._controller_execution_state(state.tasks[0]),
+            task_policy=controller._task_policy_guidance(state.tasks[0]),
+        )
         + "\n\n"
         + controller._tool_selection_policy()
     )
@@ -17282,7 +17496,7 @@ def test_task_prompts_delegate_loop_recovery_to_controller_without_retry_ceiling
 
     combined = f"{builder_prompt}\n{executor_contract}"
     assert "actual registered tool calls" in combined
-    assert "controller-owned executor contract supplies the terminal acceptance protocol" in combined
+    assert "Python appends task policy and the terminal acceptance protocol" in combined
     assert "controller supplies a loop or recovery instruction" in executor_contract
     assert "one correction" not in combined
     assert "correction fails" not in combined
@@ -19406,6 +19620,7 @@ def test_invalid_task_prompt_builder_json_uses_deterministic_template():
 
     assert executed_prompts
     assert "Assigned task" in executed_prompts[0]
+    assert executed_prompts[0].count("Reuse complete artifacts returned by tools directly") == 1
     assert state.tasks[0].status == "partial_failure"
     fallback = next(
         event for event in controller.runtime.callback_handler.events
@@ -21937,3 +22152,313 @@ def test_hypothesis_consumer_excludes_non_producers(worker_flow_case, monkeypatc
     assert controller._hypothesis_consumer_bindings(consumer) == []
     assert controller._prepare_hypothesis_consumer(_plan(), consumer) is None
     repair.assert_not_called()
+
+
+@pytest.mark.parametrize("target,method", [
+    ("https://target.test", "request"), ("tcp://target.test:9000", "enumerate"), ("/workspace/src", "read"),
+])
+def test_continuation_acquisition_replacement_preserves_and_deduplicates(worker_flow_case, monkeypatch, target, method):
+    from modules.operation_plugins.planning_contracts import PhaseTaskContract
+
+    controller, *_rest = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", target,
+                                                    "filesystem" if target.startswith("/") else "network")])
+    contract = PhaseTaskContract(module="fixture", phase_id=1, mode="fanout", min_mapping_tasks=1,
+                                 mapping_workstreams=frozenset({"source_analysis"}),
+                                 required_methods_by_workstream={"source_analysis": (method, "analyze")})
+    monkeypatch.setattr(controller, "_phase_task_contract", lambda _phase: contract)
+    original = _acceptance()
+    acceptance = replace(original, basis=replace(original.basis, procedure=replace(
+        original.basis.procedure, methods=("analyze",),
+    )), criteria=(replace(original.criteria[0], execution_requirements=(ExecutionRequirement(
+        "execution", "Analyze source", "target:target-1",
+    ),)),), manifest_hash="")
+    task = Task("source", "Analyze", "Extract source metadata", phase=1, status="active", acceptance=acceptance,
+                recovery_context={"phase_task_contract": {"module": "fixture", "phase_id": 1,
+                                                         "workstream": "source_analysis", "task_role": "mapping"},
+                                  "execution_evidence_receipts": {"execution": ["old"]}})
+    controller.state.store_task(task)
+    prompt = Mock()
+    monkeypatch.setattr(controller, "_build_task_prompt", prompt)
+    controller._run_task_in_trace(plan, plan.phases[0], task)
+    prompt.assert_not_called()
+    assert controller._replace_missing_procedure_methods(plan, plan.phases[0], task)
+    replacements = [item for item in controller.state.tasks if item.replacement_of == task.task_uid]
+    assert len(replacements) == 1
+    replacement = replacements[0]
+    assert set(replacement.acceptance.basis.procedure.methods) == {method, "analyze"}
+    assert replacement.supersedes_criteria == [acceptance.criteria[0].id]
+    assert "execution_evidence_receipts" not in replacement.recovery_context
+    assert next(item for item in controller.state.tasks if item.task_uid == task.task_uid).acceptance == acceptance
+    assert not controller._replace_missing_procedure_methods(plan, plan.phases[0], replacement)
+
+
+def test_required_acquisition_capability_is_checked_in_preflight(worker_flow_case, monkeypatch):
+    from modules.operation_plugins.planning_contracts import load_phase_task_contract
+
+    controller, *_rest = worker_flow_case
+    monkeypatch.setattr(controller, "_phase_task_contract", lambda _phase: load_phase_task_contract("web", 1))
+    monkeypatch.setattr(controller, "_available_task_execution_capabilities", lambda: {"analyze"})
+    proposal = SimpleNamespace(inferred_basis_kind="procedure", task_role="mapping", workstream="client_side_api",
+                               methods=["analyze"], target_ids=[])
+    with pytest.raises(ValueError, match="request"):
+        controller._validate_generated_task_proposals(_plan().phases[0], [proposal])
+    monkeypatch.setattr(controller, "_available_task_execution_capabilities", lambda: {"analyze", "request"})
+    controller._validate_generated_task_proposals(_plan().phases[0], [proposal])
+
+
+def test_source_acquisition_guidance_is_protocol_neutral(worker_flow_case):
+    controller, task, *_rest = worker_flow_case
+    plan = _plan()
+    builder = controller._task_prompt_builder_prompt(plan, plan.phases[0], task)
+    critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, {"prompt": "Analyze"})
+    for prompt in (builder, critic):
+        assert "workspace resources, not target access" in prompt
+        assert "Acquire missing source data within declared capabilities and scope" in prompt
+        assert "Acquisition alone is not" in prompt
+        assert "Reuse complete artifacts returned by tools directly" in prompt
+        assert "save source data only when it has not already been persisted" in prompt
+        assert "Derive transformed inputs from the complete saved source" in prompt
+    assert "Incomplete processing requires a coverage gap" in critic
+    assert "zero extracted items or failed optional formatting alone do not establish failure" in critic
+    assert "alter, evade, validate, or compare authorization controls" in critic
+
+
+@pytest.mark.parametrize("context", [
+    None, {"module": "other", "phase_id": 1, "workstream": "client_side_api"},
+    {"module": "web", "phase_id": 9, "workstream": "client_side_api"},
+    {"module": "web", "phase_id": 1, "workstream": "bounded_crawl"},
+])
+def test_continuation_acquisition_policy_uses_only_matching_metadata(worker_flow_case, monkeypatch, context):
+    from modules.operation_plugins.planning_contracts import load_phase_task_contract
+
+    controller, *_rest = worker_flow_case
+    monkeypatch.setattr(controller, "_phase_task_contract", lambda _phase: load_phase_task_contract("web", 1))
+    task = Task("unrelated", "client_side_api", "Fetch source", phase=1, status="active", acceptance=_acceptance(),
+                recovery_context={"phase_task_contract": context})
+    assert not controller._replace_missing_procedure_methods(_plan(), _plan().phases[0], task)
+    assert not any(candidate.replacement_of == task.task_uid for candidate in controller.state.tasks)
+
+
+@pytest.mark.parametrize("scope", [None, "OP_TEST"])
+def test_registration_success_uses_task_local_storage_for_shared_and_operation_credentials(scope, monkeypatch):
+    controller, _plan_value, task = _refresh_setup_controller(monkeypatch, ("first",))
+    record = {"origin": "registered", "target": "https://target.test", "role": "member",
+              "status": "unknown", "operation_id": scope}
+    store = SimpleNamespace(get_credential=Mock(return_value=record))
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="store", tool_name="store_credential", success=True, correctable=False,
+        input_summary="", output_summary=json.dumps({"stored": True, "credential": {"credential_id": "first"}}),
+    )
+    assert controller._registered_worker_success(task, record["target"], ("member",), [outcome])
+    assert not controller._registered_worker_success(task, record["target"], ("member",), [])
+    assert not controller._registered_worker_success(task, "https://other.test", ("member",), [outcome])
+    assert not controller._registered_worker_success(task, record["target"], ("other",), [outcome])
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_flow_review_keeps_functional_success_separate_from_mapping(worker_flow_case, monkeypatch, success):
+    controller, task, _factory, _worker, store, reference = worker_flow_case
+    monkeypatch.setattr(MultiAgentWorkflowController, "_refine_worker_flow", _REAL_REFINE_WORKER_FLOW)
+    candidate = {"target": "https://target.test", "kind": "browser_registration",
+                 "steps": [{"action": "form_submission", "url": "https://target.test/signup",
+                            "field_names": ["Email 📧", "🔐 Password"]}]}
+    attempt = {"reviewed": False, "successful": success, "candidate": candidate, "recorder_names": {"record_flow"}}
+    outcome = ToolOutcome(sequence=1, tool_use_id="form", tool_name="browser_get_page_html", success=True,
+                          correctable=False, input_summary="", output_summary=reference, artifact_refs=(reference,))
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: {
+        "approved": True, "feedback": [], "supporting_evidence_refs": [reference],
+    })
+    repair = Mock(return_value=workflow_mod.TaskExecutorCycleResult(text="", outcomes=[]))
+    controller._refine_worker_flow(task, "https://target.test", "registration", attempt, [outcome], repair,
+                                   [_tool("record_flow"), _tool("browser_perform_action")])
+    if success:
+        repair.assert_not_called()
+        store.upsert_authentication_flow.assert_called_once()
+        assert attempt["mapping_approved"] is True
+    else:
+        store.upsert_authentication_flow.assert_not_called()
+        assert repair.call_count == controller.flow_refinement_cycles - 1
+
+
+def test_successful_flow_metadata_repairs_cannot_repeat_submission(worker_flow_case, monkeypatch):
+    controller, task, _factory, _worker, _store, reference = worker_flow_case
+    monkeypatch.setattr(MultiAgentWorkflowController, "_refine_worker_flow", _REAL_REFINE_WORKER_FLOW)
+    attempt = {"reviewed": False, "successful": True, "candidate": {"kind": "browser_registration"},
+               "recorder_names": {"record_flow"}}
+    outcome = ToolOutcome(sequence=1, tool_use_id="form", tool_name="browser_get_page_html", success=True,
+                          correctable=False, input_summary="", output_summary=reference, artifact_refs=(reference,))
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: {
+        "approved": False, "feedback": ["Preserve observed Unicode controls"], "supporting_evidence_refs": [],
+    })
+    repair = Mock(return_value=workflow_mod.TaskExecutorCycleResult(text="", outcomes=[]))
+    controller._refine_worker_flow(task, "https://target.test", "registration", attempt, [outcome], repair,
+                                   [_tool("record_flow"), _tool("browser_perform_action"), _tool("shell")])
+    assert repair.call_count == controller.flow_refinement_cycles - 1
+    for call in repair.call_args_list:
+        assert {workflow_mod.get_tool_name(tool) for tool in call.args[1]} == {"record_flow"}
+        assert "do not create another account" in call.args[0]
+
+
+def test_flow_publication_failure_preserves_functional_success_as_mapping_gap(worker_flow_case, monkeypatch):
+    controller, task, _factory, _worker, store, reference = worker_flow_case
+    monkeypatch.setattr(MultiAgentWorkflowController, "_refine_worker_flow", _REAL_REFINE_WORKER_FLOW)
+    attempt = {"reviewed": False, "successful": True, "candidate": {"kind": "browser_registration"}}
+    outcome = ToolOutcome(sequence=1, tool_use_id="form", tool_name="browser_get_page_html", success=True,
+                          correctable=False, input_summary="", output_summary=reference, artifact_refs=(reference,))
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: {
+        "approved": True, "feedback": [], "supporting_evidence_refs": [reference],
+    })
+    store.upsert_authentication_flow.side_effect = OSError("unavailable")
+    repair = Mock()
+    controller._refine_worker_flow(task, "https://target.test", "registration", attempt, [outcome], repair, [])
+    repair.assert_not_called()
+    assert not attempt.get("mapping_approved")
+    persisted = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
+    assert persisted.recovery_context["registration_flow_gap"]["functional_success"] is True
+
+
+@pytest.mark.parametrize("comparison,expected", [("none", ["credential-b"]),
+                                                 ("account", ["credential-b", "credential-a"])])
+def test_authentication_setup_selects_minimum_required_sessions(monkeypatch, comparison, expected):
+    target = "https://target.test"
+    plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value=target, type="network")])
+    task = Task(task_uid="minimum-auth", title="Check", objective="Check", phase=1, status="active",
+                target_ids=["target-1"], recovery_context={
+                    "authentication_requirement": {"comparison": comparison, "roles": ["member"]},
+                })
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                              state_store=FakeState(plan, [task]))
+    records = [
+        {"credential_id": "credential-a", "role": "member", "account_label": "first"},
+        {"credential_id": "credential-b", "role": "member", "account_label": "second"},
+        {"credential_id": "admin", "role": "admin", "account_label": "third"},
+    ]
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        list_credentials=lambda *_args, **_kwargs: records,
+    ))
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(controller, "_authentication_flow_hints", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_discovery_endpoints", lambda *_args: ())
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid",
+                        lambda _op, _target, credential_id: credential_id == "credential-b")
+    setup = controller._authentication_setup_request(plan, task)
+    assert [credential["credential_id"] for credential in setup.credentials] == expected
+    assert setup.comparison == comparison
+    if comparison == "none":
+        alternate = controller._authentication_setup_request(
+            plan, task, excluded_credential_ids=("credential-b",),
+        )
+        assert [credential["credential_id"] for credential in alternate.credentials] == ["credential-a"]
+    else:
+        with pytest.raises(workflow_mod.AuthenticationSelectionError):
+            controller._authentication_setup_request(plan, task, excluded_credential_ids=("credential-a",))
+
+
+@pytest.mark.parametrize("replacement_round,frozen", [(1, False), (0, True)])
+def test_authentication_selection_retry_preserves_bounds_and_frozen_bindings(monkeypatch, replacement_round, frozen):
+    plan = _plan()
+    task = Task(task_uid="selection", status="active", title="Check", objective="Check", phase=1, recovery_context={
+        "validation_auth_context": {"credential_ids": ["a"]} if frozen else {},
+    })
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                              state_store=FakeState(plan, [task]))
+    lookup = Mock()
+    monkeypatch.setattr(controller, "_authentication_setup_request", lookup)
+    assert controller._retry_authentication_selection(plan, task, ("a",), (), replacement_round) is None
+    lookup.assert_not_called()
+
+
+def test_authentication_selection_retry_excludes_failed_ids(monkeypatch):
+    plan = _plan()
+    task = Task(task_uid="selection", status="active", title="Check", objective="Check", phase=1)
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                              state_store=FakeState(plan, [task]))
+    monkeypatch.setattr(controller, "_authentication_setup_request", Mock())
+    run = Mock(return_value=workflow_mod.AuthenticationSetupResult("established", ("b",)))
+    monkeypatch.setattr(controller, "_run_authentication_agent", run)
+    assert controller._retry_authentication_selection(plan, task, ("a",), ("old",), 0).ready
+    run.assert_called_once_with(plan, task, excluded_credential_ids=("old", "a"), replacement_round=1)
+    monkeypatch.setattr(controller, "_authentication_setup_request", Mock(
+        side_effect=workflow_mod.AuthenticationSelectionError("unavailable"),
+    ))
+    assert controller._retry_authentication_selection(plan, task, ("a",), (), 0) is None
+
+
+@pytest.mark.parametrize("comparison,reject_first,expected", [
+    ("none", False, ["a"]), ("none", True, ["a", "b"]),
+    ("account", False, ["a", "b"]), ("account", True, ["a", "b", "c"]),
+])
+def test_authentication_worker_runs_only_selected_accounts(monkeypatch, comparison, reject_first, expected):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("a", "b", "c"))
+    task = replace(task, recovery_context={
+        "authentication_requirement": {"comparison": comparison, "roles": ["member"]},
+    })
+    controller.state.tasks = [task]
+    target = "https://target.test"
+    records = [{"credential_id": name, "credential_type": "username_password", "role": "member",
+                "account_label": name, "target": target} for name in ("a", "b", "c")]
+    store = SimpleNamespace(list_credentials=lambda *_args, **_kwargs: records, authorize_credential_for_task=Mock(),
+                            record_credential_status=Mock(), record_credential_usage=Mock())
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    flow = {"kind": "browser_form", "login_url": f"{target}/login", "allowed_origins": [target]}
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: (flow,))
+    monkeypatch.setattr(controller, "_authentication_flow_hints", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_discovery_endpoints", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_setup_request",
+                        lambda *args, **kwargs: MultiAgentWorkflowController._authentication_setup_request(
+                            controller, *args, **kwargs,
+                        ))
+    valid = set()
+    calls = []
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, name: name in valid)
+
+    def worker(_task, _setup, credential, _flows, _tools):
+        name = credential["credential_id"]
+        calls.append(name)
+        if name != "a" or not reject_first:
+            valid.add(name)
+        return workflow_mod.AuthenticationWorkerResult(True)
+
+    monkeypatch.setattr(workflow_mod, "authentication_attempt_result",
+                        lambda _op, _target, name: {"outcome": "credential_rejected"}
+                        if name == "a" and reject_first else None)
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+    result = controller._run_authentication_agent(plan, task)
+    assert result.ready
+    if reject_first:
+        assert store.record_credential_status.call_args.args[1:3] == ("a", "invalid")
+    else:
+        store.record_credential_status.assert_not_called()
+    assert calls == expected
+    assert len(result.credential_ids) == (2 if comparison == "account" else 1)
+    assert "a" not in result.credential_ids if reject_first else "a" in result.credential_ids
+
+
+def test_authentication_setup_keeps_frozen_ids_and_reports_missing_pair(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch)
+    task = replace(task, recovery_context={"validation_auth_context": {"credential_ids": ["first", "second"]}})
+    monkeypatch.setattr(controller, "_authentication_setup_request", Mock(
+        side_effect=workflow_mod.AuthenticationSelectionError("frozen_credentials_unavailable"),
+    ))
+    result = controller._run_authentication_agent(plan, task)
+    assert not result.ready
+    assert result.reason == "frozen_credentials_unavailable"
+
+
+def test_authentication_setup_matches_assigned_target_with_trailing_slash(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
+    plan = replace(plan, targets=[OperationTarget(target_id="target-1", value="https://target.test/", type="network")])
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        list_credentials=lambda *_args, **_kwargs: [
+            {"credential_id": "first", "target": "https://target.test", "role": "member"},
+        ],
+    ))
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(controller, "_authentication_flow_hints", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_discovery_endpoints", lambda *_args: ())
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: False)
+    setup = MultiAgentWorkflowController._authentication_setup_request(controller, plan, task)
+    assert setup.targets == ("https://target.test",)
+    assert setup.credentials[0]["credential_id"] == "first"

@@ -10,6 +10,69 @@ from modules.tools import recon_inventory_manifest as manifest_tool
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 
 
+@pytest.mark.parametrize(("route", "classification"), [
+    ("/", "concrete"), ("/usersignup", "concrete"), ("/api/search?q=a$b", "concrete"),
+    ("/foo$", "concrete"), ("/*", "pattern"), ("/foo/*", "pattern"),
+    ("/${user}/login", "template"), ("/:id/signup", "template"),
+    ("/$", "fragment"), ("/>", "fragment"), ("//other/login", "fragment"),
+    (None, "fragment"), ("login", "fragment"),
+])
+def test_client_route_classification(route, classification):
+    assert manifest_tool.classify_client_route(route) == classification
+
+
+def test_existing_bundle_extraction_and_manifest_filter_non_concrete_routes():
+    payload = {
+        "schema_version": "client_bundle_inventory_v2", "target": "https://target.test",
+        "api_paths": ["/api/users", "/api/${id}"],
+        "spa_routes": ["/userlogin", "/usersignup", "/*", "/$", "/>", "/:id/signup"],
+    }
+    records = manifest_tool._parse_client_bundle_inventory(json.dumps(payload))
+    assert {record["url"] for record in records} == {
+        "https://target.test/", "https://target.test/api/users",
+        "https://target.test/userlogin", "https://target.test/usersignup",
+    }
+    workflows = manifest_tool.client_bundle_workflows(payload)
+    assert len(workflows) == 2
+    raw = {
+        "schema_version": 1, "unassessed_gaps": [], "items": [
+            {"id": "valid", "target_id": "target-1", "kind": "endpoint", "value": "https://target.test/login"},
+            {"id": "pattern", "target_id": "target-1", "kind": "endpoint", "value": "https://target.test/*"},
+            {"id": "fragment", "target_id": "target-1", "kind": "endpoint", "value": "https://target.test/>"},
+            {"id": "param", "target_id": "target-1", "kind": "parameter", "value": "id",
+             "attributes": {"endpoint_id": "pattern"}},
+            {"id": "workflow", "target_id": "target-1", "kind": "workflow", "value": "Signup",
+             "attributes": {"registration": {"url": "https://target.test/${id}/signup"}}},
+        ],
+    }
+    normalized = manifest_tool._canonicalize_inventory_manifest_source(raw, target_id="target-1")
+    assert [item["id"] for item in normalized["items"]] == ["valid"]
+    assert {candidate["classification"] for candidate in normalized["route_candidates"]} == {"pattern", "template"}
+    assert len(raw["items"]) == 5
+    merged = manifest_tool._merge_inventory_manifests([("artifact:a", normalized), ("artifact:b", normalized)])
+    assert merged["route_candidates"] == normalized["route_candidates"]
+
+
+def test_consolidation_persists_mapping_gaps_and_registration_workflow(monkeypatch, tmp_path):
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    source = tmp_path / "bundle.json"
+    source.write_text(json.dumps({
+        "schema_version": "client_bundle_inventory_v2", "target": "https://target.test",
+        "api_paths": [], "spa_routes": ["/usersignup", "/userlogin"],
+    }))
+    coverage = [{"workstream": "crawl", "complete": False, "tasks": [
+        {"task_uid": "crawl-task", "status": "partial_failure", "reason": "Prompt rejected"},
+    ]}]
+    manifest_tool.consolidate_recon_artifacts(
+        [str(source)], "artifacts/inventory.json", target="https://target.test", mapping_coverage=coverage,
+    )
+    manifest = json.loads((tmp_path / "artifacts/inventory.json").read_text())
+    assert manifest["mapping_coverage"] == coverage
+    assert "Prompt rejected" in manifest["unassessed_gaps"][0]
+    assert any(item["kind"] == "workflow" and item["attributes"].get("registration") for item in manifest["items"])
+
+
 @pytest.mark.parametrize(
     ("source_format", "text", "expected_url", "expected_status"),
     [
