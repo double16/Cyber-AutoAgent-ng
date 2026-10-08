@@ -55,6 +55,24 @@ def test_enabled_web_modules_declare_credential_coverage_phase_contracts():
     assert load_phase_task_contract("threat_emulation", 1) is None
 
 
+@pytest.mark.parametrize("matrix", [[], {"other": ["account"]}, {"coverage": []},
+                                    {"coverage": "role"}, {"coverage": ["unknown"]}])
+def test_authentication_matrix_declarations_are_strict(matrix):
+    raw = {"phase_id": 1, "mode": "fanout", "min_mapping_tasks": 1,
+           "mapping_workstreams": ["coverage"], "authentication_matrix_workstreams": matrix}
+    with pytest.raises(ValueError, match="authentication_matrix_workstreams"):
+        contracts._parse_contract("fixture", raw)
+
+
+def test_modules_declare_comparison_matrices():
+    for module, phase, single, pairs in [
+        ("web", 3, "authenticated_credential_coverage", "authorization_comparison"),
+        ("web_recon", 2, "authenticated_access_coverage", "read_only_authorization_comparison"),
+    ]:
+        contract = load_phase_task_contract(module, phase)
+        assert contract.authentication_matrix_workstreams == {single: ("none",), pairs: ("account", "role")}
+
+
 @pytest.mark.parametrize("module,phase_id,workstreams", [
     ("web", 1, ["entrypoint_technology", "auth_workflow", "client_side_api"]),
     ("web_recon", 1, ["service_entrypoints", "technology_trust_boundary", "access_context_session",

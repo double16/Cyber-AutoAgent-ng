@@ -49,6 +49,7 @@ class PhaseTaskContract:
     required_methods_by_workstream: dict[str, tuple[str, ...]] = field(default_factory=dict)
     allow_partial_synthesis: bool = False
     authentication_comparison_workstreams: frozenset[str] = frozenset()
+    authentication_matrix_workstreams: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -297,6 +298,13 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
     )
     if not normalized_comparisons.issubset(normalized_workstreams):
         raise ValueError(f"authentication comparisons must be declared mapping workstreams for {module}")
+    matrix = raw.get("authentication_matrix_workstreams", {})
+    if not isinstance(matrix, dict) or any(
+        workstream not in normalized_workstreams or not isinstance(kinds, list) or not kinds
+        or any(kind not in {"none", "account", "role"} for kind in kinds)
+        for workstream, kinds in matrix.items()
+    ):
+        raise ValueError(f"authentication_matrix_workstreams is invalid for {module}")
     raw_methods = raw.get("required_methods_by_workstream", {})
     if not isinstance(raw_methods, dict):
         raise ValueError(f"required_methods_by_workstream must be an object for {module}")
@@ -366,6 +374,8 @@ def _parse_contract(module: str, raw: dict[str, Any]) -> PhaseTaskContract:
         direct_single_step_workstreams=normalized_direct_workstreams,
         exclude_public_static_assets=exclude_public_static_assets,
         authentication_comparison_workstreams=normalized_comparisons,
+        authentication_matrix_workstreams={workstream: tuple(dict.fromkeys(kinds))
+                                          for workstream, kinds in matrix.items()},
         required_methods_by_workstream=required_methods,
         allow_partial_synthesis=allow_partial_synthesis,
     )

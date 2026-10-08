@@ -62,6 +62,9 @@ planning:
         - unauthenticated_posture
         - authenticated_access_coverage
         - read_only_authorization_comparison
+      authentication_matrix_workstreams:
+        authenticated_access_coverage: [none]
+        read_only_authorization_comparison: [account, role]
       required_methods_by_workstream:
         unauthenticated_posture: [request, analyze]
         authenticated_access_coverage: [request, analyze]

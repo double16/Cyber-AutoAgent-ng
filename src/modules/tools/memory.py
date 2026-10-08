@@ -91,7 +91,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 from strands import tool
 
-from modules.authentication_requirements import AuthenticationRequirement
+from modules.authentication_requirements import AuthenticationRequirement, validate_comparison_requirement
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
@@ -9069,6 +9069,7 @@ def _create_tasks_from_proposals(
         [Any, TaskProposal, dict[str, Any], list[str], list[OperationTarget]], str
     ] | None = None,
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
+    task_transformer: Callable[[list[Task], list[Task]], list[Task]] | None = None,
     reject_duplicate_proposals: bool = False,
 ) -> str:
     """Create pending tasks for the active phase from concise task proposals.
@@ -9130,6 +9131,12 @@ def _create_tasks_from_proposals(
     unresolved_gaps: list[str] = []
 
     for proposal_index, proposal in enumerate(proposals):
+        matrix_expansion = (
+            task_transformer is not None and phase_task_contract is not None
+            and proposal.workstream in phase_task_contract.authentication_matrix_workstreams
+        )
+        if not matrix_expansion:
+            validate_comparison_requirement(proposal.authentication_requirement)
         proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
         title = proposal.title.strip()
         objective = proposal.objective.strip()
@@ -9225,6 +9232,7 @@ def _create_tasks_from_proposals(
         if (
             phase_task_contract is not None
             and proposal.workstream in phase_task_contract.authentication_comparison_workstreams
+            and not matrix_expansion
             and proposal.authentication_requirement.comparison == "none"
             and not validation_auth_binding
         ):
@@ -9274,7 +9282,7 @@ def _create_tasks_from_proposals(
                     f"{expected_snapshot_ref}; received {artifact_ref}"
                 )
             manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
-            completed_ids = _completed_coverage_item_ids(
+            completed_ids = set() if matrix_expansion else _completed_coverage_item_ids(
                 [task for task in existing_tasks if AuthenticationRequirement.model_validate(
                     task.recovery_context.get("authentication_requirement", {}),
                 ) == proposal.authentication_requirement],
@@ -9498,7 +9506,7 @@ def _create_tasks_from_proposals(
                 current_phase,
                 coverage_family,
             )
-            if any(
+            if not matrix_expansion and any(
                 _frozen_task_identity(
                     task.title,
                     task.objective,
@@ -9526,7 +9534,7 @@ def _create_tasks_from_proposals(
                 group_target_ids,
                 coverage_family,
             )
-            if any(
+            if not matrix_expansion and any(
                 _semantic_cross_phase_task_identity(
                     task.title,
                     task.objective,
@@ -9576,6 +9584,9 @@ def _create_tasks_from_proposals(
         raise ValueError(
             "task_preflight:duplicate_task: generated proposal duplicates existing durable workflow work"
         )
+
+    if task_transformer is not None:
+        staged_tasks = task_transformer(staged_tasks, existing_tasks)
 
     for task in staged_tasks:
         client.store_task(task=task, user_id=user_id)
@@ -9636,6 +9647,7 @@ def build_create_tasks_submitter(
         [Any, TaskProposal, dict[str, Any], list[str], list[OperationTarget]], str
     ] | None = None,
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
+    task_transformer: Callable[[list[Task], list[Task]], list[Task]] | None = None,
     reject_duplicate_proposals: bool = False,
     repair_guard: TaskProposalRepairGuard | None = None,
     invocation_observer: Callable[[dict[str, Any], Any, Exception | None], None] | None = None,
@@ -9669,6 +9681,7 @@ def build_create_tasks_submitter(
                 phase_task_contract=phase_task_contract,
                 execution_owner_resolver=execution_owner_resolver,
                 proposal_preflight_validator=proposal_preflight_validator,
+                task_transformer=task_transformer,
                 reject_duplicate_proposals=reject_duplicate_proposals,
             )
         except Exception as error:
@@ -9701,6 +9714,7 @@ def build_create_tasks_tool(
         [Any, TaskProposal, dict[str, Any], list[str], list[OperationTarget]], str
     ] | None = None,
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
+    task_transformer: Callable[[list[Task], list[Task]], list[Task]] | None = None,
     reject_duplicate_proposals: bool = False,
     repair_guard: TaskProposalRepairGuard | None = None,
     invocation_observer: Callable[[dict[str, Any], Any, Exception | None], None] | None = None,
@@ -9721,6 +9735,7 @@ def build_create_tasks_tool(
         phase_task_contract=phase_task_contract,
         execution_owner_resolver=execution_owner_resolver,
         proposal_preflight_validator=proposal_preflight_validator,
+        task_transformer=task_transformer,
         reject_duplicate_proposals=reject_duplicate_proposals,
         repair_guard=repair_guard,
         invocation_observer=invocation_observer,

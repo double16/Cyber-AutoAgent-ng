@@ -374,8 +374,25 @@ Task proposals declare `authentication_requirement` separately from established 
 The default is `none` with no role filter, which selects one eligible account per assigned target.
 An unauthenticated baseline adds no credential requirement. Explicit `account`, `role`, or `tenant` comparisons
 select a qualifying pair from recorded identity metadata; distinct credential IDs alone do not prove distinct accounts.
-The web authorization comparison workstream requires an explicit comparison kind through its module contract:
-`planning.phase_task_contracts[].authentication_comparison_workstreams` lists workstreams requiring a pair.
+Web and web-recon module contracts declare `authentication_matrix_workstreams`. Python expands each scoped
+template using target-scoped roles from credential metadata (including unavailable credentials) and structured
+registration flows. Role applicability is independent of credential and session availability.
+
+| Comparison | Expansion | Credential requirement |
+| --- | --- | --- |
+| Unauthenticated versus role | Once per defined role | One account for that role |
+| Same role, different accounts | Once per defined role | Two distinct accounts sharing the role |
+| Different roles | Once per unordered pair of defined roles | One account from each role |
+
+An application with one defined role has no different-role tasks and no coverage gap for their absence.
+Missing credentials for an applicable comparison remain an execution gap. Controller-owned HTTP comparisons
+retain anonymous and authenticated responses, reusing matching current-operation baseline evidence when possible;
+response differences alone do not establish a vulnerability. Non-HTTP modules can opt into the same declarative
+matrix without browser or HTTP assumptions. Explicit tenant comparisons retain their existing selection contract.
+On continuation, unfinished inherited templates and contradictory role-selection failures are superseded by
+applicable comparison tasks. Frozen inventory subjects are preserved; completed work and frozen validation
+credential bindings are retained. Reconciliation is idempotent. Identity availability is checked before executor
+prompt construction, and error events retain the requested comparison and roles.
 Python persists requirements during task fan-out, prefers valid sessions, and authenticates only selected identities.
 Session reuse and authenticated requests enforce a 600-second safety window for known JWT and cookie expiry.
 Material with less than 600 seconds remaining requires refresh; unknown expiry still requires behavioral validation.

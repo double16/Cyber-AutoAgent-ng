@@ -80,6 +80,8 @@ from modules.agents.worker_completion import WorkerCompletion
 from modules.authentication_requirements import (
     AuthenticationRequirement,
     AuthenticationSelectionError,
+    authentication_comparison_matrix,
+    authentication_role_catalog,
     select_authentication_credentials,
 )
 from modules.config.taxonomy_catalog import (
@@ -2188,6 +2190,7 @@ class MultiAgentWorkflowController:
 
             self._claim_finding_validation_tasks(phase)
             self._recover_missing_finding_validation_tasks(phase)
+            self._reconcile_authentication_comparisons(plan, phase)
 
             pending_count = len(self.state.list_tasks(phase=phase.id, status=["pending"]))
             active_count = len(self.state.list_tasks(phase=phase.id, status=["active"]))
@@ -3929,6 +3932,32 @@ class MultiAgentWorkflowController:
             return "executor"
         return "controller"
 
+    def _current_unauthenticated_response(self, task: Task, url: str, method: str) -> dict[str, Any]:
+        """Reuse a matching current-operation baseline or capture an anonymous response."""
+
+        for baseline in self.state.list_tasks(phase=task.phase, status=["done"]):
+            if (
+                self._task_planning_workstream(baseline) != "unauthenticated_baseline"
+                or baseline.target_ids != task.target_ids
+                or baseline.acceptance.basis.snapshot_hash != task.acceptance.basis.snapshot_hash
+                or set(baseline.acceptance.basis.item_ids) != set(task.acceptance.basis.item_ids)
+            ):
+                continue
+            for reference in baseline.evidence:
+                try:
+                    payload = json.loads(Path(resolve_operation_artifact_path(reference)).read_text())
+                    if not isinstance(payload, dict):
+                        continue
+                    for response in payload.get("responses", []):
+                        if (
+                            isinstance(response, dict) and response.get("url") == url
+                            and response.get("method") == method and response.get("outcome") == "response"
+                        ):
+                            return response
+                except (OSError, TypeError, ValueError):
+                    continue
+        return self._controller_baseline_request(url, method)
+
     def _run_controller_web_authenticated_coverage(
         self, plan: OperationPlan, phase: PlanPhase, task: Task
     ) -> bool:
@@ -3967,6 +3996,7 @@ class MultiAgentWorkflowController:
         parsed = urlparse(url)
         service = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
         responses: list[dict[str, Any]] = []
+        anonymous_responses: list[dict[str, Any]] = []
         coverage_gaps: list[str] = []
         if service not in selected_targets:
             coverage_gaps.append("Frozen inventory URL is outside the assigned target service boundary.")
@@ -3977,6 +4007,12 @@ class MultiAgentWorkflowController:
                 if method not in {"GET", "HEAD"}:
                     coverage_gaps.append(f"Recorded {method} operation was not executed by read-only coverage.")
                     continue
+                if task.recovery_context.get("authentication_matrix"):
+                    anonymous = self._current_unauthenticated_response(task, url, method)
+                    if anonymous["outcome"] == "response":
+                        anonymous_responses.append(anonymous)
+                    else:
+                        coverage_gaps.append(f"Anonymous {method} request did not produce an HTTP response.")
                 for credential_id in credential_ids:
                     try:
                         try:
@@ -4009,7 +4045,16 @@ class MultiAgentWorkflowController:
         output_path = Path(_operation_output_root()) / "artifacts" / "controller_authenticated_coverage" / f"{task.task_uid}.json"
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
-            json.dumps({"task_uid": task.task_uid, "responses": responses, "coverage_gaps": coverage_gaps}, indent=2),
+            json.dumps({
+                "task_uid": task.task_uid, "responses": responses, "coverage_gaps": coverage_gaps,
+                "unauthenticated_responses": anonymous_responses,
+                "comparisons": [{
+                    "method": authenticated["method"], "credential_id": authenticated["credential_id"],
+                    "anonymous_status": anonymous["status"], "authenticated_status": authenticated["status"],
+                    "body_equal": anonymous.get("body", "") == authenticated["body"],
+                } for authenticated in responses for anonymous in anonymous_responses
+                    if anonymous["method"] == authenticated["method"]],
+            }, indent=2),
             encoding="utf-8",
         )
         evidence_ref = canonical_artifact_reference(str(output_path))
@@ -4775,6 +4820,14 @@ class MultiAgentWorkflowController:
             return
         if self._run_controller_web_authenticated_coverage(plan, phase, task):
             return
+        if self._authentication_agent_tool_names(task):
+            try:
+                self._authentication_setup_request(plan, task)
+            except AuthenticationSelectionError as error:
+                self._record_authentication_setup(task, AuthenticationSetupResult("unavailable", reason=str(error)))
+                updated = self.state.mark_task(task, "partial_failure", f"Authentication unavailable: {error}")
+                self._emit_task_done(updated)
+                return
         preflight_feedback = (
             self._task_pre_execution_feedback(task)
             if task.recovery_context.get("task_preflight_validated")
@@ -9677,6 +9730,122 @@ Return JSON exactly: {response_schema}.
             names = [name for name in names if name != "authenticated_http_request"]
         return names
 
+    def _authentication_role_catalog(self, plan: OperationPlan) -> dict[str, dict[str, list[str]]]:
+        """Read defined roles without tying application design to credential lifecycle status."""
+
+        records = []
+        for target in plan.targets:
+            value = canonicalize_credential_target(str(target.value))
+            records.extend({**record, "target": value} for record in _get_database_store().list_credentials(
+                self.runtime.operation_id, target=value,
+                statuses=("unknown", "pending", "valid", "invalid", "expired", "revoked", "retired"),
+            ))
+        return authentication_role_catalog(records, self._credential_registration_flows(plan, "registration"))
+
+    @staticmethod
+    def _authentication_comparison_identity(task: Task) -> str:
+        """Identify one target-scoped comparison independently of generated wording."""
+
+        return json.dumps({
+            "phase": task.phase, "workstream": MultiAgentWorkflowController._task_planning_workstream(task),
+            "target_ids": sorted(task.target_ids), "basis": task.acceptance.to_dict()["basis"],
+            "requirement": task.recovery_context.get("authentication_requirement", {}),
+        }, sort_keys=True)
+
+    def _expand_authentication_comparisons(
+        self, plan: OperationPlan, phase: PlanPhase, tasks: list[Task], existing: list[Task],
+        catalog: dict[str, dict[str, list[str]]] | None = None,
+    ) -> list[Task]:
+        """Expand module-declared comparison templates before persistence or continuation execution."""
+
+        contract = self._phase_task_contract(phase)
+        if contract is None or not contract.authentication_matrix_workstreams:
+            return tasks
+        catalog = self._authentication_role_catalog(plan) if catalog is None else catalog
+        identities = {
+            self._authentication_comparison_identity(task) for task in current_workflow_tasks(existing)
+            if task.status in {"pending", "active", "done"}
+        }
+        expanded = []
+        for task in tasks:
+            kinds = contract.authentication_matrix_workstreams.get(self._task_planning_workstream(task))
+            if not kinds or task.recovery_context.get("validation_auth_context"):
+                expanded.append(task)
+                continue
+            for target in plan.targets:
+                if task.target_scope == "subset" and target.target_id not in task.target_ids:
+                    continue
+                roles = catalog.get(canonicalize_credential_target(str(target.value)), {})
+                for requirement in authentication_comparison_matrix(roles, kinds):
+                    label = {
+                        "none": "Unauthenticated versus role",
+                        "account": "Different accounts in role",
+                        "role": "Different roles",
+                    }[requirement.comparison] + ": " + ", ".join(requirement.roles)
+                    marker = task.recovery_context.get("authentication_matrix", {})
+                    title = str(marker.get("template_title") or task.title)
+                    description = (
+                        f"{label}. Compare access within the assigned frozen scope using "
+                        "the controller-selected identities and retain evidence for both sides."
+                    )
+                    context = {key: deepcopy(value) for key, value in task.recovery_context.items() if key not in {
+                        "authentication_setup", "authentication_worker_attempts", "worker_completions",
+                        "authentication_flow_gap", "controller_execution_evidence",
+                    }}
+                    context.update(
+                        authentication_requirement=requirement.model_dump(),
+                        authentication_matrix={"version": 1, "defined_roles": roles, "template_title": title},
+                    )
+                    acceptance = replace(task.acceptance, manifest_hash="", criteria=tuple(
+                        replace(criterion, description=description) for criterion in task.acceptance.criteria
+                    ))
+                    candidate = replace(
+                        task, task_uid=str(uuid.uuid4()), title=f"{title} [{label}]", objective=description,
+                        acceptance=acceptance, status="pending", status_reason=None, evidence=[], auth_context={},
+                        target_scope="subset", target_ids=[target.target_id], recovery_context=context,
+                    )
+                    identity = self._authentication_comparison_identity(candidate)
+                    if identity not in identities:
+                        identities.add(identity)
+                        expanded.append(candidate)
+        return expanded
+
+    def _reconcile_authentication_comparisons(self, plan: OperationPlan, phase: PlanPhase) -> None:
+        """Supersede inherited templates without rewriting completed work or frozen validation subjects."""
+
+        contract = self._phase_task_contract(phase)
+        if contract is None or not contract.authentication_matrix_workstreams:
+            return
+        candidates = [task for task in current_workflow_tasks(self.state.list_tasks(phase=phase.id))
+                      if self._task_planning_workstream(task) in contract.authentication_matrix_workstreams
+                      and not task.recovery_context.get("validation_auth_context")
+                      and (task.status in {"pending", "active"} or (
+                          task.status == "partial_failure" and task.recovery_context.get("authentication_setup", {})
+                          .get("reason") == "role_comparison_credentials_unavailable"
+                      ))]
+        if not candidates:
+            return
+        catalog = self._authentication_role_catalog(plan)
+        for task in candidates:
+            scope = [target for target in plan.targets
+                        if task.target_scope != "subset" or target.target_id in task.target_ids]
+            marker = task.recovery_context.get("authentication_matrix", {})
+            if len(scope) == 1 and marker.get("version") == 1 and set(marker.get("defined_roles", {})) == set(catalog.get(
+                canonicalize_credential_target(str(scope[0].value)), {},
+            )):
+                continue
+            replacements = self._expand_authentication_comparisons(
+                plan, phase, [task], [other for other in self.state.list_tasks() if other.task_uid != task.task_uid],
+                catalog,
+            )
+            for replacement in replacements:
+                self.state.store_task(replace(
+                    replacement, replacement_of=task.task_uid,
+                    supersedes_criteria=[criterion.id for criterion in task.acceptance.criteria],
+                ))
+            updated = self.state.mark_task(task, "superseded", "Replaced by applicable role-based comparisons.")
+            self._emit_task_done(updated)
+
     def _authentication_agent_tool_names(self, task: Task) -> list[str]:
         """Return the privileged, non-executor tools for one authentication setup run."""
 
@@ -10154,7 +10323,10 @@ Return JSON exactly: {response_schema}.
             "targets": list(setup.targets) if setup else [],
             "credential_ids": list(credential_ids),
             "credential_count": len(credential_ids),
-            "comparison": setup.comparison if setup else "none",
+            "comparison": setup.comparison if setup else task.recovery_context.get(
+                "authentication_requirement", {},
+            ).get("comparison", "none"),
+            "required_roles": task.recovery_context.get("authentication_requirement", {}).get("roles", []),
         })
         self._log_workflow(
             "authentication setup task=%s status=%s credentials=%s reason=%s",
@@ -14361,6 +14533,13 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
             finding_auth_bindings=finding_auth_bindings,
             phase_task_contract=self._phase_task_contract(phase),
             execution_owner_resolver=self._controller_web_baseline_execution_owner,
+            task_transformer=(
+                lambda tasks, existing: self._expand_authentication_comparisons(
+                    self.state.get_plan(), phase, tasks, existing,
+                )
+            ) if self._phase_task_contract(phase) is not None and self._phase_task_contract(
+                phase,
+            ).authentication_matrix_workstreams else None,
             proposal_preflight_validator=lambda proposals: self._validate_generated_task_proposals(phase, proposals),
             reject_duplicate_proposals=True,
             repair_guard=repair_guard,
@@ -14503,6 +14682,11 @@ evidence, or restate the plan. Return only the structured payload.{finding_conte
                 f"\n- `{workstream}` requires an explicit authentication_requirement.comparison "
                 "(account, role, or tenant)."
                 for workstream in sorted(contract.authentication_comparison_workstreams)
+                if workstream not in contract.authentication_matrix_workstreams
+            ) + "".join(
+                f"\n- Python expands `{workstream}` into {', '.join(kinds)} comparisons over defined roles; "
+                "submit one scope template. Python assigns roles and comparison requirements."
+                for workstream, kinds in sorted(contract.authentication_matrix_workstreams.items())
             ) + "\n"
         )
 

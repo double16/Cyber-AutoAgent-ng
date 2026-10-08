@@ -68,6 +68,9 @@ planning:
         - authenticated_credential_coverage
         - authorization_comparison
       authentication_comparison_workstreams: [authorization_comparison]
+      authentication_matrix_workstreams:
+        authenticated_credential_coverage: [none]
+        authorization_comparison: [account, role]
       controller_mapping_workstreams:
         - unauthenticated_baseline
         - authenticated_credential_coverage

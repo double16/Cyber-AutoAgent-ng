@@ -35,6 +35,62 @@ class AuthenticationSelectionError(ValueError):
     """The eligible pool cannot satisfy the declared identities."""
 
 
+def validate_comparison_requirement(requirement: AuthenticationRequirement) -> None:
+    """Reject contradictory explicit role restrictions without changing historical parsing."""
+
+    if requirement.comparison == "role" and requirement.roles and len(requirement.roles) != 2:
+        raise ValueError("role comparison requires exactly two distinct roles")
+    if requirement.comparison == "account" and len(requirement.roles) > 1:
+        raise ValueError("account comparison requires accounts sharing one role")
+
+
+def authentication_role_catalog(
+    records: Iterable[dict[str, Any]], flows: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, list[str]]]:
+    """Collect declared roles and metadata provenance independently of credential eligibility."""
+
+    catalog: dict[str, dict[str, set[str]]] = {}
+    for record in records:
+        target, role = str(record.get("target") or ""), str(record.get("role") or "").strip()
+        if target and role:
+            catalog.setdefault(target, {}).setdefault(role, set()).add(f"credential:{record['credential_id']}")
+    for flow in flows:
+        target = str(flow.get("target") or "")
+        for role in flow.get("roles") or ():
+            if target and str(role).strip():
+                catalog.setdefault(target, {}).setdefault(str(role).strip(), set()).add(
+                    f"registration_flow:{flow.get('flow_id') or flow.get('url') or flow.get('login_url') or target}",
+                )
+    return {target: {role: sorted(sources) for role, sources in sorted(roles.items())}
+            for target, roles in sorted(catalog.items())}
+
+
+def authentication_comparison_matrix(
+    roles: Iterable[str], comparisons: Iterable[str],
+) -> list[AuthenticationRequirement]:
+    """Expand defined roles into minimum single-role and unordered cross-role comparisons."""
+
+    roles = sorted(set(roles))
+    requirements = []
+    for comparison in dict.fromkeys(comparisons):
+        if comparison not in {"none", "account", "role"}:
+            raise ValueError(f"Unsupported automatic authentication comparison: {comparison}")
+        groups = combinations(roles, 2) if comparison == "role" else ((role,) for role in roles)
+        requirements.extend(AuthenticationRequirement(comparison=comparison, roles=list(group)) for group in groups)
+    return requirements
+
+
+def credential_comparison_matches(left: dict[str, Any], right: dict[str, Any], comparison: str) -> bool:
+    """Match distinct identities using shared account, role, and tenant metadata semantics."""
+
+    field = {"account": "account_label", "role": "role", "tenant": "tenant_label"}[comparison]
+    return bool(
+        left.get("credential_id") != right.get("credential_id")
+        and left.get(field) and right.get(field) and left[field] != right[field]
+        and (comparison != "account" or (left.get("role") and left["role"] == right.get("role")))
+    )
+
+
 def select_authentication_credentials(
     records: Iterable[dict[str, Any]],
     targets: Iterable[str],
@@ -81,10 +137,9 @@ def select_authentication_credentials(
                     )
                 selected.append(match)
             continue
-        field = {"account": "account_label", "role": "role", "tenant": "tenant_label"}[requirement.comparison]
         pair = next((
             (left, right) for left, right in combinations(pool, 2)
-            if left.get(field) and right.get(field) and left[field] != right[field]
+            if credential_comparison_matches(left, right, requirement.comparison)
             and set(requirement.roles).issubset({left.get("role", ""), right.get("role", "")})
         ), None)
         if pair is None:

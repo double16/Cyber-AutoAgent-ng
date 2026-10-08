@@ -611,7 +611,7 @@ def test_access_control_comparisons_only_offer_distinct_account_role_or_tenant_p
     result = json.loads(plan_access_control_comparisons("https://app.example.test"))
     coverage = json.loads(plan_authenticated_coverage("https://app.example.test"))
 
-    assert {item["kind"] for item in result["comparisons"]} == {"account", "role", "tenant"}
+    assert {item["kind"] for item in result["comparisons"]} == {"role", "tenant"}
     assert {member["credential_id"], admin["credential_id"]} == {
         result["comparisons"][0]["left_credential_id"], result["comparisons"][0]["right_credential_id"]
     }
@@ -621,7 +621,7 @@ def test_access_control_comparisons_only_offer_distinct_account_role_or_tenant_p
         member["credential_id"],
         admin["credential_id"],
     }
-    assert {item["kind"] for item in coverage["comparisons"]} == {"account", "role", "tenant"}
+    assert {item["kind"] for item in coverage["comparisons"]} == {"role", "tenant"}
     assert coverage["authenticated_coverage_gap"] is None
     assert coverage["comparison_coverage_gap"] is None
     assert "must-not-leak" not in json.dumps(coverage)

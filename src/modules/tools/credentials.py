@@ -29,6 +29,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from strands import ToolContext, tool
 
+from modules.authentication_requirements import credential_comparison_matches
 from modules.tools.memory import (
     _get_database_store,
     _operation_id,
@@ -582,16 +583,9 @@ def _credential_comparison_pairs(records: list[dict[str, Any]]) -> list[dict[str
         for right in records[index + 1 :]:
             left_id = str(left["credential_id"])
             right_id = str(right["credential_id"])
-            left_account = str(left.get("account_label") or "")
-            right_account = str(right.get("account_label") or "")
-            left_tenant = str(left.get("tenant_label") or "")
-            right_tenant = str(right.get("tenant_label") or "")
-            if left_account and right_account and left_account != right_account:
-                comparisons.append({"kind": "account", "left_credential_id": left_id, "right_credential_id": right_id})
-            if str(left.get("role") or "") != str(right.get("role") or ""):
-                comparisons.append({"kind": "role", "left_credential_id": left_id, "right_credential_id": right_id})
-            if left_tenant and right_tenant and left_tenant != right_tenant:
-                comparisons.append({"kind": "tenant", "left_credential_id": left_id, "right_credential_id": right_id})
+            for kind in ("account", "role", "tenant"):
+                if credential_comparison_matches(left, right, kind):
+                    comparisons.append({"kind": kind, "left_credential_id": left_id, "right_credential_id": right_id})
     unique_comparisons = {
         (item["kind"], item["left_credential_id"], item["right_credential_id"]): item for item in comparisons
     }
