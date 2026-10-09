@@ -2,6 +2,15 @@
 
 ### Features
 
+- Preserve exact returned artifact pages on disk for authentication and registration critic fallback,
+  and provide controller-recorded browser controls, actions, transitions, and transport facts for review.
+
+- Add authorized login control inspection with unique CSS selectors and exact select option values.
+
+- Replay approved browser login flows with controller-recorded typed actions and credential bindings,
+  validating fresh sessions without login inference or repeated mapping review when the flow is unchanged.
+- Give login workers compact credential-scoped context and artifact references for full browser observations.
+
 - Add versioned, protocol-neutral hypothesis deliverables with controller-bound publication, typed acceptance,
   subject-scoped reads, and deduplicated repair tasks for older continuations.
 - Share durable authentication discovery prerequisites across consumers and continuations for identical target
@@ -12,6 +21,12 @@
   target-scoped authenticated-task binding, and masked credential-use reporting.
 
 ### Fixes
+
+- Scale flow critic reads by authorized artifacts, group duplicate captures, and preserve familiar login
+  navigation in complete replay scripts. Keep evidence access limits separate from unsupported metadata.
+
+- Use the configured browser timeout for typed login actions and explain invalid selectors and unavailable
+  select options without waiting for action timeouts.
 
 - Restore browser-led authentication and registration discovery: accept supported page mappings with unknown
   transport details and defer submission behavior to authorized login and registration workers.

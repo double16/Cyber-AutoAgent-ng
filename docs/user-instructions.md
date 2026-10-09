@@ -226,8 +226,11 @@ export GEMINI_API_KEY=your_key
 See `docs/deployment.md` and `src/modules/config/README.md` for environment-variable details. Do not commit
 credentials to configuration files.
 
-Browser operations use a 240-second default timeout. Set `BROWSER_DEFAULT_TIMEOUT` to an integer number of
-milliseconds when a permitted target requires a different bound; the Docker Compose configuration forwards this value.
+Browser operations and typed login actions share the following timeout. Docker Compose forwards this setting.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BROWSER_DEFAULT_TIMEOUT` | `240000` | Browser timeout in milliseconds, including typed login actions. |
 
 ## Operation modules
 

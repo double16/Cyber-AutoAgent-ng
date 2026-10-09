@@ -28,6 +28,7 @@ def worker_case(tmp_path, monkeypatch):
     _activate_task(store, target)
     task = store.get_tasks("OP_AUTH")[0]
     runtime = _runtime()
+    runtime.config.model_id = None
     runtime.operation_id = "OP_AUTH"
     controller = workflow.MultiAgentWorkflowController(
         runtime=runtime,
@@ -1875,3 +1876,295 @@ def test_authentication_review_and_persistence_use_current_verification(worker_c
         "action": "verification", "url": target + "/users/current/photo", "field_names": [],
     }]
     assert row["descriptor"]["validation_url"] == target + "/users/current/photo"
+
+
+@pytest.fixture
+def replay_worker_case(worker_case, monkeypatch):
+    controller, task, store, target, observed = worker_case
+    flow = {
+        "target": target, "purpose": "authentication", "kind": "browser_form",
+        "flow_version": authentication.AUTHENTICATION_FLOW_VERSION, "provenance": "observed_worker_flow",
+        "login_url": target + "/login", "allowed_origins": [target], "request_header_names": ["X-Session"],
+        "evidence_refs": ["artifact:old-operation.html"], "worker_review": {"cycle": 1},
+        "replay_version": 1, "replay_actions": [
+            {"action": "navigate", "url": target + "/login"},
+            {"action": "fill", "locator": "#email", "credential_field": "email"},
+            {"action": "click", "locator": "#submit"},
+        ],
+    }
+    stored = store.upsert_authentication_flow("OP_AUTH", flow, status="validated")
+    flow["flow_id"] = stored["flow_id"]
+    monkeypatch.setattr(workflow, "reset_authentication_browser_session", AsyncMock())
+    monkeypatch.setattr(workflow, "authentication_context_is_valid", lambda *_args: False)
+    monkeypatch.setattr(workflow, "authentication_attempt_result", lambda *_args: None)
+    capture = AsyncMock(return_value=json.dumps({
+        "status": "valid", "validation_url": target + "/users/current/photo",
+        "credential_header_names": ["x-session"], "evidence_refs": ["artifact:observed.html"],
+    }))
+    monkeypatch.setattr(workflow, "capture_browser_authenticated_context", capture)
+    calls = []
+
+    def build(identifier, _origins, attempt, bound_capture, *, observations=None):
+        @tool(name="perform_login_action")
+        async def perform_login_action(action: str, **arguments):
+            calls.append((identifier, action))
+            attempt["replay_actions"].append({"action": action, **arguments})
+            if action == "click":
+                await bound_capture()
+            return "performed"
+        return perform_login_action
+
+    monkeypatch.setattr(workflow, "build_login_action_tool", build)
+    credential = {"credential_id": "first", "credential_type": "username_password", "target": target, "role": "member"}
+    setup = workflow.AuthenticationSetupRequest(task.task_uid, "authentication", (target,), (target,), (credential,))
+    return controller, task, store, target, flow, capture, calls, credential, setup, observed
+
+
+def test_approved_login_replay_uses_fresh_proof_for_each_account_without_agents(replay_worker_case):
+    controller, task, store, target, flow, capture, calls, credential, setup, _observed = replay_worker_case
+    controller.executor_session_factory = Mock(side_effect=AssertionError("Replay must not create an agent"))
+    events = []
+    controller._emit_workflow_event = events.append
+    before = store.list_authentication_flows(target)[0]
+    for identifier in ("first", "second"):
+        selected = {**credential, "credential_id": identifier}
+        result = controller._run_authentication_credential_worker(task, setup, selected, (), [])
+        assert result.terminal_reason == "unchanged_replay"
+    assert capture.await_count == 2
+    assert [identifier for identifier, action in calls if action == "click"] == ["first", "second"]
+    assert controller.text_runner.call_count == 0
+    after = store.list_authentication_flows(target)[0]
+    assert after["descriptor"] == before["descriptor"]
+    assert after["evidence_refs"] == before["evidence_refs"]
+    assert after["last_validated_at"] >= before["last_validated_at"]
+    assert all(event["review_skipped"] for event in events if event["type"] == "authentication_replay")
+    completions = controller.state.list_tasks()[0].recovery_context["worker_completions"]
+    assert len(completions) == 2
+    assert all(value["evidence_refs"] == ["artifact:observed.html"] for value in completions.values())
+    assert all(value["flow_id"] == flow["flow_id"] for value in completions.values())
+
+
+@pytest.mark.parametrize("cause", [
+    "changed_transport", "changed_binding", "missing_control", "invalid_script", "unvalidated", "capture_exception",
+])
+def test_login_replay_fallback_reviews_changes_without_repeating_success(replay_worker_case, monkeypatch, cause):
+    controller, task, store, target, flow, capture, calls, credential, setup, observed = replay_worker_case
+    if cause == "changed_transport":
+        capture.return_value = json.dumps({
+            "status": "valid", "validation_url": target + "/private",
+            "credential_header_names": ["Tauser"], "evidence_refs": ["artifact:observed.html"],
+        })
+    elif cause == "changed_binding":
+        setup = replace(setup, client_storage_header_bindings=({
+            "header_name": "X-Session", "storage_key": "session", "value_template": "{value}",
+        },))
+    elif cause == "capture_exception":
+        capture.side_effect = RuntimeError("capture transport failure")
+    elif cause == "invalid_script":
+        flow["replay_actions"] = [{"action": "click", "locator": "#submit"}]
+        store.upsert_authentication_flow("OP_AUTH", flow, status="validated")
+    elif cause == "unvalidated":
+        capture.side_effect = ValueError("not authenticated")
+    else:
+        def build(_identifier, _origins, attempt, _capture, *, observations=None):
+            @tool(name="perform_login_action")
+            async def action(action: str, **arguments):
+                if action == "fill":
+                    raise ValueError("missing control")
+                attempt["replay_actions"].append({"action": action, **arguments})
+                return "performed"
+            return action
+        monkeypatch.setattr(workflow, "build_login_action_tool", build)
+    runs = []
+
+    @contextmanager
+    def factory(_role, _tools, _system):
+        def run(prompt, _policy, _chosen=None):
+            runs.append(prompt)
+            assert "Continue from the current browser state" in prompt
+            assert "Never repeat a successful submission" in prompt
+            if cause == "missing_control":
+                assert '"next_login_action": {"action": "fill"' in prompt
+                assert len(calls) == 0
+            return workflow.TaskExecutorCycleResult("fallback", [observed])
+        yield run
+
+    controller.executor_session_factory = factory
+    refinement = Mock(return_value=[])
+    monkeypatch.setattr(controller, "_refine_worker_flow", refinement)
+    controller._run_authentication_credential_worker(task, setup, credential, (), [])
+    refinement.assert_called_once()
+    attempt = refinement.call_args.args[3]
+    if cause in {"changed_transport", "changed_binding"}:
+        assert not runs  # Only metadata review is needed after fresh authentication succeeded.
+        if cause == "changed_transport":
+            assert attempt["candidate"]["request_header_names"] == ["Tauser"]
+        else:
+            assert attempt["candidate"]["storage_header_bindings"]
+    else:
+        assert len(runs) == 1
+    assert store.list_authentication_flows(target)[0]["descriptor"]["request_header_names"] == ["X-Session"]
+
+
+def test_login_context_and_outcomes_omit_unrelated_and_large_observations(worker_case):
+    controller, task, _store, target, observed = worker_case
+    setup = workflow.AuthenticationSetupRequest(
+        task.task_uid, "authentication", (target,), (target,), ({"target": target},),
+        ({"kind": "browser_form", "login_url": target + "/login"},),
+        authentication_flow_hints=({"kind": "browser_form", "login_url": "https://unrelated.test/login"},),
+    )
+    assert "unrelated.test" not in setup.credential_worker_toon()
+    huge = replace(observed, input_summary="secret input", output_summary="large body " * 10000,
+                   raw_output_summary="large body " * 10000)
+    rendered = controller._login_outcome_section([huge])
+    assert "large body" not in rendered and "secret input" not in rendered
+    assert all(ref in rendered for ref in observed.artifact_refs)
+    failed = replace(huge, success=False, output_summary="failure " * 10000)
+    assert len(controller._login_outcome_section([failed])) < 1000
+
+
+@pytest.mark.parametrize("complete,valid", [(True, True), (False, True), (True, False)])
+@pytest.mark.parametrize("repair", [False, True])
+def test_controller_attaches_only_complete_login_scripts_before_review(worker_case, complete, valid, repair):
+    controller, task, store, target, observed = worker_case
+    attempt = controller._worker_flow_attempt(task, target, "authentication")
+    actions = [{"action": "navigate", "url": target + ("/login" if valid else "/other")}]
+    attempt.update(
+        replay_actions=actions, replay_complete=complete, successful=True, validation_url=target + "/private",
+    )
+    recorder = controller._worker_flow_recorder(task, target, "authentication", "browser_form", attempt)
+    recorder(login_url=target + "/login")
+    # Successful actions after initial recording must also be attached at review time.
+    actions.append({"action": "select", "locator": "#mode", "value": "rest"})
+    controller.text_runner.side_effect = (
+        [json.dumps({"approved": False, "feedback": ["Correct labels"]}), json.dumps(approval())]
+        if repair else [json.dumps(approval())]
+    )
+
+    def repair_metadata(_prompt, _tools):
+        recorder(login_url=target + "/login")
+        return workflow.TaskExecutorCycleResult("recorded", [])
+
+    controller._refine_worker_flow(task, target, "authentication", attempt, [observed], repair_metadata, [recorder])
+    descriptor = store.list_authentication_flows(target)[0]["descriptor"]
+    if complete and valid:
+        assert descriptor["replay_version"] == 1
+        assert descriptor["replay_actions"] == actions
+        assert "replay_actions" in controller.text_runner.call_args.args[1]
+    else:
+        assert "replay_actions" not in descriptor
+
+
+def test_replay_cannot_use_prior_context_as_fresh_execution_proof(replay_worker_case, monkeypatch):
+    controller, task, _store, _target, _flow, capture, calls, credential, setup, observed = replay_worker_case
+    monkeypatch.setattr(workflow, "authentication_context_is_valid", lambda *_args: True)
+    capture.side_effect = ValueError("new login did not validate")
+
+    @contextmanager
+    def factory(_role, _tools, _system):
+        yield lambda *_args: workflow.TaskExecutorCycleResult("incomplete", [observed])
+
+    controller.executor_session_factory = factory
+    refinement = Mock(return_value=[])
+    monkeypatch.setattr(controller, "_refine_worker_flow", refinement)
+    controller._run_authentication_credential_worker(task, setup, credential, (), [])
+    assert len(calls) == 3
+    assert refinement.call_args.args[3]["functional_completed"] is False
+    assert not refinement.call_args.args[3]["mapping_approved"]
+
+
+def test_replay_credential_rejection_stops_without_another_agent(replay_worker_case, monkeypatch):
+    controller, task, _store, _target, _flow, _capture, calls, credential, setup, _observed = replay_worker_case
+    monkeypatch.setattr(workflow, "authentication_attempt_result", lambda *_args: {"outcome": "credential_rejected"})
+    controller.executor_session_factory = Mock(side_effect=AssertionError("Rejected credentials must stop"))
+    result = controller._run_authentication_credential_worker(task, setup, credential, (), [])
+    assert result.terminal_reason == "credential_rejected"
+    assert not calls
+    state = controller.state.list_tasks()[0].recovery_context["authentication_worker_attempts"]
+    assert state["first"]["status"] == "exhausted"
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("approved", [True, False])
+def test_critic_limit_synthesis_preserves_exact_returned_evidence(worker_case, tmp_path, purpose, approved):
+    controller, _task, _store, _target, _observed = worker_case
+    (tmp_path / "observed.html").write_text("<head>" + "x" * 2000 + "</head>\n<form>📧 Password</form>")
+    calls = []
+
+    def review(role, prompt, tools, _system):
+        calls.append(prompt)
+        if tools:
+            reader = next(item for item in tools if workflow.get_tool_name(item) == "read_artifact")
+            result = reader(path="artifact:observed.html")
+            journal = ToolOutcomeJournal()
+            outcome = journal.append(
+                tool_use_id="read", tool_name="read_artifact", success=True, correctable=False,
+                tool_input={"path": "artifact:observed.html"}, output=result,
+            )
+            assert "📧" not in outcome.output_summary
+            raise workflow.EvaluatorArtifactReadLimitExceeded("read limit", [outcome])
+        assert "📧 Password" in prompt
+        assert "Exact evidence returned" in prompt
+        assert "Artifact access is closed" in prompt
+        return json.dumps(approval() if approved else {"approved": False, "feedback": ["Wrong field"]})
+
+    controller.text_runner.side_effect = review
+    result = controller._run_json_text_agent(
+        f"{purpose}_flow_critic", "Review observed fields", [], "Review evidence",
+        tool_factory=lambda: controller._flow_refinement_artifact_tools(["artifact:observed.html"]),
+    )
+    assert result["approved"] is approved
+    assert len(calls) == 2
+    assert list((tmp_path / "artifacts" / "review_evidence").glob("*/index.jsonl"))
+
+
+def test_flow_read_allowance_scales_and_duplicate_groups_remain_availability_only(worker_case, tmp_path):
+    controller, _task, _store, _target, _observed = worker_case
+    references = []
+    for index in range(5):
+        path = tmp_path / f"capture{index}.txt"
+        path.write_text("same" if index < 2 else f"different {index}")
+        references.append("artifact:" + path.name)
+    reader, _searcher = controller._flow_refinement_artifact_tools(references)
+    for reference in references:
+        assert reference in reader(path=reference)
+    assert controller._flow_artifact_groups([*references, "artifact:missing"]) == [
+        references[:2], *[[ref] for ref in references[2:]], ["artifact:missing"],
+    ]
+    assert controller._flow_observation_section({}) == ""
+    from modules.tools.browser_flow_observations import BrowserFlowObservations
+    attempt = {}
+    BrowserFlowObservations(tmp_path, attempt).record("https://target.test/signup", [], {"action": "navigate"})
+    assert "navigate" in controller._flow_observation_section(attempt)
+
+
+def test_familiar_login_navigation_learns_complete_script_and_resets_attempt_facts(replay_worker_case, monkeypatch):
+    controller, task, store, target, flow, _capture, calls, credential, setup, observed = replay_worker_case
+    flow.pop("replay_version")
+    flow.pop("replay_actions")
+    store.upsert_authentication_flow("OP_AUTH", flow, status="validated")
+    attempt = controller._worker_flow_attempt(task, target, "authentication", kinds=("browser_form",))
+    attempt["observation_refs"] = ["artifact:previous-account.json"]
+    @tool(name="browser_goto_url")
+    async def navigation(url: str) -> str:
+        """Navigate to a login page."""
+        raise AssertionError("The controller must use the typed navigation executor")
+    refined = Mock(return_value=[])
+    monkeypatch.setattr(controller, "_refine_worker_flow", refined)
+    @contextmanager
+    def factory(_role, tools, _system):
+        names = {workflow.get_tool_name(item): item for item in tools}
+        def run(_prompt, _policy, _selected=None):
+            asyncio.run(names["browser_goto_url"](url=target + "/login"))
+            asyncio.run(names["perform_login_action"](action="fill", locator="#email", credential_field="email"))
+            asyncio.run(names["perform_login_action"](action="click", locator="#submit"))
+            return workflow.TaskExecutorCycleResult("completed", [observed])
+        yield run
+    controller.executor_session_factory = factory
+    controller._run_authentication_credential_worker(task, setup, credential, (), [navigation])
+    attempt = refined.call_args.args[3]
+    assert attempt["replay_complete"]
+    assert [item["action"] for item in attempt["replay_actions"]] == ["navigate", "fill", "click"]
+    assert calls == [("first", "navigate"), ("first", "fill"), ("first", "click")]
+    assert attempt["observation_refs"] == []
+    assert attempt["functional_completed"]

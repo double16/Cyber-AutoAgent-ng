@@ -622,11 +622,14 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
     assert "flow-1" not in prompt
     assert "token" not in prompt
     assert "flow_version" not in prompt
-    assert "authentication_flow_hints" in prompt
-    assert "authentication_discovery_endpoints" in prompt
+    assert "authentication_flow_hints" not in prompt
+    assert "authentication_discovery_endpoints" not in prompt
+    assert "login_scope" in prompt
+    assert "perform_login_action" in tool_names
+    assert "inspect_login_controls" in tool_names
     assert "https://target.test/account" not in prompt
     assert "capture_browser_authenticated_context" in prompt
-    assert "validation_url" in prompt
+    assert "Python supplies validation metadata" in prompt
     assert "checkout_credential" in tool_names
     assert "generate_mfa_code" not in tool_names
     assert "set_task_auth_context" not in tool_names
@@ -6052,13 +6055,15 @@ def test_credential_provisioning_prompt_accepts_target_scoped_shell_selection():
 
 
 def test_credential_provisioning_prompt_builder_omits_generic_finding_and_swarm_guidance(monkeypatch):
+    from strands import tool
+
     from modules.tools.credentials import store_credential
 
     store = Mock(list_authentication_flows=lambda *_args, **_kwargs: [])
     monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
     runtime = _runtime()
     runtime.optional_tools_list = [
-        *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
+        *[tool(_tool(name), name=name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
         *[store_credential if name == "store_credential" else _tool(name)
           for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
     ]

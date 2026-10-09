@@ -1644,6 +1644,8 @@ class ApplicationStore(Protocol):
         status: str = "discovered",
     ) -> dict[str, Any]: ...
 
+    def mark_authentication_flow_validated(self, flow_id: str) -> None: ...
+
     def create_credential_rotation_request(
         self, request_operation_id: str, credential_id: str, reason: str, maintenance_operation_id: str
     ) -> dict[str, Any]: ...
@@ -1717,6 +1719,7 @@ class SQLiteApplicationStore:
         "list_credential_inventory",
         "list_authentication_flows",
         "upsert_authentication_flow",
+        "mark_authentication_flow_validated",
         "create_credential_rotation_request",
         "list_credential_rotation_requests",
         "cancel_credential_rotation_request",
@@ -2254,6 +2257,16 @@ class SQLiteApplicationStore:
                 ),
             )
         return {"flow_id": flow_id, "target": target, "purpose": purpose, "status": status}
+
+    def mark_authentication_flow_validated(self, flow_id: str) -> None:
+        """Refresh validation bookkeeping without replacing approved mapping or historical proof."""
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute(
+                "UPDATE authentication_flow_records SET last_validated_at = ? "
+                "WHERE logical_target = ? AND flow_id = ? AND purpose = 'authentication' AND status = 'validated'",
+                (datetime.now().isoformat(), self.logical_target, flow_id),
+            )
 
     def get_credential(self, credential_id: str, *, include_payload: bool = False) -> dict[str, Any] | None:
         """Return one credential only in this logical-target boundary."""

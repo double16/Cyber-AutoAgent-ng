@@ -808,3 +808,67 @@ Browser network HAR responses include `_body_capture_status` (`available`, `unav
 `timeout`), also shown in previews. Missing response bodies preserve request metadata, status,
 headers, redirects, and HAR indices. An empty available body has size zero; an unavailable body has
 unknown size. Metadata availability does not establish authentication or vulnerability conclusions.
+
+
+### Executable browser login replay
+
+Browser authentication workers can use the controller-bound `perform_login_action` tool to navigate,
+fill a credential-bound field, select an option, change a checkbox, or click a uniquely located
+control. Python resolves `username`, `email`, and `password` bindings for the selected credential;
+replay records contain bindings rather than credential values. Actions use observed CSS locators
+and canonical action names. Navigation, including redirects, is restricted to mapped origins.
+
+Python attaches complete successful action sequences as optional `replay_version: 1` and
+`replay_actions` authentication descriptor metadata before actor/critic review. Unsupported browser
+interactions prevent publication of a complete replay sequence. Flows without replay metadata use
+the login worker and can learn a sequence during successful execution. Registration and API/header
+credentials retain their existing execution paths.
+
+An approved replay runs once with direct browser operations. Only current-attempt authenticated
+context capture establishes success. If the reusable mapping and observed credential transport are
+unchanged, Python reuses approval, refreshes its validation timestamp, and stores fresh task-local
+proof without replacing historical flow evidence. Verification URLs and review bookkeeping are not
+reusable mapping differences. Changed transport requires review. Failed replay hands its completed
+actions and failed step to the worker in the current browser state; credential rejection stops the
+attempt. A successful submission must never be repeated merely to repair metadata.
+
+Login context includes the selected flow and mapped scope; unrelated hints are included only when
+no flow is available. Typed actions return compact control metadata and references to saved DOM and
+HAR artifacts. Login repair and critic prompts summarize outcomes and reference full observations
+for targeted artifact reads. `authentication_replay` events report replay status, completed action
+count, and whether mapping review was skipped. Existing session expiry checks still apply.
+
+Login workers can call `inspect_login_controls` to read visible controls, unique CSS selectors,
+readiness, and exact select option values and labels. Inspection shares the credential authorization
+and mapped-origin boundary of typed actions. Input values are omitted; credential material in
+control metadata is redacted. Full page observations remain in artifacts.
+
+Typed login actions use the existing `BROWSER_DEFAULT_TIMEOUT` setting (240,000 milliseconds by
+default). Invalid CSS and unavailable or disabled select values return actionable errors. Valid
+controls may wait for the configured timeout; timeout errors identify the observed control state.
+Authentication method choices come from observed options, independently of credential roles.
+Successful selections remain in the existing replay script, so approved flows can learn executable
+actions without recreation or a flow-version change.
+
+### Flow review evidence continuity
+
+Authentication and registration workers save controller-observed controls, options, required markers,
+actions, and page transitions in operation-local filesystem artifacts. Typed login actions also save
+observed request methods and content types. Input values are omitted; URL credentials, queries, and
+fragments are excluded from these summaries. Repair workers and critics receive compact facts with
+source references. Repeated control snapshots are grouped and oversized summaries remain available
+through artifact references. Facts establish observations, not automatic semantic approval.
+
+Flow critics have a total read allowance proportional to distinct authorized artifacts while each
+artifact keeps its existing page limit. Byte-identical files are grouped so a critic can read one
+representative. Successful bounded reads and searches are journaled on disk for that review invocation.
+If artifact access closes, synthesis receives complete returned pages within available context capacity,
+instead of relying on truncated outcome summaries. Duplicate returned content is grouped with all source
+references. Omitted evidence is identified as an access limitation; it does not establish missing or
+incorrect metadata. Unknown permitted fields remain valid, and supported approval still requires the
+critic's semantic judgment and controller-owned fresh execution proof. The default remains three cycles.
+
+The login worker's familiar `browser_goto_url` now uses the typed navigation executor. Its successful
+navigation is recorded with subsequent typed actions, allowing flows without scripts to learn a complete
+replay. Unsupported browser actions still prevent publication of a complete script. Existing flows can
+learn this metadata during successful execution without recreation or a version change.

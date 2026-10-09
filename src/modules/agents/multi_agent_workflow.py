@@ -90,6 +90,7 @@ from modules.config.taxonomy_catalog import (
 )
 from modules.config.types import BudgetConfig
 from modules.handlers.base import BudgetLimitReached
+from modules.handlers.conversation_budget import estimate_prompt_tokens
 from modules.handlers.max_token_recovery import capture_and_discard_max_token_output
 from modules.handlers.operation_health import (
     DEFAULT_INCOMPLETE_HEALTH_CAP,
@@ -116,6 +117,7 @@ from modules.tools.artifact import (
     resolve_operation_artifact_path,
     resolve_tool_result_max_chars,
 )
+from modules.tools.artifact_journal import ReturnedArtifactJournal
 from modules.tools.artifact_references import (
     extract_absolute_artifact_paths,
     extract_artifact_references,
@@ -140,6 +142,7 @@ from modules.tools.authentication import (
     record_browser_authentication_attempt,
 )
 from modules.tools.browser import reset_authentication_browser_session
+from modules.tools.browser_flow_observations import BrowserFlowObservations, observe_browser_tool
 from modules.tools.credentials import canonicalize_credential_target
 from modules.tools.hypotheses import (
     build_read_hypotheses_tool,
@@ -148,6 +151,12 @@ from modules.tools.hypotheses import (
     load_hypothesis_set,
 )
 from modules.tools.inventory_item import create_inventory_item_reader
+from modules.tools.login_replay import (
+    build_login_action_tool,
+    build_login_inspection_tool,
+    replay_actions,
+    reusable_login_metadata,
+)
 from modules.tools.memory import (
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
@@ -1310,6 +1319,13 @@ class AuthenticationSetupRequest:
         credential = self.credentials[0]
         flow = self.authentication_flows[0] if self.authentication_flows else {}
         replay_flow = _normalize_authentication_verification(flow)
+        scope = "login_scope{target,allowed_origins}:\n  " + ",".join((
+            sanitize_toon_value(str(credential.get("target") or "")),
+            sanitize_toon_value("|".join(self.allowed_origins)),
+        ))
+        discovery = ""
+        if not flow:
+            discovery = "\n" + self.to_toon()
         header_names = [
             str(binding.get("header_name") or "")
             for binding in _effective_storage_header_bindings(flow, self.client_storage_header_bindings)
@@ -1325,6 +1341,7 @@ class AuthenticationSetupRequest:
                 str(flow.get("login_url") or ""),
                 "|".join(header_names),
             ))
+            + "\n" + scope + discovery
             + "\nobserved_flow_steps: " + json.dumps(replay_flow.get("steps") or [], ensure_ascii=False)
         )
 
@@ -4754,6 +4771,11 @@ class MultiAgentWorkflowController:
                     task, registration_target, "registration", "browser_registration", attempt, roles,
                 ))
                 tools.extend(self._flow_refinement_artifact_tools())
+                observations = BrowserFlowObservations(_operation_output_root(), attempt)
+                tools = [observe_browser_tool(item, observations)
+                         if get_tool_name(item) in {
+                             "browser_goto_url", "browser_perform_action", "browser_observe_page", "browser_get_page_html",
+                         } else item for item in tools]
 
         if self._authentication_agent_tool_names(task):
             tools = self._executor_tools_without_authentication_material(tools, task)
@@ -10662,6 +10684,14 @@ Return JSON exactly: {response_schema}.
                 ))
             if attempt["existing"]:
                 candidate["flow_id"] = attempt["existing"]["flow_id"]
+            if purpose == "authentication" and attempt.get("replay_complete") and attempt.get("replay_actions"):
+                proposed = {**candidate, "replay_version": 1, "replay_actions": deepcopy(attempt["replay_actions"])}
+                try:
+                    replay_actions(proposed)
+                except ValueError:
+                    pass
+                else:
+                    candidate = proposed
             attempt["candidate"] = candidate
 
         attempt.setdefault("recorder_names", set()).add(name)
@@ -10831,6 +10861,18 @@ Return JSON exactly: {response_schema}.
             "evidence_refs": list(completion.evidence_refs),
         }
 
+    @staticmethod
+    def _login_outcome_section(outcomes: list[ToolOutcome]) -> str:
+        """Keep full observations in artifacts rather than repeated login/repair context."""
+
+        compact = [replace(
+            entry, input_summary="", raw_output_summary="",
+            output_summary=(
+                "Evidence: " + "|".join(entry.artifact_refs) if entry.success else entry.output_summary[:400]
+            ),
+        ) for entry in outcomes]
+        return MultiAgentWorkflowController._tool_outcome_section(compact)
+
     def _refine_worker_flow(
         self,
         task: Task,
@@ -10872,7 +10914,22 @@ Return JSON exactly: {response_schema}.
                 break
             successful_before_repair = attempt["successful"]
             candidate = attempt["candidate"]
+            if candidate and purpose == "authentication" and "replay_actions" in attempt:
+                candidate.pop("replay_version", None)
+                candidate.pop("replay_actions", None)
+                if attempt.get("replay_complete") and attempt["replay_actions"]:
+                    proposed = {**candidate, "replay_version": 1, "replay_actions": attempt["replay_actions"]}
+                    try:
+                        replay_actions(proposed)
+                    except ValueError:
+                        pass
+                    else:
+                        candidate.update(replay_version=1, replay_actions=deepcopy(attempt["replay_actions"]))
             if candidate and attempt["successful"] and purpose == "authentication":
+                if candidate.get("kind") in {"browser_form", "browser_redirect", "browser_mfa"}:
+                    names = attempt.get("validation_metadata", {}).get("credential_header_names")
+                    if names is not None:
+                        candidate["request_header_names"] = list(names)
                 candidate.update(_normalize_authentication_verification(
                     candidate, attempt.get("validation_url") or "",
                 ))
@@ -10895,8 +10952,10 @@ Return JSON exactly: {response_schema}.
                         + "Worker objective: " + str(attempt.get("worker_objective") or task.objective) + "\n"
                         + str(attempt.get("worker_context") or "") + "\n"
                         + json.dumps({"candidate": candidate, "corrections": feedback, "evidence_refs": references})
-                        + self._tool_outcome_section([*outcomes, *added])
+                        + (self._login_outcome_section([*outcomes, *added]) if purpose == "authentication"
+                           else self._tool_outcome_section([*outcomes, *added]))
                         + self._worker_completion_section(task)
+                        + self._flow_observation_section(attempt)
                     )
                     result = self._executor_cycle_result(self._run_flow_refinement_stage(
                         lambda: repair(prompt, repair_tools if attempt["successful"] else tools),
@@ -10926,8 +10985,10 @@ Return JSON exactly: {response_schema}.
                         + json.dumps({"evidence_refs": self._worker_flow_references(
                             task, target, purpose, attempt, [*outcomes, *added],
                         )})
-                        + self._tool_outcome_section([*outcomes, *added])
+                        + (self._login_outcome_section([*outcomes, *added]) if purpose == "authentication"
+                           else self._tool_outcome_section([*outcomes, *added]))
                         + self._worker_completion_section(task)
+                        + self._flow_observation_section(attempt)
                     )
                     recorded = self._executor_cycle_result(self._run_flow_refinement_stage(
                         lambda: repair(recording_prompt, repair_tools),
@@ -10937,6 +10998,10 @@ Return JSON exactly: {response_schema}.
                     attempt["last_worker_reason"] = recorded.reason
                 candidate = attempt["candidate"]
                 if candidate and attempt["successful"] and purpose == "authentication":
+                    if candidate.get("kind") in {"browser_form", "browser_redirect", "browser_mfa"}:
+                        names = attempt.get("validation_metadata", {}).get("credential_header_names")
+                        if names is not None:
+                            candidate["request_header_names"] = list(names)
                     candidate.update(_normalize_authentication_verification(
                         candidate, attempt.get("validation_url") or "",
                     ))
@@ -10956,6 +11021,7 @@ Return JSON exactly: {response_schema}.
                                 authorized_references=references,
                             )
                             + self._worker_completion_section(task)
+                            + self._flow_observation_section(attempt)
                             + f"\nController-confirmed functional success: {attempt['successful']}",
                             [],
                             "Review the completed flow against current-task execution evidence. Never perform actions.",
@@ -11044,7 +11110,7 @@ Return JSON exactly: {response_schema}.
         scope = {"allowed_artifact_refs": references} if references is not None else {}
         return [
             create_bounded_artifact_reader(
-                max_reads=pages,
+                max_reads=max(1, authorized_count * pages),
                 context_window_tokens=self._artifact_context_window_tokens(),
                 max_reads_per_artifact=pages,
                 max_lines_per_read=200,
@@ -11137,6 +11203,23 @@ Return JSON exactly: {response_schema}.
                 f"Artifact synthesis failed: {type(error).__name__}"
             ) from error
 
+    def _flow_observation_section(self, attempt: dict[str, Any]) -> str:
+        if not attempt.get("observation_refs"):
+            return ""
+        return BrowserFlowObservations(_operation_output_root(), attempt).context()
+
+    @staticmethod
+    def _flow_artifact_groups(references: list[str]) -> list[list[str]]:
+        groups: dict[str, list[str]] = {}
+        for reference in references:
+            try:
+                with open(resolve_operation_artifact_path(reference), "rb") as source:
+                    digest = hashlib.file_digest(source, "sha256").hexdigest()
+            except (OSError, TypeError, ValueError):
+                digest = "unavailable:" + reference
+            groups.setdefault(digest, []).append(reference)
+        return list(groups.values())
+
     def _flow_refinement_critic_prompt(
         self,
         purpose: str,
@@ -11160,7 +11243,9 @@ Return JSON exactly: {response_schema}.
         observed = {key: value for key, value in candidate.items() if key in reviewable_fields}
         controller_metadata = (
             "Controller-bound storage metadata: " + json.dumps({
-                key: candidate[key] for key in ("storage_header_bindings", "authorization_storage_key")
+                key: candidate[key] for key in (
+                    "storage_header_bindings", "authorization_storage_key", "replay_version", "replay_actions",
+                )
                 if key in candidate and key not in reviewable_fields
             }) if purpose == "authentication" else ""
         )
@@ -11186,6 +11271,8 @@ Return JSON with approved (boolean), feedback (list), and supporting_evidence_re
 Select supporting references from the authorized observations below; approval requires at least one.
 Extra observations and duplicate captures alone are not reasons to reject a supported mapping.
 Rejection feedback must identify incorrect observed fields or missing observations the actor can correct.
+Unknown permitted fields are not missing required observations. Evidence access failures are controller limitations;
+do not request actor metadata changes to repair them. Controller-recorded controls and actions remain reviewable facts.
 Check target scope. {mapping_requirements}
 Inventory hints do not prove a usable flow. HTTP status and tool success alone cannot prove support.
 Use the controller-validated reusable URL when available; an empty URL is allowed when only the
@@ -11209,9 +11296,11 @@ Candidate from successful worker execution:
 {json.dumps(observed, sort_keys=True)}
 Authorized observations (availability does not establish support):
 {json.dumps(authorized_references or self._artifact_refs_from_tool_outcomes(outcomes))}
+Byte-identical observation groups (read one representative when sufficient):
+{json.dumps(self._flow_artifact_groups(authorized_references or self._artifact_refs_from_tool_outcomes(outcomes)))}
 Prior corrections:
 {json.dumps(feedback)}
-{self._tool_outcome_section(outcomes)}
+{self._login_outcome_section(outcomes) if purpose == "authentication" else self._tool_outcome_section(outcomes)}
 """
 
     def _validate_flow_refinement_critique(self, data: dict[str, Any], references: list[str]) -> None:
@@ -11306,7 +11395,9 @@ Prior corrections:
         attempt["candidate"] = None
         attempt.update(
             functional_completed=False, validation_metadata={}, validation_url="", capture_failure_reason="",
-            evidence_refs=[], credential_id=credential["credential_id"],
+            evidence_refs=[], observation_refs=[], credential_id=credential["credential_id"],
+            replay_actions=[], replay_complete=True, replay_attempted=False,
+            review_count=0, review_stop_reason="not_reviewed",
         )
         if attempt["existing"]:
             flows = (attempt["existing"],)
@@ -11377,21 +11468,42 @@ Prior corrections:
                     )
                 except ValueError as error:
                     attempt["capture_failure_reason"] = str(error)
+                    login_url = str(flow.get("login_url") or "")
+                    if login_url:
+                        record_browser_authentication_attempt(
+                            self.runtime.operation_id, target, credential["credential_id"], login_url,
+                        )
                     raise
                 record_completion(result)
                 return result
 
             async def capture_after_interaction() -> None:
+                attempt["replay_complete"] = False
                 if attempt.get("functional_completed") or attempt["stop_check"]():
                     return
                 await capture_context()
 
+            observations = BrowserFlowObservations(_operation_output_root(), attempt)
+            login_action = build_login_action_tool(
+                credential["credential_id"], credential_setup.allowed_origins, attempt, capture_context,
+                observations=observations,
+            )
+
+            @strands_tool(name="browser_goto_url")
+            async def login_navigation(url: str) -> str:
+                """Navigate within the assigned login origins and record the successful replay step."""
+                return await login_action(action="navigate", url=url)
+
             worker_tools = [
-                self._authentication_browser_capture_tool(item, capture_after_interaction)
-                if get_tool_name(item) in {"browser_goto_url", "browser_perform_action"} else item
+                login_navigation if get_tool_name(item) == "browser_goto_url" else
+                observe_browser_tool(self._authentication_browser_capture_tool(item, capture_after_interaction),
+                                     observations)
+                if get_tool_name(item) == "browser_perform_action" else item
                 for item in worker_tools
             ]
-            worker_tools.append(capture_context)
+            worker_tools.extend([capture_context, login_action, build_login_inspection_tool(
+                credential["credential_id"], credential_setup.allowed_origins, observations=observations,
+            )])
         else:
 
             @strands_tool(name="establish_credential_authenticated_context")
@@ -11435,8 +11547,10 @@ Prior corrections:
 transport details in the mapping do not block browser login. Determine submission and session behavior during
 this authorized interaction. Python attempts capture after browser navigation and actions; use
 `capture_browser_authenticated_context` for an observed validation URL or authenticated-only marker correction.
-Record observed controls and ordered steps;
-flow metadata may leave validation_url empty because Python supplies it after successful context validation.
+Prefer `perform_login_action` with observed unique CSS locators and credential-field bindings.
+Use `inspect_login_controls` for CSS selectors and exact option values; choose methods from observed options.
+It records successful actions automatically. Use existing browser tools for unsupported interactions.
+Record observed controls and ordered steps; Python supplies validation metadata after successful validation.
 If the same URL returns HTTP 200 anonymously, supply a non-secret response marker that appears only when signed in.
 """
         else:
@@ -11444,11 +11558,16 @@ If the same URL returns HTTP 200 anonymously, supply a non-secret response marke
                 "Call `establish_credential_authenticated_context` with no arguments; the controller supplies "
                 "the selected validation URL when known; supply an observed URL otherwise."
             )
+        credential_access = (
+            "Use credential-field bindings for typed actions; check out the credential only if an unsupported "
+            "interaction needs its values."
+            if browser_flow else
+            "Check out the controller-selected credential using `checkout_credential` with no arguments."
+        )
         prompt = f"""You are the controller-owned authentication worker. Establish an opaque context for this one
-credential and target. Check out the controller-selected credential using `checkout_credential` with no arguments.
+credential and target. {credential_access}
 
 {credential_setup.credential_worker_toon()}
-{credential_setup.to_toon()}
 
 {flow_instructions}
 Use the existing flow as previously observed guidance, or discover the entry point from assigned hints. Follow observed
@@ -11484,6 +11603,8 @@ expose session material or secret values in text, artifacts, observations, or ta
         def succeeded(_outcomes: list[ToolOutcome]) -> bool:
             if attempt.get("functional_completed"):
                 return True
+            if attempt.get("replay_attempted"):
+                return False  # Replay requires this attempt's capture, never an older opaque context.
             valid = authentication_context_is_valid(self.runtime.operation_id, target, credential["credential_id"])
             if valid:
                 attempt["validation_url"] = authentication_context_validation_url(
@@ -11511,8 +11632,101 @@ expose session material or secret values in text, artifacts, observations, or ta
                 return "credential_rejected"
             return "authentication_credential_worker_done" if succeeded([]) else None
 
+        replay_status = "not_available"
+        if browser_flow and attempt["existing"]:
+            try:
+                actions = replay_actions(flows[0])
+            except ValueError:
+                actions = []
+                replay_status = "invalid_metadata"
+            if actions:
+                attempt["replay_attempted"] = True
+                async def execute_replay() -> None:
+                    for action in actions:
+                        if terminal_check():
+                            break
+                        attempt["replay_next_action"] = action.model_dump(exclude_defaults=True)
+                        completed_before = len(attempt["replay_actions"])
+                        try:
+                            await login_action(**action.model_dump())
+                        except Exception:
+                            if len(attempt["replay_actions"]) > completed_before:
+                                attempt.pop("replay_next_action", None)
+                            raise
+                        attempt.pop("replay_next_action", None)
+                try:
+                    asyncio.run(execute_replay())
+                    replay_status = "validated" if succeeded([]) else "validation_incomplete"
+                except BudgetLimitReached:
+                    raise
+                except Exception as error:
+                    replay_status = type(error).__name__
+                candidate = deepcopy(flows[0])
+                if succeeded([]):
+                    candidate["request_header_names"] = attempt["validation_metadata"].get(
+                        "credential_header_names", candidate.get("request_header_names", []),
+                    )
+                    if reusable_login_metadata(candidate) == reusable_login_metadata(attempt["existing"]):
+                        attempt.update(
+                            successful=True, mapping_approved=True, reviewed=True,
+                            review_count=0, review_stop_reason="unchanged_replay",
+                        )
+                        _get_database_store().mark_authentication_flow_validated(attempt["existing"]["flow_id"])
+                        self._persist_worker_completion(task, WorkerCompletion(
+                            operation_id=self.runtime.operation_id, task_uid=task.task_uid,
+                            purpose="authentication", target=target,
+                            role=str(credential.get("role") or ""), credential_id=credential["credential_id"],
+                            evidence_refs=tuple(attempt["validation_metadata"].get("evidence_refs", [])),
+                            flow_id=attempt["existing"]["flow_id"], mapping_approved=True,
+                        ))
+                        self._emit_workflow_event({
+                            "type": "authentication_replay", "task_uid": task.task_uid,
+                            "credential_id": credential["credential_id"], "status": "validated",
+                            "completed_actions": len(attempt["replay_actions"]), "review_skipped": True,
+                        })
+                        attempts[credential["credential_id"]] = {
+                            "target": target, "status": "established", "reason": "unchanged_replay",
+                        }
+                        self.state.patch_task(task.task_uid, recovery_context_updates={
+                            "authentication_worker_attempts": attempts,
+                        })
+                        self._emit_workflow_event({
+                            "type": "authentication_worker_completion", "task_uid": task.task_uid,
+                            "credential_id": credential["credential_id"], "target": target,
+                            "context_validated": True, "functional_completed": True,
+                            "mapping_approved": True, "reviews": 0, "review_stop_reason": "unchanged_replay",
+                            "outcome": "established",
+                        })
+                        return AuthenticationWorkerResult(
+                            True, "unchanged_replay", frozenset({"perform_login_action"}),
+                        )
+                    attempt["candidate"] = candidate
+                    replay_status = "mapping_changed"
+        if browser_flow and attempt["stop_check"]():
+            attempts[credential["credential_id"]] = {
+                "target": target, "status": "exhausted", "reason": "credential_rejected",
+            }
+            self.state.patch_task(task.task_uid, recovery_context_updates={"authentication_worker_attempts": attempts})
+            self._emit_workflow_event({
+                "type": "authentication_replay", "task_uid": task.task_uid,
+                "credential_id": credential["credential_id"], "status": "credential_rejected",
+                "completed_actions": len(attempt["replay_actions"]), "review_skipped": False,
+            })
+            return AuthenticationWorkerResult(True, "credential_rejected", frozenset({"perform_login_action"}))
+        if browser_flow:
+            self._emit_workflow_event({
+                "type": "authentication_replay", "task_uid": task.task_uid,
+                "credential_id": credential["credential_id"], "status": replay_status,
+                "completed_actions": len(attempt["replay_actions"]), "review_skipped": False,
+            })
+            prompt += "\n" + json.dumps({
+                "replay_status": replay_status,
+                "next_login_action": attempt.get("replay_next_action"),
+                "completed_login_actions": attempt["replay_actions"],
+                "functional_completed": attempt["functional_completed"],
+            }) + "\nContinue from the current browser state. Never repeat a successful submission."
         attempt["worker_objective"] = "Establish authentication only for the selected credential and target."
-        attempt["worker_context"] = credential_setup.credential_worker_toon() + "\n" + credential_setup.to_toon()
+        attempt["worker_context"] = credential_setup.credential_worker_toon()
         policy = AgentRunPolicy(
             min_tool_calls=1,
             required_tool_names=terminal_tools,
@@ -11535,7 +11749,9 @@ expose session material or secret values in text, artifacts, observations, or ta
             worker_tools,
             "Perform only the assigned credential's authentication and flow recording.",
         ) as actor:
-            run_result = actor(prompt, policy)
+            run_result = (
+                TaskExecutorCycleResult("replay_completed", []) if succeeded([]) else actor(prompt, policy)
+            )
             outcomes = self._executor_cycle_result(run_result).outcomes
             self._worker_flow_references(task, target, "authentication", attempt, outcomes)
 
@@ -15317,6 +15533,10 @@ Allowed evidence references:
         pending_token_escalation: tuple[str, int] | None = None
         artifact_synthesis_active = False
         artifact_synthesis_transient_retries = 0
+        returned_journal = (
+            ReturnedArtifactJournal(Path(_operation_output_root()) / "artifacts" / "review_evidence")
+            if role in {"authentication_flow_critic", "registration_flow_critic"} else None
+        )
         structured_runner = getattr(self, "structured_runner", None)
         fallback_key = self._structured_output_fallback_key()
         legacy_fallback_active = structured_runner is None or fallback_key in self._structured_output_fallback_registry()
@@ -15340,6 +15560,10 @@ Allowed evidence references:
                 attempt_tools = [] if artifact_synthesis_active else (
                     tool_factory() if tool_factory is not None else tools
                 )
+                if returned_journal is not None:
+                    for item in attempt_tools:
+                        if hasattr(item, "returned_artifact_journal"):
+                            item.returned_artifact_journal = returned_journal
                 if role in {"task_prompt_builder", "task_prompt_critic"}:
                     current_prompt = self._fit_task_prompt_input(role, current_prompt, system_prompt, attempt_tools)
                 data: dict[str, Any] | None = None
@@ -15390,10 +15614,18 @@ Allowed evidence references:
                     self._emit_refinement_artifact_synthesis(
                         role, cycle, evaluator_fallback_context or {}, getattr(error, "limit_events", ()),
                     )
+                    base_prompt = prompt + self._tool_outcome_section(error.outcomes)
+                    model_id = str(self.runtime.config.model_id or "")
+                    def estimate(text: str) -> int:
+                        return estimate_prompt_tokens(model_id, extra_content=text)
+                    context_window = self._artifact_context_window_tokens()
+                    journal_budget = max(0, min(context_window // 2,
+                                                context_window - estimate(base_prompt + system_prompt) - 1024))
                     current_prompt = (
-                        prompt + self._tool_outcome_section(error.outcomes)
-                        + "\nArtifact access is closed. Return the required JSON review from already-returned "
-                        "evidence. Do not request further tools. Identify unsupported fields as gaps."
+                        base_prompt + returned_journal.context(journal_budget, estimate)
+                        + "\nArtifact access is closed. Return the required JSON review using the exact returned "
+                        "evidence and controller observations above. Do not request further tools. "
+                        "Evidence access limitations do not establish incorrect metadata."
                     )
                     continue
                 if role != "task_evaluator":

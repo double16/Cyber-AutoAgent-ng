@@ -65,6 +65,13 @@ def latest_browser_interaction_receipts() -> list[dict[str, Any]]:
     return [dict(receipt) for receipt in _LAST_INTERACTION_RECEIPTS]
 
 
+def set_browser_interaction_receipts(receipts: list[dict[str, Any]]) -> None:
+    """Share secret-free current-action response metadata across browser action implementations."""
+
+    global _LAST_INTERACTION_RECEIPTS
+    _LAST_INTERACTION_RECEIPTS = [dict(receipt) for receipt in receipts]
+
+
 async def _interaction_response_receipts(requests: list[Request]) -> list[dict[str, Any]]:
     """Collect same-action response metadata without retaining headers or bodies."""
 
@@ -1551,6 +1558,7 @@ async def get_browser():
 async def reset_authentication_browser_session() -> None:
     """Clear authentication state without destroying the shared browser service."""
 
+    set_browser_interaction_receipts([])
     async with get_browser() as browser:
         async def _reset() -> None:
             page_url = str(browser.page.url or "")
@@ -2264,8 +2272,7 @@ async def browser_perform_action(
                 return observations, summary, page_change, str(browser.page.url), receipts
 
         observations, summary, page_change, final_url, receipts = await browser.run_in_browser_loop(_impl)
-        global _LAST_INTERACTION_RECEIPTS
-        _LAST_INTERACTION_RECEIPTS = receipts
+        set_browser_interaction_receipts(receipts)
         logger.info("browser_perform_action: %s action done", action_category)
         page_change_result = ""
         if page_change is not None:

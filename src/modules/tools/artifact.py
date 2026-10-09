@@ -10,6 +10,7 @@ from typing import Any
 
 from strands import tool
 
+from modules.tools.artifact_journal import ReturnedArtifactJournal
 from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.tools.memory import _artifact_path_from_ref, _operation_output_root
 from modules.tools.tool_result_policy import bounded_inline_result
@@ -691,6 +692,7 @@ def create_bounded_artifact_searcher(
     allowed_artifact_refs: Iterable[str] | None = None,
     max_searches_per_artifact: int | None = None,
     max_output_chars: int | None = None,
+    returned_journal: ReturnedArtifactJournal | None = None,
 ) -> Any:
     """Create a scoped full-artifact search tool with optional path and call limits."""
 
@@ -778,8 +780,14 @@ def create_bounded_artifact_searcher(
             raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: {error}") from error
         calls += 1
         searches_by_path[resolved] = searches_by_path.get(resolved, 0) + 1
+        if search_artifact.returned_artifact_journal is not None:
+            search_artifact.returned_artifact_journal.record("search_artifact", {
+                "path": path, "search_pattern": search_pattern, "search_regex": search_regex,
+                "context_lines": context_lines, "max_matches": max_matches, "match_offset": match_offset,
+            }, result)
         return result
 
+    search_artifact.returned_artifact_journal = returned_journal
     search_artifact.artifact_limit_state = limit_state
     return bounded_inline_result(search_artifact)
 
@@ -794,6 +802,7 @@ def create_bounded_artifact_reader(
     max_lines_per_read: int | None = None,
     max_output_chars: int | None = None,
     context_reduction_state: dict[str, int] | None = None,
+    returned_journal: ReturnedArtifactJournal | None = None,
 ) -> Any:
     """Create an agent-local artifact reader with optional path and page limits."""
 
@@ -1073,8 +1082,14 @@ def create_bounded_artifact_reader(
             "range": page_range,
             "result": result,
         })
+        if bounded_read_artifact.returned_artifact_journal is not None:
+            bounded_read_artifact.returned_artifact_journal.record("read_artifact", {
+                "path": path, "start_line": start_line, "max_lines": max_lines,
+                "start_byte": start_byte, "max_bytes": max_bytes,
+            }, result)
         return result
 
+    bounded_read_artifact.returned_artifact_journal = returned_journal
     bounded_read_artifact.__name__ = "read_artifact"
     bounded_read_artifact._cyber_context_reduction_state = reduction_state
     bounded_read_artifact.artifact_limit_state = limit_state
