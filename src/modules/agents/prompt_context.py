@@ -18,6 +18,7 @@ def fit_task_prompt(
     context_window: int,
     output_tokens: int,
     log: Callable[[dict], None],
+    optional_headings: tuple[str, ...] = ("Task history", "Eligible Semantic Memories"),
 ) -> str:
     """Reduce optional sections in a fixed order; keep required content byte-for-byte."""
 
@@ -39,7 +40,7 @@ def fit_task_prompt(
     }
     reductions = []
     # History and eligible memories are advisory; selected memories are retained separately.
-    for heading in ("Task history", "Eligible Semantic Memories"):
+    for heading in optional_headings:
         if estimate("".join(sections)) <= target:
             break
         for index, section in enumerate(sections):

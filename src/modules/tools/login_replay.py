@@ -207,6 +207,7 @@ def build_login_inspection_tool(
     credential_id: str,
     allowed_origins: tuple[str, ...],
     observations: BrowserFlowObservations | None = None,
+    credential_resolver: Callable[[], tuple[Any, dict[str, Any], str]] | None = None,
 ) -> Any:
     """Bind read-only inspection to the same authorization and origin boundary as login."""
     origins = {_origin(url) for url in allowed_origins}
@@ -214,7 +215,9 @@ def build_login_inspection_tool(
     @tool(name="inspect_login_controls")
     async def inspect_login_controls() -> str:
         """Inspect current login controls, unique CSS selectors, and exact select option values."""
-        _task, record, _identifier = _active_record(credential_id)
+        _task, record, _identifier = (
+            credential_resolver() if credential_resolver is not None else _active_record(credential_id)
+        )
         async with get_browser() as browser:
 
             async def inspect() -> str:
@@ -303,6 +306,7 @@ def build_login_action_tool(
     attempt: dict[str, Any],
     capture: Callable[[], Any],
     observations: BrowserFlowObservations | None = None,
+    credential_resolver: Callable[[], tuple[Any, dict[str, Any], str]] | None = None,
 ) -> Any:
     """Bind direct browser operations to one selected credential and its mapped origins."""
 
@@ -333,7 +337,9 @@ def build_login_action_tool(
                 "checked": checked,
             }
         )
-        _task, record, _identifier = _active_record(credential_id)
+        _task, record, _identifier = (
+            credential_resolver() if credential_resolver is not None else _active_record(credential_id)
+        )
         payload = record["payload"]
         for key in ("username", "email", "password"):
             material = payload.get(key)

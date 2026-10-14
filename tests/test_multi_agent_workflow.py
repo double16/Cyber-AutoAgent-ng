@@ -579,7 +579,7 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
         state_store=FakeState(plan),
         text_runner=runner,
     )
-    credential_store = SimpleNamespace(list_credentials=Mock(return_value=[
+    credential_store = SimpleNamespace(authorize_credential_for_task=Mock(), list_credentials=Mock(return_value=[
         {"credential_id": "credential-1", "credential_type": "username_password", "role": "member"}
     ]))
     monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: credential_store)
@@ -668,7 +668,7 @@ def test_authentication_browser_reset_failure_prevents_credential_worker(monkeyp
     monkeypatch.setattr(
         workflow_mod,
         "_get_database_store",
-        lambda: SimpleNamespace(list_credentials=Mock(return_value=[
+        lambda: SimpleNamespace(authorize_credential_for_task=Mock(), list_credentials=Mock(return_value=[
             {"credential_id": "credential-1", "credential_type": "username_password", "role": "member"},
         ])),
     )
@@ -952,7 +952,7 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
     monkeypatch.setattr(
         workflow_mod,
         "_get_database_store",
-        lambda: SimpleNamespace(list_credentials=Mock(return_value=[
+        lambda: SimpleNamespace(authorize_credential_for_task=Mock(), list_credentials=Mock(return_value=[
             {"credential_id": "credential-1", "credential_type": "username_password", "role": "member"},
             {"credential_id": "credential-2", "credential_type": "username_password", "role": "member"},
         ])),
@@ -4602,11 +4602,13 @@ def test_task_evaluator_completed_alias_does_not_abort_workflow():
     assert decision.status == "done"
 
 
-def test_task_evaluator_cannot_reopen_controller_accepted_execution_gate():
+@pytest.mark.parametrize("semantic_gap", [False, True])
+@pytest.mark.parametrize("subject", ["https://target.test", "tcp://target.test:22", "/src/application"])
+def test_task_evaluator_cannot_reopen_controller_accepted_execution_gate(semantic_gap, subject):
     plan = _plan()
     criterion = AcceptanceCriterion(
         id="criterion-1",
-        description="Crawl the assigned target",
+        description=f"Exercise the assigned operation on {subject}",
         evidence_requirements=[EvidenceRequirement(kind="artifact")],
         execution_requirements=[ExecutionRequirement(
             "criterion-1-execution-1",
@@ -4655,11 +4657,12 @@ def test_task_evaluator_cannot_reopen_controller_accepted_execution_gate():
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=state,
-        text_runner=lambda *args: (
-            '{"status":"partial_failure","reason":"The prior acceptance call lacked execution evidence.",'
-            '"instructions":"Gather crawl evidence.",'
-            '"repair":{"kind":"execution","evidence_gaps":["crawl receipt"]}}'
-        ),
+        text_runner=lambda *args: json.dumps({
+            "status": "partial_failure", "reason": "Review needs evidence",
+            "repair": {"kind": "execution",
+                       "execution_receipt_gaps": ["criterion-1-execution-1"],
+                       "evidence_gaps": ["The intended operation was not exercised"] if semantic_gap else []},
+        }),
     )
 
     decision = controller._evaluate_task(
@@ -4669,13 +4672,13 @@ def test_task_evaluator_cannot_reopen_controller_accepted_execution_gate():
         acceptance_results=state.list_task_acceptance_results(task.task_uid),
     )
 
-    assert decision.status == "done"
-    assert "Controller acceptance is authoritative" in decision.reason
+    assert decision.status == ("partial_failure" if semantic_gap else "done")
+    assert ("Controller acceptance is authoritative" in decision.reason) is not semantic_gap
     assert any(
         event["type"] == "evaluator_execution_gate_reconciled"
         and event["outcome"] == "suppressed_stale_execution_feedback"
         for event in controller.runtime.callback_handler.events
-    )
+    ) is not semantic_gap
 
 
 def test_task_evaluator_execution_feedback_remains_when_controller_receipt_is_missing():
@@ -10836,7 +10839,7 @@ def test_task_evaluator_uses_memory_as_evidence_without_inventing_a_requirement(
             {
                 "id": "obs-1",
                 "memory": "[OBSERVATION] /login returned 200 and /admin returned 403",
-                "metadata": {"category": "observation"},
+                "metadata": {"category": "observation", "source_task_uid": "active", "operation_id": "OP_TEST"},
             }
         ]
     )
@@ -16956,8 +16959,13 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
         (
             controller._task_evaluator_prompt(plan, phase, task),
             [
-                ("## Evaluation target: active task", task_json),
-                ("## Context only: active phase", phase_json),
+                ("## Evaluation target: active task", json.dumps({
+                    key: value for key, value in task.to_dict().items()
+                    if key not in {"recovery_context", "auth_context"}
+                } | {"authentication_requirement": {}, "credential_ids": []}, sort_keys=True)),
+                ("## Context only: active phase", json.dumps({
+                    "id": phase.id, "title": phase.title, "status": phase.status,
+                })),
             ],
         ),
         (
@@ -22471,3 +22479,47 @@ def test_authentication_setup_matches_assigned_target_with_trailing_slash(monkey
     setup = MultiAgentWorkflowController._authentication_setup_request(controller, plan, task)
     assert setup.targets == ("https://target.test",)
     assert setup.credentials[0]["credential_id"] == "first"
+
+
+def test_evaluator_unknown_receipt_ids_are_rejected():
+    data = {"status": "partial_failure", "repair": {
+        "kind": "execution", "execution_receipt_gaps": ["unknown"], "evidence_gaps": [],
+    }}
+    with pytest.raises(ValueError, match="frozen execution requirements"):
+        MultiAgentWorkflowController._validate_task_evaluator_decision_payload(
+            data, allowed=("partial_failure",), execution_requirement_ids=("required",),
+        )
+
+
+@pytest.mark.parametrize("oversized_required", [False, True])
+def test_evaluator_bounds_input_and_preserves_mandatory_acceptance(oversized_required):
+    from modules.agents.prompt_context import PromptInputTooLarge
+
+    plan = _plan()
+    task = Task(task_uid="bounded-evaluator", title="Evaluate operation",
+                objective="mandatory" * 40000 if oversized_required else "Required objective",
+                phase=1, status="active", recovery_context={"large_bookkeeping": "x" * 300000})
+    runtime = _runtime()
+    runtime.prompt_token_limit = 40000
+    seen = []
+    def run(_role, prompt, _tools, _system):
+        seen.append(prompt)
+        return '{"status":"done","reason":"Supported"}'
+    controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(plan, [task]), text_runner=run)
+    before = controller.state.list_task_acceptance_results(task.task_uid)
+    decision = controller._evaluate_task(plan, plan.phases[0], task, worker_context="advisory" * 40000)
+    if oversized_required:
+        assert decision.status == "blocked" and "evaluator_input_capacity" in decision.reason
+        assert seen == []
+    else:
+        assert decision.status == "done"
+        assert "large_bookkeeping" not in seen[0]
+        assert "Required objective" in seen[0] and "Frozen acceptance results" in seen[0]
+        assert "Omitted to fit input capacity" in seen[0]
+    assert controller.state.list_task_acceptance_results(task.task_uid) == before
+    events = [event for event in runtime.callback_handler.events if event["type"] == "task_prompt_input_budget"]
+    assert events and events[0]["input_limit"] < 40000
+    if not oversized_required:
+        assert events[0]["estimated_tokens_after"] <= events[0]["input_limit"]
+    assert issubclass(PromptInputTooLarge, ValueError)

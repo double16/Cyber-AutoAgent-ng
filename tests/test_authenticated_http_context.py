@@ -1018,8 +1018,9 @@ def test_validation_url_diagnostic_preserves_ipv6_without_sensitive_parts():
 
 
 @pytest.mark.parametrize(("browser_expiry_seconds", "expected_seconds"), [(None, 900), (3600, 3600)])
+@pytest.mark.parametrize("worker_access", [False, True])
 def test_browser_capture_preserves_cookie_expiry_from_browser_or_har(
-    browser_expiry_seconds, expected_seconds, monkeypatch
+    browser_expiry_seconds, expected_seconds, monkeypatch, worker_access
 ):
     target = "https://target.test"
     validation_url = f"{target}/protected"
@@ -1081,9 +1082,15 @@ def test_browser_capture_preserves_cookie_expiry_from_browser_or_har(
     monkeypatch.setattr(authentication, "_store_context", store_context)
     monkeypatch.setattr("modules.tools.browser.get_browser", lambda: Browser())
 
-    assert asyncio.run(
-        authentication.capture_browser_authenticated_context("credential", [], validation_url)
-    ) == "captured"
+    if worker_access:
+        monkeypatch.setattr(authentication, "_active_record", Mock(side_effect=AssertionError("No checkout")))
+        result = authentication._capture_browser_authenticated_context(
+            "credential", [], validation_url,
+            credential_resolver=lambda: (SimpleNamespace(task_uid="task"), {"target": target}, "credential"),
+        )
+    else:
+        result = authentication.capture_browser_authenticated_context("credential", [], validation_url)
+    assert asyncio.run(result) == "captured"
     assert captured["expires"] == now + expected_seconds
 
 
@@ -2138,3 +2145,55 @@ def test_browser_capture_proves_data_request_after_public_spa(
         assert proof["credential_header_names"] == names
         assert proof["cookie_names"] == (["session"] if use_cookies else [])
         assert "opaque-session" not in json.dumps(proof)
+
+
+@pytest.mark.parametrize("case", [
+    "authorized", "worker", "operation", "foreign_credential_operation", "inactive", "unauthorized", "other_task",
+    "missing", "invalid", "target", "mailbox",
+])
+def test_worker_resolver_requires_bound_authorization_without_checkout(tmp_path, monkeypatch, case):
+    target = "https://worker.test"
+    store = SQLiteApplicationStore(str(tmp_path / "worker-resolver.db"), target)
+    _activate_task(store, target)
+    credential = store.store_credential("OP_AUTH", {
+        "credential_type": "email_login" if case == "mailbox" else "username_password",
+        "target": "https://other.test" if case == "target" else target,
+        "role": "member", "payload": {"username": "worker", "password": "worker-resolver-secret"},
+        "origin": "provided", "management_policy": "user", "status": "unknown",
+        "operation_id": "OTHER" if case == "foreign_credential_operation" else None,
+    })
+    identifier = credential["credential_id"]
+    if case != "unauthorized":
+        store.authorize_credential_for_task(
+            "OP_AUTH", identifier, "auth-task",
+            "authentication_worker" if case == "worker" else "reused_authenticated_context",
+        )
+    if case == "other_task":
+        store.store_task("OP_AUTH", Task(
+            "other-task", "Other auth", "Authenticate", make_acceptance("other-task"), 1, "active",
+        ))
+    if case == "missing":
+        monkeypatch.setattr(store, "get_credential", lambda *_args, **_kwargs: None)
+    if case == "invalid":
+        store.record_credential_status("OP_AUTH", identifier, "invalid", "user", "invalid", [])
+    if case == "inactive":
+        store.patch_task("OP_AUTH", "auth-task", status="done")
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_AUTH")
+    assert store.credential_ids_selected_by_task("OP_AUTH", "auth-task") == set()
+    if case in {"authorized", "worker"}:
+        task, record, resolved = authentication.resolve_worker_credential("OP_AUTH", "auth-task", target, identifier)
+        assert task.task_uid == "auth-task" and resolved == identifier
+        assert record["payload"]["password"] == "worker-resolver-secret"
+        assert "worker-resolver-secret" not in redact_text("worker-resolver-secret")
+        assert store.credential_ids_selected_by_task("OP_AUTH", "auth-task") == set()
+        if case == "worker":
+            with pytest.raises(ValueError, match="AUTH_CONTEXT_UNAVAILABLE"):
+                credentials._active_credential_for_access(store, "OP_AUTH", identifier, "context")
+            with pytest.raises(ValueError, match="checked out"):
+                credentials._active_credential_for_access(store, "OP_AUTH", identifier, "checkout")
+    else:
+        with pytest.raises(ValueError):
+            authentication.resolve_worker_credential("OTHER" if case == "operation" else "OP_AUTH",
+                                                     "other-task" if case == "other_task" else "auth-task",
+                                                     target, identifier)

@@ -812,6 +812,15 @@ unknown size. Metadata availability does not establish authentication or vulnera
 
 ### Executable browser login replay
 
+Before authentication starts, the controller records `authentication_worker` authorization for the
+selected credentials in the current operation and task. The bound worker can resolve credential
+fields for replay, inspection, and capture without an LLM checkout. Worker authorization does not
+count as checkout and does not grant executor context access. After session validation succeeds,
+the controller promotes the authorization to `reused_authenticated_context`, which also covers
+newly established validated sessions. Executor requests still require a valid authenticated context.
+Authorization write failures stop authentication setup before browser execution. SQLite migration
+0013 preserves existing context authorizations while adding the worker authorization kind.
+
 Browser authentication workers can use the controller-bound `perform_login_action` tool to navigate,
 fill a credential-bound field, select an option, change a checkbox, or click a uniquely located
 control. Python resolves `username`, `email`, and `password` bindings for the selected credential;
@@ -872,3 +881,27 @@ The login worker's familiar `browser_goto_url` now uses the typed navigation exe
 navigation is recorded with subsequent typed actions, allowing flows without scripts to learn a complete
 replay. Unsupported browser actions still prevent publication of a complete script. Existing flows can
 learn this metadata during successful execution without recreation or a version change.
+
+### Authorized session refresh and evaluator input bounds
+
+The controller binds credential resolution to the operation, active task, exact target, and selected
+credential. An explicit task authorization permits internal login actions, control inspection, and
+session capture without an executor checkout. Each access rechecks authorization and credential status;
+sensitive values remain internal and executor checkout restrictions still apply. Replay events include
+sanitized failure reasons and the failed action. Every replay still requires fresh authenticated proof.
+
+Task evaluation receives frozen acceptance criteria, results, controller receipts, artifact references,
+and relevant findings. Recovery state and unrelated phase tasks are excluded. Advisory history and
+memories are task-scoped. Before each initial, repair, or synthesis model call, input fitting accounts
+for system instructions, tool and output schemas, and output allowance. Optional history, memories,
+and worker narration are removed as complete sections before mandatory evidence is considered.
+Mandatory context overflow blocks evaluation with `evaluator_input_capacity`; it does not alter
+acceptance records or establish a semantic failure. Input-budget events expose estimates and omissions.
+
+Evaluator `repair.execution_receipt_gaps` names frozen execution requirement IDs and is separate from
+semantic `repair.evidence_gaps`. Unknown IDs are invalid. Python reconciles stale receipt objections
+only when those receipts are satisfied and no semantic gaps remain. Tool execution establishes
+availability, not that a comparison exercised its intended operation. Web comparison policy requires
+the inventory-defined method and required inputs; matching generic errors are inconclusive unless
+there is supporting evidence of legitimate denial or resource concealment. The evaluator retains
+semantic judgment, and permitted corrective execution remains within the frozen task scope.

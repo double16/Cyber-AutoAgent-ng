@@ -671,3 +671,19 @@ def test_typed_login_records_controller_facts_and_transport(action_case, tmp_pat
         assert data["requests"][0]["request_content_type"] == "application/x-www-form-urlencoded"
         assert data["requests"][0]["url"] == "https://target.test/login"
         assert attempt["replay_actions"][0]["action"] == "navigate"
+
+
+@pytest.mark.parametrize("inspection", [False, True])
+def test_controller_resolver_bypasses_executor_checkout_for_bound_tools(action_case, monkeypatch, inspection):
+    _tool, attempt, capture, _page, _control, payload = action_case
+    monkeypatch.setattr(mod, "_active_record", Mock(side_effect=AssertionError("Must use controller resolver")))
+    resolver = Mock(return_value=(None, {"payload": payload}, "selected"))
+    if inspection:
+        bound = mod.build_login_inspection_tool("selected", ("https://target.test",), credential_resolver=resolver)
+        asyncio.run(bound())
+    else:
+        bound = mod.build_login_action_tool("selected", ("https://target.test",), attempt, capture,
+                                            credential_resolver=resolver)
+        asyncio.run(bound(action="navigate", url="https://target.test/login"))
+    resolver.assert_called_once_with()
+    assert "credential_resolver" not in get_tool_spec(bound)["inputSchema"]["json"]["properties"]

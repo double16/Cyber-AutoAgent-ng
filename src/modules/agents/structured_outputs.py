@@ -110,6 +110,7 @@ class TaskPhaseClassificationOutput(StrictStructuredOutput):
 class EvaluatorRepairOutput(StrictStructuredOutput):
     kind: Literal["none", "acceptance", "execution"] = "none"
     evidence_gaps: list[str] = Field(default_factory=list)
+    execution_receipt_gaps: list[str] = Field(default_factory=list)
 
 
 class FindingRecommendationOutput(StrictStructuredOutput):

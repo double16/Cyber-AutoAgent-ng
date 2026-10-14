@@ -1620,6 +1620,8 @@ class ApplicationStore(Protocol):
 
     def credential_ids_authorized_by_task(self, operation_id: str, task_uid: str) -> set[str]: ...
 
+    def credential_ids_authorized_for_worker(self, operation_id: str, task_uid: str) -> set[str]: ...
+
     def authorize_credential_for_task(
         self, operation_id: str, credential_id: str, task_uid: str, authorization_kind: str
     ) -> None: ...
@@ -2842,9 +2844,21 @@ class SQLiteApplicationStore:
 
     def credential_ids_authorized_by_task(self, operation_id: str, task_uid: str) -> set[str]:
         """Return checked-out or controller-authorized context credentials for one task."""
+        return self._task_authorized_credential_ids(operation_id, task_uid, ("reused_authenticated_context",))
 
+    def credential_ids_authorized_for_worker(self, operation_id: str, task_uid: str) -> set[str]:
+        """Return credentials available to a bound authentication worker, including checkout."""
+        return self._task_authorized_credential_ids(
+            operation_id, task_uid, ("authentication_worker", "reused_authenticated_context"),
+        )
+
+    def _task_authorized_credential_ids(
+        self, operation_id: str, task_uid: str, authorization_kinds: tuple[str, ...],
+    ) -> set[str]:
+        """Resolve task permissions without treating worker access as executor context access."""
         if not str(task_uid).strip():
             return set()
+        placeholders = ", ".join("?" for _ in authorization_kinds)
         with self._lock, closing(self._connect()) as conn, conn:
             selected_rows = conn.execute(
                 """
@@ -2854,20 +2868,21 @@ class SQLiteApplicationStore:
                 (self.logical_target, operation_id, task_uid),
             ).fetchall()
             authorized_rows = conn.execute(
-                """
+                f"""
                 SELECT credential_id FROM credential_task_authorizations
                 WHERE logical_target = ? AND operation_id = ? AND task_uid = ?
+                    AND authorization_kind IN ({placeholders})
                 """,
-                (self.logical_target, operation_id, task_uid),
+                (self.logical_target, operation_id, task_uid, *authorization_kinds),
             ).fetchall()
         return {str(row[0]) for row in (*selected_rows, *authorized_rows)}
 
     def authorize_credential_for_task(
         self, operation_id: str, credential_id: str, task_uid: str, authorization_kind: str
     ) -> None:
-        """Record controller authorization to use an already validated task credential context."""
+        """Record worker access or validated context access for a controller-selected credential."""
 
-        if authorization_kind != "reused_authenticated_context":
+        if authorization_kind not in {"authentication_worker", "reused_authenticated_context"}:
             raise ValueError("unsupported task credential authorization kind")
         if not str(task_uid).strip():
             raise ValueError("task_uid is required for task credential authorization")
@@ -2878,7 +2893,12 @@ class SQLiteApplicationStore:
                 INSERT INTO credential_task_authorizations (
                     logical_target, operation_id, task_uid, credential_id, authorization_kind, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(logical_target, operation_id, task_uid, credential_id) DO NOTHING
+                ON CONFLICT(logical_target, operation_id, task_uid, credential_id) DO UPDATE SET
+                    authorization_kind = CASE
+                        WHEN excluded.authorization_kind = 'reused_authenticated_context'
+                        THEN excluded.authorization_kind
+                        ELSE credential_task_authorizations.authorization_kind
+                    END
                 """,
                 (
                     self.logical_target,

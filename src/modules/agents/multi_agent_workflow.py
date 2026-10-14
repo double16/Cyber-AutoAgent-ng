@@ -137,9 +137,12 @@ from modules.tools.authentication import (
     authentication_context_is_valid,
     authentication_context_validation_url,
     build_record_authentication_flow_tool,
-    capture_browser_authenticated_context,
     establish_credential_authenticated_context,
     record_browser_authentication_attempt,
+    resolve_worker_credential,
+)
+from modules.tools.authentication import (
+    _capture_browser_authenticated_context as capture_browser_authenticated_context,
 )
 from modules.tools.browser import reset_authentication_browser_session
 from modules.tools.browser_flow_observations import BrowserFlowObservations, observe_browser_tool
@@ -430,6 +433,7 @@ class WorkflowDecision:
     finding_advisory_confidence: float = 0.0
     repair_kind: str = "none"
     unresolved_evidence_gaps: tuple[str, ...] = ()
+    execution_receipt_gaps: tuple[str, ...] = ()
 
 
 @dataclass
@@ -11393,10 +11397,12 @@ Prior corrections:
         attempt["last_worker_reason"] = ""
         attempt["successful"] = False
         attempt["candidate"] = None
+        attempt.pop("replay_next_action", None)
         attempt.update(
             functional_completed=False, validation_metadata={}, validation_url="", capture_failure_reason="",
             evidence_refs=[], observation_refs=[], credential_id=credential["credential_id"],
             replay_actions=[], replay_complete=True, replay_attempted=False,
+            replay_failure_reason="",
             review_count=0, review_stop_reason="not_reviewed",
         )
         if attempt["existing"]:
@@ -11465,6 +11471,7 @@ Prior corrections:
                         request_header_names=list(flow.get("request_header_names") or []),
                         validation_url=validation_url,
                         validation_marker=validation_marker,
+                        credential_resolver=credential_resolver,
                     )
                 except ValueError as error:
                     attempt["capture_failure_reason"] = str(error)
@@ -11484,9 +11491,14 @@ Prior corrections:
                 await capture_context()
 
             observations = BrowserFlowObservations(_operation_output_root(), attempt)
+            def credential_resolver() -> tuple[Any, dict[str, Any], str]:
+                return resolve_worker_credential(
+                    self.runtime.operation_id, task.task_uid, target, credential["credential_id"],
+                )
             login_action = build_login_action_tool(
                 credential["credential_id"], credential_setup.allowed_origins, attempt, capture_context,
                 observations=observations,
+                credential_resolver=credential_resolver,
             )
 
             @strands_tool(name="browser_goto_url")
@@ -11503,6 +11515,7 @@ Prior corrections:
             ]
             worker_tools.extend([capture_context, login_action, build_login_inspection_tool(
                 credential["credential_id"], credential_setup.allowed_origins, observations=observations,
+                credential_resolver=credential_resolver,
             )])
         else:
 
@@ -11661,6 +11674,8 @@ expose session material or secret values in text, artifacts, observations, or ta
                     raise
                 except Exception as error:
                     replay_status = type(error).__name__
+                    from modules.utils.redaction import redact
+                    attempt["replay_failure_reason"] = self._short(str(redact(str(error))), 300)
                 candidate = deepcopy(flows[0])
                 if succeeded([]):
                     candidate["request_header_names"] = attempt["validation_metadata"].get(
@@ -11718,6 +11733,8 @@ expose session material or secret values in text, artifacts, observations, or ta
                 "type": "authentication_replay", "task_uid": task.task_uid,
                 "credential_id": credential["credential_id"], "status": replay_status,
                 "completed_actions": len(attempt["replay_actions"]), "review_skipped": False,
+                "failure_reason": attempt.get("replay_failure_reason", ""),
+                "failed_action": attempt.get("replay_next_action"),
             })
             prompt += "\n" + json.dumps({
                 "replay_status": replay_status,
@@ -11966,6 +11983,24 @@ expose session material or secret values in text, artifacts, observations, or ta
             plan, task, excluded_credential_ids=excluded, replacement_round=1,
         )
 
+    def _authorize_task_credentials(
+        self, task: Task, credential_ids: tuple[str, ...], authorization_kind: str,
+    ) -> bool:
+        """Persist selected worker access and promote only validated sessions to context access."""
+        try:
+            store = _get_database_store()
+            for credential_id in credential_ids:
+                store.authorize_credential_for_task(
+                    self.runtime.operation_id, credential_id, task.task_uid, authorization_kind,
+                )
+        except Exception as error:
+            self._log_workflow(
+                "authentication credential authorization failed task=%s kind=%s reason=%s",
+                self._task_label(task), authorization_kind, self._short(error),
+            )
+            return False
+        return True
+
     def _run_authentication_agent(
         self, plan: OperationPlan, task: Task, *,
         excluded_credential_ids: tuple[str, ...] = (), replacement_round: int = 0,
@@ -12008,27 +12043,13 @@ expose session material or secret values in text, artifacts, observations, or ta
                 self.runtime.operation_id, credential["target"], credential["credential_id"]
             )
         )
-        if valid_ids:
-            try:
-                store = _get_database_store()
-                for credential_id in valid_ids:
-                    store.authorize_credential_for_task(
-                        self.runtime.operation_id,
-                        credential_id,
-                        task.task_uid,
-                        "reused_authenticated_context",
-                    )
-            except Exception as error:
-                self._log_workflow(
-                    "reused authentication context authorization failed task=%s reason=%s",
-                    self._task_label(task),
-                    self._short(error),
-                )
-                return self._record_authentication_setup(
-                    task,
-                    AuthenticationSetupResult("failed", reason="task_authorization_failed"),
-                    setup,
-                )
+        worker_ids = tuple(identifier for identifier in credential_ids if identifier not in valid_ids)
+        if not self._authorize_task_credentials(task, worker_ids, "authentication_worker") or (
+            valid_ids and not self._authorize_task_credentials(task, valid_ids, "reused_authenticated_context")
+        ):
+            return self._record_authentication_setup(
+                task, AuthenticationSetupResult("failed", reason="task_authorization_failed"), setup,
+            )
         if len(valid_ids) == len(credential_ids):
             return self._record_authentication_setup(task, AuthenticationSetupResult("reused", valid_ids), setup)
         tools = [
@@ -12203,6 +12224,10 @@ expose session material or secret values in text, artifacts, observations, or ta
                 self.runtime.operation_id, credential["target"], credential["credential_id"]
             )
         )
+        if valid_ids and not self._authorize_task_credentials(task, valid_ids, "reused_authenticated_context"):
+            return self._record_authentication_setup(
+                task, AuthenticationSetupResult("failed", reason="task_authorization_failed"), setup,
+            )
         result = (
             AuthenticationSetupResult("established", valid_ids)
             if len(valid_ids) == len(credential_ids)
@@ -12572,33 +12597,38 @@ applicability or a finding, and published proof of concepts must not be executed
                 len(decision.unresolved_evidence_gaps),
             )
             return decision
-        data = self._run_json_text_agent(
-            "task_evaluator",
-            self._task_evaluator_prompt(
-                plan,
-                phase,
-                task,
-                worker_context,
-                tool_outcomes,
-                resolved_acceptance_results,
-            ),
-            [],
-            self._task_evaluator_system_prompt(),
-            tool_factory=lambda: self._task_evaluator_tools(task, resolved_acceptance_results),
-            data_validator=lambda payload: self._validate_task_evaluator_decision_payload(
-                payload, allowed=("done", "partial_failure", "blocked")
-            ),
-            cycle=cycle,
-            cycle_total=cycle_total,
-            evaluator_fallback_context={
-                "task_uid": task.task_uid,
-                "task_title": task.title,
-            },
-        )
+        try:
+            data = self._run_json_text_agent(
+                "task_evaluator",
+                self._task_evaluator_prompt(
+                    plan,
+                    phase,
+                    task,
+                    worker_context,
+                    tool_outcomes,
+                    resolved_acceptance_results,
+                ),
+                [],
+                self._task_evaluator_system_prompt(),
+                tool_factory=lambda: self._task_evaluator_tools(task, resolved_acceptance_results),
+                data_validator=lambda payload: self._validate_task_evaluator_decision_payload(
+                    payload, allowed=("done", "partial_failure", "blocked"),
+                    execution_requirement_ids=execution_requirement_ids,
+                ),
+                cycle=cycle,
+                cycle_total=cycle_total,
+                evaluator_fallback_context={
+                    "task_uid": task.task_uid,
+                    "task_title": task.title,
+                },
+            )
+        except PromptInputTooLarge as error:
+            return WorkflowDecision(status="blocked", reason=f"evaluator_input_capacity: {error}")
         decision = self._decision_from_data(data, allowed=("done", "partial_failure", "blocked"))
         repair = self._evaluator_repair_from_data(data)
         decision.repair_kind = repair["kind"]
         decision.unresolved_evidence_gaps = tuple(repair["evidence_gaps"])
+        decision.execution_receipt_gaps = tuple(repair["execution_receipt_gaps"])
         if self._evaluator_reopens_resolved_execution_gate(task, resolved_acceptance_results, decision):
             self._emit_evaluator_execution_gate_reconciliation(task, decision)
             decision = WorkflowDecision(
@@ -12785,6 +12815,9 @@ applicability or a finding, and published proof of concepts must not be executed
             and all_material_criteria_resolved
             and decision.status == "partial_failure"
             and decision.repair_kind == "execution"
+            and bool(decision.execution_receipt_gaps)
+            and set(decision.execution_receipt_gaps) <= set(_required_ids)
+            and not decision.unresolved_evidence_gaps
         )
 
     def _emit_evaluator_execution_gate_reconciliation(
@@ -13359,7 +13392,7 @@ applicability or a finding, and published proof of concepts must not be executed
 
         repair = data.get("repair")
         if repair is None:
-            return {"kind": "none", "evidence_gaps": []}
+            return {"kind": "none", "evidence_gaps": [], "execution_receipt_gaps": []}
         if not isinstance(repair, dict):
             raise WorkflowInvariantError("task evaluator repair must be an object")
         kind = str(repair.get("kind") or "").strip().lower()
@@ -13371,9 +13404,15 @@ applicability or a finding, and published proof of concepts must not be executed
         normalized_gaps = list(dict.fromkeys(gap.strip() for gap in gaps))
         if len(normalized_gaps) > 3:
             raise WorkflowInvariantError("task evaluator repair.evidence_gaps may contain at most three items")
-        if kind == "execution" and not normalized_gaps:
+        receipt_gaps = repair.get("execution_receipt_gaps", [])
+        if not isinstance(receipt_gaps, list) or any(not isinstance(gap, str) or not gap.strip() for gap in receipt_gaps):
+            raise WorkflowInvariantError("task evaluator repair.execution_receipt_gaps must contain non-empty strings")
+        receipt_gaps = list(dict.fromkeys(gap.strip() for gap in receipt_gaps))
+        if receipt_gaps and kind != "execution":
+            raise WorkflowInvariantError("execution_receipt_gaps requires execution repair")
+        if kind == "execution" and not normalized_gaps and not receipt_gaps:
             raise WorkflowInvariantError("task evaluator execution repair requires evidence_gaps")
-        return {"kind": kind, "evidence_gaps": normalized_gaps}
+        return {"kind": kind, "evidence_gaps": normalized_gaps, "execution_receipt_gaps": receipt_gaps}
 
     def _close_phase_at_hard_cap(
         self,
@@ -15564,7 +15603,7 @@ Allowed evidence references:
                     for item in attempt_tools:
                         if hasattr(item, "returned_artifact_journal"):
                             item.returned_artifact_journal = returned_journal
-                if role in {"task_prompt_builder", "task_prompt_critic"}:
+                if role in {"task_prompt_builder", "task_prompt_critic", "task_evaluator"}:
                     current_prompt = self._fit_task_prompt_input(role, current_prompt, system_prompt, attempt_tools)
                 data: dict[str, Any] | None = None
                 if not legacy_fallback_active and structured_runner is not None:
@@ -15605,6 +15644,8 @@ Allowed evidence references:
                     role, "failed", attempt=activity_attempt, attempt_total=activity_total,
                     cycle=cycle, cycle_total=cycle_total,
                 )
+                if role == "task_evaluator":
+                    raise
                 raise TaskPromptBuildError(str(error), repairable=True, failure_source="prompt_input_capacity") from error
             except EvaluatorArtifactReadLimitExceeded as error:
                 if role in {"authentication_flow_critic", "registration_flow_critic"}:
@@ -16132,6 +16173,7 @@ criterion. Return the JSON decision immediately.
         data: dict[str, Any],
         *,
         allowed: tuple[str, ...],
+        execution_requirement_ids: Iterable[str] | None = None,
     ) -> None:
         """Validate task-evaluator metadata inside the bounded JSON schema repair path."""
 
@@ -16143,6 +16185,10 @@ criterion. Return the JSON decision immediately.
             raise ValueError(str(error)) from error
         if repair["kind"] == "execution" and str(data.get("status") or "").strip() != "partial_failure":
             raise ValueError("task evaluator execution repair requires partial_failure status")
+        if execution_requirement_ids is not None and not (
+            set(repair["execution_receipt_gaps"]) <= set(execution_requirement_ids)
+        ):
+            raise ValueError("execution_receipt_gaps must identify frozen execution requirements")
 
     @staticmethod
     def _json_max_token_retry_prompt(original_prompt: str, classification: str) -> str:
@@ -16750,6 +16796,8 @@ while planning.
                                     {"output_schema": WORKFLOW_OUTPUT_MODELS[role].model_json_schema()}], model_id,
             self._artifact_context_window_tokens(), settings.max_tokens,
             lambda details: self._emit_workflow_event({"type": "task_prompt_input_budget", "role": role, **details}),
+            optional_headings=("Task history", "Eligible Semantic Memories", "Task worker final context")
+            if role == "task_evaluator" else ("Task history", "Eligible Semantic Memories"),
         )
 
     @staticmethod
@@ -17571,7 +17619,13 @@ the task explicitly tests that difference.
             self._tool_outcome_section(tool_outcomes or [])
         )
         task_payload = hide_raw_bundle_references(
-            json.dumps(task.to_dict(), indent=2, sort_keys=True)
+            json.dumps({
+                key: value for key, value in task.to_dict().items()
+                if key not in {"recovery_context", "auth_context"}
+            } | {
+                "authentication_requirement": task.recovery_context.get("authentication_requirement", {}),
+                "credential_ids": task.auth_context.get("credential_ids", []),
+            }, sort_keys=True)
         )
         acceptance_result_section = hide_raw_bundle_references(
             self._acceptance_result_section(resolved_acceptance_results)
@@ -17614,18 +17668,23 @@ result, but it cannot be represented as successful execution. Claims derived fro
 successful corrected invocation. Bare `curl -s` output with no captured response status is not proof of absence.
 
 Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"instructions": string,
-"repair": {{"kind":"none|acceptance|execution","evidence_gaps":[string]}},
+"repair": {{"kind":"none|acceptance|execution","evidence_gaps":[string],"execution_receipt_gaps":[string]}},
 "finding_recommendation": {{"required": bool, "confidence": number, "reason": string}}}}.
 - Omit repair or use kind=none when no correction is appropriate. Use acceptance only for a closure/schema defect that
   does not require new evidence. Use execution only when a material objective component lacks valid execution evidence,
   such as malformed tool input, wrong operation or method, or an explicitly untested required component. For execution,
   list each concrete unresolved evidence gap without prescribing a module-specific tool.
+- Put receipt bookkeeping gaps in execution_receipt_gaps using frozen requirement IDs. Put semantic support
+  concerns in evidence_gaps. Satisfied receipts cannot override semantic concerns.
 - Omit finding_recommendation unless an artifact-backed acceptance recorded as observation likely represents a missing
   security finding. Set required=true only for direct, reproducible security-impacting behavior; hypotheses,
   informational facts, expected behavior, and assessed-negative results are not findings. Confidence must be 0.0-1.0.
 - If a current-task finding is already listed below, do not recommend another one merely because acceptance remains an
   immutable observation.
 - Use done only when every material part of the task objective is supported by durable evidence.
+- For comparisons, require evidence that the intended operation and subject were exercised with the required
+  inputs. Matching generic errors alone do not establish a meaningful comparison. An evidenced negative access
+  result can qualify when it supports the frozen objective; tool execution alone cannot establish semantic support.
 - Python has already confirmed that every frozen acceptance criterion has a recorded terminal result. Review the
   semantic quality of those results and their evidence; do not add criteria or infer broader scope from phase context,
   examples, or new discoveries outside the frozen manifest.
@@ -17675,16 +17734,16 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 {plan.constraints_to_toon()}
 
 ## Context only: active phase
-{json.dumps(phase.to_dict(), indent=2, sort_keys=True)}
+{json.dumps({"id": phase.id, "title": phase.title, "status": phase.status})}
 
 ## Task history
-{self._task_history_summary(phase.id)}
+{self._task_prompt_history_context(phase.id, task)}
 
 ## Memory Guidance
 {self._memory_prompt_guidance()}
 
 ## Eligible Semantic Memories
-{self._memory_summary()}
+{self._render_memories(self._prompt_memory_records(task=task))}
 {tool_outcome_section}
 {worker_context_section}
 {endpoint_binding}

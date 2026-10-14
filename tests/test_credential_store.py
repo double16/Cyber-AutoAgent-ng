@@ -1875,3 +1875,43 @@ def test_mfa_tools_reject_missing_configuration_and_mailbox_errors(tmp_path, mon
         request_mfa_code(plain_credential["credential_id"], code_pattern="[")
     with pytest.raises(ValueError, match="not configured by an active"):
         retrieve_email_mfa_code(plain_credential["credential_id"])
+
+
+def test_worker_authorization_is_separate_and_promotes_without_downgrading(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "worker-permissions.db"), "logical-target")
+    credential = store.store_credential("op-1", {
+        "credential_type": "username_password", "target": "https://target.test", "role": "user",
+        "payload": {"username": "alice", "password": "internal-secret"}, "origin": "provided",
+        "management_policy": "user", "status": "unknown",
+    })
+    identifier = credential["credential_id"]
+    store.authorize_credential_for_task("op-1", identifier, "task-1", "authentication_worker")
+    assert store.credential_ids_authorized_for_worker("op-1", "task-1") == {identifier}
+    assert store.credential_ids_authorized_by_task("op-1", "task-1") == set()
+    assert store.credential_ids_selected_by_task("op-1", "task-1") == set()
+    assert store.credential_ids_authorized_for_worker("op-2", "task-1") == set()
+    other_target_store = SQLiteApplicationStore(str(tmp_path / "worker-permissions.db"), "other-target")
+    assert other_target_store.credential_ids_authorized_for_worker("op-1", "task-1") == set()
+    assert store.credential_ids_authorized_for_worker("op-1", "task-2") == set()
+    assert store.credential_ids_authorized_for_worker("op-1", "") == set()
+    assert store.credential_ids_authorized_by_task("op-1", "") == set()
+    store.authorize_credential_for_task("op-1", identifier, "task-1", "reused_authenticated_context")
+    store.authorize_credential_for_task("op-1", identifier, "task-1", "authentication_worker")
+    assert store.credential_ids_authorized_by_task("op-1", "task-1") == {identifier}
+    assert store.credential_ids_authorized_for_worker("op-1", "task-1") == {identifier}
+    assert store.credential_ids_used_by_task("op-1", "task-1", [identifier]) == set()
+    for kind, task in [("unknown", "task-1"), ("authentication_worker", "")]:
+        with pytest.raises(ValueError):
+            store.authorize_credential_for_task("op-1", identifier, task, kind)
+
+
+def test_checked_out_credentials_remain_available_to_bound_workers(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "checkout.db"), "logical-target")
+    credential = store.store_credential("op-1", {
+        "credential_type": "username_password", "target": "https://target.test", "role": "user",
+        "payload": {"username": "alice", "password": "internal-secret"}, "origin": "provided",
+        "management_policy": "user", "status": "unknown",
+    })
+    identifier = credential["credential_id"]
+    store.record_credential_usage("op-1", identifier, task_uid="task-1", outcome="selected")
+    assert store.credential_ids_authorized_for_worker("op-1", "task-1") == {identifier}

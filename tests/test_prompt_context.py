@@ -61,3 +61,15 @@ def test_required_overflow_accounts_for_system_schemas_and_output(system, schema
     with pytest.raises(context.PromptInputTooLarge, match="PROMPT_REQUIRED_INPUT_TOO_LARGE"):
         context.fit_task_prompt("## Task\nimmutable", system, schemas, "model", 1000, output, log)
     assert log.call_count == 1
+
+
+def test_optional_evaluator_narrative_is_removed_whole():
+    mandatory = "## Frozen acceptance results\nimmutable evidence refs\n"
+    prompt = mandatory + "## Task worker final context\n" + "large narration" * 300
+    event = Mock()
+    result = context.fit_task_prompt(
+        prompt, "system", [{"output_schema": "schema"}], "model", 1000, 100, event,
+        optional_headings=("Task worker final context",),
+    )
+    assert mandatory in result and "large narration" not in result
+    assert event.call_args.args[0]["reductions"] == ["Task worker final context"]

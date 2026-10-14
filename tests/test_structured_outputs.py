@@ -172,3 +172,15 @@ def test_general_critique_schema_does_not_accept_discovery_selection():
     for role in ("plan_critic", "task_prompt_critic"):
         with pytest.raises(ValidationError):
             WORKFLOW_OUTPUT_MODELS[role](approved=True, supporting_evidence_refs=["artifact:form.html"])
+
+
+def test_evaluator_receipt_gaps_are_typed_separately_from_semantic_gaps():
+    from modules.agents.structured_outputs import EvaluatorRepairOutput
+
+    repair = EvaluatorRepairOutput(kind="execution", execution_receipt_gaps=["requirement-1"],
+                                   evidence_gaps=["Unsupported comparison"])
+    assert repair.execution_receipt_gaps == ["requirement-1"]
+    assert repair.evidence_gaps == ["Unsupported comparison"]
+    assert "execution_receipt_gaps" in EvaluatorRepairOutput.model_json_schema()["properties"]
+    with pytest.raises(ValidationError):
+        EvaluatorRepairOutput(execution_receipt_gaps=[123])

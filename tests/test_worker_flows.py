@@ -18,6 +18,7 @@ from modules.tools import artifact, authentication, credentials, memory
 from modules.tools.memory import SQLiteApplicationStore
 from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
 from tests.test_authenticated_http_context import _activate_task
+from tests.test_login_replay import action_case as action_case
 from tests.test_multi_agent_workflow import FakeState, _runtime
 
 
@@ -1294,7 +1295,9 @@ def test_browser_capture_uses_known_headers_with_or_without_staged_flow(worker_c
         request_header_names=[],
         validation_url=f"{target}/protected",
         validation_marker="",
+        credential_resolver=capture.await_args.kwargs["credential_resolver"],
     )
+    assert callable(capture.await_args.kwargs["credential_resolver"])
 
 
 def test_registration_critic_correction_removes_unsupported_requiredness_only(worker_case):
@@ -1406,12 +1409,9 @@ def test_authentication_navigation_hints_preserve_path_scope(worker_case, monkey
     assert [entry["url"] for entry in endpoints] == [scoped]
 
 
-@pytest.fixture
-def production_registered_case(registered_case, monkeypatch):
-    """Exercise the production wrapper with durable SQLite state and no task-list attribute."""
+def _use_sqlite_workflow_state(controller, store, monkeypatch):
+    """Keep the production state wrapper and database; replace only the memory client boundary."""
     from types import SimpleNamespace
-
-    controller, task, store, target, observed, stored = registered_case
 
     def list_tasks(phase=None, status=None):
         return [item for item in store.get_tasks("OP_AUTH")
@@ -1426,6 +1426,13 @@ def production_registered_case(registered_case, monkeypatch):
     )
     monkeypatch.setattr(workflow, "get_memory_client", lambda **_kwargs: client)
     controller.state = workflow.WorkflowStateStore("OP_AUTH")
+
+
+@pytest.fixture
+def production_registered_case(registered_case, monkeypatch):
+    """Exercise the production wrapper with durable SQLite state and no task-list attribute."""
+    controller, task, store, target, observed, stored = registered_case
+    _use_sqlite_workflow_state(controller, store, monkeypatch)
     return controller, task, store, target, observed, stored
 
 
@@ -1904,9 +1911,10 @@ def replay_worker_case(worker_case, monkeypatch):
     monkeypatch.setattr(workflow, "capture_browser_authenticated_context", capture)
     calls = []
 
-    def build(identifier, _origins, attempt, bound_capture, *, observations=None):
+    def build(identifier, _origins, attempt, bound_capture, *, observations=None, credential_resolver=None):
         @tool(name="perform_login_action")
         async def perform_login_action(action: str, **arguments):
+            credential_resolver()
             calls.append((identifier, action))
             attempt["replay_actions"].append({"action": action, **arguments})
             if action == "click":
@@ -1915,6 +1923,13 @@ def replay_worker_case(worker_case, monkeypatch):
         return perform_login_action
 
     monkeypatch.setattr(workflow, "build_login_action_tool", build)
+    for identifier in ("first", "second"):
+        store.store_credential("OP_AUTH", {
+            "credential_id": identifier, "credential_type": "username_password", "target": target,
+            "role": "member", "payload": {"email": f"{identifier}@example.test", "password": "replay-secret"},
+            "origin": "provided", "management_policy": "user", "status": "unknown",
+        })
+        store.authorize_credential_for_task("OP_AUTH", identifier, task.task_uid, "authentication_worker")
     credential = {"credential_id": "first", "credential_type": "username_password", "target": target, "role": "member"}
     setup = workflow.AuthenticationSetupRequest(task.task_uid, "authentication", (target,), (target,), (credential,))
     return controller, task, store, target, flow, capture, calls, credential, setup, observed
@@ -1966,9 +1981,10 @@ def test_login_replay_fallback_reviews_changes_without_repeating_success(replay_
     elif cause == "unvalidated":
         capture.side_effect = ValueError("not authenticated")
     else:
-        def build(_identifier, _origins, attempt, _capture, *, observations=None):
+        def build(_identifier, _origins, attempt, _capture, *, observations=None, credential_resolver=None):
             @tool(name="perform_login_action")
             async def action(action: str, **arguments):
+                credential_resolver()
                 if action == "fill":
                     raise ValueError("missing control")
                 attempt["replay_actions"].append({"action": action, **arguments})
@@ -2168,3 +2184,165 @@ def test_familiar_login_navigation_learns_complete_script_and_resets_attempt_fac
     assert calls == [("first", "navigate"), ("first", "fill"), ("first", "click")]
     assert attempt["observation_refs"] == []
     assert attempt["functional_completed"]
+
+
+@pytest.mark.parametrize("account_count,starting_context,promotion_failure,frozen", [
+    (1, "missing", False, False), (2, "missing", False, False),
+    (1, "expiring", False, False), (2, "expiring", False, False),
+    (1, "missing", True, False), (1, "missing", False, True),
+])
+def test_controller_replay_authorizes_real_worker_without_checkout_or_agents(
+    worker_case, action_case, monkeypatch, tmp_path, account_count, starting_context, promotion_failure, frozen,
+):
+    import time
+
+    import requests
+
+    from tests.test_authenticated_http_context import _jwt_with_exp
+
+    controller, task, store, target, _observed = worker_case
+    _tool, _attempt, _capture, page, control, _payload = action_case
+    store.patch_task("OP_AUTH", task.task_uid, recovery_context_updates={
+        "phase_task_contract": {"workstream": "authenticated_credential_coverage"},
+        "authentication_requirement": {"comparison": "account" if account_count == 2 else "none", "roles": ["member"]},
+    })
+    _use_sqlite_workflow_state(controller, store, monkeypatch)
+    task = controller.state.list_tasks()[0]
+    plan = store.get_plan("OP_AUTH")
+    identifiers = []
+    for index in range(account_count):
+        credential = store.store_credential("OP_AUTH", {
+            "credential_type": "username_password", "target": target, "role": "member",
+            "payload": {"email": f"member-{index}@example.test", "password": "controller-replay-secret",
+                        "account_label": f"member-{index}"},
+            "origin": "provided", "management_policy": "user", "status": "unknown",
+        })
+        identifiers.append(credential["credential_id"])
+    unselected = store.store_credential("OP_AUTH", {
+        "credential_type": "username_password", "target": target, "role": "member" if frozen else "other",
+        "payload": {"email": "other@example.test", "password": "not-selected"},
+        "origin": "provided", "management_policy": "user", "status": "unknown",
+    })
+    if frozen:
+        store.patch_task("OP_AUTH", task.task_uid, recovery_context_updates={
+            "validation_auth_context": {"credential_ids": identifiers},
+        })
+        task = controller.state.list_tasks()[0]
+    store.upsert_authentication_flow("OP_AUTH", {
+        "target": target, "purpose": "authentication", "kind": "browser_form",
+        "flow_version": authentication.AUTHENTICATION_FLOW_VERSION, "login_url": target + "/login",
+        "allowed_origins": [target], "request_header_names": ["X-Session"],
+        "provenance": "observed_worker_flow", "evidence_refs": ["artifact:old-operation.html"],
+        "replay_version": 1, "replay_actions": [
+            {"action": "navigate", "url": target + "/login"},
+            {"action": "fill", "locator": "#email", "credential_field": "email"},
+            {"action": "click", "locator": "#submit"},
+        ],
+    }, status="validated")
+    monkeypatch.setattr(authentication, "_CONTEXTS", {})
+    monkeypatch.setattr(authentication, "_operation_output_root", lambda: str(tmp_path))
+
+    def request(_session, _target, _method, url, **kwargs):
+        response = requests.Response()
+        response.status_code = 200 if kwargs.get("headers", {}).get("X-Session") else 401
+        response._content = b"authenticated" if response.status_code == 200 else b"denied"
+        response.url = url
+        return response
+
+    monkeypatch.setattr(authentication, "_scoped_request", request)
+    if starting_context == "expiring":
+        for identifier in identifiers:
+            context = authentication._AuthenticationContext(
+                target, identifier, requests.Session(), {"X-Session": _jwt_with_exp(int(time.time()) + 60)},
+                {}, target + "/private",
+            )
+            authentication._CONTEXTS[authentication._context_key("OP_AUTH", target, identifier)] = context
+
+    async def reset():
+        control.click.reset_mock()
+
+    monkeypatch.setattr(workflow, "reset_authentication_browser_session", reset)
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda _task: ["browser_goto_url"])
+    # Keep actual selection, SQLite authorization, typed actions, resolver, proof, and context validation.
+    async def capture(*, credential_id, credential_resolver, **_kwargs):
+        bound_task, record, resolved = credential_resolver()
+        assert resolved == credential_id
+        assert store.credential_ids_selected_by_task("OP_AUTH", task.task_uid) == set()
+        with pytest.raises(ValueError, match="checked out"):
+            credentials._active_credential_for_access(store, "OP_AUTH", credential_id, "checkout")
+        if not control.click.await_count:
+            raise ValueError("Login submission has not completed")
+        return authentication._store_context(
+            bound_task, record, resolved, requests.Session(), {"X-Session": f"session-{resolved}"},
+            {}, target + "/private",
+        )
+
+    monkeypatch.setattr(workflow, "capture_browser_authenticated_context", capture)
+    if promotion_failure:
+        authorize = store.authorize_credential_for_task
+
+        def write(operation_id, identifier, task_uid, kind):
+            if kind == "reused_authenticated_context":
+                raise OSError("Session authorization storage unavailable")
+            authorize(operation_id, identifier, task_uid, kind)
+
+        monkeypatch.setattr(store, "authorize_credential_for_task", write)
+    controller.executor_session_factory = Mock(side_effect=AssertionError("Replay must not create an LLM agent"))
+    events = []
+    controller._emit_workflow_event = events.append
+    result = controller._run_authentication_agent(plan, task)
+    if promotion_failure:
+        assert result.status == "failed" and result.reason == "task_authorization_failed"
+        assert store.credential_ids_authorized_by_task("OP_AUTH", task.task_uid) == set()
+        for identifier in identifiers:
+            assert authentication.authentication_context_is_valid("OP_AUTH", target, identifier)
+            with pytest.raises(ValueError, match="AUTH_CONTEXT_UNAVAILABLE"):
+                authentication.authenticated_http_request("GET", target + "/private", credential_id=identifier)
+    else:
+        assert result.status == "established"
+        assert set(result.credential_ids) == set(identifiers)
+        assert store.credential_ids_authorized_by_task("OP_AUTH", task.task_uid) == set(identifiers)
+    assert page.goto.await_count == account_count
+    assert control.fill.await_count == account_count
+    assert controller.text_runner.call_count == 0
+    assert store.credential_ids_selected_by_task("OP_AUTH", task.task_uid) == set()
+    assert unselected["credential_id"] not in store.credential_ids_authorized_for_worker("OP_AUTH", task.task_uid)
+    replays = [event for event in events if event["type"] == "authentication_replay"]
+    assert len(replays) == account_count
+    assert all(event["status"] == "validated" and event["review_skipped"] for event in replays)
+    for identifier in (() if promotion_failure else identifiers):
+        _, record = credentials._active_credential_for_access(store, "OP_AUTH", identifier, "context")
+        assert "payload" not in record
+        response = json.loads(authentication.authenticated_http_request(
+            "GET", target + "/private", credential_id=identifier,
+        ))
+        assert response["status_code"] == 200
+
+
+@pytest.mark.parametrize("failure_kind", ["authentication_worker", "reused_authenticated_context"])
+def test_controller_authorization_write_failure_reports_setup_failure(worker_case, monkeypatch, failure_kind):
+    controller, task, store, target, _observed = worker_case
+    store.store_credential("OP_AUTH", {
+        "credential_type": "username_password", "target": target, "role": "member",
+        "payload": {"username": "member", "password": "secret"}, "origin": "provided",
+        "management_policy": "user", "status": "unknown",
+    })
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda _task: ["browser_goto_url"])
+    monkeypatch.setattr(
+        workflow, "authentication_context_is_valid", lambda *_args: failure_kind != "authentication_worker",
+    )
+    authorize = store.authorize_credential_for_task
+
+    def write(operation_id, identifier, task_uid, kind):
+        if kind == failure_kind:
+            raise OSError("Authorization storage unavailable")
+        authorize(operation_id, identifier, task_uid, kind)
+
+    monkeypatch.setattr(store, "authorize_credential_for_task", write)
+    worker = Mock(side_effect=AssertionError("Authorization failure must precede browser execution"))
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+    result = controller._run_authentication_agent(store.get_plan("OP_AUTH"), task)
+    assert result.status == "failed" and result.reason == "task_authorization_failed"
+    worker.assert_not_called()
+    assert store.credential_ids_authorized_by_task("OP_AUTH", task.task_uid) == set()
+    assert store.credential_ids_selected_by_task("OP_AUTH", task.task_uid) == set()

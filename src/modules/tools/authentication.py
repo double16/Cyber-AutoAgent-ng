@@ -29,6 +29,7 @@ from modules.tools.credentials import (
     CredentialAccessMode,
     _active_credential_for_access,
     _active_task_target_values,
+    _register_credential_payload_secrets,
     _task_resolved_targets,
 )
 from modules.tools.memory import _get_database_store, _operation_id, _operation_output_root, active_credential_task
@@ -699,6 +700,26 @@ def _active_record(
     return task, record, resolved_credential_id
 
 
+def resolve_worker_credential(
+    operation_id: str, task_uid: str, target: str, credential_id: str,
+) -> tuple[Any, dict[str, Any], str]:
+    """Resolve authorized worker material without granting executor checkout access."""
+    _bound_flow_task_target_values(task_uid, operation_id, target, "authentication")
+    store = _get_database_store()
+    if credential_id not in store.credential_ids_authorized_for_worker(operation_id, task_uid):
+        raise ValueError("Authentication worker credential is not authorized for the assigned task")
+    record = store.get_credential(credential_id, include_payload=True)
+    if record is None or record["status"] not in {"unknown", "valid"}:
+        raise ValueError("Eligible credential is required for authentication worker")
+    if record.get("operation_id") and record["operation_id"] != operation_id:
+        raise ValueError("Authentication worker credential is scoped to another operation")
+    if record["target"] != target or record["credential_type"] == "email_login":
+        raise ValueError("Authentication worker credential does not match its assigned target")
+    task = next(item for item in store.get_tasks(operation_id) if item.task_uid == task_uid)
+    _register_credential_payload_secrets(record)
+    return task, record, credential_id
+
+
 def _store_context(
     task: Any,
     record: dict[str, Any],
@@ -1220,6 +1241,20 @@ async def capture_browser_authenticated_context(
     validation_marker: str = "",
     request_header_names: list[str] | None = None,
 ) -> str:
+    """Capture browser authentication under the active task checkout boundary."""
+    return await _capture_browser_authenticated_context(
+        credential_id, storage_header_bindings, validation_url, validation_marker, request_header_names,
+    )
+
+
+async def _capture_browser_authenticated_context(
+    credential_id: str,
+    storage_header_bindings: list[dict[str, str]],
+    validation_url: str = "",
+    validation_marker: str = "",
+    request_header_names: list[str] | None = None,
+    credential_resolver: Callable[[], tuple[Any, dict[str, Any], str]] | None = None,
+) -> str:
     """Capture an authentication agent's browser session into an opaque HTTP context.
 
     Python binds staged header metadata for the authentication agent. It copies same-origin cookies plus
@@ -1230,7 +1265,9 @@ async def capture_browser_authenticated_context(
 
     from modules.tools.browser import get_browser
 
-    task, record, credential_id = _active_record(credential_id)
+    task, record, credential_id = (
+        credential_resolver() if credential_resolver is not None else _active_record(credential_id)
+    )
     target = str(record["target"]).rstrip("/")
     if validation_url and not _credential_target_url_contains(target, validation_url, label="validation_url"):
         raise ValueError("validation URL must share the credential target origin")
