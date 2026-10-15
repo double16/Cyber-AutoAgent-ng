@@ -37,6 +37,14 @@ from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.utils.redaction import redact, register_runtime_secret
 
 
+class AuthenticatedRequestError(ValueError):
+    """Sanitized recovery category; never expose redirect destinations or request secrets."""
+
+    def __init__(self, category: str, message: str) -> None:
+        self.category = category
+        super().__init__(f"{category}: {message}")
+
+
 @dataclass
 class _AuthenticationContext:
     target: str
@@ -191,7 +199,9 @@ def _scoped_request(
     """Apply the credential target boundary before every network hop."""
 
     if not _credential_target_url_contains(target, url, label="request URL"):
-        raise ValueError("authenticated request is outside the credential target boundary")
+        raise AuthenticatedRequestError(
+            "AUTH_REQUEST_SCOPE_REJECTED", "Request is outside the credential target boundary.",
+        )
     for _ in range(6):
         if method.upper() == "GET":
             response = session.get(url, allow_redirects=False, **kwargs)
@@ -203,13 +213,17 @@ def _scoped_request(
             return response
         next_url = urljoin(url, response.headers["Location"])
         if not _credential_target_url_contains(target, next_url, label="redirect URL"):
-            raise ValueError("authenticated redirect is outside the credential target boundary")
+            raise AuthenticatedRequestError(
+                "AUTH_REDIRECT_BLOCKED",
+                "Redirect leaves the credential target boundary. "
+                "Use allow_redirects=False to capture the original response.",
+            )
         if response.status_code == 303 or (response.status_code in {301, 302} and method.upper() == "POST"):
             method = "GET"
             kwargs.pop("data", None)
             kwargs.pop("json", None)
         url = next_url
-    raise ValueError("authenticated redirect limit reached")
+    raise AuthenticatedRequestError("AUTH_REDIRECT_BLOCKED", "Redirect limit reached; use allow_redirects=False.")
 
 
 def _safe_authorization_storage_key(value: str) -> str:
@@ -1506,7 +1520,7 @@ def authenticated_http_request(
 ) -> str:
     """Make one request through a validated operation-local authenticated context.
 
-    Cookie and Authorization headers are controller-owned and cannot be supplied by the task.
+    Credential headers and query parameters are controller-owned and cannot be overridden by the task.
     """
 
     normalized_headers = dict(headers or {})
@@ -1515,10 +1529,14 @@ def authenticated_http_request(
     task, record, credential_id = _active_record(credential_id, access_mode="context")
     target = str(record["target"]).rstrip("/")
     if not _credential_target_url_contains(target, url, label="request URL"):
-        raise ValueError("request URL is outside the credential target origin")
+        raise AuthenticatedRequestError(
+            "AUTH_REQUEST_SCOPE_REJECTED", "Request is outside the credential target boundary.",
+        )
     context = _CONTEXTS.get(_context_key(operation_id, target, credential_id))
     if context is None:
-        raise ValueError(AUTH_CONTEXT_REFRESH_REQUIRED_ERROR)
+        raise AuthenticatedRequestError(
+            "AUTH_CONTEXT_REFRESH_REQUIRED", AUTH_CONTEXT_REFRESH_REQUIRED_ERROR.split(": ", 1)[1],
+        )
     owned_headers = {name.lower() for name in context.headers} | {"cookie"}
     if any(name.lower() in owned_headers for name in normalized_headers):
         raise ValueError("controller-owned credential headers cannot be overridden")
@@ -1527,14 +1545,24 @@ def authenticated_http_request(
         raise ValueError("controller-owned credential query parameters cannot be overridden")
     validated = _validate(context) and _prove_authenticated_context(context)
     if not validated or _expiring_authentication_material(context, time.time(), expired_only=False):
-        raise ValueError(AUTH_CONTEXT_REFRESH_REQUIRED_ERROR)
+        raise AuthenticatedRequestError(
+            "AUTH_CONTEXT_REFRESH_REQUIRED", AUTH_CONTEXT_REFRESH_REQUIRED_ERROR.split(": ", 1)[1],
+        )
     merged_headers = {**context.headers, **normalized_headers}
     try:
         response = _scoped_request(
             context.session, target, method.upper(), url, data=body, headers=merged_headers,
             params=context.params, timeout=20, follow_redirects=allow_redirects,
         )
-    except (requests.RequestException, ValueError) as error:
-        raise ValueError("authenticated request failed") from error
+    except AuthenticatedRequestError:
+        raise
+    except requests.RequestException as error:
+        raise AuthenticatedRequestError(
+            "AUTH_TRANSPORT_FAILED", "Request transport failed. This does not establish an expired session.",
+        ) from error
+    except ValueError as error:
+        raise AuthenticatedRequestError(
+            "AUTH_REQUEST_INVALID", "Request could not be executed; check request inputs.",
+        ) from error
     store.record_credential_usage(operation_id, credential_id, task_uid=task.task_uid, outcome="succeeded")
     return json.dumps(redact({"status_code": response.status_code, "headers": dict(response.headers), "body": response.text}))

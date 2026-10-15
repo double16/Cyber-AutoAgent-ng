@@ -1422,7 +1422,7 @@ def _use_sqlite_workflow_state(controller, store, monkeypatch):
         patch_task=lambda **kwargs: store.patch_task("OP_AUTH", **kwargs),
         get_active_plan=lambda **_kwargs: store.get_plan("OP_AUTH"),
         list_finding_records=lambda: store.list_findings("OP_AUTH"),
-        list_task_acceptance_results=lambda uid: store.list_task_acceptance_results("OP_AUTH", uid),
+        list_task_acceptance_results=lambda uid: store.get_acceptance_results("OP_AUTH", uid),
     )
     monkeypatch.setattr(workflow, "get_memory_client", lambda **_kwargs: client)
     controller.state = workflow.WorkflowStateStore("OP_AUTH")

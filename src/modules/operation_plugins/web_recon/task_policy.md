@@ -6,6 +6,11 @@ Acquisition is preparation for analysis. Bounded read-only comparisons are permi
 assigned task explicitly authorizes verification. State-changing actions require explicit authorization.
 
 Read-only authorization comparisons require evidence that the intended application operation was exercised
-with its inventory-defined method and required inputs. Matching generic 404/Not Found responses alone
+with its inventory-defined method and required inputs. Matching invalid-input responses or generic errors alone
 are inconclusive. Legitimate denial or resource concealment can support a negative result when evidenced.
 Correct requests only within the assigned read-only authorization and preserve unresolved coverage.
+
+Controller captures may await semantic acceptance. Assess the retained request and response evidence before
+requesting new execution. Pending acceptance alone is not an evidence gap. Refresh authentication only for a
+stale context or failed session validation; redirect restrictions, transport failures, and resource denials
+alone do not establish a session failure.

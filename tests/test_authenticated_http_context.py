@@ -99,7 +99,7 @@ def test_scoped_authenticated_redirect_rejects_a_foreign_origin():
         status_code=302, headers={"Location": "https://elsewhere.test/private"}, text="",
     )
 
-    with pytest.raises(ValueError, match="outside the credential target boundary"):
+    with pytest.raises(ValueError, match="AUTH_REDIRECT_BLOCKED"):
         authentication._scoped_request(session, "https://target.test", "GET", "https://target.test/private")
     session.get.assert_called_once()
 
@@ -2197,3 +2197,36 @@ def test_worker_resolver_requires_bound_authorization_without_checkout(tmp_path,
             authentication.resolve_worker_credential("OTHER" if case == "operation" else "OP_AUTH",
                                                      "other-task" if case == "other_task" else "auth-task",
                                                      target, identifier)
+
+
+@pytest.mark.parametrize("failure,category", [
+    ("redirect", "AUTH_REDIRECT_BLOCKED"), ("scope", "AUTH_REQUEST_SCOPE_REJECTED"),
+    ("transport", "AUTH_TRANSPORT_FAILED"), ("invalid", "AUTH_REQUEST_INVALID"),
+])
+def test_authenticated_request_errors_are_sanitized_and_preserve_recovery_category(monkeypatch, failure, category):
+    target = "https://target.test"
+    session = Mock()
+    context = authentication._AuthenticationContext(target, "credential", session, {"X-Session": "secret"}, {}, target)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_ERROR")
+    monkeypatch.setattr(authentication, "_get_database_store", Mock)
+    monkeypatch.setattr(authentication, "_active_record", lambda *_args, **_kwargs: (
+        SimpleNamespace(task_uid="task"), {"target": target}, "credential",
+    ))
+    monkeypatch.setitem(authentication._CONTEXTS, ("OP_ERROR", target, "credential"), context)
+    monkeypatch.setattr(authentication, "_validate", lambda *_args: True)
+    monkeypatch.setattr(authentication, "_prove_authenticated_context", lambda *_args: True)
+    monkeypatch.setattr(authentication, "_expiring_authentication_material", lambda *_args, **_kwargs: None)
+    session.get.return_value = SimpleNamespace(status_code=302, headers={"Location": "https://other.test/?secret=value"})
+    if failure == "transport":
+        session.get.side_effect = authentication.requests.ConnectionError("secret=value")
+    elif failure == "invalid":
+        session.get.side_effect = ValueError("secret=value")
+    url = "https://other.test/" if failure == "scope" else target
+    with pytest.raises(authentication.AuthenticatedRequestError) as caught:
+        authentication.authenticated_http_request("GET", url)
+    assert caught.value.category == category
+    assert "secret" not in str(caught.value)
+    assert authentication._CONTEXTS[("OP_ERROR", target, "credential")] is context
+    if failure == "redirect":
+        assert "allow_redirects=False" in str(caught.value)
+        assert session.get.call_count == 1

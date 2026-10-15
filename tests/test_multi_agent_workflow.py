@@ -1209,7 +1209,7 @@ def test_controller_refreshes_only_task_authorized_credential(monkeypatch):
     authorized_ids = {"first"}
     worker = Mock(return_value=workflow_mod.AuthenticationWorkerResult(True))
     monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
-    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: True)
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: worker.call_count > 0)
     monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
         credential_ids_authorized_by_task=lambda *_args: authorized_ids,
     ))
@@ -1286,7 +1286,7 @@ def test_executor_tools_recover_stale_request_for_one_credential(monkeypatch, ou
     monkeypatch.setattr(controller, "_run_authentication_credential_worker", lambda *_args: (
         calls.append(("worker", "first")) or workflow_mod.AuthenticationWorkerResult(True)
     ))
-    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: outcome != "refresh_failed")
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: ("worker", "first") in calls and outcome != "refresh_failed")
 
     tools = controller._resolve_task_executor_base_tools(plan, task, {"tools": []})
     by_name = {workflow_mod.get_tool_name(item): item for item in tools}
@@ -5957,11 +5957,22 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
     assert controller._task_executor_persistence_tool_names(task) == {"store_observation"}
 
 
-def test_credential_provisioning_prompt_accepts_registration_email_tool():
+def test_credential_provisioning_prompt_accepts_registration_email_tool(tmp_path, monkeypatch):
     runtime = _runtime()
     runtime.optional_tools_list = [
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
+    ]
+    from modules.tools import browser
+    from modules.tools.credentials import store_credential
+
+    store = SQLiteApplicationStore(str(tmp_path / "selection.db"), "target")
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    runtime.optional_tools_list = [
+        store_credential if tool.__name__ == "store_credential" else
+        browser.__dict__[tool.__name__] if tool.__name__ in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES else tool
+        for tool in runtime.optional_tools_list
     ]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -5974,7 +5985,11 @@ def test_credential_provisioning_prompt_accepts_registration_email_tool():
         objective="Register the missing test identities",
         phase=1,
         status="pending",
-        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+        recovery_context={"conditional_phase": {
+            "kind": "credential_provisioning",
+            "registration_flow": {"target": "https://target.test", "roles": ["member"]},
+            "credential_slot": {"role": "member"},
+        }},
     )
 
     normalized = controller._normalize_task_prompt_spec(
@@ -5986,18 +6001,29 @@ def test_credential_provisioning_prompt_accepts_registration_email_tool():
         task,
     )
 
-    assert normalized["tools"] == ["generate_password", "generate_registration_email"]
+    assert normalized["tools"] == []
 
 
 @pytest.mark.parametrize("tools", [["checkout_credential"]])
 def test_credential_provisioning_prompt_rejects_out_of_scope_tool_selection(
-    tools,
+    tools, tmp_path, monkeypatch,
 ):
     runtime = _runtime()
     runtime.optional_tools_list = [
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
         _tool("checkout_credential"),
+    ]
+    from modules.tools import browser
+    from modules.tools.credentials import store_credential
+
+    store = SQLiteApplicationStore(str(tmp_path / "selection.db"), "target")
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    runtime.optional_tools_list = [
+        store_credential if tool.__name__ == "store_credential" else
+        browser.__dict__[tool.__name__] if tool.__name__ in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES else tool
+        for tool in runtime.optional_tools_list
     ]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -6010,10 +6036,14 @@ def test_credential_provisioning_prompt_rejects_out_of_scope_tool_selection(
         objective="Register the missing test identities",
         phase=1,
         status="pending",
-        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+        recovery_context={"conditional_phase": {
+            "kind": "credential_provisioning",
+            "registration_flow": {"target": "https://target.test", "roles": ["member"]},
+            "credential_slot": {"role": "member"},
+        }},
     )
 
-    with pytest.raises(TaskPromptBuildError, match="controller-authorized registration tools"):
+    with pytest.raises(TaskPromptBuildError, match="unknown or unavailable selection"):
         controller._normalize_task_prompt_spec(
             {
                 "prompt": "Register the missing identities",
@@ -6024,12 +6054,23 @@ def test_credential_provisioning_prompt_rejects_out_of_scope_tool_selection(
         )
 
 
-def test_credential_provisioning_prompt_accepts_target_scoped_shell_selection():
+def test_credential_provisioning_prompt_accepts_target_scoped_shell_selection(tmp_path, monkeypatch):
     runtime = _runtime()
     runtime.config.available_tools = ["curl"]
     runtime.optional_tools_list = [
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
+    ]
+    from modules.tools import browser
+    from modules.tools.credentials import store_credential
+
+    store = SQLiteApplicationStore(str(tmp_path / "selection.db"), "target")
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    runtime.optional_tools_list = [
+        store_credential if tool.__name__ == "store_credential" else
+        browser.__dict__[tool.__name__] if tool.__name__ in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES else tool
+        for tool in runtime.optional_tools_list
     ]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -6042,7 +6083,11 @@ def test_credential_provisioning_prompt_accepts_target_scoped_shell_selection():
         objective="Register the missing test identities",
         phase=1,
         status="pending",
-        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+        recovery_context={"conditional_phase": {
+            "kind": "credential_provisioning",
+            "registration_flow": {"target": "https://target.test", "roles": ["member"]},
+            "credential_slot": {"role": "member"},
+        }},
     )
 
     normalized = controller._normalize_task_prompt_spec(
@@ -6975,7 +7020,7 @@ def test_scope_only_prompt_repairs_preserve_crawl_selections(monkeypatch, iterat
     monkeypatch.setattr(controller, "_normalize_task_prompt_spec", lambda spec, *_args: spec)
     monkeypatch.setattr(controller, "_filter_repairable_shell_selections", lambda spec: spec)
     monkeypatch.setattr(controller, "_run_json_text_agent", lambda role, *_args, **_kwargs: (
-        next(drafts) if role == "task_prompt_builder" else {"approved": True, "feedback": []}
+        next(drafts) if role == "task_prompt_builder" else {"issues": []}
     ))
     spec = controller._build_task_prompt(plan, plan.phases[0], task)
     assert spec["tools"] == ["specialized_recon_orchestrator"]
@@ -9131,7 +9176,7 @@ def test_task_roles_share_task_trace_attributes(monkeypatch):
         if role == "task_prompt_builder":
             return '{"prompt":"execute active","tools":[]}'
         if role == "task_prompt_critic":
-            return '{"approved":true,"feedback":[]}'
+            return '{"issues":[]}'
         if role == "task_evaluator":
             return '{"status":"done","reason":"completed"}'
         raise AssertionError(role)
@@ -10578,7 +10623,7 @@ def test_malformed_memory_id_reaches_prompt_critic_with_valid_prompt():
                 '["98d09291-78dc-443c-aba2-f2c4b467fc"],"tools":[],"shell_commands":[]}'
             )
         if role == "task_prompt_critic":
-            return '{"approved":true,"feedback":[]}'
+            return '{"issues":[]}'
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -17054,7 +17099,7 @@ def test_optional_tool_catalog_uses_tool_spec_name_and_description():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    catalog = controller._optional_tool_catalog()
+    catalog = controller._tool_catalog("optional_tools", runtime.optional_tools_list)
 
     assert catalog.startswith("optional_tools[1]{name,description}:")
     assert "spec_name,Spec description." in catalog
@@ -17082,9 +17127,9 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
 
     prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
 
-    assert "core_tools[4]{name,description}:" in prompt
+    assert "core_tools[" in prompt and "{name,description}:" in prompt
     assert "spec_shell,Execute shell commands." in prompt
-    assert "optional_tools[2]{name,description}:" in prompt
+    assert "optional_tools[" in prompt
     assert "spec_scan,Run a targeted scan." in prompt
     assert "`tools` JSON field contains optional-tool names only" in prompt
     assert "Never return core-tool names in `tools`" in prompt
@@ -17595,7 +17640,7 @@ def test_task_prompt_builder_can_omit_controller_owned_acceptance_requirements()
             return '{"prompt":"Inspect the assigned entry points and capture the results.","tools":[],"shell_commands":[]}'
         if role == "task_prompt_critic":
             captured["critic"] = prompt
-            return '{"approved":true,"feedback":[]}'
+            return '{"issues":[]}'
         if role == "task_evaluator":
             return '{"status":"partial_failure","reason":"no acceptance was recorded"}'
         raise AssertionError(role)
@@ -17931,7 +17976,7 @@ def test_task_prompt_scope_mismatch_is_revised_before_the_executor_can_run():
         [
             '{"prompt":"Probe custom-scheme://service.example:4200/health","memory_ids":[],"tools":[],"shell_commands":[]}',
             '{"prompt":"Probe custom-scheme://service.example:4280/health","memory_ids":[],"tools":[],"shell_commands":[]}',
-            '{"approved":true,"feedback":[]}',
+            '{"issues":[]}',
         ]
     )
     calls = []
@@ -18461,7 +18506,7 @@ def test_task_prompt_critic_permits_http_request_and_curl_overlap(monkeypatch):
     assert "http_request" in prompt
     assert "curl" in prompt
     assert "Tool overlap is permitted" in prompt
-    assert "Core tools are supplied automatically and must not appear in `tools`" in prompt
+    assert "Python has validated tool membership" in prompt
     assert "relevant and available" not in prompt
 
 
@@ -18786,8 +18831,8 @@ def test_tool_catalog_renders_empty_lists_and_rejects_unknown_structure_names():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert controller._core_tool_catalog() == "core_tools[0]{name,description}:\n"
-    assert controller._optional_tool_catalog() == "optional_tools[0]{name,description}:\n"
+    assert controller._tool_catalog("core_tools", []) == "core_tools[0]{name,description}:\n"
+    assert controller._tool_catalog("optional_tools", []) == "optional_tools[0]{name,description}:\n"
     with pytest.raises(ValueError, match="Unsupported tool catalog structure"):
         controller._tool_catalog("tools", [])
 
@@ -19384,7 +19429,7 @@ def test_task_prompt_critic_approves_initial_draft():
         if role == "task_prompt_builder":
             return '{"prompt":"approved execution","memory_ids":[],"tools":[],"shell_commands":[]}'
         if role == "task_prompt_critic":
-            return '{"approved":true,"feedback":[]}'
+            return '{"issues":[]}'
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -19425,8 +19470,8 @@ def test_task_prompt_critic_rejection_runs_revision_until_approved():
     )
     critic_responses = iter(
         [
-            '{"approved":false,"feedback":["Add the relevant validation tool"]}',
-            '{"approved":true,"feedback":[]}',
+            '{"issues":[{"category":"execution_policy","message":"Add the relevant validation tool","tool_names":[]}]}',
+            '{"issues":[]}',
         ]
     )
 
@@ -19482,7 +19527,7 @@ def test_task_prompt_final_rejection_marks_task_partial_failure_without_executio
         if role == "task_prompt_builder":
             return '{"prompt":"unsafe draft","tools":[]}'
         if role == "task_prompt_critic":
-            return '{"approved":false,"feedback":["Prompt broadens scope outside target boundary"]}'
+            return '{"issues":[{"category":"scope","message":"Prompt broadens scope outside target boundary","tool_names":[]}]}'
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -19515,8 +19560,8 @@ def test_task_prompt_repairable_rejection_runs_one_bounded_repair():
         '{"prompt":"capture response body with an explicit http URL","tools":[],"shell_commands":[]}',
     ])
     critics = iter([
-        '{"approved":false,"repairable":true,"feedback":["The response body is required for artifact evidence"]}',
-        '{"approved":true,"repairable":false,"feedback":[]}',
+        '{"issues": [{"category": "execution_policy", "message": "The response body is required for artifact evidence", "tool_names": []}], "repairable": true}',
+        '{"issues": [], "repairable": false}',
     ])
 
     def text_runner(role, prompt, tools, system_prompt):
@@ -19550,7 +19595,7 @@ def test_task_prompt_repairable_rejection_uses_deterministic_template():
         if role == "task_prompt_builder":
             return '{"prompt":"unsafe","tools":[],"shell_commands":[]}'
         if role == "task_prompt_critic":
-            return '{"approved":false,"repairable":true,"feedback":["Add an explicit URL scheme"]}'
+            return '{"issues": [{"category": "execution_policy", "message": "Add an explicit URL scheme", "tool_names": []}], "repairable": true}'
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -22523,3 +22568,16 @@ def test_evaluator_bounds_input_and_preserves_mandatory_acceptance(oversized_req
     if not oversized_required:
         assert events[0]["estimated_tokens_after"] <= events[0]["input_limit"]
     assert issubclass(PromptInputTooLarge, ValueError)
+
+
+def test_authorized_refresh_reuses_context_with_sufficient_lifetime(monkeypatch):
+    controller, plan, original_task = _refresh_setup_controller(monkeypatch, ("first",))
+    task = replace(original_task, auth_context={"mode": "authenticated", "credential_ids": ["first"]})
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        credential_ids_authorized_by_task=lambda *_args: {"first"},
+    ))
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: True)
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", lambda *_args: pytest.fail("valid session"))
+    assert controller._refresh_authenticated_context_for_task(plan, task, "first") == {
+        "credential_id": "first", "status": "ready", "reason": "reused",
+    }

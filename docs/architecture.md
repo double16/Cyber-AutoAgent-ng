@@ -776,12 +776,29 @@ For web phase-3 tasks, the controller can execute an authenticated credential-co
 provides an in-scope HTTP endpoint with a recorded GET or HEAD interaction. The authentication worker establishes or
 refreshes an opaque context only when needed. The controller then uses each validated, task-authorized credential ID
 to request the endpoint without following redirects and stores the response with a specific gap for failed requests.
-Authorization comparisons and interactions without a safe recorded method continue through task executors.
+Controller comparison captures go directly to the existing semantic evaluator when explicit machine-checkable
+assertions cannot establish completion. An execution worker starts only for an evidenced gap, with one bounded
+corrective execution. Interactions without a safe recorded method continue through task executors. Capture-only
+criteria can still complete without an evaluator. Comparisons never complete from status or body equality alone.
+
+The web adapter accepts an explicit frozen inventory `comparison_contract` (version 1): concrete `url`, `method`
+(GET or HEAD), `prerequisite_evidence_refs`, and `assertions` for every required identity. Each assertion specifies
+`identity` (an opaque credential ID or `anonymous`), `status`, `content_type`, and `body_contains`. Every assertion
+must match the same concrete request. Prerequisite references must name retained current-operation task evidence;
+free-text success signals are advisory. Contracts that are absent, invalid, or unmatched require semantic review.
+
+Captures persist with operation/task/frozen-contract bindings, selected credential IDs, and a content digest.
+Continuation reuses unchanged captures without issuing requests or renewing sessions solely to review evidence.
+Changed bindings or unreadable/modified artifacts require recapture. Repair attempts also persist across continuation.
 
 Authenticated task executors can call `refresh_authenticated_context` for a credential already bound to their task.
 When only one credential is authorized, credential tools take no credential ID; tasks with multiple authorized
-credentials still select an ID. The controller runs the authentication worker for that credential and returns only
-`ready` or `unavailable`.
+credentials still select an ID. The controller first reuses that credential's session if validation and the expiry safety window pass;
+otherwise it runs the authentication worker. It returns only `ready` or `unavailable`.
+Authenticated requests distinguish stale context, scope rejection, blocked redirects, and transport failures.
+Only stale context or failed session validation warrants refresh. A blocked redirect can be inspected by requesting
+`allow_redirects=False`; credentials are never forwarded across their scope boundary. Resource denials and transport
+failures do not invalidate sessions.
 The executor can retry a failed authenticated request once after `ready`; credential material stays with the worker.
 For example, if a token expires during a long task, the executor requests a refresh before retrying its GET.
 Each refresh outcome is recorded as a secret-safe operation event with the task and opaque credential IDs.
@@ -905,3 +922,27 @@ availability, not that a comparison exercised its intended operation. Web compar
 the inventory-defined method and required inputs; matching generic errors are inconclusive unless
 there is supporting evidence of legitimate denial or resource concealment. The evaluator retains
 semantic judgment, and permitted corrective execution remains within the frozen task scope.
+
+### Comparison assessment and task tool selection
+
+Comparison tasks are identified by explicit authentication requirements, authentication matrix metadata,
+and module comparison contracts. Their evaluator returns `comparison_assessment` with `outcome`
+(`supported` or `inconclusive`), `operation_evidence_refs`, `comparison_evidence_refs`, and `reason`.
+Supported comparisons cite artifacts establishing suitable operation inputs and subjects as well as
+behavior for the required identities. Matching invalid-input responses or successful login alone
+cannot establish access behavior. Evidenced denial and resource concealment can support conclusions.
+Python validates assessment structure and artifact scope; semantic judgment remains with the evaluator.
+Comparison-specific structured output requires a non-null assessment; the JSON example, compatibility path,
+input budgeting, and schema repair use the same contract. Exhausted malformed output is recorded separately as
+`evaluator_output_failure`, without inventing a semantic judgment or rerunning target actions.
+Inconclusive assessments prevent completion and use existing bounded evidence-producing repair. Assessments
+are stored in task recovery context without changing historical acceptance evidence or reopening
+completed tasks. HTTP, network, and filesystem modules share this protocol-neutral control behavior.
+
+Task prompts use one inventory derived from executor tool factories. It distinguishes automatically
+supplied core and task tools from selectable optional tools, including dynamically generated tools.
+Python removes redundant supplied selections before review and rejects unavailable or unauthorized
+selections. Critics see the resolved executor capabilities and shell selections, without the builder's advisory tool array.
+Task-prompt critiques use typed scope, objective, evidence, execution-policy, and tool-availability issues. Python
+dismisses availability claims for tools actually supplied, emits diagnostics, and derives approval from remaining
+issues. Scope and suitability objections remain substantive review concerns.

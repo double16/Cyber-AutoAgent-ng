@@ -86,6 +86,17 @@ class CritiqueOutput(StrictStructuredOutput):
     repairable: bool | None = None
 
 
+class TaskPromptIssueOutput(StrictStructuredOutput):
+    category: Literal["scope", "objective", "evidence", "execution_policy", "tool_availability"]
+    message: str = Field(min_length=1)
+    tool_names: list[str] = Field(default_factory=list)
+
+
+class TaskPromptCritiqueOutput(StrictStructuredOutput):
+    issues: list[TaskPromptIssueOutput]
+    repairable: bool = True
+
+
 class FlowCritiqueOutput(CritiqueOutput):
     supporting_evidence_refs: list[str] = Field(default_factory=list)
 
@@ -119,12 +130,26 @@ class FindingRecommendationOutput(StrictStructuredOutput):
     reason: str = ""
 
 
+class ComparisonAssessmentOutput(StrictStructuredOutput):
+    """Semantic support for an intended operation and its identity comparison."""
+
+    outcome: Literal["supported", "inconclusive"]
+    operation_evidence_refs: list[str] = Field(default_factory=list)
+    comparison_evidence_refs: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+
 class WorkflowDecisionOutput(StrictStructuredOutput):
     status: str
     reason: str = ""
     instructions: str = ""
     repair: EvaluatorRepairOutput | None = None
+    comparison_assessment: ComparisonAssessmentOutput | None = None
     finding_recommendation: FindingRecommendationOutput | None = None
+
+
+class ComparisonTaskDecisionOutput(WorkflowDecisionOutput):
+    comparison_assessment: ComparisonAssessmentOutput
 
 
 class TaxonomyMappingOutput(StrictStructuredOutput):
@@ -192,7 +217,7 @@ WORKFLOW_OUTPUT_MODELS: dict[str, type[BaseModel]] = {
     "authentication_flow_critic": FlowCritiqueOutput,
     "registration_flow_critic": FlowCritiqueOutput,
     "task_prompt_builder": TaskPromptOutput,
-    "task_prompt_critic": CritiqueOutput,
+    "task_prompt_critic": TaskPromptCritiqueOutput,
     "task_phase_classifier": TaskPhaseClassificationOutput,
     "task_evaluator": WorkflowDecisionOutput,
     "phase_evaluator": WorkflowDecisionOutput,
