@@ -593,7 +593,8 @@ def test_build_role_tools_excludes_create_tasks_by_default_and_accepts_tuple_nam
     ) == [create_tasks, other_tool, create_tasks]
 
 
-def test_create_agent_reuses_runtime_resources(monkeypatch):
+@pytest.mark.parametrize("native_ollama", [False, True])
+def test_create_agent_reuses_runtime_resources(monkeypatch, tmp_path, native_ollama):
     class FakeAgent:
         def __init__(self, **kwargs):
             self.init_kwargs = kwargs
@@ -619,8 +620,12 @@ def test_create_agent_reuses_runtime_resources(monkeypatch):
         prompt_token_limit=123,
     )
 
+    from modules.config.models.ollama import OllamaModel
+
+    runtime.provider_capture_directory = tmp_path
+    model = OllamaModel(None, model_id="llama") if native_ollama else SimpleNamespace(stateful=False)
     monkeypatch.setattr(cyber_agent_module, "create_agent_runtime_resources", Mock(side_effect=AssertionError))
-    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=model))
     monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
     monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(return_value=SimpleNamespace(supports_reasoning=True)))
     monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
@@ -635,6 +640,9 @@ def test_create_agent_reuses_runtime_resources(monkeypatch):
     assert agent._prompt_token_limit == 123
     assert agent.system_prompt == "system text"
     assert runtime.callback_handler is callback_handler
+    if native_ollama:
+        assert model.capture_directory == tmp_path
+        assert model.capture_role == "task_executor"
 
 
 def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
@@ -1086,6 +1094,7 @@ def test_create_agent_runtime_resources_builds_integrated_runtime_with_module_fa
     runtime = cyber_agent_module.create_agent_runtime_resources("example.test", "assess", config)
 
     assert runtime.operation_id == "OP_INTEGRATED"
+    assert runtime.provider_capture_directory == tmp_path / "diagnostics" / "provider_responses"
     assert runtime.config.model_id == "default-model"
     assert runtime.config.region_name == "us-test-1"
     assert runtime.sdk_context_manager is None

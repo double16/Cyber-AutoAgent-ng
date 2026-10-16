@@ -8,6 +8,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any, TypeVar, Unpack, cast, override
 
 import ollama
@@ -24,6 +25,8 @@ from strands.types.exceptions import ContextWindowOverflowException
 from strands.types.streaming import StopReason, StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 from typing_extensions import TypedDict
+
+from modules.config.models.provider_capture import ProviderResponseCapture
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +106,8 @@ class OllamaModel(Model):
             ollama_client_args: Additional arguments for the Ollama client.
             **model_config: Configuration options for the Ollama model.
         """
+        self.capture_directory: Path | None = None
+        self.capture_role = "unknown"
         self.host = host
         self.client_args = dict(ollama_client_args or {})
         self.client_args.setdefault("trust_env", False)
@@ -366,7 +371,8 @@ class OllamaModel(Model):
         )
         return True, fallback_value
 
-    async def _chat_with_fallback(self, client: ollama.AsyncClient, request: dict[str, Any]) -> Any:
+    async def _chat_with_fallback(self, client: ollama.AsyncClient, request: dict[str, Any],
+                                  capture: ProviderResponseCapture | None = None) -> Any:
         """Execute chat request with progressive parameter stripping upon provider errors."""
         from modules.config.models.agent_profiles import get_agent_settings_registry
         registry = get_agent_settings_registry()
@@ -378,6 +384,8 @@ class OllamaModel(Model):
 
         while True:
             try:
+                if capture is not None:
+                    capture.request(current_request)
                 response = await client.chat(**current_request)
                 if pending_think_fallback is not None:
                     registry.record_parameter_fallback(
@@ -469,10 +477,14 @@ class OllamaModel(Model):
 
         client = ollama.AsyncClient(self.host, **self.client_args)
         response = None
+        capture = ProviderResponseCapture(self.capture_directory, self.capture_role, self.config["model_id"])
+        success = False
         try:
-            response = await self._chat_with_fallback(client, request)
+            response = await self._chat_with_fallback(client, request, capture)
 
             logger.debug("got response from model")
+            if isinstance(response, ChatResponse):
+                capture.response(response)
             yield self.format_chunk({"chunk_type": "message_start"})
             yield self.format_chunk({"chunk_type": "content_start", "data_type": "text"})
 
@@ -496,6 +508,7 @@ class OllamaModel(Model):
             last_event = None
             if hasattr(response, "__aiter__"):
                 async for event in response:
+                    capture.response(event)
                     last_event = event
                     for se in produce_chunks(event):
                         yield se
@@ -509,6 +522,8 @@ class OllamaModel(Model):
             yield self.format_chunk({"chunk_type": "content_stop", "data_type": "text"})
 
             if last_event is not None:
+                if last_event.done_reason in {"length", "max_tokens"}:
+                    capture.finish(True)
                 yield self.format_chunk(
                     {"chunk_type": "message_stop", "data": "tool_use" if tool_requested[0] else last_event.done_reason}
                 )
@@ -518,8 +533,10 @@ class OllamaModel(Model):
                     {"chunk_type": "message_stop", "data": "end_turn"}
                 )
 
+            success = True
             logger.debug("finished streaming response from model")
         finally:
+            capture.finish(success)
             try:
                 await _close_async_resource(response)
             finally:
@@ -546,20 +563,26 @@ class OllamaModel(Model):
 
         client = ollama.AsyncClient(self.host, **self.client_args)
         response = None
+        capture = ProviderResponseCapture(self.capture_directory, self.capture_role, self.config["model_id"])
+        success = False
         try:
             try:
-                response = await self._chat_with_fallback(client, formatted_request)
+                response = await self._chat_with_fallback(client, formatted_request, capture)
             except ollama.ResponseError as error:
                 if any(message in str(error).lower() for message in self.OVERFLOW_MESSAGES):
                     raise ContextWindowOverflowException(str(error)) from error
                 raise
 
             try:
+                capture.response(response)
                 content = response.message.content.strip()
-                yield {"output": output_model.model_validate_json(content)}
+                validated = output_model.model_validate_json(content)
+                success = True
+                yield {"output": validated}
             except Exception as e:
                 raise ValueError(f"Failed to parse or load content into model: {e}") from e
         finally:
+            capture.finish(success)
             try:
                 await _close_async_resource(response)
             finally:

@@ -111,7 +111,7 @@ def _stable_id(kind: str, target_id: str, value: str) -> str:
 def _record(
     url: str,
     *,
-    method: str = "GET",
+    method: str | None = None,
     status: Any = None,
     content_type: Any = None,
     technologies: Any = None,
@@ -124,6 +124,7 @@ def _record(
     record = {
         "url": url,
         "method": str(method or "GET").upper(),
+        "operation_provenance": "observed" if method else "inferred",
         "status": int(status) if str(status or "").isdigit() else None,
         "technologies": technologies if isinstance(technologies, list) else [],
     }
@@ -178,7 +179,7 @@ def _parse_katana(text: str) -> list[dict[str, Any]]:
             content_type = content_type or response_headers.get("content-type") or response_headers.get("Content-Type")
             records.append(_record(
                 url,
-                method=request.get("method", "GET"),
+                method=request.get("method"),
                 status=response.get("status_code"),
                 content_type=content_type,
             ))
@@ -194,7 +195,7 @@ def _parse_feroxbuster(text: str) -> list[dict[str, Any]]:
                 records.append(
                     _record(
                         item.get("url") or item.get("target"),
-                        method=item.get("method", "GET"),
+                        method=item.get("method"),
                         status=item.get("status") or item.get("status_code"),
                     )
                 )
@@ -218,7 +219,7 @@ def _parse_ffuf(text: str) -> list[dict[str, Any]]:
                     _record(
                         url,
                         status=item.get("status"),
-                        method=item.get("method", "GET"),
+                        method=item.get("method"),
                         response_length=item.get("length"),
                         words=item.get("words"),
                         lines=item.get("lines"),
@@ -229,7 +230,7 @@ def _parse_ffuf(text: str) -> list[dict[str, Any]]:
     try:
         for row in csv.DictReader(io.StringIO(text)):
             if row.get("url"):
-                records.append(_record(row["url"], status=row.get("status"), method=row.get("method", "GET")))
+                records.append(_record(row["url"], status=row.get("status"), method=row.get("method")))
     except csv.Error:
         pass
     return records or _urls_from_text(text)
@@ -328,7 +329,7 @@ def _parse_auth_chain(text: str) -> list[dict[str, Any]]:
             continue
         url = endpoint.get("full_url") or endpoint.get("url")
         if url:
-            records.append(_record(url, method=endpoint.get("method", "GET"), status=endpoint.get("status")))
+            records.append(_record(url, method=endpoint.get("method"), status=endpoint.get("status")))
     return records
 
 
@@ -450,7 +451,7 @@ def _parse_technology_inventory(text: str) -> list[dict[str, Any]]:
         records.append(
             _record(
                 str(entry["url"]),
-                method=entry.get("method", "GET"),
+                method=entry.get("method"),
                 status=entry.get("response_status", entry.get("status")),
                 content_type=entry.get("content_type") or entry.get("mime_type"),
                 technologies=entry.get("technology_clues", entry.get("technologies")),
@@ -631,6 +632,7 @@ def records_to_inventory_manifest(
                         "interaction": {
                             "interface": "http",
                             "operations": [str(record.get("method") or "GET").upper()],
+                "operation_provenance": record.get("operation_provenance", "inferred"),
                             "inputs": [],
                             "success_signals": [],
                             "failure_signals": [],
@@ -644,6 +646,7 @@ def records_to_inventory_manifest(
             interaction = {
                 "interface": "http",
                 "operations": [str(record.get("method") or "GET").upper()],
+                "operation_provenance": record.get("operation_provenance", "inferred"),
                 "inputs": [],
                 "success_signals": ([f"HTTP {record['status']}"] if record.get("status") else []),
                 "failure_signals": [],
@@ -691,6 +694,7 @@ def records_to_inventory_manifest(
                         "interaction": {
                             "interface": "http",
                             "operations": [str(record.get("method") or "GET").upper()],
+                "operation_provenance": record.get("operation_provenance", "inferred"),
                             "inputs": [{"name": name, "location": "query"}],
                             "success_signals": [],
                             "failure_signals": [],
@@ -738,6 +742,7 @@ def records_to_inventory_manifest(
                     "interaction": {
                         "interface": "http",
                         "operations": ["GET"],
+                        "operation_provenance": "inferred",
                         "inputs": [{"name": name, "location": "unknown"}],
                         "success_signals": [],
                         "failure_signals": [],
@@ -862,7 +867,7 @@ def _canonicalize_inventory_manifest_source(
     fields before consolidation; merging arbitrary ``items`` JSON is unsafe.
     """
 
-    from modules.tools.memory import INVENTORY_MANIFEST_ITEM_KINDS
+    from modules.tools.memory import INVENTORY_MANIFEST_ITEM_KINDS, _normalize_inventory_interaction
 
     normalized = json.loads(json.dumps(manifest))
     schema_version = normalized.get("schema_version")
@@ -900,7 +905,13 @@ def _canonicalize_inventory_manifest_source(
         item_ids.add(item_id)
         if "attributes" in item and not isinstance(item["attributes"], dict):
             raise ValueError(f"inventory_manifest source item {item_id} attributes must be an object")
-        item.setdefault("attributes", {})
+        attributes = item.setdefault("attributes", {})
+        _normalize_inventory_interaction(item_id, attributes)
+        interaction = attributes.get("interaction", {})
+        if isinstance(interaction, dict) and interaction.get("interface") == "http":
+            from modules.operation_plugins.web.comparison import inventory_comparison_contract
+
+            inventory_comparison_contract([item], [item_id])
     normalized["schema_version"] = 1
     excluded_ids = set()
     retained = []
@@ -1028,6 +1039,13 @@ def _merge_inventory_value(existing: Any, incoming: Any) -> Any:
     if isinstance(existing, dict) and isinstance(incoming, dict):
         merged = json.loads(json.dumps(existing))
         for key, value in incoming.items():
+            if key == "http_comparison":
+                if merged.get("http_comparison_conflict"):
+                    continue
+                if key in merged and merged[key] != value:
+                    merged.pop(key)
+                    merged["http_comparison_conflict"] = True
+                    continue
             merged[key] = _merge_inventory_value(merged[key], value) if key in merged else value
         return merged
     if isinstance(existing, list) and isinstance(incoming, list):

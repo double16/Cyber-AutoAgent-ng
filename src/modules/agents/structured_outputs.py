@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, model_validator
 
+from modules.tools.artifact_references import require_artifact_reference
 from modules.tools.memory import TaskProposal
 from modules.utils.json_repair import normalize_json_key_case
 
@@ -88,12 +89,12 @@ class CritiqueOutput(StrictStructuredOutput):
 
 class TaskPromptIssueOutput(StrictStructuredOutput):
     category: Literal["scope", "objective", "evidence", "execution_policy", "tool_availability"]
-    message: str = Field(min_length=1)
+    message: str = Field(min_length=1, max_length=500)
     tool_names: list[str] = Field(default_factory=list)
 
 
 class TaskPromptCritiqueOutput(StrictStructuredOutput):
-    issues: list[TaskPromptIssueOutput]
+    issues: list[TaskPromptIssueOutput] = Field(max_length=5)
     repairable: bool = True
 
 
@@ -130,12 +131,25 @@ class FindingRecommendationOutput(StrictStructuredOutput):
     reason: str = ""
 
 
+ArtifactEvidenceReference = Annotated[str, BeforeValidator(require_artifact_reference), Field(
+    pattern=r"^artifact(?:_id)?:\s*\S",
+    description="Current-task artifact: or artifact_id: reference only; memory: and other kinds are unsupported.",
+)]
+
+
+class OperationSupportOutput(StrictStructuredOutput):
+    status: Literal["established", "unestablished"]
+    basis: Literal["observed_intended_behavior", "established_access_policy", "availability_only", "unestablished"]
+    evidence_refs: list[ArtifactEvidenceReference] = Field(default_factory=list)
+
+
 class ComparisonAssessmentOutput(StrictStructuredOutput):
     """Semantic support for an intended operation and its identity comparison."""
 
     outcome: Literal["supported", "inconclusive"]
-    operation_evidence_refs: list[str] = Field(default_factory=list)
-    comparison_evidence_refs: list[str] = Field(default_factory=list)
+    operation_support: OperationSupportOutput
+    operation_evidence_refs: list[ArtifactEvidenceReference] = Field(default_factory=list)
+    comparison_evidence_refs: list[ArtifactEvidenceReference] = Field(default_factory=list)
     reason: str = Field(min_length=1)
 
 

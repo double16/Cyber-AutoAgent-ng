@@ -159,7 +159,8 @@ def test_ffuf_wildcard_responses_become_auditable_gaps_not_endpoints():
 def test_gobuster_parser_extracts_default_relative_path_output():
     records = manifest_tool._parse_gobuster("/admin (Status: 301) [Size: 0]")
 
-    assert records == [{"url": "/admin", "method": "GET", "status": 301, "technologies": []}]
+    assert records == [{"url": "/admin", "method": "GET", "operation_provenance": "inferred",
+                        "status": 301, "technologies": []}]
 
 
 def test_format_inference_handles_structured_formats_and_url_lists():

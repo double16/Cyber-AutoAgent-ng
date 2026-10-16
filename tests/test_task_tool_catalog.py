@@ -43,8 +43,14 @@ def test_dynamic_refresh_and_required_auth_tools_are_supplied_before_review(cata
         controller._task_prompt_critic_prompt(plan, plan.phases[0], task, normalized),
         controller._task_prompt_revision_prompt(plan, plan.phases[0], task, normalized, []),
     ):
-        assert "Automatically supplied task tools" in prompt and "refresh_authenticated_context" in prompt
-        assert "Selectable optional tools" in prompt
+        assert "refresh_authenticated_context" in prompt
+        if "Review the proposed" in prompt:
+            assert "Actual task executor tools" in prompt
+            assert "Selectable optional tools" not in prompt
+            assert "Selected tool input schemas" not in prompt
+        else:
+            assert "Automatically supplied task tools" in prompt
+            assert "Selectable optional tools" in prompt
 
 
 def test_builder_core_selections_do_not_trigger_extra_critic_cycles(catalog_case):
@@ -138,3 +144,32 @@ def test_terminal_tools_are_available_to_critic_and_scope_categories_are_authori
             {"category": category, "message": message},
         ]})
         assert controller._task_prompt_critique_is_hard_scope_violation(resolved) is expected
+
+
+def test_critic_receives_task_authentication_facts_without_candidate_ids(catalog_case):
+    from dataclasses import replace
+
+    controller, plan, task = catalog_case
+    task = replace(task, recovery_context={**task.recovery_context,
+        "authentication_requirement": {"comparison": "account", "roles": ["member"]},
+        "authentication_matrix": {"version": 1, "defined_roles": {"member": ["credential:candidate-one",
+                                                                                 "credential:candidate-two"]}},
+    })
+    before = task.to_dict()
+    prompt = controller._task_prompt_critic_prompt(plan, plan.phases[0], task,
+                                                  {"prompt": "Compare two selected accounts", "tools": []})
+    assert "candidate-one" not in prompt and "candidate-two" not in prompt
+    assert '"accounts_per_role": 2' in prompt and '"anonymous_comparison_required": false' in prompt
+    assert '"candidate_account_counts"' in prompt
+    assert "Selectable optional tools" not in prompt and "Selected tool input schemas" not in prompt
+    assert task.to_dict() == before
+
+
+def test_critic_output_has_bounded_actionable_issues():
+    from modules.agents.structured_outputs import TaskPromptCritiqueOutput
+
+    valid = {"category": "evidence", "message": "Evidence is insufficient"}
+    assert TaskPromptCritiqueOutput.model_validate({"issues": [valid]}).issues
+    for value in ({"issues": [valid] * 6}, {"issues": [{**valid, "message": "x" * 501}]}):
+        with pytest.raises(ValueError):
+            TaskPromptCritiqueOutput.model_validate(value)

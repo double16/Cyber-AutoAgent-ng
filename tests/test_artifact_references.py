@@ -228,3 +228,19 @@ def test_legacy_proof_label_preserves_multiple_paths():
     assert extract_artifact_references(
         "artifact paths: /tmp/first.txt,/tmp/second.txt", allow_legacy_labels=True,
     ) == ["artifact:/tmp/first.txt", "artifact:/tmp/second.txt"]
+
+
+@pytest.mark.parametrize("reference", ["memory:abc", "finding:abc", "https://target.test/result", "artifacts/file.txt"])
+def test_require_artifact_reference_rejects_other_kinds_before_file_resolution(reference):
+    from modules.tools.artifact_references import require_artifact_reference
+
+    with pytest.raises(ValueError, match="Expected artifact: or artifact_id:"):
+        require_artifact_reference(reference)
+
+
+@pytest.mark.parametrize("reference,expected", [("`artifact: artifacts/file.txt`", "artifact:artifacts/file.txt"),
+                                                ("artifact_id: abc", "artifact_id:abc")])
+def test_require_artifact_reference_uses_shared_normalization(reference, expected):
+    from modules.tools.artifact_references import require_artifact_reference
+
+    assert require_artifact_reference(reference) == expected

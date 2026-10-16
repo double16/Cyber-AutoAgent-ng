@@ -772,7 +772,8 @@ This architecture enables autonomous operation while keeping workflow control de
 
 # Controller-owned authenticated coverage
 
-For web phase-3 tasks, the controller can execute an authenticated credential-coverage task when its frozen inventory
+For web phase-3 tasks, the controller can execute authenticated credential coverage and account/role comparisons
+when their frozen inventory
 provides an in-scope HTTP endpoint with a recorded GET or HEAD interaction. The authentication worker establishes or
 refreshes an opaque context only when needed. The controller then uses each validated, task-authorized credential ID
 to request the endpoint without following redirects and stores the response with a specific gap for failed requests.
@@ -781,11 +782,36 @@ assertions cannot establish completion. An execution worker starts only for an e
 corrective execution. Interactions without a safe recorded method continue through task executors. Capture-only
 criteria can still complete without an evaluator. Comparisons never complete from status or body equality alone.
 
-The web adapter accepts an explicit frozen inventory `comparison_contract` (version 1): concrete `url`, `method`
-(GET or HEAD), `prerequisite_evidence_refs`, and `assertions` for every required identity. Each assertion specifies
-`identity` (an opaque credential ID or `anonymous`), `status`, `content_type`, and `body_contains`. Every assertion
-must match the same concrete request. Prerequisite references must name retained current-operation task evidence;
-free-text success signals are advisory. Contracts that are absent, invalid, or unmatched require semantic review.
+Inventory producers can declare typed `attributes.interaction.extensions.http_comparison` metadata for an
+observed HTTP interaction (`operation_provenance: observed`). Recon consolidation validates and preserves it;
+conflicting declarations disable deterministic assertion acceptance. Defaults inferred from extracted URLs carry
+`operation_provenance: inferred`; neither an inferred method nor a prose success signal establishes suitability.
+
+The version-1 contract declares a concrete `url`, `method` (GET or HEAD), `comparison` (none/account/role), nonempty
+`prerequisite_evidence_refs`, and response `assertions`. Each assertion specifies an `identity` selector, `status`,
+`content_type`, and nonempty `body_contains`. Selectors are `anonymous`, `account:1`, `account:2`, or `role:ROLE`.
+A role selector applies to every selected credential in that role; account slots use controller selection order.
+The controller binds selectors to authorized IDs, freezes current-operation prerequisite digests, and checks every
+required identity against the same request. Assertions are explicit expected behavior, never synthesized from equal
+responses or HTTP status. Missing assertions, changed prerequisites, or mismatches require semantic review.
+
+```json
+{
+  "interface": "http", "operations": ["GET"], "operation_provenance": "observed",
+  "extensions": {"http_comparison": {
+    "version": 1, "url": "https://target.test/resource?id=known", "method": "GET",
+    "comparison": "none", "prerequisite_evidence_refs": ["artifact:artifacts/resource-proof.json"],
+    "assertions": [
+      {"identity": "anonymous", "status": 403, "content_type": "text/plain", "body_contains": "Policy denied"},
+      {"identity": "role:member", "status": 200, "content_type": "text/plain", "body_contains": "Known resource"}
+    ]
+  }}
+}
+```
+
+Pending task activation recalculates execution ownership and binds this metadata without changing frozen criteria.
+Active and completed tasks retain their execution assignment. `completion_review` records `capture_only`, `assertions`,
+or `semantic` plus its reason; `controller_comparison_review` events expose comparison routing for operation reviews.
 
 Captures persist with operation/task/frozen-contract bindings, selected credential IDs, and a content digest.
 Continuation reuses unchanged captures without issuing requests or renewing sessions solely to review evidence.
@@ -927,7 +953,13 @@ semantic judgment, and permitted corrective execution remains within the frozen 
 
 Comparison tasks are identified by explicit authentication requirements, authentication matrix metadata,
 and module comparison contracts. Their evaluator returns `comparison_assessment` with `outcome`
-(`supported` or `inconclusive`), `operation_evidence_refs`, `comparison_evidence_refs`, and `reason`.
+(`supported` or `inconclusive`), `operation_support`, `operation_evidence_refs`, `comparison_evidence_refs`, and `reason`.
+Operation support declares `status` (established/unestablished), a basis (observed_intended_behavior,
+established_access_policy, availability_only, or unestablished), and artifact evidence references. Python downgrades
+purported support based only on availability to inconclusive. Semantic interpretation remains with the evaluator;
+legitimate denial or concealment must have evidence establishing the operation and its policy, not only a generic error.
+Comparison evidence fields advertise canonical artifact/artifact_id references. Memory and other reference kinds are
+rejected as unsupported kinds before artifact resolution; bounded schema repair reuses retained evidence.
 Supported comparisons cite artifacts establishing suitable operation inputs and subjects as well as
 behavior for the required identities. Matching invalid-input responses or successful login alone
 cannot establish access behavior. Evidenced denial and resource concealment can support conclusions.
@@ -945,4 +977,31 @@ Python removes redundant supplied selections before review and rejects unavailab
 selections. Critics see the resolved executor capabilities and shell selections, without the builder's advisory tool array.
 Task-prompt critiques use typed scope, objective, evidence, execution-policy, and tool-availability issues. Python
 dismisses availability claims for tools actually supplied, emits diagnostics, and derives approval from remaining
-issues. Scope and suitability objections remain substantive review concerns.
+issues. Scope and suitability objections remain substantive review concerns. Critic input uses a single resolved
+capability catalog and selected shell capabilities; full input schemas and duplicate optional catalogs are omitted.
+Task-specific authentication facts include required account counts and matching completed baseline task IDs.
+Candidate credential IDs are withheld until authentication setup. Critiques have at most five issues of 500 characters;
+the typed scope category, rather than feedback wording, controls scope handling.
+
+
+### Native provider response diagnostics
+
+Ollama operation agents spool native SDK responses before Strands conversion or structured-output
+validation to `diagnostics/provider_responses/<invocation_id>.jsonl` inside the operation directory.
+The recorder writes complete responses or individual streaming chunks directly to disk, including
+content, thinking, tool calls, usage, and provider timing. Settings records include effective `think`,
+`num_predict`, context size, and streaming configuration after parameter compatibility fallbacks;
+request messages, tool schemas, transport headers, and connection credentials are excluded.
+
+Successful captures are deleted. Token-limit responses, provider/conversion/validation failures, and
+interrupted generations are retained. Response records have an 8 MiB limit per invocation; terminal
+metadata records whether data was truncated or incomplete. A process killed without cleanup can leave
+an unfinished spool without an end record. Capture failures do not change model execution or recovery.
+Files use owner-only permissions and are sensitive internal diagnostics that may contain exact secrets.
+They are not task evidence and must not be used for acceptance or fed back into agents.
+
+Langfuse receives a diagnostic event with the invocation ID, capture path, role/model, trace/span
+correlation, finish reason, usage, truncation status, and a redacted excerpt of at most 4,000 characters.
+Full native response data stays on the local filesystem. Capture is automatic for operation-bound
+Ollama agents; standalone models and other providers do not capture responses. No configuration or
+schema migration is required. Restart the running application to enable capture for subsequent calls.

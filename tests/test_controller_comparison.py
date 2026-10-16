@@ -2,6 +2,7 @@
 
 import json
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from modules.agents import multi_agent_workflow as workflow
 from modules.operation_plugins.web.comparison import comparison_contract_matches
 from modules.tools import memory
 from modules.tools.memory import AcceptanceBasis, AcceptanceContract, AcceptanceCriterion, EvidenceRequirement
+from tests.helpers.comparison import operation_support
 from tests.test_authentication_comparisons import matrix_case as matrix_case
 from tests.test_worker_flows import _use_sqlite_workflow_state
 from tests.test_worker_flows import worker_case as worker_case
@@ -89,6 +91,7 @@ def test_controller_semantic_review_precedes_acceptance_or_repair(capture_case, 
         return json.dumps({
             "status": "blocked" if outcome == "blocked" else "done",
             "comparison_assessment": {
+                "operation_support": operation_support("supported" if outcome == "supported" else "inconclusive", [reference]),
                 "outcome": "supported" if outcome == "supported" else "inconclusive",
                 "operation_evidence_refs": [reference], "comparison_evidence_refs": [reference],
                 "reason": "External prerequisite unavailable" if outcome == "blocked" else "Reviewed comparison",
@@ -172,7 +175,11 @@ def test_explicit_frozen_comparison_completes_without_agent(capture_case, monkey
     contract["url"] = url
     proof = tmp_path / "resource-proof"
     proof.write_text("Current operation verified the concrete resource and required inputs")
-    manifest["comparison_contract"] = contract
+    contract["comparison"] = "none"
+    contract["assertions"][1]["identity"] = "account:1"
+    manifest["items"][0]["attributes"]["interaction"].update({
+        "operation_provenance": "observed", "extensions": {"http_comparison": contract},
+    })
     (tmp_path / "inventory.json").write_text(json.dumps(manifest))
     _manifest, digest = workflow._load_inventory_manifest("artifact:inventory.json")
     task = replace(task, task_uid="explicit-comparison", evidence=["artifact:resource-proof"], acceptance=replace(
@@ -216,6 +223,7 @@ def test_controller_handoff_uses_one_execution_repair(capture_case, monkeypatch,
             item for item in store.get_tasks("OP_AUTH") if item.task_uid == task.task_uid
         ).evidence[0]
         return json.dumps({"status": "done", "comparison_assessment": {
+            "operation_support": operation_support("supported" if supported else "inconclusive", [reference] if supported else []),
             "outcome": "supported" if supported else "inconclusive", "reason": "Verify suitable resource inputs",
             "operation_evidence_refs": [reference] if supported else [], "comparison_evidence_refs": [reference],
         }})
@@ -240,3 +248,51 @@ def test_controller_handoff_uses_one_execution_repair(capture_case, monkeypatch,
     assert updated.status == ("done" if repair_resolves else "partial_failure"), updated.status_reason
     assert len(actors) == 1 and len(evaluations) == 2
     assert requests == ["request"]
+
+
+@pytest.mark.parametrize("comparison,roles", [("account", ["member"]), ("role", ["member", "owner"])])
+def test_controller_compares_two_accounts_without_anonymous_or_initial_executor(
+    capture_case, monkeypatch, comparison, roles,
+):
+    controller, task, store, plan, phase, _calls, _manifest = capture_case
+    task = replace(task, task_uid=f"controller-{comparison}", recovery_context={
+        **task.recovery_context,
+        "authentication_requirement": {"comparison": comparison, "roles": roles},
+        "phase_task_contract": {
+            **task.recovery_context["phase_task_contract"], "workstream": "authorization_comparison",
+        },
+    })
+    store.store_task("OP_AUTH", task)
+    monkeypatch.setattr(controller, "_prepare_task_authentication", lambda _plan, current: controller.state.patch_task(
+        current.task_uid, auth_context={"credential_ids": ["first", "second"]},
+    ))
+    requested = []
+
+    def request(_method, _url, credential_id, **_kwargs):
+        requested.append(credential_id)
+        return json.dumps({"status_code": 200, "body": "known application result", "headers": {}})
+
+    monkeypatch.setattr(workflow, "authenticated_http_request", request)
+    monkeypatch.setattr(controller, "_current_unauthenticated_response", lambda *_args: pytest.fail(
+        "not an anonymous comparison",
+    ))
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: pytest.fail("no initial execution worker"))
+
+    def evaluate(_role, _prompt, _tools, _system):
+        current = next(item for item in store.get_tasks("OP_AUTH") if item.task_uid == task.task_uid)
+        refs = current.evidence
+        return json.dumps({"status": "done", "comparison_assessment": {
+            "outcome": "supported", "operation_support": operation_support("supported", refs),
+            "operation_evidence_refs": refs, "comparison_evidence_refs": refs, "reason": "Intended operation compared",
+        }})
+
+    controller.text_runner = evaluate
+    controller._run_task_in_trace(plan, phase, task)
+    current = next(item for item in store.get_tasks("OP_AUTH") if item.task_uid == task.task_uid)
+    assert current.status == "done", current.status_reason
+    assert requested == ["first", "second"]
+    capture = json.loads((Path(workflow._operation_output_root()) / "artifacts" / "controller_authenticated_coverage"
+                          / f"{task.task_uid}.json").read_text())
+    assert capture["unauthenticated_responses"] == []
+    assert capture["comparisons"][0]["left_credential_id"] == "first"
+    assert capture["comparisons"][0]["right_credential_id"] == "second"

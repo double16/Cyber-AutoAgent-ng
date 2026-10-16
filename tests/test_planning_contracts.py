@@ -135,7 +135,7 @@ def test_web_phase_three_declares_controller_owned_baseline_workstream():
     contract = load_phase_task_contract("web", 3)
 
     assert contract.controller_mapping_workstreams == {
-        "unauthenticated_baseline", "authenticated_credential_coverage",
+        "unauthenticated_baseline", "authenticated_credential_coverage", "authorization_comparison",
     }
     assert contract.exclude_public_static_assets is True
 

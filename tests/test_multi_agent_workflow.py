@@ -7344,7 +7344,7 @@ def test_web_workflow_baseline_runs_in_controller_without_prompt_or_executor(mon
         ("authenticated_credential_coverage", ["GET"], "endpoint", "controller"),
         ("authenticated_credential_coverage", ["POST"], "endpoint", "executor"),
         ("authenticated_credential_coverage", ["GET"], "workflow", "executor"),
-        ("authorization_comparison", ["GET"], "endpoint", "executor"),
+        ("authorization_comparison", ["GET"], "endpoint", "controller"),
     ],
 )
 def test_controller_authenticated_coverage_ownership_uses_frozen_read_only_interaction(
@@ -16991,7 +16991,8 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
         ),
         (
             controller._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
-            [("## Active phase", phase_json), ("## Assigned task", task_json)],
+            [("## Active phase (context only)", json.dumps({"id": phase.id, "title": phase.title})),
+             ("## Assigned task", task_json)],
         ),
         (
             controller._task_prompt_revision_prompt(plan, phase, task, prompt_spec, ["Add evidence"]),
@@ -22156,6 +22157,7 @@ def test_hypothesis_repair_uses_real_state_lifecycle(worker_flow_case, monkeypat
     controller, *_rest = worker_flow_case
     backing = controller.state
     client = SimpleNamespace(
+        get_active_plan=lambda **_kwargs: backing.get_plan(),
         list_tasks=lambda **kwargs: backing.list_tasks(**kwargs),
         store_task=lambda *, task: backing.store_task(task),
         patch_task=None,

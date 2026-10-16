@@ -49,6 +49,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal, get_type_hints
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -126,6 +127,7 @@ from modules.tools.artifact_references import (
     extract_artifact_references,
     normalize_artifact_reference_token,
     replace_artifact_references,
+    require_artifact_reference,
 )
 from modules.tools.auth_chain_analyzer import auth_chain_analyzer
 from modules.tools.authentication import (
@@ -3022,6 +3024,13 @@ class MultiAgentWorkflowController:
         return None
 
     def _activate_task(self, task: Task) -> Task:
+        if task.status == "pending":
+            plan = self.state.get_plan()
+            phase = next((phase for phase in plan.phases if phase.id == task.phase), None) if plan else None
+            if phase is not None:
+                refreshed = self._web_comparison_execution_metadata(plan, phase, task)
+                if refreshed.recovery_context != task.recovery_context:
+                    task = self.state.patch_task(task.task_uid, recovery_context_updates=refreshed.recovery_context)
         active_task = self.state.activate_task(task)
         self._log_workflow("task activated task=%s phase=%s", self._task_label(active_task), active_task.phase)
         return active_task
@@ -3957,10 +3966,12 @@ class MultiAgentWorkflowController:
         if (
             phase_task_contract is None
             or phase_task_contract.module != "web"
-            or proposal.workstream not in {"unauthenticated_baseline", "authenticated_credential_coverage"}
+            or proposal.workstream not in {
+                "unauthenticated_baseline", "authenticated_credential_coverage", "authorization_comparison",
+            }
         ):
             return "executor"
-        if proposal.workstream == "authenticated_credential_coverage":
+        if proposal.workstream in {"authenticated_credential_coverage", "authorization_comparison"}:
             items = {str(item.get("id")): item for item in manifest.get("items", []) if isinstance(item, dict)}
             if any(items.get(item_id, {}).get("kind") != "endpoint" for item_id in item_ids):
                 return "executor"
@@ -3973,17 +3984,156 @@ class MultiAgentWorkflowController:
         target_values = {target.value.rstrip("/") for target in selected_targets}
         safe_methods = (
             {"GET", "HEAD"}
-            if proposal.workstream == "authenticated_credential_coverage"
+            if proposal.workstream in {"authenticated_credential_coverage", "authorization_comparison"}
             else _SAFE_BASELINE_HTTP_METHODS
         )
         if (
             parsed.scheme.lower() not in {"http", "https"}
             or not parsed.netloc
             or service not in target_values
-            or not any(method in safe_methods for method in methods)
+            or not methods or not (
+                all(method in safe_methods for method in methods)
+                if proposal.workstream != "unauthenticated_baseline"
+                else any(method in safe_methods for method in methods)
+            )
         ):
             return "executor"
         return "controller"
+
+    def _web_comparison_execution_metadata(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> Task:
+        contract = self._phase_task_contract(phase)
+        context = task.recovery_context.get("phase_task_contract", {})
+        if (
+            contract is None or contract.module != "web" or task.acceptance.basis.kind != "snapshot"
+            or context.get("workstream") not in contract.controller_mapping_workstreams
+        ):
+            return task
+        try:
+            source_ref = next(ref for ref in task.acceptance.basis.source_refs if ref.startswith("artifact:"))
+            manifest, digest = _load_inventory_manifest(source_ref)
+            if digest != task.acceptance.basis.snapshot_hash:
+                return task
+            from modules.operation_plugins.web.comparison import inventory_comparison_contract
+
+            template = inventory_comparison_contract(manifest["items"], list(task.acceptance.basis.item_ids))
+            selected = [target for target in plan.targets if target.target_id in task.target_ids]
+            owner = self._controller_web_baseline_execution_owner(
+                contract, SimpleNamespace(workstream=context["workstream"]), manifest,
+                list(task.acceptance.basis.item_ids), selected,
+            )
+        except (OSError, StopIteration, KeyError, TypeError, ValueError):
+            return task
+        previous = task.recovery_context.get("http_comparison_contract", {})
+        digests = previous.get("prerequisite_digests", {}) if previous.get("template") == template else {}
+        if template and not digests:
+            digests = self._comparison_prerequisite_digests(template)
+        return replace(task, recovery_context={
+            **task.recovery_context, "phase_task_contract": {**context, "execution_owner": owner},
+            "http_comparison_contract": {"template": template, "source_ref": source_ref, "snapshot_hash": digest,
+                                         "prerequisite_digests": digests},
+        })
+
+    @staticmethod
+    def _comparison_includes_anonymous(task: Task) -> bool:
+        requirement = task.recovery_context.get("authentication_requirement", {})
+        return (
+            bool(task.recovery_context.get("authentication_matrix"))
+            and requirement.get("comparison", "none") == "none"
+        )
+
+    @staticmethod
+    def _comparison_prerequisite_digests(template: dict[str, Any]) -> dict[str, str]:
+        digests = {}
+        root = Path(_operation_output_root()).resolve()
+        for reference in template.get("prerequisite_evidence_refs", []):
+            try:
+                canonical = canonical_artifact_reference(require_artifact_reference(reference))
+                path = Path(resolve_operation_artifact_path(canonical)).resolve()
+                if path.is_relative_to(root) and path.is_file() and path.stat().st_size:
+                    with path.open("rb") as stream:
+                        digests[canonical] = hashlib.file_digest(stream, "sha256").hexdigest()
+            except (OSError, TypeError, ValueError):
+                continue
+        return digests
+
+    def _controller_comparison_review(
+        self, task: Task, manifest: dict[str, Any], captures: dict[str, Any], evidence_ref: str,
+        credential_ids: tuple[str, ...],
+    ) -> ControllerCoverageResult:
+        from modules.operation_plugins.web.comparison import (
+            bind_comparison_contract,
+            comparison_contract_matches,
+            inventory_comparison_contract,
+        )
+
+        # Asserted semantics come from explicit frozen metadata, never from HTTP status/body heuristics.
+        invalid_template = False
+        try:
+            template = inventory_comparison_contract(manifest["items"], list(task.acceptance.basis.item_ids))
+        except (TypeError, ValueError):
+            invalid_template = True
+            template = None
+        requirement = task.recovery_context.get("authentication_requirement", {})
+        credential_roles = {}
+        store = _get_database_store()
+        for credential_id in credential_ids:
+            record = store.get_credential(credential_id)
+            credential_roles[credential_id] = str(record["role"] or "") if record else ""
+        include_anonymous = self._comparison_includes_anonymous(task)
+        bound = bind_comparison_contract(
+            template, comparison=requirement.get("comparison", "none"), credential_roles=credential_roles,
+            include_anonymous=include_anonymous,
+        )
+        current_digests = self._comparison_prerequisite_digests(template or {})
+        previous = task.recovery_context.get("http_comparison_contract", {})
+        frozen_digests = previous.get("prerequisite_digests") if previous.get("template") == template else None
+        if frozen_digests is None:
+            frozen_digests = current_digests
+        prerequisites = {ref for ref, digest in current_digests.items() if frozen_digests.get(ref) == digest}
+        identities = set(credential_ids) | ({"anonymous"} if include_anonymous else set())
+        matched = comparison_contract_matches(bound, captures, prerequisite_refs=prerequisites, identities=identities)
+        mode = "assertions" if matched else "semantic"
+        if matched:
+            reason = "assertions_matched"
+        elif captures.get("coverage_gaps"):
+            reason = "capture_incomplete"
+        elif invalid_template:
+            reason = "assertions_invalid"
+        elif template is None:
+            reason = "assertions_absent"
+        elif bound is None:
+            reason = "identity_assertion_binding_unavailable"
+        elif not set(template["prerequisite_evidence_refs"]).issubset(prerequisites):
+            reason = "prerequisite_evidence_unavailable_or_changed"
+        else:
+            reason = "response_assertions_unmatched"
+        self.state.patch_task(task.task_uid, recovery_context_updates={
+            "completion_review": {"mode": mode, "reason": reason, "operation_id": self.runtime.operation_id},
+            "http_comparison_contract": {**previous, "template": template, "bound": bound,
+                                         "prerequisite_digests": frozen_digests,
+                                         "snapshot_hash": task.acceptance.basis.snapshot_hash},
+        })
+        self._emit_workflow_event({"type": "controller_comparison_review", "task_uid": task.task_uid,
+                                   "mode": mode, "reason": reason})
+        if not matched:
+            return ControllerCoverageResult("needs_semantic_review", (evidence_ref,))
+        summary = "Explicit frozen HTTP comparison assertions matched every required identity."
+        self.state.patch_task(task.task_uid, recovery_context_updates={"comparison_assessment": {
+            "outcome": "supported", "operation_id": self.runtime.operation_id,
+            "operation_support": {"status": "established", "basis": "observed_intended_behavior",
+                                  "evidence_refs": sorted(prerequisites)},
+            "operation_evidence_refs": sorted(prerequisites), "comparison_evidence_refs": [evidence_ref],
+            "reason": summary,
+        }})
+        try:
+            self.state.record_task_acceptance(task, {"status": "satisfied", "disposition": "observation",
+                                                     "summary": summary, "evidence_refs": [evidence_ref]})
+        except (TypeError, ValueError) as error:
+            updated = self.state.mark_task(task, "partial_failure", f"Controller comparison acceptance failed: {error}")
+        else:
+            updated = self.state.mark_task(task, "done", summary)
+        self._emit_task_done(updated)
+        return ControllerCoverageResult("completed", (evidence_ref,))
 
     def _current_unauthenticated_response(self, task: Task, url: str, method: str) -> dict[str, Any]:
         """Reuse a matching current-operation baseline or capture an anonymous response."""
@@ -4023,13 +4173,16 @@ class MultiAgentWorkflowController:
             or contract.module != "web"
             or not isinstance(context, dict)
             or context.get("execution_owner") != "controller"
-            or context.get("workstream") != "authenticated_credential_coverage"
+            or context.get("workstream") not in {"authenticated_credential_coverage", "authorization_comparison"}
             or task.acceptance.basis.kind != "snapshot"
         ):
             return ControllerCoverageResult("not_applicable")
         binding = hashlib.sha256(json.dumps({
             "operation_id": self.runtime.operation_id, "task_uid": task.task_uid,
             "acceptance": task.to_dict()["acceptance"], "target_ids": task.target_ids,
+            "targets": {
+                target.target_id: target.value for target in plan.targets if target.target_id in task.target_ids
+            },
             "authentication_requirement": task.recovery_context.get("authentication_requirement"),
             "authentication_matrix": task.recovery_context.get("authentication_matrix"),
         }, sort_keys=True).encode()).hexdigest()
@@ -4042,8 +4195,14 @@ class MultiAgentWorkflowController:
             try:
                 path = Path(resolve_operation_artifact_path(retained["evidence_ref"]))
                 if hashlib.sha256(path.read_bytes()).hexdigest() == retained["sha256"]:
-                    return ControllerCoverageResult("needs_semantic_review", (retained["evidence_ref"],))
-            except (OSError, KeyError, TypeError, ValueError):
+                    source = next(ref for ref in task.acceptance.basis.source_refs if ref.startswith("artifact:"))
+                    manifest, digest = _load_inventory_manifest(source)
+                    if digest == task.acceptance.basis.snapshot_hash:
+                        return self._controller_comparison_review(
+                            task, manifest, json.loads(path.read_text()), retained["evidence_ref"],
+                            tuple(task.auth_context.get("credential_ids", ())),
+                        )
+            except (OSError, StopIteration, KeyError, TypeError, ValueError):
                 pass
         task = self._prepare_task_authentication(plan, task)
         if task is None:
@@ -4078,7 +4237,7 @@ class MultiAgentWorkflowController:
                 if method not in {"GET", "HEAD"}:
                     coverage_gaps.append(f"Recorded {method} operation was not executed by read-only coverage.")
                     continue
-                if task.recovery_context.get("authentication_matrix"):
+                if self._comparison_includes_anonymous(task):
                     anonymous = self._current_unauthenticated_response(task, url, method)
                     if anonymous["outcome"] == "response":
                         anonymous_responses.append(anonymous)
@@ -4125,16 +4284,18 @@ class MultiAgentWorkflowController:
                     "anonymous_status": anonymous["status"], "authenticated_status": authenticated["status"],
                     "body_equal": anonymous.get("body", "") == authenticated["body"],
                 } for authenticated in responses for anonymous in anonymous_responses
-                    if anonymous["method"] == authenticated["method"]],
+                    if anonymous["method"] == authenticated["method"]] + [{
+                    "method": first["method"], "left_credential_id": first["credential_id"],
+                    "right_credential_id": second["credential_id"], "left_status": first["status"],
+                    "right_status": second["status"], "body_equal": first["body"] == second["body"],
+                } for index, first in enumerate(responses) for second in responses[index + 1:]
+                    if first["method"] == second["method"] and first["credential_id"] != second["credential_id"]],
             }, indent=2),
             encoding="utf-8",
         )
         evidence_ref = canonical_artifact_reference(str(output_path))
         task = self.state.patch_task(task.task_uid, evidence_additions=[evidence_ref])
         if self._requires_comparison_assessment(phase, task):
-            from modules.operation_plugins.web.comparison import comparison_contract_matches
-
-            captures = json.loads(output_path.read_text(encoding="utf-8"))
             self.state.patch_task(task.task_uid, recovery_context_updates={
                 "controller_comparison_capture": {
                     "binding": binding, "evidence_ref": evidence_ref,
@@ -4142,33 +4303,13 @@ class MultiAgentWorkflowController:
                     "credential_ids": list(credential_ids), "operation_id": self.runtime.operation_id,
                 },
             })
-            identities = set(credential_ids)
-            if task.recovery_context.get("authentication_matrix"):
-                identities.add("anonymous")
-            # Only current-operation, retained task evidence can establish declared prerequisites.
-            prerequisites = set()
-            root = Path(_operation_output_root()).resolve()
-            for reference in task.evidence:
-                if reference == evidence_ref:
-                    continue
-                try:
-                    path = Path(resolve_operation_artifact_path(reference)).resolve()
-                    if path.is_relative_to(root) and path.is_file() and path.stat().st_size:
-                        prerequisites.add(canonical_artifact_reference(reference))
-                except (OSError, TypeError, ValueError):
-                    continue
-            explicit_contract = manifest.get("comparison_contract")
-            if not comparison_contract_matches(
-                explicit_contract, captures, prerequisite_refs=prerequisites, identities=identities,
-            ):
-                return ControllerCoverageResult("needs_semantic_review", (evidence_ref,))
-            self.state.patch_task(task.task_uid, recovery_context_updates={
-                "comparison_assessment": {
-                    "outcome": "supported", "operation_id": self.runtime.operation_id,
-                    "operation_evidence_refs": sorted(prerequisites), "comparison_evidence_refs": [evidence_ref],
-                    "reason": "Explicit frozen HTTP comparison assertions matched all required identities.",
-                },
-            })
+            return self._controller_comparison_review(
+                task, manifest, json.loads(output_path.read_text()), evidence_ref, credential_ids,
+            )
+        self.state.patch_task(task.task_uid, recovery_context_updates={
+            "completion_review": {"mode": "capture_only", "reason": "No comparison conclusion required",
+                                  "operation_id": self.runtime.operation_id},
+        })
         if not responses or coverage_gaps:
             summary = "Controller authenticated coverage was incomplete: " + "; ".join(coverage_gaps)
             updated = self.state.mark_task(task, "partial_failure", summary)
@@ -4923,6 +5064,15 @@ class MultiAgentWorkflowController:
         self._queue_replacement_task(task, replacement, trigger)
         return True
 
+    def _record_controller_capture_completion(self, task: Task) -> None:
+        current = next(item for item in self.state.list_tasks() if item.task_uid == task.task_uid)
+        if current.status == "done":
+            self.state.patch_task(task.task_uid, recovery_context_updates={
+                "completion_review": {"mode": "capture_only",
+                                      "reason": "Controller criterion requires capture or synthesis",
+                                      "operation_id": self.runtime.operation_id},
+            })
+
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
         if self._replace_missing_procedure_methods(plan, phase, task):
             return
@@ -4933,8 +5083,10 @@ class MultiAgentWorkflowController:
         self._emit_task_started(task)
         self._log_workflow("running task=%s phase=%s", self._task_label(task), phase.id)
         if self._run_controller_inventory_synthesis(plan, phase, task):
+            self._record_controller_capture_completion(task)
             return
         if self._run_controller_web_baseline(plan, phase, task):
+            self._record_controller_capture_completion(task)
             return
         coverage = self._run_controller_web_authenticated_coverage(plan, phase, task)
         if coverage.status == "completed":
@@ -9657,6 +9809,19 @@ Return exactly one decision for each candidate.
             data["recovery_context"] = {
                 key: value for key, value in recovery_context.items() if key != "authentication_setup"
             }
+            recovery = data["recovery_context"]
+            for key in ("controller_comparison_capture", "controller_comparison_repair", "http_comparison_contract",
+                        "comparison_assessment", "validation_auth_context"):
+                recovery.pop(key, None)
+            matrix = recovery.get("authentication_matrix")
+            if isinstance(matrix, dict):
+                roles = matrix.get("defined_roles", {})
+                names = sorted(roles) if isinstance(roles, dict) else list(roles)
+                recovery["authentication_matrix"] = {"version": matrix.get("version"), "defined_roles": names}
+                if isinstance(roles, dict):
+                    recovery["authentication_matrix"]["candidate_account_counts"] = {
+                        role: sum(str(ref).startswith("credential:") for ref in refs) for role, refs in roles.items()
+                    }
         return data
 
     def _task_inventory_route_feedback(self, plan: OperationPlan, task: Task) -> list[str]:
@@ -9980,7 +10145,7 @@ Return JSON exactly: {response_schema}.
                     identity = self._authentication_comparison_identity(candidate)
                     if identity not in identities:
                         identities.add(identity)
-                        expanded.append(candidate)
+                        expanded.append(self._web_comparison_execution_metadata(plan, phase, candidate))
         return expanded
 
     def _reconcile_authentication_comparisons(self, plan: OperationPlan, phase: PlanPhase) -> None:
@@ -12709,6 +12874,13 @@ applicability or a finding, and published proof of concepts must not be executed
             if required:
                 raise ValueError("Comparison tasks require comparison_assessment")
             return None
+        if isinstance(value, dict):
+            for field in ("operation_evidence_refs", "comparison_evidence_refs"):
+                for reference in value.get(field, []):
+                    require_artifact_reference(reference)
+            support = value.get("operation_support", {})
+            for reference in support.get("evidence_refs", []) if isinstance(support, dict) else []:
+                require_artifact_reference(reference)
         assessment = ComparisonAssessmentOutput.model_validate(value)
         if not assessment.reason.strip():
             raise ValueError("comparison_assessment reason must be non-empty")
@@ -12720,6 +12892,20 @@ applicability or a finding, and published proof of concepts must not be executed
             if assessment.outcome == "supported" and not refs:
                 raise ValueError(f"Supported comparisons require {field_name}")
             setattr(assessment, field_name, list(dict.fromkeys(refs)))
+        support = assessment.operation_support
+        support.evidence_refs = list(dict.fromkeys(canonical_artifact_reference(ref) for ref in support.evidence_refs))
+        if not set(support.evidence_refs) <= allowed:
+            raise ValueError("operation_support contains unauthorized artifact evidence")
+        established = support.status == "established" and support.basis in {
+            "observed_intended_behavior", "established_access_policy",
+        }
+        if established and not support.evidence_refs:
+            raise ValueError("Established operation support requires artifact evidence")
+        if not established:
+            support.status = "unestablished"
+        if assessment.outcome == "supported" and not established:
+            assessment.outcome = "inconclusive"
+            assessment.reason = "Intended operation or access policy is unestablished: " + assessment.reason
         return assessment.model_dump()
 
     def _evaluate_task(
@@ -17256,6 +17442,23 @@ Shell command selection guidance:
 {self._shell_command_catalog()}
 """
 
+    def _task_authentication_review_context(self, task: Task) -> str:
+        requirement = task.recovery_context.get("authentication_requirement", {})
+        comparison = requirement.get("comparison", "none")
+        baselines = [candidate for candidate in self.state.list_tasks(phase=task.phase, status=["done"])
+                     if self._task_planning_workstream(candidate) == "unauthenticated_baseline"
+                     and candidate.target_ids == task.target_ids
+                     and candidate.acceptance.basis.snapshot_hash == task.acceptance.basis.snapshot_hash
+                     and set(candidate.acceptance.basis.item_ids) == set(task.acceptance.basis.item_ids)]
+        required = bool(requirement.get("roles")) or comparison != "none" or self._comparison_includes_anonymous(task)
+        facts = {"comparison": comparison, "roles": requirement.get("roles", []), "authentication_required": required,
+                 "accounts_per_role": 2 if comparison == "account" else int(required),
+                 "anonymous_comparison_required": self._comparison_includes_anonymous(task),
+                 "completed_baseline_task_uids": [candidate.task_uid for candidate in baselines]}
+        return ("## Task authentication requirements and current-operation prerequisites\n" + json.dumps(facts)
+                + "\nCompleted prerequisites may be reused. Phase-wide goals do not add identities or baseline "
+                  "work to the frozen task. Selected credential IDs are supplied after authentication setup.")
+
     def _task_prompt_critic_prompt(
         self,
         plan: OperationPlan,
@@ -17295,7 +17498,7 @@ Approve only when the draft:
 - does not delegate task creation, task execution, phase transitions, operation termination, or acceptance recording to
   child swarm agents;
 - selects memories, optional tools, and shell commands with a reasonable relationship to the task; and
-- follows the required task prompt schema.
+- keeps its scoped actions executable with the resolved capabilities.
 {("- preserves every requirement in the Hypothesis-Generation Guidance when present; and" if hypothesis_guidance else "")}
 {provisioning_critic_guidance}
 
@@ -17346,13 +17549,16 @@ is preferred.
 
 Return JSON exactly: {{"issues": [{{"category":"scope|objective|evidence|execution_policy|tool_availability",
 "message":string,"tool_names":[string]}}],"repairable":bool}}. Use an empty issues list to approve.
+Return at most five issues, each at most 500 characters.
 Tool availability issues must name the tools claimed unavailable. Python checks those claims against resolved tools.
 
 ## Plan
 {self._task_prompt_plan_context(plan, phase, task)}
 
-## Active phase
-{json.dumps(self._task_prompt_phase_context(phase), indent=2, sort_keys=True)}
+## Active phase (context only)
+{json.dumps({"id": phase.id, "title": phase.title})}
+
+{self._task_authentication_review_context(task)}
 
 ## Assigned task
 {json.dumps(self._pre_auth_task_prompt_data(task), indent=2, sort_keys=True)}
@@ -17362,24 +17568,19 @@ Tool availability issues must name the tools claimed unavailable. Python checks 
 
 {self._memory_selection_catalog(memory_records, task=task)}
 
-{self._task_tool_catalog(plan, task)}
-
 ## Actual task executor tools for this draft
 {self._tool_catalog("task_executor_tools", self._resolve_task_executor_base_tools(plan, task, prompt_spec))}
 Controller-supplied terminal tools: {", ".join(sorted(self._task_executor_terminal_tool_names(task)))}
 
-## Selected tool input schemas
-{json.dumps([{ "name": get_tool_name(tool), "inputSchema": (get_tool_spec(tool) or {}).get("inputSchema", {})}
-             for tool in self._resolve_task_executor_base_tools(plan, task, prompt_spec)], sort_keys=True)}
-
-## Candidate shell commands
-{self._shell_command_catalog()}
+## Selected shell capabilities
+{json.dumps(prompt_spec.get("shell_commands", []))}
+Python validates tool membership, input schemas, and shell availability. Review scope and suitability.
 
 ## Selected semantic memory context
 {self._selected_memory_context(prompt_spec.get("memory_ids", []), memory_records, task_uid=task.task_uid)}
 
 ## Proposed task prompt draft
-{json.dumps({key: value for key, value in prompt_spec.items() if key != "tools"}, indent=2, sort_keys=True)}
+{json.dumps({"prompt": prompt_spec["prompt"]}, indent=2, sort_keys=True)}
 """
 
     def _task_prompt_revision_prompt(
@@ -17796,14 +17997,20 @@ the task explicitly tests that difference.
         if not self._requires_comparison_assessment(phase, task):
             return ""
         return (', "comparison_assessment": {"outcome":"supported|inconclusive", '
-                '"operation_evidence_refs":[string], "comparison_evidence_refs":[string], "reason":string}')
+                '"operation_support":{"status":"established|unestablished", "basis":"observed_intended_behavior|'
+                'established_access_policy|availability_only|unestablished", "evidence_refs":["artifact:..."]}, '
+                '"operation_evidence_refs":["artifact:..."], "comparison_evidence_refs":["artifact:..."], '
+                '"reason":string}')
 
     def _comparison_assessment_prompt(self, phase: PlanPhase, task: Task) -> str:
         if not self._requires_comparison_assessment(phase, task):
             return ""
         return """## Required comparison assessment
-Return comparison_assessment with outcome supported|inconclusive, operation_evidence_refs,
-comparison_evidence_refs, and reason. Cite authorized current-task artifacts establishing suitable
+Return comparison_assessment with outcome supported|inconclusive, operation_support,
+operation_evidence_refs, comparison_evidence_refs, and reason. Operation_support requires status
+established|unestablished, basis observed_intended_behavior|established_access_policy|availability_only|
+unestablished, and artifact evidence_refs. Availability alone cannot establish the intended operation.
+Cite authorized current-task artifacts establishing suitable
 subject, method, and inputs, then the required identity comparison. Read response evidence when
 uncertain. Matching invalid-input or generic error responses and successful login alone do not
 establish access behavior. A supported denial or concealment result requires evidence that the

@@ -17,3 +17,12 @@ Controller captures may await semantic acceptance. Assess the retained request a
 requesting new execution. Pending acceptance alone is not an evidence gap. Refresh authentication only for a
 stale context or failed session validation; redirect restrictions, transport failures, and resource denials
 alone do not establish a session failure.
+
+SPA shell delivery establishes page accessibility only. Generic Not Found/error responses require evidence
+of a suitable operation or established denial/concealment policy before supporting an authorization comparison.
+An inferred HTTP method is a candidate, not observed application behavior.
+For observed interactions, inventory producers may preserve explicit expected response assertions under
+attributes.interaction.extensions.http_comparison: version=1, concrete url, method=GET|HEAD,
+comparison=none|account|role, prerequisite_evidence_refs, and assertions with identity, status,
+content_type, body_contains. Identity selectors are anonymous, account:1, account:2, or role:ROLE.
+Set operation_provenance=observed and cite current-operation suitability evidence; omit assertions when uncertain.

@@ -444,7 +444,8 @@ def inventory_manifest_contract_text() -> str:
         f"kind ({kinds}), and an optional attributes object; unassessed_gaps must be a list. "
         "The extraction summary is controller-owned and may be omitted by the producer. "
         "Put item metadata in attributes, not in a metadata field. Optional attributes.interaction is protocol-neutral "
-        "and may contain interface, operations, inputs, success_signals, failure_signals, and evidence_refs. Each input "
+        "and may contain interface, operations, inputs, success_signals, failure_signals, evidence_refs, "
+        "operation_provenance (observed|inferred), and extensions (an object of typed adapter metadata). Each input "
         "requires a name and may include location and type. Use HTTP operations and input locations only for HTTP "
         "items; filesystem, code-security, service, workflow, and other modules should use their native operations. "
         "Workflow maps, reports, "
@@ -7902,6 +7903,7 @@ def _deterministic_inventory_candidates() -> tuple[list[dict[str, Any]], int]:
                     attributes["interaction"] = {
                         "interface": "http",
                         "operations": operations,
+                        "operation_provenance": "observed",
                         "inputs": list({json.dumps(item, sort_keys=True): item for item in inputs}.values()),
                         "evidence_refs": [canonical_artifact_reference(path)],
                     }
@@ -8008,12 +8010,18 @@ def _normalize_inventory_interaction(item_id: str, attributes: dict[str, Any]) -
         "success_signals",
         "failure_signals",
         "evidence_refs",
+        "operation_provenance",
+        "extensions",
     }
     unknown = sorted(set(interaction) - allowed)
     if unknown:
         raise ValueError(
             f"inventory manifest item {item_id} attributes.interaction has unsupported fields: {', '.join(unknown)}"
         )
+    if "operation_provenance" in interaction and interaction["operation_provenance"] not in ("observed", "inferred"):
+        raise ValueError(f"inventory manifest item {item_id} operation_provenance must be observed|inferred")
+    if "extensions" in interaction and not isinstance(interaction["extensions"], dict):
+        raise ValueError(f"inventory manifest item {item_id} interaction.extensions must be an object")
     changed = False
     interface = interaction.get("interface")
     if interface is not None and not str(interface).strip():

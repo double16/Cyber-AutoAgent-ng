@@ -220,6 +220,7 @@ class AgentRuntimeResources:
     quarantined_shell_commands: set[str] = field(default_factory=set)
     structured_output_fallbacks: dict[str, str] = field(default_factory=dict)
     termination_policy: str = ""
+    provider_capture_directory: Path | None = None
 
 
 def _tool_names(tools: list[Any]) -> set[str]:
@@ -341,6 +342,7 @@ def create_agent_runtime_resources(
 
     # Ensure unified output directories (root + artifacts + tools) exist before any tools run
     paths: dict[str, str] = {}
+    provider_capture_directory = None
     try:
         paths = config_manager.ensure_operation_output_dirs(
             config.provider, target_name, operation_id, module=config.module
@@ -359,6 +361,7 @@ def create_agent_runtime_resources(
             tools_path = paths.get("tools")
             if isinstance(root_path, str) and root_path:
                 os.environ["CYBER_OPERATION_ROOT"] = root_path
+                provider_capture_directory = Path(root_path) / "diagnostics" / "provider_responses"
             if isinstance(artifacts_path, str) and artifacts_path:
                 os.environ["CYBER_ARTIFACTS_DIR"] = artifacts_path
             if isinstance(tools_path, str) and tools_path:
@@ -1103,6 +1106,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         trace_attributes=trace_attributes,
         prompt_token_limit=prompt_token_limit,
         termination_policy=module_termination_policy.strip(),
+        provider_capture_directory=provider_capture_directory,
     )
 
 
@@ -1129,6 +1133,11 @@ def create_agent(
     agent_logger.debug("Creating autonomous agent")
 
     model = create_strands_model(config.provider, config.model_id, agent_type or "task_executor")
+    from modules.config.models.ollama import OllamaModel
+
+    if isinstance(model, OllamaModel):
+        model.capture_directory = runtime.provider_capture_directory
+        model.capture_role = agent_type or "task_executor"
 
     trace_attributes = dict(runtime.trace_attributes)
     if agent_type:

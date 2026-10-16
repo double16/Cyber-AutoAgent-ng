@@ -46,6 +46,17 @@ def normalize_artifact_reference_token(value: Any) -> str:
 
 
 
+def require_artifact_reference(value: Any) -> str:
+    """Validate reference kind before file resolution so memories are not reported as missing files."""
+
+    reference = normalize_artifact_reference_token(value)
+    if not _REFERENCE_PREFIX_PATTERN.match(reference):
+        raise ValueError(
+            "Expected artifact: or artifact_id: evidence reference; memory and other kinds are unsupported"
+        )
+    return reference
+
+
 @dataclass(frozen=True)
 class ArtifactReferenceMatch:
     """A normalized reference and its original text span for safe replacement."""

@@ -9,6 +9,7 @@ import pytest
 from modules.agents import multi_agent_workflow as workflow
 from modules.agents.structured_outputs import WorkflowDecisionOutput
 from modules.tools.memory import AcceptanceResult, OperationTarget
+from tests.helpers.comparison import operation_support
 from tests.test_worker_flows import _use_sqlite_workflow_state
 from tests.test_worker_flows import worker_case as worker_case
 
@@ -45,7 +46,7 @@ def test_comparison_assessment_controls_completion_with_production_state(
     _use_sqlite_workflow_state(controller, store, monkeypatch)
     task = controller.state.list_tasks()[0]
     reason = "Suitable operation and compared identities are evidenced" if outcome == "supported" else body
-    assessment = {
+    assessment = {"operation_support": operation_support(outcome, [reference] if outcome == "supported" else []),
         "outcome": outcome, "operation_evidence_refs": [reference] if outcome == "supported" else [],
         "comparison_evidence_refs": [reference], "reason": reason,
     }
@@ -74,7 +75,8 @@ def test_comparison_assessment_controls_completion_with_production_state(
 ])
 def test_comparison_schema_and_scope_reject_unsupported_payload(change):
     reference = "artifact:artifacts/current-response.txt"
-    assessment = {"outcome": "supported", "operation_evidence_refs": [reference],
+    assessment = {
+        "operation_support": operation_support("supported", [reference]), "outcome": "supported", "operation_evidence_refs": [reference],
                   "comparison_evidence_refs": [reference], "reason": "Valid operation and access comparison"}
     if change == "invalid_outcome":
         assessment["outcome"] = "maybe"
@@ -139,7 +141,8 @@ def test_inconclusive_comparison_is_not_overridden_by_satisfied_receipts(worker_
     task = replace(task, recovery_context={"authentication_requirement": {"comparison": "account"}})
     monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: {
         "status": "partial_failure", "repair": {"kind": "execution", "execution_receipt_gaps": ["request"]},
-        "comparison_assessment": {"outcome": "inconclusive", "reason": "No appropriate subject was established"},
+        "comparison_assessment": {"outcome": "inconclusive", "reason": "No appropriate subject was established",
+                                  "operation_support": operation_support("inconclusive", [])},
     })
     reconciliations = []
     monkeypatch.setattr(controller, "_evaluator_reopens_resolved_execution_gate",
@@ -167,6 +170,7 @@ def test_comparison_schema_repair_accepts_corrected_assessment(worker_case, monk
         if len(calls) == 1:
             return '{"status":"done"}'
         return json.dumps({"status": "done", "comparison_assessment": {
+            "operation_support": operation_support("supported", [reference]),
             "outcome": "supported", "reason": "Operation and comparison demonstrated",
             "operation_evidence_refs": [reference], "comparison_evidence_refs": [reference, reference],
         }})
@@ -226,6 +230,7 @@ def test_inconclusive_comparison_runs_one_evidence_producing_repair(tmp_path, mo
         evaluations.append(True)
         supported = repair_resolves and len(evaluations) == 2
         return json.dumps({"status": "done", "comparison_assessment": {
+            "operation_support": operation_support("supported" if supported else "inconclusive", [reference] if supported else []),
             "outcome": "supported" if supported else "inconclusive",
             "operation_evidence_refs": [reference] if supported else [],
             "comparison_evidence_refs": [reference],
@@ -277,6 +282,7 @@ def test_comparison_schema_is_required_in_structured_transport_and_repair(worker
         if len(models) == 1:
             return {"status": "done"}
         return {"status": "done", "comparison_assessment": {
+            "operation_support": operation_support("supported", [reference]),
             "outcome": "supported", "reason": "Suitable request and comparison evidenced",
             "operation_evidence_refs": [reference], "comparison_evidence_refs": [reference],
         }}
@@ -285,3 +291,68 @@ def test_comparison_schema_is_required_in_structured_transport_and_repair(worker
     controller.text_runner = lambda *_args: pytest.fail("structured output is available")
     controller._evaluate_task(store.get_plan("OP_AUTH"), store.get_plan("OP_AUTH").phases[0], task)
     assert len(models) == 2
+
+
+@pytest.mark.parametrize("interface", ["http", "network", "filesystem"])
+@pytest.mark.parametrize("basis", ["availability_only", "unestablished"])
+def test_availability_cannot_satisfy_operation_support(worker_case, monkeypatch, tmp_path, interface, basis):
+    controller, task, store, _target, _observed = worker_case
+    path = tmp_path / f"{interface}-responses.txt"
+    path.write_text("Both requests completed but intended behavior is unestablished")
+    reference = f"artifact:{path}"
+    store.patch_task("OP_AUTH", task.task_uid, evidence_additions=[reference], recovery_context_updates={
+        "authentication_requirement": {"comparison": "account"},
+    })
+    _use_sqlite_workflow_state(controller, store, monkeypatch)
+    task = controller.state.list_tasks()[0]
+    controller.text_runner = lambda *_args: json.dumps({"status": "done", "comparison_assessment": {
+        "outcome": "supported", "reason": "Responses are identical",
+        "operation_support": {"status": "established", "basis": basis, "evidence_refs": [reference]},
+        "operation_evidence_refs": [reference], "comparison_evidence_refs": [reference],
+    }})
+    decision = controller._evaluate_task(store.get_plan("OP_AUTH"), store.get_plan("OP_AUTH").phases[0], task)
+    assert decision.status == "partial_failure" and decision.repair_kind == "execution"
+    saved = store.get_tasks("OP_AUTH")[0].recovery_context["comparison_assessment"]
+    assert saved["outcome"] == "inconclusive" and saved["operation_support"]["status"] == "unestablished"
+
+
+def test_operation_support_refs_are_required_and_scoped():
+    reference = "artifact:valid.txt"
+    data = {"comparison_assessment": {
+        "outcome": "supported", "reason": "Resource policy evidenced",
+        "operation_support": {"status": "established", "basis": "established_access_policy", "evidence_refs": []},
+        "operation_evidence_refs": [reference], "comparison_evidence_refs": [reference],
+    }}
+    # Use a normalization boundary stub to isolate semantic schema validation from file availability.
+    from unittest.mock import patch
+
+    with patch.object(workflow, "canonical_artifact_reference", side_effect=lambda ref: ref):
+        with pytest.raises(ValueError, match="requires artifact evidence"):
+            workflow.MultiAgentWorkflowController._comparison_assessment_from_data(data, required=True,
+                                                                                   allowed_refs=[reference])
+        data["comparison_assessment"]["operation_support"]["evidence_refs"] = ["artifact:other.txt"]
+        with pytest.raises(ValueError, match="unauthorized artifact"):
+            workflow.MultiAgentWorkflowController._comparison_assessment_from_data(data, required=True,
+                                                                                   allowed_refs=[reference])
+        data["comparison_assessment"]["operation_support"]["evidence_refs"] = [reference]
+        assert workflow.MultiAgentWorkflowController._comparison_assessment_from_data(
+            data, required=True, allowed_refs=[reference],
+        )["outcome"] == "supported"
+
+
+def test_comparison_artifact_schema_normalizes_supported_presentation_and_explains_kinds():
+    from modules.agents.structured_outputs import ComparisonAssessmentOutput
+
+    assessment = {
+        "outcome": "supported", "reason": "Observed policy",
+        "operation_support": {"status": "established", "basis": "established_access_policy",
+                              "evidence_refs": ["Artifact: proof.txt"]},
+        "operation_evidence_refs": ["`artifact: proof.txt`"], "comparison_evidence_refs": ["artifact_id: response"],
+    }
+    parsed = ComparisonAssessmentOutput.model_validate(assessment)
+    assert parsed.operation_evidence_refs == ["artifact:proof.txt"]
+    assert parsed.operation_support.evidence_refs == ["artifact:proof.txt"]
+    assert parsed.comparison_evidence_refs == ["artifact_id:response"]
+    assessment["comparison_evidence_refs"] = ["memory:observation"]
+    with pytest.raises(ValueError, match="memory and other kinds are unsupported"):
+        ComparisonAssessmentOutput.model_validate(assessment)

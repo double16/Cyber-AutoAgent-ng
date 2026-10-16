@@ -74,3 +74,4 @@ planning:
       controller_mapping_workstreams:
         - unauthenticated_baseline
         - authenticated_credential_coverage
+        - authorization_comparison
