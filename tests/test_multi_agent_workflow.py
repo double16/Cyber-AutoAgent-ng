@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from strands.types.exceptions import MaxTokensReachedException
+from strands.types.exceptions import ContextWindowOverflowException, MaxTokensReachedException
 
 from modules.agents import multi_agent_workflow as workflow_mod
 from modules.agents.cyber_autoagent import build_role_tools
@@ -7028,7 +7028,7 @@ def test_scope_only_prompt_repairs_preserve_crawl_selections(monkeypatch, iterat
     assert spec["memory_ids"] == ["memory-1"]
     assert spec["prompt"] == "Crawl http://target.test:3001"
     critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, spec)
-    assert "additional capabilities alone do not make it" in critic
+    assert "Judge scoped capabilities, not a tool's unrelated features" in critic
 
 
 @pytest.mark.parametrize("prompt", [
@@ -16987,7 +16987,8 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
         ),
         (
             controller._task_prompt_builder_prompt(plan, phase, task),
-            [("## Phase", phase_json), ("## Task", task_json)],
+            [("## Active phase (context only)", json.dumps({"id": phase.id, "title": phase.title})),
+             ("## Task", task_json)],
         ),
         (
             controller._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
@@ -16996,7 +16997,8 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
         ),
         (
             controller._task_prompt_revision_prompt(plan, phase, task, prompt_spec, ["Add evidence"]),
-            [("## Active phase", phase_json), ("## Assigned task", task_json)],
+            [("## Active phase (context only)", json.dumps({"id": phase.id, "title": phase.title})),
+             ("## Assigned task", task_json)],
         ),
         (
             controller._task_creator_prompt(plan, phase),
@@ -17031,8 +17033,8 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
     assert '"current_phase": 1' in builder_prompt
     assert "## Existing Tasks Across All Phases\ntask_phase_status_counts[1]" in creator_prompt
     assert "task_creation_relevant_tasks[1]" in creator_prompt
-    assert "## Canonical task acceptance ledger\n[" in phase_evaluator_prompt
-    assert '"manifest_hash"' in phase_evaluator_prompt
+    assert '## Canonical task acceptance ledger\n{"acceptance_status_counts"' in phase_evaluator_prompt
+    assert "criteria[1]{task_uid,task_status,criterion_id" in phase_evaluator_prompt
 
 
 def test_phase_evaluator_uses_accepted_artifact_instead_of_predicted_task_evidence(
@@ -17084,7 +17086,8 @@ def test_phase_evaluator_uses_accepted_artifact_instead_of_predicted_task_eviden
 
     assert decision.status == "done"
     assert "artifact:artifacts/accepted.json" in captured["prompt"]
-    assert str(accepted_artifact) in captured["prompt"]
+    assert str(accepted_artifact) not in captured["prompt"]
+    assert "read_path" not in captured["prompt"]
     assert "artifact:artifacts/predicted.json" not in captured["prompt"]
 
 
@@ -17136,8 +17139,8 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "Never return core-tool names in `tools`" in prompt
     assert "Overlapping capabilities are allowed" in prompt
     assert "capability required by the task that supplied native tools do not provide" not in prompt
-    assert "mandatory execution guardrail" in prompt
-    assert '"constraints": [' in prompt
+    assert "## Controller-Appended Operation Constraints" in prompt
+    assert '"constraints": [' not in controller._task_prompt_plan_context(_plan(), _plan().phases[0], task)
     assert 'curl -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" <url>' in prompt
     assert "curl -sS -D - -o /dev/null <url>" in prompt
     assert "Do not rely on bare `curl -s <url>` as evidence" in prompt
@@ -17618,9 +17621,9 @@ def test_task_prompt_critic_has_tool_agnostic_mapping_validation_boundary():
     )
 
     assert "observable candidate security surfaces" in prompt
-    assert "must not treat those observations as findings" in prompt
-    assert "changed HTTP methods" in prompt
-    assert "injected headers" in prompt
+    assert "do not treat those observations as findings" in prompt
+    assert "Do not test controls unless the assigned task explicitly authorizes testing or validation" in prompt
+    assert "changed HTTP methods" not in prompt
     assert "auth_chain_analyzer" not in prompt.split("## Proposed task prompt draft", maxsplit=1)[0]
 
 
@@ -18465,11 +18468,11 @@ def test_task_prompts_reject_host_wide_scans_for_explicit_url_service_targets():
     assert "explicit `scheme://host:port` URL" in normalized
     assert "preserve that exact scheme, host, and port boundary" in normalized
     assert "host-only" in normalized
-    assert "all open ports" in normalized
+    assert "host-wide enumeration" in normalized
     assert "omitted-port" in normalized
     assert "`-p-`" in normalized
     assert "`1-65535`" in normalized
-    assert "scheme-appropriate service tooling" in normalized
+    assert "scheme or exact host:port service" in normalized
     assert "separate executable host or network target authorizes that scope" in normalized
 
 
@@ -18507,7 +18510,7 @@ def test_task_prompt_critic_permits_http_request_and_curl_overlap(monkeypatch):
     assert "http_request" in prompt
     assert "curl" in prompt
     assert "Tool overlap is permitted" in prompt
-    assert "Python has validated tool membership" in prompt
+    assert "Python validates membership and schemas" in prompt
     assert "relevant and available" not in prompt
 
 
@@ -22285,7 +22288,7 @@ def test_source_acquisition_guidance_is_protocol_neutral(worker_flow_case):
         assert "Derive transformed inputs from the complete saved source" in prompt
     assert "Incomplete processing requires a coverage gap" in critic
     assert "zero extracted items or failed optional formatting alone do not establish failure" in critic
-    assert "alter, evade, validate, or compare authorization controls" in critic
+    assert "Do not test controls unless the assigned task explicitly authorizes testing or validation" in critic
 
 
 @pytest.mark.parametrize("context", [
@@ -22583,3 +22586,266 @@ def test_authorized_refresh_reuses_context_with_sufficient_lifetime(monkeypatch)
     assert controller._refresh_authenticated_context_for_task(plan, task, "first") == {
         "credential_id": "first", "status": "ready", "reason": "reused",
     }
+
+
+@pytest.mark.parametrize("target,target_type", [
+    ("https://target.test:8443", "network"),
+    ("tcp://target.test:9000", "network"),
+    ("/workspace/source", "filesystem"),
+])
+@pytest.mark.parametrize("comparison,roles,matrix,workstream,accounts,anonymous,baseline", [
+    ("account", ["member 🔑"], False, "authorization_comparison", 2, False, False),
+    ("role", ["member", "admin"], False, "authorization_comparison", 1, False, False),
+    ("tenant", ["member"], False, "authorization_comparison", 1, False, False),
+    ("none", ["member"], True, "authenticated_credential_coverage", 1, True, False),
+    ("none", ["member"], False, "authenticated_credential_coverage", 1, False, False),
+    ("none", [], False, "unauthenticated_baseline", 0, False, True),
+    ("none", [], False, "source_analysis", 0, False, False),
+])
+def test_prompt_roles_share_frozen_requirements_without_phase_expansion(
+    target, target_type, comparison, roles, matrix, workstream, accounts, anonymous, baseline,
+):
+    plan = replace(_plan(), constraints=["Unique target execution boundary"], targets=[
+        OperationTarget("target-1", target, target_type),
+    ])
+    phase = replace(plan.phases[0], criteria="Phase-wide requirement must not become task work")
+    state = FakeState(plan)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+    )
+    task = Task("assigned", "Assigned", "Perform assigned work", phase=phase.id, status="active",
+                target_scope="subset", target_ids=["target-1"], acceptance=_artifact_acceptance("result"),
+                recovery_context={"authentication_requirement": {"comparison": comparison, "roles": roles},
+                                  "authentication_matrix": matrix,
+                                  "phase_task_contract": {"workstream": workstream}})
+    completed = replace(task, task_uid="completed-baseline", status="done", recovery_context={
+        "phase_task_contract": {"workstream": "unauthenticated_baseline"},
+    })
+    state.store_task(completed)
+    state.store_task(replace(completed, task_uid="wrong-target", target_ids=["other-target"]))
+    state.store_task(replace(completed, task_uid="pending-baseline", status="pending"))
+    state.store_task(replace(completed, task_uid="other-snapshot", acceptance=replace(
+        completed.acceptance, basis=replace(completed.acceptance.basis, snapshot_hash="other-snapshot"),
+        manifest_hash="",
+    )))
+    shared = controller._task_prompt_requirements_context(task)
+    facts = json.loads(shared.splitlines()[1])
+    assert facts["accounts_per_role"] == accounts
+    assert facts["anonymous_comparison_required"] is anonymous
+    assert facts["baseline_task"] is baseline
+    assert facts["completed_baseline_task_uids"] == ["completed-baseline"]
+    assert facts["roles"] == roles
+    spec = {"prompt": "Perform assigned work", "tools": []}
+    prompts = [
+        controller._task_prompt_builder_prompt(plan, phase, task),
+        controller._task_prompt_critic_prompt(plan, phase, task, spec),
+        controller._task_prompt_revision_prompt(plan, phase, task, spec, ["Clarify inputs"]),
+    ]
+    for prompt in prompts:
+        assert prompt.count(shared) == 1
+        assert prompt.count("Unique target execution boundary") == 1
+        assert prompt.count("## Task Policy (Controller-owned)") == 1
+        assert "Phase-wide requirement must not become task work" not in prompt
+    fallback = controller._deterministic_task_prompt_spec(plan, phase, task, RuntimeError("failed"))["prompt"]
+    assert fallback.count(shared) == 1
+    assert "Phase-wide requirement must not become task work" not in fallback
+    assert "swarm` only when" not in prompts[1]
+    assert "not stylistic preferences or optional refinements" in prompts[1]
+    assert "do not reopen resolved checks" in prompts[1]
+
+
+@pytest.mark.parametrize("module", ["web", "web_recon"])
+def test_web_task_policy_keeps_baseline_and_mapping_work_task_local(module):
+    runtime = _runtime()
+    runtime.config.module = module
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+    )
+    task = Task("mapping", "Map", "Map assigned surface", phase=1, status="active")
+    policy = controller._task_policy_guidance(task)
+    assert "do not add anonymous requests to account, role, or tenant comparisons" in policy
+    assert "changed HTTP methods" in policy
+    assert "injected headers" in policy
+    assert "unless the assigned task authorizes that testing" in policy
+
+
+@pytest.mark.parametrize("target,target_type", [
+    ("https://target.test:8443", "network"), ("tcp://target.test:9000", "network"),
+    ("/workspace/source", "filesystem"),
+])
+def test_large_phase_ledger_preserves_all_criteria_and_stored_evidence(monkeypatch, target, target_type):
+    import csv
+
+    plan = replace(_plan(), targets=[OperationTarget("target-1", target, target_type)])
+    tasks = [Task(f"task-{i}", "Repeated long title " * 50, "Assigned work", phase=1, status="done",
+                  acceptance=_artifact_acceptance(f"criterion-{i}"), status_reason="Long narrative " * 2000)
+             for i in range(129)]
+    state = FakeState(plan, tasks=tasks)
+    for i, task in enumerate(tasks):
+        state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=f"criterion-{i}", status="satisfied", disposition="observation",
+            summary="Recorded result " * 2000,
+            evidence_refs=[f"artifact:artifacts/{i},a.txt", f"artifact:artifacts/{i}-b.txt",
+                           f"artifact:artifacts/{i}-c.txt"],
+        )]
+    before = [result.to_dict() for results in state.acceptance_results.values() for result in results]
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=state)
+    ledger = controller._phase_acceptance_ledger(1)
+    counts = json.loads(ledger.splitlines()[0])
+    assert counts["task_count"] == counts["criterion_count"] == 129
+    assert counts["acceptance_status_counts"] == {"satisfied": 129}
+    rows = list(csv.reader(ledger.splitlines()[2:], escapechar="\\", skipinitialspace=True))
+    assert {row[0] for row in rows} == {task.task_uid for task in tasks}
+    assert {row[2] for row in rows} == {f"criterion-{i}" for i in range(129)}
+    for i, row in enumerate(rows):
+        assert len(row[6]) == 600 and row[7] == "true"
+        assert json.loads(row[8]) == [f"artifact:artifacts/{i},a.txt", f"artifact:artifacts/{i}-b.txt"]
+        assert row[9] == "1"
+    assert [result.to_dict() for results in state.acceptance_results.values() for result in results] == before
+    prompt = controller._phase_evaluator_prompt(plan, plan.phases[0])
+    fitted = controller._fit_task_prompt_input("phase_evaluator", prompt, "system", [])
+    assert ledger in fitted
+    assert "## Task history" not in prompt
+    assert "Long narrative" not in prompt
+    assert "Artifact availability alone does not establish" in prompt
+
+
+@pytest.mark.parametrize("entrypoint", ["normal", "creation_stalled", "hard_cap"])
+@pytest.mark.parametrize("failure", ["input", "provider"])
+@pytest.mark.parametrize("task_status,expected", [
+    ("done", "done"), ("pending", "continue"), ("blocked", "blocked"), ("partial_failure", "partial_failure"),
+])
+def test_phase_capacity_failure_uses_guarded_durable_fallback(
+    monkeypatch, entrypoint, failure, task_status, expected,
+):
+    plan = _plan()
+    task = Task("phase-task", "Assigned", "Assigned work", phase=1, status=task_status,
+                acceptance=_artifact_acceptance())
+    state = FakeState(plan, tasks=[task])
+    calls = []
+
+    def runner(*args):
+        calls.append(args[0])
+        raise ContextWindowOverflowException("Provider input exceeds capacity")
+
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=state, text_runner=runner)
+    if failure == "input":
+        monkeypatch.setattr(controller, "_artifact_context_window_tokens", lambda: 1)
+    if entrypoint == "creation_stalled":
+        creation = workflow_mod.TaskCreationOutcome(created_count=0, attempts=1, failure_reason="No new work")
+        decision = controller._evaluate_phase_after_task_creation_failure(plan, plan.phases[0], creation)
+    else:
+        decision = controller._evaluate_phase_with_policy(
+            plan, plan.phases[0], hard_cap=100 if entrypoint == "hard_cap" else None,
+        )
+    if entrypoint == "hard_cap" and task_status == "pending":
+        expected = "partial_failure"
+    assert decision.status == expected
+    assert len(calls) == (1 if failure == "provider" else 0)
+    assert task.status == task_status
+    assert state.acceptance_results == {}
+    event = next(e for e in controller.runtime.callback_handler.events if e["type"] == "evaluator_fallback")
+    assert event["failure_kind"] == ("input_capacity" if failure == "input" else "context_overflow")
+    assert "deterministic durable-state" in decision.reason
+
+
+def test_phase_fitter_keeps_required_ledger_and_drops_optional_memories(monkeypatch):
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(_plan()))
+    required = "## Canonical task acceptance ledger\ncriteria[1]{task_uid,status}:\n  task,unrecorded\n"
+    prompt = required + "## Eligible Semantic Memories\n" + "advisory memory " * 20000
+    fitted = controller._fit_task_prompt_input("phase_evaluator", prompt, "system", [])
+    assert required in fitted
+    assert "advisory memory" not in fitted
+    event = next(e for e in controller.runtime.callback_handler.events if e["type"] == "task_prompt_input_budget")
+    assert event["role"] == "phase_evaluator"
+    assert event["reductions"] == ["Eligible Semantic Memories"]
+    assert event["estimated_tokens_after"] <= event["input_limit"]
+
+
+def test_phase_retry_growth_is_fitted_before_another_provider_call(monkeypatch):
+    state = FakeState(_plan())
+    calls = []
+
+    def runner(*args):
+        calls.append(args[0])
+        return "invalid JSON"
+
+    controller = MultiAgentWorkflowController(runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 1}),
+                                             budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+                                             text_runner=runner)
+    monkeypatch.setattr(controller, "_json_retry_prompt", lambda *_args, **_kwargs: "required retry " * 200000)
+    decision = controller._evaluate_phase(_plan(), _plan().phases[0])
+    assert decision.status == "partial_failure"
+    assert calls == ["phase_evaluator"]
+    event = next(e for e in controller.runtime.callback_handler.events if e["type"] == "evaluator_fallback")
+    assert event["failure_kind"] == "input_capacity"
+
+
+def test_phase_capacity_fallback_retains_earlier_phase_terminal_guard():
+    plan = replace(_plan(), total_phases=2, current_phase=2, phases=[PlanPhase(1, "Prior", "done"), PlanPhase(2, "Current", "active")])
+    tasks = [Task("prior", "Prior", "Prior work", phase=1, status="pending"),
+             Task("current", "Current", "Current work", phase=2, status="done")]
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(plan, tasks=tasks))
+    decision = controller._phase_evaluator_fallback(plan.phases[1], ContextWindowOverflowException("overflow"))
+    assert decision.status == "partial_failure"
+    assert "overridden" in decision.reason
+
+
+def test_phase_ledger_keeps_unresolved_criteria_and_coverage_without_mutation():
+    import csv
+
+    plan = _plan()
+    acceptance = _artifact_acceptance("recorded")
+    acceptance = replace(acceptance, criteria=(*acceptance.criteria, replace(
+        acceptance.criteria[0], id="unrecorded", description="Unresolved required work",
+    )), manifest_hash="")
+    task = Task("assigned", "Assigned", "Assigned work", phase=1, status="partial_failure", acceptance=acceptance)
+    result = AcceptanceResult("recorded", "inaccessible", "observation", "Missing operation proof",
+                              ("artifact:artifacts/one.txt",), coverage=(
+                                  CoverageResult("item-1", "satisfied", ("artifact:artifacts/one.txt",)),
+                                  CoverageResult("item-2", "inaccessible", ("artifact:artifacts/two.txt",)),
+                                  CoverageResult("item-3", "assessed_negative", ("artifact:artifacts/three.txt",)),
+                              ))
+    state = FakeState(plan, tasks=[task])
+    state.acceptance_results[task.task_uid] = [result]
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=state)
+    ledger = controller._phase_acceptance_ledger(1)
+    counts = json.loads(ledger.splitlines()[0])
+    assert counts["acceptance_status_counts"] == {"inaccessible": 1, "unrecorded": 1}
+    rows = list(csv.reader(ledger.splitlines()[2:], escapechar="\\", skipinitialspace=True))
+    assert rows[0][4] == "inaccessible" and rows[1][4] == "unrecorded"
+    assert rows[0][7] == "false" and rows[0][9] == "1"
+    assert json.loads(rows[0][10]) == {"satisfied": 1, "inaccessible": 1, "assessed_negative": 1}
+    assert state.acceptance_results[task.task_uid] == [result]
+
+
+def test_phase_capacity_fallback_reconciles_successful_replacement(monkeypatch):
+    plan = _plan()
+    original = Task("original", "Original", "Assigned work", phase=1, status="partial_failure",
+                    acceptance=_artifact_acceptance("criterion"))
+    replacement = replace(original, task_uid="replacement", status="done", replacement_of="original",
+                          supersedes_criteria=["criterion"])
+    state = FakeState(plan, tasks=[original, replacement])
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=state,
+                                             text_runner=lambda *_args: pytest.fail("input must be rejected locally"))
+    monkeypatch.setattr(controller, "_artifact_context_window_tokens", lambda: 1)
+    decision = controller._evaluate_phase(plan, plan.phases[0])
+    assert decision.status == "done"
+    assert next(task for task in state.tasks if task.task_uid == "original").status == "superseded"
+
+
+def test_phase_evaluation_preserves_unrelated_provider_errors():
+    def runner(*_args):
+        raise RuntimeError("backend unavailable")
+
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(_plan()), text_runner=runner)
+    with pytest.raises(RuntimeError, match="backend unavailable"):
+        controller._evaluate_phase(_plan(), _plan().phases[0])
+    assert not any(e["type"] == "evaluator_fallback" for e in controller.runtime.callback_handler.events)

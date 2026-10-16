@@ -26,3 +26,8 @@ attributes.interaction.extensions.http_comparison: version=1, concrete url, meth
 comparison=none|account|role, prerequisite_evidence_refs, and assertions with identity, status,
 content_type, body_contains. Identity selectors are anonymous, account:1, account:2, or role:ROLE.
 Set operation_provenance=observed and cite current-operation suitability evidence; omit assertions when uncertain.
+
+The frozen task defines required identities and comparison sides. Reuse completed current-operation baseline
+prerequisites; do not add anonymous requests to account, role, or tenant comparisons unless separately assigned.
+Mapping and reconnaissance may preserve candidate surfaces, but must not test controls through changed HTTP methods,
+injected headers, credentials, tokens, cookies, or session state unless the assigned task authorizes that testing.

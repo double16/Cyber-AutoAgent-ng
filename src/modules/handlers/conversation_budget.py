@@ -2189,6 +2189,16 @@ def _dedupe_state_markers(agent: Agent) -> None:
     agent.messages[:] = new_messages
 
 
+def _raise_if_prompt_overflow(tokens: int | None, input_limit: int) -> None:
+    """Stop an unreduced oversized request instead of submitting it to the provider."""
+
+    if tokens is not None and tokens > input_limit:
+        raise ContextWindowOverflowException(
+            f"Prompt input estimates {tokens} tokens; available input is {input_limit} tokens. "
+            "Context reduction could not fit the required input."
+        )
+
+
 def _ensure_prompt_within_budget(agent: Agent) -> None:
     logger.info("BUDGET CHECK: Called for agent=%s", getattr(agent, "name", "unknown"))
     _strip_reasoning_content(agent)
@@ -2331,6 +2341,7 @@ def _ensure_prompt_within_budget(agent: Agent) -> None:
                 current_tokens,
                 threshold,
             )
+            _raise_if_prompt_overflow(current_tokens, limit_for_threshold)
             return
         logger.debug(
             "Using shared conversation manager for agent=%s (swarm agent)",
@@ -2383,6 +2394,7 @@ def _ensure_prompt_within_budget(agent: Agent) -> None:
             except Exception as e:
                 logger.debug("Failed to delete _prompt_budget_escalations: %s", e)
                 agent._prompt_budget_escalations = 0
+        _raise_if_prompt_overflow(safe_estimate_tokens(agent), limit_for_threshold)
         return
 
     # Escalate if still near/over threshold; perform up to 2 additional aggressive passes
@@ -2468,6 +2480,8 @@ def _ensure_prompt_within_budget(agent: Agent) -> None:
                 after_tokens if after_tokens is not None else "unknown",
                 limit_for_threshold,
             )
+
+    _raise_if_prompt_overflow(after_tokens, limit_for_threshold)
 
 
 class PromptBudgetHook(HookProvider):

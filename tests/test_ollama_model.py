@@ -413,3 +413,51 @@ async def test_structured_output_preserves_non_overflow_response_error(monkeypat
     with pytest.raises(mod.ollama.ResponseError, match="model is unavailable"):
         async for _chunk in _model().structured_output(Output, [{"role": "user", "content": [{"text": "go"}]}]):
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["stream", "complete", "structured"])
+@pytest.mark.parametrize("message,overflow", [
+    ("input length (172235 tokens) exceeds the model's maximum context length (131072 tokens)", True),
+    ("Input length (172,235 tokens) exceeds the model’s maximum context length (131,072 tokens)", True),
+    ("The input length exceeds the context length", True),
+    ("model is unavailable", False),
+    ("context configuration could not be loaded", False),
+])
+async def test_ollama_capacity_errors_are_consistent_across_response_modes(monkeypatch, mode, message, overflow):
+    class Output(BaseModel):
+        answer: int
+
+    client = type("Client", (), {"chat": AsyncMock(side_effect=mod.ollama.ResponseError(message, status_code=400)),
+                                 "aclose": AsyncMock()})()
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda *_args, **_kwargs: client)
+    model = _non_streaming_model()
+    if mode == "stream":
+        model.update_config(stream=True)
+    messages = [{"role": "user", "content": [{"text": "review"}]}]
+    generator = model.structured_output(Output, messages) if mode == "structured" else model.stream(messages)
+    with pytest.raises(ContextWindowOverflowException if overflow else mod.ollama.ResponseError):
+        async for _event in generator:
+            pass
+    assert client.chat.await_count == 1
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overflow", [True, False])
+async def test_ollama_normalizes_errors_during_stream_iteration(monkeypatch, overflow):
+    message = ("input length (99 tokens) exceeds the model's maximum context length (50 tokens)"
+               if overflow else "model is unavailable")
+
+    async def responses():
+        raise mod.ollama.ResponseError(message, status_code=400)
+        yield  # pragma: no cover
+
+    response = responses()
+    client = type("Client", (), {"chat": AsyncMock(return_value=response), "aclose": AsyncMock()})()
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda *_args, **_kwargs: client)
+    with pytest.raises(ContextWindowOverflowException if overflow else mod.ollama.ResponseError):
+        async for _event in _model().stream([{"role": "user", "content": [{"text": "review"}]}]):
+            pass
+    assert client.chat.await_count == 1
+    client.aclose.assert_awaited_once()

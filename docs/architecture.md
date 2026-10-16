@@ -1005,3 +1005,40 @@ correlation, finish reason, usage, truncation status, and a redacted excerpt of 
 Full native response data stays on the local filesystem. Capture is automatic for operation-bound
 Ollama agents; standalone models and other providers do not capture responses. No configuration or
 schema migration is required. Restart the running application to enable capture for subsequent calls.
+
+### Task prompt instruction ownership
+
+The frozen task and acceptance contract define required actions. Prompt builders, critics, revisions, and
+fallback prompts share controller-rendered authentication requirements and current-operation prerequisites.
+Completed prerequisites may be reused; phase-wide sequencing does not add anonymous requests to account,
+role, or tenant comparisons. Planning retains responsibility for operation-wide coverage.
+
+Builders produce task-specific steps, inputs, evidence, and unresolved prerequisites. Python appends scope,
+module policy, credential rules, and terminal acceptance instructions. Critics check concrete contradictions
+and missing task actions; omission of controller-appended rules is not a defect. Policies and operation
+constraints appear once per construction prompt, and phase descriptions are context rather than new work.
+
+This separation applies to HTTP, network, and source/filesystem tasks. Protocol-specific execution rules
+remain in module policies and typed capabilities. Critic JSON, cycle limits, and model settings are unchanged.
+
+### Phase evaluation input capacity
+
+Phase evaluation receives one compact TOON ledger containing every effective task and criterion, task and
+acceptance status counts, recorded dispositions, summary excerpts, and evidence references. Summaries are
+limited to 600 characters and references to two distinct references per result, including coverage evidence.
+Excerpts and omitted-reference counts are explicit. Complete acceptance records remain unchanged in SQLite;
+read paths, availability objects, and duplicate task history are excluded from the evaluation prompt.
+
+The shared input fitter accounts for system instructions, output schemas, tools, and reserved output tokens
+before each phase evaluation attempt, including retries and task-creation-stall evaluation. Advisory semantic
+memories may be omitted. Required phase criteria, constraints, and ledger rows are never dropped to fit.
+
+If required input cannot fit, or the provider rejects an underestimated request for context overflow, Python
+uses the existing durable-state classification and terminal guards. The fallback event distinguishes input
+capacity, provider context overflow, and evaluator output failures. This classification does not create fresh
+semantic proof or modify acceptance records. A larger model context window is not required for recovery.
+
+Conversation reduction is bounded. If input remains above the configured allowance after reduction, or no
+reduction manager is available, the budget hook raises a context-overflow exception before submission.
+Near-capacity requests that still fit remain allowed. Recognized Ollama capacity errors are normalized across
+complete, streaming, and native structured responses; unrelated provider errors retain their original behavior.

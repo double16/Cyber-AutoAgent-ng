@@ -6,6 +6,7 @@
 import inspect
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -371,6 +372,17 @@ class OllamaModel(Model):
         )
         return True, fallback_value
 
+    @classmethod
+    def _raise_context_overflow(cls, error: ollama.ResponseError) -> None:
+        """Normalize recognized provider input-capacity failures for every response path."""
+
+        message = str(error).lower()
+        if any(marker in message for marker in cls.OVERFLOW_MESSAGES) or re.search(
+            r"input length\s*\([\d,]+\s+tokens?\)\s+exceeds the model.s maximum context length",
+            message,
+        ):
+            raise ContextWindowOverflowException(str(error)) from error
+
     async def _chat_with_fallback(self, client: ollama.AsyncClient, request: dict[str, Any],
                                   capture: ProviderResponseCapture | None = None) -> Any:
         """Execute chat request with progressive parameter stripping upon provider errors."""
@@ -397,6 +409,8 @@ class OllamaModel(Model):
                     )
                 return response
             except Exception as exc:
+                if isinstance(exc, ollama.ResponseError):
+                    self._raise_context_overflow(exc)
                 if isinstance(exc, RecursionError):
                     logger.error(
                         "Ollama request failed for %s with RecursionError; no parameter fallback will be attempted",
@@ -535,6 +549,9 @@ class OllamaModel(Model):
 
             success = True
             logger.debug("finished streaming response from model")
+        except ollama.ResponseError as error:
+            self._raise_context_overflow(error)
+            raise
         finally:
             capture.finish(success)
             try:
@@ -566,12 +583,7 @@ class OllamaModel(Model):
         capture = ProviderResponseCapture(self.capture_directory, self.capture_role, self.config["model_id"])
         success = False
         try:
-            try:
-                response = await self._chat_with_fallback(client, formatted_request, capture)
-            except ollama.ResponseError as error:
-                if any(message in str(error).lower() for message in self.OVERFLOW_MESSAGES):
-                    raise ContextWindowOverflowException(str(error)) from error
-                raise
+            response = await self._chat_with_fallback(client, formatted_request, capture)
 
             try:
                 capture.response(response)

@@ -21,15 +21,15 @@ within the applicable operational phases; do not create a separate consolidation
   technology, major user journeys, and interesting endpoints with parameter names and access requirements.
 - Prefer safe comparisons such as unauthenticated versus authenticated responses, role or tenant denial behavior,
   validation differences, policy consistency across versions or content types, and non-destructive workflow navigation.
-- Establish an unauthenticated baseline before checking out any target-scoped credential-store entry. Use supplied
-  credentials only through checked-out, task-bound authentication contexts and record missing roles, accounts, MFA,
-  or eligible credentials as coverage gaps.
+- Reuse completed current-operation baseline prerequisites; capture a new baseline only when assigned. Use supplied
+  credentials through controller-validated task-bound authentication contexts and record missing roles, accounts,
+  MFA, or eligible credentials as coverage gaps.
 - Do not guess credentials or automatically self-register in this read-only module. When supplied test credentials are
   unavailable, map the unauthenticated behavior and record authenticated coverage as a gap rather than attempting
-  common, inferred, or generated credentials. When two existing eligible account, role, or tenant credentials are
-  available, perform a credential-ID-backed, read-only IDOR comparison only against a mapped endpoint and planned
-  comparison pair. Use GET requests only, preserve the minimum response evidence needed to prove or reject an access
-  boundary, and do not enumerate identifiers or retrieve unrelated records.
+  common, inferred, or generated credentials. Perform a credential-ID-backed, read-only comparison only when the
+  assigned task requires it, against its mapped endpoint and controller-selected comparison pair. Use GET requests
+  only, preserve the minimum response evidence needed to prove or reject an access boundary, and do not enumerate
+  identifiers or retrieve unrelated records.
 - Do not turn a verification signal into exploitation. Bound the affected scope and capture any deeper test as follow-up
   work for an appropriately authorized module.
 - Treat public client keys, permissive headers, version disclosure, reflection, listings, and errors as observations

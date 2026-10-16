@@ -142,7 +142,7 @@ DEFAULT_AGENT_PROFILES: dict[LLMRoleType, AgentModelSettings] = {
     ),
     LLMRoleType.PLAN_CRITIC: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.MEDIUM,
+        reasoning_level=ReasoningLevel.LOW,
         max_tokens=4096,
     ),
     LLMRoleType.TASK_CREATOR: AgentModelSettings(
@@ -157,17 +157,17 @@ DEFAULT_AGENT_PROFILES: dict[LLMRoleType, AgentModelSettings] = {
     ),
     LLMRoleType.TASK_PROMPT_CRITIC: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.MEDIUM,
+        reasoning_level=ReasoningLevel.LOW,
         max_tokens=4096,
     ),
     LLMRoleType.AUTHENTICATION_FLOW_CRITIC: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.MEDIUM,
+        reasoning_level=ReasoningLevel.LOW,
         max_tokens=4096,
     ),
     LLMRoleType.REGISTRATION_FLOW_CRITIC: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.MEDIUM,
+        reasoning_level=ReasoningLevel.LOW,
         max_tokens=4096,
     ),
     LLMRoleType.TASK_EXECUTOR: AgentModelSettings(
@@ -177,17 +177,17 @@ DEFAULT_AGENT_PROFILES: dict[LLMRoleType, AgentModelSettings] = {
     ),
     LLMRoleType.TASK_EVALUATOR: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.MEDIUM,
+        reasoning_level=ReasoningLevel.LOW,
         max_tokens=4096,
     ),
     LLMRoleType.PHASE_EVALUATOR: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.MEDIUM,
+        reasoning_level=ReasoningLevel.LOW,
         max_tokens=4096,
     ),
     LLMRoleType.TASK_PHASE_CLASSIFIER: AgentModelSettings(
         temperature=0.0,
-        reasoning_level=ReasoningLevel.MEDIUM,
+        reasoning_level=ReasoningLevel.LOW,
         max_tokens=4096,
     ),
     LLMRoleType.REPORT_AGENT: AgentModelSettings(
@@ -198,7 +198,7 @@ DEFAULT_AGENT_PROFILES: dict[LLMRoleType, AgentModelSettings] = {
     LLMRoleType.REPORT_CRITIC: AgentModelSettings(
         temperature=0.0,
         reasoning_level=ReasoningLevel.LOW,
-        max_tokens=2048,
+        max_tokens=4096,
     ),
     LLMRoleType.TAXONOMY_ANNOTATOR: AgentModelSettings(
         temperature=0.0,

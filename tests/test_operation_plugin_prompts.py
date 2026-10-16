@@ -113,13 +113,13 @@ def test_web_modules_define_credential_coverage_phases_with_different_state_chan
     assert web_policy.index("Authentication Coverage and Authorization Controls") < web_policy.index(
         "Generate Attack Hypotheses"
     )
-    assert "store-backed IDOR path" in web_prompt
+    assert "controller establishes authentication and supplies validated opaque credential IDs" in web_prompt
     assert "public sign-up flow may be used" in web_prompt
     assert "Access Context Mapping" in recon_policy
     assert "unauthenticated posture" in recon_policy
     assert "Do not guess credentials or automatically self-register" in recon_prompt
-    assert "read-only IDOR comparison" in recon_prompt
-    assert "Use GET requests only" in recon_prompt
+    assert "credential-ID-backed, read-only comparison only when" in recon_prompt
+    assert "Use GET requests only" in " ".join(recon_prompt.split())
     assert "credential-ID-backed IDOR comparison" in recon_policy
     assert "Do not automatically self-register, enumerate identifiers, or alter target state" in recon_policy
     assert "controller-owned inventory-synthesis task" in recon_policy

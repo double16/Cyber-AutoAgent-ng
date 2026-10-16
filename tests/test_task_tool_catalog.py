@@ -64,7 +64,7 @@ def test_builder_core_selections_do_not_trigger_extra_critic_cycles(catalog_case
                                "tools": ["http_request", "authenticated_http_request", "refresh_authenticated_context",
                                          "runtime_probe"], "shell_commands": []})
         assert role == "task_prompt_critic"
-        assert "Python has validated tool membership" in prompt
+        assert "Python validates membership and schemas" in prompt
         assert '"tools":' not in prompt.split("## Proposed task prompt draft")[1]
         return '{"issues":[]}'
 

@@ -19,6 +19,7 @@ from typing import Any
 from unittest.mock import Mock, patch
 
 import pytest
+from strands.types.exceptions import ContextWindowOverflowException
 from strands.types.tools import ToolSpec
 
 from modules.config.manager import ConfigManager
@@ -577,7 +578,8 @@ class TestBudgetEnforcementAccuracy:
                 limit=20000
             )
 
-            _ensure_prompt_within_budget(agent)
+            with pytest.raises(ContextWindowOverflowException):
+                _ensure_prompt_within_budget(agent)
 
             # Should trigger reduction because content tokens + overhead exceed threshold
             assert len(agent.conversation_manager.calls) > 0, \
