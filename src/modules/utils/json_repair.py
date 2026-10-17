@@ -193,7 +193,7 @@ def _next_significant(text: str, index: int) -> str:
     return text[index] if index < len(text) else ""
 
 
-def _close_unbalanced_json_containers(text: str) -> str:
+def close_unbalanced_json_containers(text: str) -> str:
     """Append unambiguous JSON container closers without guessing through malformed input."""
 
     stack: list[str] = []
@@ -279,7 +279,7 @@ def repair_json_text(text: str) -> str:
 
     repaired = "".join(output)
     repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
-    return _close_unbalanced_json_containers(repaired)
+    return close_unbalanced_json_containers(repaired)
 
 
 def _quoted_fenced_json_candidate(value: Any) -> str | None:

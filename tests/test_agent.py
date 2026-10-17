@@ -598,6 +598,7 @@ def test_create_agent_reuses_runtime_resources(monkeypatch, tmp_path, native_oll
     class FakeAgent:
         def __init__(self, **kwargs):
             self.init_kwargs = kwargs
+            self.system_prompt = kwargs["system_prompt"]
             self.tool_registry = Mock()
 
     config = AgentConfig(target="example.com", objective="test", provider="ollama", model_id="llama")
@@ -626,7 +627,10 @@ def test_create_agent_reuses_runtime_resources(monkeypatch, tmp_path, native_oll
     model = OllamaModel(None, model_id="llama") if native_ollama else SimpleNamespace(stateful=False)
     monkeypatch.setattr(cyber_agent_module, "create_agent_runtime_resources", Mock(side_effect=AssertionError))
     monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=model))
-    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(
+        cyber_agent_module, "create_agent_with_stateful_retry",
+        Mock(side_effect=lambda kwargs, *_args: FakeAgent(**kwargs)),
+    )
     monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(return_value=SimpleNamespace(supports_reasoning=True)))
     monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
 
@@ -638,7 +642,7 @@ def test_create_agent_reuses_runtime_resources(monkeypatch, tmp_path, native_oll
     assert kwargs["trace_attributes"]["operation.id"] == "OP_TEST"
     assert kwargs["trace_attributes"]["cyber.agent.run_id"] == str(callback_handler.agent_run_id)
     assert agent._prompt_token_limit == 123
-    assert agent.system_prompt == "system text"
+    assert agent.system_prompt == "system payload"
     assert runtime.callback_handler is callback_handler
     if native_ollama:
         assert model.capture_directory == tmp_path

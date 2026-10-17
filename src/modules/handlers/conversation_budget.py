@@ -2199,19 +2199,23 @@ def _raise_if_prompt_overflow(tokens: int | None, input_limit: int) -> None:
         )
 
 
+def get_agent_prompt_limits(agent: Agent) -> tuple[int | None, int]:
+    """Return the configured context limit and actual output reservation used by live input checks."""
+
+    context_limit = _get_prompt_token_limit(agent)
+    output_tokens = getattr(agent.model, "_output_tokens", 0)
+    reserved = max(0, output_tokens) if isinstance(output_tokens, int) else 0
+    return context_limit, reserved
+
+
 def _ensure_prompt_within_budget(agent: Agent) -> None:
     logger.info("BUDGET CHECK: Called for agent=%s", getattr(agent, "name", "unknown"))
     _strip_reasoning_content(agent)
     _dedupe_state_markers(agent)
-    token_limit = _get_prompt_token_limit(agent)
+    token_limit, output_tokens = get_agent_prompt_limits(agent)
     if not token_limit or token_limit <= 0:
         logger.info("BUDGET CHECK: Skipped - no token limit (limit=%s)", token_limit)
         return
-
-    fallback_limit = (
-        PROMPT_TOKEN_FALLBACK_LIMIT if PROMPT_TOKEN_FALLBACK_LIMIT > 0 else None
-    )
-    effective_limit = token_limit or fallback_limit
 
     # Use estimation ONLY for threshold checking (measures current context size)
     # Telemetry provides cumulative totals which don't decrease after reductions
@@ -2249,20 +2253,8 @@ def _ensure_prompt_within_budget(agent: Agent) -> None:
             )
             return
 
-    # Calculate threshold for proactive reduction
-    limit_for_threshold = effective_limit or token_limit or fallback_limit
-    if not limit_for_threshold:
-        return
-
-    output_tokens = None
-    if hasattr(agent.model, "_output_tokens"):
-        output_tokens = agent.model._output_tokens
-        if isinstance(output_tokens, int):
-            if output_tokens < limit_for_threshold:
-                limit_for_threshold -= output_tokens
-            else:
-                logger.warning("BUDGET CHECK MIS-CONFIG: output tokens is larger than token limit: %d > %d",
-                               output_tokens, limit_for_threshold)
+    # Use the same limits as invocation-local fitting, including the live output reservation.
+    limit_for_threshold = max(0, token_limit - output_tokens)
 
     # Respect a prompt-cache hint to avoid premature reductions when provider caching is enabled
     try:
@@ -2523,6 +2515,10 @@ class PromptBudgetHook(HookProvider):
             # CRITICAL: Strip reasoning content BEFORE conversation management
             # Prevents 7000+ reasoning blocks from accumulating (85% of token bloat)
             _strip_reasoning_content(agent)
+
+            fitter = getattr(agent, "_cyber_prompt_fitter", None)
+            if fitter is not None:
+                fitter(agent)
 
             # Proactively apply sliding window management before threshold check
             # This enforces the configured window size (e.g., 100 messages)

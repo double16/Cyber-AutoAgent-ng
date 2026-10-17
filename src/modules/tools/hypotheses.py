@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 from strands import tool
 
 from modules.tools.artifact import resolve_operation_artifact_path
+from modules.tools.artifact_references import require_artifact_reference
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -28,7 +29,9 @@ class Hypothesis(BaseModel):
     positive_expectations: list[Text] = Field(min_length=1)
     negative_expectations: list[Text] = Field(min_length=1)
     required_evidence: list[Text] = Field(min_length=1)
-    supporting_refs: list[Text] = Field(min_length=1)
+    supporting_refs: list[Text] = Field(
+        min_length=1, description="Current-operation artifact: or artifact_id: references, not memory IDs or URLs.",
+    )
     research_refs: list[Text] = Field(default_factory=list)
 
 
@@ -76,12 +79,41 @@ def hypothesis_contract(task: Any) -> Any:
     return replace(task, acceptance=replace(task.acceptance, criteria=criteria, manifest_hash=""))
 
 
-def load_hypothesis_set(reference: str, task: Any, operation_id: str) -> HypothesisSet:
+def hypothesis_binding(task: Any) -> dict[str, Any]:
+    """Return the authoritative cumulative publication, never a superseded or legacy binding."""
+
+    publications = task.recovery_context.get("hypothesis_publications", [])
+    if not isinstance(publications, list):
+        raise ValueError("Invalid hypothesis publication history")
+    if not publications:
+        return {}
+    binding = publications[-1]
+    if not isinstance(binding, dict) or not binding.get("artifact_ref") or not binding.get("sha256"):
+        raise ValueError("Invalid authoritative hypothesis publication binding")
+    return binding
+
+
+def _validate_supporting_refs(subject: SubjectHypotheses) -> None:
+    for index, hypothesis in enumerate(subject.hypotheses):
+        for support in hypothesis.supporting_refs:
+            try:
+                resolve_operation_artifact_path(require_artifact_reference(support))
+            except (OSError, TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Subject {subject.item_id} hypotheses[{index}].supporting_refs: invalid reference {support!r}. "
+                    "Cite an existing current-operation artifact: or artifact_id: reference; "
+                    "for memory context, cite its underlying artifact. " + str(error)
+                ) from error
+
+
+def load_hypothesis_set(
+    reference: str, task: Any, operation_id: str, *, require_complete: bool = True,
+) -> HypothesisSet:
     """Check the explicit producer binding, content digest, and frozen subject assignment."""
 
     from modules.tools.memory import canonical_artifact_reference
 
-    binding = task.recovery_context.get("hypothesis_output") or {}
+    binding = hypothesis_binding(task)
     canonical = canonical_artifact_reference(reference)
     # Acceptance bookkeeping may copy the published artifact into an immutable evidence snapshot.
     # The controller binding and the submitted copy must both retain the complete content digest.
@@ -101,20 +133,42 @@ def load_hypothesis_set(reference: str, task: Any, operation_id: str) -> Hypothe
     if (
         result.operation_id != operation_id or result.producer_task_uid != task.task_uid
         or result.snapshot_hash != basis.snapshot_hash or set(result.source_refs) != set(basis.source_refs)
-        or len(subjects) != len(set(subjects)) or set(subjects) != set(basis.item_ids)
+        or len(subjects) != len(set(subjects)) or not set(subjects).issubset(basis.item_ids)
     ):
         raise ValueError("hypothesis artifact does not match the frozen producer assignment")
     for subject in result.subjects:
         for hypothesis in subject.hypotheses:
             if not hypothesis.hypothesis_id:
                 raise ValueError("hypothesis ID is required")
-            for support in hypothesis.supporting_refs:
-                resolve_operation_artifact_path(support)
+        _validate_supporting_refs(subject)
+    missing = sorted(set(basis.item_ids) - set(subjects))
+    if require_complete and missing:
+        raise ValueError(f"Publish missing assigned subjects with record_hypotheses: {', '.join(missing)}")
     return result
+
+
+def bind_hypothesis_acceptance(task: Any, operation_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach validated controller-owned publication evidence without inventing semantic acceptance."""
+
+    if payload.get("status") not in {"satisfied", "assessed_negative"}:
+        return payload
+    binding = hypothesis_binding(task)
+    reference = binding.get("artifact_ref", "")
+    if not reference:
+        raise ValueError(
+            "Publish assigned subjects with record_hypotheses before successful acceptance; missing subjects: "
+            + ", ".join(sorted(task.acceptance.basis.item_ids))
+        )
+    load_hypothesis_set(reference, task, operation_id)
+    # Retained older publications are provenance, not additional independent deliverables.
+    obsolete = {item["artifact_ref"] for item in task.recovery_context["hypothesis_publications"][:-1]}
+    references = [ref for ref in payload.get("evidence_refs", []) if ref not in obsolete]
+    return {**payload, "evidence_refs": list(dict.fromkeys([*references, reference]))}
 
 
 def build_record_hypotheses_tool(
     task: Any, operation_id: str, output_root: str, persist: Callable[[dict[str, Any]], None],
+    *, current_task: Callable[[], Any] | None = None,
 ) -> Any:
     """Bind operation and assignment in Python; the model supplies only future-test reasoning."""
 
@@ -131,7 +185,10 @@ def build_record_hypotheses_tool(
 
     @tool(name="record_hypotheses", inputSchema=schema)
     def record_hypotheses(subjects: list[dict[str, Any]]) -> str:
-        """Publish hypotheses or a reasoned no-test disposition for every assigned inventory subject."""
+        """Publish assigned subjects incrementally; each submitted subject replaces its prior records.
+
+        The returned artifact is cumulative. Python binds the latest complete publication to acceptance.
+        """
 
         normalized = []
         aliases = {"supplied": "hypotheses_supplied", "none": "no_testable_hypotheses"}
@@ -144,13 +201,13 @@ def build_record_hypotheses_tool(
         basis = task.acceptance.basis
         if not basis.snapshot_hash or not basis.source_refs or not basis.item_ids:
             raise ValueError("hypothesis producer requires a frozen inventory snapshot")
-        if len(ids) != len(set(ids)) or set(ids) != set(basis.item_ids):
-            raise ValueError("provide exactly one disposition for each assigned subject")
+        if not ids or len(ids) != len(set(ids)) or not set(ids).issubset(basis.item_ids):
+            raise ValueError(
+                "provide exactly one disposition per submitted assigned subject; no duplicates or foreign IDs"
+            )
         for subject in normalized:
             seen = set()
             for hypothesis in subject.hypotheses:
-                for support in hypothesis.supporting_refs:
-                    resolve_operation_artifact_path(support)
                 identity = json.dumps(hypothesis.model_dump(exclude={"hypothesis_id"}), sort_keys=True)
                 hypothesis.hypothesis_id = hashlib.sha256(
                     f"{task.task_uid}|{subject.item_id}|{identity}".encode()
@@ -158,12 +215,23 @@ def build_record_hypotheses_tool(
                 if hypothesis.hypothesis_id in seen:
                     raise ValueError("duplicate hypothesis for the same subject")
                 seen.add(hypothesis.hypothesis_id)
+            _validate_supporting_refs(subject)
+        latest_task = current_task() if current_task is not None else task
+        if latest_task.acceptance.manifest_hash != task.acceptance.manifest_hash:
+            raise ValueError("Frozen hypothesis producer assignment changed; rebuild the bound tool")
+        binding = hypothesis_binding(latest_task)
+        previous = (load_hypothesis_set(binding["artifact_ref"], latest_task, operation_id, require_complete=False)
+                    if binding else None)
+        merged = {subject.item_id: subject for subject in previous.subjects} if previous else {}
+        merged.update({subject.item_id: subject for subject in normalized})
         payload = HypothesisSet(
             operation_id=operation_id, producer_task_uid=task.task_uid, snapshot_hash=basis.snapshot_hash,
-            source_refs=list(basis.source_refs), subjects=normalized,
+            source_refs=list(basis.source_refs), subjects=[merged[key] for key in sorted(merged)],
         )
         content = payload.model_dump_json(indent=2).encode()
         digest = hashlib.sha256(content).hexdigest()
+        if binding and binding["sha256"] == digest:
+            return json.dumps({**binding, "published_subject_ids": sorted(ids)})
         folder = Path(output_root) / "artifacts" / "hypotheses"
         folder.mkdir(parents=True, exist_ok=True)
         filename = f"{hashlib.sha256(task.task_uid.encode()).hexdigest()[:16]}-{digest[:16]}.json"
@@ -171,9 +239,18 @@ def build_record_hypotheses_tool(
         temporary = path.with_suffix(".tmp")
         temporary.write_bytes(content)
         os.replace(temporary, path)
-        binding = {"artifact_ref": f"artifact:artifacts/hypotheses/{filename}", "sha256": digest}
+        binding = {
+            "artifact_ref": f"artifact:artifacts/hypotheses/{filename}", "sha256": digest,
+            "subject_ids": sorted(merged), "published_subject_ids": sorted(ids),
+            "missing_subject_ids": sorted(set(basis.item_ids) - set(merged)),
+        }
         persist(binding)
-        return json.dumps({**binding, "subject_ids": sorted(ids)})
+        # Direct tool users and callbacks retain the same durable metadata contract.
+        publications = list(latest_task.recovery_context.get("hypothesis_publications", []))
+        if not publications or publications[-1]["sha256"] != digest:
+            publications.append(binding)
+        task.recovery_context["hypothesis_publications"] = publications
+        return json.dumps(binding)
 
     return record_hypotheses
 

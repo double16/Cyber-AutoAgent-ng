@@ -8,7 +8,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
-from modules.utils.json_repair import parse_json_response
+from modules.utils.json_repair import close_unbalanced_json_containers, parse_json_response
 
 
 @dataclass(frozen=True)
@@ -95,3 +95,109 @@ def normalize_tool_call_payload(
         available = ", ".join(sorted(registered_tool_names)) or "none"
         raise ValueError(f"tool-call name {name!r} is not registered; available tools: {available}")
     return NormalizedToolCall(name=name, arguments=nested_arguments)
+
+
+@dataclass(frozen=True)
+class JSONContainerDiagnostic:
+    """Describe a container syntax failure without retaining argument values."""
+
+    path: str
+    expected_types: tuple[str, ...]
+    line: int
+    column: int
+
+
+def normalize_json_container_arguments(
+    payload: Any,
+    schema: dict[str, Any],
+    *,
+    diagnostics: list[JSONContainerDiagnostic] | None = None,
+) -> tuple[Any, tuple[str, ...]]:
+    """Decode JSON-wrapped containers only where the tool schema excludes string inputs."""
+
+    paths: list[str] = []
+
+    def reject_constant(_value: str) -> None:
+        raise ValueError("Non-standard JSON constant")
+
+    def branches(node: Any, seen: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+        if not isinstance(node, dict):
+            return [{}]
+        reference = node.get("$ref")
+        if reference is not None:
+            if not isinstance(reference, str) or not reference.startswith("#/") or reference in seen:
+                return [{}]
+            resolved: Any = schema
+            for part in reference[2:].split("/"):
+                key = part.replace("~1", "/").replace("~0", "~")
+                if not isinstance(resolved, dict) or key not in resolved:
+                    return [{}]
+                resolved = resolved[key]
+            # Sibling constraints are still enforced by normal validation.
+            return branches(resolved, seen | {reference})
+        alternatives = node.get("anyOf", node.get("oneOf"))
+        if isinstance(alternatives, list):
+            return [variant for alternative in alternatives for variant in branches(alternative, seen)]
+        return [node]
+
+    def normalize(value: Any, node: Any, path: str, depth: int = 0) -> Any:
+        if depth > 64:
+            return value
+        variants = branches(node)
+        # String-accepting and unconstrained schemas must preserve the supplied text.
+        if isinstance(value, str):
+            if any(variant.get("type") is None or "string" in (
+                variant["type"] if isinstance(variant["type"], list) else [variant["type"]]
+            ) for variant in variants):
+                return value
+            expected_types = tuple(sorted({kind for variant in variants for kind in (
+                variant["type"] if isinstance(variant["type"], list) else [variant["type"]]
+            ) if kind in {"array", "object"}}))
+            if not expected_types:
+                return value
+            decoded = value
+            for _ in range(2):
+                if not isinstance(decoded, str):
+                    break
+                try:
+                    decoded = json.loads(decoded, parse_constant=reject_constant)
+                except json.JSONDecodeError as error:
+                    try:
+                        decoded = json.loads(close_unbalanced_json_containers(decoded),
+                                             parse_constant=reject_constant)
+                    except (ValueError, RecursionError):
+                        if diagnostics is not None:
+                            diagnostics.append(JSONContainerDiagnostic(
+                                path, expected_types, error.lineno, error.colno,
+                            ))
+                        return value
+                except (ValueError, RecursionError):
+                    return value
+            kind = "object" if isinstance(decoded, dict) else "array" if isinstance(decoded, list) else None
+            if kind is None or not any(kind in (
+                variant.get("type") if isinstance(variant.get("type"), list) else [variant.get("type")]
+            ) for variant in variants):
+                return value
+            paths.append(path)
+            value = decoded
+        kind = "object" if isinstance(value, dict) else "array" if isinstance(value, list) else None
+        matching = [variant for variant in variants if kind is not None and kind in (
+            variant.get("type") if isinstance(variant.get("type"), list) else [variant.get("type")]
+        )]
+        # Ambiguous container alternatives retain normal schema validation without nested guesses.
+        if len(matching) != 1:
+            return value
+        selected = matching[0]
+        if isinstance(value, dict):
+            properties = selected.get("properties", {})
+            additional = selected.get("additionalProperties", {})
+            return {key: normalize(item, properties.get(key, additional), f"{path}.{key}", depth + 1)
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            prefix = selected.get("prefixItems", [])
+            return [normalize(item, prefix[index] if index < len(prefix) else selected.get("items", {}),
+                              f"{path}[{index}]", depth + 1) for index, item in enumerate(value)]
+        return value
+
+    normalized = normalize(payload, schema, "$")
+    return normalized, tuple(paths)

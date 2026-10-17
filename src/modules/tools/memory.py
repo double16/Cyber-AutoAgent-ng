@@ -9859,8 +9859,11 @@ def _validate_acceptance_result_evidence(
             raise _acceptance_evidence_reference_error()
     for requirement in criterion.evidence_requirements:
         if requirement.kind == "hypothesis_set":
-            from modules.tools.hypotheses import load_hypothesis_set
+            from modules.tools.hypotheses import hypothesis_binding, load_hypothesis_set
 
+            bound = hypothesis_binding(task).get("artifact_ref")
+            if bound:
+                load_hypothesis_set(bound, task, _operation_id())
             matching = 0
             for reference in references:
                 try:
@@ -9869,7 +9872,12 @@ def _validate_acceptance_result_evidence(
                     continue
                 matching += 1
             if matching < requirement.min_count:
-                raise ValueError("Publish a bound hypothesis_set with record_hypotheses before acceptance")
+                raise ValueError(
+                    "Include the published hypothesis_set artifact reference returned by record_hypotheses "
+                    "in evidence_refs. The submitted references do not include enough valid hypothesis_set "
+                    "artifacts bound to this task. If already published, reuse its returned artifact reference; "
+                    "otherwise publish it with record_hypotheses first."
+                )
             continue
         if requirement.kind == "inventory_manifest":
             matching = 0
@@ -10541,13 +10549,16 @@ def build_record_task_acceptance_tool(
             (item for item in _get_database_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
             task,
         )
+        payload = {"status": status, "disposition": disposition, "summary": summary, "evidence_refs": evidence_refs}
+        if any(requirement.kind == "hypothesis_set" for requirement in criterion.evidence_requirements):
+            from modules.tools.hypotheses import bind_hypothesis_acceptance
+
+            payload = bind_hypothesis_acceptance(current_task, _operation_id(), payload)
         if acceptance_reconciler is not None:
-            payload = acceptance_reconciler(current_task, {
-                "status": status, "disposition": disposition, "summary": summary, "evidence_refs": evidence_refs,
-            })
-            status, disposition, summary, evidence_refs = (
-                payload["status"], payload["disposition"], payload["summary"], payload["evidence_refs"]
-            )
+            payload = acceptance_reconciler(current_task, payload)
+        status, disposition, summary, evidence_refs = (
+            payload["status"], payload["disposition"], payload["summary"], payload["evidence_refs"]
+        )
         status = _normalize_acceptance_status_alias(status)
         disposition = _normalize_acceptance_disposition_alias(disposition)
         evidence_refs = split_delimited_reference_values(evidence_refs, allow_delimited_strings=True)

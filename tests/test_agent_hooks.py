@@ -248,7 +248,7 @@ def test_agent_repair_hook_rejects_unregistered_generic_tool_use():
 
 def test_agent_repair_hook_ignores_direct_tool_calls_and_rejects_invalid_wrapper_input():
     hook = AgentRepairHook()
-    direct = SimpleNamespace(tool_use={"name": "shell"}, cancel_tool=False)
+    direct = SimpleNamespace(tool_use={"name": "shell"}, selected_tool=None, cancel_tool=False)
     hook.before_tool_call_repair(direct)
     assert direct.cancel_tool is False
 
@@ -264,6 +264,7 @@ def test_agent_repair_hook_ignores_direct_tool_calls_and_rejects_invalid_wrapper
 def test_agent_repair_hook_repairs_atem_envelope_before_direct_tool_dispatch():
     hook = AgentRepairHook()
     event = SimpleNamespace(
+        selected_tool=None,
         tool_use={
             "name": "store_observation",
             "input": {

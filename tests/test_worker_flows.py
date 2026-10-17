@@ -334,7 +334,7 @@ def test_provisioning_repair_storage_closes_acceptance_without_another_actor(
     controller.state.acceptance_complete = False
     monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Register once", "tools": []})
     monkeypatch.setattr(controller, "_prepare_task_authentication", lambda _plan, selected: selected)
-    monkeypatch.setattr(controller, "_task_prompt_scope_feedback", lambda *_args: [])
+    monkeypatch.setattr(controller, "_task_assignment_scope_feedback", lambda *_args: [])
     monkeypatch.setattr(controller, "_task_inventory_route_feedback", lambda *_args: [])
     monkeypatch.setattr(controller, "_resolve_task_executor_base_tools", lambda *_args: [])
     monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: approval())
@@ -373,7 +373,7 @@ def test_provisioning_repair_storage_closes_acceptance_without_another_actor(
     reloaded = workflow.MultiAgentWorkflowController(
         runtime=controller.runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=controller.state,
     )
-    for name in ("_build_task_prompt", "_prepare_task_authentication", "_task_prompt_scope_feedback",
+    for name in ("_build_task_prompt", "_prepare_task_authentication", "_task_assignment_scope_feedback",
                  "_task_inventory_route_feedback", "_resolve_task_executor_base_tools", "_evaluate_task"):
         monkeypatch.setattr(reloaded, name, getattr(controller, name))
     reloaded.work_runner = Mock(side_effect=AssertionError("Completed registration must not be repeated"))
@@ -1173,7 +1173,7 @@ def test_provisioning_stops_at_storage_then_reviews_and_accepts_without_resubmis
     )
     controller.state.tasks[0] = task
     monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": task.objective, "tools": []})
-    monkeypatch.setattr(controller, "_task_prompt_scope_feedback", lambda *_args: [])
+    monkeypatch.setattr(controller, "_task_assignment_scope_feedback", lambda *_args: [])
     monkeypatch.setattr(controller, "_prepare_task_authentication", lambda *_args: task)
     monkeypatch.setattr(
         controller,

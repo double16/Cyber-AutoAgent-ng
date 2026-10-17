@@ -7000,7 +7000,7 @@ def test_inventory_synthesis_partial_policy_and_provider_gate(
         assert providers == {"inventory_synthesis": set(), "auth_workflow": set()}
 
 
-@pytest.mark.parametrize("iterations", [1, 2])
+@pytest.mark.parametrize("iterations", [2, 3])
 def test_scope_only_prompt_repairs_preserve_crawl_selections(monkeypatch, iterations):
     plan = _plan()
     plan = replace(plan, targets=[OperationTarget("target-1", "http://target.test:3001", "network")])
@@ -7019,8 +7019,12 @@ def test_scope_only_prompt_repairs_preserve_crawl_selections(monkeypatch, iterat
     )
     monkeypatch.setattr(controller, "_normalize_task_prompt_spec", lambda spec, *_args: spec)
     monkeypatch.setattr(controller, "_filter_repairable_shell_selections", lambda spec: spec)
+    critiques = iter([
+        {"issues": [{"category": "scope", "message": "Probe only the assigned target", "tool_names": []}]},
+        {"issues": []},
+    ])
     monkeypatch.setattr(controller, "_run_json_text_agent", lambda role, *_args, **_kwargs: (
-        next(drafts) if role == "task_prompt_builder" else {"issues": []}
+        next(drafts) if role == "task_prompt_builder" else next(critiques)
     ))
     spec = controller._build_task_prompt(plan, plan.phases[0], task)
     assert spec["tools"] == ["specialized_recon_orchestrator"]
@@ -15473,7 +15477,7 @@ def test_hypothesis_dependent_batches_cover_every_completed_hypothesis(monkeypat
         if producer.status == "done":
             controller.state.store_task(workflow_mod.hypothesis_contract(producer))
             controller.state.patch_task(producer.task_uid, recovery_context_updates={
-                "hypothesis_output": {"artifact_ref": producer.evidence[0]},
+                "hypothesis_publications": [{"artifact_ref": producer.evidence[0], "sha256": "fixture-digest"}],
             })
     monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda *_args: SimpleNamespace())
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
@@ -15554,7 +15558,7 @@ def test_hypothesis_dependent_batches_record_gaps_and_use_covered_groups(monkeyp
         if producer.status == "done":
             controller.state.store_task(workflow_mod.hypothesis_contract(producer))
             controller.state.patch_task(producer.task_uid, recovery_context_updates={
-                "hypothesis_output": {"artifact_ref": producer.evidence[0]},
+                "hypothesis_publications": [{"artifact_ref": producer.evidence[0], "sha256": "fixture-digest"}],
             })
     monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda *_args: SimpleNamespace())
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
@@ -15787,7 +15791,7 @@ def test_hypothesis_inventory_binding_preserves_separate_manifest_item_ids(monke
         if producer.status == "done":
             controller.state.store_task(workflow_mod.hypothesis_contract(producer))
             controller.state.patch_task(producer.task_uid, recovery_context_updates={
-                "hypothesis_output": {"artifact_ref": producer.evidence[0]},
+                "hypothesis_publications": [{"artifact_ref": producer.evidence[0], "sha256": "fixture-digest"}],
             })
     monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda *_args: SimpleNamespace())
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda value: value)
@@ -17304,7 +17308,7 @@ def test_finding_validation_context_backfills_legacy_locator_and_includes_prior_
     assert context["prior_validation_rule"].endswith("fresh evidence.")
 
 
-def test_task_prompt_builder_requires_reusable_acceptance_summaries():
+def test_task_prompt_builder_delegates_reusable_acceptance_summaries_to_controller():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -17321,8 +17325,10 @@ def test_task_prompt_builder_requires_reusable_acceptance_summaries():
 
     prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
 
-    assert "Require every acceptance summary to state the concrete result or negative result" in prompt
-    assert "publishes" in prompt
+    assert "Describe required actions and results" in prompt
+    assert "Do not restate those controller-owned requirements here" in prompt
+    contract = controller._task_executor_contract(task, set())
+    assert "Successful acceptance publishes the summary" in contract
     assert "store_observation" not in prompt
     assert "Store each security claim with `store_finding`" not in prompt
 
@@ -17562,7 +17568,7 @@ def test_task_prompts_delegate_loop_recovery_to_controller_without_retry_ceiling
 
     combined = f"{builder_prompt}\n{executor_contract}"
     assert "actual registered tool calls" in combined
-    assert "Python appends task policy and the terminal acceptance protocol" in combined
+    assert "task policy, the acceptance contract, evidence requirements" in builder_prompt
     assert "controller supplies a loop or recovery instruction" in executor_contract
     assert "one correction" not in combined
     assert "correction fails" not in combined
@@ -17591,8 +17597,8 @@ def test_task_prompt_critic_checks_pseudo_calls_and_tool_selection_limits():
         {"prompt": "Use the target.", "memory_ids": [], "tools": [], "shell_commands": []},
     )
 
-    assert "actual registered tool calls" in prompt
-    assert "pseudo-syntax" in prompt
+    assert "Natural-language steps are valid" in prompt
+    assert "simulated execution" in prompt
     assert "Controller-Appended Terminal Protocol" in prompt
     assert "record_task_acceptance` exactly once" in prompt
     assert "Do not reject a draft for omitting" in prompt
@@ -17979,6 +17985,7 @@ def test_task_prompt_scope_mismatch_is_revised_before_the_executor_can_run():
     responses = iter(
         [
             '{"prompt":"Probe custom-scheme://service.example:4200/health","memory_ids":[],"tools":[],"shell_commands":[]}',
+            '{"issues":[{"category":"scope","message":"Wrong service port","tool_names":[]}]}',
             '{"prompt":"Probe custom-scheme://service.example:4280/health","memory_ids":[],"tools":[],"shell_commands":[]}',
             '{"issues":[]}',
         ]
@@ -17999,13 +18006,11 @@ def test_task_prompt_scope_mismatch_is_revised_before_the_executor_can_run():
     prompt_spec = controller._build_task_prompt(plan, plan.phases[0], task)
 
     assert prompt_spec["prompt"] == "Probe custom-scheme://service.example:4280/health"
-    assert calls == ["task_prompt_builder", "task_prompt_builder", "task_prompt_critic"]
-    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "task_scope_validation")
-    assert event["stage"] == "prompt_draft"
-    assert event["decision"] == "revision_requested"
+    assert calls == ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_critic"]
+    assert not any(event["type"] == "task_scope_validation" for event in controller.runtime.callback_handler.events)
 
 
-def test_immutable_task_scope_mismatch_fails_without_prompt_generation():
+def test_unknown_structured_task_target_fails_without_prompt_generation():
     plan = OperationPlan(
         objective="assess custom-scheme://service.example:4280",
         current_phase=1,
@@ -18020,7 +18025,7 @@ def test_immutable_task_scope_mismatch_fails_without_prompt_generation():
         phase=1,
         status="active",
         target_scope="subset",
-        target_ids=["target-1"],
+        target_ids=["unknown-target"],
     )
     calls = []
     controller = MultiAgentWorkflowController(
@@ -18030,7 +18035,7 @@ def test_immutable_task_scope_mismatch_fails_without_prompt_generation():
         text_runner=lambda *args: calls.append(args) or "{}",
     )
 
-    with pytest.raises(workflow_mod.TaskPromptBuildError, match="Task content exceeds") as error:
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="Task assignment exceeds") as error:
         controller._build_task_prompt(plan, plan.phases[0], task)
 
     assert error.value.repairable is False
@@ -18040,7 +18045,7 @@ def test_immutable_task_scope_mismatch_fails_without_prompt_generation():
     assert event["decision"] == "blocked"
 
 
-def test_task_executor_blocks_an_out_of_scope_prompt_that_bypasses_prompt_building(monkeypatch):
+def test_task_executor_blocks_unknown_assignment_that_bypasses_prompt_building(monkeypatch):
     plan = OperationPlan(
         objective="assess custom-scheme://service.example:4280",
         current_phase=1,
@@ -18055,7 +18060,7 @@ def test_task_executor_blocks_an_out_of_scope_prompt_that_bypasses_prompt_buildi
         phase=1,
         status="active",
         target_scope="subset",
-        target_ids=["target-1"],
+        target_ids=["unknown-target"],
     )
     state = FakeState(plan, tasks=[task])
     worker_prompts = []
@@ -18080,7 +18085,8 @@ def test_task_executor_blocks_an_out_of_scope_prompt_that_bypasses_prompt_buildi
     event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "task_scope_validation")
     assert event["stage"] == "pre_executor"
     assert event["decision"] == "blocked"
-    assert event["violations"][0]["literal"] == "custom-scheme://service.example:4200"
+    assert event["target_ids"] == ["unknown-target"]
+    assert event["validation_source"] == "structured_assignment"
 
 
 def test_task_scope_validation_adds_safe_event_to_active_task_trace(monkeypatch):
@@ -18098,7 +18104,7 @@ def test_task_scope_validation_adds_safe_event_to_active_task_trace(monkeypatch)
         phase=1,
         status="active",
         target_scope="subset",
-        target_ids=["target-1"],
+        target_ids=["unknown-target"],
     )
     span = Mock()
     tracer = Mock()
@@ -18119,7 +18125,6 @@ def test_task_scope_validation_adds_safe_event_to_active_task_trace(monkeypatch)
     controller._emit_task_scope_validation(
         plan,
         task,
-        "Probe custom-scheme://service.example:4200/health",
         "prompt_draft",
         "revision_requested",
     )
@@ -21934,7 +21939,7 @@ def _publish_controller_hypotheses(controller, task):
 
     def persist(binding):
         controller.state.patch_task(task.task_uid, recovery_context_updates={
-            "hypothesis_output": binding, "hypothesis_operation_id": controller.runtime.operation_id,
+            "hypothesis_publications": [binding], "hypothesis_operation_id": controller.runtime.operation_id,
         })
 
     tool = build_record_hypotheses_tool(task, controller.runtime.operation_id, workflow_mod._operation_output_root(), persist)
@@ -22014,7 +22019,7 @@ def test_hypothesis_bound_tools_and_direct_repair_dispatch(worker_flow_case, mon
     }]))
     updated = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
     assert result["artifact_ref"] in updated.evidence
-    assert updated.recovery_context["hypothesis_output"]["sha256"] == result["sha256"]
+    assert updated.recovery_context["hypothesis_publications"][-1]["sha256"] == result["sha256"]
     consumer = replace(_hypothesis_task("consumer"), recovery_context={"hypothesis_source_task_uids": [task.task_uid]})
     controller.state.patch_task(task.task_uid, status="done")
     controller.state.store_task(consumer)
@@ -22108,7 +22113,7 @@ def test_damaged_continuation_plan_does_not_trigger_plan_creation(monkeypatch):
 
 
 def test_required_prompt_overflow_stops_without_model_retry():
-    runner = Mock()
+    runner = Mock(spec=lambda role, prompt, tools, system_prompt: "")
     runtime = _runtime()
     runtime.prompt_token_limit = 100
     controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60),
@@ -22849,3 +22854,236 @@ def test_phase_evaluation_preserves_unrelated_provider_errors():
     with pytest.raises(RuntimeError, match="backend unavailable"):
         controller._evaluate_phase(_plan(), _plan().phases[0])
     assert not any(e["type"] == "evaluator_fallback" for e in controller.runtime.callback_handler.events)
+
+
+@pytest.mark.parametrize("kind", ["publication", "acceptance", "invalid_input", "success", "unrelated"])
+def test_hypothesis_repair_context_retains_exact_submission(worker_flow_case, kind):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    binding = _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    payload = {"subjects": [{"item_id": "subject", "disposition": "none", "reason": "Correct this"}]}
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="rejected", tool_name=(
+            "record_task_acceptance" if kind == "acceptance" else "read_artifact" if kind == "unrelated"
+            else "record_hypotheses"
+        ), success=kind == "success", correctable=False,
+        input_summary="not JSON" if kind == "invalid_input" else json.dumps(payload),
+        output_summary="Subject subject hypotheses[0].supporting_refs: invalid memory reference",
+    )
+    updated = controller._retain_hypothesis_repair(task, [outcome])
+    text = controller._hypothesis_repair_context(updated)
+    assert binding["artifact_ref"] in text
+    assert "Do not restart inventory discovery" in text
+    if kind in {"publication", "acceptance", "invalid_input"}:
+        repair = updated.recovery_context["hypothesis_repair"]
+        assert repair["error"] == outcome.output_summary
+        assert repair["submission"] == (None if kind == "invalid_input" else payload)
+    else:
+        assert not updated.recovery_context.get("hypothesis_repair")
+    unbound = replace(task, recovery_context={})
+    assert controller._hypothesis_repair_context(unbound) == ""
+    assert controller._retain_hypothesis_repair(unbound, []) is unbound
+
+
+@pytest.mark.parametrize("case", ["absent", "partial", "complete", "corrupt", "malformed", "ordinary"])
+def test_hypothesis_production_state_validates_output_not_input(worker_flow_case, case):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    if case == "partial":
+        task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+            task.acceptance.basis, item_ids=["subject", "second"],
+        )))
+    controller.state.store_task(task)
+    if case in {"partial", "complete", "corrupt"}:
+        binding = _publish_controller_hypotheses(controller, task)
+        task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+        if case == "corrupt":
+            from modules.tools.artifact import resolve_operation_artifact_path
+
+            Path(resolve_operation_artifact_path(binding["artifact_ref"])).write_text("corrupt")
+    if case == "malformed":
+        task = replace(task, recovery_context={"hypothesis_publications": "invalid"})
+    if case == "ordinary":
+        task = Task("ordinary", "Ordinary", "Inspect", phase=1, status="active")
+        assert controller._hypothesis_production_state(task) is None
+        return
+    result = controller._hypothesis_production_state(task)
+    assert result["mode"] == ("acceptance" if case == "complete" else "production")
+    assert result["source_refs"] == list(task.acceptance.basis.source_refs)
+    if case == "partial":
+        assert result["missing_subject_ids"] == ["second"]
+    if case in {"corrupt", "malformed"}:
+        assert result["publication_error"]
+        assert controller._hypothesis_repair_context(task) is not None
+
+
+@pytest.mark.parametrize("subject", ["https://target.test/resource", "tcp://target.test:9000", "/workspace/source"])
+def test_hypothesis_continuation_preserves_protocol_neutral_inputs(worker_flow_case, subject):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(replace(_hypothesis_task(), objective=f"Derive tests for {subject}"))
+    text = controller._hypothesis_production_prompt(task, controller._hypothesis_production_state(task))
+    assert subject in text
+    assert "artifact:form.html" in text
+    assert '"subject"' in text
+    assert "record_hypotheses" in text
+    assert "no_testable_hypotheses" in text
+    assert "not proof of completed work" in text
+
+
+def test_hypothesis_recovery_state_survives_sqlite_reload(worker_flow_case, tmp_path):
+    from modules.tools.hypotheses import build_record_hypotheses_tool
+
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+        task.acceptance.basis, item_ids=["subject", "second"],
+    )))
+    store = memory_mod.SQLiteApplicationStore(str(tmp_path / "recovery.db"), "target")
+    store.store_task("OP_TEST", task)
+
+    def current():
+        return store.get_tasks("OP_TEST")[0]
+
+    def persist(binding):
+        store.patch_task("OP_TEST", task.task_uid, recovery_context_updates={
+            "hypothesis_publications": [*current().recovery_context.get("hypothesis_publications", []), binding],
+        })
+
+    writer = build_record_hypotheses_tool(task, "OP_TEST", str(tmp_path), persist, current_task=current)
+    writer(subjects=[{"item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No safe test"}])
+    partial = controller._hypothesis_production_state(current())
+    assert partial["mode"] == "production"
+    assert partial["missing_subject_ids"] == ["second"]
+    writer(subjects=[{"item_id": "second", "disposition": "no_testable_hypotheses", "reason": "No safe test"}])
+    assert controller._hypothesis_production_state(current())["mode"] == "acceptance"
+
+
+@pytest.mark.parametrize("first_result", ["read_only", "rejected_acceptance", "policy_recovery", "loop"])
+def test_hypothesis_actor_continuation_retains_publisher(worker_flow_case, monkeypatch, first_result):
+    controller, _consumer, _factory, _worker, _store, reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [_tool("get_inventory_item")])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive hypotheses", "tools": []})
+    monkeypatch.setattr(controller, "_evaluate_task", lambda *_args, **_kwargs: workflow_mod.WorkflowDecision(
+        status="done", reason="Published and reviewed",
+    ))
+    prompts = []
+
+    def actor(_role, prompt, tools, _system, policy):
+        prompts.append(prompt)
+        names = {workflow_mod.get_tool_name(tool) for tool in tools}
+        assert "record_hypotheses" in names
+        assert "get_inventory_item" in names
+        if len(prompts) == 1:
+            outcome = ToolOutcome(
+                sequence=1, tool_use_id="input", tool_name="read_artifact", success=True,
+                correctable=False, input_summary=json.dumps({"path": reference}),
+                output_summary="Inventory observations", artifact_refs=(reference,),
+            )
+            if first_result == "rejected_acceptance":
+                outcome = replace(
+                    outcome, tool_name="record_task_acceptance", success=False,
+                    input_summary=json.dumps({"status": "satisfied"}),
+                    output_summary="Publish assigned subjects with record_hypotheses before successful acceptance",
+                )
+            return workflow_mod.TaskExecutorCycleResult(
+                text="Input inspected", outcomes=[outcome],
+                recovery_required=first_result == "policy_recovery",
+                recovery_guidance="Repair the missing acceptance",
+                repeat_loop_detected=first_result == "loop", repeat_loop_signature="read-loop",
+            )
+        assert "artifact:form.html" in prompt
+        assert "subject" in prompt
+        assert "record_hypotheses" in prompt
+        assert policy.required_tool_names != {"record_task_acceptance"} or policy.max_model_turns > 6
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        binding = json.loads(writer(subjects=[{
+            "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No safe test supported",
+        }]))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id="future-tests", status="satisfied", disposition="observation",
+            summary="No safe test supported", evidence_refs=(binding["artifact_ref"],),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[ToolOutcome(
+            sequence=2, tool_use_id="accepted", tool_name="record_task_acceptance", success=True,
+            correctable=False, input_summary="{}", output_summary='{"complete":true}',
+        )])
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    assert len(prompts) == 2
+    updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert updated.status == "done"
+    assert controller._hypothesis_production_state(updated)["mode"] == "acceptance"
+
+
+@pytest.mark.parametrize("case", ["repair", "already_bound", "no_binding", "success", "other_error", "empty"])
+def test_hypothesis_acceptance_replay_is_limited_to_reference_omission(worker_flow_case, case):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    binding = _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    payload = {"status": "satisfied", "disposition": "observation", "summary": "Existing semantic decision",
+               "evidence_refs": [binding["artifact_ref"]] if case == "already_bound" else []}
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="rejected", tool_name="record_task_acceptance", success=case == "success",
+        correctable=False, input_summary=json.dumps(payload),
+        output_summary=("semantic rejection" if case == "other_error"
+                        else "Include the published hypothesis_set artifact reference returned by record_hypotheses"),
+    )
+    if case == "no_binding":
+        task = replace(task, recovery_context={})
+    recorded = []
+    controller._replay_hypothesis_acceptance(task, lambda **values: recorded.append(values),
+                                            [] if case == "empty" else [outcome])
+    assert recorded == ([payload] if case == "repair" else [])
+    controller._replay_hypothesis_acceptance(task, None, [outcome])
+
+
+@pytest.mark.parametrize("subject", ["https://target.test:8443", "tcp://target.test:9000", "/workspace/source"])
+def test_quoted_external_evidence_reaches_critic_without_scope_rewrite(subject):
+    plan = replace(_plan(), targets=[OperationTarget(
+        "target-1", subject, "filesystem" if subject.startswith("/") else "network",
+    )])
+    task = Task("quoted", "Inspect recorded data", "Review a value containing https://outside.test", phase=1,
+                status="active", target_scope="subset", target_ids=["target-1"])
+    seen = []
+
+    def runner(role, prompt, tools, system):
+        seen.append(role)
+        if role == "task_prompt_builder":
+            return json.dumps({"prompt": "Inspect assigned data; observed value was https://outside.test", "tools": []})
+        assert "Quoted observations, redirect destinations" in " ".join(prompt.split())
+        return '{"issues":[]}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 3}),
+        budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, [task]), text_runner=runner,
+    )
+    assert "https://outside.test" in controller._build_task_prompt(plan, plan.phases[0], task)["prompt"]
+    assert seen == ["task_prompt_builder", "task_prompt_critic"]
+    assert not any(event["type"] == "task_scope_validation" for event in controller.runtime.callback_handler.events)
+    controller._emit_task_scope_validation(plan, task, "pre_executor", "allowed")
+    event = controller.runtime.callback_handler.events[-1]
+    assert event["violations"] == []
+    assert event["assignment_errors"] == []
+    assert event["validation_source"] == "structured_assignment"
+
+
+def test_successful_publication_preserves_pending_hypothesis_acceptance(worker_flow_case):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    repair = {"tool_name": "record_task_acceptance", "submission": {"summary": "Keep my decision"},
+              "error": "Missing publication reference"}
+    task = replace(workflow_mod.hypothesis_contract(_hypothesis_task(status="active")),
+                   recovery_context={"hypothesis_repair": repair})
+    controller.state.store_task(task)
+    outcome = ToolOutcome(sequence=1, tool_use_id="published", tool_name="record_hypotheses", success=True,
+                          correctable=False, input_summary="{}", output_summary="Published")
+    updated = controller._retain_hypothesis_repair(task, [outcome])
+    assert updated.recovery_context["hypothesis_repair"] == repair

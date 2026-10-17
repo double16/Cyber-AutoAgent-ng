@@ -2,6 +2,9 @@
 
 Cyber-AutoAgent implements a **Python-orchestrated multi-agent workflow** using the Strands framework for autonomous security assessment.
 
+Web search uses DDGS with `backend="auto"`, delegating engine selection and fallback to the library.
+The application retains its existing retry wrapper, sensitive-query checks, and semantic result cache.
+
 ## Design Philosophy: Python-Owned Workflow, Focused Agents
 
 The core design philosophy centers on deterministic Python ownership of workflow state with short-lived agents assigned to narrow, well-defined roles.
@@ -250,13 +253,41 @@ subject; that rejection occurs before ledger persistence. Prompt-memory selector
 are logged and dropped while valid selected context remains available to the executor.
 
 A testing phase that depends on hypotheses creates tasks only for inventory groups with completed, validated
-hypothesis deliverables. `record_hypotheses` publishes a `hypothesis_set_v1` artifact and a controller-owned digest
-binding. Python supplies the operation, producer, frozen snapshot, subject assignment, and hypothesis IDs. Every
-assigned subject must have testable hypotheses or a reasoned `no_testable_hypotheses` disposition. The contract is
+hypothesis deliverables. Each `record_hypotheses` call may publish a non-empty subset of assigned subjects. A
+resubmitted subject replaces its prior hypotheses or no-test disposition; omitted subjects remain unchanged.
+Every successful call produces an immutable cumulative `hypothesis_set_v1` artifact. Python supplies operation,
+producer, frozen assignment, and hypothesis IDs. The result includes `artifact_ref`, `sha256`, cumulative
+`subject_ids`, `published_subject_ids`, and `missing_subject_ids`. Identical publication is idempotent.
+
+Task recovery metadata stores ordered `hypothesis_publications` digest bindings in SQLite. The latest cumulative
+snapshot is authoritative; older snapshots remain provenance and cannot substitute for missing or corrupt current
+output. Publication reloads durable state between calls and actor cycles. Every assigned subject must have testable
+hypotheses or a reasoned `no_testable_hypotheses` disposition before successful acceptance. The contract is
 protocol-neutral: HTTP endpoints, network services, and source/filesystem subjects use the same reasoning fields.
-Current-operation supporting artifacts establish availability; the actor/critic review still evaluates their support.
-Research references remain advisory. Inventories, memory summaries, and completion prose do not satisfy the typed
-`hypothesis_set` acceptance requirement.
+
+Supporting references must be existing current-operation `artifact:` or `artifact_id:` references. Unsupported
+kinds and missing files return the subject, field, offending reference, and correction. Memory context is advisory;
+cite its underlying artifacts. Availability does not establish semantic support. Positive expectations must
+distinguish the suspected weakness from normal functionality; capability discovery alone is not vulnerability
+validation. The evaluator assesses that distinction, while Python owns availability and provenance checks.
+
+The bound `record_task_acceptance` tool automatically attaches the latest complete cumulative artifact to submitted
+`evidence_refs`, preserving the actor's status, disposition, summary, and other evidence. Missing subject IDs are
+reported directly. Publication alone never invents semantic acceptance. Historical missing-reference rejections
+may replay the retained acceptance through the same validation path. Other failures retain the rejected submission,
+error, publication reference, and missing subjects across cycles so repair does not restart inventory discovery.
+
+Recovery selects production or acceptance mode from the validated cumulative publication, not successful input
+reads or the absence of execution requirements. Missing, partial, or invalid output retains the approved production
+tools, including the publisher, during ordinary and tool-policy recovery. Fresh producer cycles carry frozen source
+references and subject IDs separately from completion evidence, plus publication state and rejected submissions.
+Optional metadata gaps do not require repeated searching: the actor publishes supported hypotheses or a reasoned
+no-test disposition. Only complete validated output permits acceptance-only closure. Workflow logs record the mode
+and missing subjects. The bounded invocation loop guard also detects interleaved repeats of identical successful
+artifact reads/searches; different paging arguments and search patterns remain distinct calls.
+
+No database migration is needed. Older unreleased singular bindings are invalidated and use the existing producer
+repair path; historical acceptance ledgers are not rewritten.
 
 Consumers receive only bound hypothesis output references, producer IDs, digests, and a compact subject index;
 supporting inventory inputs remain separate. `read_hypotheses` validates the binding and frozen assignment on every
@@ -1042,3 +1073,56 @@ Conversation reduction is bounded. If input remains above the configured allowan
 reduction manager is available, the budget hook raises a context-overflow exception before submission.
 Near-capacity requests that still fit remain allowed. Recognized Ollama capacity errors are normalized across
 complete, streaming, and native structured responses; unrelated provider errors retain their original behavior.
+
+### Task prompt construction and review
+
+Builders describe task-specific actions and results and select capabilities from tool descriptions. Critics
+check objective, scope, evidence requirements, and capability suitability. Executors receive tool schemas and
+own argument construction and call batching. Natural-language steps and observations citing retained artifacts
+are valid; drafts need not repeat controller-appended acceptance or terminal policies.
+
+Deterministic prompt scope checks validate structured target assignments. Critics distinguish requested target
+actions from quoted observations, redirect destinations, research URLs, and payload values. Prose literals alone
+do not trigger deterministic prompt rejection. Existing target-access enforcement remains authoritative. Scope
+validation events identify their structured-assignment source; LLM critique events represent model decisions.
+
+Agent construction preserves the resolved role prompt. Support roles retain scope and module policy while
+executor tool protocols are removed and a support-role boundary is added. The original runtime prompt must not
+overwrite that resolved prompt after construction.
+
+Offline tests inspect production runner inputs at the model boundary across HTTP, network, and filesystem
+subjects. The opt-in semantic evaluation pairs valid drafts with single-defect variants and scores approval and
+issue category, without matching model wording or requiring a rejection quota:
+
+```bash
+UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -m ollama tests/test_task_prompt_review.py \
+  --ollama-model <installed-model> --ollama-host http://localhost:11434 \
+  --junitxml=/tmp/task-prompt-review.xml
+```
+
+The suite uses synthetic tasks and makes only model requests, never target requests. Use existing Ollama test
+CLI options for model, host, and timeout. Live semantic scores are separate from deterministic unit-test results.
+After deployment and restart, verify a fresh builder/critic pair in Langfuse has the filtered system prompt;
+continuing an existing operation is sufficient.
+
+### Final input estimation and tool argument normalization
+
+Production task prompt builders, critics, task evaluators, and phase evaluators fit input in the model-call
+hook after Strands registers structured-output tools. Fitting uses the finalized system prompt, all live
+messages, registered tool schemas, and the model's actual output reservation. The budget hook uses the same
+context extraction, estimator, and limits. Optional sections may be removed; required task and acceptance
+content remains intact. The invocation-local fitter runs again on corrective model requests. Custom runners
+without a live agent retain the existing synthetic preflight check. Capacity failures still use the existing
+workflow recovery paths and final overflow guard.
+
+The shared tool-call repair hook normalizes valid JSON wrapped in strings before preview checks, repetition
+fingerprints, recovery bookkeeping, and SDK validation. The selected tool's current schema determines whether
+a value must be an object or array, including nested fields and local schema references. At most two wrapping
+layers are decoded. Missing matching closing braces or brackets are completed using the shared JSON helper,
+then strictly decoded. Unterminated strings, incomplete values, mismatched delimiters, and trailing content
+are rejected with field paths and syntax locations before execution. Fields that permit strings, untyped or
+ambiguous fields, and mismatched container types remain unchanged for normal validation. No string contents,
+fields, or code fences are rewritten. Tool schemas remain unchanged and validators still enforce their rules.
+
+Normalization logging contains only tool names and changed-field counts. Raw provider captures are preserved.
+No additional model requests, database migrations, environment variables, or flow version changes are needed.

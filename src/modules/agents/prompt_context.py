@@ -2,8 +2,15 @@
 
 import re
 from collections.abc import Callable
+from copy import deepcopy
+from typing import Any
 
-from modules.handlers.conversation_budget import estimate_prompt_tokens
+from modules.config.models.factory import get_model_id_from_agent
+from modules.handlers.conversation_budget import (
+    _get_agent_input_context,
+    estimate_prompt_tokens,
+    get_agent_prompt_limits,
+)
 
 
 class PromptInputTooLarge(ValueError):
@@ -19,6 +26,8 @@ def fit_task_prompt(
     output_tokens: int,
     log: Callable[[dict], None],
     optional_headings: tuple[str, ...] = ("Task history", "Eligible Semantic Memories"),
+    *,
+    estimate_input: Callable[[str], int] | None = None,
 ) -> str:
     """Reduce optional sections in a fixed order; keep required content byte-for-byte."""
 
@@ -27,6 +36,8 @@ def fit_task_prompt(
     target = int(input_limit * 0.8)
 
     def estimate(text: str) -> int:
+        if estimate_input is not None:
+            return estimate_input(text)
         return estimate_prompt_tokens(
             model_id, messages=[{"role": "user", "content": [{"text": text}]}],
             system_prompt=system_prompt, tool_specs=tool_specs,
@@ -71,3 +82,45 @@ def fit_task_prompt(
             f"available input is {input_limit} after reserving {output_tokens} output tokens."
         )
     return fitted
+
+
+def attach_live_prompt_fitter(
+    agent: Any,
+    prompt: str,
+    log: Callable[[dict], None],
+    optional_headings: tuple[str, ...],
+) -> None:
+    """Fit only this invocation's request text against the SDK's final live model input."""
+
+    current_prompt = prompt
+
+    def fit(live_agent: Any) -> None:
+        nonlocal current_prompt
+        context = _get_agent_input_context(live_agent)
+        context_limit, output_tokens = get_agent_prompt_limits(live_agent)
+        if context_limit is None:
+            return
+        for message_index, message in enumerate(context.messages or []):
+            if message.get("role") != "user":
+                continue
+            for block_index, block in enumerate(message.get("content", [])):
+                if block.get("text") != current_prompt:
+                    continue
+                model_id = get_model_id_from_agent(live_agent)
+
+                def estimate(candidate: str) -> int:
+                    messages = deepcopy(context.messages)
+                    messages[message_index]["content"][block_index]["text"] = candidate
+                    return estimate_prompt_tokens(
+                        model_id, messages, context.system_prompt, context.tool_specs,
+                    )
+
+                fitted = fit_task_prompt(
+                    current_prompt, context.system_prompt, context.tool_specs or [], model_id,
+                    context_limit, output_tokens, log, optional_headings, estimate_input=estimate,
+                )
+                block["text"] = fitted
+                current_prompt = fitted
+                return
+
+    agent._cyber_prompt_fitter = fit

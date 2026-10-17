@@ -16,7 +16,9 @@ from modules.agents.patches import (
     patch_ollama_model_json_toolcalls,
 )
 from modules.config.system.logger import get_logger
+from modules.handlers.utils import get_tool_spec
 from modules.utils.tool_call_normalization import (
+    normalize_json_container_arguments,
     normalize_tool_call_payload,
     repair_model_response_tool_input,
 )
@@ -57,31 +59,56 @@ class AgentRepairHook(HookProvider):
                 ", ".join(repaired_fields),
                 tool_use.get("name", "unknown"),
             )
-        if tool_use.get("name") != "tool_use":
-            return
-        wrapper_input = tool_use.get("input", {})
-        registry = getattr(getattr(event.agent, "tool_registry", None), "registry", {})
-        try:
-            normalized = normalize_tool_call_payload(
-                {"name": "tool_use", **(wrapper_input if isinstance(wrapper_input, dict) else {})},
-                registered_tool_names=registry.keys() if isinstance(registry, dict) else (),
-            )
-        except ValueError as error:
-            available = ", ".join(sorted(registry)) if isinstance(registry, dict) else ""
-            event.cancel_tool = (
-                "Generic tool_use wrappers are invalid. Call a registered tool directly. "
-                f"{error}. Available tools: {available or 'none'}."
-            )
-            return
+        if tool_use.get("name") == "tool_use":
+            wrapper_input = tool_use.get("input", {})
+            registry = getattr(getattr(event.agent, "tool_registry", None), "registry", {})
+            try:
+                normalized = normalize_tool_call_payload(
+                    {"name": "tool_use", **(wrapper_input if isinstance(wrapper_input, dict) else {})},
+                    registered_tool_names=registry.keys() if isinstance(registry, dict) else (),
+                )
+            except ValueError as error:
+                available = ", ".join(sorted(registry)) if isinstance(registry, dict) else ""
+                event.cancel_tool = (
+                    "Generic tool_use wrappers are invalid. Call a registered tool directly. "
+                    f"{error}. Available tools: {available or 'none'}."
+                )
+                return
 
-        selected_tool = registry[normalized.name]
-        event.selected_tool = selected_tool
-        event.tool_use = {
-            **tool_use,
-            "name": normalized.name,
-            "input": normalized.arguments,
-        }
-        logger.warning("Repaired generic tool_use wrapper to registered tool %s", normalized.name)
+            selected_tool = registry[normalized.name]
+            event.selected_tool = selected_tool
+            event.tool_use = {
+                **tool_use,
+                "name": normalized.name,
+                "input": normalized.arguments,
+            }
+            logger.warning("Repaired generic tool_use wrapper to registered tool %s", normalized.name)
+
+        tool_spec = get_tool_spec(event.selected_tool) or {}
+        schema = tool_spec.get("inputSchema", {}).get("json", {})
+        if not isinstance(schema, dict):
+            return
+        diagnostics = []
+        normalized, paths = normalize_json_container_arguments(
+            event.tool_use.get("input", {}), schema, diagnostics=diagnostics,
+        )
+        if diagnostics:
+            details = "; ".join(
+                f"{item.path}: expected {' or '.join(item.expected_types)}; invalid JSON at "
+                f"line {item.line}, column {item.column}"
+                for item in diagnostics
+            )
+            event.cancel_tool = (
+                f"Invalid JSON container argument: {details}. "
+                "Resubmit with a native JSON object or array, not a JSON string."
+            )
+            logger.info("Rejected malformed JSON containers for tool %s (%d fields)",
+                        tool_spec.get("name", "unknown"), len(diagnostics))
+            return
+        if paths:
+            event.tool_use = {**event.tool_use, "input": normalized}
+            logger.info("Normalized JSON containers for tool %s (%d fields)",
+                        tool_spec.get("name", "unknown"), len(paths))
 
     def after_model_call_check(self, event: AfterModelCallEvent) -> None:
         """

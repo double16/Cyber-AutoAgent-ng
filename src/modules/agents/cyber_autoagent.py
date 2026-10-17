@@ -1299,10 +1299,6 @@ def create_agent(
             agent._cyber_parent_agent_run_id = callback_handler.parent_agent_run_id
     except Exception:
         pass
-    # Ensure legacy-compatible system prompt is directly accessible for tests
-    with contextlib.suppress(Exception):
-        agent.system_prompt = runtime.system_prompt
-
     if include_tool_catalog and agent_kwargs["tools"]:
         agent.tool_registry.register_tool(tool_catalog_wrapper(agent, config.available_tools))
 

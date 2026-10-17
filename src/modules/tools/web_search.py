@@ -272,10 +272,9 @@ class SemanticWebSearchCache:
 _semantic_web_search_cache = SemanticWebSearchCache()
 
 
-# 9.10.0 has backend: brave, duckduckgo, google, grokipedia, mojeek, wikipedia, yahoo, yandex
 def search_duckduckgo(query: str, num: int) -> list[WebSearchHit]:
     with DDGS() as ddg:
-        results = ddg.text(query, backend="brave,duckduckgo", max_results=num)
+        results = ddg.text(query, backend="auto", max_results=num)
         return [WebSearchHit(title=r["title"], url=r["href"], snippet=r["body"])
                 for r in results]
 

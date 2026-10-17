@@ -89,6 +89,45 @@ async def _stream_result(selected_tool, tool_use, invocation_state):
     return events[0].tool_result
 
 
+@pytest.mark.parametrize("name", ["read_artifact", "search_artifact"])
+def test_interleaved_successful_artifact_inspection_stops(name):
+    hook = ToolRepeatGuardHook()
+    state = {}
+    tool = FakeTool(name)
+    for index in range(4):
+        event = _before(state, tool, f"read-{index}", {"path": "artifact:source", "start_line": 1}, name)
+        hook._before_tool(event)
+        hook._after_tool(_after(event, _result(f"read-{index}", "source observations")))
+        other = _before(state, tool, f"other-{index}", {"path": f"artifact:other-{index}"}, name)
+        hook._before_tool(other)
+        hook._after_tool(_after(other, _result(f"other-{index}", "other")))
+    assert state["request_state"]["stop_event_loop"] is True
+    assert state["request_state"][REPEATED_TOOL_LOOP_STATE_KEY]["tool_name"] == name
+
+
+@pytest.mark.parametrize("variation", ["pages", "patterns", "failures", "other_tool"])
+def test_interleaved_inspection_does_not_conflate_changed_or_failed_calls(variation):
+    hook = ToolRepeatGuardHook()
+    state = {}
+    name = "custom_reader" if variation == "other_tool" else "search_artifact"
+    tool = FakeTool(name)
+    for index in range(5):
+        payload = {"path": "artifact:source"}
+        if variation == "pages":
+            payload["start_line"] = index * 20
+        if variation == "patterns":
+            payload["search_pattern"] = str(index)
+        event = _before(state, tool, f"read-{index}", payload, name)
+        hook._before_tool(event)
+        hook._after_tool(_after(event, _result(
+            f"read-{index}", "observations", "error" if variation == "failures" else "success",
+        )))
+        other = _before(state, tool, f"other-{index}", {"path": f"artifact:other-{index}"}, name)
+        hook._before_tool(other)
+        hook._after_tool(_after(other, _result(f"other-{index}", "other")))
+    assert not state.get("request_state", {}).get("stop_event_loop")
+
+
 def _run_combined_before(repeat_hook, recovery_hook, event):
     """Run before callbacks in production registration order."""
 
