@@ -254,22 +254,35 @@ are logged and dropped while valid selected context remains available to the exe
 
 A testing phase that depends on hypotheses creates tasks only for inventory groups with completed, validated
 hypothesis deliverables. Each `record_hypotheses` call may publish a non-empty subset of assigned subjects. A
-resubmitted subject replaces its prior hypotheses or no-test disposition; omitted subjects remain unchanged.
+resubmitted subject accumulates distinct hypotheses by default (`mode="append"`). Exact duplicates are idempotent,
+including repeated entries for a subject within one call. To correct or remove hypotheses, use `mode="replace"`
+with that subject's complete corrected list; omitted subjects remain unchanged. Conflicting dispositions in one
+submission fail atomically. Appending hypotheses replaces a no-test disposition; clearing existing hypotheses
+requires explicit replacement with a reasoned no-test disposition.
 Every successful call produces an immutable cumulative `hypothesis_set_v1` artifact. Python supplies operation,
 producer, frozen assignment, and hypothesis IDs. The result includes `artifact_ref`, `sha256`, cumulative
-`subject_ids`, `published_subject_ids`, and `missing_subject_ids`. Identical publication is idempotent.
+`subject_ids`, `published_subject_ids`, `missing_subject_ids`, `hypothesis_ids_by_subject`, and `hypothesis_counts`.
 
 Task recovery metadata stores ordered `hypothesis_publications` digest bindings in SQLite. The latest cumulative
 snapshot is authoritative; older snapshots remain provenance and cannot substitute for missing or corrupt current
 output. Publication reloads durable state between calls and actor cycles. Every assigned subject must have testable
 hypotheses or a reasoned `no_testable_hypotheses` disposition before successful acceptance. The contract is
 protocol-neutral: HTTP endpoints, network services, and source/filesystem subjects use the same reasoning fields.
+No supported hypothesis is a successful outcome, not a coverage gap or a claim that no vulnerabilities exist.
+Accepted no-hypothesis subjects do not generate downstream testing tasks. If all relevant subjects have accepted
+no-hypothesis dispositions, dependent testing is not applicable. Mixed subjects generate tests only where a
+hypothesis exists. Missing optional metadata does not require speculation; explicitly required unavailable
+evidence remains a prerequisite gap.
 
 Supporting references must be existing current-operation `artifact:` or `artifact_id:` references. Unsupported
 kinds and missing files return the subject, field, offending reference, and correction. Memory context is advisory;
 cite its underlying artifacts. Availability does not establish semantic support. Positive expectations must
 distinguish the suspected weakness from normal functionality; capability discovery alone is not vulnerability
 validation. The evaluator assesses that distinction, while Python owns availability and provenance checks.
+The evaluator receives every record from the latest validated publication in a controller-generated TOON index.
+Historical publications and acceptance summaries cannot establish current coverage. Semantic revisions retain
+the publisher and use explicit replacement without executing future tests. Satisfied execution receipts cannot
+override a rejected hypothesis review.
 
 The bound `record_task_acceptance` tool automatically attaches the latest complete cumulative artifact to submitted
 `evidence_refs`, preserving the actor's status, disposition, summary, and other evidence. Missing subject IDs are
@@ -285,6 +298,12 @@ Optional metadata gaps do not require repeated searching: the actor publishes su
 no-test disposition. Only complete validated output permits acceptance-only closure. Workflow logs record the mode
 and missing subjects. The bounded invocation loop guard also detects interleaved repeats of identical successful
 artifact reads/searches; different paging arguments and search patterns remain distinct calls.
+Complete assigned inventory records are saved under `artifacts/hypothesis_context/`, keyed by frozen source refs,
+digest, and subject IDs. Source fingerprints invalidate changed inputs. Compact records are supplied to builders,
+critics, and actors; oversized attributes remain available in the complete saved artifact. A task-local filesystem
+ledger retains the last 24 distinct successful inspection arguments and returned references across cycles, without
+retaining response bodies. These inputs are investigation context, never execution proof. No new global read limit
+or process-wide in-memory cache is introduced.
 
 No database migration is needed. Older unreleased singular bindings are invalidated and use the existing producer
 repair path; historical acceptance ledgers are not rewritten.

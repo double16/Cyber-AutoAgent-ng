@@ -177,6 +177,7 @@ def build_record_hypotheses_tool(
         "json": {
             "type": "object", "properties": {
                 "subjects": {"type": "array", "minItems": 1, "items": subject_schema},
+                "mode": {"type": "string", "enum": ["append", "replace"], "default": "append"},
             }, "required": ["subjects"],
         },
     }
@@ -184,37 +185,45 @@ def build_record_hypotheses_tool(
     schema["json"]["$defs"] = subject_schema.pop("$defs", {})
 
     @tool(name="record_hypotheses", inputSchema=schema)
-    def record_hypotheses(subjects: list[dict[str, Any]]) -> str:
-        """Publish assigned subjects incrementally; each submitted subject replaces its prior records.
+    def record_hypotheses(subjects: list[dict[str, Any]], mode: str = "append") -> str:
+        """Append hypotheses by default. Use mode=replace with a subject's full corrected list to remove records.
 
         The returned artifact is cumulative. Python binds the latest complete publication to acceptance.
         """
 
-        normalized = []
+        mode = mode.strip().lower()
+        mode = {"add": "append", "merge": "append", "overwrite": "replace"}.get(mode, mode)
+        if mode not in {"append", "replace"}:
+            raise ValueError("mode must be append or replace")
+        grouped = {}
         aliases = {"supplied": "hypotheses_supplied", "none": "no_testable_hypotheses"}
         for raw in subjects:
             entry = dict(raw)
             value = str(entry.get("disposition", "")).strip().lower()
             entry["disposition"] = aliases.get(value, value)
-            normalized.append(SubjectHypotheses.model_validate(entry))
+            subject = SubjectHypotheses.model_validate(entry)
+            prior = grouped.get(subject.item_id)
+            if prior is not None:
+                if prior.disposition != subject.disposition:
+                    raise ValueError(f"Conflicting dispositions for subject {subject.item_id}")
+                subject.hypotheses = [*prior.hypotheses, *subject.hypotheses]
+            grouped[subject.item_id] = subject
+        normalized = list(grouped.values())
         ids = [item.item_id for item in normalized]
         basis = task.acceptance.basis
         if not basis.snapshot_hash or not basis.source_refs or not basis.item_ids:
             raise ValueError("hypothesis producer requires a frozen inventory snapshot")
-        if not ids or len(ids) != len(set(ids)) or not set(ids).issubset(basis.item_ids):
+        if not ids or not set(ids).issubset(basis.item_ids):
             raise ValueError(
-                "provide exactly one disposition per submitted assigned subject; no duplicates or foreign IDs"
+                "Submit one or more assigned subject IDs; foreign IDs are not allowed"
             )
         for subject in normalized:
-            seen = set()
             for hypothesis in subject.hypotheses:
                 identity = json.dumps(hypothesis.model_dump(exclude={"hypothesis_id"}), sort_keys=True)
                 hypothesis.hypothesis_id = hashlib.sha256(
                     f"{task.task_uid}|{subject.item_id}|{identity}".encode()
                 ).hexdigest()[:24]
-                if hypothesis.hypothesis_id in seen:
-                    raise ValueError("duplicate hypothesis for the same subject")
-                seen.add(hypothesis.hypothesis_id)
+            subject.hypotheses = list({item.hypothesis_id: item for item in subject.hypotheses}.values())
             _validate_supporting_refs(subject)
         latest_task = current_task() if current_task is not None else task
         if latest_task.acceptance.manifest_hash != task.acceptance.manifest_hash:
@@ -223,7 +232,18 @@ def build_record_hypotheses_tool(
         previous = (load_hypothesis_set(binding["artifact_ref"], latest_task, operation_id, require_complete=False)
                     if binding else None)
         merged = {subject.item_id: subject for subject in previous.subjects} if previous else {}
-        merged.update({subject.item_id: subject for subject in normalized})
+        for subject in normalized:
+            prior = merged.get(subject.item_id)
+            if mode == "append" and prior is not None and prior.hypotheses:
+                if not subject.hypotheses:
+                    raise ValueError(
+                        f"Subject {subject.item_id} has hypotheses; use mode=replace for a no-hypothesis disposition"
+                    )
+                subject.hypotheses = list({
+                    item.hypothesis_id: item for item in [*prior.hypotheses, *subject.hypotheses]
+                }.values())
+            subject.hypotheses.sort(key=lambda item: item.hypothesis_id)
+            merged[subject.item_id] = subject
         payload = HypothesisSet(
             operation_id=operation_id, producer_task_uid=task.task_uid, snapshot_hash=basis.snapshot_hash,
             source_refs=list(basis.source_refs), subjects=[merged[key] for key in sorted(merged)],
@@ -243,6 +263,10 @@ def build_record_hypotheses_tool(
             "artifact_ref": f"artifact:artifacts/hypotheses/{filename}", "sha256": digest,
             "subject_ids": sorted(merged), "published_subject_ids": sorted(ids),
             "missing_subject_ids": sorted(set(basis.item_ids) - set(merged)),
+            "hypothesis_ids_by_subject": {
+                key: [item.hypothesis_id for item in value.hypotheses] for key, value in sorted(merged.items())
+            },
+            "hypothesis_counts": {key: len(value.hypotheses) for key, value in sorted(merged.items())},
         }
         persist(binding)
         # Direct tool users and callbacks retain the same durable metadata contract.

@@ -175,7 +175,7 @@ def test_live_critic_distinguishes_valid_and_defective_drafts(
         assert not result.issues
 
 
-@pytest.fixture(params=[False, True], ids=["benign-success-only", "weakness-distinguished"])
+@pytest.fixture(params=[False, True, None], ids=["benign-success-only", "weakness-distinguished", "no-hypothesis"])
 def semantic_hypothesis_case(review_case, request, tmp_path, monkeypatch):
     controller, plan, task, subject = review_case
     monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
@@ -184,6 +184,11 @@ def semantic_hypothesis_case(review_case, request, tmp_path, monkeypatch):
     (tmp_path / "artifacts").mkdir(exist_ok=True)
     (tmp_path / "artifacts" / "inventory.json").write_text("{}")
     objective = f"Derive a testable input-injection hypothesis for {subject}, distinguishing weakness from normal use."
+    if request.param is None:
+        objective = f"Derive supported security hypotheses or a no-hypothesis disposition for {subject}."
+        (tmp_path / "observation.txt").write_text(
+            "Inventory records presence only, without attacker-controlled operations or trust-boundary crossings."
+        )
     task = replace(task, objective=objective, recovery_context={}, acceptance=replace(
         task.acceptance, criteria=[replace(task.acceptance.criteria[0], description=objective,
                                            evidence_requirements=[EvidenceRequirement(kind="hypothesis_set")])],
@@ -194,9 +199,13 @@ def semantic_hypothesis_case(review_case, request, tmp_path, monkeypatch):
                                        if request.param else ["Request succeeds and normal output is returned"])
     record["suspected_mechanism"] = "Attacker input is executed by an interpreter instead of being treated as data"
     writer = hypotheses.build_record_hypotheses_tool(task, controller.runtime.operation_id, str(tmp_path), lambda _: None)
-    binding = json.loads(writer(subjects=[{
+    entry = {
         "item_id": "subject-1", "disposition": "hypotheses_supplied", "hypotheses": [record],
-    }]))
+    } if request.param is not None else {
+        "item_id": "subject-1", "disposition": "no_testable_hypotheses",
+        "reason": "Frozen observations establish presence only, with no supported security-relevant test.",
+    }
+    binding = json.loads(writer(subjects=[entry]))
     task = replace(task, evidence=[binding["artifact_ref"]])
     controller.state.store_task(task)
     content = Path(artifact.resolve_operation_artifact_path(binding["artifact_ref"])).read_text()
@@ -208,14 +217,14 @@ def semantic_hypothesis_case(review_case, request, tmp_path, monkeypatch):
                               (binding["artifact_ref"],))
     prompt = controller._task_evaluator_prompt(plan, plan.phases[0], task, tool_outcomes=[outcome],
                                                acceptance_results=[result])
-    return controller, prompt, request.param
+    return controller, prompt, request.param is not False
 
 
 def test_evaluator_checks_hypothesis_semantics_even_when_publication_is_available(semantic_hypothesis_case):
     _controller, prompt, _valid = semantic_hypothesis_case
-    assert "positive expectations distinguish the suspected weakness from normal functionality" in prompt
+    assert "Positive/control expectations must distinguish the suspected weakness from normal functionality" in prompt
     assert "Require correction for that semantic gap" in prompt
-    assert "Attacker input is executed" in prompt
+    assert "Attacker input is executed" in prompt or "no_testable_hypotheses" in prompt
 
 
 @pytest.mark.ollama

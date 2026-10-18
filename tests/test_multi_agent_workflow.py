@@ -2829,6 +2829,7 @@ def _runtime(progress=0, env_ints=None, env_floats=None):
         config=SimpleNamespace(target="target", objective="assess", available_tools=[]),
         operation_id="OP_TEST",
         system_prompt="base prompt",
+        prompt_token_limit=48_000,
         termination_policy="",
         config_manager=SimpleNamespace(
             getenv_int=lambda name, default=0: env_ints.get(name, default),
@@ -15479,7 +15480,11 @@ def test_hypothesis_dependent_batches_cover_every_completed_hypothesis(monkeypat
             controller.state.patch_task(producer.task_uid, recovery_context_updates={
                 "hypothesis_publications": [{"artifact_ref": producer.evidence[0], "sha256": "fixture-digest"}],
             })
-    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda *_args: SimpleNamespace())
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda _ref, task, *_args: SimpleNamespace(
+        subjects=[
+            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace()]) for item in task.acceptance.basis.item_ids
+        ],
+    ))
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
     monkeypatch.setattr(
         controller,
@@ -15560,7 +15565,11 @@ def test_hypothesis_dependent_batches_record_gaps_and_use_covered_groups(monkeyp
             controller.state.patch_task(producer.task_uid, recovery_context_updates={
                 "hypothesis_publications": [{"artifact_ref": producer.evidence[0], "sha256": "fixture-digest"}],
             })
-    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda *_args: SimpleNamespace())
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda _ref, task, *_args: SimpleNamespace(
+        subjects=[
+            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace()]) for item in task.acceptance.basis.item_ids
+        ],
+    ))
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
     monkeypatch.setattr(
         controller,
@@ -15793,7 +15802,11 @@ def test_hypothesis_inventory_binding_preserves_separate_manifest_item_ids(monke
             controller.state.patch_task(producer.task_uid, recovery_context_updates={
                 "hypothesis_publications": [{"artifact_ref": producer.evidence[0], "sha256": "fixture-digest"}],
             })
-    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda *_args: SimpleNamespace())
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda _ref, task, *_args: SimpleNamespace(
+        subjects=[
+            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace()]) for item in task.acceptance.basis.item_ids
+        ],
+    ))
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda value: value)
     monkeypatch.setattr(
         controller, "_load_controller_inventory_manifest",
@@ -22958,6 +22971,151 @@ def test_hypothesis_recovery_state_survives_sqlite_reload(worker_flow_case, tmp_
     assert partial["missing_subject_ids"] == ["second"]
     writer(subjects=[{"item_id": "second", "disposition": "no_testable_hypotheses", "reason": "No safe test"}])
     assert controller._hypothesis_production_state(current())["mode"] == "acceptance"
+
+
+@pytest.mark.parametrize("case", ["none", "supplied", "missing", "corrupt", "uncovered", "mixed"])
+def test_no_hypothesis_subjects_do_not_create_downstream_gaps_or_tests(worker_flow_case, monkeypatch, case):
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_rest = worker_flow_case
+    controller.state.tasks = []
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="done"))
+    if case == "mixed":
+        task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+            task.acceptance.basis, item_ids=["subject", "second"],
+        )))
+    controller.state.store_task(task)
+    plan = OperationPlan(objective="Assess", current_phase=2, total_phases=2, phases=[
+        PlanPhase(id=1, title="Hypotheses", status="done", produces_hypotheses=True,
+                  source_manifest_refs=("artifact:form.html",)),
+        PlanPhase(id=2, title="Tests", status="active", task_creation_mode="hypothesis_dependent"),
+    ])
+    controller.state.plan = plan
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    writer = next(tool for tool in controller._resolve_task_executor_base_tools(plan, task, {})
+                  if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+    supplied = {"item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [
+        {**hypothesis(), "supporting_refs": ["artifact:form.html"]},
+    ]}
+    entries = [{"item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No supported security test"}]
+    if case == "supplied":
+        entries = [supplied]
+    if case == "mixed":
+        entries.append({**supplied, "item_id": "second"})
+    if case != "missing":
+        binding = json.loads(writer(subjects=entries))
+        if case == "corrupt":
+            from modules.tools.artifact import resolve_operation_artifact_path
+
+            Path(resolve_operation_artifact_path(binding["artifact_ref"])).write_text("corrupt")
+    ids = ["subject", "second"] if case in {"mixed", "uncovered"} else ["subject"]
+    manifest = {"items": [{"id": item, "target_id": "target-1", "kind": "service", "value": f"tcp://host/{item}"}
+                          for item in ids]}
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", lambda *_args: (
+        manifest, task.acceptance.basis.snapshot_hash,
+    ))
+    monkeypatch.setattr(controller, "_repair_hypothesis_producer", lambda *_args: task)
+    assert controller._hypothesis_testing_unnecessary(plan, plan.phases[1]) == (case == "none")
+    batches = controller._task_creation_batches(plan, plan.phases[1], "system")
+    actual_ids = {item for batch in batches for item in batch.item_ids}
+    assert actual_ids == ({"subject"} if case == "supplied" else {"second"} if case == "mixed" else set())
+    if case in {"none", "mixed"}:
+        event = next(
+            e for e in reversed(controller.runtime.callback_handler.events) if e["type"] == "hypothesis_coverage"
+        )
+        assert event["missing_group_count"] == 0
+        assert "subject" in event["no_hypothesis_subject_ids"]
+    if case == "none":
+        decision, _counts = controller._classify_phase_from_durable_state(plan.phases[1])
+        assert decision.status == "not_applicable"
+        creator = Mock(side_effect=AssertionError("No test task should be created"))
+        monkeypatch.setattr(controller, "_create_tasks", creator)
+        controller.run()
+        creator.assert_not_called()
+        assert controller.state.get_plan().phases[1].status == "not_applicable"
+
+
+@pytest.mark.parametrize("status", ["done", "partial_failure"])
+def test_hypothesis_evaluator_reviews_current_records_and_preserves_semantic_repair(
+    worker_flow_case, monkeypatch, status,
+):
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    capture = []
+
+    def evaluate(_role, prompt, *_args, **_kwargs):
+        capture.append(prompt)
+        return {"status": status, "reason": "Reviewed current disposition", "instructions": (
+            "Correct the published positive/control expectations" if status == "partial_failure" else ""
+        ), "repair": {"kind": "execution", "evidence_gaps": ["semantic gap"]}
+            if status == "partial_failure" else {"kind": "none"}}
+
+    monkeypatch.setattr(controller, "_run_json_text_agent", evaluate)
+    guard = Mock(return_value=True)
+    monkeypatch.setattr(controller, "_evaluator_reopens_resolved_execution_gate", guard)
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
+    assert decision.status == status
+    guard.assert_not_called()
+    if status == "partial_failure":
+        assert decision.repair_kind == "acceptance"
+    assert "Authoritative current hypothesis publication" in capture[0]
+    assert "no_testable_hypotheses" in capture[0]
+    assert "not every inventory item" in capture[0]
+
+
+def test_semantic_hypothesis_repair_keeps_publisher_after_complete_publication(worker_flow_case, monkeypatch):
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive tests", "tools": []})
+    monkeypatch.setattr(controller, "_evaluate_task", Mock(side_effect=[
+        workflow_mod.WorkflowDecision(status="partial_failure", reason="Normal output does not establish impact",
+                                     instructions="Replace the unsupported hypothesis with a no-hypothesis disposition",
+                                     repair_kind="acceptance"),
+        workflow_mod.WorkflowDecision(status="done", reason="Supported no-hypothesis disposition"),
+    ]))
+    calls = []
+
+    def actor(_role, prompt, tools, _system, _policy):
+        calls.append(prompt)
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        if len(calls) == 1:
+            binding = json.loads(writer(subjects=[{
+                "item_id": "subject", "disposition": "supplied", "hypotheses": [
+                    {**hypothesis(), "supporting_refs": ["artifact:form.html"]},
+                ],
+            }]))
+        else:
+            assert "mode=replace" in prompt and "Do not execute future tests" in prompt
+            assert "unsupported hypothesis" in prompt
+            binding = json.loads(writer(subjects=[{
+                "item_id": "subject", "disposition": "no_testable_hypotheses",
+                "reason": "Available observations support no discriminating security test",
+            }], mode="replace"))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id="future-tests", status="satisfied", disposition="observation",
+            summary="Published disposition", evidence_refs=(binding["artifact_ref"],),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[ToolOutcome(
+            sequence=len(calls), tool_use_id=f"accepted-{len(calls)}", tool_name="record_task_acceptance",
+            success=True, correctable=False, input_summary="{}", output_summary='{"complete":true}',
+        )])
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    assert len(calls) == 2
+    updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert updated.status == "done"
+    assert workflow_mod.load_hypothesis_set(
+        workflow_mod.hypothesis_binding(updated)["artifact_ref"], updated, "OP_TEST",
+    ).subjects[0].disposition == "no_testable_hypotheses"
 
 
 @pytest.mark.parametrize("first_result", ["read_only", "rejected_acceptance", "policy_recovery", "loop"])

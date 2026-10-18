@@ -112,13 +112,13 @@ def test_invalid_disposition_rejected(producer, tmp_path, entry):
     assert not producer.recovery_context
 
 
-def test_duplicate_and_missing_assignment_rejected(producer, tmp_path):
+def test_duplicate_entries_merge_and_missing_assignment_is_rejected(producer, tmp_path):
     entry = {"item_id": "subject", "disposition": "supplied", "hypotheses": [hypothesis(), hypothesis()]}
-    with pytest.raises(ValueError, match="duplicate hypothesis"):
-        publish(producer, tmp_path, [entry])
+    binding, _writer = publish(producer, tmp_path, [entry])
+    assert binding["hypothesis_counts"] == {"subject": 1}
     entry["hypotheses"] = [hypothesis()]
-    with pytest.raises(ValueError, match="exactly one"):
-        publish(producer, tmp_path, [entry, entry])
+    repeated, _writer = publish(producer, tmp_path, [entry, entry])
+    assert repeated["sha256"] == binding["sha256"]
     with pytest.raises(ValueError, match="frozen inventory"):
         publish(replace(producer, acceptance=replace(producer.acceptance, basis=replace(
             producer.acceptance.basis, snapshot_hash="",
@@ -209,7 +209,8 @@ def test_contract_idempotence(producer):
 
 
 @pytest.mark.parametrize("shape", ["native", "wrapped", "double_wrapped", "nested", "invalid_json", "wrong_type",
-                                   "unknown_field", "unknown_disposition", "root_wrapped", "missing_closer"])
+                                   "unknown_field", "unknown_disposition", "root_wrapped", "missing_closer",
+                                   "replace_mode", "append_alias", "invalid_mode"])
 def test_hypothesis_arguments_normalize_before_sdk_validation(producer, tmp_path, shape):
     import asyncio
     import importlib
@@ -261,6 +262,10 @@ def test_hypothesis_arguments_normalize_before_sdk_validation(producer, tmp_path
     results = []
 
     arguments = {"subjects": subjects}
+    if shape in {"replace_mode", "invalid_mode"}:
+        arguments["mode"] = "replace" if shape == "replace_mode" else "invented"
+    if shape == "append_alias":
+        arguments["mode"] = "merge"
     if shape == "root_wrapped":
         arguments = json.dumps(arguments)
 
@@ -271,7 +276,7 @@ def test_hypothesis_arguments_normalize_before_sdk_validation(producer, tmp_path
         )]
 
     asyncio.run(collect())
-    valid = shape not in {"invalid_json", "wrong_type", "unknown_field", "unknown_disposition"}
+    valid = shape not in {"invalid_json", "wrong_type", "unknown_field", "unknown_disposition", "invalid_mode"}
     assert results[0]["status"] == ("success" if valid else "error")
     assert len(recorded) == int(valid)
     if shape == "invalid_json":
@@ -310,14 +315,14 @@ def test_incremental_publication_replacement_reload_and_idempotence(producer, tm
     before = list(producer.recovery_context["hypothesis_publications"])
     assert json.loads(writer(subjects=[no_test("second")]))["sha256"] == second["sha256"]
     assert producer.recovery_context["hypothesis_publications"] == before
-    # A new tool instance uses the durable publication, replacing rather than appending a subject's hypotheses.
+    # A new tool instance appends to the durable publication.
     third, writer = publish(producer, tmp_path, [{
         "item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [hypothesis()],
     }])
     payload = hypotheses.load_hypothesis_set(third["artifact_ref"], producer, "OP_TEST")
     assert len(payload.subjects) == 2
     assert len(next(subject for subject in payload.subjects if subject.item_id == "subject").hypotheses) == 1
-    fourth = json.loads(writer(subjects=[no_test(reason="Corrected disposition")]))
+    fourth = json.loads(writer(subjects=[no_test(reason="Corrected disposition")], mode="replace"))
     assert not next(subject for subject in hypotheses.load_hypothesis_set(
         fourth["artifact_ref"], producer, "OP_TEST",
     ).subjects if subject.item_id == "subject").hypotheses
@@ -413,3 +418,67 @@ def test_changed_assignment_rejects_stale_publication_tool(producer, tmp_path):
     )
     with pytest.raises(ValueError, match="assignment changed"):
         writer(subjects=[no_test()])
+
+
+def test_four_incremental_hypotheses_survive_sqlite_reload_and_consumer(producer, tmp_path):
+    store = memory.SQLiteApplicationStore(str(tmp_path / "append.db"), "target")
+    store.store_task("OP_TEST", producer)
+
+    def current():
+        return store.get_tasks("OP_TEST")[0]
+
+    def persist(binding):
+        store.patch_task("OP_TEST", producer.task_uid, recovery_context_updates={
+            "hypothesis_publications": [*current().recovery_context.get("hypothesis_publications", []), binding],
+        })
+
+    for action in ["Cross-account access", "Mass assignment", "Excessive data", "Reflected script"]:
+        writer = hypotheses.build_record_hypotheses_tool(current(), "OP_TEST", str(tmp_path), persist,
+                                                        current_task=current)
+        result = json.loads(writer(subjects=[{
+            "item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [hypothesis(action)],
+        }]))
+    assert result["hypothesis_counts"] == {"subject": 4}
+    reader = hypotheses.build_read_hypotheses_tool([(result["artifact_ref"], current())], "OP_TEST", {"subject"})
+    assert len(json.loads(reader(item_id="subject"))["hypotheses"]) == 4
+    assert len(result["hypothesis_ids_by_subject"]["subject"]) == 4
+    payload = {"status": "satisfied", "disposition": "observation", "summary": "Four future tests", "evidence_refs": []}
+    bound = hypotheses.bind_hypothesis_acceptance(current(), "OP_TEST", payload)
+    assert bound["evidence_refs"] == [result["artifact_ref"]]
+    payload = hypotheses.load_hypothesis_set(bound["evidence_refs"][0], current(), "OP_TEST")
+    assert len(payload.subjects[0].hypotheses) == 4
+
+
+@pytest.mark.parametrize("mode", ["replace", "REPLACE", "overwrite"])
+def test_explicit_replacement_revises_without_accumulating(producer, tmp_path, mode):
+    _binding, writer = publish(producer, tmp_path)
+    result = json.loads(writer(subjects=[{
+        "item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [hypothesis("Corrected test")],
+    }], mode=mode))
+    records = hypotheses.load_hypothesis_set(result["artifact_ref"], producer, "OP_TEST").subjects[0].hypotheses
+    assert len(records) == 1
+    assert records[0].attacker_controlled_input == "Corrected test"
+
+
+@pytest.mark.parametrize("case", ["mode", "conflicting", "clear", "foreign"])
+def test_invalid_accumulation_preserves_publication(producer, tmp_path, case):
+    first, writer = publish(producer, tmp_path)
+    args = {"subjects": [no_test()]}
+    if case == "mode":
+        args["mode"] = "invented"
+    elif case == "conflicting":
+        args["subjects"].append({"item_id": "subject", "disposition": "supplied", "hypotheses": [hypothesis()]})
+    elif case == "foreign":
+        args["subjects"] = [no_test("foreign")]
+    with pytest.raises(ValueError):
+        writer(**args)
+    assert producer.recovery_context["hypothesis_publications"][-1]["sha256"] == first["sha256"]
+
+
+def test_runtime_schema_advertises_publication_modes(producer, tmp_path):
+    _binding, writer = publish(producer, tmp_path)
+    schema = writer.tool_spec["inputSchema"]["json"]
+    assert schema["properties"]["mode"]["enum"] == ["append", "replace"]
+    Draft202012Validator(schema).validate({"subjects": [no_test()], "mode": "replace"})
+    with pytest.raises(Exception, match="invented"):
+        Draft202012Validator(schema).validate({"subjects": [no_test()], "mode": "invented"})

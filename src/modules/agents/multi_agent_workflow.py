@@ -68,6 +68,12 @@ from modules.agents.cyber_autoagent import (
     build_role_tools,
     create_agent,
 )
+from modules.agents.hypothesis_context import (
+    frozen_input_context,
+    inspection_context,
+    publication_review,
+    retain_inspections,
+)
 from modules.agents.prompt_context import PromptInputTooLarge, attach_live_prompt_fitter, fit_task_prompt
 from modules.agents.run_policy import AgentRunPolicy
 from modules.agents.structured_outputs import (
@@ -2366,6 +2372,18 @@ class MultiAgentWorkflowController:
             finding_dependent = phase.task_creation_mode == "finding_dependent" or (
                 phase.task_creation_mode == "standard" and phase.requires_finding_candidates
             )
+            if before_count == 0 and self._hypothesis_testing_unnecessary(plan, phase):
+                previous_signature = self._plan_signature(plan)
+                updated_plan = self._mark_phase(plan, phase.id, "not_applicable")
+                self._emit_plan_output("updated", updated_plan, previous_signature)
+                self._emit_workflow_event({
+                    "type": "phase_dependency_gate", "phase": phase.id, "decision": "not_applicable",
+                    "reason": "accepted_no_hypothesis_dispositions",
+                })
+                if updated_plan.assessment_complete or self._all_phases_terminal(updated_plan):
+                    self._emit_workflow_completion(updated_plan)
+                    return
+                continue
             if finding_dependent and before_count == 0:
                 eligible_candidates = self._eligible_finding_records(phase)
                 if not eligible_candidates:
@@ -5693,6 +5711,7 @@ class MultiAgentWorkflowController:
         recovery_used = False
         endpoint_evidence_recoveries = 0
         evaluator_corrections = 0
+        evaluator_instructions = ""
         finding_acceptance_recovery = False
         acceptance_recovery_active = False
         missing_acceptance_recovery_active = False
@@ -5800,6 +5819,8 @@ class MultiAgentWorkflowController:
                     prompt = (
                         self._hypothesis_production_prompt(task, production)
                         + self._hypothesis_repair_context(task)
+                        + self._hypothesis_input_context(task)
+                        + inspection_context(task, _operation_output_root())
                         + "\n\n" + self._task_executor_contract(
                             task, self._tool_names(tools), selected_shell_commands, plan=plan,
                             execution_state=self._controller_execution_state(task),
@@ -5885,7 +5906,8 @@ class MultiAgentWorkflowController:
                 unfinished_hypotheses = bool(
                     hypothesis_production and hypothesis_production["mode"] == "production"
                 )
-                if unfinished_hypotheses:
+                hypothesis_revision = bool(hypothesis_production and evaluator_instructions)
+                if unfinished_hypotheses or hypothesis_revision:
                     # A successful input read is not the required output. Closure policies would
                     # remove the publisher and make this task impossible to finish.
                     current_policy = task_policy
@@ -5950,7 +5972,7 @@ class MultiAgentWorkflowController:
                         if get_tool_name(tool)
                         in evaluator_synthesis_recovery_policy.recovery_allowed_tool_names
                     ]
-                if unfinished_hypotheses:
+                if unfinished_hypotheses or hypothesis_revision:
                     closure_tools = None
                 prior_tool_inputs = {
                     (outcome.tool_name, outcome.input_summary)
@@ -6013,9 +6035,16 @@ class MultiAgentWorkflowController:
                 cycle_shell_commands = selected_shell_commands if "shell" in cycle_tool_names else []
                 cycle_prompt_base = execution_prompt_context if actor_prompt == execution_prompt else actor_prompt
                 if cycle > 1 and self._is_hypothesis_producer(task):
-                    if unfinished_hypotheses:
+                    if unfinished_hypotheses or hypothesis_revision:
                         cycle_prompt_base = self._hypothesis_production_prompt(task, hypothesis_production)
+                        if hypothesis_revision:
+                            cycle_prompt_base += (
+                                "\nRepair current hypothesis records with mode=replace and the full corrected "
+                                "subject list. Do not execute future tests.\n" + evaluator_instructions
+                            )
                     cycle_prompt_base += self._hypothesis_repair_context(task)
+                    cycle_prompt_base += inspection_context(task, _operation_output_root())
+                cycle_prompt_base += self._hypothesis_input_context(task)
                 if hypothesis_production:
                     self._log_workflow(
                         "hypothesis recovery state task=%s cycle=%s mode=%s missing_subject_ids=%s",
@@ -6060,6 +6089,7 @@ class MultiAgentWorkflowController:
                     max_token_synthesis_recovery_active = False
                 task = self._retain_task_artifact_evidence(task, tool_outcomes)
                 if self._is_hypothesis_producer(task):
+                    retain_inspections(task, cycle_result.outcomes, _operation_output_root())
                     task = self._retain_hypothesis_repair(task, cycle_result.outcomes)
                     self._replay_hypothesis_acceptance(task, acceptance_tool, tool_outcomes)
                 self._emit_model_claim_conflicts(task, cycle_result.text, cycle_result.outcomes)
@@ -6596,6 +6626,8 @@ class MultiAgentWorkflowController:
                         )
                     )
                     tool_outcomes.extend(recovery_result.outcomes)
+                    if self._is_hypothesis_producer(task):
+                        retain_inspections(task, recovery_result.outcomes, _operation_output_root())
                     self._emit_model_claim_conflicts(task, recovery_result.text, recovery_result.outcomes)
                     cycle_result.outcomes.extend(recovery_result.outcomes)
                     recovery_failed_acceptance, recovery_successful_acceptance, recovery_repeated_acceptance = (
@@ -6852,6 +6884,8 @@ class MultiAgentWorkflowController:
                                         synthesis_instructions = (
                                             decision.instructions.strip() or decision.reason.strip()
                                         )
+                                        if self._is_hypothesis_producer(task):
+                                            evaluator_instructions = synthesis_instructions
                                         self._record_efficiency_correction("evaluator_synthesis_repair")
                                         acceptance_submitted = False
                                         self._emit_evaluator_synthesis_repair(
@@ -8181,7 +8215,8 @@ by the storage tool or listed above. Do not add criteria or broaden scope.
             + "\nInput references are investigation context, not proof of completed work. "
               "Use get_inventory_item with the frozen manifest reference for missing subjects; reuse "
               "available observations instead of repeating inventory searches. Publish missing subjects "
-              "with record_hypotheses, preserving published subjects unless correcting them. "
+              "with record_hypotheses; new hypotheses accumulate. Use mode=replace with a subject's full "
+              "corrected list only to revise or remove existing hypotheses. "
               "Missing optional metadata does not require further searching or invented hypotheses. "
               "If observations support no safe testable hypothesis, publish no_testable_hypotheses "
               "with an evidence-based reason. Then record_task_acceptance; Python binds the complete output."
@@ -10050,7 +10085,7 @@ Return exactly one decision for each candidate.
         memory_records: list[dict[str, Any]] | None = None,
     ) -> str:
         memory_catalog = self._memory_selection_catalog(memory_records, task=task)
-        hypothesis_guidance = self._hypothesis_phase_guidance(phase)
+        hypothesis_guidance = self._hypothesis_phase_guidance(phase) + self._hypothesis_input_context(task)
         response_schema = (
             '{"prompt": string, "memory_ids": [string], "tools": [string], "shell_commands": [string]}'
             if memory_catalog
@@ -12972,11 +13007,20 @@ never completion. Positive expectations must distinguish the suspected weakness 
 capability discovery alone is not proof of unauthorized behavior or impact. For each path, preserve the
 observed basis and preconditions, suspected mechanism,
 attacker-controlled path, safe later-phase test steps, expected positive and negative/control results, and required
-evidence. Publish every assigned subject with record_hypotheses; research references are advisory. Research public
+evidence. Publish every assigned subject with record_hypotheses; new hypotheses accumulate by default. Use
+mode=replace with the full corrected subject list to revise or remove hypotheses. A reasoned
+no_testable_hypotheses disposition is successful coverage when no supported security-relevant test exists;
+do not invent a security implication for every inventory item. Absent optional metadata alone is not a gap.
+An explicitly required unavailable input remains a prerequisite gap. Research references are advisory. Research public
 intelligence when observed technology, software versions, components, protocols, or behavior provide a useful lead;
 CVEs, advisories, and published proof of concepts inform hypothesis and test design only, do not establish
 applicability or a finding, and published proof of concepts must not be executed.
 """ + module_section
+
+    def _hypothesis_input_context(self, task: Task) -> str:
+        if not self._is_hypothesis_producer(task):
+            return ""
+        return frozen_input_context(task, _operation_output_root())
 
     @staticmethod
     def _validated_selection_list(value: Any, field_name: str) -> list[str]:
@@ -13095,6 +13139,14 @@ applicability or a finding, and published proof of concepts must not be executed
             comparison_refs.extend(
                 ref for ref in task.acceptance.basis.source_refs if ref.startswith(("artifact:", "artifact_id:"))
             )
+        if self._is_hypothesis_producer(task):
+            try:
+                publication_review(task, self.runtime.operation_id)
+            except (OSError, TypeError, ValueError) as error:
+                return WorkflowDecision(
+                    status="partial_failure", reason=f"Hypothesis publication unavailable: {error}",
+                    repair_kind="acceptance", instructions="Repair and republish the assigned hypothesis subjects.",
+                )
         try:
             data = self._run_json_text_agent(
                 "task_evaluator",
@@ -13127,6 +13179,9 @@ applicability or a finding, and published proof of concepts must not be executed
         decision = self._decision_from_data(data, allowed=("done", "partial_failure", "blocked"))
         repair = self._evaluator_repair_from_data(data)
         decision.repair_kind = repair["kind"]
+        if self._is_hypothesis_producer(task) and decision.status == "partial_failure" and decision.instructions:
+            # Hypothesis repairs edit a future-test deliverable, not target execution receipts.
+            decision.repair_kind = "acceptance"
         decision.unresolved_evidence_gaps = tuple(repair["evidence_gaps"])
         decision.execution_receipt_gaps = tuple(repair["execution_receipt_gaps"])
         try:
@@ -13162,8 +13217,9 @@ applicability or a finding, and published proof of concepts must not be executed
                         "identities within the frozen scope. Retain unresolved prerequisites as a coverage gap."
                     )
         comparison_supported = assessment is None or assessment["outcome"] == "supported"
-        if comparison_supported and self._evaluator_reopens_resolved_execution_gate(
-            task, resolved_acceptance_results, decision,
+        if (
+            comparison_supported and not self._is_hypothesis_producer(task)
+            and self._evaluator_reopens_resolved_execution_gate(task, resolved_acceptance_results, decision)
         ):
             self._emit_evaluator_execution_gate_reconciliation(task, decision)
             decision = WorkflowDecision(
@@ -13818,6 +13874,9 @@ applicability or a finding, and published proof of concepts must not be executed
         elif tasks and all(task.status in {"done", "superseded"} for task in tasks):
             status = "done"
             classification_reason = "all phase tasks reached successful terminal states"
+        elif not tasks and self._hypothesis_testing_unnecessary(self.state.get_plan(), phase):
+            status = "not_applicable"
+            classification_reason = "accepted no-hypothesis dispositions require no downstream tests"
         elif not tasks and _phase_semantically_requires_finding_candidates(phase):
             status = "not_applicable"
             classification_reason = "the candidate-dependent phase has no tasks or finding candidates"
@@ -14261,7 +14320,10 @@ Return only the requested JSON decision, with at most three concrete evidence ga
             return TaskCreationOutcome(
                 created_count=0,
                 attempts=0,
-                failure_reason="No completed hypothesis-covered inventory groups are available for testing.",
+                failure_reason=(
+                    "" if self._hypothesis_testing_unnecessary(plan, phase)
+                    else "No completed hypothesis-covered inventory groups are available for testing."
+                ),
                 batch_count=0,
             )
         self._validate_task_creation_feasibility(phase, batches)
@@ -14503,6 +14565,44 @@ Return only the requested JSON decision, with at most three concrete evidence ga
         )
         return self.state.store_plan(updated)
 
+    def _hypothesis_testing_unnecessary(self, plan: OperationPlan, phase: PlanPhase) -> bool:
+        """An entirely assessed no-hypothesis inventory requires no dependent test tasks."""
+
+        if phase.task_creation_mode != "hypothesis_dependent":
+            return False
+        source = next((item for item in reversed(plan.phases) if item.id < phase.id and item.produces_hypotheses), None)
+        if source is None:
+            return False
+        if not source.source_manifest_refs:
+            plan = self._bind_hypothesis_inventory(plan, source)
+            source = next(item for item in plan.phases if item.id == source.id)
+        if not source.source_manifest_refs:
+            return False
+        for reference in source.source_manifest_refs:
+            try:
+                manifest, digest = self._load_controller_inventory_manifest(plan, reference)
+                required = {
+                    item_id for *_rest, item_ids in _coverage_route_groups(
+                        manifest, prompt_token_limit=self.runtime.prompt_token_limit,
+                    ) for item_id in item_ids
+                }
+                covered = set()
+                for producer in self.state.list_tasks(phase=source.id):
+                    if (producer.status != "done" or not self._is_hypothesis_producer(producer)
+                            or producer.acceptance.basis.snapshot_hash != digest):
+                        continue
+                    publication = load_hypothesis_set(
+                        hypothesis_binding(producer).get("artifact_ref", ""), producer, self.runtime.operation_id,
+                    )
+                    if any(subject.hypotheses for subject in publication.subjects):
+                        return False
+                    covered.update(subject.item_id for subject in publication.subjects)
+                if not required or not required.issubset(covered):
+                    return False
+            except (OSError, TypeError, ValueError):
+                return False
+        return True
+
     def _task_creation_batches(
         self,
         plan: OperationPlan,
@@ -14517,6 +14617,7 @@ Return only the requested JSON decision, with at most three concrete evidence ga
         source_phase = max(prior_phase_ids)
         hypothesis_sources: dict[str, tuple[str, ...]] = {}
         hypothesis_artifact_refs: dict[str, tuple[str, ...]] = {}
+        hypothesis_assessed: set[str] = set()
         if phase.task_creation_mode == "hypothesis_dependent":
             hypothesis_phases = [
                 item for item in plan.phases if item.id < phase.id and item.produces_hypotheses
@@ -14572,7 +14673,9 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                         producer = task
                         try:
                             binding = hypothesis_binding(producer)
-                            load_hypothesis_set(binding.get("artifact_ref", ""), producer, self.runtime.operation_id)
+                            publication = load_hypothesis_set(
+                                binding.get("artifact_ref", ""), producer, self.runtime.operation_id,
+                            )
                         except (OSError, TypeError, ValueError):
                             if task.kind == "hypothesis_repair":
                                 continue
@@ -14581,10 +14684,16 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                                 continue
                             try:
                                 binding = hypothesis_binding(producer)
-                                load_hypothesis_set(binding.get("artifact_ref", ""), producer, self.runtime.operation_id)
+                                publication = load_hypothesis_set(
+                                    binding.get("artifact_ref", ""), producer, self.runtime.operation_id,
+                                )
                             except (OSError, TypeError, ValueError):
                                 continue
-                        for item_id in basis.item_ids:
+                        hypothesis_assessed.update(subject.item_id for subject in publication.subjects)
+                        for subject in publication.subjects:
+                            if not subject.hypotheses:
+                                continue
+                            item_id = subject.item_id
                             prior = hypothesis_sources.get(item_id, ())
                             hypothesis_sources[item_id] = tuple(sorted({*prior, producer.task_uid}))
                             previous_artifacts = hypothesis_artifact_refs.get(item_id, ())
@@ -14662,7 +14771,7 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                 missing_groups = [
                     label
                     for _target_id, _kind, label, item_ids in groups
-                    if not set(item_ids).issubset(hypothesis_sources)
+                    if not set(item_ids).issubset(hypothesis_assessed)
                 ]
                 self._emit_workflow_event({
                     "type": "hypothesis_coverage",
@@ -14672,10 +14781,12 @@ Return only the requested JSON decision, with at most three concrete evidence ga
                     "covered_group_count": len(groups) - len(missing_groups),
                     "missing_group_count": len(missing_groups),
                     "missing_groups": sorted(missing_groups),
+                    "no_hypothesis_subject_ids": sorted(hypothesis_assessed - hypothesis_sources.keys()),
                 })
                 groups = [
-                    group for group in groups
-                    if set(group[3]).issubset(hypothesis_sources)
+                    (target_id, kind, label, tuple(item for item in item_ids if item in hypothesis_sources))
+                    for target_id, kind, label, item_ids in groups
+                    if set(item_ids) <= hypothesis_assessed and any(item in hypothesis_sources for item in item_ids)
                 ]
             if not groups:
                 continue
@@ -17456,7 +17567,7 @@ while planning.
             if hypothesis_source_refs
             else ""
         )
-        hypothesis_guidance = self._hypothesis_phase_guidance(phase)
+        hypothesis_guidance = self._hypothesis_phase_guidance(phase) + self._hypothesis_input_context(task)
         memory_catalog = self._memory_selection_catalog(memory_records, task=task)
         memory_selection_guidance = (
             "Memory selection:\n"
@@ -17626,7 +17737,7 @@ Shell command selection guidance:
     ) -> str:
         acceptance_requirement = self._task_terminal_protocol_summary(task)
         task_policy_guidance = self._task_policy_guidance(task)
-        hypothesis_guidance = self._hypothesis_phase_guidance(phase)
+        hypothesis_guidance = self._hypothesis_phase_guidance(phase) + self._hypothesis_input_context(task)
         provisioning_critic_guidance = """
 For credential-provisioning tasks, browser navigation, form interaction, client-side DOM/JavaScript/state inspection,
 same-session cookie inspection, rendered HTML, and screenshots are in scope for the registration entry
@@ -17726,7 +17837,7 @@ Controller-supplied terminal tools: {", ".join(sorted(self._task_executor_termin
         memory_records: list[dict[str, Any]] | None = None,
     ) -> str:
         memory_catalog = self._memory_selection_catalog(memory_records, task=task)
-        hypothesis_guidance = self._hypothesis_phase_guidance(phase)
+        hypothesis_guidance = self._hypothesis_phase_guidance(phase) + self._hypothesis_input_context(task)
         response_schema = (
             '{"prompt": string, "memory_ids": [string], "tools": [string], "shell_commands": [string]}'
             if memory_catalog
@@ -18221,6 +18332,9 @@ established within scope, return inconclusive and request bounded repair or reco
         execution_gate_section = self._controller_execution_gate_section(task, resolved_acceptance_results)
         artifact_limit_section = self._task_evaluator_artifact_limit_section(task, resolved_acceptance_results)
         current_task_findings = self._task_finding_summary(task.task_uid)
+        hypothesis_review = (
+            publication_review(task, self.runtime.operation_id) if self._is_hypothesis_producer(task) else ""
+        )
         endpoint_binding = ""
         if task.acceptance.mode == "coverage" and str(task.title).lower().startswith("assess endpoint "):
             endpoint_binding = """
@@ -18271,8 +18385,15 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 - If a current-task finding is already listed below, do not recommend another one merely because acceptance remains an
   immutable observation.
 - Use done only when every material part of the task objective is supported by durable evidence. For hypothesis
-  deliverables, check that positive expectations distinguish the suspected weakness from normal functionality;
-  capability discovery alone does not validate a vulnerability. Require correction for that semantic gap.
+  deliverables, review every record in the authoritative current publication, not claims in summaries or older
+  snapshots. Positive/control expectations must distinguish the suspected weakness from normal functionality.
+  Hypotheses propose future tests; exploitation need not already be proved. Ordinary content delivery, exposed
+  versions, or missing headers alone cannot establish the claimed impact. Require correction for that semantic gap,
+  naming the affected hypothesis IDs and using publication repair rather than executing future tests.
+  A reasoned no_testable_hypotheses disposition is successful coverage: not every inventory item has a supported
+  security implication. Do not demand speculative hypotheses. Missing optional metadata alone is not incomplete
+  work; an explicitly required unavailable input remains a prerequisite gap. No hypothesis does not prove no
+  vulnerability. Review the reason against the available frozen observations.
 - For comparisons, require evidence that the intended operation and subject were exercised with the required
   inputs. Matching generic errors alone do not establish a meaningful comparison. An evidenced negative access
   result can qualify when it supports the frozen objective; tool execution alone cannot establish semantic support.
@@ -18309,6 +18430,8 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 
 ## Frozen acceptance results
 {acceptance_result_section}
+{hypothesis_review}
+{self._hypothesis_input_context(task)}
 {self._worker_completion_section(task)}
 
 ## Controller execution-gate status
