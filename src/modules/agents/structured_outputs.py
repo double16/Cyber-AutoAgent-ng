@@ -153,17 +153,51 @@ class ComparisonAssessmentOutput(StrictStructuredOutput):
     reason: str = Field(min_length=1)
 
 
-class WorkflowDecisionOutput(StrictStructuredOutput):
+class TaskReviewDecisionOutput(StrictStructuredOutput):
     status: str
     reason: str = ""
     instructions: str = ""
     repair: EvaluatorRepairOutput | None = None
+
+
+class WorkflowDecisionOutput(TaskReviewDecisionOutput):
     comparison_assessment: ComparisonAssessmentOutput | None = None
     finding_recommendation: FindingRecommendationOutput | None = None
 
 
 class ComparisonTaskDecisionOutput(WorkflowDecisionOutput):
     comparison_assessment: ComparisonAssessmentOutput
+
+
+class HypothesisRecordReview(StrictStructuredOutput):
+    hypothesis_id: str
+    decision: Literal["retain", "revise", "withdraw"]
+    reason: str = Field(min_length=1)
+
+
+class HypothesisSubjectReview(StrictStructuredOutput):
+    item_id: str
+    decision: Literal["retain", "revise", "withdraw"]
+    reason: str = Field(min_length=1)
+    hypotheses: list[HypothesisRecordReview]
+
+
+class HypothesisPrerequisiteGap(StrictStructuredOutput):
+    criterion_id: str
+    missing_input: str = Field(min_length=1)
+    item_ids: list[str] = Field(min_length=1)
+    source_refs: list[ArtifactEvidenceReference] = Field(min_length=1)
+
+
+class HypothesisTaskDecisionOutput(TaskReviewDecisionOutput):
+    publication_sha256: str
+    subject_reviews: list[HypothesisSubjectReview]
+    prerequisite_gaps: list[HypothesisPrerequisiteGap] = Field(default_factory=list)
+    unresolved_criterion_ids: list[str] = Field(default_factory=list)
+
+
+class HypothesisCheckpointDecisionOutput(TaskReviewDecisionOutput):
+    prerequisite_gaps: list[HypothesisPrerequisiteGap]
 
 
 class TaxonomyMappingOutput(StrictStructuredOutput):

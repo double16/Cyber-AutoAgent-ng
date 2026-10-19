@@ -236,3 +236,28 @@ def test_sdk_sequential_batch_never_executes_queued_mutation_after_terminal_resu
     assert calls == ["execute"]
     assert [result["status"] for result in results] == ["success", "error"]
     assert state["request_state"][POLICY_TERMINAL_STATE_KEY]["reason"] == terminal["reason"]
+
+
+def test_publication_checkpoint_counts_all_tools_and_only_new_digests_reset():
+    progress = [""]
+    hook = TerminalToolHook("task_executor")
+    hook.configure(AgentRunPolicy(checkpoint_tool_calls=16, progress_key=lambda: progress[0]))
+    for _ in range(15):
+        event = _event("shell", "preview")
+        hook._after_tool(event)
+        assert not event.invocation_state
+    progress[0] = "new-digest"
+    event = _event("record_hypotheses", "saved")
+    hook._after_tool(event)
+    assert not event.invocation_state
+    for _ in range(15):
+        event = _event("store_observation", "duplicate")
+        hook._after_tool(event)
+        assert not event.invocation_state
+    event = _event("record_hypotheses", "same digest")
+    hook._after_tool(event)
+    assert event.invocation_state["request_state"][POLICY_TERMINAL_STATE_KEY]["reason"] == "publication_checkpoint"
+    hook.configure(AgentRunPolicy(checkpoint_tool_calls=1))
+    event = _event("network_probe", "failure", status="error")
+    hook._after_tool(event)
+    assert event.invocation_state["request_state"]["stop_event_loop"]

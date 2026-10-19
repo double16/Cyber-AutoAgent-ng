@@ -42,6 +42,7 @@ def producer(tmp_path, monkeypatch):
 
 def hypothesis(action="Supply an input"):
     return {
+        "authentication_requirement": {"comparison": "none", "roles": []},
         "observed_basis": "Assigned subject accepts user input", "preconditions": ["Authorized isolated target"],
         "suspected_mechanism": "Input may reach an interpreter", "attacker_controlled_input": action,
         "safe_test_steps": ["Compare a harmless probe with a control"],
@@ -210,7 +211,8 @@ def test_contract_idempotence(producer):
 
 @pytest.mark.parametrize("shape", ["native", "wrapped", "double_wrapped", "nested", "invalid_json", "wrong_type",
                                    "unknown_field", "unknown_disposition", "root_wrapped", "missing_closer",
-                                   "replace_mode", "append_alias", "invalid_mode"])
+                                   "replace_mode", "append_alias", "invalid_mode", "authentication_alias",
+                                   "unknown_authentication"])
 def test_hypothesis_arguments_normalize_before_sdk_validation(producer, tmp_path, shape):
     import asyncio
     import importlib
@@ -227,6 +229,11 @@ def test_hypothesis_arguments_normalize_before_sdk_validation(producer, tmp_path
     recorded = []
     received = []
     entry = {"item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [hypothesis()]}
+    if shape in {"authentication_alias", "unknown_authentication"}:
+        entry["hypotheses"][0]["authentication_requirement"] = {
+            "comparison": "cross_account" if shape == "authentication_alias" else "invented",
+            "roles": ["member"],
+        }
     if shape == "unknown_field":
         entry["unknown"] = True
     if shape == "unknown_disposition":
@@ -276,7 +283,8 @@ def test_hypothesis_arguments_normalize_before_sdk_validation(producer, tmp_path
         )]
 
     asyncio.run(collect())
-    valid = shape not in {"invalid_json", "wrong_type", "unknown_field", "unknown_disposition", "invalid_mode"}
+    valid = shape not in {"invalid_json", "wrong_type", "unknown_field", "unknown_disposition", "invalid_mode",
+                          "unknown_authentication"}
     assert results[0]["status"] == ("success" if valid else "error")
     assert len(recorded) == int(valid)
     if shape == "invalid_json":
@@ -482,3 +490,94 @@ def test_runtime_schema_advertises_publication_modes(producer, tmp_path):
     Draft202012Validator(schema).validate({"subjects": [no_test()], "mode": "replace"})
     with pytest.raises(Exception, match="invented"):
         Draft202012Validator(schema).validate({"subjects": [no_test()], "mode": "invented"})
+
+
+@pytest.mark.parametrize("requirement", [None, {"comparison": "account", "roles": []},
+                                         {"comparison": "role", "roles": ["member"]},
+                                         {"comparison": "none", "roles": ["member", "admin"]},
+                                         {"comparison": "unknown", "roles": []}])
+def test_authentication_metadata_is_explicit_and_strict(producer, tmp_path, requirement):
+    entry = hypothesis()
+    if requirement is None:
+        entry.pop("authentication_requirement")
+    else:
+        entry["authentication_requirement"] = requirement
+    persisted = []
+    writer = hypotheses.build_record_hypotheses_tool(producer, "OP_TEST", str(tmp_path), persisted.append)
+    with pytest.raises(ValueError):
+        writer(subjects=[{"item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [entry]}])
+    assert not persisted
+
+
+def test_declared_authentication_validation_precedes_any_publication(producer, tmp_path):
+    def validate(requirement):
+        if set(requirement.roles) - {"member"}:
+            raise ValueError("undeclared role")
+
+    persisted = []
+    writer = hypotheses.build_record_hypotheses_tool(
+        producer, "OP_TEST", str(tmp_path), persisted.append, validate_authentication=validate,
+    )
+    entry = hypothesis()
+    entry["authentication_requirement"] = {"comparison": "none", "roles": ["administrator"]}
+    with pytest.raises(ValueError, match="undeclared"):
+        writer(subjects=[{"item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [entry]}])
+    assert not persisted
+    entry["authentication_requirement"]["roles"] = ["member"]
+    assert json.loads(writer(subjects=[{
+        "item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [entry],
+    }]))["sha256"]
+
+
+def test_checkpoint_reader_is_source_bound_and_streams_pages(tmp_path, monkeypatch):
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    (tmp_path / "input.txt").write_text("abcdefghijkl")
+    reader = hypotheses.build_hypothesis_input_reader({"artifact:input.txt"})
+    page = json.loads(reader(source_ref="artifact:input.txt", offset=3, max_chars=4))
+    assert page["text"] == "defg" and page["next_offset"] == 7
+    assert json.loads(reader(source_ref="artifact:input.txt", offset=100))["text"] == ""
+    assert json.loads(reader(source_ref="artifact:input.txt", offset=7))["next_offset"] is None
+    for kwargs in [{"source_ref": "artifact:other"}, {"source_ref": "artifact:input.txt", "offset": -1},
+                   {"source_ref": "artifact:input.txt", "max_chars": 10001}]:
+        with pytest.raises(ValueError):
+            reader(**kwargs)
+
+
+@pytest.mark.parametrize("content", ["\n\t\"\\" * 4000, "🔑漢字" * 4000, "ordinary" * 4000], ids=["escaped", "unicode", "ordinary"])
+def test_checkpoint_reader_pages_stay_inline_through_router(tmp_path, monkeypatch, content):
+    import asyncio
+    from types import SimpleNamespace
+
+    from modules.handlers.tool_router import ToolRouterHook
+
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    (tmp_path / "input.txt").write_text(content)
+    reader = hypotheses.build_hypothesis_input_reader({"artifact:input.txt"}, max_inline_chars=300)
+    offset = 0
+    pages = []
+    while True:
+        result = reader(source_ref="artifact:input.txt", offset=offset, max_chars=10000)
+        assert len(result) <= 300
+        event = SimpleNamespace(selected_tool=reader, tool_use={"name": "read_hypothesis_input"},
+                                result={"content": [{"text": result}], "status": "success"})
+        router = ToolRouterHook(max_result_chars=300, artifact_threshold=100, artifacts_dir=tmp_path)
+        asyncio.run(router._truncate_large_results_async(event))
+        assert event.result["content"] == [{"text": result}]
+        page = json.loads(result)
+        pages.append(page["text"])
+        if page["next_offset"] is None:
+            break
+        assert page["next_offset"] > offset
+        offset = page["next_offset"]
+    assert "".join(pages) == content
+
+
+def test_checkpoint_reader_rejects_impossible_inline_ceiling(tmp_path, monkeypatch):
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    (tmp_path / "input.txt").write_text("x")
+    reader = hypotheses.build_hypothesis_input_reader({"artifact:input.txt"}, max_inline_chars=1)
+    with pytest.raises(ValueError, match="ceiling is too small"):
+        reader(source_ref="artifact:input.txt")

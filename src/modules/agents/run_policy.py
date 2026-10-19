@@ -38,6 +38,8 @@ class AgentRunPolicy:
     recovery_next_action: str = ""
     recovery_allowed_tool_names: frozenset[str] = field(default_factory=frozenset)
     terminal_check: Callable[[], str | None] | None = None
+    checkpoint_tool_calls: int = 0
+    progress_key: Callable[[], str] | None = None
 
     def __init__(
         self,
@@ -60,6 +62,8 @@ class AgentRunPolicy:
         recovery_next_action: str = "",
         recovery_allowed_tool_names: Iterable[str] = frozenset(),
         terminal_check: Callable[[], str | None] | None = None,
+        checkpoint_tool_calls: int = 0,
+        progress_key: Callable[[], str] | None = None,
     ):
         object.__setattr__(self, "min_tool_calls", min_tool_calls)
         object.__setattr__(self, "required_tool_names", frozenset(required_tool_names))
@@ -84,3 +88,5 @@ class AgentRunPolicy:
         object.__setattr__(self, "recovery_next_action", str(recovery_next_action or ""))
         object.__setattr__(self, "recovery_allowed_tool_names", frozenset(recovery_allowed_tool_names))
         object.__setattr__(self, "terminal_check", terminal_check)
+        object.__setattr__(self, "checkpoint_tool_calls", max(0, int(checkpoint_tool_calls)))
+        object.__setattr__(self, "progress_key", progress_key)

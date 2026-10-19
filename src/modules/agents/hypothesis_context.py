@@ -58,15 +58,15 @@ def frozen_input_context(task: Any, output_root: str) -> str:
         detail = "The records below include all assigned attributes."
         if len(rendered) > 12_000:
             rendered = _rows("assigned_inventory", ("id", "kind", "value"), rows)
-            detail = "Attributes are omitted below; page the complete assigned-record artifact for required details."
+            detail = "Attributes are omitted below; complete attributes remain in the assigned-record artifact."
         return (
             f"\n## Frozen investigation inputs (not completion evidence)\n"
             f"Complete assigned records: artifact:{path.relative_to(output_root).as_posix()}\n{rendered}\n"
             f"{detail} Absent optional attributes in complete records are unrecorded; "
-            "do not repeatedly search for them. Inspect other sources only for a concrete unresolved precondition.\n"
+            "their absence alone does not establish a missing prerequisite.\n"
         )
     except (OSError, TypeError, ValueError, KeyError) as error:
-        return f"\nFrozen input context unavailable: {error}. Use frozen source refs; do not invent records.\n"
+        return f"\nFrozen input context unavailable: {error}; do not invent records.\n"
 
 
 def retain_inspections(task: Any, outcomes: list[Any], output_root: str) -> None:
@@ -75,7 +75,9 @@ def retain_inspections(task: Any, outcomes: list[Any], output_root: str) -> None
     path = _inspection_path(task, output_root)
     entries = json.loads(path.read_text()) if path.exists() else []
     for outcome in outcomes:
-        if not outcome.success or outcome.tool_name not in {"read_artifact", "search_artifact", "get_inventory_item"}:
+        if not outcome.success or outcome.tool_name not in {
+            "read_artifact", "search_artifact", "get_inventory_item", "read_hypothesis_input",
+        }:
             continue
         entry = {"tool": outcome.tool_name, "input": outcome.input_summary,
                  "references": list(outcome.artifact_refs)}
@@ -97,7 +99,7 @@ def inspection_context(task: Any, output_root: str) -> str:
     entries = json.loads(path.read_text())
     rows = [{"tool": entry["tool"], "input": entry["input"][:800],
              "references": entry["references"]} for entry in entries]
-    return "\nAlready inspected; reuse results or make a materially different lookup:\n" + _rows(
+    return "\nAlready inspected sources and recorded lookup arguments:\n" + _rows(
         "inspections", ("tool", "input", "references"), rows,
     )
 
@@ -119,5 +121,5 @@ def publication_review(task: Any, operation_id: str) -> str:
         + "\n" + _rows("hypotheses", ("item_id", "hypothesis_id", "observed_basis", "preconditions",
                                        "suspected_mechanism", "attacker_controlled_input", "safe_test_steps",
                                        "positive_expectations", "negative_expectations", "required_evidence",
-                                       "supporting_refs"), records)
+                                       "supporting_refs", "authentication_requirement"), records)
     )

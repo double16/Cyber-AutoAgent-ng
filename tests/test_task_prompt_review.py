@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 from strands import tool
 
+from modules.agents.hypothesis_review import validate_review
 from modules.agents.multi_agent_workflow import MultiAgentWorkflowController, extract_json_object
-from modules.agents.structured_outputs import TaskPromptCritiqueOutput, WorkflowDecisionOutput
+from modules.agents.structured_outputs import HypothesisTaskDecisionOutput, TaskPromptCritiqueOutput
 from modules.config.types import BudgetConfig
 from modules.handlers.tool_recovery import ToolOutcome
 from modules.prompts.factory import get_role_system_prompt
@@ -222,7 +223,9 @@ def semantic_hypothesis_case(review_case, request, tmp_path, monkeypatch):
 
 def test_evaluator_checks_hypothesis_semantics_even_when_publication_is_available(semantic_hypothesis_case):
     _controller, prompt, _valid = semantic_hypothesis_case
-    assert "Positive/control expectations must distinguish the suspected weakness from normal functionality" in prompt
+    assert "Positive/control expectations must distinguish the suspected weakness from normal functionality" in (
+        " ".join(prompt.split())
+    )
     assert "Require correction for that semantic gap" in prompt
     assert "Attacker input is executed" in prompt or "no_testable_hypotheses" in prompt
 
@@ -233,13 +236,40 @@ def test_live_evaluator_distinguishes_capability_from_weakness(
 ):
     controller, prompt, valid = semantic_hypothesis_case
     client, model = ollama_taxonomy_client
-    response = client.chat(
-        model=model, stream=False, options={"temperature": 0},
-        format=WorkflowDecisionOutput.model_json_schema(),
-        messages=[{"role": "system", "content": controller._evaluator_system_prompt()},
-                  {"role": "user", "content": prompt}],
-    )
-    result = WorkflowDecisionOutput.model_validate(extract_json_object(response.message.content))
+    import ollama
+
+    messages = [{"role": "system", "content": controller._evaluator_system_prompt()},
+                {"role": "user", "content": prompt}]
+    try:
+        response = client.chat(
+            model=model, stream=False, options={"temperature": 0, "num_predict": 4096},
+            format=HypothesisTaskDecisionOutput.model_json_schema(), messages=messages,
+        )
+    except ollama.ResponseError as error:
+        if error.status_code != 501:
+            raise
+        # Exercise the application's validated JSON fallback when structured transport is unavailable.
+        messages[-1]["content"] += "\nReturn JSON matching: " + json.dumps(
+            HypothesisTaskDecisionOutput.model_json_schema(),
+        )
+        response = client.chat(
+            model=model, stream=False, options={"temperature": 0, "num_predict": 4096}, messages=messages,
+        )
+    result = HypothesisTaskDecisionOutput.model_validate(extract_json_object(response.message.content))
+    task = next(task for task in controller.state.list_tasks() if controller._is_hypothesis_producer(task))
+    validate_review(result.model_dump(), task, controller.runtime.operation_id)
     record_property("expected_done", valid)
     record_property("actual_status", result.status)
     assert (result.status == "done") == valid
+
+
+def test_hypothesis_roles_consider_unauthenticated_scenarios_without_forcing_duplicates(semantic_hypothesis_case):
+    controller, prompt, _valid = semantic_hypothesis_case
+    phase = memory.PlanPhase(id=1, title="Hypotheses", status="active", produces_hypotheses=True)
+    producer_guidance = " ".join(controller._hypothesis_phase_guidance(phase).split())
+    review_guidance = " ".join(prompt.split())
+    assert "Consider unauthenticated attack paths alongside applicable authenticated" in producer_guidance
+    assert "comparison=none with roles=[] means unauthenticated execution" in producer_guidance
+    assert "Assess whether relevant unauthenticated scenarios were overlooked" in review_guidance
+    assert "Do not require an unauthenticated counterpart for every authenticated hypothesis" in review_guidance
+    assert "reasoned no_testable_hypotheses disposition is successful coverage" in review_guidance

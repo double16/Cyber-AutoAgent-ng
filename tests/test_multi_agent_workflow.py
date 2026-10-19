@@ -15482,7 +15482,9 @@ def test_hypothesis_dependent_batches_cover_every_completed_hypothesis(monkeypat
             })
     monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda _ref, task, *_args: SimpleNamespace(
         subjects=[
-            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace()]) for item in task.acceptance.basis.item_ids
+            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace(hypothesis_id=f"hyp-{item}",
+                authentication_requirement=workflow_mod.AuthenticationRequirement())])
+            for item in task.acceptance.basis.item_ids
         ],
     ))
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
@@ -15567,7 +15569,9 @@ def test_hypothesis_dependent_batches_record_gaps_and_use_covered_groups(monkeyp
             })
     monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda _ref, task, *_args: SimpleNamespace(
         subjects=[
-            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace()]) for item in task.acceptance.basis.item_ids
+            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace(hypothesis_id=f"hyp-{item}",
+                authentication_requirement=workflow_mod.AuthenticationRequirement())])
+            for item in task.acceptance.basis.item_ids
         ],
     ))
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
@@ -15804,7 +15808,9 @@ def test_hypothesis_inventory_binding_preserves_separate_manifest_item_ids(monke
             })
     monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda _ref, task, *_args: SimpleNamespace(
         subjects=[
-            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace()]) for item in task.acceptance.basis.item_ids
+            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace(hypothesis_id=f"hyp-{item}",
+                authentication_requirement=workflow_mod.AuthenticationRequirement())])
+            for item in task.acceptance.basis.item_ids
         ],
     ))
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda value: value)
@@ -23050,7 +23056,8 @@ def test_hypothesis_evaluator_reviews_current_records_and_preserves_semantic_rep
         capture.append(prompt)
         return {"status": status, "reason": "Reviewed current disposition", "instructions": (
             "Correct the published positive/control expectations" if status == "partial_failure" else ""
-        ), "repair": {"kind": "execution", "evidence_gaps": ["semantic gap"]}
+        ), "comparison_assessment": {"outcome": "inconclusive", "reason": "Not applicable"},
+            "repair": {"kind": "acceptance", "evidence_gaps": ["semantic gap"]}
             if status == "partial_failure" else {"kind": "none"}}
 
     monkeypatch.setattr(controller, "_run_json_text_agent", evaluate)
@@ -23064,6 +23071,11 @@ def test_hypothesis_evaluator_reviews_current_records_and_preserves_semantic_rep
     assert "Authoritative current hypothesis publication" in capture[0]
     assert "no_testable_hypotheses" in capture[0]
     assert "not every inventory item" in capture[0]
+    assert "finding_recommendation" not in capture[0]
+    assert "comparison_assessment" not in capture[0]
+    assert "closure/schema defect" not in capture[0]
+    assert "same security outcome" in capture[0]
+    assert "not completed exploitation" in capture[0]
 
 
 def test_semantic_hypothesis_repair_keeps_publisher_after_complete_publication(worker_flow_case, monkeypatch):
@@ -23245,3 +23257,372 @@ def test_successful_publication_preserves_pending_hypothesis_acceptance(worker_f
                           correctable=False, input_summary="{}", output_summary="Published")
     updated = controller._retain_hypothesis_repair(task, [outcome])
     assert updated.recovery_context["hypothesis_repair"] == repair
+
+
+@pytest.mark.parametrize("checkpoint_outcome", ["published", "blocked", "inspect", "publish"])
+def test_hypothesis_checkpoint_forces_publication_and_scopes_followup(
+    worker_flow_case, monkeypatch, checkpoint_outcome,
+):
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [_tool("shell")])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive hypotheses", "tools": []})
+    monkeypatch.setattr(controller, "_evaluate_task", lambda *_args, **_kwargs: workflow_mod.WorkflowDecision(
+        status="done", reason="Published and reviewed",
+    ))
+    review = {"status": "blocked" if checkpoint_outcome == "blocked" else "partial_failure",
+              "reason": "Required source absent" if checkpoint_outcome == "blocked" else "Use existing inputs",
+              "instructions": "Publish from retained input", "repair": {
+                  "kind": "none" if checkpoint_outcome == "blocked" else "execution"
+                  if checkpoint_outcome == "inspect" else "acceptance",
+              }, "prerequisite_gaps": [{
+                  "criterion_id": task.acceptance.criteria[0].id, "missing_input": "Required source section",
+                  "item_ids": ["subject"], "source_refs": ["artifact:form.html"],
+              }] if checkpoint_outcome in {"blocked", "inspect"} else []}
+    critiques = []
+
+    def critic(_role, _prompt, *_args, **kwargs):
+        kwargs["data_validator"](review)
+        critiques.append(True)
+        return review
+
+    monkeypatch.setattr(controller, "_run_json_text_agent", critic)
+    calls = []
+
+    def actor(_role, prompt, tools, _system, policy):
+        calls.append(prompt)
+        names = controller._tool_names(tools)
+        if len(calls) == 1:
+            assert policy.checkpoint_tool_calls == 16
+            assert policy.progress_key() == ""
+            return workflow_mod.TaskExecutorCycleResult(text="Inspected", outcomes=[], reason="publication_checkpoint")
+        assert "shell" not in names
+        if len(calls) == 2:
+            assert "Publication checkpoint" in prompt
+            assert "Use get_inventory_item" not in prompt
+            assert "No source inspection tools" in prompt
+            assert policy.max_model_turns == 4
+            if checkpoint_outcome != "published":
+                return workflow_mod.TaskExecutorCycleResult(text="Missing input described", outcomes=[])
+        if len(calls) > 2:
+            assert ("read_hypothesis_input" in names) == (checkpoint_outcome == "inspect")
+            assert "Use get_inventory_item" not in prompt
+            assert "Do not restart discovery" in prompt
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        binding = json.loads(writer(subjects=[{
+            "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No supported security test",
+        }]))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id, status="satisfied",
+            disposition="observation", summary="Published reasoned disposition",
+            evidence_refs=[binding["artifact_ref"]],
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[])
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert updated.status == ("blocked" if checkpoint_outcome == "blocked" else "done")
+    assert len(calls) == (2 if checkpoint_outcome in {"published", "blocked"} else 3)
+    assert bool(critiques) == (checkpoint_outcome != "published")
+
+
+@pytest.mark.parametrize("roles", [[], ["member"], ["unknown"]])
+def test_hypothesis_authentication_roles_are_scoped_to_declared_targets(worker_flow_case, monkeypatch, roles):
+    controller, task, *_rest = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", "https://target.test", "network"),
+                                     OperationTarget("target-2", "tcp://target.test:9000", "network")])
+    task = replace(task, target_scope="subset", target_ids=["target-1"])
+    monkeypatch.setattr(controller, "_authentication_role_catalog", lambda _plan: {
+        "https://target.test": {"member": []},
+    })
+    requirement = workflow_mod.AuthenticationRequirement(roles=roles)
+    if roles == ["unknown"]:
+        with pytest.raises(ValueError, match="declared"):
+            controller._validate_hypothesis_authentication(plan, task, requirement)
+    else:
+        controller._validate_hypothesis_authentication(plan, task, requirement)
+
+
+def test_hypothesis_task_batch_rejects_atomically_before_any_persistence(worker_flow_case, monkeypatch):
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_rest = worker_flow_case
+    producer = workflow_mod.hypothesis_contract(_hypothesis_task(status="done"))
+    controller.state.store_task(producer)
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(controller, "_authentication_role_catalog", lambda _plan: {})
+    writer = next(tool for tool in controller._resolve_task_executor_base_tools(_plan(), producer, {})
+                  if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+    second = hypothesis("Other input")
+    second["authentication_requirement"] = {"comparison": "none", "roles": ["member"]}
+    for entry in (second,):
+        entry["supporting_refs"] = ["artifact:form.html"]
+    first = {**hypothesis(), "supporting_refs": ["artifact:form.html"]}
+    binding = json.loads(writer(subjects=[{
+        "item_id": "subject", "disposition": "supplied", "hypotheses": [first, second],
+    }]))
+    batch = workflow_mod.TaskCreationBatch(
+        1, 1, "artifact:form.html", (("target-1", "service", "tcp://target.test:9000", ("subject",)),), 0,
+        (("subject", (producer.task_uid,)),), (("subject", (binding["artifact_ref"],)),),
+    )
+    calls = []
+
+    def compile_batch(_phase, _batch, *, assignment_transformer, task_sink):
+        def submit(_proposals):
+            calls.append(True)
+            if len(calls) == 2:
+                raise ValueError("Invalid second proposal")
+            staged = replace(producer, task_uid="must-not-persist", kind="standard", phase=2, status="pending")
+            task_sink(assignment_transformer([staged], []))
+            return '{"created_count":1}'
+        return submit
+
+    monkeypatch.setattr(controller, "_task_creator_submitter", compile_batch)
+    with pytest.raises(ValueError, match="second proposal"):
+        controller._create_hypothesis_tasks(
+            PlanPhase(id=2, title="Tests", status="active", task_creation_mode="hypothesis_dependent"), [batch],
+        )
+    assert not any(task.task_uid == "must-not-persist" for task in controller.state.list_tasks())
+
+
+def test_hypothesis_noop_critic_prose_does_not_trigger_another_actor(worker_flow_case, monkeypatch):
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive hypotheses", "tools": []})
+    monkeypatch.setattr(controller, "_evaluate_task", lambda *_args, **_kwargs: workflow_mod.WorkflowDecision(
+        status="partial_failure", reason="Optional metadata absent", instructions="No further task work required",
+        repair_kind="none",
+    ))
+    calls = []
+
+    def actor(_role, _prompt, tools, _system, _policy):
+        calls.append(True)
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        binding = json.loads(writer(subjects=[{
+            "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No supported security test",
+        }]))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id, status="satisfied", disposition="observation",
+            summary="No supported hypotheses", evidence_refs=[binding["artifact_ref"]],
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[])
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("mode", ["standard", "hypothesis_dependent"])
+@pytest.mark.parametrize("created_count,batches,attempts", [(0, 1, 2), (1, 1, 2), (64, 3, 4)])
+def test_task_creation_reports_aggregate_persisted_count_once(monkeypatch, caplog, mode, created_count, batches, attempts):
+    plan = _plan()
+    plan.phases[0] = replace(plan.phases[0], task_creation_mode=mode)
+    archived = [Task(f"old-{index}", "Historical", "Previous work", phase=1, status="replanned")
+                for index in range(73)]
+    state = FakeState(plan, tasks=archived)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+        text_runner=lambda *_args: pytest.fail("Task creation summary must not invoke a model"),
+    )
+
+    def create(_plan, _phase):
+        for index in range(created_count):
+            state.store_task(Task(f"new-{index}", "New task", "Assigned work", phase=1, status="pending"))
+        return workflow_mod.TaskCreationOutcome(
+            created_count=created_count, attempts=attempts, batch_count=batches,
+            failure_reason="Rejected batch" if not created_count else "",
+        )
+
+    monkeypatch.setattr(controller, "_create_tasks", create)
+    caplog.set_level("INFO", logger=workflow_mod.__name__)
+    if created_count:
+        class SummaryObserved(Exception):
+            """Stop at the next boundary without executing newly queued work."""
+
+        monkeypatch.setattr(controller, "_get_or_activate_task", Mock(side_effect=SummaryObserved))
+        with pytest.raises(SummaryObserved):
+            controller.run()
+    else:
+        with pytest.raises(workflow_mod.WorkflowInvariantError, match="Rejected batch"):
+            controller.run()
+    word = "task" if created_count == 1 else "tasks"
+    expected = f"Phase 1 task creation: created {created_count} {word}."
+    outputs = [event["content"] for event in controller.runtime.callback_handler.events
+               if event["type"] == "output" and event.get("content", "").startswith("Phase 1 task creation:")]
+    assert outputs == [expected]
+    assert sum(expected in record.getMessage() for record in caplog.records) == 1
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("correction", ["preserve", "reverse", "unexplained", "blocked", "remove_gap"])
+def test_hypothesis_schema_correction_preserves_semantic_feedback(worker_flow_case, monkeypatch, structured, correction):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    binding = _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    row = {"item_id": "subject", "decision": "revise", "reason": "Unsupported claim needs replacement",
+           "hypotheses": []}
+    initial = {"status": "done", "publication_sha256": binding["sha256"], "subject_reviews": [row],
+               "repair": {"kind": "acceptance", "mode": "replace"}}
+    corrected = {**initial, "repair": {"kind": "acceptance"}}
+    if correction == "reverse":
+        corrected["subject_reviews"] = [{**row, "decision": "retain", "reason": "Now acceptable"}]
+    if correction in {"unexplained", "blocked"}:
+        initial = {"status": "partial_failure" if correction == "unexplained" else "blocked",
+                   "publication_sha256": binding["sha256"],
+                   "subject_reviews": [{**row, "decision": "retain"}]}
+        corrected = initial
+    if correction == "remove_gap":
+        initial = {**initial, "subject_reviews": [{**row, "decision": "retain"}], "prerequisite_gaps": [{
+            "criterion_id": "future-tests", "missing_input": "Explicitly required source unavailable",
+            "item_ids": ["subject"], "source_refs": ["artifact:form.html"],
+        }]}
+        corrected = {**initial, "repair": {"kind": "none"}, "prerequisite_gaps": []}
+    responses = iter([initial, corrected])
+    prompts = []
+
+    def runner(_role, prompt, *_args):
+        prompts.append(prompt)
+        result = next(responses)
+        return result if structured else json.dumps(result)
+
+    controller.text_runner = runner
+    controller.structured_runner = runner if structured else None
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
+    assert decision.status == "partial_failure"
+    assert len(prompts) == 2
+    stored = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    feedback = stored.recovery_context["hypothesis_review"]
+    assert feedback["subject_reviews"] == initial["subject_reviews"]
+    if correction == "remove_gap":
+        assert feedback["prerequisite_gaps"] == initial["prerequisite_gaps"]
+    if correction == "preserve":
+        assert decision.repair_kind == "acceptance"
+        assert row["reason"] in decision.instructions
+        assert row["reason"] in controller._hypothesis_repair_context(stored)
+        # An unchanged publication cannot clear an unresolved semantic judgment on another review.
+        controller.text_runner = Mock(side_effect=AssertionError("Do not rejudge unchanged rejected publication"))
+        again = controller._evaluate_task(_plan(), _plan().phases[0], stored, acceptance_results=[])
+        assert again.status == "partial_failure" and again.repair_kind == "acceptance"
+        assert row["reason"] in again.instructions
+    else:
+        assert "schema" in decision.reason
+        assert decision.repair_kind == "none"
+
+
+@pytest.mark.parametrize("module", ["web", "web_recon", ""])
+def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow_case, monkeypatch, module):
+    from modules.prompts import factory as prompt_factory
+
+    controller, *_ = worker_flow_case
+    controller.runtime.config.module = module
+    templates = Path("src/modules/prompts/templates")
+    monkeypatch.setattr(prompt_factory, "load_prompt_template", lambda name: (templates / name).read_text())
+    controller.runtime.system_prompt = prompt_factory.get_system_prompt(
+        "https://service.test", "Assess frozen observations", "OP_TEST",
+    )
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    plan = _plan()
+    phase = replace(plan.phases[0], produces_hypotheses=True)
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    draft = {"prompt": "Derive proposals from frozen observations", "tools": [], "shell_commands": []}
+    prompts = [
+        controller._task_prompt_builder_prompt(plan, phase, task),
+        controller._task_prompt_critic_prompt(plan, phase, task, draft),
+        controller._task_prompt_revision_prompt(plan, phase, task, draft, ["Clarify proposal"]),
+        controller._task_prompt_bounded_repair_prompt(plan, phase, task, draft, ["Clarify proposal"]),
+        controller._task_evaluator_system_prompt() + controller._task_evaluator_prompt(plan, phase, task),
+        controller.runtime.system_prompt + controller._hypothesis_input_context(task)
+        + controller._task_executor_contract(task, {"record_hypotheses", "record_task_acceptance"}),
+    ]
+    roles = ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_builder"]
+    for index, role in enumerate(roles):
+        prompts[index] = prompt_factory.get_role_system_prompt(controller.runtime.system_prompt, role) + prompts[index]
+    for prompt in prompts:
+        assert "not individual hypotheses" in prompt
+        assert "no_testable_hypotheses" in prompt
+        assert "does not require live target acquisition" in prompt
+        assert "separately contracted follow-up task" not in prompt
+    evaluator = prompts[-2]
+    assert "Do not put replacement" in evaluator
+    assert "closure/schema defect" not in evaluator
+    assert "capture headers and response body" not in prompts[3]
+
+
+@pytest.mark.parametrize("subject", ["https://service.test/entry", "tcp://service.test:1234", "/workspace/source.py"])
+def test_structured_hypothesis_review_reaches_real_actor_replacement(worker_flow_case, monkeypatch, subject):
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(replace(
+        _hypothesis_task(status="active"), title=f"Hypotheses for {subject}",
+        objective=f"Derive supported future tests for {subject}",
+    ))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive tests", "tools": []})
+    actors = []
+    reviews = []
+
+    def evaluator(role, _prompt, *_args):
+        assert role == "task_evaluator"
+        current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+        binding = workflow_mod.hypothesis_binding(current)
+        publication = workflow_mod.load_hypothesis_set(binding["artifact_ref"], current, "OP_TEST")
+        row = publication.subjects[0]
+        reviews.append(binding["sha256"])
+        return json.dumps({
+            "status": "done", "publication_sha256": binding["sha256"], "subject_reviews": [{
+                "item_id": "subject", "decision": "revise" if row.hypotheses else "retain",
+                "reason": "Controls do not distinguish impact" if row.hypotheses else "Sound empty disposition",
+                "hypotheses": [{"hypothesis_id": item.hypothesis_id, "decision": "withdraw",
+                                "reason": "The positive expectation proves only ordinary delivery"}
+                               for item in row.hypotheses],
+            }],
+        })
+
+    def actor(_role, prompt, tools, system, _policy):
+        actors.append((prompt, system))
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        if len(actors) == 1:
+            binding = json.loads(writer(subjects=[{
+                "item_id": "subject", "disposition": "supplied", "hypotheses": [
+                    {**hypothesis(), "supporting_refs": ["artifact:form.html"]},
+                ],
+            }]))
+        else:
+            assert prompt.count("Controls do not distinguish impact") == 1
+            assert prompt.count("The positive expectation proves only ordinary delivery") == 1
+            assert reviews[0] in prompt
+            assert "Do not execute future tests" in prompt
+            binding = json.loads(writer(subjects=[{
+                "item_id": "subject", "disposition": "no_testable_hypotheses",
+                "reason": "Frozen observations support no test that distinguishes unauthorized behavior",
+            }], mode="replace"))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id="future-tests", status="satisfied", disposition="observation",
+            summary="Published disposition", evidence_refs=(binding["artifact_ref"],),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[ToolOutcome(
+            sequence=len(actors), tool_use_id=f"accepted-{len(actors)}", tool_name="record_task_acceptance",
+            success=True, correctable=False, input_summary="{}", output_summary='{"complete":true}',
+        )])
+
+    controller.text_runner = evaluator
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert updated.status == "done"
+    assert len(actors) == 2 and len(reviews) == 2
+    assert reviews[0] != reviews[1]

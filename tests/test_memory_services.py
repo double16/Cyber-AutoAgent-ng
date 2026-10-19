@@ -6424,3 +6424,159 @@ def test_snapshot_fanout_retains_distinct_authentication_requirements(fake_memor
     result = json.loads(mod.create_tasks([{**common, "authentication_requirement": requirements[1]}]))
     assert result["created_count"] == 1
     assert store.tasks[-1].recovery_context["authentication_requirement"] == requirements[1]
+
+
+@pytest.mark.parametrize("index", [None, -1, 99, True, "0"])
+def test_task_repair_unknown_rejection_unlocks_batch_and_refreshes_signature(index):
+    original = mod.TaskProposal.model_validate(task_proposal("Original", "Inspect assigned source", "inspect"))
+    guard = mod.TaskProposalRepairGuard()
+    guard.capture([original])
+    guard.restore([original])
+    previous = guard.last_submitted_signature
+    error = ValueError("Batch rejected")
+    error.diagnostic = {"proposal_index": index}
+    guard.mark_rejected(error)
+    corrected = [original.model_copy(update={"title": "Corrected"}),
+                 original.model_copy(update={"title": "Additional independent work"})]
+    assert guard.restore(corrected) == corrected
+    assert guard.last_submitted_signature != previous
+    guard.capture(corrected)
+    assert len(guard.baseline) == 2
+    assert guard.valid_indexes == {0, 1}
+    guard.mark_rejected(ValueError("Batch constraints rejected"))
+    assert not guard.valid_indexes
+    assert guard.restore([original.model_dump()]) == [original.model_dump()]
+    assert "Original" in guard.last_submitted_signature
+
+
+def test_task_repair_indexed_rejection_preserves_unaffected_proposal_count():
+    proposals = [mod.TaskProposal.model_validate(task_proposal(title, "Inspect assigned input", "inspect"))
+                 for title in ["Preserve", "Repair"]]
+    guard = mod.TaskProposalRepairGuard()
+    guard.capture(proposals)
+    guard.mark_rejected(mod.TaskProposalValidationError("Invalid objective", proposal_index=1))
+    guard.restore(proposals)
+    original_signature = guard.last_submitted_signature
+    with pytest.raises(ValueError, match="count and order"):
+        guard.restore(proposals[:1])
+    assert guard.last_submitted_signature != original_signature
+    assert len(json.loads(guard.last_submitted_signature)) == 1
+    guard.capture(proposals[:1])
+    corrected = [proposals[0].model_copy(update={"title": "Unrelated change"}),
+                 proposals[1].model_copy(update={"title": "Corrected"})]
+    guard.capture(corrected)
+    assert [proposal.title for proposal in guard.restore(corrected)] == ["Preserve", "Corrected"]
+
+
+@pytest.mark.parametrize("entrypoint", ["submitter", "controller"])
+@pytest.mark.parametrize("kind,value", [("endpoint", "https://target.test/input"),
+                                        ("service", "tcp://target.test:9000"),
+                                        ("workflow", "/workspace/source.py")])
+def test_snapshot_workstream_correction_survives_shared_submitter_sqlite(
+    fake_memory_client, tmp_path, monkeypatch, kind, value, entrypoint,
+):
+    _client, _fake_store = fake_memory_client
+    monkeypatch.setattr(mod, "_operation_output_root", lambda: str(tmp_path))
+    store = mod.SQLiteApplicationStore(str(tmp_path / "repair.db"), "target")
+    plan = mod.OperationPlan(
+        objective="Assess", current_phase=1, total_phases=1,
+        phases=[mod.PlanPhase(id=1, title="Develop hypotheses", status="active")],
+        targets=[mod.OperationTarget("target-1", value, "filesystem" if value.startswith("/") else "network")],
+    )
+    store.store_plan("op1", plan)
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    manifest = {"schema_version": mod.INVENTORY_MANIFEST_SCHEMA_VERSION, "unassessed_gaps": [], "items": [{
+        "id": "subject", "target_id": "target-1", "kind": kind, "value": value, "attributes": {},
+    }]}
+    directory = tmp_path / "artifacts"
+    directory.mkdir(exist_ok=True)
+    (directory / "inventory.json").write_text(json.dumps(manifest))
+    proposal = mod.TaskProposal.model_validate({
+        "title": "Develop hypotheses", "objective": "Develop safe future tests for the assigned subject",
+        "snapshot_refs": ["artifact:artifacts/inventory.json"], "methods": [],
+        "criteria": [{"description": "Publish supported future tests or a reasoned no-hypothesis disposition"}],
+        "target_ids": ["target-1"],
+    })
+    if entrypoint == "controller":
+        from modules.agents import multi_agent_workflow as workflow
+        from modules.config.types import BudgetConfig
+        from tests.test_multi_agent_workflow import _runtime
+
+        runtime = _runtime()
+        runtime.operation_id = "op1"
+        responses = [proposal.model_dump(), proposal.model_copy(update={
+            "workstream": "hypothesis_generation",
+        }).model_dump()]
+        prompts = []
+
+        def generate(_role, prompt, *_args):
+            prompts.append(prompt)
+            return {"tasks": [responses[len(prompts) - 1]]}
+
+        controller = workflow.MultiAgentWorkflowController(
+            runtime=runtime, budget=BudgetConfig(max_duration_minutes=60),
+            state_store=workflow.WorkflowStateStore("op1"), structured_runner=generate,
+            text_runner=lambda *_args: pytest.fail("Unexpected JSON fallback"),
+        )
+        batch = workflow.TaskCreationBatch(
+            1, 1, "artifact:artifacts/inventory.json", (("target-1", kind, value, ("subject",)),), 0,
+        )
+        monkeypatch.setattr(controller, "_task_creation_batches", lambda *_args: [batch])
+        monkeypatch.setattr(workflow, "_operation_output_root", lambda: str(tmp_path))
+        outcome = controller._create_tasks(plan, plan.phases[0])
+        assert outcome.created_count == 1 and outcome.attempts == 2
+        assert len(store.get_tasks("op1")) == 1
+        assert "proposal_index=0" in prompts[1]
+        return
+    guard = mod.TaskProposalRepairGuard()
+    observed = []
+
+    def observe(_input, _result, error):
+        if error is not None:
+            observed.append(error)
+            guard.mark_rejected(error)
+
+    submit = mod.build_create_tasks_submitter(
+        coverage_item_ids={"subject"}, expected_snapshot_ref="artifact:artifacts/inventory.json",
+        repair_guard=guard, invocation_observer=observe,
+    )
+    guard.capture([proposal])
+    with pytest.raises(mod.TaskProposalValidationError, match="non-empty workstream"):
+        submit([proposal])
+    rejected_signature = guard.last_submitted_signature
+    assert observed[0].diagnostic["proposal_index"] == 0
+    assert store.get_tasks("op1") == []
+    corrected = proposal.model_copy(update={"workstream": "hypothesis_generation"})
+    duplicate_batch = [corrected, corrected.model_copy(update={"title": "Another goal"})]
+    guard.capture(duplicate_batch)
+    with pytest.raises(ValueError, match="distinct snapshot proposal workstreams"):
+        submit(duplicate_batch)
+    assert not guard.valid_indexes
+    assert store.get_tasks("op1") == []
+    guard.capture([corrected])
+    assert json.loads(submit([corrected]))["created_count"] == 1
+    assert guard.last_submitted_signature != rejected_signature
+    persisted = store.get_tasks("op1")
+    assert len(persisted) == 1
+    assert persisted[0].recovery_context["coverage_family"] == "hypothesis_generation"
+    assert persisted[0].acceptance.basis.item_ids == ("subject",)
+
+
+def test_multiple_missing_workstreams_unlock_entire_batch_without_serial_repairs():
+    proposals = [mod.TaskProposal.model_validate({
+        "title": title, "objective": "Assess assigned frozen input",
+        "snapshot_refs": ["artifact:inventory.json"], "criteria": [{"description": "Record an assessed outcome"}],
+    }) for title in ["First", "Second"]]
+    guard = mod.TaskProposalRepairGuard()
+    guard.capture(proposals)
+    submit = mod.build_create_tasks_submitter(
+        coverage_item_ids={"subject"}, repair_guard=guard,
+        invocation_observer=lambda _input, _result, error: guard.mark_rejected(error) if error else None,
+    )
+    with pytest.raises(mod.TaskProposalValidationError) as rejected:
+        submit(proposals)
+    assert rejected.value.diagnostic["proposal_index"] is None
+    assert not guard.valid_indexes
+    corrected = [proposal.model_copy(update={"workstream": f"goal_{index}"})
+                 for index, proposal in enumerate(proposals)]
+    assert guard.restore(corrected) == corrected

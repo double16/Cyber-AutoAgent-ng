@@ -24,6 +24,8 @@ class TerminalToolHook(HookProvider):
         self.successful_tools: set[str] = set()
         self.called_tools: set[str] = set()
         self.tool_count = 0
+        self.checkpoint_count = 0
+        self.progress_key = ""
 
     def configure(self, policy: AgentRunPolicy) -> None:
         """Install invocation-local completion criteria and reset prior completions."""
@@ -31,6 +33,8 @@ class TerminalToolHook(HookProvider):
         self.successful_tools.clear()
         self.called_tools.clear()
         self.tool_count = 0
+        self.checkpoint_count = 0
+        self.progress_key = policy.progress_key() if policy.progress_key else ""
 
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(AfterToolCallEvent, self._after_tool)
@@ -59,6 +63,15 @@ class TerminalToolHook(HookProvider):
         if _result_success(event.result, event.exception):
             self.successful_tools.add(tool_name)
         reason = policy.terminal_check() if policy.terminal_check is not None else None
+        if policy.checkpoint_tool_calls:
+            progress = policy.progress_key() if policy.progress_key else ""
+            if progress != self.progress_key:
+                self.progress_key = progress
+                self.checkpoint_count = 0
+            else:
+                self.checkpoint_count += 1
+            if self.checkpoint_count >= policy.checkpoint_tool_calls:
+                reason = "publication_checkpoint"
         # A controller predicate is authoritative when supplied: tool availability
         # or a successful tool status alone cannot establish functional completion.
         if policy.terminal_check is None and policy.terminal_after_required_tools and policy.required_tool_names:

@@ -7084,7 +7084,7 @@ class TaskProposalValidationError(ValueError):
 
 @dataclass
 class TaskProposalRepairGuard:
-    """Restore previously valid proposals before a corrective task-creation mutation."""
+    """Preserve unaffected proposals while leaving controller-rejected work editable."""
 
     baseline: list[TaskProposal | None] = field(default_factory=list)
     valid_indexes: set[int] = field(default_factory=set)
@@ -7097,7 +7097,7 @@ class TaskProposalRepairGuard:
             return
         if self.valid_indexes and len(tasks) != len(self.baseline):
             return
-        baseline = list(self.baseline) if self.baseline else [None] * len(tasks)
+        baseline = list(self.baseline) if self.valid_indexes else [None] * len(tasks)
         valid_indexes = set(self.valid_indexes)
         for index, task in enumerate(tasks):
             if index in valid_indexes:
@@ -7113,30 +7113,37 @@ class TaskProposalRepairGuard:
         self.valid_indexes = valid_indexes
 
     def mark_rejected(self, error: Exception) -> None:
-        """Allow the model to repair the one proposal rejected by controller validation."""
+        """Unlock an indexed rejection, or the whole batch when its scope is unknown."""
 
         diagnostic = getattr(error, "diagnostic", {})
         proposal_index = diagnostic.get("proposal_index") if isinstance(diagnostic, dict) else None
-        if isinstance(proposal_index, int) and proposal_index in self.valid_indexes:
-            self.valid_indexes.remove(proposal_index)
+        if type(proposal_index) is int and 0 <= proposal_index < len(self.baseline):
+            self.valid_indexes.discard(proposal_index)
+        else:
+            self.valid_indexes.clear()
+            self.baseline.clear()
+
+    @staticmethod
+    def _signature(tasks: TaskProposalList) -> str:
+        return json.dumps(
+            [proposal.model_dump(mode="json") if isinstance(proposal, TaskProposal) else proposal
+             for proposal in tasks],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     def restore(self, tasks: TaskProposalList) -> TaskProposalList:
-        """Prevent an LLM correction from changing proposals that were already valid."""
+        """Preserve unaffected proposals and record every effective submission, even invalid shapes."""
 
-        if not self.valid_indexes:
-            return tasks
-        if len(tasks) != len(self.baseline):
+        self.last_submitted_signature = self._signature(tasks)
+        if self.valid_indexes and len(tasks) != len(self.baseline):
             raise ValueError("task-creator repair must preserve the original proposal count and order")
         restored = list(tasks)
         for index in self.valid_indexes:
             baseline = self.baseline[index]
             if baseline is not None:
                 restored[index] = baseline
-        self.last_submitted_signature = json.dumps(
-            [proposal.model_dump(mode="json") for proposal in restored],
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        self.last_submitted_signature = self._signature(restored)
         return restored
 
 
@@ -9112,6 +9119,7 @@ def _create_tasks_from_proposals(
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
     task_transformer: Callable[[list[Task], list[Task]], list[Task]] | None = None,
     reject_duplicate_proposals: bool = False,
+    task_sink: Callable[[list[Task]], None] | None = None,
 ) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
@@ -9150,9 +9158,11 @@ def _create_tasks_from_proposals(
         proposal_preflight_validator(proposals)
     if coverage_item_ids is not None:
         coverage_families = [_proposal_coverage_family(proposal) for proposal in proposals]
-        if any(family == "default" for family in coverage_families):
-            raise ValueError(
-                "controller-bound inventory batch requires every snapshot proposal to declare a non-empty workstream"
+        missing_workstreams = [index for index, family in enumerate(coverage_families) if family == "default"]
+        if missing_workstreams:
+            raise TaskProposalValidationError(
+                "controller-bound inventory batch requires every snapshot proposal to declare a non-empty workstream",
+                proposal_index=missing_workstreams[0] if len(missing_workstreams) == 1 else None,
             )
         if len(set(coverage_families)) != len(coverage_families):
             raise ValueError(
@@ -9199,12 +9209,16 @@ def _create_tasks_from_proposals(
             ]
             finding_refs = list(dict.fromkeys(finding_refs))
             if not finding_refs:
-                raise ValueError("finding-dependent task proposal requires at least one canonical finding_refs entry")
+                raise TaskProposalValidationError(
+                    "finding-dependent task proposal requires at least one canonical finding_refs entry",
+                    proposal_index=proposal_index,
+                )
             invalid_finding_refs = sorted(set(finding_refs) - required_finding_refs)
             if invalid_finding_refs:
-                raise ValueError(
+                raise TaskProposalValidationError(
                     "finding-dependent task proposal includes unavailable finding_refs: "
-                    + ", ".join(invalid_finding_refs)
+                    + ", ".join(invalid_finding_refs),
+                    proposal_index=proposal_index,
                 )
         validation_auth_context: dict[str, Any] = {}
         validation_auth_binding: dict[str, Any] = {}
@@ -9223,8 +9237,9 @@ def _create_tasks_from_proposals(
                 for binding in bindings
             }
             if len(binding_signatures) != 1:
-                raise ValueError(
-                    "finding-dependent task proposal mixes incompatible authentication contexts or target scopes"
+                raise TaskProposalValidationError(
+                    "finding-dependent task proposal mixes incompatible authentication contexts or target scopes",
+                    proposal_index=proposal_index,
                 )
             binding = bindings[0]
             auth_context = binding.get("auth_context") if isinstance(binding, dict) else None
@@ -9239,7 +9254,10 @@ def _create_tasks_from_proposals(
         if replacement_of is not None:
             parent = next((task for task in existing_tasks if task.task_uid == replacement_of), None)
             if parent is None:
-                raise ValueError(f"replacement_of references unknown task {replacement_of}")
+                raise TaskProposalValidationError(
+                    f"replacement_of references unknown task {replacement_of}",
+                    proposal_index=proposal_index,
+                )
             if "authentication_requirement" not in proposal.model_fields_set:
                 proposal = proposal.model_copy(update={
                     "authentication_requirement": AuthenticationRequirement.model_validate(
@@ -9247,18 +9265,28 @@ def _create_tasks_from_proposals(
                     ),
                 })
             if parent.phase != current_phase:
-                raise ValueError("replacement task must remain in the parent task's phase")
+                raise TaskProposalValidationError(
+                    "replacement task must remain in the parent task's phase",
+                    proposal_index=proposal_index,
+                )
             if parent.status not in {"partial_failure", "blocked"}:
-                raise ValueError("replacement_of must reference a partial_failure or blocked task")
+                raise TaskProposalValidationError(
+                    "replacement_of must reference a partial_failure or blocked task",
+                    proposal_index=proposal_index,
+                )
             parent_criteria = {criterion.id for criterion in parent.acceptance.criteria}
             if not supersedes_criteria or not set(supersedes_criteria).issubset(parent_criteria):
                 allowed_criteria = ", ".join(sorted(parent_criteria)) or "none"
-                raise ValueError(
+                raise TaskProposalValidationError(
                     "supersedes_criteria must identify existing acceptance criteria on the parent task; "
-                    f"allowed criterion IDs: {allowed_criteria}"
+                    f"allowed criterion IDs: {allowed_criteria}",
+                    proposal_index=proposal_index,
                 )
         elif supersedes_criteria:
-            raise ValueError("supersedes_criteria requires replacement_of")
+            raise TaskProposalValidationError(
+                "supersedes_criteria requires replacement_of",
+                proposal_index=proposal_index,
+            )
         proposal_created_count = 0
         proposal_duplicate_count = 0
         target_scope, target_ids = _validate_task_target_scope(
@@ -9277,7 +9305,10 @@ def _create_tasks_from_proposals(
             and proposal.authentication_requirement.comparison == "none"
             and not validation_auth_binding
         ):
-            raise ValueError("comparison workstream requires an explicit authentication comparison kind")
+            raise TaskProposalValidationError(
+                "comparison workstream requires an explicit authentication comparison kind",
+                proposal_index=proposal_index,
+            )
         if proposal_preflight_validator is not None:
             planning_context["task_preflight_validated"] = True
         if phase_task_contract is not None:
@@ -9306,11 +9337,15 @@ def _create_tasks_from_proposals(
             [*existing_tasks, *staged_tasks],
         )
         if coverage_item_ids is not None and acceptance.mode != "coverage":
-            raise ValueError("task-creation batch requires a snapshot-based proposal")
+            raise TaskProposalValidationError(
+                "task-creation batch requires a snapshot-based proposal",
+                proposal_index=proposal_index,
+            )
         if coverage_item_ids is not None and phase_objective and _is_generic_snapshot_proposal(proposal):
-            raise ValueError(
+            raise TaskProposalValidationError(
                 "snapshot proposal must describe the active phase's distinct objective; "
-                "generic endpoint assessment is not allowed"
+                "generic endpoint assessment is not allowed",
+                proposal_index=proposal_index,
             )
 
         acceptance_groups = [(title, objective, acceptance, target_scope, target_ids)]
@@ -9318,9 +9353,10 @@ def _create_tasks_from_proposals(
             coverage_family = _proposal_coverage_family(proposal)
             artifact_ref = next(ref for ref in acceptance.basis.source_refs if ref.startswith("artifact:"))
             if expected_snapshot_ref is not None and artifact_ref != expected_snapshot_ref:
-                raise ValueError(
+                raise TaskProposalValidationError(
                     "task-creation batch requires snapshot reference "
-                    f"{expected_snapshot_ref}; received {artifact_ref}"
+                    f"{expected_snapshot_ref}; received {artifact_ref}",
+                    proposal_index=proposal_index,
                 )
             manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
             completed_ids = set() if matrix_expansion else _completed_coverage_item_ids(
@@ -9351,9 +9387,10 @@ def _create_tasks_from_proposals(
                     if group_ids.isdisjoint(coverage_item_ids):
                         continue
                     if not group_ids.issubset(coverage_item_ids):
-                        raise ValueError(
+                        raise TaskProposalValidationError(
                             "task-creation batch split an atomic inventory route group: "
-                            f"{route_label}"
+                            f"{route_label}",
+                            proposal_index=proposal_index,
                         )
                 remaining_ids = [item_id for item_id in item_ids if item_id not in completed_ids]
                 if not remaining_ids:
@@ -9529,7 +9566,10 @@ def _create_tasks_from_proposals(
                     group_planning_context["hypothesis_source_artifact_refs"] = source_artifact_refs
             if requires_hypotheses:
                 if group_acceptance.basis.kind != "snapshot" or not group_acceptance.basis.item_ids:
-                    raise ValueError("hypothesis producers require assigned frozen inventory subjects")
+                    raise TaskProposalValidationError(
+                        "hypothesis producers require assigned frozen inventory subjects",
+                        proposal_index=proposal_index,
+                    )
                 group_planning_context["hypothesis_operation_id"] = _operation_id()
                 group_acceptance = replace(
                     group_acceptance, manifest_hash="", criteria=tuple(
@@ -9629,8 +9669,11 @@ def _create_tasks_from_proposals(
     if task_transformer is not None:
         staged_tasks = task_transformer(staged_tasks, existing_tasks)
 
-    for task in staged_tasks:
-        client.store_task(task=task, user_id=user_id)
+    if task_sink is not None:
+        task_sink(staged_tasks)
+    else:
+        for task in staged_tasks:
+            client.store_task(task=task, user_id=user_id)
 
     response: dict[str, Any] = {
         "complete": True,
@@ -9690,6 +9733,7 @@ def build_create_tasks_submitter(
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
     task_transformer: Callable[[list[Task], list[Task]], list[Task]] | None = None,
     reject_duplicate_proposals: bool = False,
+    task_sink: Callable[[list[Task]], None] | None = None,
     repair_guard: TaskProposalRepairGuard | None = None,
     invocation_observer: Callable[[dict[str, Any], Any, Exception | None], None] | None = None,
 ) -> Callable[[TaskProposalList], str]:
@@ -9724,6 +9768,7 @@ def build_create_tasks_submitter(
                 proposal_preflight_validator=proposal_preflight_validator,
                 task_transformer=task_transformer,
                 reject_duplicate_proposals=reject_duplicate_proposals,
+                task_sink=task_sink,
             )
         except Exception as error:
             if invocation_observer is not None:

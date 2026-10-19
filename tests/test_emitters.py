@@ -191,3 +191,16 @@ def test_event_emitter_cleans_nested_unserializable_values():
 
     assert cleaned["payload"]["value"]["nested"][1:] == [None, True]
     assert isinstance(cleaned["payload"]["value"]["nested"][0], str)
+
+
+def test_task_creation_summary_uses_existing_output_event():
+    emitter = StdoutEventEmitter(operation_id="TEST_OP")
+    content = "Phase 4 task creation: created 64 tasks."
+    stream = io.StringIO()
+    with redirect_stdout(stream):
+        emitter.emit({"type": "output", "content": content})
+    output = stream.getvalue()
+    payload = json.loads(output.split("__CYBER_EVENT__", 1)[1].split("__CYBER_EVENT_END__", 1)[0])
+    assert payload["type"] == "output"
+    assert payload["content"] == content
+    assert output.count(content) == 1

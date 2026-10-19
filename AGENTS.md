@@ -109,6 +109,11 @@
 - Budget is reporting only after reporting or evaluation stages are reached.
 
 ## LLM Best Practices
+- When changes affect agent prompts, tool contracts, or output schemas, review the complete assembled instructions
+  for affected roles and execution paths, including continuation, repair, retry, and prompt fitting where applicable.
+  Resolve conflicting, inconsistent, ambiguous, or unnecessarily duplicated instructions. Ensure required actions match
+  available tools, schemas, and controller behavior. Consolidate shared rules at their source. Test representative
+  assembled inputs rather than isolated phrases, and summarize what was reviewed and any limitations.
 - Design considerations should prefer deterministic actions in Python or Typescript code, reasoning actions in agents/LLM.
 - When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.
 - When an LLM is to return structured data, prefer JSON.

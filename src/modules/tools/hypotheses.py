@@ -10,8 +10,10 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from strands import tool
 
+from modules.authentication_requirements import AuthenticationRequirement, validate_comparison_requirement
 from modules.tools.artifact import resolve_operation_artifact_path
 from modules.tools.artifact_references import require_artifact_reference
+from modules.tools.tool_result_policy import bounded_inline_result
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -21,6 +23,7 @@ class Hypothesis(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     hypothesis_id: str = ""
+    authentication_requirement: AuthenticationRequirement
     observed_basis: Text
     preconditions: list[Text] = Field(min_length=1)
     suspected_mechanism: Text
@@ -33,6 +36,15 @@ class Hypothesis(BaseModel):
         min_length=1, description="Current-operation artifact: or artifact_id: references, not memory IDs or URLs.",
     )
     research_refs: list[Text] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_authentication(self) -> "Hypothesis":
+        validate_comparison_requirement(self.authentication_requirement)
+        if self.authentication_requirement.comparison != "none" and not self.authentication_requirement.roles:
+            raise ValueError("comparison hypotheses require explicit roles")
+        if self.authentication_requirement.comparison == "none" and len(self.authentication_requirement.roles) > 1:
+            raise ValueError("single-session hypotheses allow at most one role")
+        return self
 
 
 class SubjectHypotheses(BaseModel):
@@ -169,6 +181,7 @@ def bind_hypothesis_acceptance(task: Any, operation_id: str, payload: dict[str, 
 def build_record_hypotheses_tool(
     task: Any, operation_id: str, output_root: str, persist: Callable[[dict[str, Any]], None],
     *, current_task: Callable[[], Any] | None = None,
+    validate_authentication: Callable[[AuthenticationRequirement], None] | None = None,
 ) -> Any:
     """Bind operation and assignment in Python; the model supplies only future-test reasoning."""
 
@@ -202,6 +215,9 @@ def build_record_hypotheses_tool(
             value = str(entry.get("disposition", "")).strip().lower()
             entry["disposition"] = aliases.get(value, value)
             subject = SubjectHypotheses.model_validate(entry)
+            if validate_authentication is not None:
+                for hypothesis in subject.hypotheses:
+                    validate_authentication(hypothesis.authentication_requirement)
             prior = grouped.get(subject.item_id)
             if prior is not None:
                 if prior.disposition != subject.disposition:
@@ -281,6 +297,7 @@ def build_record_hypotheses_tool(
 
 def build_read_hypotheses_tool(
     bindings: list[tuple[str, Any]], operation_id: str, allowed_ids: set[str],
+    hypothesis_ids: set[str] | None = None,
 ) -> Any:
     @tool(name="read_hypotheses")
     def read_hypotheses(item_id: str, offset: int = 0, max_records: int = 5) -> str:
@@ -296,7 +313,8 @@ def build_read_hypotheses_tool(
                 if subject.item_id == item_id:
                     dispositions.append({"producer_task_uid": producer.task_uid,
                                          "disposition": subject.disposition, "reason": subject.reason})
-                    records.extend(item.model_dump() for item in subject.hypotheses)
+                    records.extend(item.model_dump() for item in subject.hypotheses
+                                   if hypothesis_ids is None or item.hypothesis_id in hypothesis_ids)
         if not dispositions:
             raise ValueError("no validated hypothesis output covers this subject")
         page = records[offset:offset + max_records]
@@ -307,3 +325,47 @@ def build_read_hypotheses_tool(
                            "next_offset": offset + len(page) if offset + len(page) < len(records) else None})
 
     return read_hypotheses
+
+
+def build_hypothesis_input_reader(source_refs: set[str], max_inline_chars: int = 30_000) -> Any:
+    """Bind checkpoint follow-up inspection to the critic's identified frozen inputs."""
+
+    @tool(name="read_hypothesis_input")
+    def read_hypothesis_input(source_ref: str, offset: int = 0, max_chars: int = 4000) -> str:
+        """Read a bounded page of an identified prerequisite input; offsets count characters."""
+
+        if source_ref not in source_refs:
+            raise ValueError(f"Use an identified source_ref from: {sorted(source_refs)}")
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        if not 1 <= max_chars <= 10_000:
+            raise ValueError("max_chars must be from 1 to 10000")
+        path = resolve_operation_artifact_path(require_artifact_reference(source_ref))
+        with open(path, encoding="utf-8", errors="replace") as stream:
+            # Stream through preceding characters without retaining the whole input in memory.
+            remaining = offset
+            while remaining:
+                chunk = stream.read(min(remaining, 10_000))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+            page = stream.read(max_chars)
+            more = bool(stream.read(1))
+        def encode(length: int) -> str:
+            return json.dumps({"source_ref": source_ref, "text": page[:length],
+                               "next_offset": offset + length if more or length < len(page) else None},
+                              ensure_ascii=False)
+
+        low, high = 0, len(page)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if len(encode(middle)) <= max_inline_chars:
+                low = middle
+            else:
+                high = middle - 1
+        result = encode(low)
+        if len(result) > max_inline_chars or (page and low == 0):
+            raise ValueError("Inline ceiling is too small for a source reference and one character")
+        return result
+
+    return bounded_inline_result(read_hypothesis_input)

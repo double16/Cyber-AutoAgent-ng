@@ -26,13 +26,19 @@ The controller creates agents for specific jobs:
 - **plan_creator**: creates or revises an initial high-level plan and infers operation-wide constraints
 - **plan_critic**: reviews an initial plan and either approves it or returns actionable revision feedback
 - **task_creator**: creates concrete current-phase tasks with finite acceptance contracts from a deterministic
-  controller prompt
+  controller prompt, except for modes such as `hypothesis_dependent` that construct tasks directly in Python
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
 - **task_prompt_critic**: approves a proposed task execution prompt or returns actionable revision feedback
 - **task_executor**: executes one active task objective and retains its conversation across critic-guided passes
 - **task_evaluator**: reviews semantically complete acceptance ledgers and returns `done`, `partial_failure`, or `blocked`
 - **phase_evaluator**: returns phase status: `continue`, `done`, `partial_failure`, or `blocked`
+
+Task-creation repair distinguishes schema validity from controller approval. Proposal-local rejection
+diagnostics identify an index: that proposal remains editable while unaffected proposals retain their
+previous values and positions. Batch-wide or unindexed rejections unlock the complete batch, including
+its proposal count. Every retry is fully revalidated before any task is persisted. Repeat detection
+compares the current effective submission, including corrections preserved by the repair guard.
 
 Module execution guidance supplies operation intent, explicit access boundaries, domain behavior, and evidence rules to
 planning and execution roles. The module termination policy, including any advisory recommended minimum phase contract,
@@ -313,6 +319,47 @@ supporting inventory inputs remain separate. `read_hypotheses` validates the bin
 bounded subject read. Older producers without valid output get one deduplicated repair task per original producer
 and frozen contract. The original completed task and its acceptance ledger remain unchanged. Testing waits for
 validated repair output or records an explicit prerequisite coverage gap.
+
+Phases declaring `task_creation_mode: hypothesis_dependent` use controller-owned task construction.
+The nearest preceding phase declaring `produces_hypotheses: true` supplies validated publications;
+phase numbers and titles do not select this behavior. Python partitions each atomic inventory group by
+the hypotheses' explicit `authentication_requirement`, compiles snapshot proposals through the shared
+task compiler, validates the complete batch before persistence, and binds each task to its assigned
+hypothesis IDs and publication digests. No task-creation agent runs for this mode. Execution prompts,
+prompt critics and executors still choose suitable tools and reason about outcomes. Consumers paginate
+only assigned hypotheses. Changed or unavailable publications invalidate those bindings. Stable assignment
+keys prevent duplicate tasks on continuation. Subjects with reasoned no-hypothesis dispositions create no
+testing tasks; a completely assessed inventory with no hypotheses makes testing not applicable.
+
+Every hypothesis declares `authentication_requirement`, using the same contract as task planning:
+`{"comparison":"none","roles":[]}` requests unauthenticated execution; one declared role with
+`comparison: none` requests one session. Account, role and tenant comparisons request additional identities
+only where needed. Roles must be declared for the assigned operation targets. Missing metadata is not
+inferred from prose or silently treated as unauthenticated; existing producer repair preserves the original
+completed publication and acceptance ledger.
+
+Producer and critic guidance considers unauthenticated attack paths alongside applicable authenticated
+and identity-comparison scenarios. Authentication requirements describe execution rather than limiting
+hypothesis generation to authenticated work. The critic requests targeted repair when frozen observations
+support an overlooked unauthenticated scenario. No additional coverage field or automatic unauthenticated
+counterpart is required; a reasoned no-hypothesis outcome remains valid. Unauthenticated assignments
+retain empty roles and require no credential sessions.
+
+After 16 exploration calls without a new publication digest, the after-tool hook returns a normal
+publication checkpoint. Shell and other exploration calls count; duplicate publications and observation
+writes do not reset progress. A bounded publication turn reuses retained filesystem inputs and inspection
+context. If publication remains incomplete, the critic identifies a frozen criterion, missing required input,
+affected subjects and frozen source references. Further inspection is restricted to those input artifacts
+through a paginated, source-bound reader. Optional missing metadata does not justify further inspection.
+Unrecoverable prerequisites close as blocked. These turns remain inside the configured actor/critic cycles
+(three by default); they do not introduce a global artifact quota.
+
+Hypothesis critics return the latest publication digest and exactly one retain, revise or withdraw decision
+with reasons for every current subject and hypothesis. Python checks review coverage and provenance; the
+critic assesses observed versus conditional preconditions, meaningful controls and security impact.
+Availability, versions, absent headers or normal output alone do not establish impact. Revisions use an
+explicit publication repair and replace a subject's complete corrected list while preserving unaffected
+records. An explicit `repair.kind: none` remains terminal even with explanatory instructions.
 
 The same fields describe each module's native actions; subject identity comes from the frozen inventory:
 
@@ -1145,3 +1192,35 @@ fields, or code fences are rewritten. Tool schemas remain unchanged and validato
 
 Normalization logging contains only tool names and changed-field counts. Raw provider captures are preserved.
 No additional model requests, database migrations, environment variables, or flow version changes are needed.
+
+
+### Hypothesis review and checkpoint recovery
+
+Hypothesis reviews evaluate grounded future tests, not completed exploitation. Their output contracts
+exclude finding recommendations and identity-comparison assessments. The controller applies comparison
+assessments only when the task's structured requirements require them.
+
+Checkpoint publication repair uses `acceptance` with no prerequisite gaps. Required source inspection
+uses `execution` with gaps bound to frozen criteria, subjects, and source references. An unavailable
+external prerequisite uses `blocked` with no repair. Recovery prompts describe only the available tools
+and preserve published subjects. Missing publications are deliverables, not prerequisite inputs.
+
+The checkpoint reader streams allowlisted source files. Its complete serialized page stays within the
+configured inline ceiling, including escaping and metadata; character offsets allow lossless pagination.
+Semantic review checks that the mechanism, test steps, controls, and expected results describe the same
+security outcome. Conditional hypotheses and justified no-hypothesis dispositions remain valid.
+
+Hypothesis publication counts refer to hypothesis-set artifacts, not individual hypotheses. A reasoned
+`no_testable_hypotheses` publication satisfies a one-publication requirement without inventing a test.
+Builders, critics, executors, and evaluators share this interpretation; frozen-input prompt repairs do
+not authorize new target acquisition or execution of proposed tests.
+
+For published hypotheses, Python derives repair routing from explicit subject and hypothesis decisions.
+Revisions and withdrawals take priority over prerequisite inspection and always reach the actor with
+IDs, reasons, and the reviewed publication digest. The evaluator returns review feedback, while the actor
+publishes the full corrected subject list with `mode=replace`. Schema correction preserves semantic
+judgments and reasons. A subsequent review cannot clear unresolved changes against the same publication
+digest; an updated publication must be reviewed. Non-success reviews require a concrete reason, and an
+incomplete review must identify publication changes, `unresolved_criterion_ids` from the frozen contract,
+or required frozen-input gaps. Acceptance still
+requires all frozen criteria; retained hypotheses alone do not establish completion.
