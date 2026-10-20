@@ -228,6 +228,9 @@ def test_client_bundle_inventory_persists_webcrack_derivative_without_raw_refere
     assert result["formatted_artifact"] == "artifact:artifacts/app.webcrack.js"
     assert (artifacts / "app.webcrack.js").is_file()
     assert extraction["analysis_artifact"] == "artifact:artifacts/app.webcrack.js"
+    manifest = json.loads((artifacts / "inventory-manifest.json").read_text())
+    assert all(item["attributes"]["implementation_refs"] == [extraction["analysis_artifact"]]
+               for item in manifest["items"])
     assert extraction["api_paths"] == ["/api/formatted"]
     assert "artifact:artifacts/app.js" not in json.dumps(extraction)
 
@@ -327,3 +330,55 @@ def test_client_bundle_inventory_rejects_unresolved_target(monkeypatch, tmp_path
             "artifacts/manifest.json",
             target="configured-target",
         )
+
+
+@pytest.mark.parametrize("formatted", [False, True])
+def test_bundle_operations_survive_direct_and_saved_artifact_conversion(monkeypatch, tmp_path, formatted):
+    from modules.tools import recon_inventory_manifest as converter
+
+    _operation_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(bundle_tool, "resolve_inventory_target", lambda *_args: ("https://target.test", "target-1"))
+    monkeypatch.setattr(converter, "resolve_inventory_target", lambda *_args: ("https://target.test", "target-1"))
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    source = '''const api={file:"/api/file",email:"/api/email"};
+function send(config){
+ const normalized=typeof config==="string"?{url:config}:config;
+ return client.request(normalized).then(result=>result.data).catch(error=>error);
+}
+send({url:`${api.file}/raw?path=${path}`,method:"GET"});
+send({url:`${api.file}/raw?path=${path}`,method:"PUT",data:content});
+send({url:`${api.email}/sendSupportEmail?name=${name}&to=${to}&subject=${subject}&content=${content}`,method:"GET"});
+function uncertain(config){if(enabled)return client.request(config)}
+uncertain({url:`${api.email}/candidate`,method:"POST"});'''
+    (artifacts / "app.js").write_text(source.replace("\n", ""))
+    monkeypatch.setattr(bundle_tool, "_format_bundle_with_webcrack",
+                        lambda _path: (source.encode(), "formatted") if formatted else (None, "unavailable"))
+    result = json.loads(bundle_tool.client_bundle_inventory(
+        "artifact:artifacts/app.js", "artifacts/extraction.json", "artifacts/direct.json"))
+    assert result["request_operation_count"] == 3
+    assert result["request_analysis_status"] == "complete"
+    assert "not that all requests were resolved" in result["request_analysis_note"]
+    converter.recon_output_to_inventory_manifest(
+        source_artifact="artifact:artifacts/extraction.json", source_format="client_bundle_inventory",
+        output_file="artifacts/reconverted.json", target="https://target.test", target_id="target-1")
+    direct = json.loads((artifacts / "direct.json").read_text())
+    reconverted = json.loads((artifacts / "reconverted.json").read_text())
+    for manifest in [direct, reconverted]:
+        endpoint = next(i for i in manifest["items"] if i["value"] == "https://target.test/api/file/raw")
+        interaction = endpoint["attributes"]["interaction"]
+        assert interaction["operations"] == ["GET", "PUT"]
+        assert interaction["operation_provenance"] == "inferred"
+        assert len(interaction["extensions"]["client_source_operations"]) == 2
+        email = next(i for i in manifest["items"] if i["value"] == "https://target.test/api/email/sendSupportEmail")
+        assert email["attributes"]["interaction"]["operations"] == ["GET"]
+        assert {i["name"] for i in email["attributes"]["interaction"]["inputs"]} == {
+            "name", "to", "subject", "content",
+        }
+        assert not any(i["value"] == "https://target.test/api/email/candidate" for i in manifest["items"])
+        assert any(gap.get("callee") == "uncertain" and gap.get("candidate", {}).get("url") == "/api/email/candidate"
+                   for gap in manifest["unassessed_gaps"])
+        merged = converter._merge_inventory_manifests([("artifact:artifacts/source.json", manifest),
+                                                      ("artifact:artifacts/second.json", manifest)])
+        assert len([i for i in merged["items"] if i["value"] == endpoint["value"]]) == 1
+        assert any(gap.get("callee") == "uncertain" for gap in merged["unassessed_gaps"])

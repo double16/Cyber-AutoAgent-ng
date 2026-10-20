@@ -12,6 +12,11 @@ inapplicable and document the reason.
 
 ### Phase-1 task fan-out
 
+Include bounded POST method discovery for relevant in-scope endpoints when permitted by module,
+objective, and task constraints, even if no form or API declaration identifies POST. Assign this
+explicitly to endpoint/workflow mapping tasks. Retain method, inputs, response artifacts, and
+evidence-backed exclusions or coverage gaps; GET results alone do not establish POST coverage.
+
 Create separate artifact-producing tasks for at least three applicable workstreams: entry-point and technology mapping,
 bounded crawl and route discovery, client-side/API extraction, and authentication/workflow mapping. Create one final
 inventory-synthesis task only after those mapping tasks are queued; it is the sole task that produces the canonical

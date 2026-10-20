@@ -15,6 +15,8 @@ from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 
 from strands import tool
 
+from modules.tools.inventory_provenance import merge_operation_provenance, set_operation_provenance
+
 SUPPORTED_RECON_FORMATS = (
     "katana",
     "feroxbuster",
@@ -372,6 +374,25 @@ def _parse_client_bundle_inventory(text: str) -> list[dict[str, Any]]:
             continue
         records.append(_record(urljoin(target.rstrip("/") + "/", path.lstrip("/"))))
     return records
+
+
+def attach_client_bundle_evidence(
+    manifest: dict[str, Any], payload: dict[str, Any], *, target: str | None = None, target_id: str | None = None
+) -> None:
+    """Merge client declarations and provenance without asserting successful execution."""
+
+    from modules.tools.client_request_extraction import attach_request_operations
+
+    attach_request_operations(manifest, payload, target=target, target_id=target_id)
+    reference = payload.get("analysis_artifact")
+    if not isinstance(reference, str) or not reference.startswith("artifact:"):
+        return
+    for item in manifest["items"]:
+        attributes = item.setdefault("attributes", {})
+        references = attributes.setdefault("source_artifact_refs", [])
+        if reference not in references:
+            references.append(reference)
+        attributes["implementation_refs"] = [reference]
 
 
 _REGISTRATION_ROUTE_TOKENS = ("register", "signup", "sign-up", "create-account")
@@ -1001,6 +1022,7 @@ def _read_inventory_source(
     )
     if normalized_format == "client_bundle_inventory":
         payload = _json_values(text)[0]
+        attach_client_bundle_evidence(manifest, payload, target=bound_target, target_id=resolved_target_id)
         manifest["route_candidates"] = [
             {"value": route, "classification": classify_client_route(route)}
             for route in [*payload["api_paths"], *payload["spa_routes"]]
@@ -1088,8 +1110,13 @@ def _merge_inventory_manifests(sources: Iterable[tuple[str, dict[str, Any]]]) ->
                 items_by_identity[identity] = item
                 continue
             existing = items_by_identity[identity]
-            existing_attributes = existing.get("attributes") if isinstance(existing.get("attributes"), dict) else {}
-            existing["attributes"] = _merge_inventory_value(existing_attributes, attributes)
+            existing_attrs = existing.get("attributes") if isinstance(existing.get("attributes"), dict) else {}
+            existing["attributes"] = _merge_inventory_value(existing_attrs, attributes)
+            if isinstance(existing_attrs.get("interaction"), dict) and isinstance(attributes.get("interaction"), dict):
+                set_operation_provenance(
+                    existing["attributes"]["interaction"],
+                    merge_operation_provenance(existing_attrs["interaction"], attributes["interaction"]),
+                )
     items = [items_by_identity[identity] for identity in sorted(items_by_identity)]
     if not items:
         raise ValueError("No valid in-scope inventory items were available for consolidation")

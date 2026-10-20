@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from modules.tools.inventory_provenance import operation_provenance
+
 
 class ResponseAssertion(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -90,7 +92,7 @@ def inventory_comparison_contract(items: list[dict[str, Any]], item_ids: list[st
         if (
             interaction.get("interface") != "http" or contract.url != item.get("value")
             or contract.method not in interaction.get("operations", [])
-            or interaction.get("operation_provenance") != "observed"
+            or operation_provenance(interaction).get(contract.method) != "observed"
         ):
             raise ValueError("HTTP comparison assertions require the same concrete URL and an observed operation")
         contracts.append(contract.model_dump())

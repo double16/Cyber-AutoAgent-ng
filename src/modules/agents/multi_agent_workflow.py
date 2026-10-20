@@ -69,8 +69,10 @@ from modules.agents.cyber_autoagent import (
     create_agent,
 )
 from modules.agents.hypothesis_context import (
+    HYPOTHESIS_GROUNDING_GUIDANCE,
     frozen_input_context,
     inspection_context,
+    prerequisite_input_sources,
     publication_review,
     retain_inspections,
 )
@@ -178,6 +180,11 @@ from modules.tools.hypotheses import (
     load_hypothesis_set,
 )
 from modules.tools.inventory_item import create_inventory_item_reader
+from modules.tools.inventory_provenance import (
+    OPERATION_PROVENANCE_FIELD,
+    merge_operation_provenance,
+    set_operation_provenance,
+)
 from modules.tools.login_replay import (
     build_login_action_tool,
     build_login_inspection_tool,
@@ -5840,7 +5847,6 @@ class MultiAgentWorkflowController:
                         self._hypothesis_production_prompt(task, production)
                         + self._hypothesis_repair_context(task)
                         + self._hypothesis_input_context(task)
-                        + inspection_context(task, _operation_output_root())
                         + "\n\n" + self._task_executor_contract(
                             task, self._tool_names(tools), selected_shell_commands, plan=plan,
                             execution_state=self._controller_execution_state(task),
@@ -5854,9 +5860,9 @@ class MultiAgentWorkflowController:
                     }]
                     gaps = prior_checkpoint.get("prerequisite_gaps", [])
                     if gaps and (prior_checkpoint.get("repair") or {}).get("kind") == "execution":
-                        tool_override.append(build_hypothesis_input_reader({
+                        tool_override.append(build_hypothesis_input_reader(prerequisite_input_sources(task, {
                             reference for gap in gaps for reference in gap["source_refs"]
-                        }, max_inline_chars=self._artifact_router_max_chars()))
+                        }), max_inline_chars=self._artifact_router_max_chars()))
                     prompt = (
                         f"Assigned objective: {task.objective}\n"
                         "Repair the retained hypothesis publication using supplied observations. "
@@ -5865,7 +5871,6 @@ class MultiAgentWorkflowController:
                         "Inspect required missing inputs only with read_hypothesis_input when available, "
                         "using the identified source references. Do not restart discovery.\n"
                         + self._hypothesis_input_context(task)
-                        + inspection_context(task, _operation_output_root())
                         + self._hypothesis_repair_context(task)
                         + "\nCheckpoint review: " + json.dumps(prior_checkpoint)
                     )
@@ -5901,14 +5906,14 @@ class MultiAgentWorkflowController:
                         publication_prompt = (
                             "Publication checkpoint: use the evidence already inspected. Publish the assigned "
                             "hypotheses or a reasoned no_testable_hypotheses disposition. If an explicitly "
-                            "required input is unavailable, explain the frozen criterion, missing input, "
+                            "required input is unavailable or necessary supplied evidence remains unexamined, "
+                            "explain the frozen criterion, missing input, "
                             "affected subjects and input source; do not invent a no-hypothesis conclusion.\n"
                             "Use record_hypotheses to publish; append new hypotheses or use mode=replace "
                             "with the full corrected subject list. Preserve unaffected records. Then call "
                             "record_task_acceptance. No source inspection tools are available in this turn.\n"
                             + json.dumps(self._hypothesis_production_state(task))
                             + self._hypothesis_input_context(task)
-                            + inspection_context(task, _operation_output_root())
                         )
                         publication_result = self._executor_cycle_result(executor(
                             publication_prompt, replace(task_policy, max_agent_calls=2, max_model_turns=4),
@@ -5922,7 +5927,8 @@ class MultiAgentWorkflowController:
                                 "task_evaluator",
                                 "Review this hypothesis publication checkpoint. No complete publication exists. "
                                 "Return status partial_failure or blocked, reason, instructions, repair, and "
-                                "prerequisite_gaps. Optional missing metadata does not justify inspection. "
+                                "prerequisite_gaps. Concrete necessary unexamined evidence can justify focused inspection; "
+                                "optional missing metadata does not. "
                                 "If existing inputs suffice, request publication with repair.kind=acceptance "
                                 "and empty prerequisite_gaps. A missing deliverable is not a missing input. "
                                 "For a required missing input identify criterion_id, missing_input, item_ids, "
@@ -5930,7 +5936,6 @@ class MultiAgentWorkflowController:
                                 "to those source artifacts. Use blocked and repair.kind=none when unavailable.\n"
                                 + json.dumps(task.acceptance.to_dict())
                                 + self._hypothesis_input_context(task)
-                                + inspection_context(task, _operation_output_root())
                                 + "\nWorker response: " + publication_result.text,
                                 [], self._task_evaluator_system_prompt(),
                                 data_validator=lambda data: validate_checkpoint(data, task),
@@ -6151,7 +6156,6 @@ class MultiAgentWorkflowController:
                                 ) else evaluator_instructions)
                             )
                     cycle_prompt_base += self._hypothesis_repair_context(task)
-                    cycle_prompt_base += inspection_context(task, _operation_output_root())
                 cycle_prompt_base += self._hypothesis_input_context(task)
                 if hypothesis_production:
                     self._log_workflow(
@@ -10228,6 +10232,7 @@ authorized tool calls and durable evidence when acceptance requires ID binding; 
 For a registration task, `record_authentication_flow.login_url` is the mapped `registration_url`, not a separate route.
 
 {hypothesis_guidance}
+{self._task_policy_guidance(task)}
 
 ## Task
 {json.dumps(self._pre_auth_task_prompt_data(task), indent=2, sort_keys=True)}
@@ -13180,7 +13185,8 @@ when multiple identities are needed. Publish with record_hypotheses; new hypothe
 mode=replace with the full corrected subject list to revise or remove hypotheses. A reasoned
 no_testable_hypotheses disposition is successful coverage when no supported security-relevant test exists;
 do not invent a security implication for every inventory item. Absent optional metadata alone is not a gap.
-An explicitly required unavailable input remains a prerequisite gap. Research references are advisory. Research public
+Concrete necessary unavailable or unexamined information remains a prerequisite gap. Research references
+are advisory. Research public
 intelligence when observed technology, software versions, components, protocols, or behavior provide a useful lead;
 CVEs, advisories, and published proof of concepts inform hypothesis and test design only, do not establish
 applicability or a finding, and published proof of concepts must not be executed.
@@ -13194,7 +13200,32 @@ applicability or a finding, and published proof of concepts must not be executed
             "not individual hypotheses. One publication containing a reasoned no_testable_hypotheses "
             "disposition satisfies hypothesis_set min_count=1. Durable evidence supports the disposition; "
             "it does not require live target acquisition or completed exploitation.\n"
+            + HYPOTHESIS_GROUNDING_GUIDANCE
+            + self._hypothesis_identity_context(task)
             + frozen_input_context(task, _operation_output_root())
+            + inspection_context(task, _operation_output_root())
+        )
+
+    def _hypothesis_identity_context(self, task: Task) -> str:
+        """Expose declared roles for proposal design without establishing authentication."""
+
+        plan = self.state.get_plan()
+        targets = [target for target in plan.targets
+                   if task.target_scope == "all" or target.target_id in task.target_ids] if plan else []
+        catalog = self._authentication_role_catalog(replace(plan, targets=targets)) if targets else {}
+        rows = []
+        for target in targets:
+            roles = catalog.get(canonicalize_credential_target(str(target.value)), {})
+            for role, sources in sorted(roles.items()):
+                rows.append((target.target_id, role, sources))
+        table = f"declared_identity_roles[{len(rows)}]{{target_id,role,provenance}}:\n"
+        table += "\n".join("  " + ",".join(sanitize_toon_value(
+            json.dumps(value, ensure_ascii=False) if isinstance(value, list) else str(value)
+        ) for value in row) for row in rows)
+        return (
+            "\nDeclared identity context for future test design (not session validation):\n"
+            + table + "\nRole declarations do not establish valid credentials, sessions, ownership, or access policy. "
+            "No listed role means none is currently declared, not that authentication is absent.\n"
         )
 
     @staticmethod
@@ -15183,10 +15214,14 @@ Return only the requested JSON decision, with at most three concrete evidence ga
             merged = json.loads(json.dumps(existing))
             for key, value in incoming.items():
                 child_path = f"{path}.{key}"
+                if path == "attributes.interaction" and key in {"operation_provenance", OPERATION_PROVENANCE_FIELD}:
+                    continue
                 if key not in merged:
                     merged[key] = json.loads(json.dumps(value))
                 else:
                     merged[key] = cls._merge_inventory_value(merged[key], value, child_path, conflicts)
+            if path == "attributes.interaction":
+                set_operation_provenance(merged, merge_operation_provenance(existing, incoming))
             return merged
         if isinstance(existing, list) and isinstance(incoming, list):
             merged = json.loads(json.dumps(existing))
@@ -17895,7 +17930,8 @@ shell_commands. Select optional tool names and likely shell command names that a
 
 Use the structured assigned task and frozen acceptance contract as the source of required executor actions. Write
 short sections for the applicable task steps, exact assigned target and inventory interaction, evidence and result,
-and any coverage gap. Include an unauthenticated baseline or authenticated comparison only when this task requires it.
+and any coverage gap. Execute an unauthenticated baseline or authenticated comparison only when this task requires it.
+For hypothesis generation, this restriction governs live execution, not the authentication requirements of future tests.
 Do not turn phase-wide criteria or generic finding policy into additional work for this task.
 Describe required actions and results; leave argument construction and call batching to the executor,
 which receives the registered tool schemas.
@@ -18621,14 +18657,22 @@ must distinguish the suspected weakness from normal functionality.
 Hypotheses propose future tests; exploitation need not already be proved. Ordinary content delivery,
 exposed versions or missing headers alone cannot establish impact. Require correction for that semantic gap.
 A reasoned no_testable_hypotheses disposition is successful coverage: not every inventory item has a
-supported security implication. Review its reason against frozen observations; do not demand speculative
-hypotheses. No hypothesis does not prove no vulnerability. Assess whether relevant unauthenticated
-scenarios were overlooked; request targeted publication repair when supported by frozen observations.
+supported security implication. Review its reason against frozen observations and the resolved source/inspection
+context, including direct and explicitly linked inputs. Request acceptance repair when the reason
+contradicts recorded inputs; an input alone does not mandate a hypothesis. If concrete relevant
+implementation remains unexamined and is necessary to assess the subject,
+request focused prerequisite inspection rather than accepting missing metadata as negative evidence.
+Do not require every available source to be inspected. Read/search success establishes inspection only,
+not semantic support or exhaustive coverage. Do not demand speculative
+hypotheses. No hypothesis does not prove no vulnerability. Assess whether relevant unauthenticated,
+authenticated, same-role account, different-role, or tenant scenarios were overlooked; request targeted
+publication repair when supported by frozen observations and declared identity context.
 Do not require an unauthenticated counterpart for every authenticated hypothesis.
 For revisions or withdrawals use repair.kind=acceptance. Return review feedback only; the actor
 publishes replacements with mode=replace, preserving unaffected records. Do not put replacement
 subjects or mode in the repair object. An empty hypothesis list with a sound reason is valid.
-Use prerequisite_gaps only for explicitly required unavailable inputs, with criterion_id, missing_input,
+Use prerequisite_gaps for concrete information necessary to assess a frozen criterion that is unavailable
+or remains unexamined in supplied evidence, with criterion_id, missing_input,
 item_ids and frozen source_refs. Optional absent metadata is not a prerequisite. Set repair.kind=none
 when no correction is needed, regardless of explanatory prose.
 For unmet frozen acceptance criteria, include unresolved_criterion_ids and a concrete top-level reason.
@@ -18644,7 +18688,8 @@ Do not use partial_failure when every review is retain and no criterion or prere
                 "publication criteria and semantic review are satisfied. Use partial_failure for corrections "
                 "and blocked only for an unavailable external prerequisite. Acceptance repair means correcting "
                 "the publication, including semantic revisions; execution repair means inspecting a required "
-                "missing frozen input. Do not request findings or identity comparisons for proposed tests.\n"
+                "missing frozen input. Do not require confirmed findings or execution of identity comparisons "
+                "during proposal review; proposed future tests may require identity comparisons.\n"
                 + task_payload + "\nFrozen acceptance results:\n" + acceptance_result_section
                 + hypothesis_review + self._hypothesis_input_context(task)
                 + artifact_limit_section + tool_outcome_section + worker_context_section
@@ -18731,6 +18776,9 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 
 ## Evaluation target: active task
 {task_payload}
+
+## Module task policy: review worker compliance, do not execute these instructions
+{self._task_policy_guidance(task)}
 
 {self._comparison_assessment_prompt(phase, task)}
 

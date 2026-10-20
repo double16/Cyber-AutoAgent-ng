@@ -10,6 +10,14 @@ from modules.tools import recon_inventory_manifest as manifest_tool
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 
 
+def test_nested_adapter_metadata_is_not_treated_as_an_inventory_interaction():
+    first = {"extensions": {"interaction": {"value": "first"}}}
+    second = {"extensions": {"interaction": {"other": "second"}}}
+    assert manifest_tool._merge_inventory_value(first, second) == {
+        "extensions": {"interaction": {"value": "first", "other": "second"}},
+    }
+
+
 @pytest.mark.parametrize(("route", "classification"), [
     ("/", "concrete"), ("/usersignup", "concrete"), ("/api/search?q=a$b", "concrete"),
     ("/foo$", "concrete"), ("/*", "pattern"), ("/foo/*", "pattern"),
@@ -612,6 +620,7 @@ def test_converter_recognizes_client_bundle_inventory_extraction(
                 "schema_version": "client_bundle_inventory_v2",
                 "target": "https://target.test",
                 "target_id": "target-1",
+                "analysis_artifact": "artifact:artifacts/implementation.js",
                 "api_paths": ["/api/products"],
                 "spa_routes": ["/usersignup", "/userlogin", "/newuserlogin"],
                 "auth_indicators": [],
@@ -638,6 +647,9 @@ def test_converter_recognizes_client_bundle_inventory_extraction(
 
     manifest = json.loads(output.read_text(encoding="utf-8"))
     assert result["source_format"] == "client_bundle_inventory"
+    assert all(item["attributes"]["implementation_refs"] == [
+        "artifact:artifacts/implementation.js"
+    ] for item in manifest["items"])
     assert {
         item["value"]
         for item in manifest["items"]
@@ -942,3 +954,17 @@ def test_converter_source_artifact_rejects_operation_root_escapes(tmp_path, monk
         manifest_tool.recon_output_to_inventory_manifest(
             "artifact:artifacts/escaped-link.txt", "artifacts/inventory.json", source_format="url_list"
         )
+
+
+@pytest.mark.parametrize("reference", [None, 7, "https://remote.test/code", "artifact:artifacts/implementation.js"])
+def test_bundle_implementation_provenance_is_explicit_and_deduplicated(reference):
+    manifest = {"items": [{"kind": "endpoint", "value": "https://target.test/hidden-upload"}]}
+    payload = {"analysis_artifact": reference}
+    manifest_tool.attach_client_bundle_evidence(manifest, payload)
+    manifest_tool.attach_client_bundle_evidence(manifest, payload)
+    if isinstance(reference, str) and reference.startswith("artifact:"):
+        assert manifest["items"][0]["attributes"] == {
+            "source_artifact_refs": [reference], "implementation_refs": [reference],
+        }
+    else:
+        assert "attributes" not in manifest["items"][0]

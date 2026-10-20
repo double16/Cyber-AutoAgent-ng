@@ -107,6 +107,7 @@ from modules.tools.artifact_references import (
     normalize_artifact_reference_token,
     split_delimited_reference_values,
 )
+from modules.tools.inventory_provenance import operation_provenance
 from modules.tools.semantic_enum import normalize_semantic_enum
 
 # Set up logging
@@ -445,7 +446,10 @@ def inventory_manifest_contract_text() -> str:
         "The extraction summary is controller-owned and may be omitted by the producer. "
         "Put item metadata in attributes, not in a metadata field. Optional attributes.interaction is protocol-neutral "
         "and may contain interface, operations, inputs, success_signals, failure_signals, evidence_refs, "
-        "operation_provenance (observed|inferred), and extensions (an object of typed adapter metadata). Each input "
+        "operation_provenance (observed|inferred), operation_provenance_by_operation "
+        "(an authoritative map covering exactly operations with observed|inferred|unknown values), "
+        "and extensions (an object of typed adapter metadata). Legacy aggregate provenance applies only "
+        "when that map is absent. Each input "
         "requires a name and may include location and type. Use HTTP operations and input locations only for HTTP "
         "items; filesystem, code-security, service, workflow, and other modules should use their native operations. "
         "Workflow maps, reports, "
@@ -8018,6 +8022,7 @@ def _normalize_inventory_interaction(item_id: str, attributes: dict[str, Any]) -
         "failure_signals",
         "evidence_refs",
         "operation_provenance",
+        "operation_provenance_by_operation",
         "extensions",
     }
     unknown = sorted(set(interaction) - allowed)
@@ -8046,6 +8051,7 @@ def _normalize_inventory_interaction(item_id: str, attributes: dict[str, Any]) -
         if values != normalized_values:
             interaction[field_name] = normalized_values
             changed = True
+    operation_provenance(interaction)
     inputs = interaction.get("inputs")
     if inputs is not None:
         if not isinstance(inputs, list):

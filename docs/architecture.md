@@ -1224,3 +1224,113 @@ digest; an updated publication must be reviewed. Non-success reviews require a c
 incomplete review must identify publication changes, `unresolved_criterion_ids` from the frozen contract,
 or required frozen-input gaps. Acceptance still
 requires all frozen criteria; retained hypotheses alone do not establish completion.
+
+
+Hypothesis grounding follows supplied implementation references when route summaries cannot characterize
+relevant behavior. Client bundle inventories preserve their analysis artifact as implementation provenance;
+this reference establishes evidence availability, not observed functionality. Existing summaries can also
+lead to implementation through their extraction artifact. Empty input arrays mean unrecorded inputs.
+Actors use targeted saved-artifact inspection within existing limits, without new target acquisition.
+Observed functionality can support conditional future tests with explicit assumptions. Endpoint names
+remain investigation leads. Critics accept justified empty publications without a minimum hypothesis count,
+but do not accept missing metadata or inspection exhaustion as negative evidence. Concrete necessary
+unexamined information uses structured prerequisite recovery bound to the frozen parent inventory, with
+the referenced implementation and missing information identified in the gap description.
+
+
+Normal hypothesis context resolves assigned implementation references before builder, critic, actor, and
+evaluator calls, including direct links from older extraction summaries. Resolution inspects at most 32
+summary artifacts, reading at most 1 MB per summary and following only one level of explicit artifact
+links. Complete assigned records and resolved-reference metadata stay on disk; prompts show at most 32
+references with their origin and current availability. These supplementary links do not change the frozen
+inventory identity or establish execution proof. Listed operations are not exhaustive supported methods;
+missing method provenance stays unknown and inferred GET never establishes a GET-only endpoint.
+
+The recent inspection ledger uses structured tool inputs captured before summary truncation. It separates
+canonical inspected source references and lookup ranges/patterns from returned references. Failed reads
+are not inspections; successful partial reads/searches do not establish exhaustive coverage or semantic
+support. Absence from the bounded recent ledger means no recorded inspection, not proof of no inspection.
+Evaluators judge whether unexamined implementation is necessary and request focused prerequisite repair
+when it is. Unread artifacts alone do not reject a justified empty hypothesis publication.
+
+### Client request extraction during mapping
+
+Wrapper recognition accepts immutable configuration aliases and string/object normalization when an
+object caller configuration reaches the transport unchanged. Returned response chains (`then`, `catch`,
+`finally`) may be ignored when their callbacks do not reference that configuration. Mutation, escape,
+shadowing, transformed configurations, and unsupported branches remain unresolved. This is bounded
+syntax analysis, not JavaScript execution or general interprocedural analysis.
+
+Unresolved calls retain callee and wrapper locations plus recoverable unverified caller declarations.
+These candidates remain inventory gaps, not resolved operations or execution proof. Analysis status
+`complete` means the analysis finished; counts and gaps describe remaining extraction coverage. Mapping
+workers inspect relevant calls and shared wrappers together, and reviewers request focused repair when
+unexamined calls leave the assigned objective unsupported. Justified gaps remain acceptable. Reprocess
+saved bundles and rerun synthesis and affected hypothesis fan-out after deploying extraction changes;
+existing frozen inventories are not modified automatically.
+
+All hypothesis roles receive a shared, target-scoped declared-role catalog with provenance. Role
+declarations remain separate from credential eligibility and session validity; generation does not log
+in. The generation task's authentication requirement does not constrain each hypothesis's future test
+requirement. Reviewers consider grounded anonymous, authenticated, same-role account, cross-role, and
+tenant scenarios without requiring variants for every endpoint. A single declared role creates no
+cross-role gap. Ownership and access policies require recorded observations rather than role or route
+names. Unsupported empty reasons use acceptance repair; necessary unexamined evidence uses existing
+prerequisite repair. Completed publications must be explicitly rerun after these guidance changes.
+
+Hypothesis context includes same-target parameter records explicitly linked to assigned endpoints in
+the frozen inventory. Compact input summaries retain source record IDs, locations, and operation
+provenance; complete supporting records remain in the filesystem context artifact. They do not expand
+publication scope or modify the inventory snapshot. Evaluators reconcile empty-publication reasons
+against these inputs: inputs can ground conditional tests without proving unsafe behavior, but do not
+mandate hypotheses. Completed historical publications are not automatically reopened.
+
+Bundle inventory uses Tree-sitter JavaScript syntax analysis to resolve bounded literal, constant,
+member-binding, concatenation, and template request constructions without executing JavaScript.
+Source operations include methods, query/header/body input names, and byte/line locations in the
+saved analysis artifact. Client declarations remain inferred runtime behavior; they do not establish
+successful network execution. Per-operation details preserve method-specific inputs when endpoint
+records merge. Named inputs also become endpoint-linked parameter records; opaque bodies are marked
+with `type: opaque` rather than inventing body fields. Existing literal route extraction remains
+available if syntax analysis is incomplete.
+
+Analysis is bounded to 16 MB, 500,000 syntax nodes, 2,000 request candidates, and 16 resolution steps.
+Unresolved requests and limit/parser outcomes become inventory coverage gaps. The existing client-side
+mapping worker inspects relevant gaps and publishes supplemental validated inventory evidence before
+synthesis. No exhaustive inspection or active parameter discovery is required by this mechanism.
+Rebuild mapping/synthesis and downstream task fan-out to include newly extracted operations; existing
+frozen inventories are not rewritten.
+
+Request configuration objects may be resolved through uniquely bound `const` aliases within the
+existing resolution limit. Reassignment, property mutation, unknown mutation calls, spreads, cycles,
+and ambiguous bindings remain unresolved. A wrapper caller contributes an operation only when its
+lexically bound function directly forwards the unchanged configuration parameter to a recognized
+transport. Other candidate wrappers retain an unresolved source location; concrete transport calls
+inside their bodies can still contribute independently. Recognized transports with unsupported
+configuration or signatures also produce unresolved records, which survive as mapping coverage gaps.
+
+Inventory interactions optionally declare `operation_provenance_by_operation`, an authoritative map
+covering exactly the listed `operations`, with `observed`, `inferred`, or `unknown` values. Without
+the map, readers use legacy `operation_provenance` for each listed operation, or unknown when absent.
+Consolidation combines evidence for each operation independently: observed takes precedence over
+inferred, which takes precedence over unknown. The compatible aggregate is observed only when all
+operations are observed, inferred when all are known and at least one is inferred, and omitted when
+any operation is unknown. For example:
+
+```json
+{
+  "operations": ["GET", "DELETE"],
+  "operation_provenance": "inferred",
+  "operation_provenance_by_operation": {"GET": "observed", "DELETE": "inferred"}
+}
+```
+
+HTTP comparison assertions require observed provenance for their own method. Hypothesis contexts
+render the individual provenance values so an observed GET cannot upgrade a source-declared DELETE.
+Existing frozen source manifests and snapshot digests are preserved.
+
+Authentication proof follows anonymous redirects only within the credential target boundary. If the
+next destination leaves that boundary, Python retains the redirect response for the existing
+destination/marker comparison without requesting the external destination. Successful authenticated
+access must still be distinguished from anonymous behavior. Authenticated validation and task requests
+continue to reject redirects outside the credential target boundary.

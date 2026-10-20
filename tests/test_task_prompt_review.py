@@ -270,6 +270,61 @@ def test_hypothesis_roles_consider_unauthenticated_scenarios_without_forcing_dup
     review_guidance = " ".join(prompt.split())
     assert "Consider unauthenticated attack paths alongside applicable authenticated" in producer_guidance
     assert "comparison=none with roles=[] means unauthenticated execution" in producer_guidance
-    assert "Assess whether relevant unauthenticated scenarios were overlooked" in review_guidance
+    assert ("Assess whether relevant unauthenticated, authenticated, same-role account, different-role, "
+            "or tenant scenarios were overlooked") in review_guidance
+    assert "supported by frozen observations and declared identity context" in review_guidance
+    assert "proposed future tests may require identity comparisons" in review_guidance
     assert "Do not require an unauthenticated counterpart for every authenticated hypothesis" in review_guidance
     assert "reasoned no_testable_hypotheses disposition is successful coverage" in review_guidance
+
+
+@pytest.mark.parametrize("module", ["web", "ctf", "web_recon"])
+def test_method_discovery_policy_survives_prompt_assembly_and_fitting(review_case, module):
+    from modules.agents.prompt_context import fit_task_prompt
+    from modules.prompts.factory import ModulePromptLoader
+
+    controller, plan, task, _subject = review_case
+    controller.runtime.config.module = module
+    loader = ModulePromptLoader()
+    execution = loader.load_module_execution_prompt(module)
+    termination = loader.load_module_termination_policy(module)
+    controller.runtime.system_prompt = execution
+    controller.runtime.termination_policy = termination
+    phase = plan.phases[0]
+    policy = controller._task_policy_guidance(task)
+    draft = {"prompt": "Map the assigned endpoint and retain method evidence.", "tools": [], "shell_commands": []}
+    prompts = [
+        controller._task_prompt_builder_prompt(plan, phase, task),
+        controller._task_prompt_critic_prompt(plan, phase, task, draft),
+        controller._task_prompt_revision_prompt(plan, phase, task, draft, ["Preserve method coverage."]),
+    ]
+    # Initial execution, continuation, and repair all reattach this same frozen contract.
+    for lead in ["Map the assigned endpoint.", "Continue from retained evidence.", "Repair missing method evidence."]:
+        prompts.append(
+            lead + "\n\n" + controller._task_executor_contract(
+                task, {"http_request", "record_task_acceptance"}, plan=plan, task_policy=policy
+            )
+        )
+    for prompt in prompts:
+        with_history = prompt + "\n\n## Task history\n" + "prior context " * 10000
+        fitted = fit_task_prompt(
+            with_history, execution, [], "test-model", len(prompt) + 2000, 0, lambda _event: None,
+            estimate_input=len,
+        )
+        assert "prior context" not in fitted
+        assert policy in fitted
+        if module in {"web", "web_recon"}:
+            assert "operation_provenance_by_operation for every listed operation" in fitted
+            assert "The assertion's method must be observed in that map" in fitted
+            assert "applies only when the map is absent" in fitted
+        assert "never falls back to POST" in " ".join(fitted.split())
+        if module == "web_recon":
+            assert "POST discovery is not a default mapping action" in fitted
+            assert "comparisons GET-only" in fitted
+            assert "GET requests\n  only" in execution
+        else:
+            assert "attempt bounded POST discovery" in fitted
+            assert "even without a form or API declaration" in fitted
+            assert "response alone does not establish a vulnerability" in fitted
+            assert "bounded POST" in execution
+            assert "GET results alone do not establish POST coverage" in termination

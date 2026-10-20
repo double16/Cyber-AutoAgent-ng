@@ -141,6 +141,57 @@ def test_conflicting_assertions_cannot_be_merged_into_an_invented_policy():
     assert recon._merge_inventory_value(merged, first) == merged
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_consolidation_keeps_observed_assertions_and_inferred_methods_separate(reverse):
+    contract = template_case()
+    observed = {"schema_version": 1, "unassessed_gaps": [], "items": [{
+        "id": "endpoint", "target_id": "target", "kind": "endpoint", "value": contract["url"],
+        "attributes": {"interaction": {
+            "interface": "http", "operations": ["GET"], "operation_provenance": "observed",
+            "extensions": {"http_comparison": contract},
+        }},
+    }]}
+    inferred = copy.deepcopy(observed)
+    inferred["items"][0]["attributes"]["interaction"] = {
+        "interface": "http", "operations": ["GET", "DELETE"], "operation_provenance": "inferred",
+    }
+    sources = [("artifact:bundle", inferred), ("artifact:network", observed)]
+    if reverse:
+        sources.reverse()
+    merged = recon._merge_inventory_manifests(sources)
+    item = merged["items"][0]
+    assert item["attributes"]["interaction"]["operation_provenance_by_operation"] == {
+        "GET": "observed", "DELETE": "inferred",
+    }
+    assert item["attributes"]["interaction"]["operation_provenance"] == "inferred"
+    # Re-ingestion validates the observed GET despite a conservatively inferred aggregate.
+    recon._canonicalize_inventory_manifest_source(merged, target_id="target")
+    assert inventory_comparison_contract(merged["items"], ["endpoint"]) == contract
+    interaction = item["attributes"]["interaction"]
+    interaction["extensions"]["http_comparison"]["method"] = "HEAD"
+    interaction["operations"].append("HEAD")
+    interaction["operation_provenance_by_operation"]["HEAD"] = "inferred"
+    with pytest.raises(ValueError, match="observed operation"):
+        inventory_comparison_contract(merged["items"], ["endpoint"])
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_unknown_method_provenance_remains_unknown_after_merging_observations(reverse):
+    first = {"interaction": {"operations": ["GET"]}}
+    second = {"interaction": {"operations": ["POST"], "operation_provenance": "observed"}}
+    sources = [("artifact:first", first), ("artifact:second", second)]
+    if reverse:
+        sources.reverse()
+    merged = recon._merge_inventory_manifests([
+        (reference, {"items": [{"id": "endpoint", "kind": "endpoint", "target_id": "target",
+                                "value": "https://target.test/resource", "attributes": attributes}]})
+        for reference, attributes in sources
+    ])
+    interaction = merged["items"][0]["attributes"]["interaction"]
+    assert interaction["operation_provenance_by_operation"] == {"GET": "unknown", "POST": "observed"}
+    assert "operation_provenance" not in interaction
+
+
 def test_single_role_assertion_applies_to_both_selected_accounts():
     contract = template_case("account")
     contract["assertions"] = [{**contract["assertions"][1], "identity": "role:member"}]

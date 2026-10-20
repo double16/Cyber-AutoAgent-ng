@@ -133,7 +133,8 @@ def advanced_payload_coordinator(
     How to call:
     - target_url: full URL; include query string if known.
     - parameters: comma-separated names to test. If omitted/empty, tool will attempt discovery.
-    - http_method: start with "GET" unless you know the endpoint is body-driven; tool may retry with POST.
+    - http_method: explicitly select the mapped method or an authorized discovery method.
+      Each call uses only this method; it never falls back to POST.
     - cookies/headers: include auth/session + any required custom headers.
     - output_file: path to write results to disk.
 
@@ -184,6 +185,7 @@ def advanced_payload_coordinator(
     http_method = (http_method or "GET").upper()
 
     cache_key = build_result_cache_key(
+        method_policy_version=2,
         target_url=target_url,
         test_type=test_type,
         parameters=parameters or "",
@@ -238,18 +240,6 @@ def advanced_payload_coordinator(
             if verbose:
                 print("[*] Running parameter discovery...", file=sys.stderr)
             discovered_params = advanced_parameter_discovery(request_config, parameters, tools=tools_setup["tools"])
-            if not discovered_params and request_config.http_method == "GET":
-                # try again with POST
-                request_config.http_method = "POST"
-                if verbose:
-                    print("[*] No parameters found with GET, trying POST for discovery...", file=sys.stderr)
-                discovered_params_post = advanced_parameter_discovery(
-                    request_config, parameters, tools=tools_setup["tools"]
-                )
-                if discovered_params_post:
-                    discovered_params = discovered_params_post
-                else:
-                    request_config.http_method = "GET"
             if discovered_params and verbose:
                 print(f"[*] Parameter discovery: {request_config.http_method} {discovered_params}", file=sys.stderr)
         else:
@@ -269,21 +259,6 @@ def advanced_payload_coordinator(
                 verbose=verbose,
             )
             xss_vulns = [r for r in xss_results if r.get("vulnerable", False)]
-            if not xss_vulns and request_config.http_method == "GET":
-                request_config.http_method = "POST"
-                if verbose:
-                    print("[*] No XSS found with GET, trying POST...", file=sys.stderr)
-                xss_results_post = _coordinate_xss_testing(
-                    request_config,
-                    results.get("parameters_discovered", []),
-                    tools=tools_setup["tools"],
-                    verbose=verbose,
-                )
-                xss_vulns = [r for r in xss_results_post if r.get("vulnerable", False)]
-                if xss_vulns:
-                    xss_results = xss_results_post
-                else:
-                    request_config.http_method = "GET"
             results["http_method"] = request_config.http_method
             results["payload_results"].extend(xss_results)
             results["vulnerabilities"].extend(xss_vulns)
@@ -322,22 +297,6 @@ def advanced_payload_coordinator(
                 verbose=verbose,
             )
             injection_vulns = [r for r in injection_results if r.get("vulnerable", False)]
-            if not injection_vulns and request_config.http_method == "GET":
-                request_config.http_method = "POST"
-                if verbose:
-                    print("[*] No injection vulnerabilities found with GET, trying POST...", file=sys.stderr)
-                injection_results_post = _coordinate_injection_testing(
-                    request_config,
-                    results.get("parameters_discovered", []),
-                    tools=tools_setup["tools"],
-                    focus_injection_types=focus_injection_types,
-                    verbose=verbose,
-                )
-                injection_vulns = [r for r in injection_results_post if r.get("vulnerable", False)]
-                if injection_vulns:
-                    injection_results = injection_results_post
-                else:
-                    request_config.http_method = "GET"
             results["http_method"] = request_config.http_method
             results["payload_results"].extend(injection_results)
             results["vulnerabilities"].extend(injection_vulns)

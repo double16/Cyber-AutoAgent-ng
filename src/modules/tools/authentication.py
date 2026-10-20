@@ -194,7 +194,7 @@ def _safe_flow_descriptor_url(target: str, value: str, *, label: str) -> str:
 
 def _scoped_request(
     session: requests.Session, target: str, method: str, url: str,
-    *, follow_redirects: bool = True, **kwargs: Any,
+    *, follow_redirects: bool = True, stop_at_scope_boundary: bool = False, **kwargs: Any,
 ) -> requests.Response:
     """Apply the credential target boundary before every network hop."""
 
@@ -213,6 +213,8 @@ def _scoped_request(
             return response
         next_url = urljoin(url, response.headers["Location"])
         if not _credential_target_url_contains(target, next_url, label="redirect URL"):
+            if stop_at_scope_boundary:
+                return response
             raise AuthenticatedRequestError(
                 "AUTH_REDIRECT_BLOCKED",
                 "Redirect leaves the credential target boundary. "
@@ -795,7 +797,10 @@ def _prove_authenticated_context(context: _AuthenticationContext) -> bool:
     """Require an observable difference attributable to the credential at the validation URL."""
 
     try:
-        anonymous = _scoped_request(requests.Session(), context.target, "GET", context.validation_url, timeout=15)
+        anonymous = _scoped_request(
+            requests.Session(), context.target, "GET", context.validation_url,
+            timeout=15, stop_at_scope_boundary=True,
+        )
         authenticated = _scoped_request(
             context.session, context.target, "GET", context.validation_url,
             headers=context.headers, params=context.params, timeout=15,
@@ -812,6 +817,8 @@ def _prove_authenticated_context(context: _AuthenticationContext) -> bool:
         context.validation_proof["proof_method"] = "anonymous_access_denied"
         return True
     anonymous_url = str(getattr(anonymous, "url", "") or "")
+    if anonymous.status_code in {301, 302, 303, 307, 308} and anonymous.headers.get("Location"):
+        anonymous_url = urljoin(anonymous_url or context.validation_url, anonymous.headers["Location"])
     authenticated_url = str(getattr(authenticated, "url", "") or "")
     if anonymous_url and authenticated_url and anonymous_url != authenticated_url:
         supported = _credential_target_url_contains(context.target, authenticated_url, label="authenticated response URL")

@@ -5874,9 +5874,10 @@ def test_controller_requires_available_metadata_selected_optional_tools():
     assert controller._required_optional_tool_names(inventory_task) == ["auth_chain_analyzer"]
 
 
-def test_controller_injects_bundle_inventory_for_client_side_api_workstream():
+@pytest.mark.parametrize("module", ["web", "web_recon"])
+def test_controller_injects_bundle_inventory_for_client_side_api_workstream(module):
     runtime = _runtime()
-    runtime.config.module = "web"
+    runtime.config.module = module
     runtime.optional_tools_list = [_tool("client_bundle_inventory")]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -5900,7 +5901,66 @@ def test_controller_injects_bundle_inventory_for_client_side_api_workstream():
     )} >= {"client_bundle_inventory"}
     guidance = controller._client_bundle_execution_guidance_for_task(task)
     assert "client_bundle_inventory" in guidance
-    assert "Registration discovery belongs to the assigned provisioning worker" in controller._task_policy_guidance(task)
+    if module == "web":
+        assert "Registration discovery belongs to the assigned provisioning worker" in controller._task_policy_guidance(task)
+    policy = controller._task_policy_guidance(task)
+    assert "unresolved_requests" in policy
+    assert "before inventory synthesis" in " ".join(policy.split())
+    assert "client-source declarations do not prove server execution" in policy
+
+
+@pytest.mark.parametrize("module", ["web", "web_recon"])
+def test_mapping_review_policy_survives_all_assembled_prompt_paths(worker_flow_case, monkeypatch, module):
+    from modules.agents.prompt_context import fit_task_prompt
+    from modules.prompts import factory as prompt_factory
+
+    controller, task, *_ = worker_flow_case
+    controller.runtime.config.module = module
+    controller.runtime.optional_tools_list = [_tool("client_bundle_inventory")]
+    templates = Path("src/modules/prompts/templates")
+    monkeypatch.setattr(prompt_factory, "load_prompt_template", lambda name: (templates / name).read_text())
+    controller.runtime.system_prompt = prompt_factory.get_system_prompt(
+        "https://target.test", "Map assigned application calls", "OP_TEST",
+    )
+    task = replace(task, recovery_context={"phase_task_contract": {"workstream": "client_side_api"}})
+    controller.state.store_task(task)
+    plan = _plan()
+    phase = plan.phases[0]
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    draft = {"prompt": "Map assigned client calls and explain remaining gaps", "tools": [], "shell_commands": []}
+    result = ToolOutcome(
+        sequence=1, tool_use_id="bundle", tool_name="client_bundle_inventory", success=True, correctable=False,
+        input_summary="saved source", output_summary=json.dumps({
+            "request_operation_count": 0, "unresolved_request_count": 3, "request_analysis_status": "complete",
+        }), artifact_refs=("artifact:artifacts/extraction.json",),
+    )
+    prompts = [
+        controller._task_prompt_builder_prompt(plan, phase, task),
+        controller._task_prompt_critic_prompt(plan, phase, task, draft),
+        controller._task_prompt_revision_prompt(plan, phase, task, draft, ["Inspect relevant gaps"]),
+        controller._task_prompt_bounded_repair_prompt(plan, phase, task, draft, ["Inspect relevant gaps"]),
+        controller._task_evaluator_prompt(plan, phase, task, tool_outcomes=[result]),
+        controller._task_executor_contract(task, {"client_bundle_inventory", "record_task_acceptance"},
+                                           plan=plan, task_policy=controller._task_policy_guidance(task)),
+    ]
+    roles = ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_builder",
+             "task_evaluator", "task_executor"]
+    for role, prompt in zip(roles, prompts, strict=True):
+        assembled = prompt_factory.get_role_system_prompt(controller.runtime.system_prompt, role) + "\n" + prompt
+        fitted = fit_task_prompt(
+            assembled + "\n## Task history\n" + "advisory " * 10_000,
+            "", [], "", len(assembled) + 1000, 0, lambda _details: None, estimate_input=len,
+        )
+        normalized = " ".join(fitted.split())
+        assert "Inspect related call sites and their shared wrapper together" in normalized
+        assert "Caller candidates are unverified declarations, not resolved operations" in normalized
+        assert "Explain limits only when structured analysis status records them" in normalized
+        assert "zero resolved operations alone is not failure" in normalized
+        assert "not prove server execution" in normalized
+    evaluator = " ".join(prompts[-2].split())
+    assert "review worker compliance, do not execute these instructions" in evaluator
+    assert '"request_operation_count": 0' in evaluator
+    assert '"unresolved_request_count": 3' in evaluator
 
 
 def test_credential_provisioning_executor_receives_interactive_browser_tools_only():
@@ -9062,6 +9122,34 @@ def test_phase_inventory_merge_deduplicates_and_preserves_source_provenance(monk
     assert controller._merge_phase_inventory_manifests(
         _plan(), 1, ["artifact:second.json", "artifact:first.json"]
     ) == reference
+
+
+@pytest.mark.parametrize("operations,interface", [
+    (("GET", "POST"), "http"), (("connect", "send"), "tcp"), (("read", "write"), "filesystem"),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_phase_inventory_merge_preserves_each_operations_provenance(operations, interface, reverse):
+    first_operation, second_operation = operations
+    first = {
+        "id": "subject", "target_id": "target", "kind": "endpoint", "value": "assigned-subject",
+        "attributes": {"interaction": {
+            "interface": interface, "operations": [first_operation], "operation_provenance": "observed",
+        }},
+    }
+    second = {
+        **first, "attributes": {"interaction": {
+            "interface": interface, "operations": list(operations), "operation_provenance": "inferred",
+        }},
+    }
+    if reverse:
+        first, second = second, first
+    merged = MultiAgentWorkflowController._merge_inventory_item(first, second, "artifact:source")
+    interaction = merged["attributes"]["interaction"]
+    assert interaction["operation_provenance_by_operation"] == {
+        first_operation: "observed", second_operation: "inferred",
+    }
+    assert interaction["operation_provenance"] == "inferred"
+    assert not merged["attributes"].get("merge_conflicts")
 
 
 def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation(monkeypatch):
@@ -23346,6 +23434,59 @@ def test_hypothesis_authentication_roles_are_scoped_to_declared_targets(worker_f
         controller._validate_hypothesis_authentication(plan, task, requirement)
 
 
+@pytest.mark.parametrize("target", ["https://target.test", "tcp://target.test:9000", "/workspace/source"])
+@pytest.mark.parametrize("roles", [[], ["member"], ["member", "reviewer"]])
+def test_hypothesis_identity_context_scopes_declared_roles_without_session_setup(
+    worker_flow_case, monkeypatch, target, roles,
+):
+    controller, task, *_ = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", target, "network"),
+                                     OperationTarget("target-2", "https://other.test", "network")])
+    controller.state.store_plan(plan)
+    task = replace(task, target_scope="subset", target_ids=["target-1"])
+    catalog = Mock(return_value={
+        workflow_mod.canonicalize_credential_target(target): {
+            role: [f"credential:{role}-declared"] for role in roles
+        }, "https://other.test": {"unrelated-role": ["credential:other"]},
+    })
+    monkeypatch.setattr(controller, "_authentication_role_catalog", catalog)
+    monkeypatch.setattr(controller, "_run_authentication_agent", Mock(side_effect=AssertionError("No login")))
+    rendered = controller._hypothesis_identity_context(task)
+    assert f"declared_identity_roles[{len(roles)}]" in rendered
+    assert "unrelated-role" not in rendered and "https://other.test" not in rendered
+    assert "not session validation" in rendered
+    assert "not that authentication is absent" in rendered
+    for role in roles:
+        assert role in rendered and f"credential:{role}-declared" in rendered
+    assert [t.target_id for t in catalog.call_args.args[0].targets] == ["target-1"]
+
+
+def test_hypothesis_identity_context_without_plan_or_targets(worker_flow_case, monkeypatch):
+    controller, task, *_ = worker_flow_case
+    catalog = Mock(side_effect=AssertionError("No targets to resolve"))
+    monkeypatch.setattr(controller, "_authentication_role_catalog", catalog)
+    for plan in (None, _plan()):
+        controller.state.store_plan(plan)
+        assert "declared_identity_roles[0]" in controller._hypothesis_identity_context(task)
+
+
+def test_hypothesis_identity_context_includes_unknown_and_expired_role_declarations(worker_flow_case, monkeypatch):
+    controller, task, *_rest, store, _ref = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", "https://target.test", "network")])
+    controller.state.store_plan(plan)
+    store.list_credentials = Mock(return_value=[
+        {"credential_id": "unknown-id", "role": "member", "status": "unknown"},
+        {"credential_id": "expired-id", "role": "reviewer", "status": "expired"},
+    ])
+    monkeypatch.setattr(controller, "_credential_registration_flows", lambda *_args: [])
+    rendered = controller._hypothesis_identity_context(task)
+    assert "member" in rendered and "reviewer" in rendered
+    assert "credential:unknown-id" in rendered and "credential:expired-id" in rendered
+    assert "unknown" in store.list_credentials.call_args.kwargs["statuses"]
+    assert "expired" in store.list_credentials.call_args.kwargs["statuses"]
+    assert "do not establish valid credentials" in rendered
+
+
 def test_hypothesis_task_batch_rejects_atomically_before_any_persistence(worker_flow_case, monkeypatch):
     from tests.test_hypotheses import hypothesis
 
@@ -23523,12 +23664,35 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
 
     controller, *_ = worker_flow_case
     controller.runtime.config.module = module
+    controller.state.store_plan(replace(_plan(), targets=[
+        OperationTarget("target-1", "https://service.test", "network"),
+    ]))
+    monkeypatch.setattr(controller, "_authentication_role_catalog", lambda _plan: {
+        "https://service.test": {"member": ["registration_flow:declared-flow"]},
+    })
     templates = Path("src/modules/prompts/templates")
     monkeypatch.setattr(prompt_factory, "load_prompt_template", lambda name: (templates / name).read_text())
     controller.runtime.system_prompt = prompt_factory.get_system_prompt(
         "https://service.test", "Assess frozen observations", "OP_TEST",
     )
     task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    root = Path(workflow_mod._operation_output_root())
+    (root / "inventory.json").write_text(json.dumps({"schema_version": 1, "unassessed_gaps": [], "items": [{
+        "id": "subject", "kind": "endpoint", "target_id": "target-1", "value": "https://service.test/upload",
+        "attributes": {"source_artifact_refs": ["artifact:summary.json"],
+                       "interaction": {"interface": "http", "operations": ["GET"], "inputs": []}},
+    }]}))
+    (root / "summary.json").write_text(json.dumps({"analysis_artifact": "artifact:implementation.js"}))
+    (root / "implementation.js").write_text("upload(file, fileName); renderHtml(fileName)")
+    _, digest = memory_mod._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+        task.acceptance.basis, source_refs=["artifact:inventory.json"], snapshot_hash=digest,
+    )))
+    workflow_mod.retain_inspections(task, [ToolOutcome(
+        sequence=1, tool_use_id="summary", tool_name="read_artifact", success=True, correctable=False,
+        input_summary="summary read", output_summary="implementation reference returned",
+        artifact_refs=("artifact:implementation.js",), structured_input={"path": "artifact:summary.json"},
+    )], str(root))
     controller.state.store_task(task)
     _publish_controller_hypotheses(controller, task)
     task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
@@ -23549,11 +23713,34 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
     for index, role in enumerate(roles):
         prompts[index] = prompt_factory.get_role_system_prompt(controller.runtime.system_prompt, role) + prompts[index]
     for prompt in prompts:
+        assert "artifact:implementation.js" in prompt
+        assert "artifact:summary.json" in prompt
+        assert "Returned references alone are not inspected" in prompt
+        assert prompt.count("Already inspected sources and recorded lookup arguments") == 1
+        assert "inferred GET does not mean GET-only" in prompt
+        assert "operation provenance is unknown" in prompt
+        assert "Empty input lists" in prompt
+        assert "declared_identity_roles[1]" in prompt
+        assert "registration_flow:declared-flow" in prompt
+        assert "generation only, not proposed future tests" in prompt
+        assert "One role is not a cross-role gap" in prompt
+        assert "Missing session readiness does not justify an empty" in prompt
+        assert "explicitly linked parameter records" in prompt
+        assert "its presence alone does not require a hypothesis" in prompt
+        assert "do not invent hypotheses or require a minimum count" in prompt
+        assert "inspection limits do not themselves justify" in prompt
+        assert "follow its supplied implementation/source references" in prompt
         assert "not individual hypotheses" in prompt
         assert "no_testable_hypotheses" in prompt
         assert "does not require live target acquisition" in prompt
         assert "separately contracted follow-up task" not in prompt
     evaluator = prompts[-2]
+    assert "Do not require every available source to be inspected" in evaluator
+    assert "contradicts recorded inputs" in evaluator
+    assert "authenticated, same-role account, different-role, or tenant scenarios" in evaluator
+    assert "execution of identity comparisons" in evaluator
+    assert "Do not request findings or identity comparisons" not in evaluator
+    assert "request focused prerequisite inspection" in evaluator
     assert "Do not put replacement" in evaluator
     assert "closure/schema defect" not in evaluator
     assert "capture headers and response body" not in prompts[3]

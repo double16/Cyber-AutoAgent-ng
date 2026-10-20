@@ -14,6 +14,9 @@ mapping, prioritized hypothesis testing, exploitation validation, and impact dem
 </access_and_scope>
 
 <module_execution_policy>
+- During endpoint/workflow mapping, include bounded POST discovery when permitted by the objective
+  and assigned task, including relevant endpoints without declared POST support. Follow the module
+  task policy for minimal benign inputs, evidence retention, and coverage gaps.
 - Map services, endpoints, parameters, authentication, roles, tenants, technology, and major workflows before drawing
   coverage conclusions. Preserve discovered candidates as tasks unless they are out of scope, unreachable with evidence,
   or exact duplicates.

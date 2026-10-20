@@ -104,6 +104,45 @@ def test_scoped_authenticated_redirect_rejects_a_foreign_origin():
     session.get.assert_called_once()
 
 
+@pytest.mark.parametrize("authenticated_status", [200, 302, 401, 403, 500])
+@pytest.mark.parametrize("anonymous_redirect", ["https://identity.test/signin", "/outside/login"])
+def test_sso_proof_stops_anonymous_at_boundary_and_requires_authenticated_success(
+    monkeypatch, anonymous_redirect, authenticated_status,
+):
+    target = "https://target.test/app"
+    url = f"{target}/private"
+    anonymous = Mock()
+    anonymous.get.return_value = SimpleNamespace(
+        status_code=302, headers={"Location": anonymous_redirect}, text="Sign in", url=url,
+    )
+    authenticated = Mock()
+    authenticated.get.return_value = SimpleNamespace(
+        status_code=authenticated_status, headers={}, text="Protected account", url=url,
+    )
+    monkeypatch.setattr(authentication.requests, "Session", lambda: anonymous)
+    context = authentication._AuthenticationContext(target, "credential", authenticated, {}, {}, url)
+    assert authentication._prove_authenticated_context(context) is (authenticated_status == 200)
+    anonymous.get.assert_called_once_with(url, allow_redirects=False, timeout=15)
+    authenticated.get.assert_called_once()
+    if authenticated_status == 200:
+        assert context.validation_proof["proof_method"] == "different_response_destination"
+
+
+def test_sso_proof_keeps_authenticated_redirects_inside_scope(monkeypatch):
+    target = "https://target.test"
+    url = f"{target}/private"
+    anonymous = Mock()
+    anonymous.get.return_value = SimpleNamespace(
+        status_code=302, headers={"Location": "https://identity.test/signin"}, text="", url=url,
+    )
+    authenticated = Mock()
+    authenticated.get.return_value = anonymous.get.return_value
+    monkeypatch.setattr(authentication.requests, "Session", lambda: anonymous)
+    context = authentication._AuthenticationContext(target, "credential", authenticated, {}, {}, url)
+    assert not authentication._prove_authenticated_context(context)
+    authenticated.get.assert_called_once()
+
+
 def test_context_proof_accepts_credential_dependent_same_target_redirect(monkeypatch):
     target = "https://target.test"
     anonymous = Mock()
