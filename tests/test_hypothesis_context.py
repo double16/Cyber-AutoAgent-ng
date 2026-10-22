@@ -289,3 +289,23 @@ def test_missing_or_invalid_structured_inputs_do_not_prove_inspection(producer, 
     entry = json.loads(context._inspection_path(producer, str(tmp_path)).read_text())[0]
     assert not entry["inspected_reference"]
     assert entry["returned_references"] == ["artifact:returned-only.txt"]
+
+
+def test_investigation_inspection_retains_only_ranges_returned_to_worker(producer, tmp_path):
+    output = {"view": "investigation", "context_entries": [
+        {"type": "source_reference", "reference": "artifact:listed-only.js"},
+        {"type": "source_excerpt", "reference": "artifact:inspected.js", "line": 5, "column": 1,
+         "sha256": "digest", "text": "fetch(input)"},
+    ]}
+    lookup = {"item_id": "subject", "view": "investigation", "context_offset": 20, "context_limit": 5}
+    outcome = ToolOutcomeJournal().append(
+        tool_use_id="context", tool_name="get_inventory_item", success=True, correctable=False,
+        tool_input={"manifest_ref": "artifact:inventory.json", **lookup},
+        output={"content": [{"text": json.dumps(output)}]},
+    )
+    context.retain_inspections(producer, [outcome], str(tmp_path))
+    entry = json.loads(context._inspection_path(producer, str(tmp_path)).read_text())[0]
+    assert entry["lookup"] == lookup
+    assert entry["inspected_source_ranges"] == [{"reference": "artifact:inspected.js", "line": 5,
+                                                 "column": 1, "sha256": "digest", "characters": 12}]
+    assert "inspected_source_ranges" in context.inspection_context(producer, str(tmp_path))

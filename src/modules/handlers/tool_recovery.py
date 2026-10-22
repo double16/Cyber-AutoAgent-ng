@@ -420,12 +420,17 @@ class ToolOutcome:
     artifact_refs: tuple[str, ...] = ()
     structured_input: dict[str, Any] | None = None
     execution_receipts: tuple[ExecutionReceipt, ...] = ()
+    inspected_source_ranges: tuple[dict[str, Any], ...] = ()
+    inspection_result_ref: str = ""
 
 
 class ToolOutcomeJournal:
     """Bounded per-agent journal used by task execution and evaluation."""
 
     def __init__(self, max_entries: int = 200) -> None:
+        from modules.tools.artifact_journal import current_inspection_journal
+
+        self._inspection_journal = current_inspection_journal()
         self._entries: deque[ToolOutcome] = deque(maxlen=max_entries)
         self._sequence = 0
 
@@ -455,6 +460,19 @@ class ToolOutcomeJournal:
             input_summary = str(internal_input)
         artifact_refs = _artifact_references(output, raw_output)
         execution_receipts = _execution_receipts(tool_name, internal_input, output)
+        inspected_source_ranges = ()
+        inspection_result_ref = ""
+        if success:
+            from modules.tools.artifact_journal import record_delivered_inspection
+
+            inspection_result_ref = record_delivered_inspection(
+                tool_name, tool_use_id, internal_input if isinstance(internal_input, dict) else {},
+                _result_text(output) if isinstance(output, dict) else str(output), artifact_refs, self._inspection_journal,
+            )
+        if tool_name == "get_inventory_item" and success:
+            from modules.tools.inventory_investigation import returned_source_ranges
+
+            inspected_source_ranges = returned_source_ranges(raw_output if raw_output is not None else output)
         outcome = ToolOutcome(
             sequence=self._sequence,
             tool_use_id=_bounded_text(tool_use_id, 100),
@@ -474,6 +492,8 @@ class ToolOutcomeJournal:
                 else None
             ),
             execution_receipts=execution_receipts,
+            inspected_source_ranges=inspected_source_ranges,
+            inspection_result_ref=inspection_result_ref,
         )
         self._entries.append(outcome)
         return outcome

@@ -2,10 +2,13 @@
 
 import json
 from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from typing import Any
 
 from strands import tool
 
+from modules.tools.artifact import resolve_operation_artifact_path
+from modules.tools.inventory_investigation import investigation_entries, investigation_page
 from modules.tools.memory import _load_inventory_manifest, canonical_artifact_reference
 
 _INVENTORY_ITEM_KINDS = ("endpoint", "parameter", "workflow", "service", "technology")
@@ -30,6 +33,10 @@ _INPUT_SCHEMA = {
             },
             "target_id": {"type": "string", "description": "Exact target ID"},
             "value": {"type": "string", "description": "Exact item value"},
+            "view": {"type": "string", "enum": ["record", "investigation"], "default": "record",
+                     "description": "Investigation returns linked records, diagnostics and bounded source excerpts"},
+            "context_offset": {"type": "integer", "minimum": 0, "default": 0},
+            "context_limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
         },
         "required": ["manifest_ref"],
     }
@@ -40,6 +47,7 @@ def create_inventory_item_reader(
     *,
     allowed_manifest_refs: Iterable[str] | None = None,
     expected_manifest_digests: Mapping[str, str] | None = None,
+    allowed_source_refs: Iterable[str] | None = None,
     max_output_chars: int = 30_000,
 ) -> Any:
     """Create an inventory lookup tool optionally restricted to frozen manifest refs."""
@@ -55,8 +63,13 @@ def create_inventory_item_reader(
         canonical_artifact_reference(reference): str(digest)
         for reference, digest in (expected_manifest_digests or {}).items()
     }
+    source_refs = ({canonical_artifact_reference(reference) for reference in allowed_source_refs}
+                   if allowed_source_refs is not None else None)
+    input_schema = deepcopy(_INPUT_SCHEMA)
+    if allowed_refs is not None and len(allowed_refs) == 1:
+        input_schema["json"]["properties"]["manifest_ref"]["enum"] = sorted(allowed_refs)
 
-    @tool(name="get_inventory_item", inputSchema=_INPUT_SCHEMA)
+    @tool(name="get_inventory_item", inputSchema=input_schema)
     def get_inventory_item(
         manifest_ref: str,
         item_id: str = "",
@@ -64,6 +77,9 @@ def create_inventory_item_reader(
         endpoint_id: str = "",
         target_id: str = "",
         value: str = "",
+        view: str = "record",
+        context_offset: int = 0,
+        context_limit: int = 20,
     ) -> str:
         """Look up records in the supplied current-operation inventory manifest.
 
@@ -74,10 +90,19 @@ def create_inventory_item_reader(
 
         This tool looks up matching records rather than returning the complete manifest. Use
         read_artifact to inspect the full manifest and search_artifact to search its text.
+        Prefer view=investigation for one subject's linked inputs, declarations, mismatches,
+        and exact source excerpts. Follow next_context_offset to inspect remaining context.
         """
 
+        view = {"raw": "record", "context": "investigation"}.get(view, view)
+        if view not in {"record", "investigation"}:
+            raise ValueError("view must be record or investigation")
+        if type(context_offset) is not int or context_offset < 0:
+            raise ValueError("context_offset must be a non-negative integer")
+        if type(context_limit) is not int or not 1 <= context_limit <= 50:
+            raise ValueError("context_limit must be from 1 to 50")
         if allowed_refs is not None and manifest_ref.strip() not in allowed_refs:
-            raise RuntimeError("Inventory manifest is not available to this worker")
+            raise RuntimeError(f"Inventory manifest is not available to this worker; use one of: {sorted(allowed_refs)}")
         reference = canonical_artifact_reference(manifest_ref)
         selectors = {
             "item_id": item_id.strip(),
@@ -115,6 +140,27 @@ def create_inventory_item_reader(
             matches.append(item)
 
         if len(matches) == 1:
+            if view == "investigation":
+                cache: dict[str, bytes] = {}
+
+                def read_source(source: str) -> bytes:
+                    canonical = canonical_artifact_reference(source)
+                    if source_refs is not None and canonical not in source_refs:
+                        raise ValueError("Source is not available to this worker")
+                    if canonical not in cache:
+                        with open(resolve_operation_artifact_path(canonical), "rb") as stream:
+                            content = stream.read(16_000_001)
+                        if len(content) > 16_000_000:
+                            raise ValueError("Source exceeds the 16000000-byte inspection limit")
+                        cache[canonical] = content
+                    return cache[canonical]
+
+                entries = investigation_entries(manifest, matches[0], read_source=read_source)
+                return investigation_page(
+                    entries, offset=context_offset, limit=context_limit, max_chars=max_output_chars,
+                    header={"status": "found", "view": "investigation", "manifest_ref": reference,
+                            "manifest_sha256": digest, "item_id": matches[0]["id"]},
+                )
             response = {
                 "status": "found",
                 "manifest_ref": reference,

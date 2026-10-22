@@ -10,6 +10,33 @@ from modules.tools import recon_inventory_manifest as manifest_tool
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 
 
+@pytest.mark.parametrize("difference", ["endpoint", "location", "target", "unbound", "none"])
+def test_parameter_consolidation_preserves_parent_and_location_identity(difference):
+    def parameter(uid, endpoint_id="endpoint-a", location="query", target="target-1"):
+        return {"id": uid, "kind": "parameter", "target_id": target, "value": "path",
+                "attributes": {"endpoint_id": endpoint_id, "interaction": {
+                    "inputs": [{"name": "path", "location": location}],
+                    "operations": ["GET"], "operation_provenance": "inferred",
+                }}}
+
+    first = parameter("first", endpoint_id=None if difference == "unbound" else "endpoint-a")
+    second = parameter("second", endpoint_id=(None if difference == "unbound" else
+                                             "endpoint-b" if difference == "endpoint" else "endpoint-a"),
+                       location="header" if difference == "location" else "query",
+                       target="target-2" if difference == "target" else "target-1")
+    second["attributes"]["extra"] = "complementary"
+    merged = manifest_tool._merge_inventory_manifests([
+        ("artifact:first.json", {"items": [first]}), ("artifact:second.json", {"items": [second]}),
+    ])
+    assert len(merged["items"]) == (1 if difference == "none" else 2)
+    if difference == "none":
+        assert merged["items"][0]["id"] == "first"
+        assert merged["items"][0]["attributes"]["extra"] == "complementary"
+        assert merged["items"][0]["attributes"]["source_artifact_refs"] == ["artifact:first.json", "artifact:second.json"]
+    else:
+        assert {item["id"] for item in merged["items"]} == {"first", "second"}
+
+
 @pytest.mark.parametrize("payload,expected", [
     ({"schema_version": "client_bundle_inventory_v2", "target_id": "target-1",
       "target": "https://target.test", "api_paths": ["/child"], "spa_routes": []},

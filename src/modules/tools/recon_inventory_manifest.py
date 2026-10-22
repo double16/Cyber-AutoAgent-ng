@@ -1070,8 +1070,18 @@ def _inventory_item_identity(item: dict[str, Any]) -> str:
         # aligned with that identity so sources that spell a technology differently
         # do not survive as separate items with the same deterministic ID.
         value = str(value or "").casefold()
+    identity = {"target_id": item.get("target_id"), "kind": kind, "value": value}
+    if kind == "parameter":
+        attributes = item.get("attributes", {})
+        identity["endpoint_id"] = attributes.get("endpoint_id")
+        inputs = attributes.get("interaction", {}).get("inputs", [])
+        identity["locations"] = sorted({entry["location"] for entry in inputs
+                                        if entry.get("name") == value and entry.get("location")})
+        # Unbound legacy parameters must not collapse across unrelated source records.
+        if not identity["endpoint_id"]:
+            identity["unbound_id"] = item.get("id")
     return json.dumps(
-        {"target_id": item.get("target_id"), "kind": kind, "value": value},
+        identity,
         sort_keys=True,
         separators=(",", ":"),
     )

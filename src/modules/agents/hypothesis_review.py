@@ -3,12 +3,15 @@
 import json
 from typing import Any
 
+from modules.agents.hypothesis_context import hypothesis_inspection_journal
 from modules.agents.structured_outputs import (
     HypothesisCheckpointDecisionOutput,
     HypothesisPrerequisiteGap,
     HypothesisSubjectReview,
     HypothesisTaskDecisionOutput,
 )
+from modules.tools import memory
+from modules.tools.artifact_journal import inspection_has_content
 from modules.tools.hypotheses import hypothesis_binding, load_hypothesis_set
 
 
@@ -28,7 +31,7 @@ def semantic_review(data: dict[str, Any]) -> dict[str, Any]:
     if any(not isinstance(item, str) or not item.strip() for item in criteria):
         raise ValueError("Unresolved criteria must be non-empty IDs")
     return {"publication_sha256": digest, "subject_reviews": [
-        HypothesisSubjectReview.model_validate(row).model_dump() for row in rows
+        HypothesisSubjectReview.model_validate(row).model_dump(exclude_none=True) for row in rows
     ], "prerequisite_gaps": [HypothesisPrerequisiteGap.model_validate(gap).model_dump() for gap in gaps],
         "unresolved_criterion_ids": criteria}
 
@@ -36,8 +39,30 @@ def semantic_review(data: dict[str, Any]) -> dict[str, Any]:
 def review_requires_changes(data: dict[str, Any]) -> bool:
     return any(
         row["decision"] != "retain" or any(item["decision"] != "retain" for item in row["hypotheses"])
+        or (row.get("no_hypothesis_basis") or {}).get("kind") == "metadata_only"
+        or any(item.get("supports_conditional_test") for item in
+               ((row.get("no_hypothesis_basis") or {}).get("behavior_assessments") or []))
         for row in data.get("subject_reviews", [])
     )
+
+
+def completes_review_provenance(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    """Permit missing inspection bookkeeping to be supplied without changing semantic judgments."""
+    def core(data):
+        return {**data, "subject_reviews": [{key: value for key, value in row.items() if key != "no_hypothesis_basis"}
+                                           for row in data["subject_reviews"]]}
+
+    if core(previous) != core(current):
+        return False
+    for old, new in zip(previous["subject_reviews"], current["subject_reviews"], strict=True):
+        before, after = old.get("no_hypothesis_basis"), new.get("no_hypothesis_basis")
+        if before is not None and before != after:
+            if after is None or before["kind"] != after["kind"]:
+                return False
+            for key, value in before.items():
+                if value and after.get(key) != value:
+                    return False
+    return True
 
 
 def normalize_review(data: dict[str, Any]) -> dict[str, Any]:
@@ -47,12 +72,18 @@ def normalize_review(data: dict[str, Any]) -> dict[str, Any]:
     if review.status not in {"done", "partial_failure", "blocked"}:
         raise ValueError("Unknown hypothesis review status")
     result = review.model_dump()
+    result["subject_reviews"] = semantic_review(data)["subject_reviews"]
     changes = review_requires_changes(result)
     gaps = review.prerequisite_gaps
+    if any(row.no_hypothesis_basis and row.no_hypothesis_basis.kind == "necessary_evidence_unreviewed"
+           for row in review.subject_reviews) and not gaps:
+        raise ValueError("Unreviewed necessary evidence requires explicit prerequisite_gaps")
     acceptance_gaps = review.unresolved_criterion_ids
-    if changes or ((gaps or acceptance_gaps) and review.status != "blocked"):
+    if review.status == "blocked" and gaps:
+        result["repair"] = {"kind": "none", "evidence_gaps": [], "execution_receipt_gaps": []}
+    elif changes or gaps or acceptance_gaps:
         result["status"] = "partial_failure"
-        result["repair"] = {"kind": "acceptance" if changes or acceptance_gaps else "execution",
+        result["repair"] = {"kind": "execution" if gaps else "acceptance",
                             "evidence_gaps": [gap.missing_input for gap in gaps][:3],
                             "execution_receipt_gaps": []}
         if not review.reason.strip():
@@ -125,6 +156,31 @@ def validate_review(data: dict[str, Any], task: Any, operation_id: str) -> None:
                 or {item.hypothesis_id for item in row.hypotheses} != expected[row.item_id]):
             raise ValueError("Review every current hypothesis exactly once for its subject")
         changes |= row.decision != "retain" or any(item.decision != "retain" for item in row.hypotheses)
+        if not expected[row.item_id]:
+            basis = row.no_hypothesis_basis
+            if basis is None:
+                raise ValueError("Empty hypothesis review requires no_hypothesis_basis")
+            if basis.kind == "inspected_evidence":
+                if not basis.inspection_refs:
+                    raise ValueError("Inspected-evidence basis requires retained inspection references")
+                journal = hypothesis_inspection_journal(task, operation_id, memory._operation_output_root())
+                if not all(inspection_has_content(journal.load_inspection(reference)) for reference in basis.inspection_refs):
+                    raise ValueError("Empty disposition requires inspected content, not metadata-only results")
+                if not basis.behavior_assessments and not basis.no_relevant_behavior_reason:
+                    raise ValueError("Empty review requires behavior assessments or a no-relevant-behavior explanation")
+                if basis.behavior_assessments and basis.no_relevant_behavior_reason:
+                    raise ValueError("Behavior assessments conflict with a no-relevant-behavior explanation")
+                for assessment in basis.behavior_assessments or []:
+                    if not set(assessment.inspection_refs) <= set(basis.inspection_refs):
+                        raise ValueError("Behavior assessment must cite its inspected-evidence basis")
+                if any(item.supports_conditional_test for item in basis.behavior_assessments or []):
+                    if review.status == "done" or review.repair is None or review.repair.kind != "acceptance":
+                        raise ValueError("Supported conditional test requires publication repair")
+            elif basis.kind == "metadata_only":
+                if review.status == "done" or review.repair is None or review.repair.kind not in {"acceptance", "execution"}:
+                    raise ValueError("Metadata-only empty disposition requires publication repair")
+            elif not review.prerequisite_gaps or review.status == "done":
+                raise ValueError("Unreviewed necessary evidence requires prerequisite recovery")
     criteria = {criterion.id for criterion in task.acceptance.criteria}
     if not set(review.unresolved_criterion_ids) <= criteria:
         raise ValueError("Unresolved acceptance must identify frozen criterion IDs")
@@ -135,5 +191,6 @@ def validate_review(data: dict[str, Any], task: Any, operation_id: str) -> None:
             raise ValueError("Prerequisite inspection must name a frozen input source")
     if review.status == "done" and (changes or review.prerequisite_gaps or review.unresolved_criterion_ids):
         raise ValueError("A completed hypothesis review cannot require changes or prerequisites")
-    if changes and (review.repair is None or review.repair.kind != "acceptance"):
+    permitted_repairs = {"acceptance", "execution"} if review.prerequisite_gaps else {"acceptance"}
+    if changes and review.status != "blocked" and (review.repair is None or review.repair.kind not in permitted_repairs):
         raise ValueError("Revised or withdrawn hypotheses require explicit publication repair")

@@ -9,6 +9,7 @@ from urllib.parse import parse_qsl, urljoin, urlsplit
 import tree_sitter_javascript
 from tree_sitter import Language, Parser
 
+from modules.tools.client_route_extraction import extract_route_links
 from modules.tools.inventory_provenance import (
     OPERATION_PROVENANCE_FIELD,
     operation_provenance,
@@ -486,7 +487,9 @@ def extract_client_requests(text: str) -> dict:
         if candidate_count >= _MAX_REQUESTS:
             break
     status = "request_limit" if candidate_count >= _MAX_REQUESTS else ("parse_errors" if root.has_error else "complete")
-    return {"operations": operations, "unresolved_requests": unresolved, "request_analysis_status": status}
+    return {"operations": operations, "unresolved_requests": unresolved, "request_analysis_status": status,
+            **extract_route_links(source, nodes, resolve, lookup, bindings, operations, unresolved),
+            "route_analysis_status": "parse_errors" if root.has_error else "complete"}
 
 
 def attach_request_operations(

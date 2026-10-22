@@ -7,14 +7,32 @@ from typing import Any
 
 from modules.handlers.utils import sanitize_toon_value
 from modules.tools.artifact import resolve_operation_artifact_path
+from modules.tools.artifact_journal import ReturnedArtifactJournal
 from modules.tools.hypotheses import hypothesis_binding, load_hypothesis_set
+from modules.tools.inventory_investigation import investigation_entries
 from modules.tools.inventory_provenance import operation_provenance
 from modules.tools.memory import _load_inventory_manifest, canonical_artifact_reference
 
 HYPOTHESIS_GROUNDING_GUIDANCE = """Summary records are not exhaustive implementation evidence. Empty input lists
 mean inputs are unrecorded, not absent; reconcile them with explicitly linked parameter records.
+Diagnostics inputs_unrecorded and operation_not_observed are metadata limitations with no automatic
+workflow consequence. They cannot independently justify no_testable_hypotheses.
+Follow source-backed client_route_calls relationships from route guards to components and request
+helpers. A reachable API request is client behavior, not an operation implemented by the SPA route.
+Unresolved client links are analysis limitations, not automatic prerequisites; explain why a missing
+definition is necessary before requesting prerequisite recovery.
+For an empty result assess concrete observed behavior and explain why it offers no conditional
+security test. Address storage-controlled identities, permission checks, request inputs, ownership,
+and other trust boundaries when observed; names and generic route lists alone establish none.
+Missing server observations are what a future test can resolve, not an automatic planning prerequisite.
+Use remaining_context offsets to reach subject evidence when a lookup spans pages.
+Use retained inspection results as observations; do not reconstruct their content from read arguments.
 An input can ground a conditional future test without proving unsafe handling or backend technology;
 its presence alone does not require a hypothesis. When a summary cannot characterize an interaction,
+first use get_inventory_item(view="investigation") for the assigned subject and page its linked
+records, request declarations, diagnostics and source excerpts. Search raw artifacts only to resolve
+a specific remaining question. Client declarations do not establish server handlers or unsafe behavior.
+Structural mismatches must remain explicit; do not transfer operations between different endpoints.
 follow its supplied implementation/source references with targeted artifact searches around the assigned
 subject, handlers, components, or request functions. Extraction artifacts may reference the full implementation.
 Stay within supplied operation artifacts and existing inspection limits; exhaustive inspection is not required.
@@ -31,6 +49,9 @@ source references; do not infer them from names. Missing session readiness does 
 publication; propose the future prerequisites without logging in during generation.
 Observed functionality may support
 conditional future tests: separate observed facts, assumed preconditions, and behavior the test must establish.
+Observed functionality can ground access-control or information-disclosure tests without query/body
+parameters. Server implementation is not required to propose a conditional test grounded in observed
+functionality. Neither empty inputs nor inferred methods alone justify an empty publication.
 A reasoned no_testable_hypotheses is valid when inspected evidence supports no grounded, safe,
 security-relevant test; do not invent hypotheses or require a minimum count. Missing optional metadata,
 unexamined necessary evidence, and inspection limits do not themselves justify that disposition.
@@ -51,7 +72,8 @@ def _rows(label: str, fields: tuple[str, ...], rows: list[dict[str, Any]]) -> st
     lines = [f"{label}[{len(rows)}]{{{','.join(fields)}}}:"]
     for row in rows:
         lines.append("  " + ",".join(sanitize_toon_value(
-            json.dumps(row[field], ensure_ascii=False) if isinstance(row[field], (dict, list)) else str(row[field])
+            json.dumps(row[field], ensure_ascii=False, sort_keys=True)
+            if isinstance(row[field], (dict, list)) else str(row[field])
         ) for field in fields))
     return "\n".join(lines)
 
@@ -74,7 +96,7 @@ def frozen_input_context(task: Any, output_root: str) -> str:
     """Keep complete assigned records on disk; never turn their availability into execution proof."""
 
     basis = task.acceptance.basis
-    identity = {"context_version": 2, "source_refs": list(basis.source_refs), "snapshot_hash": basis.snapshot_hash,
+    identity = {"context_version": 3, "source_refs": list(basis.source_refs), "snapshot_hash": basis.snapshot_hash,
                 "item_ids": sorted(basis.item_ids)}
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     path = Path(output_root) / "artifacts" / "hypothesis_context" / f"{key}.json"
@@ -87,15 +109,18 @@ def frozen_input_context(task: Any, output_root: str) -> str:
         if cached.get("identity") != identity or cached.get("fingerprints") != fingerprints:
             records = {}
             supporting = {}
+            context_entries = []
             for reference in basis.source_refs:
                 manifest, digest = _load_inventory_manifest(reference, persist_normalization=False)
                 if digest != basis.snapshot_hash:
                     raise ValueError("Frozen inventory snapshot changed")
                 selected, linked = _subject_records(task, manifest["items"])
+                for item in selected:
+                    context_entries.extend(investigation_entries(manifest, item))
                 records.update({item["id"]: item for item in selected})
                 supporting.update({item["id"]: item for item in linked})
             cached = {"identity": identity, "fingerprints": fingerprints, "items": list(records.values()),
-                      "supporting_items": list(supporting.values())}
+                      "supporting_items": list(supporting.values()), "investigation_entries": context_entries}
             _save(path, cached)
         items = cached["items"]
         supporting_items = cached["supporting_items"]
@@ -108,6 +133,14 @@ def frozen_input_context(task: Any, output_root: str) -> str:
             rendered = _rows("assigned_inventory", ("id", "kind", "value"), rows)
             detail = "Attributes are omitted below; complete attributes remain in the assigned-record artifact."
         sources = _resolved_input_sources(task, set(basis.source_refs), items=items + supporting_items)
+        context_entries = cached["investigation_entries"]
+        context_path = path.with_name(path.stem + "-investigation.json")
+        _save(context_path, context_entries)
+        context_summary = _rows("investigation_context", ("type", "details"), [
+            {"type": entry["type"], "details": entry} for entry in context_entries
+        ])
+        if len(context_summary) > 12_000:
+            context_summary = "Investigation context exceeds inline limit; use the paginated investigation lookup."
         source_path = path.with_name(path.stem + "-sources.json")
         source_rows = [{"reference": reference, "source": source, "availability": _availability(reference)}
                        for reference, source in sorted(sources.items())]
@@ -136,6 +169,8 @@ def frozen_input_context(task: Any, output_root: str) -> str:
             + f"\nComplete references: artifact:{source_path.relative_to(output_root).as_posix()}\n"
             + _rows("recorded_operations", ("item_id", "operations", "provenance"), operations)
             + "\n" + input_summary
+            + "\n" + context_summary
+            + f"\nComplete structural context: artifact:{context_path.relative_to(output_root).as_posix()}\n"
             + f"\n## Frozen investigation inputs (not completion evidence)\n"
             f"Complete assigned and supporting records: artifact:{path.relative_to(output_root).as_posix()}\n{rendered}\n"
             "Supporting parameters are context only, not additional publication subjects. "
@@ -216,7 +251,7 @@ def _inspection_details(outcome: Any) -> tuple[str, dict[str, Any]]:
         return "", {}
     lookup = {key: inputs[key] for key in (
         "start_line", "max_lines", "offset", "max_chars", "search_pattern", "search_regex",
-        "context_lines", "item_id",
+        "context_lines", "item_id", "view", "context_offset", "context_limit",
     ) if key in inputs}
     return reference, lookup
 
@@ -235,6 +270,10 @@ def retain_inspections(task: Any, outcomes: list[Any], output_root: str) -> None
         entry = {"tool": outcome.tool_name, "input": outcome.input_summary,
                  "inspected_reference": reference, "lookup": lookup,
                  "returned_references": list(outcome.artifact_refs)}
+        if outcome.inspected_source_ranges:
+            entry["inspected_source_ranges"] = list(outcome.inspected_source_ranges)
+        if outcome.inspection_result_ref:
+            entry["inspection_result_ref"] = outcome.inspection_result_ref
         if entry in entries:
             entries.remove(entry)
         entries.append(entry)
@@ -256,10 +295,23 @@ def inspection_context(task: Any, output_root: str) -> str:
              "lookup": entry.get("lookup", {}),
              "returned_references": entry.get("returned_references", entry.get("references", []))}
             for entry in entries]
+    for row, entry in zip(rows, entries, strict=True):
+        row["inspected_source_ranges"] = entry.get("inspected_source_ranges", [])
+        row["inspection_result_ref"] = entry.get("inspection_result_ref", "legacy_result_content_not_retained")
     return ("\nAlready inspected sources and recorded lookup arguments (bounded recent history):\n"
         "Returned references alone are not inspected. Reads and searches may cover only part of a source;\n"
         "no recorded inspection means not recorded, not proof that the source was never inspected.\n") + _rows(
-        "inspections", ("tool", "input", "inspected_reference", "lookup", "returned_references"), rows,
+        "inspections", ("tool", "input", "inspected_reference", "lookup", "returned_references",
+                        "inspected_source_ranges", "inspection_result_ref"), rows,
+    )
+
+
+def hypothesis_inspection_journal(task: Any, operation_id: str, output_root: str) -> ReturnedArtifactJournal:
+    """Recover this task's exact returned observations without reopening original evidence."""
+    return ReturnedArtifactJournal(
+        Path(output_root) / "artifacts" / "hypothesis_context" / "returned_results",
+        binding={"operation_id": operation_id, "task_uid": task.task_uid,
+                 "snapshot_hash": task.acceptance.basis.snapshot_hash}, operation_root=output_root,
     )
 
 

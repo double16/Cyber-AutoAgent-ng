@@ -175,11 +175,26 @@ class HypothesisRecordReview(StrictStructuredOutput):
     reason: str = Field(min_length=1)
 
 
+class HypothesisBehaviorAssessment(StrictStructuredOutput):
+    observed_behavior: str = Field(min_length=1)
+    inspection_refs: list[ArtifactEvidenceReference] = Field(min_length=1)
+    supports_conditional_test: bool
+    reasoning: str = Field(min_length=1)
+
+
+class NoHypothesisBasis(StrictStructuredOutput):
+    kind: Literal["inspected_evidence", "metadata_only", "necessary_evidence_unreviewed"]
+    inspection_refs: list[ArtifactEvidenceReference] = Field(default_factory=list)
+    behavior_assessments: list[HypothesisBehaviorAssessment] | None = None
+    no_relevant_behavior_reason: str | None = Field(default=None, min_length=1)
+
+
 class HypothesisSubjectReview(StrictStructuredOutput):
     item_id: str
     decision: Literal["retain", "revise", "withdraw"]
     reason: str = Field(min_length=1)
     hypotheses: list[HypothesisRecordReview]
+    no_hypothesis_basis: NoHypothesisBasis | None = None
 
 
 class HypothesisPrerequisiteGap(StrictStructuredOutput):

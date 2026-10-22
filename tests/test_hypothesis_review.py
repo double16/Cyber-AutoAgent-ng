@@ -10,6 +10,92 @@ from tests.test_hypotheses import hypothesis, producer, publish  # noqa: F401
 
 
 @pytest.fixture
+def empty_review(producer, tmp_path):
+    binding, _ = publish(producer, tmp_path, [{"item_id": "subject", "disposition": "no_testable_hypotheses",
+                                             "reason": "Inspected functionality offers no supported security test"}])
+    return producer, {"status": "done", "publication_sha256": binding["sha256"], "subject_reviews": [{
+        "item_id": "subject", "decision": "retain", "reason": "No supported implication in inspected content",
+        "hypotheses": [],
+    }]}
+
+
+def test_empty_review_requires_retained_inspected_content(empty_review, tmp_path):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+
+    task, data = empty_review
+    with pytest.raises(ValueError, match="no_hypothesis_basis"):
+        validate_review(data, task, "OP_TEST")
+    basis = {"kind": "inspected_evidence", "inspection_refs": []}
+    data["subject_reviews"][0]["no_hypothesis_basis"] = basis
+    with pytest.raises(ValueError, match="references"):
+        validate_review(data, task, "OP_TEST")
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    ref = journal.record_inspection("get_inventory_item", "metadata", {}, "{\"item\":{\"inputs\":[]}}", ())
+    basis["inspection_refs"] = [ref]
+    with pytest.raises(ValueError, match="metadata-only"):
+        validate_review(data, task, "OP_TEST")
+    ref = journal.record_inspection("read_artifact", "read", {}, "{\"content\":\"static page markup\"}", ())
+    basis["inspection_refs"] = [ref]
+    with pytest.raises(ValueError, match="behavior assessments"):
+        validate_review(data, task, "OP_TEST")
+    basis["no_relevant_behavior_reason"] = "Only static informational markup; no observed interaction or boundary"
+    validate_review(data, task, "OP_TEST")
+    basis["inspection_refs"] = ["artifact:forged.json"]
+    with pytest.raises(ValueError, match="not available"):
+        validate_review(data, task, "OP_TEST")
+
+
+def test_metadata_only_reason_routes_to_repair_without_rewriting_semantics(empty_review):
+    from modules.agents.hypothesis_review import normalize_review, semantic_review
+
+    task, data = empty_review
+    data["subject_reviews"][0]["no_hypothesis_basis"] = {"kind": "metadata_only", "inspection_refs": []}
+    with pytest.raises(ValueError, match="publication repair"):
+        validate_review(data, task, "OP_TEST")
+    normalized = normalize_review(data)
+    assert normalized["status"] == "partial_failure" and normalized["repair"]["kind"] == "acceptance"
+    assert semantic_review(normalized) == semantic_review(data)
+    validate_review(normalized, task, "OP_TEST")
+
+
+def test_necessary_unexamined_evidence_requires_frozen_prerequisite_gap(empty_review):
+    from modules.agents.hypothesis_review import normalize_review
+
+    task, data = empty_review
+    data["subject_reviews"][0]["no_hypothesis_basis"] = {"kind": "necessary_evidence_unreviewed", "inspection_refs": []}
+    with pytest.raises(ValueError, match="prerequisite"):
+        normalize_review(data)
+    data["prerequisite_gaps"] = [{"criterion_id": "hypotheses", "missing_input": "Inspect the supplied function",
+                                 "item_ids": ["subject"], "source_refs": ["artifact:inventory.json"]}]
+    with pytest.raises(ValueError, match="prerequisite"):
+        validate_review(data, task, "OP_TEST")
+    normalized = normalize_review(data)
+    assert normalized["repair"]["kind"] == "execution"
+    validate_review(normalized, task, "OP_TEST")
+
+
+def test_missing_provenance_can_be_completed_without_rewriting_judgments(reviewed):
+    from modules.agents.hypothesis_review import completes_review_provenance, semantic_review
+
+    _, data = reviewed
+    before = semantic_review(data)
+    after = copy.deepcopy(before)
+    row = after["subject_reviews"][0]
+    row["no_hypothesis_basis"] = {"kind": "inspected_evidence", "inspection_refs": []}
+    assert completes_review_provenance(before, after)
+    filled = copy.deepcopy(after)
+    filled["subject_reviews"][0]["no_hypothesis_basis"]["inspection_refs"] = ["artifact:result.json"]
+    assert completes_review_provenance(after, filled)
+    assert not completes_review_provenance(filled, after)
+    altered = copy.deepcopy(filled)
+    altered["subject_reviews"][0]["no_hypothesis_basis"]["kind"] = "metadata_only"
+    assert not completes_review_provenance(filled, altered)
+    altered = copy.deepcopy(before)
+    altered["subject_reviews"][0]["reason"] = "Different semantic judgment"
+    assert not completes_review_provenance(before, altered)
+
+
+@pytest.fixture
 def reviewed(producer, tmp_path):
     binding, _ = publish(producer, tmp_path)
     return producer, {
@@ -172,9 +258,9 @@ def test_normalization_prerequisite_routing_and_priority(reviewed, status, chang
     if changes:
         data["subject_reviews"][0]["decision"] = "revise"
     result = normalize_review(data)
-    assert result["status"] == ("blocked" if status == "blocked" and not changes else "partial_failure")
+    assert result["status"] == ("blocked" if status == "blocked" else "partial_failure")
     assert (result["repair"] or {}).get("kind", "none") == (
-        "acceptance" if changes else "none" if status == "blocked" else "execution"
+        "none" if status == "blocked" else "execution"
     )
     validate_review(result, task, "OP_TEST")
 
@@ -258,3 +344,54 @@ def test_normalization_derives_a_reason_for_explicit_required_input(reviewed):
     assert result["status"] == "partial_failure"
     assert result["reason"] == "Required frozen input unavailable"
     assert result["repair"]["kind"] == "execution"
+
+
+@pytest.mark.parametrize("behavior", [
+    "A client sends a storage-controlled identity to a permission service",
+    "A network command selects a resource using a caller-controlled identifier",
+    "A source function opens a caller-selected filesystem path",
+])
+def test_behavior_assessment_requires_consistent_repair(empty_review, tmp_path, behavior):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.agents.hypothesis_review import normalize_review
+
+    task, data = empty_review
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    reference = journal.record_inspection("read_artifact", "behavior", {}, repr({"content": behavior}), ())
+    basis = {"kind": "inspected_evidence", "inspection_refs": [reference], "behavior_assessments": [{
+        "observed_behavior": behavior, "inspection_refs": [reference], "supports_conditional_test": True,
+        "reasoning": "Compare permitted and unauthorized resource access; server behavior remains conditional",
+    }]}
+    data["subject_reviews"][0]["no_hypothesis_basis"] = basis
+    with pytest.raises(ValueError, match="conditional test"):
+        validate_review(data, task, "OP_TEST")
+    repaired = normalize_review(data)
+    assert repaired["status"] == "partial_failure" and repaired["repair"]["kind"] == "acceptance"
+    validate_review(repaired, task, "OP_TEST")
+    basis["behavior_assessments"][0]["supports_conditional_test"] = False
+    basis["behavior_assessments"][0]["reasoning"] = "The inspected example is a non-executable documentation sample"
+    validate_review(data, task, "OP_TEST")
+    basis["no_relevant_behavior_reason"] = "No behavior"
+    with pytest.raises(ValueError, match="conflict"):
+        validate_review(data, task, "OP_TEST")
+    del basis["no_relevant_behavior_reason"]
+    basis["behavior_assessments"][0]["inspection_refs"] = ["artifact:uncited.json"]
+    with pytest.raises(ValueError, match="cite"):
+        validate_review(data, task, "OP_TEST")
+
+
+def test_provenance_completion_preserves_supplied_behavior_judgments(reviewed):
+    from modules.agents.hypothesis_review import completes_review_provenance, semantic_review
+
+    _, data = reviewed
+    before = semantic_review(data)
+    before["subject_reviews"][0]["no_hypothesis_basis"] = {
+        "kind": "inspected_evidence", "inspection_refs": ["artifact:result.json"],
+    }
+    after = copy.deepcopy(before)
+    after["subject_reviews"][0]["no_hypothesis_basis"]["no_relevant_behavior_reason"] = "Only static markup"
+    assert completes_review_provenance(before, after)
+    assert not completes_review_provenance(after, before)
+    changed = copy.deepcopy(after)
+    changed["subject_reviews"][0]["no_hypothesis_basis"]["inspection_refs"] = ["artifact:other.json"]
+    assert not completes_review_provenance(after, changed)
