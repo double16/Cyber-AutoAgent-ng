@@ -78,6 +78,7 @@ from modules.agents.hypothesis_context import (
     retain_inspections,
 )
 from modules.agents.hypothesis_review import (
+    BoundHypothesisReview,
     completes_review_provenance,
     normalize_review,
     repair_context,
@@ -13456,16 +13457,20 @@ applicability or a finding, and published proof of concepts must not be executed
                     status="partial_failure", reason=f"Hypothesis publication unavailable: {error}",
                     repair_kind="acceptance", instructions="Repair and republish the assigned hypothesis subjects.",
                 )
+        review_binding = (BoundHypothesisReview.capture(task, self.runtime.operation_id)
+                          if self._is_hypothesis_producer(task) else None)
         semantic_baseline: dict[str, Any] | None = None
 
         def prepare_review(payload: dict[str, Any]) -> dict[str, Any]:
             nonlocal semantic_baseline
+            current_task = next(item for item in self.state.list_tasks() if item.task_uid == task.task_uid)
+            payload = review_binding.bind(payload, current_task)
             judgments = semantic_review(payload)
             if (semantic_baseline is not None and judgments != semantic_baseline
                     and not completes_review_provenance(semantic_baseline, judgments)):
                 raise ValueError("Schema correction must preserve the original hypothesis decisions and reasons")
             semantic_baseline = judgments
-            return normalize_review(payload)
+            return normalize_review(review_binding.canonicalize(payload, current_task))
 
         previous_review = task.recovery_context.get("hypothesis_review", {})
         if (self._is_hypothesis_producer(task)
@@ -13484,7 +13489,9 @@ applicability or a finding, and published proof of concepts must not be executed
                 comparison_required=comparison_required, comparison_evidence_refs=comparison_refs,
             )
             if self._is_hypothesis_producer(task):
-                validate_review(payload, task, self.runtime.operation_id)
+                current_task = next(item for item in self.state.list_tasks() if item.task_uid == task.task_uid)
+                review_binding.bind(payload, current_task)
+                validate_review(payload, current_task, self.runtime.operation_id)
             return result
 
         try:
@@ -13500,6 +13507,7 @@ applicability or a finding, and published proof of concepts must not be executed
                         worker_context,
                         tool_outcomes,
                         resolved_acceptance_results,
+                        review_binding=review_binding,
                     ),
                     [],
                     self._task_evaluator_system_prompt(),
@@ -13508,7 +13516,8 @@ applicability or a finding, and published proof of concepts must not be executed
                     data_preprocessor=prepare_review if self._is_hypothesis_producer(task) else None,
                     cycle=cycle,
                     cycle_total=cycle_total,
-                    output_model_override=(HypothesisTaskDecisionOutput if self._is_hypothesis_producer(task)
+                    canonical_output_model=HypothesisTaskDecisionOutput if review_binding else None,
+                    output_model_override=(review_binding.output_model if review_binding
                                            else ComparisonTaskDecisionOutput if comparison_required else None),
                     evaluator_fallback_context={
                         "task_uid": task.task_uid,
@@ -14632,8 +14641,9 @@ applicability or a finding, and published proof of concepts must not be executed
 
     def _evaluator_system_prompt(self) -> str:
         return """## Evaluator Role Boundary
-Classify existing work only; Python owns execution and workflow transitions. Task evaluators may use read_artifact,
-search_artifact, or get_inventory_item only for supplied task-local references within controller limits. Phase evaluators
+Classify existing work only; Python owns execution and workflow transitions. Task evaluators may use
+read_artifact, search_artifact, read_inspection_result, or get_inventory_item only for supplied task-local
+references within controller limits. Phase evaluators
 have no tools.
 Return only the requested JSON decision, with at most three concrete evidence gaps and no analysis or Markdown."""
 
@@ -16641,6 +16651,7 @@ Allowed evidence references:
         tool_factory: Callable[[], list[Any]] | None = None,
         output_model_override: Any = None,
         data_preprocessor: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        canonical_output_model: Any = None,
     ) -> dict[str, Any]:
         output_model = output_model_override or WORKFLOW_OUTPUT_MODELS.get(role)
         if output_model is None:
@@ -16966,7 +16977,7 @@ Allowed evidence references:
             try:
                 candidate = (data_preprocessor(normalized_payload.value) if data_preprocessor
                              else normalized_payload.value)
-                data = structured_output_dict(output_model.model_validate(candidate))
+                data = structured_output_dict((canonical_output_model or output_model).model_validate(candidate))
                 if data_validator:
                     data_validator(data)
             except (json.JSONDecodeError, ValueError) as error:
@@ -17309,7 +17320,8 @@ Error: {error}
 
 {previous_response_section}
 Return only a {correction}, valid JSON object matching the schema requested in the original prompt. Do not include
-markdown fences, prose, or explanations.
+markdown fences, prose, or explanations. Return the complete object, including every required top-level
+field; a correction is not a partial update. Preserve previously valid judgments and reasons.
 
 Original prompt:
 {original_prompt}
@@ -18695,6 +18707,7 @@ established within scope, return inconclusive and request bounded repair or reco
         worker_context: str = "",
         tool_outcomes: list[ToolOutcome] | None = None,
         acceptance_results: list[Any] | None = None,
+        review_binding: BoundHypothesisReview | None = None,
     ) -> str:
         resolved_acceptance_results = acceptance_results or []
         visible_artifact_refs = set(
@@ -18759,16 +18772,22 @@ established within scope, return inconclusive and request bounded repair or reco
         if hypothesis_review:
             hypothesis_review += """
 ## Required hypothesis review output
-Include publication_sha256 and subject_reviews. Review each current subject exactly once with
+Python binds publication_sha256; omit it from your response. Always include top-level status
+(done|partial_failure|blocked) and repair (kind=none|acceptance|execution). Return a complete decision,
+including these fields on every correction; never return only the corrected fragment.
+Include subject_reviews. Review each current subject exactly once with
 item_id, decision (retain|revise|withdraw), reason, and hypotheses. Each hypothesis entry must contain
 hypothesis_id, decision, and reason; review every current hypothesis exactly once.
 For a subject with no hypotheses include no_hypothesis_basis with kind (inspected_evidence,
 metadata_only, necessary_evidence_unreviewed) and inspection_refs. A retained empty disposition
 requires inspected_evidence and references to exact saved inspection results containing source content.
-Include behavior_assessments with observed_behavior, inspection_refs, supports_conditional_test,
-and reasoning. Address relevant observed interactions and trust boundaries, including evidence
+Only for an empty subject, nest behavior_assessments INSIDE subject_reviews[].no_hypothesis_basis,
+with observed_behavior, inspection_refs, supports_conditional_test, and reasoning.
+For populated subjects omit no_hypothesis_basis; never add behavior_assessments at the subject level.
+Address relevant observed interactions and trust boundaries, including evidence
 returned before the checkpoint; do not rely solely on the publication's chosen citations.
-If inspected content has no relevant behavior, provide no_relevant_behavior_reason instead.
+If inspected content has no relevant behavior, nest no_relevant_behavior_reason inside
+no_hypothesis_basis instead of behavior_assessments.
 Assessments must cite the basis inspection_refs. If any assessment supports a conditional test,
 request publication repair (repair.kind=acceptance); do not retain completed empty coverage.
 Judge the content's semantic adequacy; a valid reference alone is not support. Metadata-only grounds
@@ -18808,10 +18827,14 @@ For unmet frozen acceptance criteria, include unresolved_criterion_ids and a con
 Do not use partial_failure when every review is retain and no criterion or prerequisite remains unresolved.
 """
         if hypothesis_review:
+            hypothesis_review += (
+                "\nComplete shape example using the bound IDs (illustrative judgments only):\n"
+                + (review_binding or BoundHypothesisReview.capture(task, self.runtime.operation_id)).example + "\n"
+            )
             return (
                 "Review the assigned hypothesis publication only. Do not execute proposed tests or gather new "
                 "target evidence. Use available artifact readers only for supplied task-local references within "
-                "the controller limits. Return only the HypothesisTaskDecisionOutput JSON contract. "
+                "the controller limits. Return only the task-bound BoundHypothesisReviewOutput structured contract. "
                 "Python owns provenance and workflow transitions. Failed invocations do not prove execution. "
                 "Judge grounded, testable proposals, not completed exploitation. Use done when the frozen "
                 "publication criteria and semantic review are satisfied. Use partial_failure for corrections "

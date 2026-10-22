@@ -185,7 +185,9 @@ class HypothesisBehaviorAssessment(StrictStructuredOutput):
 class NoHypothesisBasis(StrictStructuredOutput):
     kind: Literal["inspected_evidence", "metadata_only", "necessary_evidence_unreviewed"]
     inspection_refs: list[ArtifactEvidenceReference] = Field(default_factory=list)
-    behavior_assessments: list[HypothesisBehaviorAssessment] | None = None
+    behavior_assessments: list[HypothesisBehaviorAssessment] | None = Field(
+        default=None, description="Only inside an empty subject's no_hypothesis_basis; assess observed behavior.",
+    )
     no_relevant_behavior_reason: str | None = Field(default=None, min_length=1)
 
 
@@ -194,7 +196,9 @@ class HypothesisSubjectReview(StrictStructuredOutput):
     decision: Literal["retain", "revise", "withdraw"]
     reason: str = Field(min_length=1)
     hypotheses: list[HypothesisRecordReview]
-    no_hypothesis_basis: NoHypothesisBasis | None = None
+    no_hypothesis_basis: NoHypothesisBasis | None = Field(
+        default=None, description="Only for subjects with no hypotheses; nest behavior assessments here.",
+    )
 
 
 class HypothesisPrerequisiteGap(StrictStructuredOutput):

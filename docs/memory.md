@@ -286,3 +286,11 @@ inspection references, whether it supports a conditional test, and reasoning), o
 `no_relevant_behavior_reason` when inspected content contains no relevant behavior. An assessment
 supporting a conditional test requires publication repair. Historical reviews remain readable.
 Missing server observations and unrecorded inputs do not independently prohibit proposing future tests.
+
+Hypothesis evaluation uses a task-bound structured-output schema when supported by the provider.
+Python binds the publication digest and constrains review identifiers to the current publication and
+frozen criteria. The evaluator still supplies `status`, semantic judgments, and repair instructions.
+For empty subjects, behavior assessments belong inside `subject_reviews[].no_hypothesis_basis`;
+populated subjects omit that basis. JSON compatibility and correction paths use the same schema,
+and corrections return a complete decision while preserving already valid judgments. Stored reviews
+retain the canonical `HypothesisTaskDecisionOutput` format, including the controller-bound digest.

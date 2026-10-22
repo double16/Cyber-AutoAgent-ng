@@ -1,14 +1,20 @@
 """Validate review coverage and provenance without deciding semantic merit."""
 
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal, Union
+
+from pydantic import Field, create_model
 
 from modules.agents.hypothesis_context import hypothesis_inspection_journal
 from modules.agents.structured_outputs import (
     HypothesisCheckpointDecisionOutput,
     HypothesisPrerequisiteGap,
+    HypothesisRecordReview,
     HypothesisSubjectReview,
     HypothesisTaskDecisionOutput,
+    NoHypothesisBasis,
+    TaskReviewDecisionOutput,
 )
 from modules.tools import memory
 from modules.tools.artifact_journal import inspection_has_content
@@ -174,7 +180,11 @@ def validate_review(data: dict[str, Any], task: Any, operation_id: str) -> None:
                     if not set(assessment.inspection_refs) <= set(basis.inspection_refs):
                         raise ValueError("Behavior assessment must cite its inspected-evidence basis")
                 if any(item.supports_conditional_test for item in basis.behavior_assessments or []):
-                    if review.status == "done" or review.repair is None or review.repair.kind != "acceptance":
+                    waiting = review.status == "blocked" and bool(review.prerequisite_gaps)
+                    required_kind = "execution" if review.prerequisite_gaps else "acceptance"
+                    if review.status == "done" or (not waiting and (
+                        review.repair is None or review.repair.kind != required_kind
+                    )):
                         raise ValueError("Supported conditional test requires publication repair")
             elif basis.kind == "metadata_only":
                 if review.status == "done" or review.repair is None or review.repair.kind not in {"acceptance", "execution"}:
@@ -194,3 +204,80 @@ def validate_review(data: dict[str, Any], task: Any, operation_id: str) -> None:
     permitted_repairs = {"acceptance", "execution"} if review.prerequisite_gaps else {"acceptance"}
     if changes and review.status != "blocked" and (review.repair is None or review.repair.kind not in permitted_repairs):
         raise ValueError("Revised or withdrawn hypotheses require explicit publication repair")
+
+
+@dataclass(frozen=True)
+class BoundHypothesisReview:
+    """Immutable publication identity and model-facing structured review contract."""
+
+    digest: str
+    output_model: Any
+    task_uid: str
+    example: str
+
+    @classmethod
+    def capture(cls, task: Any, operation_id: str) -> "BoundHypothesisReview":
+        binding = hypothesis_binding(task)
+        publication = load_hypothesis_set(binding["artifact_ref"], task, operation_id)
+        rows = []
+        for index, subject in enumerate(publication.subjects):
+            identifiers = tuple(item.hypothesis_id for item in subject.hypotheses)
+            record = create_model(
+                f"BoundHypothesisRecord{index}", __base__=HypothesisRecordReview,
+                hypothesis_id=(Literal[identifiers] if identifiers else str, ...),
+            )
+            rows.append(create_model(
+                f"BoundHypothesisSubject{index}", __base__=HypothesisSubjectReview,
+                item_id=(Literal[subject.item_id], ...),
+                hypotheses=(list[record], Field(min_length=len(identifiers), max_length=len(identifiers))),
+                no_hypothesis_basis=(type(None), None) if identifiers else (NoHypothesisBasis, ...),
+            ))
+        if not rows:
+            raise ValueError("Cannot review a publication without subjects")
+        row_type = rows[0] if len(rows) == 1 else Annotated[
+            Union[tuple(rows)], Field(discriminator="item_id")  # noqa: UP007 - runtime union of generated models
+        ]
+        criteria = tuple(item.id for item in task.acceptance.criteria)
+        criterion_type = Literal[criteria]
+        gap = create_model(
+            "BoundHypothesisPrerequisiteGap", __base__=HypothesisPrerequisiteGap,
+            criterion_id=(criterion_type, ...),
+            item_ids=(list[Literal[tuple(subject.item_id for subject in publication.subjects)]], Field(min_length=1)),
+        )
+        model = create_model(
+            "BoundHypothesisReviewOutput", __base__=TaskReviewDecisionOutput,
+            status=(Literal["done", "partial_failure", "blocked"], ...),
+            subject_reviews=(list[row_type], Field(min_length=len(rows), max_length=len(rows))),
+            prerequisite_gaps=(list[gap], Field(default_factory=list)),
+            unresolved_criterion_ids=(list[criterion_type], Field(default_factory=list)),
+        )
+        has_empty = any(not subject.hypotheses for subject in publication.subjects)
+        example = {"status": "partial_failure" if has_empty else "done",
+                   "reason": "Illustrative review only; replace reasons with your evidence-based judgments",
+                   "repair": {"kind": "acceptance" if has_empty else "none"},
+                   "subject_reviews": [{
+                       "item_id": subject.item_id, "decision": "revise" if not subject.hypotheses else "retain",
+                       "reason": "Explain your judgment", "hypotheses": [{
+                           "hypothesis_id": item.hypothesis_id, "decision": "retain", "reason": "Explain test adequacy",
+                       } for item in subject.hypotheses],
+                       **({"no_hypothesis_basis": {"kind": "metadata_only", "inspection_refs": []}}
+                          if not subject.hypotheses else {}),
+                   } for subject in publication.subjects],
+                   "prerequisite_gaps": [], "unresolved_criterion_ids": []}
+        return cls(binding["sha256"], model, task.task_uid, json.dumps(example))
+
+    def bind(self, payload: dict[str, Any], task: Any) -> dict[str, Any]:
+        """Attach controller provenance before freezing any parseable semantic judgments."""
+        if task.task_uid != self.task_uid or hypothesis_binding(task).get("sha256") != self.digest:
+            raise ValueError("Publication changed during hypothesis evaluation")
+        wire = dict(payload)
+        if wire.pop("publication_sha256", self.digest) != self.digest:
+            raise ValueError("Hypothesis review must bind the latest publication digest")
+        return {**wire, "publication_sha256": self.digest}
+
+    def canonicalize(self, payload: dict[str, Any], task: Any) -> dict[str, Any]:
+        """Validate model judgments and produce the existing canonical decision envelope."""
+        wire = self.bind(payload, task)
+        wire.pop("publication_sha256")
+        result = self.output_model.model_validate(wire).model_dump(exclude_none=True)
+        return {**result, "publication_sha256": self.digest}

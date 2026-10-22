@@ -395,3 +395,137 @@ def test_provenance_completion_preserves_supplied_behavior_judgments(reviewed):
     changed = copy.deepcopy(after)
     changed["subject_reviews"][0]["no_hypothesis_basis"]["inspection_refs"] = ["artifact:other.json"]
     assert not completes_review_provenance(after, changed)
+
+
+def test_bound_review_schema_owns_digest_and_constrains_populated_subject(reviewed):
+    from modules.agents.hypothesis_review import BoundHypothesisReview
+
+    task, data = reviewed
+    bound = BoundHypothesisReview.capture(task, "OP_TEST")
+    schema = bound.output_model.model_json_schema()
+    assert "publication_sha256" not in schema["properties"]
+    assert "status" in schema["required"]
+    assert schema["properties"]["status"]["enum"] == ["done", "partial_failure", "blocked"]
+    wire = {key: value for key, value in data.items() if key != "publication_sha256"}
+    assert bound.canonicalize(wire, task)["publication_sha256"] == data["publication_sha256"]
+    assert bound.canonicalize(data, task) == bound.canonicalize(wire, task)
+    assert any(definition.get("properties", {}).get("item_id", {}).get("const") == "subject"
+               for definition in schema["$defs"].values())
+    for change in ("status", "subject", "hypothesis", "basis", "misnested", "criterion", "duplicate"):
+        candidate = copy.deepcopy(wire)
+        row = candidate["subject_reviews"][0]
+        if change == "status":
+            candidate.pop("status")
+        elif change == "subject":
+            row["item_id"] = "foreign"
+        elif change == "hypothesis":
+            row["hypotheses"][0]["hypothesis_id"] = "foreign"
+        elif change == "basis":
+            row["no_hypothesis_basis"] = {"kind": "metadata_only"}
+        elif change == "misnested":
+            row["behavior_assessments"] = []
+        elif change == "criterion":
+            candidate["unresolved_criterion_ids"] = ["foreign"]
+        else:
+            candidate["subject_reviews"].append(copy.deepcopy(row))
+        with pytest.raises(ValueError):
+            bound.canonicalize(candidate, task)
+    with pytest.raises(ValueError, match="latest publication"):
+        bound.canonicalize({**wire, "publication_sha256": "stale"}, task)
+    from dataclasses import replace
+
+    with pytest.raises(ValueError, match="Publication changed"):
+        bound.canonicalize(wire, replace(task, task_uid="foreign-task"))
+    assert bound.output_model.model_validate_json(bound.example).status == "done"
+
+
+def test_bound_empty_review_requires_nested_basis(empty_review):
+    from modules.agents.hypothesis_review import BoundHypothesisReview
+
+    task, data = empty_review
+    bound = BoundHypothesisReview.capture(task, "OP_TEST")
+    with pytest.raises(ValueError, match="no_hypothesis_basis"):
+        bound.canonicalize(data, task)
+    row = data["subject_reviews"][0]
+    row["no_hypothesis_basis"] = {"kind": "inspected_evidence", "inspection_refs": ["artifact:inspection.json"],
+                                  "no_relevant_behavior_reason": "Only inert documentation"}
+    assert bound.canonicalize(data, task)["subject_reviews"][0] == row
+    assert bound.output_model.model_validate_json(bound.example).repair.kind == "acceptance"
+
+
+def test_bound_review_mixed_subjects(reviewed, monkeypatch):
+    from types import SimpleNamespace
+
+    import modules.agents.hypothesis_review as review_module
+
+    task, _data = reviewed
+    publication = review_module.load_hypothesis_set(
+        review_module.hypothesis_binding(task)["artifact_ref"], task, "OP_TEST",
+    )
+    subjects = [*publication.subjects, SimpleNamespace(item_id="empty-subject", hypotheses=[])]
+    monkeypatch.setattr(review_module, "load_hypothesis_set", lambda *_args: SimpleNamespace(subjects=subjects))
+    bound = review_module.BoundHypothesisReview.capture(task, "OP_TEST")
+    wire = bound.output_model.model_validate_json(bound.example).model_dump(exclude_none=True)
+    assert len(bound.canonicalize(wire, task)["subject_reviews"]) == 2
+    wire["subject_reviews"][1]["item_id"] = "foreign"
+    with pytest.raises(ValueError):
+        bound.canonicalize(wire, task)
+    wire = bound.output_model.model_validate_json(bound.example).model_dump(exclude_none=True)
+    wire["unresolved_criterion_ids"] = ["unknown"]
+    with pytest.raises(ValueError):
+        bound.canonicalize(wire, task)
+    subjects.clear()
+    with pytest.raises(ValueError, match="without subjects"):
+        review_module.BoundHypothesisReview.capture(task, "OP_TEST")
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_bound_review_strands_runtime_schema_resolves_every_reference(reviewed, monkeypatch, mixed):
+    import json
+    from types import SimpleNamespace
+
+    from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
+
+    import modules.agents.hypothesis_review as review_module
+
+    task, _data = reviewed
+    if mixed:
+        original = review_module.load_hypothesis_set(
+            review_module.hypothesis_binding(task)["artifact_ref"], task, "OP_TEST",
+        )
+        monkeypatch.setattr(review_module, "load_hypothesis_set", lambda *_args: SimpleNamespace(subjects=[
+            *original.subjects, SimpleNamespace(item_id="empty-subject", hypotheses=[]),
+        ]))
+    bound = review_module.BoundHypothesisReview.capture(task, "OP_TEST")
+    schema = StructuredOutputTool(bound.output_model).tool_spec["inputSchema"]["json"]
+    assert "status" in schema["required"]
+    assert "publication_sha256" not in schema["properties"]
+    assert '"$ref"' not in json.dumps(schema)
+    assert '"subject"' in json.dumps(schema)
+    if mixed:
+        assert '"empty-subject"' in json.dumps(schema)
+        assert "no_hypothesis_basis" in json.dumps(schema)
+
+
+@pytest.mark.parametrize("blocked", [False, True])
+def test_supported_behavior_can_wait_for_explicit_prerequisite(empty_review, tmp_path, blocked):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.agents.hypothesis_review import normalize_review
+
+    task, data = empty_review
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    reference = journal.record_inspection("read_artifact", "behavior", {},
+                                          repr({"content": "Function accepts caller-selected resource identity"}), ())
+    data["subject_reviews"][0]["no_hypothesis_basis"] = {
+        "kind": "inspected_evidence", "inspection_refs": [reference], "behavior_assessments": [{
+            "observed_behavior": "Caller selects a resource", "inspection_refs": [reference],
+            "supports_conditional_test": True, "reasoning": "Compare authorization across owners",
+        }],
+    }
+    data["prerequisite_gaps"] = [{"criterion_id": "hypotheses", "missing_input": "Required ownership policy",
+                                 "item_ids": ["subject"], "source_refs": ["artifact:inventory.json"]}]
+    data["status"] = "blocked" if blocked else "partial_failure"
+    data["reason"] = "Required policy is unavailable" if blocked else "Inspect required policy first"
+    result = normalize_review(data)
+    assert result["repair"]["kind"] == ("none" if blocked else "execution")
+    validate_review(result, task, "OP_TEST")

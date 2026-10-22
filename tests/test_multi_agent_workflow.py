@@ -24093,6 +24093,11 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
     assert "supports_conditional_test" in evaluator
     assert "no_relevant_behavior_reason" in evaluator
     assert "before the checkpoint" in evaluator
+    assert "Python binds publication_sha256; omit it" in evaluator
+    assert "Always include top-level status" in evaluator
+    assert "INSIDE subject_reviews[].no_hypothesis_basis" in evaluator
+    assert "Complete shape example using the bound IDs" in evaluator
+    assert "read_inspection_result" in controller._task_evaluator_system_prompt()
     assert "request focused prerequisite inspection" in evaluator
     assert "Do not put replacement" in evaluator
     assert "closure/schema defect" not in evaluator
@@ -24109,6 +24114,10 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
         assert "Structural mismatches must remain explicit" in fitted
         assert "assess concrete observed behavior" in fitted
         assert "future test can resolve" in fitted
+        if "Required hypothesis review output" in prompt:
+            assert "Always include top-level status" in fitted
+            assert "INSIDE subject_reviews[].no_hypothesis_basis" in fitted
+            assert "Complete shape example using the bound IDs" in fitted
 
 
 @pytest.mark.parametrize("subject", ["https://service.test/entry", "tcp://service.test:1234", "/workspace/source.py"])
@@ -24270,3 +24279,49 @@ def test_legacy_route_inspection_survives_fresh_checkpoint_and_supports_hypothes
     current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
     assert current.status == "done" and len(calls) == 2
     assert manifest_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("failure", ["missing_status", "misnested_basis", "malformed_json"])
+def test_bound_hypothesis_contract_repairs_full_envelope(worker_flow_case, monkeypatch, structured, failure):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    calls = []
+
+    def runner(_role, prompt, _tools, _system, *models):
+        calls.append(prompt)
+        if models:
+            schema = models[0].model_json_schema()
+            assert "publication_sha256" not in schema["properties"]
+            assert "status" in schema["required"]
+        valid = {"status": "partial_failure", "reason": "Inspect relevant implementation before accepting emptiness",
+                 "repair": {"kind": "acceptance"}, "subject_reviews": [{
+                     "item_id": "subject", "decision": "revise", "reason": "Metadata alone is insufficient",
+                     "hypotheses": [], "no_hypothesis_basis": {"kind": "metadata_only", "inspection_refs": []},
+                 }]}
+        if len(calls) == 1:
+            if failure == "missing_status":
+                valid.pop("status")
+            elif failure == "misnested_basis":
+                valid["subject_reviews"][0]["behavior_assessments"] = []
+            elif not structured:
+                return '{"status":"done",'
+            else:
+                # A malformed structured payload fails schema validation rather than JSON parsing.
+                valid.pop("status")
+        return valid if structured else json.dumps(valid)
+
+    controller.text_runner = runner
+    controller.structured_runner = runner if structured else None
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
+    assert len(calls) == 2
+    assert decision.status == "partial_failure" and decision.repair_kind == "acceptance"
+    assert "complete object" in calls[1]
+    assert "INSIDE subject_reviews[].no_hypothesis_basis" in calls[0]
+    stored = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert stored.recovery_context["hypothesis_review"]["publication_sha256"] == (
+        workflow_mod.hypothesis_binding(task)["sha256"]
+    )
