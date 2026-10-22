@@ -10,6 +10,39 @@ from modules.tools import recon_inventory_manifest as manifest_tool
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 
 
+@pytest.mark.parametrize("payload,expected", [
+    ({"schema_version": "client_bundle_inventory_v2", "target_id": "target-1",
+      "target": "https://target.test", "api_paths": ["/child"], "spa_routes": []},
+     {"target-1": "https://target.test/"}),
+    ({"schema_version": 1, "items": [{"id": "child", "kind": "endpoint", "target_id": "target-1",
+      "value": "https://target.test/child", "attributes": {}}], "unassessed_gaps": []}, {"target-1": None}),
+    ([], None), ({}, None),
+    ({"schema_version": "client_bundle_inventory_v2", "target_id": "target-1", "target": "invalid",
+      "api_paths": [], "spa_routes": []}, None),
+    ({"schema_version": "client_bundle_inventory_v2", "target": "https://target.test",
+      "api_paths": [], "spa_routes": []}, None),
+])
+def test_inventory_scope_loader_uses_declared_targets_not_endpoint_urls(tmp_path, monkeypatch, payload, expected):
+    path = tmp_path / "scope.json"
+    path.write_text(json.dumps(payload))
+    monkeypatch.setattr(memory, "_artifact_path_from_ref", lambda _reference: str(path))
+    before = path.read_bytes()
+    if expected is None:
+        with pytest.raises(ValueError):
+            manifest_tool.load_inventory_target_bindings("artifact:scope.json")
+    else:
+        assert manifest_tool.load_inventory_target_bindings("artifact:scope.json") == expected
+    assert path.read_bytes() == before
+
+
+def test_inventory_scope_loader_bounds_artifact_reads(tmp_path, monkeypatch):
+    path = tmp_path / "large.json"
+    path.write_text(" " * 16_000_001)
+    monkeypatch.setattr(memory, "_artifact_path_from_ref", lambda _reference: str(path))
+    with pytest.raises(ValueError, match="inspection limit"):
+        manifest_tool.load_inventory_target_bindings("artifact:large.json")
+
+
 def test_nested_adapter_metadata_is_not_treated_as_an_inventory_interaction():
     first = {"extensions": {"interaction": {"value": "first"}}}
     second = {"extensions": {"interaction": {"other": "second"}}}

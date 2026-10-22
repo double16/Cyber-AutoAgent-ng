@@ -41,7 +41,8 @@ def test_artifact_read_and_search_tools_have_separate_schemas():
     bounded_schema = create_bounded_artifact_searcher(max_searches=1).tool_spec["inputSchema"]["json"]["properties"]
     for schema in (search_schema, bounded_schema):
         assert schema["context_lines"]["minimum"] == 0
-        assert schema["context_lines"]["maximum"] == 10
+        assert schema["context_lines"]["maximum"] == 20
+        assert "0 through 20" in schema["context_lines"]["description"]
         assert schema["context_lines"]["default"] == 2
         assert schema["max_matches"]["minimum"] == 1
         assert schema["max_matches"]["maximum"] == 50
@@ -49,7 +50,7 @@ def test_artifact_read_and_search_tools_have_separate_schemas():
         assert "1 through 50" in schema["max_matches"]["description"]
 
 
-def test_search_artifact_context_range_keeps_zero_and_ten_and_rejects_twenty(tmp_path: Path):
+def test_search_artifact_context_range_accepts_twenty_inclusive(tmp_path: Path):
     artifact = tmp_path / "evidence.txt"
     artifact.write_text("needle\n", encoding="utf-8")
     with (
@@ -58,10 +59,24 @@ def test_search_artifact_context_range_keeps_zero_and_ten_and_rejects_twenty(tmp
     ):
         assert "'match_count': 1" in SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=0)
         assert "'match_count': 1" in SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=10)
-        with pytest.raises(ValueError, match="context_lines must be between 0 and 10"):
-            SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=20)
-        with pytest.raises(ValueError, match="context_lines must be between 0 and 10"):
+        assert "'match_count': 1" in SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=20)
+        with pytest.raises(ValueError, match="context_lines must be between 0 and 20"):
+            SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=21)
+        with pytest.raises(ValueError, match="context_lines must be between 0 and 20"):
             SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=-1)
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_search_artifact_returns_twenty_lines_before_and_after_match(tmp_path: Path, bounded):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("before\n" * 20 + "needle\n" + "after\n" * 20, encoding="utf-8")
+    searcher = create_bounded_artifact_searcher(max_searches=1) if bounded else SEARCH_ARTIFACT
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        result = ast.literal_eval(searcher("evidence.txt", "needle", context_lines=20))
+    assert [line["line"] for line in result["matches"][0]["context"]] == list(range(1, 42))
 
 
 def test_search_artifact_match_limit_boundaries_and_validation(tmp_path: Path):

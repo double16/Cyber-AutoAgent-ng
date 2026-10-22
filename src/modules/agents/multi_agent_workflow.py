@@ -246,7 +246,7 @@ from modules.tools.optional_tool_selection import (
     credential_tool_names,
     required_optional_tool_names,
 )
-from modules.tools.recon_inventory_manifest import consolidate_recon_artifacts
+from modules.tools.recon_inventory_manifest import consolidate_recon_artifacts, load_inventory_target_bindings
 from modules.tools.semantic_enum import normalize_semantic_enum
 from modules.tools.shell import scoped_shell_command_validator
 from modules.tools.shell_provenance import (
@@ -7543,6 +7543,7 @@ class MultiAgentWorkflowController:
                                 task,
                                 acceptance_recovery_evidence,
                                 next_cycle=cycle + 1,
+                                tool_outcomes=tool_outcomes,
                             )
                             self._record_efficiency_correction("execution_prerequisite_repair")
                         self._log_workflow(
@@ -8212,6 +8213,7 @@ output and replay it itself after this turn. Do not call or attempt to describe 
         recovery_evidence: list[dict[str, str]],
         *,
         next_cycle: int,
+        tool_outcomes: list[ToolOutcome] | None = None,
     ) -> str:
         """Build one provenance-only repair turn without exposing controller-owned acceptance replay."""
 
@@ -8228,6 +8230,26 @@ output and replay it itself after this turn. Do not call or attempt to describe 
             for criterion in task.acceptance.criteria
             for requirement in criterion.execution_requirements
         ) or "none"
+        diagnostic_rows = []
+        if tool_outcomes:
+            expected = set(canonical_procedure_methods(
+                procedure.methods if procedure is not None else ("analyze",), self._task_execution_targets(plan, task),
+            ))
+            candidates = [(outcome, self._outcome_execution_capabilities(outcome)) for outcome in tool_outcomes
+                          if outcome.success and outcome.tool_name not in _NON_EXECUTION_RECEIPT_TOOLS]
+            for criterion in task.acceptance.criteria:
+                for requirement in criterion.execution_requirements:
+                    matched, _linked = self._execution_subject_matches(plan, task, requirement.subject_ref, candidates)
+                    observed = set().union(*(capabilities for _outcome, capabilities in matched))
+                    diagnostic_rows.append((requirement.id, sorted(observed), sorted(expected - observed),
+                                            sorted(outcome.tool_use_id for outcome, _caps in matched)))
+        diagnostics = (
+            f"execution_bindings[{len(diagnostic_rows)}]"
+            "{requirement_id,observed_capabilities,missing_capabilities,matched_tool_use_ids}:\n"
+            + "\n".join("  " + ",".join(sanitize_toon_value(
+                json.dumps(value) if isinstance(value, list) else value
+            ) for value in row) for row in diagnostic_rows)
+        )
         return f"""## Execution Evidence Recovery
 Start fresh actor cycle {next_cycle} for the existing task. Do not replay prior reasoning or broaden scope.
 
@@ -8237,10 +8259,12 @@ Frozen execution methods: {methods}
 Frozen execution bindings: {requirements}
 Retained task-local evidence:
 {evidence_ledger}
+{diagnostics}
 
 Produce current-operation artifact-backed evidence for the exact frozen method and subject. The controller retained
 the prior acceptance submission and will validate and replay it itself after this turn. Do not call or attempt to
-describe record_task_acceptance.
+describe record_task_acceptance. Reuse matched acquisition and analysis; repair only the missing capability,
+artifact output, or subject binding rather than repeating a completed request.
 """
 
     def _missing_acceptance_recovery_prompt(
@@ -19140,6 +19164,9 @@ support. Do not infer unshown content or turn missing detail into a supported co
             "deterministically records the frozen finding-candidate acceptance; do not call "
             "`record_task_acceptance` afterward."
             if candidate_acceptance_owned
+            else "The controller owns acceptance reconciliation for this turn. Produce the requested evidence "
+            "and return a concise summary; do not call an unavailable acceptance tool."
+            if available_tool_names is not None and "record_task_acceptance" not in tool_names
             else "For the assigned task, call `record_task_acceptance` with one terminal status, disposition, concrete "
             "summary, and evidence_refs list."
         )
@@ -19204,8 +19231,8 @@ support. Do not infer unshown content or turn missing detail into a supported co
             "\n\n## Execution Evidence Prerequisite\n"
             "Execute only unresolved declared capabilities against their frozen subjects and preserve concrete "
             "results as current-operation artifacts. The controller "
-            "matches that task-local tool outcome to the requirement automatically when record_task_acceptance is "
-            "called. Raw commands, memories, and unsupported claims are not execution evidence."
+            "matches that task-local tool outcome to the requirement automatically during acceptance reconciliation. "
+            "Raw commands, memories, and unsupported claims are not execution evidence."
             if unresolved_requirements
             else ""
         )
@@ -19238,7 +19265,7 @@ Use actual registered tool calls for actions; do not simulate calls with pseudo-
 authoritative task context rather than replaying the prior action.
 Acceptance `evidence_refs` must be durable references only: use `artifact:`, `artifact_id:`, `memory:`, or
 `finding:`. Raw shell commands, tool IDs, URLs, and pasted tool output are invalid. Save command or browser output
-with the appropriate artifact-producing tool before calling `record_task_acceptance`.
+with the appropriate artifact-producing tool before acceptance.
 {finding_lifecycle_guidance} {follow_up_persistence_guidance} Python
 schedules any required follow-up work after the current task. For the assigned task: {acceptance_instruction}
 {disposition_instruction} This
@@ -20092,6 +20119,57 @@ tools and durable evidence before relying on it."""
     ) -> bool:
         """Return whether an observed invocation is bound to the frozen subject."""
 
+        payload = MultiAgentWorkflowController._execution_input(outcome)
+        explicit_ids = payload.get("target_ids", [])
+        if "target_id" in payload:
+            explicit_ids = [*explicit_ids, payload["target_id"]] if isinstance(explicit_ids, list) else None
+        if explicit_ids is None or not isinstance(explicit_ids, list):
+            return False
+        assigned = {target.target_id: target.value for target in plan.targets
+                    if not task.target_ids or target.target_id in task.target_ids}
+        if any(not isinstance(value, str) or value not in assigned for value in explicit_ids):
+            return False
+        concrete = [payload[field] for field in ("url", "target", "subject_ref")
+                    if isinstance(payload.get(field), str) and payload[field].strip()]
+        concrete = [assigned.get(value.removeprefix("target:"), value) for value in concrete]
+        if explicit_ids and concrete:
+            for value in concrete:
+                normalized = MultiAgentWorkflowController._canonical_url_subject(value)
+                compatible = False
+                for target_id in explicit_ids:
+                    target = assigned[target_id]
+                    boundary = MultiAgentWorkflowController._canonical_url_subject(target)
+                    compatible |= (normalized is not None and boundary is not None and normalized[:3] == boundary[:3])
+                    compatible |= normalized is None and (value == target or value.startswith(target.rstrip("/") + "/"))
+                if not compatible:
+                    return False
+        if concrete or explicit_ids:
+            values = concrete or [assigned[value] for value in explicit_ids]
+            # Explicit inputs take precedence over incidental URLs in result text.
+            outcome = replace(outcome, input_summary=json.dumps(values), structured_input=None,
+                              output_summary="", raw_output_summary="")
+        elif isinstance(outcome.structured_input, dict):
+            outcome = replace(outcome, input_summary=json.dumps(payload, default=str))
+        if not concrete and not explicit_ids and "analyze" in (
+            MultiAgentWorkflowController._outcome_execution_capabilities(outcome)
+        ):
+            outcome = replace(outcome, output_summary="", raw_output_summary="")
+        return MultiAgentWorkflowController._direct_execution_subject_match(plan, task, subject_ref, outcome)
+
+    @staticmethod
+    def _execution_input(outcome: ToolOutcome) -> dict[str, Any]:
+        if isinstance(outcome.structured_input, dict):
+            return outcome.structured_input
+        try:
+            payload = json.loads(outcome.input_summary)
+        except (TypeError, ValueError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _direct_execution_subject_match(
+        plan: OperationPlan, task: Task, subject_ref: str, outcome: ToolOutcome,
+    ) -> bool:
         subject = str(subject_ref or "").strip()
         haystack = f"{outcome.input_summary} {outcome.output_summary} {outcome.raw_output_summary}"
         observed_urls = MultiAgentWorkflowController._outcome_url_subjects(outcome)
@@ -20106,7 +20184,11 @@ tools and durable evidence before relying on it."""
             assigned_values = {
                 str(target.value or "").strip().rstrip("/").lower()
                 for target in assigned_targets
+                if not str(target.value).startswith("/")
             }
+            if any(MultiAgentWorkflowController._source_subject_in_text(str(target.value), haystack)
+                   for target in assigned_targets if str(target.value).startswith("/")):
+                return True
             if any(value and value in haystack.lower() for value in assigned_values):
                 return True
             assigned_urls = {
@@ -20124,7 +20206,11 @@ tools and durable evidence before relying on it."""
                     (scheme, host, port) in assigned_authorities and bool(route_pattern.fullmatch(path))
                     for scheme, host, port, path in observed_urls
                 )
-            return bool(route_pattern.search(haystack))
+            return MultiAgentWorkflowController._source_subject_in_text(subject, haystack)
+        normalized_url = MultiAgentWorkflowController._canonical_url_subject(subject)
+        if normalized_url is not None:
+            authorities = {value[:3] for value in MultiAgentWorkflowController._assigned_url_subjects(plan, task)}
+            return normalized_url in observed_urls and (not authorities or normalized_url[:3] in authorities)
         normalized_subject = subject.rstrip("/").lower()
         if normalized_subject and normalized_subject in haystack.lower():
             return True
@@ -20134,6 +20220,112 @@ tools and durable evidence before relying on it."""
             if not task.target_ids or target.target_id in task.target_ids
         }
         return any(value and value in haystack.lower() for value in assigned)
+
+    @staticmethod
+    def _source_subject_in_text(subject: str, text: str) -> bool:
+        if not subject.rstrip("/"):
+            return False
+        return bool(re.search(r"(?<![A-Za-z0-9_./-])" + re.escape(subject.rstrip("/"))
+                              + r"(?=/|[\"'\s]|$)", text))
+
+    def _execution_subject_matches(
+        self, plan: OperationPlan, task: Task, subject: str, candidates: list[tuple[ToolOutcome, frozenset[str]]],
+    ) -> tuple[list[tuple[ToolOutcome, frozenset[str]]], list[str]]:
+        """Use explicit scope or one earlier artifact producer; never build transitive chains."""
+
+        direct = [(outcome, capabilities) for outcome, capabilities in candidates
+                  if self._outcome_matches_execution_subject(plan, task, subject, outcome)]
+        matched = list(direct)
+        linked = []
+        for outcome, capabilities in sorted(candidates, key=lambda item: item[0].sequence):
+            was_direct = any(item[0].tool_use_id == outcome.tool_use_id for item in direct)
+            if capabilities and "analyze" not in capabilities:
+                continue
+            payload = self._execution_input(outcome)
+            explicit_scope = any(field in payload for field in ("target_id", "target_ids", "target", "url", "subject_ref"))
+            outputs = self._execution_output_refs(outcome)
+            bindings = {}
+            invalid_scope = False
+            for reference in outputs:
+                try:
+                    recovered = load_inventory_target_bindings(reference)
+                except (OSError, TypeError, ValueError, KeyError):
+                    continue
+                for target_id, value in recovered.items():
+                    target = next((target for target in plan.targets if target.target_id == target_id), None)
+                    if (target is None or (task.target_ids and target_id not in task.target_ids)
+                            or (value is not None and self._canonical_url_subject(value)
+                                != self._canonical_url_subject(target.value))):
+                        invalid_scope = True
+                    bindings[target_id] = value
+            if bindings and explicit_scope and not all(
+                self._outcome_matches_execution_subject(plan, task, f"target:{target_id}", outcome)
+                for target_id in bindings
+            ):
+                invalid_scope = True
+            if invalid_scope:
+                direct = [item for item in direct if item[0].tool_use_id != outcome.tool_use_id]
+                matched = [item for item in matched if item[0].tool_use_id != outcome.tool_use_id]
+                continue
+            if was_direct:
+                continue
+            if explicit_scope:
+                continue
+            if bindings:
+                scoped = replace(outcome, structured_input={"target_ids": list(bindings)})
+                if self._outcome_matches_execution_subject(plan, task, subject, scoped):
+                    matched.append((outcome, capabilities))
+                continue
+            inputs = set()
+            consumption = {key: value for key, value in payload.items()
+                           if key not in {"output_file", "output_path", "output_artifact", "inventory_manifest"}}
+            references = [*extract_artifact_references(consumption),
+                          *self._operation_local_artifact_refs_in_text(json.dumps(consumption, default=str))]
+            for reference in references:
+                try:
+                    reference = canonical_artifact_reference(reference)
+                except (OSError, TypeError, ValueError):
+                    continue
+                if self._execution_artifact_is_current_operation(reference):
+                    inputs.add(reference)
+            if not inputs:
+                continue
+            producers = [(producer, producer_capabilities) for producer, producer_capabilities in direct
+                         if producer.sequence < outcome.sequence
+                         and inputs.intersection(self._execution_output_refs(producer))]
+            produced_inputs = set().union(*(self._execution_output_refs(producer) for producer, _caps in producers))
+            if producers and inputs <= produced_inputs:
+                matched.append((outcome, capabilities))
+                linked.append(outcome.tool_use_id)
+        return matched, linked
+
+    def _execution_output_refs(self, outcome: ToolOutcome) -> set[str]:
+        """Separate produced evidence from references merely consumed by a tool."""
+
+        produced = set()
+        for reference in extract_artifact_references([
+            *outcome.artifact_refs, outcome.output_summary, outcome.raw_output_summary,
+        ]):
+            reference = self._safe_execution_artifact_reference(reference)
+            if reference is not None:
+                produced.add(reference)
+        if outcome.tool_name == "shell":
+            provenance = self._shell_execution_provenance(outcome)
+            if len(provenance.executables) == 1 and len(provenance.urls) <= 1 and len(provenance.output_paths) == 1:
+                reference = self._safe_execution_artifact_reference(provenance.output_paths[0])
+                if reference is not None:
+                    produced.add(reference)
+        return produced
+
+    @staticmethod
+    def _safe_execution_artifact_reference(value: Any) -> str | None:
+        """Ignore optional output candidates that are not regular operation-local artifacts."""
+
+        try:
+            reference = canonical_artifact_reference(value)
+            return reference if MultiAgentWorkflowController._execution_artifact_is_current_operation(reference) else None
+        except (OSError, TypeError, ValueError, RuntimeError):
+            return None
 
     def _resolve_controller_execution_evidence(
         self,
@@ -20162,17 +20354,9 @@ tools and durable evidence before relying on it."""
 
         resolved: dict[str, list[str]] = {}
         details: dict[str, dict[str, Any]] = {}
+        diagnostics = {}
         for requirement in criterion.execution_requirements:
-            matched = [
-                (outcome, capabilities)
-                for outcome, capabilities in candidates
-                if self._outcome_matches_execution_subject(
-                    plan,
-                    task,
-                    requirement.subject_ref,
-                    outcome,
-                )
-            ]
+            matched, linked_ids = self._execution_subject_matches(plan, task, requirement.subject_ref, candidates)
             route_collection_matches = (
                 self._enumeration_receipt_outcomes(plan, task, requirement, candidates)
                 if expected_capabilities.intersection({"crawl", "enumerate"})
@@ -20186,13 +20370,25 @@ tools and durable evidence before relying on it."""
                 if not any(existing[0].tool_use_id == item[0].tool_use_id for existing in receipt_producers):
                     receipt_producers.append(item)
             references = self._valid_required_output_artifact_refs(
-                plan, task, tool_outcomes, requirement
+                plan, task, tool_outcomes, requirement, matched_outcomes=[outcome for outcome, _caps in matched],
             )
             if procedure is not None and procedure.output_kind == "inventory_manifest" and matched:
                 references = list(dict.fromkeys([
                     *references,
                     *self._valid_inventory_output_refs_linked_to_execution(plan, tool_outcomes, matched),
                 ]))
+            diagnostics[requirement.id] = {
+                "observed_capabilities": sorted(observed_capabilities),
+                "missing_capabilities": sorted(expected_capabilities - observed_capabilities),
+                "subject_matched_tool_use_ids": sorted(outcome.tool_use_id for outcome, _caps in matched),
+                "linked_analysis_tool_use_ids": sorted(linked_ids),
+                "unknown_capability_tool_use_ids": sorted(outcome.tool_use_id for outcome, caps in matched if not caps),
+                "unbound_analysis_tool_use_ids": sorted(
+                    outcome.tool_use_id for outcome, capabilities in candidates if "analyze" in capabilities
+                    and not any(item[0].tool_use_id == outcome.tool_use_id for item in matched)
+                ),
+                "output_evidence_available": bool(references),
+            }
             if not references:
                 continue
             if (
@@ -20247,7 +20443,7 @@ tools and durable evidence before relying on it."""
                     },
                 },
             )
-        self._emit_controller_execution_evidence(task, criterion, resolved, details, expected_capabilities)
+        self._emit_controller_execution_evidence(task, criterion, resolved, details, expected_capabilities, diagnostics)
         return resolved
 
     def _all_execution_requirements_resolved(
@@ -20339,6 +20535,7 @@ tools and durable evidence before relying on it."""
         task: Task,
         tool_outcomes: list[ToolOutcome],
         requirement: ExecutionRequirement | None = None,
+        *, matched_outcomes: list[ToolOutcome] | None = None,
     ) -> list[str]:
         """Return current-operation artifacts that satisfy the task's frozen output contract.
 
@@ -20352,12 +20549,15 @@ tools and durable evidence before relying on it."""
             return []
         references = []
         matching_outcomes = []
+        if requirement is not None and matched_outcomes is None:
+            candidates = [(outcome, self._outcome_execution_capabilities(outcome)) for outcome in tool_outcomes
+                          if outcome.success and outcome.tool_name not in _NON_EXECUTION_RECEIPT_TOOLS]
+            matched, _linked = self._execution_subject_matches(plan, task, requirement.subject_ref, candidates)
+            matched_outcomes = [outcome for outcome, _caps in matched]
         for outcome in tool_outcomes:
             if not outcome.success or outcome.tool_name in _NON_EXECUTION_RECEIPT_TOOLS:
                 continue
-            if requirement is not None and not self._outcome_matches_execution_subject(
-                plan, task, requirement.subject_ref, outcome
-            ):
+            if requirement is not None and outcome not in matched_outcomes:
                 continue
             matching_outcomes.append(outcome)
             for reference in self._artifact_refs_from_tool_outcomes([outcome]):
@@ -20521,6 +20721,7 @@ tools and durable evidence before relying on it."""
         resolved: dict[str, list[str]],
         details: dict[str, dict[str, Any]],
         expected_capabilities: set[str],
+        diagnostics: dict[str, Any] | None = None,
     ) -> None:
         """Emit structured proof-resolution telemetry to the log and current task trace."""
 
@@ -20533,6 +20734,7 @@ tools and durable evidence before relying on it."""
             "criterion_id": criterion.id,
             "outcome": outcome,
             "expected_capabilities": sorted(expected_capabilities),
+            "requirement_diagnostics": diagnostics or {},
             "matched_requirement_ids": sorted(resolved),
             "missing_requirement_ids": sorted(required_ids - set(resolved)),
             "matched_tool_use_ids": sorted({
@@ -20555,6 +20757,7 @@ tools and durable evidence before relying on it."""
             "workflow.execution_evidence.missing": json.dumps(sorted(required_ids - set(resolved))),
             "workflow.execution_evidence.tool_use_ids": json.dumps(event["matched_tool_use_ids"]),
             "workflow.execution_evidence.receipt_modes": json.dumps(event["receipt_modes"]),
+            "workflow.execution_evidence.requirement_diagnostics": json.dumps(diagnostics or {}, sort_keys=True),
         }
         try:
             tracer = otel_trace.get_tracer(__name__)

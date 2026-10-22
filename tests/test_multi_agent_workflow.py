@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from email.message import Message
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -3689,6 +3690,338 @@ def test_controller_matches_root_route_to_target_url_without_trailing_slash():
     )
 
     assert MultiAgentWorkflowController._outcome_matches_execution_subject(plan, task, "/", outcome)
+
+
+@pytest.mark.parametrize("value,kind,subject", [
+    ("https://target.test:8443", "network", "/"),
+    ("tcp://target.test:9000", "network", "target:target-1"),
+    ("/workspace/source", "filesystem", "target:target-1"),
+])
+@pytest.mark.parametrize("payload,expected", [
+    ({"target_id": "target-1"}, True),
+    ({"target_ids": ["target-1"]}, True),
+    ({"target": "target:target-1"}, True),
+    ({"target_id": "other"}, False),
+    ({"target_ids": "target-1"}, False),
+    ({"target_id": "target-1", "url": "https://elsewhere.test"}, False),
+])
+def test_execution_explicit_bindings_override_truncated_or_incidental_summaries(value, kind, subject, payload, expected):
+    plan = replace(_plan(), targets=[OperationTarget("target-1", value, kind)])
+    task = Task("binding", "Analyze", "Analyze", phase=1, status="active",
+                target_scope="subset", target_ids=["target-1"])
+    outcome = ToolOutcome(1, "analysis", "mcp_analysis", True, False, "truncated",
+                          f"incidental documentation mentions {value}", structured_input=payload)
+    assert MultiAgentWorkflowController._outcome_matches_execution_subject(plan, task, subject, outcome) is expected
+
+
+@pytest.fixture
+def execution_binding_case(worker_flow_case, tmp_path, monkeypatch):
+    controller, task, *_ = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", "https://target.test:8443", "network"),
+                                     OperationTarget("target-2", "https://other.test", "network")])
+    criterion = AcceptanceCriterion("criterion", "Acquire and analyze", evidence_requirements=[
+        EvidenceRequirement(kind="artifact"),
+    ], execution_requirements=[
+        ExecutionRequirement("proof", "Acquire and analyze the assigned root", "/"),
+    ])
+    task = replace(task, target_scope="subset", target_ids=["target-1"], acceptance=AcceptanceContract(
+        mode="outcome", basis=AcceptanceBasis(kind="procedure", description="Acquire and analyze",
+                                              source_refs=["target:target-1"], procedure={
+            "methods": ["request", "analyze"], "limits": {"max_requests": 5},
+            "stop_condition": "first_limit_reached", "gap_policy": "record_unassessed", "output_kind": "artifact",
+        }), criteria=[criterion],
+    ))
+    controller.state.store_plan(plan)
+    controller.state.store_task(task)
+    root = tmp_path / "artifacts"
+    root.mkdir(exist_ok=True)
+    for name in ("source.txt", "analysis.json", "unrelated.txt", "third.json"):
+        (root / name).write_text("{}")
+    producer = ToolOutcome(1, "acquire", "browser_goto_url", True, False, "truncated", "saved",
+                           artifact_refs=("artifact:artifacts/source.txt",),
+                           structured_input={"url": "https://target.test:8443/"})
+    analysis = ToolOutcome(2, "analysis", "client_bundle_inventory", True, False, "truncated", "saved",
+                          artifact_refs=("artifact:artifacts/analysis.json",),
+                          structured_input={"source_artifact": str(root / "source.txt")})
+    events = []
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+    return controller, plan, task, criterion, producer, analysis, root, events
+
+
+@pytest.mark.parametrize("destination", ["null", "external_tmp", "configured_tmp", "dynamic_tmp"])
+def test_execution_shell_non_artifact_destinations_preserve_valid_evidence(
+    execution_binding_case, tmp_path, monkeypatch, destination, external_shell_tmp,
+):
+    controller, plan, task, criterion, producer, analysis, _root, _events = execution_binding_case
+    external = tmp_path.parent / f"{tmp_path.name}-scratch"
+    external.mkdir(exist_ok=True)
+    scratch = external / "response.txt"
+    scratch.write_text("scratch")
+    tmp_scratch = external_shell_tmp / "response.txt"
+    tmp_scratch.write_text("scratch")
+    monkeypatch.setenv("TMPDIR", str(external))
+    paths = {"null": "/dev/null", "external_tmp": str(tmp_scratch),
+             "configured_tmp": str(Path(str(external)) / "response.txt"), "dynamic_tmp": "$TMPDIR/response.txt"}
+    producer = replace(producer, tool_name="shell", output_summary="200 https://target.test:8443/",
+                       artifact_refs=(*producer.artifact_refs, f"artifact:{scratch}", "artifact:/dev/null",
+                                      "artifact:artifacts/missing.txt"),
+                       structured_input={"command": f'curl -sS -o "{paths[destination]}" '
+                           '-w "%{http_code} %{url_effective}\\n" https://target.test:8443/'})
+    assert controller._execution_output_refs(producer) == {"artifact:artifacts/source.txt"}
+    assert "request" in controller._outcome_execution_capabilities(producer)
+    assert "proof" in controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis])
+    assert scratch.read_text() == "scratch"
+
+
+@pytest.fixture
+def external_shell_tmp():
+    with TemporaryDirectory(prefix="caa-output-test-", dir="/tmp") as directory:
+        yield Path(directory)
+
+
+@pytest.mark.parametrize("path_kind,accepted", [
+    ("absolute", True), ("relative", True), ("internal_tmp", True), ("internal_symlink", True),
+    ("external_symlink", False), ("missing", False), ("directory", False), ("null", False),
+    ("malformed", False), ("dangling_symlink", False),
+])
+def test_safe_execution_artifacts_respect_resolved_operation_boundary(execution_binding_case, tmp_path, path_kind, accepted):
+    controller, _plan_value, _task, _criterion, _producer, _analysis, root, _events = execution_binding_case
+    path = root / "source.txt"
+    if path_kind == "relative":
+        path = "artifact:artifacts/source.txt"
+    elif path_kind == "internal_tmp":
+        path = root / "tmp" / "scratch.txt"
+        path.parent.mkdir()
+        path.write_text("retained within operation")
+    elif path_kind in {"internal_symlink", "external_symlink", "dangling_symlink"}:
+        destination = root / "source.txt"
+        if path_kind == "external_symlink":
+            destination = tmp_path.parent / f"{tmp_path.name}-external.txt"
+            destination.write_text("external")
+        elif path_kind == "dangling_symlink":
+            destination = root / "missing.txt"
+        path = root / "linked.txt"
+        path.symlink_to(destination)
+    elif path_kind == "missing":
+        path = root / "missing.txt"
+    elif path_kind == "directory":
+        path = root
+    elif path_kind == "null":
+        path = "/dev/null"
+    elif path_kind == "malformed":
+        path = "artifact:artifacts/invalid\x00.txt"
+    result = controller._safe_execution_artifact_reference(str(path))
+    assert (result is not None) is accepted
+    if accepted:
+        assert result.startswith("artifact:artifacts/")
+
+
+@pytest.mark.parametrize("error", [OSError("unreadable"), ValueError("invalid"), TypeError("invalid type"),
+                                    RuntimeError("symlink resolution failed")])
+def test_optional_execution_artifact_resolution_errors_are_local(execution_binding_case, monkeypatch, error):
+    controller, _plan_value, _task, _criterion, producer, _analysis, _root, _events = execution_binding_case
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", Mock(side_effect=error))
+    assert controller._safe_execution_artifact_reference("artifact:artifacts/source.txt") is None
+    assert controller._execution_output_refs(replace(producer, tool_name="shell", structured_input={
+        "command": "curl https://target.test:8443/ -o /dev/null",
+    })) == set()
+
+
+def test_safe_execution_artifacts_recheck_operation_membership(execution_binding_case, monkeypatch):
+    controller, *_rest = execution_binding_case
+    monkeypatch.setattr(controller.__class__, "_execution_artifact_is_current_operation", staticmethod(lambda _ref: False))
+    assert controller._safe_execution_artifact_reference("artifact:artifacts/source.txt") is None
+
+
+@pytest.mark.parametrize("binding", ["input", "manifest", "extraction", "artifact", "unknown_tool"])
+def test_execution_analysis_uses_existing_scope_and_artifact_bindings(execution_binding_case, binding):
+    controller, plan, task, criterion, producer, analysis, root, events = execution_binding_case
+    if binding == "input":
+        analysis = replace(analysis, structured_input={"target_id": "target-1"})
+    elif binding == "manifest":
+        (root / "analysis.json").write_text(json.dumps({"schema_version": 1, "items": [{
+            "id": "endpoint", "kind": "endpoint", "target_id": "target-1",
+            "value": "https://target.test:8443/child", "attributes": {},
+        }], "unassessed_gaps": []}))
+        analysis = replace(analysis, structured_input={})
+    elif binding == "extraction":
+        (root / "analysis.json").write_text(json.dumps({"schema_version": "client_bundle_inventory_v2",
+            "target_id": "target-1", "target": "https://target.test:8443", "api_paths": [], "spa_routes": [],
+        }))
+        analysis = replace(analysis, structured_input={})
+    elif binding == "unknown_tool":
+        analysis = replace(analysis, tool_name="mcp_future_analysis",
+                           structured_input={"document": "artifact:artifacts/source.txt"})
+    resolved = controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis])
+    assert "proof" in resolved
+    assert "artifact:artifacts/analysis.json" in resolved["proof"]
+    diagnostics = events[-1]["requirement_diagnostics"]["proof"]
+    assert diagnostics["subject_matched_tool_use_ids"] == ["acquire", "analysis"]
+    assert diagnostics["missing_capabilities"] == (["analyze"] if binding == "unknown_tool" else [])
+    # Reloading retained outcomes requires no new acquisition or changed acceptance contract.
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis]) == resolved
+    assert controller._all_execution_requirements_resolved(plan, task, [producer, analysis])
+    assert task.acceptance.criteria == (criterion,)
+    if binding in {"artifact", "unknown_tool"}:
+        assert diagnostics["linked_analysis_tool_use_ids"] == ["analysis"]
+
+
+@pytest.mark.parametrize("failure", [
+    "failed_producer", "failed_analysis", "missing_source", "unrelated_input", "mixed_inputs", "wrong_id",
+    "different_route", "different_port", "future_producer", "output_conflict", "input_output_conflict", "cross_operation",
+    "shell_batch", "input_echo",
+])
+def test_execution_analysis_rejects_unproven_bindings(execution_binding_case, tmp_path, failure):
+    controller, plan, task, criterion, producer, analysis, root, events = execution_binding_case
+    if failure == "failed_producer":
+        producer = replace(producer, success=False)
+    elif failure == "failed_analysis":
+        analysis = replace(analysis, success=False)
+    elif failure == "missing_source":
+        (root / "source.txt").unlink()
+    elif failure == "unrelated_input":
+        analysis = replace(analysis, structured_input={"document": "artifact:artifacts/unrelated.txt"})
+    elif failure == "mixed_inputs":
+        analysis = replace(analysis, structured_input={"documents": [
+            "artifact:artifacts/source.txt", "artifact:artifacts/unrelated.txt",
+        ]})
+    elif failure == "wrong_id":
+        analysis = replace(analysis, structured_input={"target_id": "target-2"})
+    elif failure in {"different_route", "different_port"}:
+        url = "https://target.test:8443/child" if failure == "different_route" else "https://target.test:9443/"
+        analysis = replace(analysis, structured_input={"url": url, "target_id": "target-1"})
+    elif failure == "future_producer":
+        producer = replace(producer, sequence=3)
+    elif failure in {"output_conflict", "input_output_conflict"}:
+        (root / "analysis.json").write_text(json.dumps({"schema_version": "client_bundle_inventory_v2",
+            "target_id": "target-1", "target": "https://target.test:9443", "api_paths": [], "spa_routes": [],
+        }))
+        if failure == "input_output_conflict":
+            analysis = replace(analysis, structured_input={"target_id": "target-1"})
+    elif failure == "cross_operation":
+        other = tmp_path.parent / "other-operation.txt"
+        other.write_text("data")
+        producer = replace(producer, artifact_refs=(f"artifact:{other}",))
+        analysis = replace(analysis, structured_input={"source_artifact": f"artifact:{other}"})
+    elif failure == "shell_batch":
+        producer = replace(producer, tool_name="shell", artifact_refs=(), structured_input={"command":
+            f"curl https://target.test:8443/ -o {root / 'source.txt'} && "
+            f"curl https://target.test:8443/other -o {root / 'unrelated.txt'}"})
+        matched, linked = controller._execution_subject_matches(plan, task, "/", [
+            (producer, controller._outcome_execution_capabilities(producer)), (analysis, frozenset({"analyze"})),
+        ])
+        assert [outcome.tool_use_id for outcome, _caps in matched] == ["acquire"]
+        assert not linked
+        return  # The shell's own catalog capabilities remain independent of artifact linking.
+    elif failure == "input_echo":
+        producer = replace(producer, artifact_refs=(), structured_input={
+            "url": "https://target.test:8443/", "source_artifact": "artifact:artifacts/source.txt",
+        })
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis]) == {}
+    diagnostic = events[-1]["requirement_diagnostics"]["proof"]
+    assert diagnostic["missing_capabilities"]
+    assert events[-1]["missing_requirement_ids"] == ["proof"]
+
+
+def test_execution_scope_output_does_not_claim_every_inventory_endpoint_was_analyzed(execution_binding_case):
+    controller, plan, task, _criterion, _producer, analysis, root, _events = execution_binding_case
+    (root / "analysis.json").write_text(json.dumps({"schema_version": "client_bundle_inventory_v2",
+        "target_id": "target-1", "target": "https://target.test:8443", "api_paths": ["/child"], "spa_routes": [],
+    }))
+    analysis = replace(analysis, structured_input={})
+    matched, _linked = controller._execution_subject_matches(plan, task, "/child", [(analysis, frozenset({"analyze"}))])
+    assert not matched
+
+
+def test_execution_binding_applies_to_inventory_output_contract(execution_binding_case):
+    controller, plan, task, criterion, producer, analysis, root, _events = execution_binding_case
+    criterion = replace(criterion, evidence_requirements=[EvidenceRequirement(kind="inventory_manifest")])
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(task.acceptance.basis, procedure={
+        "methods": ["request", "analyze"], "limits": {"max_requests": 5},
+        "stop_condition": "first_limit_reached", "gap_policy": "record_unassessed", "output_kind": "inventory_manifest",
+    }), criteria=[criterion]))
+    controller.state.store_task(task)
+    (root / "analysis.json").write_text(json.dumps({"schema_version": 1, "items": [{
+        "id": "endpoint", "kind": "endpoint", "target_id": "target-1",
+        "value": "https://target.test:8443/child", "attributes": {},
+    }], "unassessed_gaps": []}))
+    analysis = replace(analysis, structured_input={"target_id": "target-1"})
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis]) == {
+        "proof": ["artifact:artifacts/analysis.json"],
+    }
+
+
+def test_execution_artifact_fallback_is_one_step_only(execution_binding_case):
+    controller, plan, task, criterion, producer, analysis, _root, events = execution_binding_case
+    third = replace(analysis, sequence=3, tool_use_id="third", artifact_refs=("artifact:artifacts/third.json",),
+                    structured_input={"source_artifact": "artifact:artifacts/analysis.json"})
+    controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis, third])
+    diagnostic = events[-1]["requirement_diagnostics"]["proof"]
+    assert diagnostic["linked_analysis_tool_use_ids"] == ["analysis"]
+    assert diagnostic["unbound_analysis_tool_use_ids"] == ["third"]
+
+
+@pytest.mark.parametrize("value,kind", [
+    ("https://target.test:8443", "network"), ("tcp://target.test:9000", "network"),
+    ("/workspace/source", "filesystem"),
+])
+def test_execution_one_step_artifact_binding_is_protocol_neutral(execution_binding_case, value, kind):
+    controller, plan, task, _criterion, producer, analysis, _root, _events = execution_binding_case
+    plan = replace(plan, targets=[OperationTarget("target-1", value, kind)])
+    producer = replace(producer, tool_name="mcp_acquisition", structured_input={"target": value})
+    candidates = [(producer, frozenset({"request"})), (analysis, frozenset({"analyze"}))]
+    matched, linked = controller._execution_subject_matches(plan, task, "target:target-1", candidates)
+    assert [outcome.tool_use_id for outcome, _caps in matched] == ["acquire", "analysis"]
+    assert linked == ["analysis"]
+
+
+def test_execution_analysis_ignores_incidental_urls_and_prior_task_artifact(execution_binding_case):
+    controller, plan, task, criterion, _producer, analysis, _root, events = execution_binding_case
+    analysis = replace(analysis, output_summary="Documentation: https://target.test:8443/")
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [analysis]) == {}
+    assert events[-1]["requirement_diagnostics"]["proof"]["subject_matched_tool_use_ids"] == []
+
+
+@pytest.mark.parametrize("mode", ["unbound", "complete"])
+def test_execution_recovery_assembled_prompt_reuses_acquisition_and_matches_available_tools(execution_binding_case, mode):
+    from modules.agents.prompt_context import fit_task_prompt
+
+    controller, plan, task, _criterion, producer, analysis, _root, _events = execution_binding_case
+    if mode == "unbound":
+        analysis = replace(analysis, structured_input={"source_artifact": "artifact:artifacts/unrelated.txt"})
+    prompt = controller._execution_prerequisite_recovery_prompt(
+        plan, task, [], next_cycle=2, tool_outcomes=[producer, analysis],
+    )
+    contract = controller._task_executor_contract(task, {"http_request", "client_bundle_inventory"}, plan=plan,
+                                                 task_policy=controller._task_policy_guidance(task))
+    assembled = controller.runtime.system_prompt + "\n" + prompt + "\n" + contract
+    fitted = fit_task_prompt(assembled + "\n## Task history\n" + "advisory " * 1000,
+                             "", [], "", len(assembled) + 500, 0, lambda _details: None, estimate_input=len)
+    assert "execution_bindings[1]" in fitted
+    assert "missing_capabilities" in fitted and "acquire" in fitted
+    assert "Reuse matched acquisition and analysis" in fitted
+    assert "The controller owns acceptance reconciliation for this turn" in fitted
+    assert "For the assigned task, call `record_task_acceptance`" not in fitted
+    assert "when record_task_acceptance is called" not in fitted
+    row = next(line.strip().split(",", 3) for line in fitted.splitlines() if line.startswith("  proof,"))
+    if mode == "unbound":
+        assert row[1:3] == ['["request"]', '["analyze"]']
+    else:
+        assert "analyze" in row[1] and "request" in row[1] and row[2] == "[]"
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("/workspace/source/app.py", True), ("/workspace/source-other/app.py", False),
+    ("/workspace/Source/app.py", False),
+])
+def test_execution_source_bindings_preserve_case_and_directory_boundaries(path, expected):
+    plan = replace(_plan(), targets=[OperationTarget("target-1", "/workspace/source", "filesystem")])
+    task = Task("source", "Analyze", "Analyze", phase=1, status="active", target_ids=["target-1"])
+    outcome = ToolOutcome(1, "analysis", "python_repl", True, False, "truncated", "analysis complete",
+                          structured_input={"path": path})
+    assert MultiAgentWorkflowController._outcome_matches_execution_subject(
+        plan, task, "target:target-1", outcome,
+    ) is expected
 
 
 def test_controller_matches_root_url_with_trailing_slash_from_structured_shell_input():
@@ -11094,7 +11427,7 @@ def test_task_executor_recovers_in_same_session_and_evaluator_receives_authorita
     )
     assert captured["executor_prompts"][0].endswith(
         controller._task_executor_contract(
-            state.tasks[0], {"store_finding"},
+            state.tasks[0], {"store_finding", "record_task_acceptance"},
             execution_state=controller._controller_execution_state(state.tasks[0]),
             task_policy=controller._task_policy_guidance(state.tasks[0]),
         )
@@ -11800,7 +12133,7 @@ def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval
     assert executor_calls[0].startswith("enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)")
     assert executor_calls[0].endswith(
         controller._task_executor_contract(
-            state.tasks[0], {"store_finding"},
+            state.tasks[0], {"store_finding", "record_task_acceptance"},
             execution_state=controller._controller_execution_state(state.tasks[0]),
             task_policy=controller._task_policy_guidance(state.tasks[0]),
         )

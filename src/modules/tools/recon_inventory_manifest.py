@@ -376,6 +376,30 @@ def _parse_client_bundle_inventory(text: str) -> list[dict[str, Any]]:
     return records
 
 
+def load_inventory_target_bindings(reference: str) -> dict[str, str | None]:
+    """Read declared analysis scope, not every resource mentioned in an inventory."""
+
+    from modules.tools.memory import _artifact_path_from_ref, _load_inventory_manifest
+
+    with open(_artifact_path_from_ref(reference), encoding="utf-8") as stream:
+        text = stream.read(16_000_001)
+    if len(text) > 16_000_000:
+        raise ValueError("Inventory scope exceeds inspection limit")
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("Not an inventory scope artifact")
+    if payload.get("schema_version") == "client_bundle_inventory_v2":
+        target_id = payload.get("target_id")
+        if not isinstance(target_id, str) or not target_id or not _parse_client_bundle_inventory(text):
+            raise ValueError("Invalid client extraction scope")
+        return {target_id: _canonical_url(payload["target"])}
+    _load_inventory_manifest(reference, persist_normalization=False)
+    target_ids = [item["target_id"] for item in payload["items"]]
+    if any(not isinstance(target_id, str) or not target_id for target_id in target_ids):
+        raise ValueError("Invalid inventory target binding")
+    return dict.fromkeys(target_ids)
+
+
 def attach_client_bundle_evidence(
     manifest: dict[str, Any], payload: dict[str, Any], *, target: str | None = None, target_id: str | None = None
 ) -> None:

@@ -1255,6 +1255,27 @@ when it is. Unread artifacts alone do not reject a justified empty hypothesis pu
 
 ### Client request extraction during mapping
 
+Optional execution-output discovery accepts only existing regular files whose resolved paths remain
+inside the current operation output directory. Non-artifact destinations such as `/dev/null`, external
+`/tmp/` or expanded `$TMPDIR/` files, missing files, and escaping symlinks are skipped locally; valid
+outputs and request evidence are retained. Dynamic shell paths remain unresolved and are never
+expanded by inference. An operation rooted under a temporary directory can still retain its own
+artifacts. These rules do not restrict filesystem targets or ordinary scratch-file use.
+
+Execution matching uses full structured tool inputs to resolve explicit operation target references.
+For analysis results, recognized inventory and extraction artifacts can supply declared target scope;
+individual resources listed in those artifacts do not prove each resource was analyzed. Conflicting
+explicit bindings remain unresolved, and incidental URLs in analysis result text do not establish scope.
+
+An analysis tool without a direct binding can inherit one from an earlier successful producer when
+all its explicit input artifacts match that producer's recorded current-operation outputs. Matching is
+one step only, uses canonical references and existing shell output-path parsing, and rejects ambiguous
+shell batches. It does not require a known tool name, new contracts, or a provenance graph. Existing
+task-local outcomes and receipts support continuation and repair; no new storage is introduced.
+Per-requirement diagnostics distinguish observed/missing capabilities, bound tool IDs, linked analysis,
+unbound analysis, and output availability even when the complete execution requirement is unresolved.
+These checks establish execution and availability only. Evaluators still assess semantic support.
+
 Wrapper recognition accepts immutable configuration aliases and string/object normalization when an
 object caller configuration reaches the transport unchanged. Returned response chains (`then`, `catch`,
 `finally`) may be ignored when their callbacks do not reference that configuration. Mutation, escape,

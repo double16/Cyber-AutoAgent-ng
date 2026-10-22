@@ -73,15 +73,15 @@ def test_two_invalid_searches_in_one_model_turn_allow_corrected_next_turn():
     journal = ToolOutcomeJournal()
     hook = TaskFailureRecoveryHook(journal)
     invalid = [
-        ("first", {"path": "artifact:inventory.json", "search_pattern": "endpoint", "context_lines": 20}),
-        ("second", {"path": "artifact:inventory.json", "search_pattern": "parameter", "context_lines": 20}),
+        ("first", {"path": "artifact:inventory.json", "search_pattern": "endpoint", "context_lines": 21}),
+        ("second", {"path": "artifact:inventory.json", "search_pattern": "parameter", "context_lines": 21}),
     ]
     _model_turn(hook, "first", "second")
     for tool_id, tool_input in invalid:
         before = _before(tool_id, "search_artifact", tool_input)
         hook._before_tool(before)
         assert before.cancel_tool is False
-        _dispatch_after(hook, _after(tool_id, "search_artifact", tool_input, status="error", text="context_lines must be between 0 and 10"))
+        _dispatch_after(hook, _after(tool_id, "search_artifact", tool_input, status="error", text="context_lines must be between 0 and 20"))
     _finish_turn(hook)
 
     assert hook.failure_category == "invalid_invocation"
