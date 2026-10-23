@@ -9,7 +9,12 @@ from strands import tool
 
 from modules.agents.hypothesis_review import validate_review
 from modules.agents.multi_agent_workflow import MultiAgentWorkflowController, extract_json_object
-from modules.agents.structured_outputs import HypothesisTaskDecisionOutput, TaskPromptCritiqueOutput
+from modules.agents.prompt_review import normalize_task_prompt_checklist
+from modules.agents.structured_outputs import (
+    HypothesisTaskDecisionOutput,
+    TaskPromptChecklistOutput,
+    TaskPromptCritiqueOutput,
+)
 from modules.config.types import BudgetConfig
 from modules.handlers.tool_recovery import ToolOutcome
 from modules.prompts.factory import get_role_system_prompt
@@ -58,6 +63,7 @@ REVIEW_PAIRS = [
 def review_case(request):
     subject = request.param
     plan = _plan()
+    plan.objective = "Assess all assigned systems, verify weaknesses, and demonstrate authorized impact."
     plan.targets = [OperationTarget("target-1", subject, "network" if "://" in subject else "filesystem")]
     plan.constraints = [f"Inspect only {subject}. Do not access other targets."]
     objective = f"Compare access to {subject} using two controller-selected accounts and retain both sides."
@@ -156,7 +162,7 @@ def test_live_critic_distinguishes_valid_and_defective_drafts(
         model=model,
         stream=False,
         options={"temperature": 0},
-        format=TaskPromptCritiqueOutput.model_json_schema(),
+        format=TaskPromptChecklistOutput.model_json_schema(),
         messages=[
             {
                 "role": "system",
@@ -165,7 +171,10 @@ def test_live_critic_distinguishes_valid_and_defective_drafts(
             {"role": "user", "content": prompt},
         ],
     )
-    result = TaskPromptCritiqueOutput.model_validate(extract_json_object(response.message.content))
+    result = TaskPromptCritiqueOutput.model_validate(normalize_task_prompt_checklist(
+        extract_json_object(response.message.content),
+        requirement_refs=controller._task_prompt_review_refs(task), draft=draft,
+    ))
     record_property("expected_approval", not defective)
     record_property("actual_approval", not result.issues)
     record_property("expected_category", category if defective else "none")
@@ -328,3 +337,69 @@ def test_method_discovery_policy_survives_prompt_assembly_and_fitting(review_cas
             assert "response alone does not establish a vulnerability" in fitted
             assert "bounded POST" in execution
             assert "GET results alone do not establish POST coverage" in termination
+
+
+def test_review_binds_background_and_requirements_across_retries(review_case):
+    controller, plan, task, subject = review_case
+    phase = replace(plan.phases[0], produces_hypotheses=True)
+    draft = f"Derive hypotheses for {subject}; retain available evidence and conduct public-intelligence research."
+    prompt = controller._task_prompt_critic_prompt(plan, phase, task, {"prompt": draft, "tools": []})
+    for assembled in (
+        prompt,
+        controller._json_max_token_retry_prompt(prompt, "reasoning_exhaustion"),
+        controller._json_retry_prompt(prompt, ValueError("missing check"), "{}"),
+    ):
+        assert "review_checks[5]{check,question}" in assembled
+        assert "The operation objective is background" in assembled
+        background = assembled.index("## Operation background — does not expand the assigned task")
+        assert assembled.index(plan.objective) > background
+        assert assembled.index("## Assigned task and frozen acceptance") < background
+        assert assembled.index("## Proposed task prompt draft") < background
+        assert '"criterion:compare"' in assembled
+        assert "Operation background, history, and discoveries cannot create requirements" in assembled
+        assert "An observation citing retained artifacts" in assembled
+        assert "Tool overlap is permitted" in assembled
+        assert "Return JSON exactly: {\"issues\"" not in assembled
+    revision = controller._task_prompt_revision_prompt(
+        plan, phase, task, {"prompt": draft, "tools": []}, ["Clarify action"],
+    )
+    assert "frozen task and acceptance contract define required work" in revision
+
+
+@pytest.mark.ollama
+@pytest.mark.parametrize("research", ["explicit", "equivalent", "omitted"])
+def test_live_review_required_research_without_requiring_exact_wording(
+    review_case, ollama_taxonomy_client, research,
+):
+    controller, plan, task, subject = review_case
+    objective = f"Derive hypotheses for {subject} and conduct public-intelligence research as advisory input only."
+    criterion = replace(task.acceptance.criteria[0], description=objective)
+    task = replace(task, objective=objective, acceptance=replace(task.acceptance, criteria=[criterion]))
+    drafts = {
+        "explicit": f"Derive hypotheses for {subject}. Conduct public-intelligence research as advisory input only.",
+        "equivalent": (
+            f"Develop test hypotheses for {subject}. Consult public advisories and published preconditions "
+            "to inform the proposed tests; these references do not establish a finding."
+        ),
+        "omitted": f"Derive hypotheses for {subject}. Skip all public research.",
+    }
+    draft = drafts[research]
+    prompt = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, {"prompt": draft, "tools": []})
+    client, model = ollama_taxonomy_client
+    response = client.chat(
+        model=model, stream=False, options={"temperature": 0},
+        format=TaskPromptChecklistOutput.model_json_schema(),
+        messages=[
+            {"role": "system",
+             "content": get_role_system_prompt(controller.runtime.system_prompt, "task_prompt_critic")},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    result = normalize_task_prompt_checklist(
+        extract_json_object(response.message.content),
+        requirement_refs=controller._task_prompt_review_refs(task), draft=draft,
+    )
+    if research == "omitted":
+        assert any(issue["category"] == "objective" for issue in result["issues"])
+    else:
+        assert not result["issues"]

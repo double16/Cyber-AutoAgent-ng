@@ -15,11 +15,12 @@ from modules.agents import cyber_autoagent as agent_module
 from modules.agents.cyber_autoagent import AgentRuntimeResources
 from modules.agents.multi_agent_workflow import default_structured_runner, default_text_runner
 from modules.agents.prompt_context import PromptInputTooLarge, attach_live_prompt_fitter
-from modules.agents.structured_outputs import TaskPromptCritiqueOutput, TaskPromptOutput
+from modules.agents.structured_outputs import TaskPromptChecklistOutput, TaskPromptOutput
 from modules.config import AgentConfig
 from modules.handlers import conversation_budget as budget
 from modules.handlers.conversation_budget import PromptBudgetHook
 from modules.prompts.factory import get_role_system_prompt
+from tests.test_multi_agent_workflow import _checklist_response
 
 
 class Review(BaseModel):
@@ -161,7 +162,7 @@ def test_live_fitter_runs_before_proactive_management():
 @pytest.mark.parametrize("role", ["task_prompt_builder", "task_prompt_critic", "task_executor"])
 @pytest.mark.parametrize("subject", ["https://target.test:8443", "tcp://target.test:9000", "/workspace/source"])
 def test_production_runners_preserve_role_prompt_at_model_boundary(monkeypatch, structured, role, subject):
-    output = ({"issues": [], "repairable": False} if role == "task_prompt_critic"
+    output = (json.loads(_checklist_response('{"issues":[],"repairable":false}')) if role == "task_prompt_critic"
               else {"prompt": "Inspect the assigned subject and retain evidence.", "tools": [], "shell_commands": []})
     model = LocalModel(output)
     monkeypatch.setattr(agent_module, "create_strands_model", lambda *_args: model)
@@ -178,15 +179,19 @@ def test_production_runners_preserve_role_prompt_at_model_boundary(monkeypatch, 
     assigned = "Assigned role policy. " + original
     prompt = f"Inspect only {subject}."
     if structured:
-        schema = TaskPromptCritiqueOutput if role == "task_prompt_critic" else TaskPromptOutput
+        schema = TaskPromptChecklistOutput if role == "task_prompt_critic" else TaskPromptOutput
         result = default_structured_runner(runtime)(role, prompt, [], assigned, schema)
-        assert result == schema(**output).model_dump(exclude_none=True)
+        assert result == schema(**output).model_dump(exclude_none=role != "task_prompt_critic")
     else:
         assert default_text_runner(runtime)(role, prompt, [], assigned) == "done"
     sent = model.calls[0]
-    assert "Assigned role policy." in sent["system"]
-    assert "Preserve target scope." in sent["system"]
-    assert "Preserve evidence policy." in sent["system"]
+    if role == "task_executor":
+        assert "Assigned role policy." in sent["system"]
+        assert "Preserve target scope." in sent["system"]
+        assert "Preserve evidence policy." in sent["system"]
+    else:
+        assert "You construct or review task-specific execution guidance" in sent["system"]
+        assert "controller-owned constraints and acceptance are authoritative" in sent["system"]
     assert ("executor-only-protocol" in sent["system"]) == (role == "task_executor")
     assert ("<role_boundary>" in sent["system"]) == (role != "task_executor")
     assert subject in json.dumps(sent["messages"])
@@ -194,3 +199,29 @@ def test_production_runners_preserve_role_prompt_at_model_boundary(monkeypatch, 
         assert [tool["name"] for tool in sent["tools"]] == [schema.__name__]
     else:
         assert not sent["tools"]
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("critic", [False, True])
+def test_construction_live_fitting_reserves_safety_and_preserves_evidence(structured, critic):
+    schema = TaskPromptChecklistOutput if critic else TaskPromptOutput
+    output = (json.loads(_checklist_response('{"issues":[]}')) if critic
+              else {"prompt": "Use the discovered interaction", "tools": []})
+    model = LocalModel(output)
+    generation = 9024 if critic else 17024
+    model._output_tokens = generation
+    evidence = "## Retained inspection evidence\nartifact:interaction.log shows an assigned write operation.\n"
+    prompt = "## Task\nPlan the assigned interaction.\n" + evidence
+    prompt += "## Task history\n" + "advisory " * 15000
+    agent = Agent(model=model, tools=[], load_tools_from_directory=False, callback_handler=None,
+                  hooks=[PromptBudgetHook(budget._ensure_prompt_within_budget)])
+    agent._prompt_token_limit = 40000
+    events = []
+    attach_live_prompt_fitter(agent, prompt, events.append, ("Task history",), reserve_safety=True)
+    agent(prompt, **({"structured_output_model": schema} if structured else {}))
+    assert len(model.calls) == 1
+    sent = model.calls[0]
+    assert events[0]["input_limit"] == 40000 - generation - 800
+    assert sent["estimate"] + generation + 800 <= 40000
+    assert evidence in sent["messages"][0]["content"][0]["text"]
+    assert events[0]["reductions"] == ["Task history"]

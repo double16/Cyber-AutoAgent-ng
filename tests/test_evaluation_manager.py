@@ -274,6 +274,7 @@ def test_langfuse_prompt_helpers_cache_seed_and_remote(monkeypatch, tmp_path):
 
 
 def test_evaluator_setup_models_all_providers(monkeypatch):
+    monkeypatch.setattr(eval_mod, "require_prompt_token_limit", lambda *_args: 40000)
     class FakeWrapper:
         def __init__(self, inner):
             self.inner = inner
@@ -287,11 +288,12 @@ def test_evaluator_setup_models_all_providers(monkeypatch):
         provider="ollama",
         get_provider=lambda: manager.provider,
         get_server_config=lambda _provider: SimpleNamespace(
-            evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model")),
+            evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model"), judge_max_tokens=800),
             embedding=SimpleNamespace(model_id="embed-model"),
         ),
         getenv=lambda name, default=None: {"OLLAMA_HOST": "http://ollama", "CYBER_AGENT_EMBEDDING_MODEL": "bedrock/embed"}.get(name, default),
         get_default_region=lambda: "us-east-1",
+        getenv_int=lambda _name, default=0: default,
     )
     monkeypatch.setattr(eval_mod, "get_config_manager", lambda: manager)
     monkeypatch.setattr(eval_mod, "LangchainLLMWrapper", FakeWrapper)

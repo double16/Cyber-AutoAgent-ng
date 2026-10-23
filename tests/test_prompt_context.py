@@ -73,3 +73,93 @@ def test_optional_evaluator_narrative_is_removed_whole():
     )
     assert mandatory in result and "large narration" not in result
     assert event.call_args.args[0]["reductions"] == ["Task worker final context"]
+
+
+@pytest.mark.parametrize("window,guidance,generation", [
+    (8000, 800, 8192), (40000, 4000, 17024), (48000, 4096, 17408), (200000, 4096, 17408),
+])
+def test_builder_budget_separates_guidance_and_generation(window, guidance, generation):
+    budget = context.TaskPromptBudget.resolve(window, 8192)
+    assert budget.guidance_tokens == guidance
+    assert budget.desired_generation_tokens == generation
+    assert str(guidance) in budget.instructions()
+    assert str(4 * guidance) in budget.instructions()
+
+
+@pytest.mark.parametrize("window,profile", [(0, 8192), (48000, 0), (-1, 1)])
+def test_invalid_builder_budget(window, profile):
+    with pytest.raises(ValueError, match="positive"):
+        context.TaskPromptBudget.resolve(window, profile)
+
+
+def test_builder_generation_cap_and_explicit_ceiling():
+    assert context.TaskPromptBudget.resolve(200000, 64000).desired_generation_tokens == 32768
+    assert context.TaskPromptBudget.resolve(48000, 8192, 6000).desired_generation_tokens == 6000
+    assert context.TaskPromptBudget.resolve(48000, 8192, 0).desired_generation_tokens == 17408
+
+
+def test_builder_fit_preserves_discoveries_and_reduces_reasoning_after_optional_context():
+    budget = context.TaskPromptBudget.resolve(8000, 8192)
+    evidence = "## Retained inspection evidence\n" + "e" * 4500 + "\n"
+    history = "## Task history\n" + "h" * 5000 + "\n"
+    log = Mock()
+    fitted, generation = budget.fit("## Task\nassigned\n" + evidence + history, "system", [], "model", log)
+    assert evidence in fitted
+    assert "h" * 5000 not in fitted
+    assert budget.guidance_tokens + 1024 <= generation < budget.desired_generation_tokens
+    assert log.call_args.args[0]["generation_allowance"] == generation
+    assert log.call_args.args[0]["estimated_input_tokens"] + generation + budget.safety_tokens <= 8000
+
+
+def test_builder_fit_counts_system_and_schema_and_rejects_impossible_capacity():
+    budget = context.TaskPromptBudget.resolve(8000, 8192)
+    log = Mock()
+    with pytest.raises(context.PromptInputTooLarge):
+        budget.fit("## Task\n" + "x" * 2000, "s" * 2000, [{"schema": "z" * 4000}], "model", log)
+    with pytest.raises(context.PromptInputTooLarge, match="output ceiling"):
+        context.TaskPromptBudget.resolve(48000, 8192, 1000).fit("task", "", [], "model", log)
+
+
+def test_builder_does_not_restore_advisory_history_when_reducing_reasoning():
+    budget = context.TaskPromptBudget.resolve(40000, 8192)
+    prompt = "## Retained inspection evidence\n" + "e" * 23000 + "\n## Task history\n" + "h" * 2000
+    fitted, generation = budget.fit(prompt, "system", [], "model", Mock())
+    assert "e" * 23000 in fitted
+    assert "h" * 2000 not in fitted
+    assert budget.guidance_tokens + 1024 <= generation < budget.desired_generation_tokens
+
+
+def test_builder_guidance_validation_counts_only_prompt():
+    budget = context.TaskPromptBudget.resolve(8000, 8192)
+    budget.validate({"prompt": "x" * 800, "tools": ["related"] * 1000}, "model")
+    with pytest.raises(ValueError, match="concise complete replacement"):
+        budget.validate({"prompt": "x" * 801}, "model")
+
+
+@pytest.mark.parametrize("window,answer,generation", [
+    (8000, 400, 4096), (40000, 2000, 9024), (48000, 2048, 9216),
+])
+def test_critic_budget_separates_answer_and_reasoning(window, answer, generation):
+    budget = context.TaskPromptBudget.resolve(window, 4096, role="task_prompt_critic")
+    assert budget.guidance_tokens == answer
+    assert budget.desired_generation_tokens == generation
+    assert "Critic output budget" in budget.instructions()
+    assert str(answer) in budget.instructions()
+    assert "five issues" in budget.instructions()
+
+
+def test_critic_budget_validates_complete_output_and_capacity():
+    budget = context.TaskPromptBudget.resolve(40000, 4096, role="task_prompt_critic")
+    budget.validate({"issues": [], "repairable": True}, "model")
+    with pytest.raises(ValueError, match="concise complete replacement"):
+        budget.validate({"issues": [{"message": "x" * 2001}], "repairable": True}, "model")
+    evidence = "## Retained inspection evidence\n" + "e" * 15900
+    fitted, generation = budget.fit(evidence, "system", [{"schema": "output"}], "model", Mock())
+    assert evidence in fitted
+    assert generation == 9024
+    with pytest.raises(context.PromptInputTooLarge, match="output ceiling"):
+        context.TaskPromptBudget.resolve(40000, 4096, 1000, role="task_prompt_critic").fit(
+            "task", "", [], "model", Mock(),
+        )
+    with pytest.raises(ValueError, match="Unsupported"):
+        context.TaskPromptBudget.resolve(40000, 4096, role="unknown")

@@ -2820,6 +2820,21 @@ def _plan():
     )
 
 
+
+def _checklist_response(legacy):
+    """Build new wire fixtures while retaining assertions on canonical critique results."""
+    data = json.loads(legacy)
+    result = {name: {"status": "pass", "issue": None} for name in (
+        "task_coverage", "scope", "execution_policy", "evidence", "capability_fit",
+    )}
+    names = {"objective": "task_coverage", "scope": "scope", "execution_policy": "execution_policy",
+             "evidence": "evidence", "tool_availability": "capability_fit"}
+    for issue in data["issues"]:
+        result[names[issue["category"]]] = {
+            "status": "fail", "issue": {**issue, "requirement_ref": "task", "draft_excerpt": ""},
+        }
+    return json.dumps({**result, "repairable": data.get("repairable", True)})
+
 def _runtime(progress=0, env_ints=None, env_floats=None):
     env_ints = {
         "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 0,
@@ -9602,7 +9617,7 @@ def test_task_roles_share_task_trace_attributes(monkeypatch):
         if role == "task_prompt_builder":
             return '{"prompt":"execute active","tools":[]}'
         if role == "task_prompt_critic":
-            return '{"issues":[]}'
+            return _checklist_response('{"issues":[]}')
         if role == "task_evaluator":
             return '{"status":"done","reason":"completed"}'
         raise AssertionError(role)
@@ -11049,7 +11064,7 @@ def test_malformed_memory_id_reaches_prompt_critic_with_valid_prompt():
                 '["98d09291-78dc-443c-aba2-f2c4b467fc"],"tools":[],"shell_commands":[]}'
             )
         if role == "task_prompt_critic":
-            return '{"issues":[]}'
+            return _checklist_response('{"issues":[]}')
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -17437,7 +17452,7 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
         (
             controller._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
             [("## Active phase (context only)", json.dumps({"id": phase.id, "title": phase.title})),
-             ("## Assigned task", task_json)],
+             ("## Assigned task and frozen acceptance [ref: task]", task_json)],
         ),
         (
             controller._task_prompt_revision_prompt(plan, phase, task, prompt_spec, ["Add evidence"]),
@@ -17585,9 +17600,9 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
     assert "capability required by the task that supplied native tools do not provide" not in prompt
     assert "## Controller-Appended Operation Constraints" in prompt
     assert '"constraints": [' not in controller._task_prompt_plan_context(_plan(), _plan().phases[0], task)
-    assert 'curl -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" <url>' in prompt
-    assert "curl -sS -D - -o /dev/null <url>" in prompt
-    assert "Do not rely on bare `curl -s <url>` as evidence" in prompt
+    assert "require explicit HTTP status and effective URL" in prompt
+    assert "Empty body output alone does not establish accessibility" in prompt
+    assert "the executor chooses" in prompt
 
 
 def test_finding_validation_prompt_separates_payload_markers_from_target_scope():
@@ -17873,7 +17888,7 @@ def test_task_prompt_builder_scopes_baseline_and_header_guidance_to_assigned_tas
     critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, {"prompt": "Compare access"})
     credential_rules = controller._credential_execution_guidance_for_task(task)
 
-    assert "short sections for the applicable task steps" in builder
+    assert "short sections for task-specific actions" in builder
     assert "only when the assigned operation or target constraints specify them" in builder
     assert "https://login.test" in builder
     assert "The controller performs credential setup" in credential_rules
@@ -17883,7 +17898,7 @@ def test_task_prompt_builder_scopes_baseline_and_header_guidance_to_assigned_tas
     assert "Do not send cookies or Authorization headers to target-1" in critic
 
 
-def test_task_prompt_builder_requires_finding_guidance_only_for_finding_candidate_acceptance():
+def test_task_prompt_builder_references_finding_contract_without_repeating_persistence_rules():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -17913,7 +17928,10 @@ def test_task_prompt_builder_requires_finding_guidance_only_for_finding_candidat
     finding_prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], finding)
 
     assert "Store each security claim with `store_finding`" not in coverage_prompt
-    assert "Store each security claim with `store_finding`" in finding_prompt
+    assert "Store each security claim with `store_finding`" not in finding_prompt
+    assert '"kind": "finding_candidate"' in finding_prompt
+    assert '"kind": "finding_candidate"' not in coverage_prompt
+    assert "Do not restate those controller-owned requirements" in finding_prompt
 
 
 def test_prompt_building_treats_prior_authentication_context_as_unvalidated():
@@ -18090,7 +18108,7 @@ def test_task_prompt_builder_can_omit_controller_owned_acceptance_requirements()
             return '{"prompt":"Inspect the assigned entry points and capture the results.","tools":[],"shell_commands":[]}'
         if role == "task_prompt_critic":
             captured["critic"] = prompt
-            return '{"issues":[]}'
+            return _checklist_response('{"issues":[]}')
         if role == "task_evaluator":
             return '{"status":"partial_failure","reason":"no acceptance was recorded"}'
         raise AssertionError(role)
@@ -18425,9 +18443,9 @@ def test_task_prompt_scope_mismatch_is_revised_before_the_executor_can_run():
     responses = iter(
         [
             '{"prompt":"Probe custom-scheme://service.example:4200/health","memory_ids":[],"tools":[],"shell_commands":[]}',
-            '{"issues":[{"category":"scope","message":"Wrong service port","tool_names":[]}]}',
+            _checklist_response('{"issues":[{"category":"scope","message":"Wrong service port","tool_names":[]}]}'),
             '{"prompt":"Probe custom-scheme://service.example:4280/health","memory_ids":[],"tools":[],"shell_commands":[]}',
-            '{"issues":[]}',
+            _checklist_response('{"issues":[]}'),
         ]
     )
     calls = []
@@ -19878,7 +19896,7 @@ def test_task_prompt_critic_approves_initial_draft():
         if role == "task_prompt_builder":
             return '{"prompt":"approved execution","memory_ids":[],"tools":[],"shell_commands":[]}'
         if role == "task_prompt_critic":
-            return '{"issues":[]}'
+            return _checklist_response('{"issues":[]}')
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -19893,7 +19911,7 @@ def test_task_prompt_critic_approves_initial_draft():
     assert prompt_spec["prompt"] == "approved execution"
     assert [call[0] for call in calls] == ["task_prompt_builder", "task_prompt_critic"]
     assert all(call[2] == [] for call in calls)
-    assert all(call[3] == "base prompt" for call in calls)
+    assert all("You construct or review task-specific execution guidance" in call[3] for call in calls)
     assert "Proposed task prompt draft" in calls[1][1]
     assert "approved execution" in calls[1][1]
     activities = [
@@ -19908,7 +19926,7 @@ def test_task_prompt_critic_approves_initial_draft():
     ]
 
 
-def test_task_prompt_critic_rejection_runs_revision_until_approved():
+def test_task_prompt_critic_rejection_runs_revision_until_approved(monkeypatch):
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
     calls = []
     builder_responses = iter(
@@ -19919,8 +19937,11 @@ def test_task_prompt_critic_rejection_runs_revision_until_approved():
     )
     critic_responses = iter(
         [
-            '{"issues":[{"category":"execution_policy","message":"Add the relevant validation tool","tool_names":[]}]}',
-            '{"issues":[]}',
+            _checklist_response(
+                "{\"issues\":[{\"category\":\"execution_policy\",\"message\":\"Add the relevant va"
+                "lidation tool\",\"tool_names\":[]}]}"
+            ),
+            _checklist_response('{"issues":[]}'),
         ]
     )
 
@@ -19939,7 +19960,23 @@ def test_task_prompt_critic_rejection_runs_revision_until_approved():
         text_runner=text_runner,
     )
 
+    policies = []
+    critic_policies = []
+    run = controller._run_json_text_agent
+
+    def track_policy(role, *args, **kwargs):
+        if role == "task_prompt_builder":
+            policies.append(kwargs["task_prompt_budget"])
+        if role == "task_prompt_critic":
+            critic_policies.append(kwargs["task_prompt_budget"])
+        return run(role, *args, **kwargs)
+
+    monkeypatch.setattr(controller, "_run_json_text_agent", track_policy)
     prompt_spec = controller._build_task_prompt(_plan(), _plan().phases[0], task)
+    assert len(policies) == 2 and policies[0] is policies[1]
+    assert len(critic_policies) == 2 and critic_policies[0] is critic_policies[1]
+    assert all("within 4096 estimated tokens" in prompt for role, prompt in calls
+               if role == "task_prompt_builder")
 
     assert prompt_spec["prompt"] == "revised"
     assert [role for role, _prompt in calls] == [
@@ -19976,7 +20013,10 @@ def test_task_prompt_final_rejection_marks_task_partial_failure_without_executio
         if role == "task_prompt_builder":
             return '{"prompt":"unsafe draft","tools":[]}'
         if role == "task_prompt_critic":
-            return '{"issues":[{"category":"scope","message":"Prompt broadens scope outside target boundary","tool_names":[]}]}'
+            return _checklist_response(
+                       "{\"issues\":[{\"category\":\"scope\",\"message\":\"Prompt broadens scope outside "
+                       "target boundary\",\"tool_names\":[]}]}"
+                   )
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -20009,8 +20049,12 @@ def test_task_prompt_repairable_rejection_runs_one_bounded_repair():
         '{"prompt":"capture response body with an explicit http URL","tools":[],"shell_commands":[]}',
     ])
     critics = iter([
-        '{"issues": [{"category": "execution_policy", "message": "The response body is required for artifact evidence", "tool_names": []}], "repairable": true}',
-        '{"issues": [], "repairable": false}',
+        _checklist_response(
+            "{\"issues\": [{\"category\": \"execution_policy\", \"message\": \"The response bo"
+            "dy is required for artifact evidence\", \"tool_names\": []}], \"repairable\":"
+            " true}"
+        ),
+        _checklist_response('{"issues": [], "repairable": false}'),
     ])
 
     def text_runner(role, prompt, tools, system_prompt):
@@ -20044,7 +20088,10 @@ def test_task_prompt_repairable_rejection_uses_deterministic_template():
         if role == "task_prompt_builder":
             return '{"prompt":"unsafe","tools":[],"shell_commands":[]}'
         if role == "task_prompt_critic":
-            return '{"issues": [{"category": "execution_policy", "message": "Add an explicit URL scheme", "tool_names": []}], "repairable": true}'
+            return _checklist_response(
+                       "{\"issues\": [{\"category\": \"execution_policy\", \"message\": \"Add an explicit"
+                       " URL scheme\", \"tool_names\": []}], \"repairable\": true}"
+                   )
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -20287,7 +20334,9 @@ def test_json_text_agent_retry_can_be_disabled():
 
 def test_json_text_agent_raises_after_configured_retries():
     runtime = _runtime()
-    runtime.config_manager = SimpleNamespace(getenv_int=lambda _name, default=0: 2)
+    runtime.config_manager = SimpleNamespace(
+        getenv_int=lambda name, default=0: 2 if name.startswith("CYBER_WORKFLOW_") else default,
+    )
     task = Task(task_uid="active", title="Active", objective="run", phase=1, status="active")
     calls = []
 
@@ -22561,7 +22610,99 @@ def test_required_prompt_overflow_stops_without_model_retry():
     with pytest.raises(TaskPromptBuildError, match="PROMPT_REQUIRED_INPUT_TOO_LARGE"):
         controller._run_json_text_agent("task_prompt_builder", "required" * 1000, [], "system")
     runner.assert_not_called()
-    assert sum(event.get("type") == "task_prompt_input_budget" for event in runtime.callback_handler.events) == 1
+    assert not any(event.get("type") == "model_max_token_exhaustion"
+                   for event in runtime.callback_handler.events)
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_builder_initial_budget_and_oversize_repair_preserve_operation_context(monkeypatch, structured):
+    from modules.agents import prompt_context
+    from modules.config.models.invocation import invocation_output_tokens
+
+    runtime = _runtime()
+    runtime.prompt_token_limit = 40000
+    runtime.config.model_id = "test-model"
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", lambda _model, **_kwargs: None)
+    original = prompt_context.estimate_prompt_tokens
+    monkeypatch.setattr(prompt_context, "estimate_prompt_tokens", lambda model, **kwargs: (
+        len(kwargs["extra_content"]) // 4 if "extra_content" in kwargs else original(model, **kwargs)
+    ))
+    calls = []
+    discovery = "## Retained inspection evidence\nartifact:current-flow.log shows an account-dependent operation.\n"
+
+    def runner(role, prompt, tools, system_prompt, *_args):
+        calls.append(prompt)
+        assert invocation_output_tokens(role) == 17024
+        assert discovery in prompt
+        assert "within 4000 estimated tokens" in prompt
+        assert "You construct or review" in system_prompt
+        result = {"prompt": "x" * 17000 if len(calls) == 1 else "Compare the account-dependent operation.",
+                  "tools": ["related_tool"], "shell_commands": ["related_command"]}
+        return result if structured else json.dumps(result)
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=runner,
+    )
+    controller.structured_runner = runner if structured else None
+    result = controller._run_json_text_agent("task_prompt_builder", "Build guidance.\n" + discovery, [], "executor")
+    assert len(calls) == 2
+    assert "concise complete replacement" in calls[1]
+    assert calls[1].count("## Builder output budget") == 1
+    assert result["prompt"] == "Compare the account-dependent operation."
+    assert result["tools"] == ["related_tool"]
+    assert result["shell_commands"] == ["related_command"]
+    assert invocation_output_tokens("task_prompt_builder") is None
+
+
+@pytest.mark.parametrize("known,configured,expected", [(6000, 10000, 6000), (10000, 6000, 6000), (None, 0, 17408)])
+def test_builder_respects_known_and_configured_output_ceilings(monkeypatch, known, configured, expected):
+    def known_ceiling(_model, *, include_environment):
+        assert not include_environment
+        return known
+
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", known_ceiling)
+    runtime = _runtime(env_ints={"MAX_TOKENS": configured})
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=lambda *_args: "{}",
+    )
+    assert controller._task_prompt_budget().desired_generation_tokens == expected
+
+
+@pytest.mark.parametrize("partial,reasoning,visibility", [
+    ("", "", "empty_response"), ("", "analysis", "reasoning_only"), ("partial", "", "visible_output"),
+])
+def test_builder_exhaustion_recovery_is_local_and_reports_visibility(monkeypatch, partial, reasoning, visibility):
+    from modules.config.models.agent_profiles import get_agent_settings_registry
+    from modules.config.models.invocation import invocation_output_tokens, invocation_reasoning
+    from modules.handlers.max_token_recovery import MaxTokenFailureSnapshot
+
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", lambda _model, **_kwargs: None)
+    registry = get_agent_settings_registry()
+    before = registry.get_settings("task_prompt_builder").to_dict()
+    calls = []
+
+    def runner(role, *_args):
+        calls.append((invocation_output_tokens(role), invocation_reasoning(role)))
+        if len(calls) == 1:
+            error = MaxTokensReachedException("max_tokens")
+            error.max_token_failure_snapshot = MaxTokenFailureSnapshot(reasoning, partial, {})
+            raise error
+        return '{"prompt":"Use the observed flow", "tools":[]}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=runner,
+    )
+    result = controller._run_json_text_agent("task_prompt_builder", "Build", [], "executor")
+    assert result["prompt"] == "Use the observed flow"
+    assert calls == [(17408, None), (17408, "none")]
+    assert registry.get_settings("task_prompt_builder").to_dict() == before
+    assert invocation_output_tokens("task_prompt_builder") is None
+    event = next(event for event in controller.runtime.callback_handler.events
+                 if event["type"] == "task_prompt_builder_exhaustion")
+    assert event["response_visibility"] == visibility
 
 
 @pytest.mark.parametrize("target", ["https://example.test:8080", "example.test:22", "/src/application"])
@@ -23651,7 +23792,7 @@ def test_quoted_external_evidence_reaches_critic_without_scope_rewrite(subject):
         if role == "task_prompt_builder":
             return json.dumps({"prompt": "Inspect assigned data; observed value was https://outside.test", "tools": []})
         assert "Quoted observations, redirect destinations" in " ".join(prompt.split())
-        return '{"issues":[]}'
+        return _checklist_response('{"issues":[]}')
 
     controller = MultiAgentWorkflowController(
         runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 3}),
@@ -24325,3 +24466,81 @@ def test_bound_hypothesis_contract_repairs_full_envelope(worker_flow_case, monke
     assert stored.recovery_context["hypothesis_review"]["publication_sha256"] == (
         workflow_mod.hypothesis_binding(task)["sha256"]
     )
+
+
+@pytest.mark.parametrize("partial,reasoning,visibility", [
+    ("", "", "empty_response"), ("", "analysis", "reasoning_only"), ("partial", "", "visible_output"),
+])
+def test_critic_exhaustion_recovery_is_local_and_reports_visibility(monkeypatch, partial, reasoning, visibility):
+    from modules.config.models.agent_profiles import get_agent_settings_registry
+    from modules.config.models.invocation import invocation_output_tokens, invocation_reasoning
+    from modules.handlers.max_token_recovery import MaxTokenFailureSnapshot
+
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", lambda _model, **_kwargs: None)
+    registry = get_agent_settings_registry()
+    before = registry.get_settings("task_prompt_critic").to_dict()
+    calls = []
+
+    def runner(role, *_args):
+        calls.append((invocation_output_tokens(role), invocation_reasoning(role)))
+        if len(calls) == 1:
+            error = MaxTokensReachedException("max_tokens")
+            error.max_token_failure_snapshot = MaxTokenFailureSnapshot(reasoning, partial, {})
+            raise error
+        return _checklist_response('{"issues":[],"repairable":true}')
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=runner,
+    )
+    result = controller._run_json_text_agent("task_prompt_critic", "Build", [], "executor")
+    assert result["issues"] == []
+    assert calls == [(9216, None), (9216, "none")]
+    assert registry.get_settings("task_prompt_critic").to_dict() == before
+    assert invocation_output_tokens("task_prompt_critic") is None
+    event = next(event for event in controller.runtime.callback_handler.events
+                 if event["type"] == "task_prompt_critic_exhaustion")
+    assert event["response_visibility"] == visibility
+
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("subject", ["https://target.test:8443", "tcp://target.test:9000", "/workspace/source"])
+def test_critic_oversize_repair_preserves_discoveries(monkeypatch, structured, subject):
+    from modules.agents import prompt_context
+    from modules.config.models.invocation import invocation_output_tokens
+
+    runtime = _runtime()
+    runtime.prompt_token_limit = 40000
+    runtime.config.model_id = "fixture/critic"
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", lambda *_args, **_kw: None)
+    estimate = prompt_context.estimate_prompt_tokens
+    monkeypatch.setattr(prompt_context, "estimate_prompt_tokens", lambda model, **kwargs: (
+        len(kwargs["extra_content"]) if "extra_content" in kwargs else estimate(model, **kwargs)
+    ))
+    discovery = f"## Retained inspection evidence\nObserved task-local behavior for {subject}.\n"
+    calls = []
+
+    def runner(role, prompt, tools, system, *_args):
+        calls.append(prompt)
+        assert invocation_output_tokens(role) == 9024
+        assert discovery in prompt
+        assert prompt.count("## Critic output budget") == 1
+        result = {"issues": [{"category": "objective", "message": "x" * 490, "tool_names": ["tool"] * 2000}],
+                  "repairable": True} if len(calls) == 1 else {"issues": [], "repairable": True}
+        wire = _checklist_response(json.dumps(result))
+        return json.loads(wire) if structured else wire
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=runner,
+    )
+    controller.structured_runner = runner if structured else None
+    assert controller._run_json_text_agent("task_prompt_critic", "Review.\n" + discovery, [], "system")["issues"] == []
+    assert len(calls) == 2
+    assert "concise complete replacement" in calls[1]
+    events = [e for e in runtime.callback_handler.events if e["type"] == "task_prompt_critic_budget"
+              and "generation_allowance" in e]
+    assert len(events) == 2
+    assert events[0]["generation_allowance"] == 9024
+    assert invocation_output_tokens("task_prompt_critic") is None

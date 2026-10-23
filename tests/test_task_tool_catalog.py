@@ -7,7 +7,7 @@ import pytest
 from modules.agents import multi_agent_workflow as workflow
 from modules.config.types import BudgetConfig
 from modules.handlers.utils import get_tool_name
-from tests.test_multi_agent_workflow import FakeState, Task, _plan, _runtime, _tool
+from tests.test_multi_agent_workflow import FakeState, Task, _checklist_response, _plan, _runtime, _tool
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def test_builder_core_selections_do_not_trigger_extra_critic_cycles(catalog_case
         assert role == "task_prompt_critic"
         assert "Python validates membership and schemas" in prompt
         assert '"tools":' not in prompt.split("## Proposed task prompt draft")[1]
-        return '{"issues":[]}'
+        return _checklist_response('{"issues":[]}')
 
     controller.text_runner = model
     spec = controller._build_task_prompt(plan, plan.phases[0], task)

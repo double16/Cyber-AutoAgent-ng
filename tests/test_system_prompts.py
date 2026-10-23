@@ -208,7 +208,8 @@ class TestGetSystemPrompt:
         assert "store_observation" not in role_prompt
         assert "store_finding" not in role_prompt
         assert "<role_boundary>" in role_prompt
-        assert "INSTRUCTION PRECEDENCE" in role_prompt
+        assert "controller-owned constraints and acceptance are authoritative" in role_prompt
+        assert "Use discoveries to customize guidance" in role_prompt
 
     def test_executor_role_prompt_retains_registered_tool_guidance(self):
         prompt = get_system_prompt(

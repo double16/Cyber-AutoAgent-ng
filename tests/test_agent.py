@@ -690,7 +690,8 @@ def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
 
     kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
     assert "tool_catalog" not in kwargs["system_prompt"]
-    assert "controller support role" in kwargs["system_prompt"]
+    assert "You construct or review task-specific execution guidance" in kwargs["system_prompt"]
+    assert "Do not execute the assessment" in kwargs["system_prompt"]
 
 
 @pytest.mark.parametrize(

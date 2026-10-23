@@ -432,6 +432,42 @@ these goals and use the credential-worker tests as regression checks.
   responses. Python performs deterministic selection and bookkeeping; agents reason about observed application
   behavior. Avoid target-specific paths, fixed header assumptions, and expanding prompts with incident details.
 
+### Reasoning replay and emergency context recovery
+
+Every model request receives a generation allocation from its assembled input, resolved context capacity,
+required answer space, configured reasoning allowance, and a safety margin of the larger of 512 tokens or
+2% of context capacity. Role `max_tokens` values are preferred targets; explicit `MAX_TOKENS`,
+`MAX_COMPLETION_TOKENS`, provider configuration ceilings, and known model output limits remain hard caps.
+Required structured records determine answer capacity; an input inventory does not imply one output per item.
+Unstructured calls reserve at least the smaller of 1,024 tokens or their preferred target for an answer.
+
+The controller first reduces optional input and eligible conversation content toward the preferred target,
+then permits a smaller generation allocation when the complete-answer and reasoning minimum still fits.
+Otherwise it raises an explicit capacity error before calling the provider. Allocations are recalculated
+after tool results, continuation, repairs, and reduction, so temporary capacity pressure cannot permanently
+lower the target. Genuine output truncation can request a bounded 2,048-token retry increase; reasoning-loop
+recovery retains its separate policy. These adjustments are local to the invocation.
+
+Final transport adapters cover streaming and native structured output, including direct SDK summaries and
+evaluation prompts assembled by Ragas. SDK summaries use a target of at most 4,096 tokens and an independent
+answer floor, preserving the parent task's allocation. Provider request settings and output reservations
+are applied together on request-local model copies. Diagnostics record capacities, allocations, caps, and
+allocation reasons without recording prompt content. Existing operation budget and termination rules apply.
+
+Reasoning generation and reasoning replay are separate behaviors. Ollama may generate fresh thinking, which
+remains available in diagnostics, but prior reasoning blocks are excluded from subsequent requests and input
+estimates. LiteLLM retains its existing no-replay policy. Replay-enabled providers retain the complete latest
+reasoning-bearing assistant message, including signatures or redacted blocks, across a following tool result;
+context reduction temporarily pins that turn and preserves its tool exchange.
+
+Recent-message preservation is advisory for oversized tool payloads. If ordinary reduction cannot fit the input,
+the controller archives eligible recent tool results under `artifacts/context_reduction/<sha256>.json`, then
+replaces inline content with a bounded preview and retrieval reference. The original payload must be saved
+successfully before replacement. Structured acceptance and provenance records, task instructions, tool schemas,
+and required reasoning remain protected. A preview establishes no semantic evidence conclusion; omitted content
+must be retrieved before relying on it. Archiving preserves the current output reservation; the allocator
+may subsequently reduce it toward the complete-answer minimum. If protected input still cannot fit, the controller raises an explicit capacity error and logs fixed input, remaining messages, and output reserve.
+
 ### Credential workers
 
 Authentication and provisioning workers discover flows during authorized interaction. There is no separate
@@ -1116,7 +1152,21 @@ and missing task actions; omission of controller-appended rules is not a defect.
 constraints appear once per construction prompt, and phase descriptions are context rather than new work.
 
 This separation applies to HTTP, network, and source/filesystem tasks. Protocol-specific execution rules
-remain in module policies and typed capabilities. Critic JSON, cycle limits, and model settings are unchanged.
+remain in module policies and typed capabilities. Critic JSON and cycle limits are unchanged.
+
+The construction review covers initial generation, critic refinement, bounded repair, JSON correction,
+max-token recovery, input fitting, and deterministic fallback. Instruction ownership is explicit:
+
+| Content | Owner and construction behavior |
+| --- | --- |
+| Scope, acceptance, persistence, and terminal rules | Python supplies authoritative reference sections and appends executor rules; the builder must not copy them. |
+| Operation discoveries and frozen inputs | The builder uses concrete observations, references, and unresolved questions to customize actions and evidence interpretation. |
+| Tool and command arguments | The executor uses registered schemas; the builder selects capabilities and describes required observations. |
+| Prompt review | The critic checks missing task-specific actions and contradictions, rather than repeated policy text or stylistic refinements. |
+
+This resolves the earlier requests to both describe and omit persistence requirements, and to both leave
+command arguments to the executor and reproduce literal curl commands. Shared hypothesis guidance and module
+policy remain reference material; the builder need not restate their publication schema or generic test rules.
 
 ### Phase evaluation input capacity
 
@@ -1152,9 +1202,32 @@ actions from quoted observations, redirect destinations, research URLs, and payl
 do not trigger deterministic prompt rejection. Existing target-access enforcement remains authoritative. Scope
 validation events identify their structured-assignment source; LLM critique events represent model decisions.
 
-Agent construction preserves the resolved role prompt. Support roles retain scope and module policy while
-executor tool protocols are removed and a support-role boundary is added. The original runtime prompt must not
-overwrite that resolved prompt after construction.
+Agent construction preserves the resolved role prompt. Builders and critics use a dedicated construction system
+prompt; their request supplies scope, module policy, and operation evidence as reference data. Other support roles
+retain the filtered operation system prompt. The original runtime prompt must not overwrite the resolved role prompt.
+
+Builder guidance and model generation have separate limits. For context window `C`, the `prompt` field is limited
+to `min(4096, floor(C / 10))` estimated tokens, with a writing target of four characters per token. Tool, command,
+and memory selections are separate. Python validates the token estimate before critic review and requests a
+complete concise replacement through the existing bounded correction path; it never truncates task instructions.
+
+Before the first call, total generation is sized to `max(role_profile_max_tokens, 4 * guidance_limit + 1024)`,
+capped at 32,768 and known output/configured ceilings. The input calculation includes system instructions and the
+registered output schema, plus a safety margin of `max(512, floor(C / 50))`. For a 40,000-token context and the
+default 8,192-token profile, guidance is limited to 4,000 tokens and desired generation is 17,024 tokens. Generation
+includes reasoning where the provider counts it; this is an allowance, not a guarantee that the model will answer.
+
+History, advisory memory candidates, and catalog descriptions are reduced before reasoning headroom. Frozen
+inputs and retained inspection evidence are preserved. If needed, generation is reduced to remaining capacity,
+while reserving guidance plus 1,024 tokens for selections and serialization. Required input or an output ceiling
+that cannot accommodate that minimum uses the existing deterministic fallback. Refinement and correction use the
+same guidance policy and recalculate available generation space as feedback grows.
+
+Output overrides and reasoning recovery are invocation-local; they do not change shared role profiles. Structured
+output remains preferred and JSON fallback uses the same limit. Budget events record input estimates, context,
+guidance limit, generation allowance, safety margin, and output ceiling. Exhaustion events distinguish visible
+partial output, reasoning-only output, an empty captured response, and unavailable capture diagnostics. No new
+configuration variables are required. Provider/model-template causes of invisible generation remain separate.
 
 Offline tests inspect production runner inputs at the model boundary across HTTP, network, and filesystem
 subjects. The opt-in semantic evaluation pairs valid drafts with single-defect variants and scores approval and
@@ -1172,6 +1245,41 @@ After deployment and restart, verify a fresh builder/critic pair in Langfuse has
 continuing an existing operation is sufficient.
 
 ### Final input estimation and tool argument normalization
+
+
+Task prompt critics use the same context fitting and invocation-local recovery as builders. Their complete JSON
+answer is limited to `min(2048, context_window // 20)` estimated tokens, while generation requests
+`max(profile_max_tokens, 4 * answer_limit + 1024)` tokens, capped at 32,768 and known model/configured limits.
+At 40K context this allows a 2,000-token critique and requests 9,024 generation tokens. The safety reserve is
+`max(512, context_window // 50)` tokens. Required input must leave at least `answer_limit + 1024` generation tokens;
+otherwise the controller uses its deterministic fallback. Advisory history is reduced before reasoning capacity;
+retained discoveries and the proposed draft remain available. The policy is frozen across review and revision.
+Oversized structured and JSON critiques receive bounded complete replacement repair. The canonical five-issue,
+500-character-per-message critique remains the internal compatibility format. One max-token retry disables reasoning locally without
+changing the shared profile. `task_prompt_critic_budget` and `task_prompt_critic_exhaustion` events expose capacity
+and response visibility separately: an empty response does not establish visible answer truncation. This does not
+resolve provider-specific empty generation with reasoning disabled.
+
+
+
+Task prompt review uses one `TaskPromptChecklistOutput` call with five required decisions: task coverage, scope,
+execution policy, evidence, and capability fit. Each decision is `pass` with `issue: null`, or `fail` with one concrete
+issue. Each issue cites a controller-supplied requirement reference and a verbatim draft excerpt (up to 300
+characters); an omitted action uses an empty excerpt. Python checks reference membership, excerpts, categories,
+and status/issue consistency, then normalizes failures into the existing `TaskPromptCritiqueOutput` issue list.
+Python computes approval after existing capability-availability reconciliation. These checks establish provenance,
+not semantic correctness; the critic still judges whether the cited requirement supports its conclusion.
+
+The assigned task and frozen acceptance contract define work. Policies and operation constraints constrain that
+work. The operation objective appears last under “Operation background — does not expand the assigned task” and
+cannot create a rejection requirement. Discoveries and history remain supporting context, not new obligations.
+Initial review, revised-draft review, bounded repair, structured transport, and JSON fallback use the same contract.
+Missing decisions, unsupported references, fabricated quotations, and inconsistent statuses trigger bounded complete
+repair. An incomplete or exhausted review cannot approve a generated prompt; deterministic fallback is retained.
+Checklist answers use the existing critic token budget. Bounded output does not guarantee bounded hidden reasoning
+or resolve provider-specific empty responses. The existing opt-in Ollama semantic evaluations use the checklist
+schema and separately measure valid approvals and concrete defect categories.
+
 
 Production task prompt builders, critics, task evaluators, and phase evaluators fit input in the model-call
 hook after Strands registers structured-output tools. Fitting uses the finalized system prompt, all live
@@ -1355,3 +1463,45 @@ next destination leaves that boundary, Python retains the redirect response for 
 destination/marker comparison without requesting the external destination. Successful authenticated
 access must still be distinguished from anonymous behavior. Authenticated validation and task requests
 continue to reject redirects outside the credential target boundary.
+
+
+Review capacity is shared through `ReviewBudget` (`TaskPromptBudget` remains a compatibility alias). Plan critics,
+task prompt critics, authentication and registration flow critics, task evaluators (including hypothesis publication
+checkpoints and bound subject reviews), phase evaluators, and report critics all separate answer size from generation
+capacity. The default answer target is `min(2048, context_window // 20)`; desired generation is
+`max(profile_max_tokens, 4 * answer_target + 1024)`, capped at 32,768 and known model/configured ceilings.
+The safety reserve remains `max(512, context_window // 50)`. Builder guidance retains its existing policy.
+
+For schemas requiring repeated output records, Python derives an answer floor from required fields, literal values,
+references, and array minimum cardinalities, reserving 256 additional tokens per required array element. This is a
+capacity estimate, not a semantic conclusion. Input inventory length does not imply output cardinality: 385 inventory
+items can still require one task-local decision. A contract actually requiring 385 subject reviews must fit all of
+them; it cannot silently omit records to meet the default 2K answer target. Required answer capacity plus 1,024 tokens
+must fit the provider/configured ceiling and context. Otherwise the existing explicit capacity/fallback path applies.
+
+Every review sees its role-specific questions once and returns concise semantic feedback. Plan review covers the
+operation objective and phase dependencies. Task and phase evaluation cover frozen acceptance, evidence support,
+unresolved work, and permitted disposition. Flow critics review observed fields and ordered transitions against
+authorized evidence. Report critics review only the assigned narrative/section requirements and factual grounding.
+The operation objective is background for these narrower reviews; it remains authoritative for plan coverage.
+Existing `feedback`, `reason`, `instructions`, prerequisite gaps, subject decisions, and repair fields continue to
+carry concrete deficiencies and required actor corrections. Python retains schema, provenance, membership, receipt,
+and state checks; it does not replace semantic judgment with successful tool execution or readable artifacts.
+
+Initial, repair, synthesis, and tool-result continuations account for actual system text and structured-output
+schemas. Advisory history and optional worker narration may be reduced; frozen evidence, selected feedback, and
+required task-local results remain available in the authoritative context. Live fitting can reduce local reasoning
+capacity after advisory reductions, while preserving the complete-answer floor. Overrides are invocation-local and
+do not change shared profiles. Diagnostics distinguish reasoning-only, visible, empty, and unavailable responses.
+
+Report critics create a local model per invocation and restore their previous model and history afterward; earlier
+sections cannot become evidence for a new section. Report review uses live schema-aware fitting and the same bounded
+reasoning-disabled retry. Configured refinement cycles bound actor revisions; one final review checks the last
+revision in both narrative and structured next-step loops. Final rejection remains explicitly unapproved, and failed
+review uses deterministic fallback. Invalid JSON or exhausted review supplies no semantic actor correction.
+
+Post-operation scoring was audited separately: Ragas samples and auxiliary evaluator payloads already reserve
+context for templates and output, and scoring requests explicitly disable reasoning. Rubric judge generation is
+subject to its dedicated configured `judge_max_tokens`. These compact score/rationale judgments do not direct an
+actor, so their existing scoring contracts and failure handling remain; no actor correction cycle is introduced.
+Provider-specific empty generation when reasoning is disabled remains a separate limitation.

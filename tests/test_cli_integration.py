@@ -1005,8 +1005,44 @@ def test_workflow_max_token_recovery_orchestrates_reasoning_repair_and_token_esc
         max_duration=None,
         logger=Mock(),
     ) == recovered
-    assert token_registry.boosts
-    assert token_registry.successes
+    assert not token_registry.boosts
+    assert not token_registry.successes
+
+
+@pytest.mark.parametrize("recover", [True, False])
+def test_executor_dynamic_token_retry_is_scoped_even_on_failure(monkeypatch, recover):
+    import modules.config.models.agent_profiles as profiles
+    from modules.config.models.generation_budget import model_generation_request
+    from modules.config.models.invocation import invocation_output_tokens
+    from modules.handlers.max_token_recovery import MaxTokenClassification
+    from tests.test_generation_budget import Transport
+
+    registry = SimpleNamespace(get_settings=lambda _role: SimpleNamespace(reasoning_level=profiles.ReasoningLevel.NONE))
+    monkeypatch.setattr(profiles, "get_agent_settings_registry", lambda: registry)
+    classification = MaxTokenClassification("output_truncation", 0.0, "hash", 2000)
+    monkeypatch.setattr(cyberautoagent, "classify_and_discard_max_token_output", lambda *_a, **_kw: (classification, 0))
+    agent = SimpleNamespace(model=Transport(), messages=[], _cyber_agent_type="task_executor")
+    calls = []
+    result = cyberautoagent.AgentRunResult("task_executor_done", "done")
+
+    def run(**kwargs):
+        calls.append((invocation_output_tokens("task_executor"), model_generation_request(agent.model, 100).preferred_tokens))
+        if len(calls) == 1 or not recover:
+            raise MaxTokensReachedException("length")
+        return result
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", run)
+    arguments = dict(agent=agent, prompt="assigned task", run_policy=None, callback_handler=SimpleNamespace(),
+                     initial_prompt="assigned task", budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=1),
+                     operation_start=0, max_duration=None, logger=Mock())
+    if recover:
+        assert cyberautoagent.run_workflow_agent_with_max_token_recovery(**arguments) == result
+    else:
+        with pytest.raises(MaxTokensReachedException):
+            cyberautoagent.run_workflow_agent_with_max_token_recovery(**arguments)
+    assert calls == [(None, 8192), (10240, 10240)]
+    assert invocation_output_tokens("task_executor") is None
+    assert agent.model._cyber_preferred_output_tokens == 8192
 
 
 def test_finalization_and_cleanup_orchestrate_completion_health_and_memory_lifecycle(monkeypatch):

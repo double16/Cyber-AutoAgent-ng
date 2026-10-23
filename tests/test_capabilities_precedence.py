@@ -73,6 +73,7 @@ class TestCapabilitiesPrecedence:
         )
 
         assert allows_reasoning_content_replay("litellm", "openai/gpt-5", caps) is False
+        assert allows_reasoning_content_replay("ollama", "any-thinking-model", caps) is False
         assert allows_reasoning_content_replay("bedrock", "claude-sonnet-4", caps) is True
 
     def test_ollama_thinking_sets_internal_string_reasoning_flag(self):
@@ -312,6 +313,16 @@ def test_capability_limits_ignore_invalid_environment_overrides(monkeypatch):
         assert capabilities_module.get_model_output_limit("unknown") is None
 
     capabilities_module.get_model_output_limit.cache_clear()
+
+
+def test_known_output_ceiling_can_be_resolved_separately_from_environment(monkeypatch):
+    client = MagicMock()
+    client.get_model_info.return_value.limits.output = 4096
+    monkeypatch.setattr(capabilities_module, "get_models_client", lambda: client)
+    monkeypatch.setenv("MAX_COMPLETION_TOKENS", "32000")
+    monkeypatch.setenv("MAX_TOKENS", "20000")
+    assert get_model_output_limit("ceiling-fixture") == 32000
+    assert get_model_output_limit("ceiling-fixture", include_environment=False) == 4096
 
 
 @pytest.mark.parametrize(

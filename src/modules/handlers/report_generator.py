@@ -29,6 +29,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ValidationError
 from strands.types.exceptions import MaxTokensReachedException
 
+from modules.agents.prompt_context import PromptInputTooLarge, ReviewBudget
 from modules.agents.report_agent import ReportGenerator
 from modules.agents.structured_outputs import (
     ReportCritiqueOutput,
@@ -2772,7 +2773,7 @@ def _invoke_report_agent(
             raise RuntimeError("report agent exceeded its configured turn limit")
         return result
     except Exception as error:
-        if isinstance(error, (MaxTokensReachedException, NotImplementedError, AttributeError, ValidationError)) or (
+        if isinstance(error, (MaxTokensReachedException, PromptInputTooLarge, NotImplementedError, AttributeError, ValidationError)) or (
             is_structured_output_unavailable(error)
         ):
             raise
@@ -2824,6 +2825,52 @@ new facts, evidence, counts, or report sections. Return only the complete revise
 """
 
 
+def _invoke_budgeted_report_critic(
+    agent: Any, prompt: str, section_label: str, circuit_breaker: Any,
+    output_model: type[BaseModel] | None, reasoning: str | None,
+) -> tuple[Any, Any]:
+    """Fit the actual review request and replace only this agent's model for the call."""
+    from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
+
+    from modules.agents.prompt_context import attach_live_prompt_fitter
+
+    budget = getattr(agent, "_cyber_review_budget", None)
+    if not isinstance(budget, ReviewBudget):
+        # Lightweight injected runners own their transport/settings; production agents always carry a policy.
+        return _invoke_report_agent(agent, prompt, section_label, circuit_breaker, output_model), None
+    model_id = agent._cyber_review_model_id
+    schema = output_model or ReportCritiqueOutput
+    prompt, tokens = budget.fit(
+        prompt, str(agent.system_prompt or ""), [StructuredOutputTool(schema).tool_spec], model_id,
+        lambda details: logger.info("REPORT_REVIEW_BUDGET section=%s details=%s", section_label, details),
+    )
+    previous_model = agent.model
+    previous_messages = list(agent.messages)
+    previous_fitter = getattr(agent, "_cyber_prompt_fitter", None)
+    try:
+        agent.model = agent._cyber_review_model_factory(tokens, reasoning)
+        # Prior sections are not evidence for the currently assigned review unit.
+        agent.messages = []
+        attach_live_prompt_fitter(
+            agent, prompt, lambda details: logger.info("REPORT_REVIEW_INPUT %s", details),
+            ("Task history", "Eligible Semantic Memories"), reserve_safety=True,
+            minimum_output_tokens=budget.guidance_tokens + 1024,
+        )
+        result = _invoke_report_agent(agent, prompt, section_label, circuit_breaker, output_model)
+        return result, budget
+    except MaxTokensReachedException as error:
+        from modules.handlers.max_token_recovery import capture_and_discard_max_token_output
+
+        classification, _, snapshot = capture_and_discard_max_token_output(agent, reasoning)
+        error.max_token_classification = classification
+        error.max_token_failure_snapshot = snapshot
+        raise
+    finally:
+        agent.model = previous_model
+        agent.messages = previous_messages
+        agent._cyber_prompt_fitter = previous_fitter
+
+
 def _run_report_critic(
     critic_agent: Any,
     prompt: str,
@@ -2836,22 +2883,26 @@ def _run_report_critic(
     remaining_json_retries = json_retries
     max_token_retry_used = False
     legacy_fallback_active = False
+    reasoning = None
+
+    def invoke(output_model=None):
+        nonlocal active_budget
+        result, active_budget = _invoke_budgeted_report_critic(
+            critic_agent, current_prompt, section_label, circuit_breaker, output_model, reasoning,
+        )
+        return result
+
+    active_budget = None
     while True:
         try:
             if legacy_fallback_active:
                 response = _extract_text_from_result(
-                    _invoke_report_agent(critic_agent, current_prompt, section_label, circuit_breaker)
+                    invoke()
                 )
                 data = parse_json_response(response, require_object=True)
             else:
                 try:
-                    result = _invoke_report_agent(
-                        critic_agent,
-                        current_prompt,
-                        section_label,
-                        circuit_breaker,
-                        ReportCritiqueOutput,
-                    )
+                    result = invoke(ReportCritiqueOutput)
                     output = getattr(result, "structured_output", None)
                     if isinstance(output, (BaseModel, dict)):
                         data = structured_output_dict(output)
@@ -2864,14 +2915,25 @@ def _run_report_critic(
                     legacy_fallback_active = True
                     logger.info("Report critic using JSON compatibility output after structured-output failure: %s", error)
                     response = _extract_text_from_result(
-                        _invoke_report_agent(critic_agent, current_prompt, section_label, circuit_breaker)
+                        invoke()
                     )
                     data = parse_json_response(response, require_object=True)
+            if active_budget is not None:
+                active_budget.validate(data, critic_agent._cyber_review_model_id)
             return _validate_report_critique(data)
-        except MaxTokensReachedException:
+        except PromptInputTooLarge:
+            raise
+        except MaxTokensReachedException as error:
+            snapshot = getattr(error, "max_token_failure_snapshot", None)
+            visibility = ("unavailable" if snapshot is None else
+                          "visible_output" if snapshot.partial_output else
+                          "reasoning_only" if snapshot.recorded_reasoning else "empty_response")
+            logger.warning("REPORT_REVIEW_EXHAUSTION section=%s visibility=%s", section_label, visibility)
             if not max_token_retry_used:
                 max_token_retry_used = True
-                reset_agent_conversation_for_recovery(critic_agent)
+                reasoning = "none"
+                if not isinstance(getattr(critic_agent, "_cyber_review_budget", None), ReviewBudget):
+                    reset_agent_conversation_for_recovery(critic_agent)
                 current_prompt = """The previous critique exhausted its token limit and was discarded.
 Return only JSON matching {"approved": bool, "feedback": [string]}. Do not include analysis. Use no more than five
 short feedback items. Review request:\n""" + prompt
@@ -2899,12 +2961,7 @@ Original review request:
 """
                 continue
             break
-    return {
-        "approved": False,
-        "feedback": [
-            f"The report critic did not return a valid structured review after {json_retries + 1} attempt(s)."
-        ],
-    }
+    raise ValueError(f"Report critic did not return a valid review after {json_retries + 1} attempt(s)")
 
 
 def _run_report_refinement(
@@ -2930,7 +2987,7 @@ def _run_report_refinement(
         return content, None
 
     final_rejection = None
-    for cycle in range(1, refinement_cycles + 1):
+    for cycle in range(1, refinement_cycles + 2):
         if callable(efficiency_callback):
             efficiency_callback("critic_cycle")
         try:
@@ -2948,6 +3005,8 @@ def _run_report_refinement(
             logger.info("Report critic approved %s on cycle %s", section_label, cycle)
             return content, None
 
+        if cycle > refinement_cycles:
+            return content, critique
         logger.info("Report critic requested revision for %s on cycle %s", section_label, cycle)
         try:
             revised = _extract_text_from_result(_invoke_report_agent(
@@ -3306,7 +3365,7 @@ def _run_next_steps_refinement(
         return _apply_next_steps_budget_scope(data, configured_budget, source), None
 
     final_rejection = None
-    for cycle in range(1, refinement_cycles + 1):
+    for cycle in range(1, refinement_cycles + 2):
         if callable(efficiency_callback):
             efficiency_callback("critic_cycle")
         try:
@@ -3329,6 +3388,8 @@ def _run_next_steps_refinement(
             ), None
         if critique["approved"]:
             return _apply_next_steps_budget_scope(data, configured_budget, source), None
+        if cycle > refinement_cycles:
+            return _apply_next_steps_budget_scope(data, configured_budget, source), critique
         revision_prompt = f"""Revise the structured Appendix B result using every applicable critic feedback item.
 Return only the complete JSON object required by the original request.
 

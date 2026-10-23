@@ -98,6 +98,31 @@ class TaskPromptCritiqueOutput(StrictStructuredOutput):
     repairable: bool = True
 
 
+class TaskPromptChecklistIssueOutput(TaskPromptIssueOutput):
+    requirement_ref: str = Field(min_length=1)
+    draft_excerpt: str = Field(max_length=300)
+
+
+class TaskPromptCheckOutput(StrictStructuredOutput):
+    status: Literal["pass", "fail"]
+    issue: TaskPromptChecklistIssueOutput | None
+
+    @model_validator(mode="after")
+    def validate_status(self) -> TaskPromptCheckOutput:
+        if (self.status == "fail") != (self.issue is not None):
+            raise ValueError("Failed checks require an issue; passing checks require issue=null")
+        return self
+
+
+class TaskPromptChecklistOutput(StrictStructuredOutput):
+    task_coverage: TaskPromptCheckOutput
+    scope: TaskPromptCheckOutput
+    execution_policy: TaskPromptCheckOutput
+    evidence: TaskPromptCheckOutput
+    capability_fit: TaskPromptCheckOutput
+    repairable: bool = True
+
+
 class FlowCritiqueOutput(CritiqueOutput):
     supporting_evidence_refs: list[str] = Field(default_factory=list)
 
@@ -284,7 +309,7 @@ WORKFLOW_OUTPUT_MODELS: dict[str, type[BaseModel]] = {
     "authentication_flow_critic": FlowCritiqueOutput,
     "registration_flow_critic": FlowCritiqueOutput,
     "task_prompt_builder": TaskPromptOutput,
-    "task_prompt_critic": TaskPromptCritiqueOutput,
+    "task_prompt_critic": TaskPromptChecklistOutput,
     "task_phase_classifier": TaskPhaseClassificationOutput,
     "task_evaluator": WorkflowDecisionOutput,
     "phase_evaluator": WorkflowDecisionOutput,
@@ -296,6 +321,9 @@ WORKFLOW_OUTPUT_MODELS: dict[str, type[BaseModel]] = {
 def structured_output_dict(value: Any) -> dict[str, Any]:
     """Normalize a structured result without reparsing model text."""
 
+    if isinstance(value, TaskPromptChecklistOutput):
+        # Null issues are required pass decisions, not optional metadata.
+        return value.model_dump()
     if isinstance(value, BaseModel):
         return value.model_dump(exclude_none=True, exclude_unset=True)
     if isinstance(value, dict):

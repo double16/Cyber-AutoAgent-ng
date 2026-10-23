@@ -321,7 +321,7 @@ def allows_reasoning_content_replay(
 ) -> bool:
     """Return whether prior reasoning blocks may be replayed to the model API."""
 
-    if (provider or "").lower() == "litellm":
+    if (provider or "").lower() in {"litellm", "ollama"}:
         # Strands' LiteLLMModel uses Chat Completions, which can return reasoning
         # but cannot accept reasoningContent in later conversation turns.
         return False
@@ -408,7 +408,7 @@ def get_provider_default_limit(provider: str) -> int | None:
 
 
 @lru_cache
-def get_model_output_limit(model_id: str) -> int | None:
+def get_model_output_limit(model_id: str, *, include_environment: bool = True) -> int | None:
     """Get OUTPUT token limit for a model (max completion length).
 
     Precedence:
@@ -416,12 +416,14 @@ def get_model_output_limit(model_id: str) -> int | None:
     2. MAX_TOKENS env var (UI general setting)
     3. models.dev (authoritative)
     4. None (caller should use safe defaults)
+
+    Set include_environment=False to resolve the model ceiling separately from configured ceilings.
     """
     if not model_id:
         return None
 
     # Priority 1: MAX_COMPLETION_TOKENS (UI reasoning models)
-    override = os.getenv("MAX_COMPLETION_TOKENS")
+    override = os.getenv("MAX_COMPLETION_TOKENS") if include_environment else None
     if override:
         try:
             return int(override)
@@ -429,7 +431,7 @@ def get_model_output_limit(model_id: str) -> int | None:
             logger.warning("Invalid MAX_COMPLETION_TOKENS: %s", override)
 
     # Priority 2: MAX_TOKENS (UI general setting)
-    override = os.getenv("MAX_TOKENS")
+    override = os.getenv("MAX_TOKENS") if include_environment else None
     if override:
         try:
             return int(override)

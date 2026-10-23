@@ -3,6 +3,31 @@ from unittest.mock import MagicMock, patch
 from modules.agents.report_agent import ReportExecutionTelemetryHook, ReportGenerator
 
 
+def test_report_hook_applies_dynamic_budget_after_live_fitting(monkeypatch):
+    from types import SimpleNamespace
+
+    from tests.test_generation_budget import Transport
+
+    monkeypatch.setattr("modules.handlers.conversation_budget.safe_estimate_tokens", lambda _agent: 35000)
+    monkeypatch.setattr("modules.handlers.conversation_budget._SHARED_CONVERSATION_MANAGER", None)
+    model = Transport()
+    fitted = []
+    agent = SimpleNamespace(model=model, messages=[], _prompt_token_limit=40000,
+                            _cyber_prompt_fitter=lambda _agent: fitted.append(True))
+    event = SimpleNamespace(agent=agent, invocation_state={}, projected_input_tokens=35000)
+    ReportExecutionTelemetryHook().before_model_call(event)
+    assert fitted == [True]
+    assert model._output_tokens == model.config["max_tokens"] == 4200
+
+
+def test_report_hook_accepts_absent_agent():
+    from types import SimpleNamespace
+
+    ReportExecutionTelemetryHook().before_model_call(SimpleNamespace(
+        agent=None, invocation_state={}, projected_input_tokens=None,
+    ))
+
+
 @patch("modules.agents.report_agent.get_config_manager")
 @patch("modules.agents.report_agent.Agent")
 @patch("modules.agents.report_agent.create_strands_model")
@@ -61,7 +86,9 @@ def test_create_report_agent_supports_stateful_model_without_context_manager(
     mock_create_model, mock_agent, mock_cfg
 ):
     mock_cfg.return_value.get_llm_config.return_value.model_id = "test-model"
-    stateful_agent = object()
+    from types import SimpleNamespace
+
+    stateful_agent = SimpleNamespace()
     mock_agent.return_value = stateful_agent
 
     result = ReportGenerator.create_report_agent(provider="litellm", system_prompt="Report Prompt")

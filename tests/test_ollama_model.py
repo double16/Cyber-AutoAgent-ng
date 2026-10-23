@@ -3,6 +3,7 @@ import re
 from unittest.mock import AsyncMock
 
 import pytest
+from ollama._types import ChatRequest
 from pydantic import BaseModel
 from strands.types.exceptions import ContextWindowOverflowException
 
@@ -115,15 +116,30 @@ def test_format_request_uses_configured_non_streaming_mode():
 def test_format_request_supports_reasoning_and_images_and_rejects_unknown_content():
     model = _model()
 
-    assert model._format_request_message_contents("assistant", {"reasoningContent": {"text": "why"}}) == [
-        {"role": "assistant", "reasoningContent": {"text": "why"}}
-    ]
+    assert model._format_request_message_contents("assistant", {"reasoningContent": {"text": "why"}}) == []
     assert model._format_request_message_contents(
         "user", {"image": {"source": {"bytes": b"image-bytes"}}}
     ) == [{"role": "user", "images": [b"image-bytes"]}]
 
     with pytest.raises(TypeError, match="unsupported type"):
         model._format_request_message_contents("user", {"document": "bad"})
+
+
+def test_serialized_ollama_request_omits_prior_reasoning():
+    request = _model().format_request([
+        {"role": "assistant", "content": [{"reasoningContent": {"text": "private"}}]},
+        {"role": "assistant", "content": [
+            {"reasoningContent": {"text": "private"}}, {"text": "visible"},
+            {"toolUse": {"toolUseId": "call", "name": "inspect", "input": {}}},
+        ]},
+        {"role": "user", "content": [{"toolResult": {
+            "toolUseId": "call", "content": [{"text": "evidence"}],
+        }}]},
+    ])
+    wire = ChatRequest(model="test", messages=request["messages"]).model_dump(exclude_none=True)
+    assert "private" not in str(wire)
+    assert [message["role"] for message in wire["messages"]] == ["assistant", "assistant", "tool"]
+    assert wire["messages"][-1]["content"] == "evidence"
 
 
 def test_format_chunk_translates_all_supported_chunk_types():

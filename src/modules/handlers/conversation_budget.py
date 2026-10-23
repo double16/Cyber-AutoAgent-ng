@@ -13,6 +13,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from strands import Agent
@@ -33,6 +34,7 @@ from strands.types.exceptions import ContextWindowOverflowException
 
 from modules.config.models.dev_client import get_models_client
 from modules.config.models.factory import get_model_id_from_agent
+from modules.handlers.context_recovery import compact_recent_results, latest_reasoning_index, preserve_reasoning_turn
 from modules.handlers.max_token_recovery import classify_max_token_output
 from modules.tools.artifact_references import extract_artifact_references
 
@@ -789,9 +791,10 @@ class SlidingWindowConversationManagerWithPreservation(SlidingWindowConversation
             return
 
         first_count = max(0, min(self.preserve_first_messages, len(messages)))
-        first_messages = messages[:first_count]
         tail_start = max(first_count, len(messages) - self.window_size)
-        trimmed = first_messages + messages[tail_start:]
+        protected = _protected_indices_for_plan_state(messages)
+        trimmed = [message for index, message in enumerate(messages)
+                   if index < first_count or index >= tail_start or index in protected]
         removed = max(0, len(messages) - len(trimmed))
         messages[:] = trimmed
         self.removed_message_count += removed
@@ -805,6 +808,12 @@ class MappingConversationManager(SummarizingConversationManager):
     - reduce_context(): Reactive cascade: mapper → slide → summarize
     - Messages modified in-place: agent.messages[:] = new
     """
+
+    def _summarize_oldest(self, agent: Agent) -> None:
+        from modules.config.models.generation_budget import summary_generation_budget
+
+        with summary_generation_budget():
+            super()._summarize_oldest(agent)
 
     def __init__(
         self,
@@ -1033,6 +1042,10 @@ class MappingConversationManager(SummarizingConversationManager):
         e: Exception | None = None,
         **kwargs: Any,
     ) -> None:
+        with preserve_reasoning_turn(agent.messages):
+            self._reduce_context(agent, e, **kwargs)
+
+    def _reduce_context(self, agent: Agent, e: Exception | None = None, **kwargs: Any) -> None:
         messages = agent.messages
         before_reduce_messages = list(messages)
         window_size = getattr(self._sliding, "window_size", 100) if self._sliding else 100
@@ -1345,8 +1358,9 @@ class MappingConversationManager(SummarizingConversationManager):
 
         compressions = 0
         new_messages: list[Message] = []
+        protected_indices = _protected_indices_for_plan_state(messages)
         for idx, message in enumerate(messages):
-            if idx < start_prune or idx >= end_prune:
+            if idx < start_prune or idx >= end_prune or idx in protected_indices:
                 # In preservation zone (initial or recent messages)
                 # System messages at index 0 are automatically preserved here
                 new_messages.append(message)
@@ -1443,6 +1457,8 @@ class _AgentInputContext:
 
 def _get_agent_input_context(agent: Agent) -> _AgentInputContext:
     messages = getattr(agent, "messages", []) if hasattr(agent, "messages") else []
+    if getattr(agent, "_allow_reasoning_content", True) is False:
+        _strip_reasoning_content(agent)
 
     system_prompt = getattr(agent, "system_prompt", None) if hasattr(agent, "system_prompt") else None
 
@@ -1895,7 +1911,10 @@ def _strip_reasoning_content(agent: Agent, force: bool = False, preserve_recent_
             end_idx = len(messages) - preserve_recent_messages
         else:
             return
-    for message in messages[:end_idx]:
+    latest_reasoning = latest_reasoning_index(messages) if allow_reasoning_content else None
+    for index, message in enumerate(messages[:end_idx]):
+        if index == latest_reasoning:
+            continue
         content = message.get("content")
         if not isinstance(content, list):
             continue
@@ -2020,6 +2039,9 @@ def _message_has_tool_result(message: dict[str, Any]) -> bool:
 def _protected_indices_for_plan_state(messages: list[dict[str, Any]]) -> set[int]:
     """Indices to preserve: latest serialized plan tool result message and its adjacent tool pair."""
     protected: set[int] = set()
+    reasoning_index = latest_reasoning_index(messages)
+    if reasoning_index is not None:
+        protected.add(reasoning_index)
 
     # Preserve the most recent plan toolResult message
     plan_idx = _get_latest_plan_tool_result(messages)
@@ -2200,15 +2222,44 @@ def _raise_if_prompt_overflow(tokens: int | None, input_limit: int) -> None:
 
 
 def get_agent_prompt_limits(agent: Agent) -> tuple[int | None, int]:
-    """Return the configured context limit and actual output reservation used by live input checks."""
+    """Return fitting capacity and the preferred reservation before final live allocation."""
 
     context_limit = _get_prompt_token_limit(agent)
     output_tokens = getattr(agent.model, "_output_tokens", 0)
     reserved = max(0, output_tokens) if isinstance(output_tokens, int) else 0
+    preferred = getattr(agent.model, "_cyber_preferred_output_tokens", None)
+    if isinstance(preferred, int) and context_limit:
+        from modules.config.models.generation_budget import allocate_generation, model_generation_request
+
+        request = model_generation_request(agent.model, 0)
+        reserved = allocate_generation(request).generation_tokens
+        context_limit -= request.safety_tokens
     return context_limit, reserved
 
 
 def _ensure_prompt_within_budget(agent: Agent) -> None:
+    """Reduce toward the preferred target, then allocate against the remaining live input."""
+    dynamic = isinstance(getattr(agent.model, "_cyber_preferred_output_tokens", None), int)
+    try:
+        _enforce_prompt_input_budget(agent)
+    except ContextWindowOverflowException:
+        if not dynamic:
+            raise
+    if dynamic:
+        from modules.config.models.generation_budget import (
+            allocate_generation,
+            model_generation_request,
+            set_generation_tokens,
+        )
+
+        tokens = safe_estimate_tokens(agent)
+        if tokens is None:
+            raise ContextWindowOverflowException("Cannot allocate generation: input token estimation unavailable")
+        allocation = allocate_generation(model_generation_request(agent.model, tokens))
+        set_generation_tokens(agent.model, allocation.generation_tokens)
+
+
+def _enforce_prompt_input_budget(agent: Agent) -> None:
     logger.info("BUDGET CHECK: Called for agent=%s", getattr(agent, "name", "unknown"))
     _strip_reasoning_content(agent)
     _dedupe_state_markers(agent)
@@ -2473,6 +2524,28 @@ def _ensure_prompt_within_budget(agent: Agent) -> None:
                 limit_for_threshold,
             )
 
+    # Message-count preservation is advisory for payloads that can be archived losslessly.
+    after_tokens = safe_estimate_tokens(agent)
+    if after_tokens is not None and after_tokens > limit_for_threshold:
+        from modules.tools.memory import _operation_output_root
+
+        compacted = compact_recent_results(
+            agent.messages, Path(_operation_output_root()), limit_for_threshold,
+            lambda: safe_estimate_tokens(agent), _protected_indices_for_plan_state(agent.messages),
+        )
+        final_tokens = safe_estimate_tokens(agent)
+        fixed_tokens = estimate_prompt_tokens(
+            get_model_id_from_agent(agent), [], getattr(agent, "system_prompt", None),
+            _get_agent_input_context(agent).tool_specs,
+        )
+        logger.warning(
+            "Emergency context reduction: input=%s->%s limit=%d fixed=%d messages=%s "
+            "output_reservation=%d compacted_results=%d",
+            after_tokens, final_tokens, limit_for_threshold, fixed_tokens,
+            None if final_tokens is None else max(0, final_tokens - fixed_tokens),
+            output_tokens, compacted,
+        )
+        after_tokens = final_tokens
     _raise_if_prompt_overflow(after_tokens, limit_for_threshold)
 
 

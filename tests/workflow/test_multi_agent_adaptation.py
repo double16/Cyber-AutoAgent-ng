@@ -53,7 +53,7 @@ def test_multi_agent_adaptation_e2e_scenario():
 
     res = workflow._run_json_text_agent("plan_creator", "Generate plan", [], "sys")
     assert res["phases"][0]["title"] == "Recon"
-    assert registry.get_settings("plan_creator").reasoning_level == ReasoningLevel.NONE
+    assert registry.get_settings("plan_creator").reasoning_level == ReasoningLevel.MEDIUM
 
     # Simulate Task Evaluator hitting non-reasoning token exhaustion 3 times -> promoted max_tokens
     promoted_1 = registry.record_token_recovery_success("task_evaluator", boost_amount=2048)
@@ -67,10 +67,7 @@ def test_multi_agent_adaptation_e2e_scenario():
     # Render the Appendix A subsection and verify all adaptations are present.
     adjustments = _format_parameter_adjustments_section(registry)
     assert "### Model & Agent Parameter Adjustments" in adjustments
-    assert (
-        "| `plan_creator` | `reasoning_level` | `medium` | `none` | "
-        "reasoning loop recovery success | True |" in adjustments
-    )
+    assert "reasoning loop recovery success" not in adjustments
     assert (
         "| `task_evaluator` | `max_tokens` | `4096` | `6144` | "
         "3-strike token exhaustion escalation | True |" in adjustments

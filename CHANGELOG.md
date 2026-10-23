@@ -9,6 +9,14 @@
 
 ### Fixes
 
+- Allocate generation tokens from each complete request across workflow, executor, report, summary, and
+  evaluation calls. Preserve complete-answer space, honor explicit output caps, and isolate retry adjustments
+  from shared role profiles.
+- Exclude prior Ollama reasoning from requests and context estimates. Preserve the latest reasoning-bearing
+  assistant turn for replay-enabled providers, and recover from oversized recent tool results by archiving
+  complete payloads before replacing inline content with retrieval references.
+- Size task prompt guidance and reasoning allowances from the model context before generation; preserve operation
+  discoveries, repair oversized guidance, and remove conflicting executor instructions from builder and critic roles.
 - Use the configured browser timeout for typed login actions and explain invalid selectors and unavailable
   select options without waiting for action timeouts.
 - Share artifact-reference parsing across discovery, evidence, reporting, and conversation compaction; accept

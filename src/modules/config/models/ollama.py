@@ -155,7 +155,8 @@ class OllamaModel(Model):
             return [{"role": role, "content": content["text"]}]
 
         if "reasoningContent" in content:
-            return [{"role": role, "reasoningContent": content["reasoningContent"]}]
+            # Prior thinking is diagnostic data, not input to the next Ollama turn.
+            return []
 
         if "image" in content:
             return [{"role": role, "images": [content["image"]["source"]["bytes"]]}]

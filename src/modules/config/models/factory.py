@@ -27,6 +27,7 @@ from modules.config.models.capabilities import (
     get_model_input_limit,
     get_provider_default_limit,
 )
+from modules.config.models.invocation import invocation_output_tokens, invocation_reasoning
 from modules.config.providers import get_ollama_host, split_litellm_model_id
 from modules.config.providers.ollama_config import get_ollama_timeout
 from modules.config.system import EnvironmentReader
@@ -110,25 +111,13 @@ def _get_prompt_limit_from_model(model_id: str | None) -> int | None:
                                 limit,
                                 cand,
                             )
-                        # Fallback to context_window or max_tokens if max_input_tokens unavailable
+                        # Context capacity is separate from the maximum completion length.
                         elif not limit:
-                            for key in ("context_window", "max_tokens"):
+                            for key in ("context_window",):
                                 v = info.get(key)
                                 if isinstance(v, (int, float)) and int(v) > 0:
                                     limit = int(v)
                                     break
-                # Last resort: get_max_tokens (often returns OUTPUT limit, less reliable)
-                if not limit:
-                    get_mt = getattr(litellm, "get_max_tokens", None)
-                    if callable(get_mt):
-                        mt = get_mt(cand)
-                        if isinstance(mt, (int, float)) and int(mt) > 0:
-                            limit = int(mt)
-                            logger.debug(
-                                "Using get_max_tokens=%d for '%s' (may be output limit, verify with CYBER_CONTEXT_LIMIT)",
-                                limit,
-                                cand,
-                            )
                 if isinstance(limit, int) and limit > 0:
                     logger.info(
                         "Resolved prompt limit %d via LiteLLM for model '%s' (candidate '%s')",
@@ -414,6 +403,7 @@ class _CreateModelParameters:
     llm_max: int
     profile_max_tokens: int
     role: LLMRoleType
+    output_ceiling: int | None = None
     top_k: int | None = None
     top_p: float | None = None
     reasoning_level: Any = None
@@ -436,10 +426,10 @@ def _get_parameters_by_role(
     agent_settings = registry.get_settings(canonical_role, provider, model_id)
 
     llm_temp = agent_settings.temperature
-    llm_max = agent_settings.max_tokens
+    llm_max = invocation_output_tokens(canonical_role) or agent_settings.max_tokens
     top_k = agent_settings.top_k
     top_p = agent_settings.top_p
-    reasoning_level = agent_settings.reasoning_level
+    reasoning_level = invocation_reasoning(canonical_role) or agent_settings.reasoning_level
     out_role = canonical_role
 
     # Role profiles are the normal output-token policy.  Generic provider
@@ -455,6 +445,7 @@ def _get_parameters_by_role(
         llm_max=llm_max,
         profile_max_tokens=agent_settings.max_tokens,
         role=out_role,
+        output_ceiling=configured_ceiling if isinstance(configured_ceiling, int) and configured_ceiling > 0 else None,
         top_k=top_k,
         top_p=top_p,
         reasoning_level=ReasoningLevel.from_value(reasoning_level),
@@ -574,6 +565,7 @@ def create_bedrock_model(
 
         model = BedrockModel(**bedrock_model_config)
         model._output_tokens = create_parameters.llm_max
+        model._cyber_output_ceiling = create_parameters.output_ceiling
         model._cyber_llm_role = create_parameters.role.value
         model._cyber_provider = provider
 
@@ -634,6 +626,7 @@ def create_bedrock_model(
 
     model = BedrockModel(**bedrock_model_config)
     model._output_tokens = llm_max
+    model._cyber_output_ceiling = create_parameters.output_ceiling
     model._cyber_llm_role = role.value
     model._cyber_provider = provider
 
@@ -729,6 +722,7 @@ def create_ollama_model(
         stream=sdk_config.enable_streaming,
     )
     model._output_tokens = llm_max
+    model._cyber_output_ceiling = create_parameters.output_ceiling
     model._cyber_llm_role = role.value
     model._cyber_provider = provider
     return model
@@ -799,6 +793,7 @@ def create_litellm_model(
     role = create_parameters.role
 
     # LiteLLM best-effort output clamp (no new envs, best-effort only)
+    model_cap = None
     try:
         import litellm  # type: ignore
 
@@ -892,6 +887,9 @@ def create_litellm_model(
         stream=sdk_config.enable_streaming,
     )
     model._output_tokens = llm_max
+    output_caps = [create_parameters.output_ceiling, model_cap, max_completion_tokens]
+    output_caps = [int(value) for value in output_caps if isinstance(value, (int, float)) and value > 0]
+    model._cyber_output_ceiling = min(output_caps) if output_caps else None
     model._cyber_llm_role = role.value
     model._cyber_provider = provider
     return model
@@ -962,7 +960,7 @@ def create_gemini_model(
     from modules.config.models.agent_profiles import translate_reasoning_to_provider
     gemini_thinking = translate_reasoning_to_provider("gemini", clean_model_id, reasoning_level, llm_max)
     if "thinking_budget" in gemini_thinking:
-        client_args["thinking_config"] = {"thinking_budget": gemini_thinking["thinking_budget"]}
+        params["thinking_config"] = {"thinking_budget": gemini_thinking["thinking_budget"]}
 
     logger.info(
         "Creating native GeminiModel: model=%s, temperature=%s, max_tokens=%s",
@@ -986,6 +984,7 @@ def create_gemini_model(
         params=params,
     )
     model._output_tokens = llm_max
+    model._cyber_output_ceiling = create_parameters.output_ceiling
     model._cyber_llm_role = create_parameters.role.value
     model._cyber_provider = provider
     return model
@@ -1034,6 +1033,16 @@ def create_strands_model(
             raise ValueError(f"Unsupported provider: {provider}")
 
         apply_model_context_window(model, provider, model_id)
+        from modules.config.models.capabilities import get_model_output_limit
+        from modules.config.models.generation_budget import attach_generation_budget
+
+        ceilings = [get_model_output_limit(model_id, include_environment=False),
+                    getattr(model, "_cyber_output_ceiling", None)]
+        for name in ("MAX_TOKENS", "MAX_COMPLETION_TOKENS"):
+            with contextlib.suppress(ValueError):
+                ceilings.append(int(os.getenv(name, "0")))
+        positive_ceilings = [value for value in ceilings if isinstance(value, int) and value > 0]
+        model = attach_generation_budget(model, provider, model_id, min(positive_ceilings) if positive_ceilings else None)
         from modules.config.models.capabilities import wrap_model_with_fallback
         model = wrap_model_with_fallback(model, provider, model_id)
         return model

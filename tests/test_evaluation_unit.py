@@ -1354,11 +1354,12 @@ async def test_continuous_public_rubric_skips_insufficient_evidence(monkeypatch)
 
 
 def test_setup_models_supports_all_configured_providers(monkeypatch):
+    monkeypatch.setattr(mod, "require_prompt_token_limit", lambda *_args: 40000)
     class Config:
         def __init__(self, provider):
             self.provider = provider
             self.server = SimpleNamespace(
-                evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model")),
+                evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model"), judge_max_tokens=800),
                 embedding=SimpleNamespace(model_id="embed-model"),
             )
 
@@ -1373,6 +1374,9 @@ def test_setup_models_supports_all_configured_providers(monkeypatch):
 
         def get_default_region(self):
             return "us-east-1"
+
+        def getenv_int(self, _name, default=0):
+            return default
 
     class Model:
         instances = []

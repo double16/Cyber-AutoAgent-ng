@@ -34,7 +34,7 @@ import time
 import traceback
 import warnings
 from collections import Counter
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -1155,21 +1155,26 @@ def run_workflow_agent_with_max_token_recovery(
     current_run_policy = run_policy
     max_token_recovery_attempts = 0
     pending_reasoning_repair: tuple[str, str, str] | None = None
-    pending_token_escalation: str | None = None
+    recovery_tokens: int | None = None
 
     while True:
         try:
-            result = run_agent_until_terminal_state(
-                agent=agent,
-                callback_handler=callback_handler,
-                current_message=current_prompt,
-                initial_prompt=initial_prompt,
-                budget_cfg=budget_cfg,
-                operation_start=operation_start,
-                max_duration=max_duration,
-                logger=logger,
-                run_policy=current_run_policy,
-            )
+            from modules.config.models.invocation import model_output_budget
+
+            role = str(getattr(agent, "_cyber_agent_type", "task_executor"))
+            scope = model_output_budget(role, recovery_tokens) if recovery_tokens is not None else nullcontext()
+            with scope:
+                result = run_agent_until_terminal_state(
+                    agent=agent,
+                    callback_handler=callback_handler,
+                    current_message=current_prompt,
+                    initial_prompt=initial_prompt,
+                    budget_cfg=budget_cfg,
+                    operation_start=operation_start,
+                    max_duration=max_duration,
+                    logger=logger,
+                    run_policy=current_run_policy,
+                )
             # If we had a pending reasoning repair and recovery succeeded, lock in the permanent promotion
             if pending_reasoning_repair:
                 rep_role, rep_level, rep_reason = pending_reasoning_repair
@@ -1178,14 +1183,6 @@ def run_workflow_agent_with_max_token_recovery(
                 )
                 get_agent_settings_registry().apply_reasoning_repair(rep_role, rep_level, rep_reason, permanent=True)
                 pending_reasoning_repair = None
-
-            # If we had a pending token recovery and recovery succeeded, record token recovery success (3 strikes -> permanent)
-            if pending_token_escalation:
-                from modules.config.models.agent_profiles import (
-                    get_agent_settings_registry,
-                )
-                get_agent_settings_registry().record_token_recovery_success(pending_token_escalation, boost_amount=2048)
-                pending_token_escalation = None
 
             return result
         except MaxTokensReachedException as error:
@@ -1257,9 +1254,9 @@ def run_workflow_agent_with_max_token_recovery(
                 pending_reasoning_repair = (role, target_level.value, "reasoning max token reduction success")
             else:
                 # 3. Non-reasoning max token exhaustion: bounded token increase (+2048)
-                mutate_agent_model_max_tokens(agent, boost_amount=2048)
-                registry.boost_max_tokens_for_retry(role, boost_amount=2048)
-                pending_token_escalation = role
+                recovery_tokens = int(getattr(agent.model, "_cyber_preferred_output_tokens", output_limit) or 4096) + 2048
+                if not isinstance(getattr(agent.model, "_cyber_preferred_output_tokens", None), int):
+                    mutate_agent_model_max_tokens(agent, boost_amount=2048)
 
             reset_agent_conversation_for_recovery(agent)
             if run_policy is not None:

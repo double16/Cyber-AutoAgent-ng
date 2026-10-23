@@ -412,6 +412,20 @@ class CyberAgentEvaluator:
             callback=self._usage_callback,
         )
         self._chat_model.callbacks = [self._usage_tracker]
+        from modules.config.models.capabilities import get_model_output_limit
+        from modules.evaluation.generation_budget import attach_evaluation_budget
+
+        ceilings = [get_model_output_limit(evaluation_model_id, include_environment=False)]
+        for name in ("MAX_TOKENS", "MAX_COMPLETION_TOKENS"):
+            value = config_manager.getenv_int(name, 0)
+            if value > 0:
+                ceilings.append(value)
+        ceilings = [value for value in ceilings if isinstance(value, int) and value > 0]
+        attach_evaluation_budget(
+            self._chat_model, server_type, evaluation_model_id,
+            require_prompt_token_limit(server_type, evaluation_model_id),
+            server_config.evaluation.judge_max_tokens, min(ceilings) if ceilings else None,
+        )
         logger.info("Evaluation model reasoning disabled provider=%s", server_type)
 
         # The provider/model capability can change when an evaluator is rebuilt.

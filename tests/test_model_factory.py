@@ -13,6 +13,8 @@ class FakeModel:
         self.kwargs = kwargs
         self.config = kwargs
         self.model_id = kwargs.get("model_id")
+        self._output_tokens = kwargs.get("max_tokens", 4096)
+        self._cyber_llm_role = "unknown"
         self.client_args = kwargs.get("client_args", kwargs.get("ollama_client_args", {}))
 
     def update_config(self, **kwargs):
@@ -258,7 +260,7 @@ def test_create_ollama_model_passes_xhigh_string_reasoning(monkeypatch, config_m
     assert model.kwargs["additional_args"]["think"] == "xhigh"
 
 
-def test_prompt_limit_helper_uses_context_window_registry_and_output_fallbacks(monkeypatch):
+def test_prompt_limit_helper_keeps_input_and_output_limits_separate(monkeypatch):
     context_calls = []
     fake_litellm = SimpleNamespace(
         get_context_window=lambda candidate: context_calls.append(candidate) or (4096 if candidate == "model" else 0),
@@ -279,7 +281,7 @@ def test_prompt_limit_helper_uses_context_window_registry_and_output_fallbacks(m
 
     fake_litellm.model_cost = {}
     fake_litellm.get_max_tokens = lambda _candidate: 1024
-    assert mod._get_prompt_limit_from_model("model") == 1024
+    assert mod._get_prompt_limit_from_model("model") is None
 
 
 def test_resolve_prompt_limit_covers_force_static_litellm_and_provider_fallbacks(monkeypatch):
@@ -530,6 +532,24 @@ def test_get_parameters_by_role_applies_explicit_output_ceiling(config_manager):
     assert params.llm_max == 600
 
 
+def test_invocation_budget_reaches_model_parameters_without_changing_profile(config_manager):
+    from modules.config.models.invocation import model_output_budget
+
+    with model_output_budget("task_prompt_builder", 17024, "none"):
+        params = mod._get_parameters_by_role("ollama", "model", "task_prompt_builder", {})
+        assert params.llm_max == 17024
+        assert params.profile_max_tokens == 8192
+        assert params.reasoning_level.value == "none"
+        capped = mod._get_parameters_by_role(
+            "ollama", "model", "task_prompt_builder", {"max_tokens_ceiling": 10000},
+        )
+        assert capped.llm_max == 10000
+        assert mod._get_parameters_by_role("ollama", "model", "task_prompt_critic", {}).llm_max == 4096
+    params = mod._get_parameters_by_role("ollama", "model", "task_prompt_builder", {})
+    assert params.llm_max == 8192
+    assert params.reasoning_level.value == "medium"
+
+
 def test_thinking_model_disables_thinking_for_non_reasoning_profile(monkeypatch, config_manager):
     import strands.models
 
@@ -726,6 +746,7 @@ def test_litellm_model_applies_sagemaker_reasoning_and_azure_response_options(mo
     })
     parameters = SimpleNamespace(
         llm_temp=0.2,
+        output_ceiling=None,
         llm_max=500,
         top_k=12,
         top_p=0.7,
@@ -739,6 +760,7 @@ def test_litellm_model_applies_sagemaker_reasoning_and_azure_response_options(mo
     monkeypatch.setattr(mod, "_apply_context_window_fallbacks", Mock())
 
     sagemaker = mod.create_litellm_model("sagemaker/model", "us-east-1", role="task_executor")
+    assert sagemaker._cyber_output_ceiling == 333
 
     assert sagemaker.kwargs["client_args"] == {
         "aws_region_name": "us-east-1",
