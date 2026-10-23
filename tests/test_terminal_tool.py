@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 from strands import Agent, tool
-from strands.hooks import BeforeToolCallEvent
+from strands.hooks import AfterToolsEvent, BeforeToolCallEvent
 from strands.tools.executors import SequentialToolExecutor
 
 from modules.agents.run_policy import AgentRunPolicy
@@ -97,7 +97,10 @@ def test_terminal_tool_hook_registers_and_ignores_unusable_request_state():
     hook = TerminalToolHook("task_executor")
 
     hook.register_hooks(registry)
-    assert callbacks == [(callbacks[0][0], hook._after_tool), (BeforeToolCallEvent, hook._before_tool)]
+    assert callbacks == [
+        (callbacks[0][0], hook._after_tool), (BeforeToolCallEvent, hook._before_tool),
+        (AfterToolsEvent, hook._after_tools),
+    ]
 
     event = _event("record_task_acceptance", '{"complete": true}')
     event.invocation_state["request_state"] = "not-a-mapping"
@@ -256,8 +259,149 @@ def test_publication_checkpoint_counts_all_tools_and_only_new_digests_reset():
         assert not event.invocation_state
     event = _event("record_hypotheses", "same digest")
     hook._after_tool(event)
+    assert not event.invocation_state
+    hook._after_tools(event)
     assert event.invocation_state["request_state"][POLICY_TERMINAL_STATE_KEY]["reason"] == "publication_checkpoint"
+    queued = SimpleNamespace(invocation_state=event.invocation_state, cancel_tool=False)
+    hook._before_tool(queued)
+    assert queued.cancel_tool == (
+        "Queued tool call canceled: hypothesis publication checkpoint reached after "
+        "successful tool calls without publication progress. Return control to the workflow controller "
+        "for the publication-only pass; this checkpoint does not mark the task complete."
+    )
     hook.configure(AgentRunPolicy(checkpoint_tool_calls=1))
     event = _event("network_probe", "failure", status="error")
     hook._after_tool(event)
-    assert event.invocation_state["request_state"]["stop_event_loop"]
+    hook._after_tools(event)
+    assert not event.invocation_state
+
+
+@pytest.mark.parametrize("failure", ["error", "exception", "canceled"])
+def test_checkpoint_ignores_failed_attempts(failure):
+    hook = TerminalToolHook("worker")
+    hook.configure(AgentRunPolicy(checkpoint_tool_calls=2))
+    for _ in range(4):
+        event = _event("read", "bad parameters", status="error" if failure != "exception" else "success")
+        if failure == "exception":
+            event.exception = ValueError("invalid input")
+        hook._after_tool(event)
+        hook._after_tools(event)
+        assert not event.invocation_state
+    event = _event("read", "content")
+    hook._after_tool(event)
+    hook._after_tools(event)
+    assert hook.checkpoint_count == 1
+    assert not event.invocation_state
+
+
+@pytest.mark.parametrize("publication_progress", [True, False])
+def test_sdk_checkpoint_finishes_batch_and_later_publication_can_reset(publication_progress):
+    calls = []
+    progress = [""]
+
+    @tool
+    def read_subject(name: str) -> str:
+        """Read the assigned subject."""
+        calls.append("read")
+        return f"observed {name}"
+
+    @tool
+    def publish_subject() -> str:
+        """Publish the assigned subject."""
+        calls.append("publish")
+        if publication_progress:
+            progress[0] = "new-publication"
+        return "saved"
+
+    hook = TerminalToolHook("worker")
+    hook.configure(AgentRunPolicy(checkpoint_tool_calls=1, progress_key=lambda: progress[0]))
+    agent = Agent(model=Mock(), tools=[read_subject, publish_subject], hooks=[hook], callback_handler=None)
+    state = {}
+    results = []
+
+    async def collect():
+        return [event async for event in SequentialToolExecutor()._execute(
+            agent, [
+                {"toolUseId": "invalid", "name": "read_subject", "input": {}},
+                {"toolUseId": "read", "name": "read_subject", "input": {"name": "assigned"}},
+                {"toolUseId": "publish", "name": "publish_subject", "input": {}},
+            ], results, Mock(), Mock(), state,
+        )]
+
+    asyncio.run(collect())
+    assert calls == ["read", "publish"]
+    assert [result["status"] for result in results] == ["error", "success", "success"]
+    assert not state.get("request_state")
+    batch = AfterToolsEvent(agent=agent, message={"role": "user", "content": []}, invocation_state=state)
+    agent.hooks.invoke_callbacks(batch)
+    assert bool(batch.end_turn) is not publication_progress
+    if publication_progress:
+        assert hook.checkpoint_count == 0
+    else:
+        assert state["request_state"][POLICY_TERMINAL_STATE_KEY] == {
+            "reason": "publication_checkpoint", "successful_tool_calls_without_progress": 2,
+        }
+
+
+@pytest.mark.parametrize("terminal_key", [
+    POLICY_TERMINAL_STATE_KEY, TERMINAL_TOOL_COMPLETED_STATE_KEY, TERMINAL_TOOL_REJECTED_STATE_KEY,
+])
+def test_immediate_terminal_states_take_precedence_over_checkpoint(terminal_key):
+    hook = TerminalToolHook("worker")
+    hook.configure(AgentRunPolicy(checkpoint_tool_calls=1))
+    hook._after_tool(_event("read", "ok"))
+    event = SimpleNamespace(invocation_state={"request_state": {terminal_key: {"reason": "immediate"}}})
+    hook._after_tools(event)
+    assert event.invocation_state["request_state"] == {terminal_key: {"reason": "immediate"}}
+
+
+def test_checkpoint_hook_tolerates_missing_policy_and_unusable_state():
+    hook = TerminalToolHook("worker")
+    event = _event("read", "ok")
+    hook._after_tools(event)
+    hook.configure(AgentRunPolicy(checkpoint_tool_calls=1))
+    hook._after_tool(event)
+    event.invocation_state["request_state"] = "invalid"
+    hook._after_tools(event)
+    assert event.invocation_state["request_state"] == "invalid"
+
+
+def test_existing_safety_stop_prevents_publication_checkpoint():
+    hook = TerminalToolHook("worker")
+    hook.configure(AgentRunPolicy(checkpoint_tool_calls=1))
+    hook._after_tool(_event("read", "ok"))
+    event = SimpleNamespace(invocation_state={"request_state": {
+        "stop_event_loop": True, "tool_recovery_exhausted": {"reason": "policy_violation_limit"},
+    }})
+    hook._after_tools(event)
+    assert POLICY_TERMINAL_STATE_KEY not in event.invocation_state["request_state"]
+
+
+@pytest.mark.parametrize("with_state", [True, False])
+def test_sdk_cleanup_order_preserves_safety_stop_before_checkpoint(with_state):
+    hook = TerminalToolHook("worker")
+    hook.configure(AgentRunPolicy(checkpoint_tool_calls=1))
+    hook._after_tool(_event("read", "ok"))
+
+    def safety_stop(event):
+        if with_state:
+            event.invocation_state["request_state"] = {"stop_event_loop": True}
+        event.end_turn = "Safety stop"
+
+    safety_hook = SimpleNamespace(register_hooks=lambda registry: registry.add_callback(AfterToolsEvent, safety_stop))
+    agent = Agent(model=Mock(), tools=[], hooks=[hook, safety_hook], callback_handler=None)
+    event = AfterToolsEvent(agent=agent, message={"role": "user", "content": []}, invocation_state={})
+    agent.hooks.invoke_callbacks(event)
+    assert event.end_turn == "Safety stop"
+    assert POLICY_TERMINAL_STATE_KEY not in event.invocation_state.get("request_state", {})
+
+
+@pytest.mark.parametrize("terminal", [None, {}, {"reason": "task_completed"}])
+def test_other_terminal_reasons_keep_completion_message(terminal):
+    hook = TerminalToolHook("task_executor")
+    queued = SimpleNamespace(
+        invocation_state={"request_state": {POLICY_TERMINAL_STATE_KEY: terminal}},
+        cancel_tool=False,
+    )
+    hook._before_tool(queued)
+    assert queued.cancel_tool == "Worker completed; return control to the workflow controller."

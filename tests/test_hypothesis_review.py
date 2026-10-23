@@ -2,11 +2,18 @@
 """Review every current record once without treating evidence availability as semantic support."""
 
 import copy
+import json
+from dataclasses import replace
 
 import pytest
 
 from modules.agents.hypothesis_review import validate_review
 from tests.test_hypotheses import hypothesis, producer, publish  # noqa: F401
+
+
+def semantic_checks():
+    return {key: {"verdict": "adequate", "reason": "Grounded controls and identity context"}
+            for key in ("grounding", "test_discrimination", "identity_requirements")}
 
 
 @pytest.fixture
@@ -74,27 +81,6 @@ def test_necessary_unexamined_evidence_requires_frozen_prerequisite_gap(empty_re
     validate_review(normalized, task, "OP_TEST")
 
 
-def test_missing_provenance_can_be_completed_without_rewriting_judgments(reviewed):
-    from modules.agents.hypothesis_review import completes_review_provenance, semantic_review
-
-    _, data = reviewed
-    before = semantic_review(data)
-    after = copy.deepcopy(before)
-    row = after["subject_reviews"][0]
-    row["no_hypothesis_basis"] = {"kind": "inspected_evidence", "inspection_refs": []}
-    assert completes_review_provenance(before, after)
-    filled = copy.deepcopy(after)
-    filled["subject_reviews"][0]["no_hypothesis_basis"]["inspection_refs"] = ["artifact:result.json"]
-    assert completes_review_provenance(after, filled)
-    assert not completes_review_provenance(filled, after)
-    altered = copy.deepcopy(filled)
-    altered["subject_reviews"][0]["no_hypothesis_basis"]["kind"] = "metadata_only"
-    assert not completes_review_provenance(filled, altered)
-    altered = copy.deepcopy(before)
-    altered["subject_reviews"][0]["reason"] = "Different semantic judgment"
-    assert not completes_review_provenance(before, altered)
-
-
 @pytest.fixture
 def reviewed(producer, tmp_path):
     binding, _ = publish(producer, tmp_path)
@@ -102,7 +88,8 @@ def reviewed(producer, tmp_path):
         "status": "done", "publication_sha256": binding["sha256"],
         "subject_reviews": [{"item_id": "subject", "decision": "retain", "reason": "Conditional safe test",
                              "hypotheses": [{"hypothesis_id": binding["hypothesis_ids_by_subject"]["subject"][0],
-                                             "decision": "retain", "reason": "Controls distinguish impact"}]}],
+                                             "decision": "retain", "reason": "Controls distinguish impact",
+                                             "semantic_checks": semantic_checks()}]}],
     }
 
 
@@ -300,6 +287,80 @@ def test_current_review_feedback_is_complete_and_digest_bound(reviewed):
     assert normalize_review(reviewed[1])["repair"]["kind"] == "acceptance"
 
 
+@pytest.mark.parametrize("action", ["https://service.test/input", "tcp://service.test:9000", "/workspace/source"])
+@pytest.mark.parametrize("decision", ["revise", "withdraw"])
+def test_repair_supplies_exact_records_and_retained_siblings(producer, tmp_path, action, decision):
+    from modules.agents.hypothesis_review import repair_context
+    from modules.tools.hypotheses import load_hypothesis_set
+    from tests.test_hypotheses import no_test, two_subjects
+
+    task = two_subjects(producer)
+    binding, _ = publish(task, tmp_path, [{
+        "item_id": "subject", "disposition": "hypotheses_supplied",
+        "hypotheses": [hypothesis(action), hypothesis("Retained sibling")],
+    }, no_test("second")])
+    publication = load_hypothesis_set(binding["artifact_ref"], task, "OP_TEST")
+    subject = next(item for item in publication.subjects if item.item_id == "subject")
+    changed = next(item for item in subject.hypotheses if item.attacker_controlled_input == action)
+    data = {"publication_sha256": binding["sha256"], "subject_reviews": [{
+        "item_id": "subject", "decision": "revise", "reason": "Correct unsupported mechanism",
+        "hypotheses": [{"hypothesis_id": item.hypothesis_id,
+                        "decision": decision if item == changed else "retain", "reason": "Specific review reason"}
+                       for item in subject.hypotheses],
+    }, {"item_id": "second", "decision": "retain", "hypotheses": []}]}
+    text = repair_context(data, binding["sha256"], publication)
+    payload = json.loads(text.split("## Exact hypothesis repair records\n")[1].split("\nThese complete")[0])
+    assert payload["publication_sha256"] == binding["sha256"]
+    assert len(payload["affected_subjects"]) == 1
+    row = payload["affected_subjects"][0]
+    assert row["current_subject"] == subject.model_dump(mode="json")
+    assert row["hypotheses_requiring_changes"] == [changed.model_dump(mode="json")]
+    assert f'"decision": "{decision}"' in text and "Specific review reason" in text
+    assert "Omit unaffected subjects; Python preserves them" in text
+    assert repair_context(data, "stale", publication) == ""
+
+
+def test_acceptance_only_repair_does_not_request_republication(reviewed):
+    from modules.agents.hypothesis_review import repair_context
+    from modules.tools.hypotheses import hypothesis_binding, load_hypothesis_set
+
+    task, data = reviewed
+    publication = load_hypothesis_set(hypothesis_binding(task)["artifact_ref"], task, "OP_TEST")
+    text = repair_context(data, data["publication_sha256"], publication)
+    assert "Reuse the current publication for acceptance" in text
+    assert "## Exact hypothesis repair records" not in text
+
+
+def test_prerequisite_only_repair_does_not_claim_acceptance_ready(reviewed):
+    from modules.agents.hypothesis_review import repair_context
+    from modules.tools.hypotheses import hypothesis_binding, load_hypothesis_set
+
+    task, data = reviewed
+    publication = load_hypothesis_set(hypothesis_binding(task)["artifact_ref"], task, "OP_TEST")
+    data["prerequisite_gaps"] = [{"missing_input": "Required source", "item_ids": ["subject"]}]
+    text = repair_context(data, data["publication_sha256"], publication)
+    assert "Resolve the supplied prerequisite gaps before acceptance" in text
+    assert "No hypothesis revisions requested" not in text
+
+
+@pytest.mark.parametrize("unknown", ["subject", "hypothesis"])
+def test_repair_rejects_unknown_publication_records(reviewed, unknown):
+    from modules.agents.hypothesis_review import repair_context
+    from modules.tools.hypotheses import hypothesis_binding, load_hypothesis_set
+
+    task, data = reviewed
+    publication = load_hypothesis_set(hypothesis_binding(task)["artifact_ref"], task, "OP_TEST")
+    row = data["subject_reviews"][0]
+    row["decision"] = "revise"
+    row["hypotheses"][0]["decision"] = "revise"
+    if unknown == "subject":
+        row["item_id"] = "unknown"
+    else:
+        row["hypotheses"][0]["hypothesis_id"] = "unknown"
+    with pytest.raises(ValueError, match=f"unknown publication {unknown}"):
+        repair_context(data, data["publication_sha256"], publication)
+
+
 def test_normalization_does_not_infer_acceptance_and_supports_frozen_criterion_gaps(reviewed):
     from modules.agents.hypothesis_review import normalize_review, repair_context
 
@@ -378,23 +439,6 @@ def test_behavior_assessment_requires_consistent_repair(empty_review, tmp_path, 
     basis["behavior_assessments"][0]["inspection_refs"] = ["artifact:uncited.json"]
     with pytest.raises(ValueError, match="cite"):
         validate_review(data, task, "OP_TEST")
-
-
-def test_provenance_completion_preserves_supplied_behavior_judgments(reviewed):
-    from modules.agents.hypothesis_review import completes_review_provenance, semantic_review
-
-    _, data = reviewed
-    before = semantic_review(data)
-    before["subject_reviews"][0]["no_hypothesis_basis"] = {
-        "kind": "inspected_evidence", "inspection_refs": ["artifact:result.json"],
-    }
-    after = copy.deepcopy(before)
-    after["subject_reviews"][0]["no_hypothesis_basis"]["no_relevant_behavior_reason"] = "Only static markup"
-    assert completes_review_provenance(before, after)
-    assert not completes_review_provenance(after, before)
-    changed = copy.deepcopy(after)
-    changed["subject_reviews"][0]["no_hypothesis_basis"]["inspection_refs"] = ["artifact:other.json"]
-    assert not completes_review_provenance(after, changed)
 
 
 def test_bound_review_schema_owns_digest_and_constrains_populated_subject(reviewed):
@@ -529,3 +573,307 @@ def test_supported_behavior_can_wait_for_explicit_prerequisite(empty_review, tmp
     result = normalize_review(data)
     assert result["repair"]["kind"] == ("none" if blocked else "execution")
     validate_review(result, task, "OP_TEST")
+
+
+def test_invalid_review_can_be_reassessed_after_reference_correction(empty_review, tmp_path):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data = empty_review
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    basis = {"kind": "inspected_evidence", "inspection_refs": ["artifact:unavailable.json"],
+             "no_relevant_behavior_reason": "Only static markup"}
+    data["subject_reviews"][0]["no_hypothesis_basis"] = basis
+    with pytest.raises(ValueError, match="subject_reviews\\[0\\]"):
+        correction.prepare(data, task)
+    assert correction.accepted == {}
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    ref = journal.record_inspection("read_artifact", "source", {}, '{"content":"static markup"}', ())
+    basis["inspection_refs"] = [ref]
+    data["subject_reviews"][0]["reason"] = "Corrected assessment after inspection"
+    result = correction.prepare(data, task)
+    validate_review(result, task, "OP_TEST")
+    assert result["status"] == "done"
+
+
+def test_incomplete_behavior_assessment_does_not_freeze_bad_judgment(empty_review, tmp_path):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data = empty_review
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    ref = journal.record_inspection("read_artifact", "source", {}, '{"content":"resource access"}', ())
+    data["subject_reviews"][0]["no_hypothesis_basis"] = {"kind": "inspected_evidence", "inspection_refs": [ref]}
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    with pytest.raises(ValueError, match="behavior assessments"):
+        correction.prepare(data, task)
+    row = data["subject_reviews"][0]
+    row.update(decision="revise", reason="Observed resource boundary supports a future comparison")
+    row["no_hypothesis_basis"]["behavior_assessments"] = [{
+        "observed_behavior": "Resource selection", "inspection_refs": [ref],
+        "supports_conditional_test": True, "reasoning": "Compare authorized and unauthorized resource access",
+    }]
+    result = correction.prepare(data, task)
+    assert result["status"] == "partial_failure" and result["repair"]["kind"] == "acceptance"
+    validate_review(result, task, "OP_TEST")
+
+
+def test_correction_preserves_valid_subjects_and_rejects_stale_binding(reviewed):
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data = reviewed
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    correction.prepare(data, task)
+    changed = copy.deepcopy(data)
+    changed["subject_reviews"][0]["reason"] = "Unauthorized rewrite"
+    with pytest.raises(ValueError, match="already validated"):
+        correction.prepare(changed, task)
+    assert correction.prepare(data, task)["status"] == "done"
+    with pytest.raises(ValueError, match="digest"):
+        correction.prepare({**data, "publication_sha256": "stale"}, task)
+    with pytest.raises(ValueError, match="changed"):
+        correction.prepare(data, replace(task, task_uid="other"))
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "unknown", "not_list", "bad_row", "bad_hypothesis"])
+def test_correction_rejects_invalid_subject_identity_and_coverage(reviewed, fault):
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data = reviewed
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    if fault == "missing":
+        data["subject_reviews"] = []
+    elif fault == "duplicate":
+        data["subject_reviews"] *= 2
+    elif fault == "unknown":
+        data["subject_reviews"][0]["item_id"] = "foreign"
+    elif fault == "not_list":
+        data["subject_reviews"] = None
+    elif fault == "bad_row":
+        data["subject_reviews"] = [None]
+    else:
+        data["subject_reviews"][0]["hypotheses"] = []
+    with pytest.raises(ValueError):
+        correction.prepare(data, task)
+    assert correction.accepted == {}
+
+
+@pytest.fixture
+def candidate_review(empty_review, tmp_path, monkeypatch):
+    from modules.agents import hypothesis_review
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+
+    task, data = empty_review
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    reference = journal.record_inspection("read_artifact", "source", {}, json.dumps({
+        "artifact_ref": "artifact:source.js", "start_line": 1, "end_line": 2,
+        "content": 'const link = {url: "/file?path=example"};',
+    }), ())
+    candidate = {"candidate_id": "candidate-path", "origins": [{"kind": "client_link",
+                 "reference": "artifact:source.js", "source_location": {"start_line": 1, "end_line": 1}}]}
+    monkeypatch.setattr(hypothesis_review, "review_input_candidates", lambda _task: {"subject": [candidate]})
+    basis = {"kind": "inspected_evidence", "inspection_refs": [reference], "behavior_assessments": [{
+        "observed_behavior": "Client link includes query input path", "inspection_refs": [reference],
+        "input_candidate_ids": ["candidate-path"], "supports_conditional_test": False,
+        "reasoning": "An informational example without evidence of a security-relevant boundary",
+    }]}
+    data["subject_reviews"][0]["no_hypothesis_basis"] = basis
+    return task, data, basis, journal
+
+
+def test_visible_input_can_be_assessed_without_requiring_a_hypothesis(candidate_review):
+    task, data, _, _ = candidate_review
+    validate_review(data, task, "OP_TEST")
+
+
+@pytest.mark.parametrize("fault", ["omitted", "unknown", "uninspected", "no_behavior"])
+def test_empty_review_cannot_ignore_or_misattribute_visible_input(candidate_review, fault):
+    task, data, basis, journal = candidate_review
+    assessment = basis["behavior_assessments"][0]
+    if fault == "omitted":
+        assessment["input_candidate_ids"] = []
+    elif fault == "unknown":
+        assessment["input_candidate_ids"] = ["foreign"]
+    elif fault == "uninspected":
+        ref = journal.record_inspection("read_artifact", "unrelated", {}, json.dumps({
+            "artifact_ref": "artifact:other.js", "content": "different source", "start_line": 1, "end_line": 4,
+        }), ())
+        assessment["inspection_refs"] = [ref]
+        basis["inspection_refs"] = [ref]
+    else:
+        del basis["behavior_assessments"]
+        basis["no_relevant_behavior_reason"] = "No parameters recorded"
+    with pytest.raises(ValueError, match="input_candidate|Source input"):
+        validate_review(data, task, "OP_TEST")
+
+
+def test_bound_candidate_schema_and_supported_input_route_to_publication_repair(candidate_review):
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data, basis, _ = candidate_review
+    bound = BoundHypothesisReview.capture(task, "OP_TEST")
+    assert '"candidate-path"' in json.dumps(bound.output_model.model_json_schema())
+    bad = copy.deepcopy(data)
+    bad["subject_reviews"][0]["no_hypothesis_basis"]["behavior_assessments"][0]["input_candidate_ids"] = ["foreign"]
+    with pytest.raises(ValueError):
+        bound.canonicalize(bad, task)
+    basis["behavior_assessments"][0]["supports_conditional_test"] = True
+    result = HypothesisReviewCorrection(bound, "OP_TEST").prepare(data, task)
+    assert result["status"] == "partial_failure" and result["repair"]["kind"] == "acceptance"
+    validate_review(result, task, "OP_TEST")
+
+
+def test_mixed_correction_preserves_only_valid_subjects(producer, tmp_path):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+    from modules.tools import memory
+
+    path = tmp_path / "inventory.json"
+    manifest = json.loads(path.read_text())
+    manifest["items"].append({**manifest["items"][0], "id": "second"})
+    path.write_text(json.dumps(manifest))
+    _, digest = memory._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    task = replace(producer, acceptance=replace(producer.acceptance, manifest_hash="", basis=replace(
+        producer.acceptance.basis, item_ids=["subject", "second"], snapshot_hash=digest,
+    )))
+    binding, _ = publish(task, tmp_path, [
+        {"item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [hypothesis()]},
+        {"item_id": "second", "disposition": "no_testable_hypotheses", "reason": "No relevant behavior"},
+    ])
+    valid = {"item_id": "subject", "decision": "retain", "reason": "Adequate controlled test",
+             "hypotheses": [{"hypothesis_id": binding["hypothesis_ids_by_subject"]["subject"][0],
+                             "decision": "retain", "reason": "Controls distinguish the outcome",
+                             "semantic_checks": semantic_checks()}]}
+    invalid = {"item_id": "second", "decision": "retain", "reason": "No test", "hypotheses": [],
+               "no_hypothesis_basis": {"kind": "inspected_evidence", "inspection_refs": []}}
+    data = {"status": "done", "subject_reviews": [valid, invalid]}
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    with pytest.raises(ValueError, match="accepted_subject_reviews"):
+        correction.prepare(data, task)
+    assert correction.accepted == {"subject": valid}
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    ref = journal.record_inspection("read_artifact", "source", {}, '{"content":"static text"}', ())
+    invalid["reason"] = "Corrected after reading content"
+    invalid["no_hypothesis_basis"].update(inspection_refs=[ref], no_relevant_behavior_reason="Static content only")
+    result = correction.prepare(data, task)
+    assert result["status"] == "done"
+    validate_review(result, task, "OP_TEST")
+    data["subject_reviews"][0]["hypotheses"][0]["decision"] = "withdraw"
+    with pytest.raises(ValueError, match="already validated"):
+        correction.prepare(data, task)
+
+
+@pytest.mark.parametrize("fault", ["missing", "criterion", "subject", "source", "type", "malformed"])
+def test_invalid_prerequisite_judgment_is_not_frozen(empty_review, fault):
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data = empty_review
+    data["subject_reviews"][0]["no_hypothesis_basis"] = {
+        "kind": "necessary_evidence_unreviewed", "inspection_refs": [],
+    }
+    gap = {"criterion_id": "hypotheses", "missing_input": "Inspect the source", "item_ids": ["subject"],
+           "source_refs": ["artifact:inventory.json"]}
+    data["prerequisite_gaps"] = [gap]
+    if fault == "missing":
+        data["prerequisite_gaps"] = []
+    elif fault == "criterion":
+        gap["criterion_id"] = "foreign"
+    elif fault == "subject":
+        gap["item_ids"] = ["foreign"]
+    elif fault == "source":
+        gap["source_refs"] = ["artifact:foreign.json"]
+    elif fault == "type":
+        data["prerequisite_gaps"] = "invalid"
+    else:
+        data["prerequisite_gaps"] = [None]
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    with pytest.raises(ValueError):
+        correction.prepare(data, task)
+    assert correction.accepted == {}
+    data["subject_reviews"][0].update(reason="Corrected to publication repair", decision="revise",
+                                     no_hypothesis_basis={"kind": "metadata_only", "inspection_refs": []})
+    data["prerequisite_gaps"] = []
+    assert correction.prepare(data, task)["repair"]["kind"] == "acceptance"
+
+
+def test_valid_subject_prerequisite_cannot_disappear_during_envelope_correction(reviewed):
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data = reviewed
+    gap = {"criterion_id": "hypotheses", "missing_input": "Inspect an explicit required source",
+           "item_ids": ["subject"], "source_refs": ["artifact:inventory.json"]}
+    data["prerequisite_gaps"] = [gap]
+    data["repair"] = {"kind": "execution", "invalid_field": True}
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    with pytest.raises(ValueError):
+        correction.prepare(data, task)
+    assert correction.accepted
+    data["repair"] = {"kind": "execution"}
+    data["prerequisite_gaps"] = []
+    with pytest.raises(ValueError, match="already validated"):
+        correction.prepare(data, task)
+    data["prerequisite_gaps"] = [gap]
+    result = correction.prepare(data, task)
+    assert result["repair"]["kind"] == "execution"
+    validate_review(result, task, "OP_TEST")
+
+
+@pytest.mark.parametrize("check", ["grounding", "test_discrimination", "identity_requirements"])
+@pytest.mark.parametrize("target", ["https://service.test/resource", "tcp://service.test:1234", "/data/private"])
+def test_semantic_check_conflict_can_be_reassessed_before_freezing(reviewed, check, target):
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection, repair_context
+
+    task, data = reviewed
+    item = data["subject_reviews"][0]["hypotheses"][0]
+    item["semantic_checks"][check] = {"verdict": "revise", "reason": f"Specify the access boundary for {target}"}
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    with pytest.raises(ValueError, match="retained hypothesis"):
+        correction.prepare(data, task)
+    assert correction.accepted == {}
+    item["decision"] = "revise"
+    data["subject_reviews"][0]["decision"] = "revise"
+    result = correction.prepare(data, task)
+    assert result["repair"]["kind"] == "acceptance"
+    assert target in repair_context(result, result["publication_sha256"])
+    assert result["subject_reviews"][0]["hypotheses"][0]["semantic_checks"] == item["semantic_checks"]
+
+
+def test_new_bound_review_requires_checks_but_historical_review_remains_readable(reviewed):
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection, semantic_review
+
+    task, data = reviewed
+    del data["subject_reviews"][0]["hypotheses"][0]["semantic_checks"]
+    assert semantic_review(data)["subject_reviews"]
+    bound = BoundHypothesisReview.capture(task, "OP_TEST")
+    with pytest.raises(ValueError, match="semantic_checks"):
+        bound.canonicalize(data, task)
+    with pytest.raises(ValueError, match="semantic_checks"):
+        HypothesisReviewCorrection(bound, "OP_TEST").prepare(data, task)
+
+
+@pytest.mark.parametrize("identity", ["adequate", "not_applicable"])
+def test_grounded_future_proposal_does_not_require_execution_credentials(reviewed, identity):
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data = reviewed
+    item = data["subject_reviews"][0]["hypotheses"][0]
+    item["semantic_checks"]["identity_requirements"] = {
+        "verdict": identity, "reason": "Future test identities are specified; credentials need not exist yet",
+    }
+    assert HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST").prepare(
+        data, task,
+    )["status"] == "done"
+
+
+@pytest.mark.parametrize("value", [None, "", "Revise the controls"])
+def test_bound_runtime_instructions_are_nullable_and_canonical(reviewed, value):
+    from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
+
+    from modules.agents.hypothesis_review import BoundHypothesisReview
+
+    task, data = reviewed
+    bound = BoundHypothesisReview.capture(task, "OP_TEST")
+    schema = StructuredOutputTool(bound.output_model).tool_spec["inputSchema"]["json"]
+    assert set(schema["properties"]["instructions"]["type"]) == {"string", "null"}
+    result = bound.canonicalize({**data, "instructions": value}, task)
+    assert result["instructions"] == ("" if value is None else value)

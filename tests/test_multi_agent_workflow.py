@@ -57,6 +57,11 @@ from modules.tools.optional_tool_selection import (
 _REAL_REFINE_WORKER_FLOW = MultiAgentWorkflowController._refine_worker_flow
 
 
+def _semantic_checks():
+    return {key: {"verdict": "adequate", "reason": "Grounded controls and identity context"}
+            for key in ("grounding", "test_discrimination", "identity_requirements")}
+
+
 @pytest.fixture(autouse=True)
 def isolate_worker_flow_review(monkeypatch):
     monkeypatch.setattr(MultiAgentWorkflowController, "_refine_worker_flow", Mock(return_value=[]))
@@ -23468,6 +23473,35 @@ def test_hypothesis_repair_context_retains_exact_submission(worker_flow_case, ki
     assert controller._retain_hypothesis_repair(unbound, []) is unbound
 
 
+@pytest.mark.parametrize("stale", [False, True])
+def test_historical_publication_repair_normalizes_coverage_and_excludes_stale_review(worker_flow_case, stale):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    binding = _publish_controller_hypotheses(controller, task)
+    legacy = {key: value for key, value in binding.items()
+              if key not in {"total_published_subject_ids", "last_updated_subject_ids"}}
+    legacy["missing_subject_ids"] = ["subject"]
+    task = controller.state.patch_task(task.task_uid, recovery_context_updates={
+        "hypothesis_publications": [legacy], "hypothesis_review": {
+            "publication_sha256": "stale" if stale else binding["sha256"],
+            "subject_reviews": [{"item_id": "subject", "decision": "retain", "hypotheses": [],
+                                 "reason": "Review marker"}],
+        },
+    })
+    state = controller._hypothesis_production_state(task)
+    assert state["mode"] == "acceptance" and state["missing_subject_ids"] == []
+    assert state["publication"]["total_published_subject_ids"] == ["subject"]
+    assert state["publication"]["missing_subject_ids"] == []
+    text = controller._hypothesis_repair_context(task)
+    assert '"published_subject_ids"' not in text
+    assert ("Review marker" in text) is not stale
+    if stale:
+        assert "Stale review feedback was excluded" in text
+    else:
+        assert "Reuse the current publication for acceptance" in text
+
+
 @pytest.mark.parametrize("case", ["absent", "partial", "complete", "corrupt", "malformed", "ordinary"])
 def test_hypothesis_production_state_validates_output_not_input(worker_flow_case, case):
     controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
@@ -23495,6 +23529,11 @@ def test_hypothesis_production_state_validates_output_not_input(worker_flow_case
     assert result["source_refs"] == list(task.acceptance.basis.source_refs)
     if case == "partial":
         assert result["missing_subject_ids"] == ["second"]
+    if case in {"partial", "complete"}:
+        assert result["publication"]["total_published_subject_ids"] == ["subject"]
+        assert result["publication"]["last_updated_subject_ids"] == ["subject"]
+        assert "published_subject_ids" not in result["publication"]
+        assert "subject_ids" not in result["publication"]
     if case in {"corrupt", "malformed"}:
         assert result["publication_error"]
         assert controller._hypothesis_repair_context(task) is not None
@@ -23867,7 +23906,10 @@ def test_hypothesis_checkpoint_forces_publication_and_scopes_followup(
                 output=json.dumps({"artifact_ref": "artifact:form.html", "content": "Client observed guarded catalog"}),
             )
             assert outcome.inspection_result_ref
-            return workflow_mod.TaskExecutorCycleResult(text="Inspected", outcomes=[outcome], reason="publication_checkpoint")
+            return workflow_mod.TaskExecutorCycleResult(
+                text="Inspected", outcomes=[outcome], reason="publication_checkpoint",
+                details={"successful_tool_calls_without_progress": 18},
+            )
         assert "shell" not in names
         if len(calls) == 2:
             assert "Publication checkpoint" in prompt
@@ -23899,6 +23941,10 @@ def test_hypothesis_checkpoint_forces_publication_and_scopes_followup(
     assert updated.status == ("blocked" if checkpoint_outcome == "blocked" else "done")
     assert len(calls) == (2 if checkpoint_outcome in {"published", "blocked"} else 3)
     assert bool(critiques) == (checkpoint_outcome != "published")
+    checkpoint = next(event for event in controller.runtime.callback_handler.events
+                      if event["type"] == "hypothesis_publication_checkpoint")
+    assert checkpoint["successful_tool_calls_without_progress"] == 18
+    assert checkpoint["checkpoint_threshold"] == 16
 
 
 @pytest.mark.parametrize("roles", [[], ["member"], ["unknown"]])
@@ -24127,9 +24173,12 @@ def test_hypothesis_schema_correction_preserves_semantic_feedback(worker_flow_ca
     assert len(prompts) == 2
     stored = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
     feedback = stored.recovery_context["hypothesis_review"]
+    if correction != "preserve":
+        # Invalid subjects are not frozen into canonical feedback when bounded correction fails.
+        assert "subject_reviews" not in feedback
+        assert decision.repair_kind == "none"
+        return
     assert feedback["subject_reviews"] == initial["subject_reviews"]
-    if correction == "remove_gap":
-        assert feedback["prerequisite_gaps"] == initial["prerequisite_gaps"]
     if correction == "preserve":
         assert decision.repair_kind == "acceptance"
         assert row["reason"] in decision.instructions
@@ -24164,13 +24213,16 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
     task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
     root = Path(workflow_mod._operation_output_root())
     (root / "inventory.json").write_text(json.dumps({"schema_version": 1, "unassessed_gaps": [], "items": [{
-        "id": "subject", "kind": "endpoint", "target_id": "target-1", "value": "https://service.test/upload",
+        "id": "subject", "kind": "endpoint", "target_id": "target-1", "value": "https://service.test/upload?fileName=example",
         "attributes": {"source_artifact_refs": ["artifact:summary.json"],
                        "interaction": {"interface": "http", "operations": ["GET"], "inputs": []}},
     }]}))
     (root / "summary.json").write_text(json.dumps({"analysis_artifact": "artifact:implementation.js"}))
     (root / "implementation.js").write_text("upload(file, fileName); renderHtml(fileName)")
-    _, digest = memory_mod._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    from modules.tools.inventory_inputs import input_candidates
+
+    manifest, digest = memory_mod._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    candidate_id = input_candidates(manifest, manifest["items"][0], [])[0]["candidate_id"]
     task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
         task.acceptance.basis, source_refs=["artifact:inventory.json"], snapshot_hash=digest,
     )))
@@ -24199,6 +24251,8 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
     for index, role in enumerate(roles):
         prompts[index] = prompt_factory.get_role_system_prompt(controller.runtime.system_prompt, role) + prompts[index]
     for prompt in prompts:
+        assert candidate_id in prompt
+        assert "inventory_url" in prompt
         assert "artifact:implementation.js" in prompt
         assert "artifact:summary.json" in prompt
         assert "Returned references alone are not inspected" in prompt
@@ -24225,6 +24279,8 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
         assert "Structural mismatches must remain explicit" in prompt
         assert "separately contracted follow-up task" not in prompt
     evaluator = prompts[-2]
+    assert "input_candidate_ids" in evaluator
+    assert "accepted subject reviews" in evaluator
     assert "Do not require every available source to be inspected" in evaluator
     assert "contradicts recorded inputs" in evaluator
     assert "authenticated, same-role account, different-role, or tenant scenarios" in evaluator
@@ -24250,6 +24306,7 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
             prompt + "\n## Task history\n" + "advisory " * 10000,
             "system", [], "test-model", len(prompt) + 2000, 0, lambda _event: None, estimate_input=len,
         )
+        assert candidate_id in fitted
         assert 'get_inventory_item(view="investigation")' in fitted
         assert "Server implementation is not required" in fitted
         assert "Structural mismatches must remain explicit" in fitted
@@ -24263,8 +24320,9 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
 
 @pytest.mark.parametrize("subject", ["https://service.test/entry", "tcp://service.test:1234", "/workspace/source.py"])
 @pytest.mark.parametrize("needs_input", [False, True])
+@pytest.mark.parametrize("continuation", [False, True])
 def test_structured_hypothesis_review_reaches_real_actor_replacement(
-    worker_flow_case, monkeypatch, subject, needs_input,
+    worker_flow_case, monkeypatch, subject, needs_input, continuation,
 ):
     from tests.test_hypotheses import hypothesis
 
@@ -24282,6 +24340,10 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
 
     def evaluator(role, _prompt, *_args):
         assert role == "task_evaluator"
+        if _prompt:  # Empty only when constructing the retained continuation review fixture.
+            assert "semantic_checks contains grounding and test_discrimination" in _prompt
+            assert "do not establish ownership, tenants, or missing authorization" in _prompt
+            assert "Missing execution credentials alone" in _prompt
         current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
         binding = workflow_mod.hypothesis_binding(current)
         publication = workflow_mod.load_hypothesis_set(binding["artifact_ref"], current, "OP_TEST")
@@ -24291,10 +24353,10 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
         inspected = journal.record_inspection("read_artifact", "fixture", {},
                                               json.dumps({"content": "Observed benign target behavior"}), ())
         return json.dumps({
-            "status": "done", "publication_sha256": binding["sha256"], "subject_reviews": [{
+            "status": "done", "instructions": None, "publication_sha256": binding["sha256"], "subject_reviews": [{
                 "item_id": "subject", "decision": "revise" if row.hypotheses else "retain",
                 "reason": "Controls do not distinguish impact" if row.hypotheses else "Sound empty disposition",
-                "hypotheses": [{"hypothesis_id": item.hypothesis_id, "decision": "withdraw",
+                "hypotheses": [{"hypothesis_id": item.hypothesis_id, "decision": "withdraw", "semantic_checks": _semantic_checks(),
                                 "reason": "The positive expectation proves only ordinary delivery"}
                                for item in row.hypotheses],
                 **({"no_hypothesis_basis": {"kind": "inspected_evidence", "inspection_refs": [inspected],
@@ -24309,7 +24371,7 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
     def actor(_role, prompt, tools, system, _policy):
         actors.append((prompt, system))
         writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
-        if len(actors) == 1:
+        if len(actors) == 1 and not continuation:
             binding = json.loads(writer(subjects=[{
                 "item_id": "subject", "disposition": "supplied", "hypotheses": [
                     {**hypothesis(), "supporting_refs": ["artifact:form.html"]},
@@ -24318,7 +24380,28 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
         else:
             assert prompt.count("Controls do not distinguish impact") == 1
             assert prompt.count("The positive expectation proves only ordinary delivery") == 1
+            assert "## Exact hypothesis repair records" in prompt
+            records_text = prompt.split("## Exact hypothesis repair records\n", 1)[1].split("\nThese complete", 1)[0]
+            records = json.loads(records_text)
+            assert records["publication_sha256"] == reviews[0]
+            current = records["affected_subjects"][0]["current_subject"]
+            assert current["item_id"] == "subject"
+            assert current["hypotheses"][0]["observed_basis"] == hypothesis()["observed_basis"]
+            assert records["affected_subjects"][0]["hypotheses_requiring_changes"] == current["hypotheses"]
+            assert '"published_subject_ids"' not in prompt
+            from modules.agents.prompt_context import fit_task_prompt
+
+            fitted = fit_task_prompt(
+                prompt + "\n## Task history\n" + "advisory " * 10000,
+                system, [], "test-model", len(prompt) + len(system) + 2000, 0,
+                lambda _event: None, estimate_input=lambda text: len(text) + len(system),
+            )
+            assert records_text in fitted
+            assert records_text in controller._fit_hypothesis_replay(
+                "## Exact hypothesis repair records\n" + records_text, system, tools,
+            )
             assert reviews[0] in prompt
+            assert "semantic_checks" in prompt and "identity_requirements" in prompt
             assert "Do not execute future tests" in prompt
             if needs_input:
                 assert "Inspect required missing inputs first" in prompt
@@ -24340,12 +24423,26 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
             success=True, correctable=False, input_summary="{}", output_summary='{"complete":true}',
         )])
 
+    if continuation:
+        from modules.agents.hypothesis_review import normalize_review
+        from modules.tools.hypotheses import build_record_hypotheses_tool
+
+        def persist(binding):
+            controller.state.patch_task(task.task_uid, recovery_context_updates={"hypothesis_publications": [binding]})
+
+        writer = build_record_hypotheses_tool(task, "OP_TEST", workflow_mod._operation_output_root(), persist)
+        writer(subjects=[{"item_id": "subject", "disposition": "supplied", "hypotheses": [
+            {**hypothesis(), "supporting_refs": ["artifact:form.html"]},
+        ]}])
+        controller.state.patch_task(task.task_uid, recovery_context_updates={
+            "hypothesis_review": normalize_review(json.loads(evaluator("task_evaluator", ""))),
+        })
     controller.text_runner = evaluator
     monkeypatch.setattr(controller, "_run_worker_agent", actor)
     controller._run_task(_plan(), _plan().phases[0], task)
     updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
     assert updated.status == "done"
-    assert len(actors) == 2 and len(reviews) == 2
+    assert len(actors) == (1 if continuation else 2) and len(reviews) == 2
     assert reviews[0] != reviews[1]
 
 
@@ -24408,10 +24505,10 @@ def test_legacy_route_inspection_survives_fresh_checkpoint_and_supports_hypothes
         assert role == "task_evaluator" and "sessionStorage" in prompt
         current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
         binding = workflow_mod.hypothesis_binding(current)
-        return json.dumps({"status": "done", "publication_sha256": binding["sha256"], "subject_reviews": [{
+        return json.dumps({"status": "done", "instructions": None, "publication_sha256": binding["sha256"], "subject_reviews": [{
             "item_id": "subject", "decision": "retain", "reason": "Grounded conditional future test",
             "hypotheses": [{"hypothesis_id": binding["hypothesis_ids_by_subject"]["subject"][0],
-                            "decision": "retain", "reason": "Mechanism and controls agree"}],
+                            "decision": "retain", "reason": "Mechanism and controls agree", "semantic_checks": _semantic_checks()}],
         }]})
 
     controller.text_runner = evaluator
@@ -24544,3 +24641,18 @@ def test_critic_oversize_repair_preserves_discoveries(monkeypatch, structured, s
     assert len(events) == 2
     assert events[0]["generation_allowance"] == 9024
     assert invocation_output_tokens("task_prompt_critic") is None
+
+
+@pytest.mark.parametrize("instructions", [None, "", "Correct the identity controls"])
+def test_decision_conversion_normalizes_optional_instructions(instructions):
+    controller = object.__new__(MultiAgentWorkflowController)
+    result = controller._decision_from_data({"status": "done", "instructions": instructions}, allowed=("done",))
+    assert result.instructions == ("" if instructions is None else instructions)
+    assert controller._decision_from_data({"status": "done"}, allowed=("done",)).instructions == ""
+
+
+@pytest.mark.parametrize("instructions", [False, 12, [], {}])
+def test_decision_conversion_rejects_invalid_instructions(instructions):
+    controller = object.__new__(MultiAgentWorkflowController)
+    with pytest.raises(ValueError):
+        controller._decision_from_data({"status": "done", "instructions": instructions}, allowed=("done",))

@@ -4182,3 +4182,4 @@ def test_controller_terminal_reason_survives_sdk_limits_and_successful_tool_stat
     result = _run_agent_helper(PolicyAgent(), callback, run_policy=policy)
     assert result.reason == reason
     assert result.message == ("Worker completed" if reason == "worker_done" else reason)
+    assert result.details == ({"reason": reason} if reported else None)

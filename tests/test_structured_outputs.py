@@ -184,3 +184,38 @@ def test_evaluator_receipt_gaps_are_typed_separately_from_semantic_gaps():
     assert "execution_receipt_gaps" in EvaluatorRepairOutput.model_json_schema()["properties"]
     with pytest.raises(ValidationError):
         EvaluatorRepairOutput(execution_receipt_gaps=[123])
+
+
+@pytest.mark.parametrize("value", [None, "", "Keep meaningful feedback"])
+def test_review_instructions_normalize_nullable_wire_values(value):
+    from modules.agents.structured_outputs import TaskReviewDecisionOutput
+
+    model = TaskReviewDecisionOutput.model_validate({"status": "done", "instructions": value})
+    assert model.instructions == ("" if value is None else value)
+    assert TaskReviewDecisionOutput.model_validate({"status": "done"}).instructions == ""
+
+
+@pytest.mark.parametrize("value", [False, 12, [], {}])
+def test_review_instructions_reject_non_string_values(value):
+    from modules.agents.structured_outputs import TaskReviewDecisionOutput
+
+    with pytest.raises(ValidationError):
+        TaskReviewDecisionOutput.model_validate({"status": "done", "instructions": value})
+
+
+@pytest.mark.parametrize("fault", ["unknown", "empty_reason", "long_reason", "missing_check"])
+def test_semantic_checks_are_closed_and_bounded(fault):
+    from modules.agents.structured_outputs import HypothesisSemanticChecks
+
+    checks = {key: {"verdict": "adequate", "reason": "Grounded proposal"}
+              for key in ("grounding", "test_discrimination", "identity_requirements")}
+    if fault == "unknown":
+        checks["grounding"]["verdict"] = "probably"
+    elif fault == "empty_reason":
+        checks["grounding"]["reason"] = ""
+    elif fault == "long_reason":
+        checks["grounding"]["reason"] = "x" * 501
+    else:
+        del checks["grounding"]
+    with pytest.raises(ValidationError):
+        HypothesisSemanticChecks.model_validate(checks)

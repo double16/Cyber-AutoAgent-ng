@@ -882,6 +882,7 @@ def run_agent_until_terminal_state(
                 return AgentRunResult(
                     terminal_reason,
                     run_policy.terminal_message if terminal_reason == run_policy.terminal_reason else terminal_reason,
+                    details=policy_terminal if isinstance(policy_terminal, dict) else None,
                 )
             terminal_tool_completed = (
                 result_state.get(TERMINAL_TOOL_COMPLETED_STATE_KEY)

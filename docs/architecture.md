@@ -267,7 +267,11 @@ submission fail atomically. Appending hypotheses replaces a no-test disposition;
 requires explicit replacement with a reasoned no-test disposition.
 Every successful call produces an immutable cumulative `hypothesis_set_v1` artifact. Python supplies operation,
 producer, frozen assignment, and hypothesis IDs. The result includes `artifact_ref`, `sha256`, cumulative
-`subject_ids`, `published_subject_ids`, `missing_subject_ids`, `hypothesis_ids_by_subject`, and `hypothesis_counts`.
+`total_published_subject_ids`, `last_updated_subject_ids`, `missing_subject_ids`, `hypothesis_ids_by_subject`,
+and `hypothesis_counts`. `subject_ids` remains a legacy alias for cumulative subjects;
+`published_subject_ids` remains a legacy alias for subjects submitted by the last call. Agent prompts use only
+canonical names and derive cumulative coverage from the validated artifact, including historical bindings.
+An unchanged-content call reuses the artifact and updates last-call metadata without adding a digest snapshot.
 
 Task recovery metadata stores ordered `hypothesis_publications` digest bindings in SQLite. The latest cumulative
 snapshot is authoritative; older snapshots remain provenance and cannot substitute for missing or corrupt current
@@ -345,8 +349,12 @@ support an overlooked unauthenticated scenario. No additional coverage field or 
 counterpart is required; a reasoned no-hypothesis outcome remains valid. Unauthenticated assignments
 retain empty roles and require no credential sessions.
 
-After 16 exploration calls without a new publication digest, the after-tool hook returns a normal
-publication checkpoint. Shell and other exploration calls count; duplicate publications and observation
+After 16 successful tool calls without a new publication digest, the after-batch hook returns a normal
+publication checkpoint. Failed attempts, exceptions, and canceled calls do not count. All queued calls in
+the current model turn finish before checkpoint handoff; a later publication in the batch resets progress.
+Immediate completion, rejection, safety, and authorization stops retain precedence. Diagnostics report the
+actual successful-call count, including batch overshoot. Other execution and retry limits are unchanged.
+Shell and other exploration calls count; duplicate publications and observation
 writes do not reset progress. A bounded publication turn reuses retained filesystem inputs and inspection
 context. If publication remains incomplete, the critic identifies a frozen criterion, missing required input,
 affected subjects and frozen source references. Further inspection is restricted to those input artifacts
@@ -436,7 +444,12 @@ these goals and use the credential-worker tests as regression checks.
 
 Every model request receives a generation allocation from its assembled input, resolved context capacity,
 required answer space, configured reasoning allowance, and a safety margin of the larger of 512 tokens or
-2% of context capacity. Role `max_tokens` values are preferred targets; explicit `MAX_TOKENS`,
+2% of context capacity. Numeric allocation fields, including `generation_tokens` and `input_tokens`,
+remain visible in logs and structured exports. Only exact allocation field names with nonnegative integer values bypass
+secret-key redaction; strings and containers remain redacted, and registered runtime secrets still
+pass through final text redaction.
+
+Role `max_tokens` values are preferred targets; explicit `MAX_TOKENS`,
 `MAX_COMPLETION_TOKENS`, provider configuration ceilings, and known model output limits remain hard caps.
 Required structured records determine answer capacity; an input inventory does not imply one output per item.
 Unstructured calls reserve at least the smaller of 1,024 tokens or their preferred target for an answer.
@@ -1325,9 +1338,17 @@ not authorize new target acquisition or execution of proposed tests.
 
 For published hypotheses, Python derives repair routing from explicit subject and hypothesis decisions.
 Revisions and withdrawals take priority over prerequisite inspection and always reach the actor with
-IDs, reasons, and the reviewed publication digest. The evaluator returns review feedback, while the actor
-publishes the full corrected subject list with `mode=replace`. Schema correction preserves semantic
-judgments and reasons. A subsequent review cannot clear unresolved changes against the same publication
+IDs, reasons, and the reviewed publication digest. Repair prompts supply complete affected subject records,
+the exact hypotheses requiring revision or withdrawal, their decisions and reasons, and retained siblings.
+The actor submits each affected subject's complete corrected hypothesis list with `mode=replace`; Python
+preserves omitted subjects. Complete publications with no requested changes or prerequisite gaps need acceptance only.
+Stale review feedback is excluded, and prompt fitting preserves required repair records without truncation.
+Schema correction preserves each subject
+only after its identity, hypothesis coverage, evidence references, input assessments, and subject-local
+prerequisites validate. Invalid subjects may be reassessed, including their decisions and reasons.
+Correction feedback identifies invalid subject IDs and field paths and supplies accepted subject reviews;
+the next structured response still includes every subject and preserves accepted subject-local prerequisite gaps. Python derives workflow repair routing after
+validating the reviews rather than freezing malformed status or repair fields. A subsequent review cannot clear unresolved changes against the same publication
 digest; an updated publication must be reviewed. Non-success reviews require a concrete reason, and an
 incomplete review must identify publication changes, `unresolved_criterion_ids` from the frozen contract,
 or required frozen-input gaps. Acceptance still
@@ -1412,7 +1433,20 @@ the frozen inventory. Compact input summaries retain source record IDs, location
 provenance; complete supporting records remain in the filesystem context artifact. They do not expand
 publication scope or modify the inventory snapshot. Evaluators reconcile empty-publication reasons
 against these inputs: inputs can ground conditional tests without proving unsafe behavior, but do not
-mandate hypotheses. Completed historical publications are not automatically reopened.
+mandate hypotheses. The investigation adapter also projects stable `input_candidate` entries from
+endpoint query names and exact-endpoint client request and literal URL/link declarations. Candidate IDs
+are scoped to the subject, input name, and location; duplicate origins retain source records and source
+locations. Target, origin, port, and path mismatches never transfer inputs between endpoints. These
+projections do not change frozen inventory or establish server behavior. Versioned derived context and
+source indexes rebuild on continuation, so mapping need not rerun.
+
+An empty subject review assesses every reconciled input candidate through
+`no_hypothesis_basis.behavior_assessments[].input_candidate_ids`. Source-only candidates require retained
+inspection results covering their source locations; listed paths and metadata alone do not establish
+inspection. A candidate can be assessed as offering no safe, security-relevant conditional test. A positive
+assessment routes to publication repair, while necessary uninspected evidence uses prerequisite recovery.
+Source-backed tasks without an inventory retain their existing content-based review path. Completed
+historical publications are not automatically reopened.
 
 Bundle inventory uses Tree-sitter JavaScript syntax analysis to resolve bounded literal, constant,
 member-binding, concatenation, and template request constructions without executing JavaScript.
@@ -1505,3 +1539,23 @@ context for templates and output, and scoring requests explicitly disable reason
 subject to its dedicated configured `judge_max_tokens`. These compact score/rationale judgments do not direct an
 actor, so their existing scoring contracts and failure handling remain; no actor correction cycle is introduced.
 Provider-specific empty generation when reasoning is disabled remains a separate limitation.
+
+### Hypothesis semantic review contract
+
+New hypothesis reviews include `semantic_checks` for every hypothesis. `grounding` and
+`test_discrimination` each contain a verdict (`adequate` or `revise`) and a reason of 1–500
+characters. `identity_requirements` additionally permits `not_applicable`. The critic assesses
+semantic merit; Python rejects a retained hypothesis with a `revise` check and allows correction
+before freezing that subject. These checks and reasons travel with exact hypothesis repair records.
+Historical reviews remain readable without these fields; new task-bound reviews require them.
+Schema-derived output budgets include the bounded reasons.
+
+Authorization proposals must ground the intended operation and access boundary, specify controls
+that distinguish unauthorized access from ordinary behavior, and align execution identities with
+`authentication_requirement`. Client token storage or date filtering does not establish a tenant
+boundary. Conditional mechanisms are valid future proposals; missing execution credentials alone
+do not invalidate them. Reviewers request focused revision or withdrawal rather than executing tests.
+
+Review decision `instructions` accepts a string, null, or omission in structured output and validated
+JSON fallback. Null and omission normalize to an empty string internally. Semantic review reasons
+remain available even when no additional instructions are supplied.

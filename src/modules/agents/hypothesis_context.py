@@ -13,8 +13,21 @@ from modules.tools.inventory_investigation import investigation_entries
 from modules.tools.inventory_provenance import operation_provenance
 from modules.tools.memory import _load_inventory_manifest, canonical_artifact_reference
 
+HYPOTHESIS_AUTHORIZATION_GUIDANCE = """For authorization proposals, ground the intended operation and
+access boundary in supplied observations or declared policy. Client token storage, date filters, and absent
+server code do not establish ownership, tenants, or missing authorization. An unproved mechanism may be
+conditional; do not invent the security boundary. Compare the same protected operation/resource under
+appropriate authorized and unauthorized controls. Broad results, generic errors, reflection, and ordinary
+functionality alone cannot establish unauthorized access. Align authentication_requirement with test steps:
+account/role/tenant comparisons require corresponding identity contexts and declared roles; unauthenticated
+bypass tests may use comparison=none. Missing execution credentials alone do not invalidate a grounded
+future proposal. Do not execute proposed tests during hypothesis generation or review.
+"""
+
 HYPOTHESIS_GROUNDING_GUIDANCE = """Summary records are not exhaustive implementation evidence. Empty input lists
-mean inputs are unrecorded, not absent; reconcile them with explicitly linked parameter records.
+mean inputs are unrecorded, not absent. Reconcile input_candidate entries from recorded inputs,
+explicitly linked parameter records, endpoint query names, and exact-endpoint client declarations. These candidates
+establish available inputs only; they do not prove server handling or require a hypothesis.
 Diagnostics inputs_unrecorded and operation_not_observed are metadata limitations with no automatic
 workflow consequence. They cannot independently justify no_testable_hypotheses.
 Follow source-backed client_route_calls relationships from route guards to components and request
@@ -96,7 +109,7 @@ def frozen_input_context(task: Any, output_root: str) -> str:
     """Keep complete assigned records on disk; never turn their availability into execution proof."""
 
     basis = task.acceptance.basis
-    identity = {"context_version": 3, "source_refs": list(basis.source_refs), "snapshot_hash": basis.snapshot_hash,
+    identity = {"context_version": 4, "source_refs": list(basis.source_refs), "snapshot_hash": basis.snapshot_hash,
                 "item_ids": sorted(basis.item_ids)}
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     path = Path(output_root) / "artifacts" / "hypothesis_context" / f"{key}.json"
@@ -163,12 +176,19 @@ def frozen_input_context(task: Any, output_root: str) -> str:
         ), input_rows)
         if len(input_summary) > 12_000:
             input_summary = "Input summary exceeds prompt limit; inspect complete supporting_items and items below."
+        candidates = [entry for entry in context_entries if entry["type"] == "input_candidate"]
+        candidate_summary = _rows("input_candidates", (
+            "subject_id", "candidate_id", "name", "location", "origins",
+        ), candidates)
+        if len(candidate_summary) > 12_000:
+            candidate_summary = "Input candidates exceed inline limit; page the complete structural context."
         return (
             "\nResolved investigation references (availability is not inspection or semantic support):\n"
             + _rows("sources", ("reference", "source", "availability"), source_rows[:32])
             + f"\nComplete references: artifact:{source_path.relative_to(output_root).as_posix()}\n"
             + _rows("recorded_operations", ("item_id", "operations", "provenance"), operations)
             + "\n" + input_summary
+            + "\n" + candidate_summary
             + "\n" + context_summary
             + f"\nComplete structural context: artifact:{context_path.relative_to(output_root).as_posix()}\n"
             + f"\n## Frozen investigation inputs (not completion evidence)\n"
@@ -325,8 +345,12 @@ def publication_review(task: Any, operation_id: str) -> str:
                 for subject in publication.subjects]
     records = [{"item_id": subject.item_id, **hypothesis.model_dump()}
                for subject in publication.subjects for hypothesis in subject.hypotheses]
+    candidates = review_input_candidates(task) if any(not subject.hypotheses for subject in publication.subjects) else {}
+    candidate_rows = [row for subject_rows in candidates.values() for row in subject_rows]
     return (
-        f"\n## Authoritative current hypothesis publication\n{binding['artifact_ref']} sha256={binding['sha256']}\n"
+        _rows("reconciled_input_candidates", ("subject_id", "candidate_id", "name", "location", "origins"),
+              candidate_rows)
+        + f"\n## Authoritative current hypothesis publication\n{binding['artifact_ref']} sha256={binding['sha256']}\n"
         "Only this publication establishes current coverage. Older snapshots and prose summaries are history.\n"
         + _rows("subjects", ("item_id", "disposition", "reason", "hypothesis_count"), subjects)
         + "\n" + _rows("hypotheses", ("item_id", "hypothesis_id", "observed_basis", "preconditions",
@@ -334,3 +358,30 @@ def publication_review(task: Any, operation_id: str) -> str:
                                        "positive_expectations", "negative_expectations", "required_evidence",
                                        "supporting_refs", "authentication_requirement"), records)
     )
+
+
+def review_input_candidates(task: Any) -> dict[str, list[dict]]:
+    """Reconcile frozen records and source declarations without claiming model inspection."""
+    result = {}
+    for reference in task.acceptance.basis.source_refs:
+        content = Path(resolve_operation_artifact_path(reference)).read_bytes()
+        try:
+            payload = json.loads(content)
+        except (ValueError, UnicodeError):
+            continue  # Generic source-backed tasks may freeze implementation text rather than inventory.
+        if not isinstance(payload, dict) or "items" not in payload:
+            continue
+        manifest, digest = _load_inventory_manifest(reference, persist_normalization=False)
+        if digest != task.acceptance.basis.snapshot_hash:
+            raise ValueError("Frozen inventory snapshot changed during input reconciliation")
+        for subject in manifest["items"]:
+            if subject["id"] not in task.acceptance.basis.item_ids:
+                continue
+            entries = investigation_entries(
+                manifest, subject,
+                read_source=lambda ref: Path(resolve_operation_artifact_path(ref)).read_bytes(),
+            )
+            result.setdefault(subject["id"], []).extend(
+                entry for entry in entries if entry["type"] == "input_candidate"
+            )
+    return result

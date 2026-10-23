@@ -53,6 +53,7 @@ def test_oversized_inventory_attributes_remain_complete_on_disk(producer, tmp_pa
 
 
 def test_invalid_inventory_context_is_not_invented(producer, tmp_path):
+    (tmp_path / "inventory.json").write_text("{}")
     rendered = context.frozen_input_context(producer, str(tmp_path))
     assert "unavailable" in rendered
     assert "do not invent" in rendered
@@ -309,3 +310,54 @@ def test_investigation_inspection_retains_only_ranges_returned_to_worker(produce
     assert entry["inspected_source_ranges"] == [{"reference": "artifact:inspected.js", "line": 5,
                                                  "column": 1, "sha256": "digest", "characters": 12}]
     assert "inspected_source_ranges" in context.inspection_context(producer, str(tmp_path))
+
+
+def test_frozen_candidates_rebuild_old_context_and_survive_summary_omission(producer, tmp_path):
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps({"schema_version": 1, "items": [{
+        "id": "subject", "kind": "endpoint", "target_id": "target-1",
+        "value": "https://target.test/file?path=example", "attributes": {"interaction": {"inputs": []}},
+    }], "unassessed_gaps": []}))
+    _, digest = memory._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    task = replace(producer, acceptance=replace(producer.acceptance, manifest_hash="", basis=replace(
+        producer.acceptance.basis, snapshot_hash=digest,
+    )))
+    text = context.frozen_input_context(task, str(tmp_path))
+    assert "input_candidates[1]" in text and "inventory_url" in text
+    assert "path" in text
+    cache = next(file for file in (tmp_path / "artifacts" / "hypothesis_context").glob("*.json")
+                 if "-" not in file.stem)
+    old = json.loads(cache.read_text())
+    assert old["identity"]["context_version"] == 4
+    old["identity"]["context_version"] = 3
+    old["investigation_entries"] = []
+    cache.write_text(json.dumps(old))
+    assert context.frozen_input_context(task, str(tmp_path)) == text
+    assert context.review_input_candidates(task)["subject"][0]["name"] == "path"
+    path.write_text(path.read_text().replace("example", "changed"))
+    with pytest.raises(ValueError, match="snapshot changed"):
+        context.review_input_candidates(task)
+
+
+def test_review_candidates_include_exact_literal_source_links_without_claiming_inspection(producer, tmp_path):
+    source = tmp_path / "client.js"
+    source.write_text('const links = [{url: "/file?path=canary"}, {url: "/other?foreign=value"}];')
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps({"schema_version": 1, "items": [{
+        "id": "subject", "kind": "endpoint", "target_id": "target-1", "value": "https://target.test/file",
+        "attributes": {"implementation_refs": ["artifact:client.js"]},
+    }], "unassessed_gaps": []}))
+    _, digest = memory._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    task = replace(producer, acceptance=replace(producer.acceptance, manifest_hash="", basis=replace(
+        producer.acceptance.basis, snapshot_hash=digest,
+    )))
+    rows = context.review_input_candidates(task)["subject"]
+    assert len(rows) == 1 and rows[0]["name"] == "path"
+    assert rows[0]["origins"][0]["kind"] == "client_link"
+    assert not context.hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path)).index.exists()
+
+
+@pytest.mark.parametrize("source", ["plain source text", "[]", "{}"])
+def test_source_only_legacy_tasks_do_not_require_inventory_schema(producer, tmp_path, source):
+    (tmp_path / "inventory.json").write_text(source)
+    assert context.review_input_candidates(producer) == {}

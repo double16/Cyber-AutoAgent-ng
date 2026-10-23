@@ -223,3 +223,28 @@ def test_subject_declarations_and_excerpts_precede_broad_metadata():
     isolated = {"type": "source_excerpt", "reference": "artifact:isolated", "line": 1,
                 "column": 1, "text": "standalone"}
     assert prioritize_entries([isolated]) == [isolated]
+
+
+def test_exact_literal_links_expose_pageable_candidates_with_source_ranges(client_case):
+    manifest, _, _, _, sources = client_case
+    endpoint = manifest["items"][0]
+    endpoint["value"] = "https://target.test/resource"
+    endpoint["attributes"]["implementation_refs"] = ["artifact:links.js"]
+    sources["artifact:links.js"] = b'''const links = [
+      {url: "/resource?path=one"},
+      {url: "/other?foreign=two"},
+      {href: "https://target.test/resource?format=json"},
+      {url: "https://outside.test/resource?foreign=three"}
+    ];'''
+    entries = investigation_entries(manifest, endpoint, read_source=sources.__getitem__)
+    projected = [row for row in entries if row["type"] == "input_candidate"]
+    assert {row["name"] for row in projected} == {"path", "format"}
+    assert all(row["origins"][0]["source_location"]["start_line"] > 0 for row in projected)
+    assert len([row for row in entries if row["type"] == "client_link"]) == 2
+    offset, seen = 0, []
+    while offset is not None:
+        page = json.loads(investigation_page(entries, offset=offset, limit=2, header={}, max_chars=1800))
+        seen.extend(page["context_entries"])
+        offset = page["next_context_offset"]
+    assert seen == entries
+    assert entries[1]["type"] == "input_candidate"

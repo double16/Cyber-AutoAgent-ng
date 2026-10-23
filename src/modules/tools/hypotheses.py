@@ -105,6 +105,15 @@ def hypothesis_binding(task: Any) -> dict[str, Any]:
     return binding
 
 
+def publication_state(binding: dict[str, Any], publication: HypothesisSet) -> dict[str, Any]:
+    """Project canonical agent metadata from a validated publication, including legacy bindings."""
+    return {
+        **{key: value for key, value in binding.items() if key not in {"subject_ids", "published_subject_ids"}},
+        "total_published_subject_ids": sorted(subject.item_id for subject in publication.subjects),
+        "last_updated_subject_ids": binding.get("last_updated_subject_ids", binding.get("published_subject_ids", [])),
+    }
+
+
 def _validate_supporting_refs(subject: SubjectHypotheses) -> None:
     for index, hypothesis in enumerate(subject.hypotheses):
         for support in hypothesis.supporting_refs:
@@ -201,7 +210,10 @@ def build_record_hypotheses_tool(
     def record_hypotheses(subjects: list[dict[str, Any]], mode: str = "append") -> str:
         """Append hypotheses by default. Use mode=replace with a subject's full corrected list to remove records.
 
-        The returned artifact is cumulative. Python binds the latest complete publication to acceptance.
+        The returned artifact is cumulative. total_published_subject_ids lists all published subjects;
+        last_updated_subject_ids lists subjects submitted by this call.
+        published_subject_ids is its legacy alias.
+        Python binds the latest complete publication to acceptance.
         """
 
         mode = mode.strip().lower()
@@ -267,28 +279,33 @@ def build_record_hypotheses_tool(
         content = payload.model_dump_json(indent=2).encode()
         digest = hashlib.sha256(content).hexdigest()
         if binding and binding["sha256"] == digest:
-            return json.dumps({**binding, "published_subject_ids": sorted(ids)})
-        folder = Path(output_root) / "artifacts" / "hypotheses"
-        folder.mkdir(parents=True, exist_ok=True)
-        filename = f"{hashlib.sha256(task.task_uid.encode()).hexdigest()[:16]}-{digest[:16]}.json"
-        path = folder / filename
-        temporary = path.with_suffix(".tmp")
-        temporary.write_bytes(content)
-        os.replace(temporary, path)
+            artifact_ref = binding["artifact_ref"]
+        else:
+            folder = Path(output_root) / "artifacts" / "hypotheses"
+            folder.mkdir(parents=True, exist_ok=True)
+            filename = f"{hashlib.sha256(task.task_uid.encode()).hexdigest()[:16]}-{digest[:16]}.json"
+            path = folder / filename
+            temporary = path.with_suffix(".tmp")
+            temporary.write_bytes(content)
+            os.replace(temporary, path)
+            artifact_ref = f"artifact:artifacts/hypotheses/{filename}"
         binding = {
-            "artifact_ref": f"artifact:artifacts/hypotheses/{filename}", "sha256": digest,
+            "artifact_ref": artifact_ref, "sha256": digest,
             "subject_ids": sorted(merged), "published_subject_ids": sorted(ids),
+            "total_published_subject_ids": sorted(merged), "last_updated_subject_ids": sorted(ids),
             "missing_subject_ids": sorted(set(basis.item_ids) - set(merged)),
             "hypothesis_ids_by_subject": {
                 key: [item.hypothesis_id for item in value.hypotheses] for key, value in sorted(merged.items())
             },
             "hypothesis_counts": {key: len(value.hypotheses) for key, value in sorted(merged.items())},
         }
+        publications = list(latest_task.recovery_context.get("hypothesis_publications", []))
         persist(binding)
         # Direct tool users and callbacks retain the same durable metadata contract.
-        publications = list(latest_task.recovery_context.get("hypothesis_publications", []))
         if not publications or publications[-1]["sha256"] != digest:
             publications.append(binding)
+        else:
+            publications[-1] = binding
         task.recovery_context["hypothesis_publications"] = publications
         return json.dumps(binding)
 

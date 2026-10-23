@@ -1229,7 +1229,8 @@ def create_agent(
         # Capture original results before recovery or presentation hooks can rewrite them.
         agent_hooks.insert(0, outcome_recording_hook)
     terminal_tool_hook = TerminalToolHook(agent_type)
-    agent_hooks.append(terminal_tool_hook)
+    # Cleanup callbacks run in reverse: recovery and safety stops must settle before checkpoints.
+    agent_hooks.insert(0, terminal_tool_hook)
 
     tool_executor = runtime.tool_executor
     if agent_type in {

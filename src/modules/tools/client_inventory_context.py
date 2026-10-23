@@ -97,6 +97,12 @@ def client_inventory_context(
                 if index["route_analysis_status"] != "complete":
                     entries.append({"type": "diagnostic", "code": "route_analysis_incomplete", "reference": reference,
                                     "status": index["route_analysis_status"]})
+                for link in index.get("literal_links", []):
+                    if _route(urljoin(endpoint["value"], link["url"])) == _route(endpoint["value"]):
+                        entries.append({"type": "client_link", "item_id": record["id"],
+                                        "reference": reference, **link, "server_behavior": "unestablished"})
+                        declared.append({"source_artifact": reference, "source_location": link["source_location"],
+                                         "_route_context": True})
                 for link in index["route_links"]:
                     if _route(urljoin(endpoint["value"], link["path"])) != _route(endpoint["value"]):
                         continue

@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from modules.tools.client_inventory_context import client_inventory_context
+from modules.tools.inventory_inputs import input_candidates
 from modules.tools.inventory_provenance import operation_provenance
 
 SourceReader = Callable[[str], bytes]
@@ -58,6 +59,7 @@ def investigation_entries(
         if isinstance(gap, dict) and (gap.get("item_id") in {item["id"] for item in records}
                                      or gap.get("endpoint_id") in {item["id"] for item in records}):
             entries.append({"type": "extraction_gap", "gap": gap})
+    entries.extend(input_candidates(manifest, subject, entries))
     # Complementary source fragments frequently repeat identical declarations.
     return prioritize_entries(list({json.dumps(entry, sort_keys=True): entry for entry in entries}.values()))
 
@@ -65,10 +67,12 @@ def investigation_entries(
 
 def prioritize_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep subject-local declarations and bounded verbatim source blocks ahead of metadata."""
-    records, groups, trailing = [], [], []
+    records, groups, trailing, candidates = [], [], [], []
     for entry in entries:
         kind = entry["type"]
-        if kind == "record":
+        if kind == "input_candidate":
+            candidates.append(entry)
+        elif kind == "record":
             records.append(entry)
         elif kind in {"client_route", "client_route_definition", "client_operation"}:
             groups.append([entry])
@@ -93,7 +97,7 @@ def prioritize_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         count = 2 if group[0]["type"] != "source_excerpt" else 1
         heads.extend(group[:count])
         tails.extend(group[count:])
-    return records[:1] + heads + tails + records[1:] + trailing
+    return records[:1] + candidates + heads + tails + records[1:] + trailing
 
 
 def investigation_page(

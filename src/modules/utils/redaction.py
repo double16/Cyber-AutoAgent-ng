@@ -25,6 +25,10 @@ TEXT_REDACTION_PATTERNS = (
     _URL_CREDENTIAL_PATTERN,
 )
 _RUNTIME_SECRETS: set[str] = set()
+_TOKEN_COUNT_KEYS = frozenset({
+    "generation_tokens", "input_tokens", "minimum_tokens", "answer_tokens", "reasoning_tokens",
+    "safety_tokens", "preferred_tokens", "context_tokens", "output_ceiling",
+})
 _SAFE_METADATA_KEYS = frozenset({"credential_id", "credential_type"})
 _IGNORED_RUNTIME_SECRET_VALUES = frozenset(
     {"api", "authorization", "bearer", "changeme", "cookie", "example", "key", "masked", "password", "secret", "token"}
@@ -66,7 +70,11 @@ def redact(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
             str(key): (
-                redact(item)
+                item
+                if str(key) in _TOKEN_COUNT_KEYS and ((type(item) is int and item >= 0)
+                                                     or (key == "output_ceiling" and item is None))
+                else REDACTED if str(key) in _TOKEN_COUNT_KEYS
+                else redact(item)
                 if str(key) in _SAFE_METADATA_KEYS
                 else REDACTED if SENSITIVE_KEY_PATTERN.search(str(key)) else redact(item)
             )

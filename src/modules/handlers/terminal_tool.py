@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent, HookProvider, HookRegistry
+from strands.hooks import AfterToolCallEvent, AfterToolsEvent, BeforeToolCallEvent, HookProvider, HookRegistry
 
 from modules.agents.run_policy import AgentRunPolicy
 from modules.handlers.tool_recovery import _result_success, _result_text
@@ -39,6 +39,29 @@ class TerminalToolHook(HookProvider):
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(AfterToolCallEvent, self._after_tool)
         registry.add_callback(BeforeToolCallEvent, self._before_tool)
+        registry.add_callback(AfterToolsEvent, self._after_tools)
+
+    def _after_tools(self, event: AfterToolsEvent) -> None:
+        """Apply publication checkpoints only after the current batch has finished."""
+        policy = self.policy
+        if policy is None or not policy.checkpoint_tool_calls or self.checkpoint_count < policy.checkpoint_tool_calls:
+            return
+        if getattr(event, "end_turn", False):
+            return
+        state = event.invocation_state.setdefault("request_state", {})
+        if not isinstance(state, dict) or state.get("stop_event_loop") or any(key in state for key in (
+            POLICY_TERMINAL_STATE_KEY, TERMINAL_TOOL_COMPLETED_STATE_KEY, TERMINAL_TOOL_REJECTED_STATE_KEY,
+        )):
+            return
+        state["stop_event_loop"] = True
+        state[POLICY_TERMINAL_STATE_KEY] = {
+            "reason": "publication_checkpoint", "successful_tool_calls_without_progress": self.checkpoint_count,
+        }
+        event.end_turn = (
+            "Hypothesis publication checkpoint reached after successful tool calls without publication "
+            "progress. The current tool batch has finished. Return control to the workflow controller "
+            "for the publication-only pass; this checkpoint does not mark the task complete."
+        )
 
     def _before_tool(self, event: BeforeToolCallEvent) -> None:
         """Cancel queued calls after a terminal result in this sequential batch."""
@@ -51,7 +74,15 @@ class TerminalToolHook(HookProvider):
                 TERMINAL_TOOL_REJECTED_STATE_KEY,
             )
         ):
-            event.cancel_tool = "Worker completed; return control to the workflow controller."
+            terminal = state.get(POLICY_TERMINAL_STATE_KEY)
+            if isinstance(terminal, dict) and terminal.get("reason") == "publication_checkpoint":
+                event.cancel_tool = (
+                    "Queued tool call canceled: hypothesis publication checkpoint reached after "
+                    "successful tool calls without publication progress. Return control to the workflow controller "
+                    "for the publication-only pass; this checkpoint does not mark the task complete."
+                )
+            else:
+                event.cancel_tool = "Worker completed; return control to the workflow controller."
 
     def _policy_terminal(self, event: AfterToolCallEvent, tool_name: str) -> bool:
         policy = self.policy
@@ -60,7 +91,8 @@ class TerminalToolHook(HookProvider):
         self.called_tools.add(tool_name)
         if tool_name not in policy.ignored_terminal_tool_names:
             self.tool_count += 1
-        if _result_success(event.result, event.exception):
+        success = _result_success(event.result, event.exception)
+        if success:
             self.successful_tools.add(tool_name)
         reason = policy.terminal_check() if policy.terminal_check is not None else None
         if policy.checkpoint_tool_calls:
@@ -68,10 +100,8 @@ class TerminalToolHook(HookProvider):
             if progress != self.progress_key:
                 self.progress_key = progress
                 self.checkpoint_count = 0
-            else:
+            elif success:
                 self.checkpoint_count += 1
-            if self.checkpoint_count >= policy.checkpoint_tool_calls:
-                reason = "publication_checkpoint"
         # A controller predicate is authoritative when supplied: tool availability
         # or a successful tool status alone cannot establish functional completion.
         if policy.terminal_check is None and policy.terminal_after_required_tools and policy.required_tool_names:

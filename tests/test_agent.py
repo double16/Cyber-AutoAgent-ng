@@ -638,6 +638,7 @@ def test_create_agent_reuses_runtime_resources(monkeypatch, tmp_path, native_oll
 
     kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
     assert kwargs["conversation_manager"] is conversation_manager
+    assert kwargs["hooks"][0] is agent._cyber_terminal_tool_hook
     assert kwargs["callback_handler"] is callback_handler
     assert kwargs["trace_attributes"]["operation.id"] == "OP_TEST"
     assert kwargs["trace_attributes"]["cyber.agent.run_id"] == str(callback_handler.agent_run_id)

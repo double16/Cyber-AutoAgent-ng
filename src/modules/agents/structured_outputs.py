@@ -181,8 +181,14 @@ class ComparisonAssessmentOutput(StrictStructuredOutput):
 class TaskReviewDecisionOutput(StrictStructuredOutput):
     status: str
     reason: str = ""
-    instructions: str = ""
+    instructions: str | None = ""
     repair: EvaluatorRepairOutput | None = None
+
+    @model_validator(mode="after")
+    def normalize_instructions(self) -> TaskReviewDecisionOutput:
+        if self.instructions is None:
+            self.instructions = ""
+        return self
 
 
 class WorkflowDecisionOutput(TaskReviewDecisionOutput):
@@ -194,13 +200,31 @@ class ComparisonTaskDecisionOutput(WorkflowDecisionOutput):
     comparison_assessment: ComparisonAssessmentOutput
 
 
+class HypothesisSemanticCheck(StrictStructuredOutput):
+    verdict: Literal["adequate", "revise"]
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class HypothesisIdentityCheck(StrictStructuredOutput):
+    verdict: Literal["adequate", "revise", "not_applicable"]
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class HypothesisSemanticChecks(StrictStructuredOutput):
+    grounding: HypothesisSemanticCheck
+    test_discrimination: HypothesisSemanticCheck
+    identity_requirements: HypothesisIdentityCheck
+
+
 class HypothesisRecordReview(StrictStructuredOutput):
+    semantic_checks: HypothesisSemanticChecks | None = None
     hypothesis_id: str
     decision: Literal["retain", "revise", "withdraw"]
     reason: str = Field(min_length=1)
 
 
 class HypothesisBehaviorAssessment(StrictStructuredOutput):
+    input_candidate_ids: list[str] = Field(default_factory=list)
     observed_behavior: str = Field(min_length=1)
     inspection_refs: list[ArtifactEvidenceReference] = Field(min_length=1)
     supports_conditional_test: bool

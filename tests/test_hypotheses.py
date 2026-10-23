@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -24,14 +25,19 @@ def producer(tmp_path, monkeypatch):
     monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
     monkeypatch.setattr(memory, "_operation_id", lambda: "OP_TEST")
-    (tmp_path / "inventory.json").write_text("{}")
+    monkeypatch.setattr(memory, "_ensure_memory_client", lambda: SimpleNamespace(get_active_plan=lambda **_kwargs: None))
+    (tmp_path / "inventory.json").write_text(json.dumps({
+        "schema_version": 1, "items": [{"id": "subject", "kind": "workflow", "target_id": "target-1",
+                                      "value": "/workspace/source", "attributes": {}}], "unassessed_gaps": [],
+    }))
+    _, snapshot_hash = memory._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
     (tmp_path / "observation.txt").write_text("Observed an input accepted by the assigned subject")
     return Task(
         "producer", "Develop hypotheses", "Develop safe tests", phase=1, status="active",
         acceptance=AcceptanceContract(
             mode="outcome", basis=AcceptanceBasis(
                 kind="snapshot", description="Frozen subjects", source_refs=["artifact:inventory.json"],
-                snapshot_hash="frozen-digest", item_ids=["subject"],
+                snapshot_hash=snapshot_hash, item_ids=["subject"],
             ), criteria=[AcceptanceCriterion(
                 id="hypotheses", description="Publish future tests",
                 evidence_requirements=[EvidenceRequirement(kind="hypothesis_set")],
@@ -319,6 +325,8 @@ def test_incremental_publication_replacement_reload_and_idempotence(producer, tm
     assert [subject.item_id for subject in partial.subjects] == ["subject"]
     second = json.loads(writer(subjects=[no_test("second")]))
     assert second["subject_ids"] == ["second", "subject"]
+    assert second["total_published_subject_ids"] == ["second", "subject"]
+    assert second["last_updated_subject_ids"] == second["published_subject_ids"] == ["second"]
     assert second["missing_subject_ids"] == []
     before = list(producer.recovery_context["hypothesis_publications"])
     assert json.loads(writer(subjects=[no_test("second")]))["sha256"] == second["sha256"]
@@ -336,6 +344,34 @@ def test_incremental_publication_replacement_reload_and_idempotence(producer, tm
     ).subjects if subject.item_id == "subject").hypotheses
     with pytest.raises(ValueError, match="digest changed"):
         hypotheses.load_hypothesis_set(first["artifact_ref"], producer, "OP_TEST")
+
+
+def test_unchanged_publication_updates_last_call_without_new_snapshot(producer, tmp_path):
+    producer = two_subjects(producer)
+    _, writer = publish(producer, tmp_path, [no_test()])
+    complete = json.loads(writer(subjects=[no_test("second")]))
+    count = len(producer.recovery_context["hypothesis_publications"])
+    repeated = json.loads(writer(subjects=[no_test()]))
+    assert repeated["sha256"] == complete["sha256"]
+    assert repeated["artifact_ref"] == complete["artifact_ref"]
+    assert repeated["total_published_subject_ids"] == ["second", "subject"]
+    assert repeated["last_updated_subject_ids"] == repeated["published_subject_ids"] == ["subject"]
+    assert len(producer.recovery_context["hypothesis_publications"]) == count
+    assert hypotheses.hypothesis_binding(producer) == repeated
+
+
+@pytest.mark.parametrize("legacy", [True, False])
+def test_agent_publication_metadata_uses_validated_subjects(producer, tmp_path, legacy):
+    binding, _ = publish(producer, tmp_path)
+    publication = hypotheses.load_hypothesis_set(binding["artifact_ref"], producer, "OP_TEST")
+    if legacy:
+        binding.pop("total_published_subject_ids")
+        binding.pop("last_updated_subject_ids")
+    binding["subject_ids"] = ["wrong"]
+    result = hypotheses.publication_state(binding, publication)
+    assert result["total_published_subject_ids"] == ["subject"]
+    assert result["last_updated_subject_ids"] == ["subject"]
+    assert "published_subject_ids" not in result and "subject_ids" not in result
 
 
 @pytest.mark.parametrize("bad_ref", ["memory:observed", "https://target.test", "artifact:missing.txt"])

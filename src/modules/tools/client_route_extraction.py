@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-ROUTE_EXTRACTOR_VERSION = 1
+ROUTE_EXTRACTOR_VERSION = 2
 _FUNCTIONS = {"function_declaration", "function_expression", "arrow_function", "generator_function"}
 
 
@@ -27,6 +27,7 @@ def saved_route_index(content: bytes, cache_directory: Path) -> dict:
     extracted = extract_client_requests(content.decode("utf-8", errors="replace"))
     result = {"source_sha256": digest, "extractor_version": ROUTE_EXTRACTOR_VERSION,
               "route_links": extracted.get("route_links", []),
+              "literal_links": extracted.get("literal_links", []),
               "route_analysis_status": extracted.get("route_analysis_status", extracted["request_analysis_status"])}
     cache_directory.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f".{uuid4().hex}.tmp")
@@ -86,6 +87,19 @@ def extract_route_links(
             return definition(value, seen | {node.id})
         return None
 
+    literal_links = []
+    for node in nodes:
+        if node.type == "pair":
+            key, value = node.child_by_field_name("key"), node.child_by_field_name("value")
+        elif node.type == "jsx_attribute" and len(node.named_children) > 1:
+            key, value = node.named_children[0], node.named_children[-1]
+        else:
+            continue
+        if text(key).strip("\"'") not in {"url", "href"} or value is None or value.type != "string":
+            continue
+        url = resolve(value)
+        if url and url.startswith(("/", "http://", "https://")):
+            literal_links.append({"url": url, "source_location": location(value)})
     links = []
     for node in nodes:
         props = properties(node)
@@ -146,4 +160,4 @@ def extract_route_links(
                       "element_source_location": location(element), "definitions": definitions,
                       "unresolved_links": unresolved, "relationship": "client_route_calls",
                       "runtime_execution": "unestablished"})
-    return {"route_links": links, "route_analysis_status": "complete"}
+    return {"route_links": links, "literal_links": literal_links, "route_analysis_status": "complete"}

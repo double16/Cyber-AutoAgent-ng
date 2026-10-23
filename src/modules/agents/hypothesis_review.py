@@ -1,16 +1,20 @@
 """Validate review coverage and provenance without deciding semantic merit."""
 
 import json
-from dataclasses import dataclass
+from collections import Counter
+from copy import deepcopy
+from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import Field, create_model
 
-from modules.agents.hypothesis_context import hypothesis_inspection_journal
+from modules.agents.hypothesis_context import hypothesis_inspection_journal, review_input_candidates
 from modules.agents.structured_outputs import (
+    HypothesisBehaviorAssessment,
     HypothesisCheckpointDecisionOutput,
     HypothesisPrerequisiteGap,
     HypothesisRecordReview,
+    HypothesisSemanticChecks,
     HypothesisSubjectReview,
     HypothesisTaskDecisionOutput,
     NoHypothesisBasis,
@@ -18,11 +22,12 @@ from modules.agents.structured_outputs import (
 )
 from modules.tools import memory
 from modules.tools.artifact_journal import inspection_has_content
-from modules.tools.hypotheses import hypothesis_binding, load_hypothesis_set
+from modules.tools.hypotheses import HypothesisSet, hypothesis_binding, load_hypothesis_set
+from modules.tools.inventory_inputs import inspection_covers_input
 
 
 def semantic_review(data: dict[str, Any]) -> dict[str, Any]:
-    """Freeze semantic judgments independently of malformed workflow bookkeeping."""
+    """Extract structured judgments independently of workflow routing fields."""
 
     digest = data.get("publication_sha256")
     if not isinstance(digest, str) or not digest:
@@ -50,25 +55,6 @@ def review_requires_changes(data: dict[str, Any]) -> bool:
                ((row.get("no_hypothesis_basis") or {}).get("behavior_assessments") or []))
         for row in data.get("subject_reviews", [])
     )
-
-
-def completes_review_provenance(previous: dict[str, Any], current: dict[str, Any]) -> bool:
-    """Permit missing inspection bookkeeping to be supplied without changing semantic judgments."""
-    def core(data):
-        return {**data, "subject_reviews": [{key: value for key, value in row.items() if key != "no_hypothesis_basis"}
-                                           for row in data["subject_reviews"]]}
-
-    if core(previous) != core(current):
-        return False
-    for old, new in zip(previous["subject_reviews"], current["subject_reviews"], strict=True):
-        before, after = old.get("no_hypothesis_basis"), new.get("no_hypothesis_basis")
-        if before is not None and before != after:
-            if after is None or before["kind"] != after["kind"]:
-                return False
-            for key, value in before.items():
-                if value and after.get(key) != value:
-                    return False
-    return True
 
 
 def normalize_review(data: dict[str, Any]) -> dict[str, Any]:
@@ -108,7 +94,7 @@ def normalize_review(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def repair_context(data: dict[str, Any], digest: str) -> str:
+def repair_context(data: dict[str, Any], digest: str, publication: HypothesisSet | None = None) -> str:
     """Deliver the full current review to the actor without relying on optional prose."""
 
     if data.get("publication_sha256") != digest:
@@ -118,7 +104,44 @@ def repair_context(data: dict[str, Any], digest: str) -> str:
     ) if key in data}
     if data.get("unresolved_criterion_ids"):
         feedback["criterion_gap_reason"] = data.get("reason", "")
-    return "\n## Structured hypothesis review feedback\n" + json.dumps(feedback, ensure_ascii=False)
+    text = "\n## Structured hypothesis review feedback\n" + json.dumps(feedback, ensure_ascii=False)
+    if publication is None:
+        return text
+    subjects = {subject.item_id: subject for subject in publication.subjects}
+    affected = []
+    for row in data.get("subject_reviews", []):
+        changes = [item for item in row.get("hypotheses", []) if item.get("decision") in {"revise", "withdraw"}]
+        if not review_requires_changes({"subject_reviews": [row]}):
+            continue
+        subject = subjects.get(row["item_id"])
+        if subject is None:
+            raise ValueError("Hypothesis repair review names an unknown publication subject")
+        records = {item.hypothesis_id: item for item in subject.hypotheses}
+        if any(item["hypothesis_id"] not in records for item in changes):
+            raise ValueError("Hypothesis repair review names an unknown publication hypothesis")
+        affected.append({
+            "current_subject": subject.model_dump(mode="json"),
+            "hypotheses_requiring_changes": [
+                records[item["hypothesis_id"]].model_dump(mode="json") for item in changes
+            ],
+        })
+    if not affected:
+        if feedback.get("prerequisite_gaps"):
+            return text + (
+                "\nResolve the supplied prerequisite gaps before acceptance. Reuse the current publication "
+                "unless the review requests revisions."
+            )
+        return text + "\nNo hypothesis revisions requested. Reuse the current publication for acceptance."
+    return (
+        text + "\n## Exact hypothesis repair records\n" + json.dumps({
+            "publication_sha256": digest, "affected_subjects": affected,
+        }, ensure_ascii=False)
+        + "\nThese complete current records match the review decisions and reasons above by hypothesis_id. "
+          "They are supplied directly; do not reread the publication to reconstruct "
+          "them. Submit mode=replace with each affected subject's full corrected hypothesis list, retaining "
+          "siblings marked retain. Omit unaffected subjects; Python preserves them. Do not execute future tests. "
+          "Then record_task_acceptance."
+    )
 
 
 def validate_checkpoint(data: dict[str, Any], task: Any) -> None:
@@ -145,6 +168,56 @@ def validate_checkpoint(data: dict[str, Any], task: Any) -> None:
         raise ValueError("Further inspection requires a concrete structured prerequisite gap")
 
 
+def validate_subject_review(
+    row: HypothesisSubjectReview, expected: set[str], task: Any, operation_id: str,
+    candidates: list[dict],
+) -> None:
+    """Validate one subject before preserving it across correction attempts."""
+    if (len(row.hypotheses) != len(expected)
+            or {item.hypothesis_id for item in row.hypotheses} != expected):
+        raise ValueError("Review every current hypothesis exactly once for its subject")
+    for item in row.hypotheses:
+        if item.semantic_checks and item.decision == "retain" and any(
+            check.verdict == "revise" for check in (
+                item.semantic_checks.grounding, item.semantic_checks.test_discrimination,
+                item.semantic_checks.identity_requirements,
+            )
+        ):
+            raise ValueError("A retained hypothesis cannot have a revise semantic check")
+    if expected and row.no_hypothesis_basis is not None:
+        raise ValueError("Populated subjects must omit no_hypothesis_basis")
+    if not expected:
+        basis = row.no_hypothesis_basis
+        if basis is None:
+            raise ValueError("Empty hypothesis review requires no_hypothesis_basis")
+        if basis.kind == "inspected_evidence":
+            if not basis.inspection_refs:
+                raise ValueError("Inspected-evidence basis requires retained inspection references")
+            journal = hypothesis_inspection_journal(task, operation_id, memory._operation_output_root())
+            if not all(inspection_has_content(journal.load_inspection(reference)) for reference in basis.inspection_refs):
+                raise ValueError("Empty disposition requires inspected content, not metadata-only results")
+            if not basis.behavior_assessments and not basis.no_relevant_behavior_reason:
+                raise ValueError("Empty review requires behavior assessments or a no-relevant-behavior explanation")
+            if basis.behavior_assessments and basis.no_relevant_behavior_reason:
+                raise ValueError("Behavior assessments conflict with a no-relevant-behavior explanation")
+            for assessment in basis.behavior_assessments or []:
+                if not set(assessment.inspection_refs) <= set(basis.inspection_refs):
+                    raise ValueError("Behavior assessment must cite its inspected-evidence basis")
+            known = {candidate["candidate_id"]: candidate for candidate in candidates}
+            assessed = set()
+            for assessment in basis.behavior_assessments or []:
+                if not set(assessment.input_candidate_ids) <= known.keys():
+                    raise ValueError("Behavior assessment names unknown input_candidate_ids")
+                for candidate_id in assessment.input_candidate_ids:
+                    candidate = known[candidate_id]
+                    if not any(inspection_covers_input(candidate, journal.load_inspection(ref))
+                               for ref in assessment.inspection_refs):
+                        raise ValueError(f"Source input {candidate_id} requires corresponding retained inspection")
+                    assessed.add(candidate_id)
+            if assessed != known.keys():
+                raise ValueError(f"Empty review must assess input_candidate_ids: {sorted(known.keys() - assessed)}")
+
+
 def validate_review(data: dict[str, Any], task: Any, operation_id: str) -> None:
     review = HypothesisTaskDecisionOutput.model_validate(data)
     binding = hypothesis_binding(task)
@@ -156,29 +229,15 @@ def validate_review(data: dict[str, Any], task: Any, operation_id: str) -> None:
     if (len(review.subject_reviews) != len(expected)
             or {row.item_id for row in review.subject_reviews} != expected.keys()):
         raise ValueError("Review every current subject exactly once")
+    candidates = review_input_candidates(task) if any(not value for value in expected.values()) else {}
     changes = False
     for row in review.subject_reviews:
-        if (len(row.hypotheses) != len(expected[row.item_id])
-                or {item.hypothesis_id for item in row.hypotheses} != expected[row.item_id]):
-            raise ValueError("Review every current hypothesis exactly once for its subject")
+        validate_subject_review(row, expected[row.item_id], task, operation_id, candidates.get(row.item_id, []))
+        validate_subject_prerequisites(row, data, task)
         changes |= row.decision != "retain" or any(item.decision != "retain" for item in row.hypotheses)
         if not expected[row.item_id]:
             basis = row.no_hypothesis_basis
-            if basis is None:
-                raise ValueError("Empty hypothesis review requires no_hypothesis_basis")
             if basis.kind == "inspected_evidence":
-                if not basis.inspection_refs:
-                    raise ValueError("Inspected-evidence basis requires retained inspection references")
-                journal = hypothesis_inspection_journal(task, operation_id, memory._operation_output_root())
-                if not all(inspection_has_content(journal.load_inspection(reference)) for reference in basis.inspection_refs):
-                    raise ValueError("Empty disposition requires inspected content, not metadata-only results")
-                if not basis.behavior_assessments and not basis.no_relevant_behavior_reason:
-                    raise ValueError("Empty review requires behavior assessments or a no-relevant-behavior explanation")
-                if basis.behavior_assessments and basis.no_relevant_behavior_reason:
-                    raise ValueError("Behavior assessments conflict with a no-relevant-behavior explanation")
-                for assessment in basis.behavior_assessments or []:
-                    if not set(assessment.inspection_refs) <= set(basis.inspection_refs):
-                        raise ValueError("Behavior assessment must cite its inspected-evidence basis")
                 if any(item.supports_conditional_test for item in basis.behavior_assessments or []):
                     waiting = review.status == "blocked" and bool(review.prerequisite_gaps)
                     required_kind = "execution" if review.prerequisite_gaps else "acceptance"
@@ -206,6 +265,27 @@ def validate_review(data: dict[str, Any], task: Any, operation_id: str) -> None:
         raise ValueError("Revised or withdrawn hypotheses require explicit publication repair")
 
 
+def validate_subject_prerequisites(row: HypothesisSubjectReview, payload: dict, task: Any) -> list[dict]:
+    """Validate gaps belonging to a subject before preserving its unreviewed-evidence judgment."""
+    gaps = payload.get("prerequisite_gaps", [])
+    if not isinstance(gaps, list):
+        raise ValueError("prerequisite_gaps must be a list")
+    related = []
+    for value in gaps:
+        gap = HypothesisPrerequisiteGap.model_validate(value)
+        if row.item_id not in gap.item_ids:
+            continue
+        if (gap.criterion_id not in {criterion.id for criterion in task.acceptance.criteria}
+                or not set(gap.item_ids) <= set(task.acceptance.basis.item_ids)
+                or not set(gap.source_refs) <= set(task.acceptance.basis.source_refs)):
+            raise ValueError("Subject prerequisite must identify frozen criteria, subjects, and sources")
+        related.append(gap.model_dump())
+    if (row.no_hypothesis_basis and row.no_hypothesis_basis.kind == "necessary_evidence_unreviewed"
+            and not related):
+        raise ValueError("Unreviewed necessary evidence requires a prerequisite gap for this subject")
+    return related
+
+
 @dataclass(frozen=True)
 class BoundHypothesisReview:
     """Immutable publication identity and model-facing structured review contract."""
@@ -219,18 +299,30 @@ class BoundHypothesisReview:
     def capture(cls, task: Any, operation_id: str) -> "BoundHypothesisReview":
         binding = hypothesis_binding(task)
         publication = load_hypothesis_set(binding["artifact_ref"], task, operation_id)
+        candidates = review_input_candidates(task) if any(not item.hypotheses for item in publication.subjects) else {}
         rows = []
         for index, subject in enumerate(publication.subjects):
             identifiers = tuple(item.hypothesis_id for item in subject.hypotheses)
             record = create_model(
                 f"BoundHypothesisRecord{index}", __base__=HypothesisRecordReview,
                 hypothesis_id=(Literal[identifiers] if identifiers else str, ...),
+                semantic_checks=(HypothesisSemanticChecks, ...),
+            )
+            candidate_ids = tuple(item["candidate_id"] for item in candidates.get(subject.item_id, []))
+            assessment = create_model(
+                f"BoundHypothesisBehavior{index}", __base__=HypothesisBehaviorAssessment,
+                input_candidate_ids=(list[Literal[candidate_ids]] if candidate_ids else list[str],
+                                     Field(default_factory=list, **({} if candidate_ids else {"max_length": 0}))),
+            )
+            basis = create_model(
+                f"BoundNoHypothesisBasis{index}", __base__=NoHypothesisBasis,
+                behavior_assessments=(list[assessment] | None, None),
             )
             rows.append(create_model(
                 f"BoundHypothesisSubject{index}", __base__=HypothesisSubjectReview,
                 item_id=(Literal[subject.item_id], ...),
                 hypotheses=(list[record], Field(min_length=len(identifiers), max_length=len(identifiers))),
-                no_hypothesis_basis=(type(None), None) if identifiers else (NoHypothesisBasis, ...),
+                no_hypothesis_basis=(type(None), None) if identifiers else (basis, ...),
             ))
         if not rows:
             raise ValueError("Cannot review a publication without subjects")
@@ -259,6 +351,10 @@ class BoundHypothesisReview:
                        "item_id": subject.item_id, "decision": "revise" if not subject.hypotheses else "retain",
                        "reason": "Explain your judgment", "hypotheses": [{
                            "hypothesis_id": item.hypothesis_id, "decision": "retain", "reason": "Explain test adequacy",
+                           "semantic_checks": {
+                               key: {"verdict": "adequate", "reason": "Explain this check against supplied evidence"}
+                               for key in ("grounding", "test_discrimination", "identity_requirements")
+                           },
                        } for item in subject.hypotheses],
                        **({"no_hypothesis_basis": {"kind": "metadata_only", "inspection_refs": []}}
                           if not subject.hypotheses else {}),
@@ -281,3 +377,61 @@ class BoundHypothesisReview:
         wire.pop("publication_sha256")
         result = self.output_model.model_validate(wire).model_dump(exclude_none=True)
         return {**result, "publication_sha256": self.digest}
+
+
+@dataclass
+class HypothesisReviewCorrection:
+    """Keep validated subjects; permit invalid subjects to be reassessed on the same publication."""
+
+    binding: BoundHypothesisReview
+    operation_id: str
+    accepted: dict[str, dict] = field(default_factory=dict)
+    accepted_prerequisites: dict[str, list[dict]] = field(default_factory=dict)
+
+    def prepare(self, payload: dict[str, Any], task: Any) -> dict[str, Any]:
+        wire = self.binding.bind(payload, task)
+        publication = load_hypothesis_set(hypothesis_binding(task)["artifact_ref"], task, self.operation_id)
+        expected = {subject.item_id: {item.hypothesis_id for item in subject.hypotheses}
+                    for subject in publication.subjects}
+        candidates = review_input_candidates(task) if any(not value for value in expected.values()) else {}
+        errors, seen, rows = [], set(), []
+        raw_rows = wire.get("subject_reviews")
+        if not isinstance(raw_rows, list):
+            raise ValueError("subject_reviews must be a complete list")
+        counts = Counter(row.get("item_id") for row in raw_rows
+                         if isinstance(row, dict) and isinstance(row.get("item_id"), str))
+        duplicates = {item_id for item_id, count in counts.items() if count > 1}
+        for index, raw in enumerate(raw_rows):
+            item_id = raw.get("item_id") if isinstance(raw, dict) else None
+            try:
+                row = HypothesisSubjectReview.model_validate(raw)
+                if row.item_id not in expected or row.item_id in duplicates:
+                    raise ValueError("Review each assigned subject exactly once; unknown or duplicate subject")
+                seen.add(row.item_id)
+                if any(item.semantic_checks is None for item in row.hypotheses):
+                    raise ValueError("Each current hypothesis review requires semantic_checks")
+                validate_subject_review(row, expected[row.item_id], task, self.operation_id,
+                                        candidates.get(row.item_id, []))
+                prerequisites = validate_subject_prerequisites(row, wire, task)
+                canonical = row.model_dump(exclude_none=True)
+                if row.item_id in self.accepted and (
+                    canonical != self.accepted[row.item_id]
+                    or prerequisites != self.accepted_prerequisites[row.item_id]
+                ):
+                    raise ValueError("Preserve this already validated subject review exactly")
+                self.accepted[row.item_id] = deepcopy(canonical)
+                self.accepted_prerequisites[row.item_id] = deepcopy(prerequisites)
+                rows.append(canonical)
+            except (ValueError, OSError) as error:
+                errors.append({"item_id": item_id, "path": f"subject_reviews[{index}]", "error": str(error)})
+        for item_id in sorted(expected.keys() - seen - duplicates):
+            errors.append({"item_id": item_id, "path": "subject_reviews", "error": "Assigned subject omitted"})
+        if errors:
+            raise ValueError("Review correction required: " + json.dumps({
+                "publication_sha256": self.binding.digest, "errors": errors,
+                "accepted_subject_reviews": list(self.accepted.values()),
+                "accepted_subject_prerequisites": self.accepted_prerequisites,
+                "instruction": "Return all subjects. Preserve accepted reviews and prerequisite gaps; reassess invalid reviews.",
+            }, ensure_ascii=False))
+        wire["subject_reviews"] = rows
+        return normalize_review(self.binding.canonicalize(wire, task))

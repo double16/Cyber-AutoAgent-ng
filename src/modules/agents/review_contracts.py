@@ -40,6 +40,8 @@ def required_review_answer_tokens(schema: dict[str, Any], model_id: str) -> int:
                 estimate_prompt_tokens(model_id, extra_content=name) + size(properties.get(name, {}), seen)
                 for name in node.get("required", [])
             )
+        if node.get("type") == "string" and node.get("maxLength"):
+            return (int(node["maxLength"]) + 3) // 4 + 8
         literal = node.get("const", node.get("enum", [""])[0])
         return estimate_prompt_tokens(model_id, extra_content=str(literal)) + 8
 

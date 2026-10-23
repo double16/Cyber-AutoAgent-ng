@@ -279,3 +279,10 @@ def test_budgeted_report_json_repair_retains_actionable_feedback(failure):
     assert _run_report_critic(agent, "Review assigned section", 1)["feedback"] == [FEEDBACK]
     assert len(agent.calls) == 2
     assert all(prompt.count("## Review output budget") == 1 for prompt in agent.calls)
+
+
+def test_bounded_semantic_reasons_increase_required_answer_capacity():
+    from modules.agents.structured_outputs import HypothesisSemanticChecks
+
+    schema = HypothesisSemanticChecks.model_json_schema()
+    assert required_review_answer_tokens(schema, "fixture") >= 3 * 133
