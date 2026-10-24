@@ -1559,3 +1559,53 @@ do not invalidate them. Reviewers request focused revision or withdrawal rather 
 Review decision `instructions` accepts a string, null, or omission in structured output and validated
 JSON fallback. Null and omission normalize to an empty string internally. Semantic review reasons
 remain available even when no additional instructions are supplied.
+
+
+### Native structured agent results
+
+Structured workflow roles and report review/next-step roles finalize through Strands' provider-level
+`model.structured_output()` interface. A finalization-only adapter presents validated provider output to
+Strands as an output-tool result constructed by Python. The provider generates schema-constrained JSON,
+not tool-call syntax. This keeps SDK hooks, tracing, usage, cancellation, and schema validation active.
+
+Tool-using roles first run a bounded investigation with their assigned tools. The controller checks
+artifact-access cutoffs before finalization, then temporarily replaces the tool registry with an empty
+registry; only the SDK's output schema is registered for the final decision. The original registry,
+model, and investigation system instructions are restored afterward. Tool-free roles skip investigation.
+An output validation error carries the exact investigation conversation into the existing caller-owned
+correction cycle, which disables further investigation. Semantic review and actor repair remain separate:
+a valid JSON shape does not establish evidence support or authorize acceptance.
+
+```mermaid
+flowchart LR
+    A[Assigned task and frozen inputs] --> B{Investigation tools?}
+    B -->|Yes| C[Bounded Strands investigation]
+    C --> D[Retained evidence and controller cutoff checks]
+    B -->|No| E[Native schema finalization]
+    D --> E
+    E --> F[Pydantic validation and controller consistency]
+    F --> G[Semantic acceptance or actor repair]
+```
+
+| Transport | Structured finalization |
+| --- | --- |
+| Ollama-compatible | JSON schema in `format`; no investigation tools in the request |
+| LiteLLM | Native `response_format` through the SDK transport, including models absent from its catalog |
+| Gemini | Native JSON response MIME type and response schema through the SDK transport |
+| Bedrock SDK adapter | Validated output-tool compatibility; this installed adapter lacks native schema transport |
+
+Explicit native-transport unavailability enables validated tool output, followed by the existing bounded
+JSON compatibility path if needed. Unsupported native transport is cached by provider, endpoint, and model.
+Malformed output, schema-specific rejection, context exhaustion, and connectivity errors do not disable
+native support. Logs distinguish native versus tool mode and identify schemas by digest without logging
+schema contents. Native requests include their complete schema and final evidence in dynamic token budgets.
+Ollama also forwards actual token usage and distinguishes output exhaustion from invalid JSON. A literal
+trailing `<|eot|>` chat terminator is removed only at its native response boundary; arbitrary trailing prose,
+incomplete JSON, invalid arrays, and unknown enum values remain invalid.
+
+The covered workflow catalog includes plan creation/review, task creation, prompt building/review,
+task/phase evaluation, flow review, phase classification, taxonomy annotation, and attack enrichment,
+including bound hypothesis and checkpoint schemas. Evaluation policy, rubric judging, and application-owned
+topic extraction explicitly select LangChain native JSON-schema mode where supported; Bedrock retains
+its adapter's tool-based compatibility mode. Narrative task execution, Markdown report writing, and
+free-text evaluation context remain text. Third-party Ragas prompt internals are unchanged.

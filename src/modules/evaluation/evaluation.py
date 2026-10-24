@@ -2830,7 +2830,11 @@ class CyberAgentEvaluator:
         with_structured_output = getattr(model, "with_structured_output", None)
         if not callable(with_structured_output):
             raise NotImplementedError("chat model does not expose with_structured_output")
-        structured_model = with_structured_output(output_model)
+        if self._evaluation_provider == "bedrock":
+            logger.info("Evaluation structured output mode=tool provider=bedrock reason=adapter_not_native")
+            structured_model = with_structured_output(output_model)
+        else:
+            structured_model = with_structured_output(output_model, method="json_schema")
         result = structured_model.invoke(
             [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
         )
@@ -2956,13 +2960,14 @@ class CyberAgentEvaluator:
                 output_model,
                 chat_model=chat_model,
             )
-            return self._validated_evaluation_json(
+            validated = self._validated_evaluation_json(
                 structured,
                 output_model,
                 allow_array=allow_array,
             )
-            self._native_structured_output_available = True
-            return structured
+            if self._evaluation_provider != "bedrock":
+                self._native_structured_output_available = True
+            return validated
         except Exception as error:
             failure_category = self._structured_output_failure_category(error)
             if self._provider_status_code(error) == 501:

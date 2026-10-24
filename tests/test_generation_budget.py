@@ -338,3 +338,72 @@ def test_genuine_output_truncation_increases_only_its_invocation_target():
     assert calls == [(original["max_tokens"], None), (original["max_tokens"] + 2048, None)]
     assert registry.get_settings("plan_creator").to_dict() == original
     assert invocation_output_tokens("plan_creator") is None
+
+
+@pytest.mark.parametrize("provider", ["litellm", "gemini"])
+@pytest.mark.parametrize("stop_reason", ["end_turn", "max_tokens"])
+def test_native_sdk_schema_transport_preserves_usage_and_never_uses_tools(monkeypatch, provider, stop_reason):
+    from strands.types.exceptions import MaxTokensReachedException
+
+    from modules.config.models.generation_budget import _native_schema_events
+
+    class NativeTransport:
+        _cyber_provider = provider
+        config = {"params": {"max_tokens": 7000}}
+
+        def update_config(self, **kwargs):
+            self.config = {**self.config, **kwargs}
+
+        async def stream(self, messages, system_prompt=None):
+            assert messages == []
+            assert system_prompt == "system"
+            assert self.config["params"]["max_tokens"] == 7000
+            if provider == "litellm":
+                assert self.config["params"]["response_format"] is Result
+            else:
+                assert self.config["params"]["response_schema"] == Result.model_json_schema()
+            yield {"messageStart": {"role": "assistant"}}
+            yield {"contentBlockDelta": {"delta": {"text": '{"status":"done"}'}, "contentBlockIndex": 0}}
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+            yield {"messageStop": {"stopReason": stop_reason}}
+            yield {"metadata": {"usage": {"inputTokens": 11, "outputTokens": 7, "totalTokens": 18},
+                                "metrics": {"latencyMs": 2}}}
+
+    async def collect():
+        return [event async for event in _native_schema_events(NativeTransport(), Result, [], "system")]
+
+    if stop_reason == "max_tokens":
+        with pytest.raises(MaxTokensReachedException):
+            asyncio.run(collect())
+    else:
+        result = asyncio.run(collect())
+        assert result[0]["metadata"]["usage"]["totalTokens"] == 18
+        assert result[1]["output"].status == "done"
+
+
+def test_litellm_native_mode_bypasses_catalog_tool_fallback(monkeypatch):
+    import strands.models.litellm as sdk
+
+    monkeypatch.setattr("modules.handlers.conversation_budget.estimate_prompt_tokens", lambda *_a, **_kw: 1000)
+    monkeypatch.setattr(sdk, "supports_response_schema", lambda _model: False)
+    captured = []
+
+    async def completion(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"status":"done"}',
+                                                                                  tool_calls=None),
+                                                        finish_reason="stop")],
+                               usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15))
+
+    monkeypatch.setattr(sdk.litellm, "acompletion", completion)
+    model = sdk.LiteLLMModel(model_id="fixture", params={"max_tokens": 8192}, stream=False,
+                             context_window_limit=40000)
+    model._output_tokens = 8192
+    model._cyber_llm_role = "task_executor"
+    model._cyber_native_schema = True
+    attach_generation_budget(model, "litellm", "fixture", None)
+    result = asyncio.run(_consume(model.structured_output(Result, [])))
+    assert result[-1]["output"].status == "done"
+    assert captured[0]["response_format"] is Result
+    assert not captured[0].get("tools")
+    assert "response_format" not in model.config["params"]

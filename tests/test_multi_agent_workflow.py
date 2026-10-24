@@ -24656,3 +24656,40 @@ def test_decision_conversion_rejects_invalid_instructions(instructions):
     controller = object.__new__(MultiAgentWorkflowController)
     with pytest.raises(ValueError):
         controller._decision_from_data({"status": "done", "instructions": instructions}, allowed=("done",))
+
+
+@pytest.mark.parametrize("target", ["https://target.test/resource", "tcp://target.test:123", "/src/handler.py"])
+@pytest.mark.parametrize("failure_stage", ["native", "consistency"])
+def test_structured_correction_retains_evidence_and_closes_investigation(target, failure_stage):
+    from modules.agents.native_structured import StructuredPayload
+
+    calls = []
+    messages = [{"role": "assistant", "content": [{"text": f"Observed boundary at {target}"}]}]
+
+    def runner(role, prompt, tools, system, model):
+        calls.append((prompt, tools))
+        if len(calls) == 1:
+            if failure_stage == "native":
+                error = ValueError("invalid nested array")
+                error.native_finalization_messages = messages
+                raise error
+            return StructuredPayload({"status": "done", "reason": "Revise controls"}, messages)
+        return {"status": "done", "reason": "Controls corrected"}
+
+    def validate(data):
+        if data["reason"] == "Revise controls":
+            raise ValueError("A retained hypothesis cannot have a revise semantic check")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=lambda *_args: pytest.fail("Text fallback must not run"), structured_runner=runner,
+    )
+    output = controller._run_json_text_agent(
+        "task_evaluator", f"Review {target}", ["investigation_tool"], "system", data_validator=validate,
+    )
+    assert output["reason"] == "Controls corrected"
+    assert len(calls) == 2
+    assert calls[0][1] == ["investigation_tool"]
+    assert calls[1][1] == []
+    assert f"Observed boundary at {target}" in calls[1][0]
+    assert "Investigation is closed" in calls[1][0]

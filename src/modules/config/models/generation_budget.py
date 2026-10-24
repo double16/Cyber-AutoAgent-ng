@@ -26,6 +26,11 @@ def summary_generation_budget() -> Iterator[None]:
         _SUMMARIZING.reset(token)
 
 
+def is_summary_generation() -> bool:
+    """Identify SDK compaction calls that must retain their ordinary text transport."""
+    return _SUMMARIZING.get()
+
+
 @dataclass(frozen=True)
 class GenerationRequest:
     """Token counts for one fully assembled request; limits are positive when known."""
@@ -195,9 +200,36 @@ async def _litellm_schema_output(model: Any, output_model: Any, prompt: Any, sys
     return await type(model)._structured_output_using_response_schema(native, output_model, prompt, system_prompt)
 
 
+async def _native_schema_events(model: Any, output_model: Any, messages: Any, system_prompt: Any):
+    """Use SDK schema-capable transports while retaining their usage and stop metadata."""
+    from strands.event_loop.streaming import process_stream
+    from strands.types.exceptions import MaxTokensReachedException
+
+    params = dict(model.config.get("params") or {})
+    if model._cyber_provider == "litellm":
+        # LiteLLM converts the Pydantic class to the provider's native schema wire format.
+        params["response_format"] = output_model
+    else:
+        params.update(response_mime_type="application/json", response_schema=output_model.model_json_schema())
+    model.update_config(params=params)
+    last = None
+    async for event in process_stream(model.stream(messages, system_prompt=system_prompt)):
+        if "stop" in event:
+            last = event["stop"]
+    if last is None:
+        raise ValueError("Native schema transport returned no completion")
+    stop_reason, message, usage, metrics = last
+    yield {"metadata": {"usage": usage, "metrics": metrics}}
+    if stop_reason == "max_tokens":
+        raise MaxTokensReachedException("Native structured generation reached its output limit")
+    content = "".join(block.get("text", "") for block in message["content"])
+    yield {"output": output_model.model_validate_json(content)}
+
+
 def attach_generation_budget(model: Any, provider: str, model_id: str, ceiling: int | None) -> Any:
     """Cover both SDK model entrypoints, including calls bypassing agent hooks."""
     model._cyber_provider = provider
+    model._cyber_native_structured_output = provider in {"ollama", "litellm", "gemini"}
     model._cyber_preferred_output_tokens = model._output_tokens
     model._cyber_output_ceiling = ceiling
     from modules.config.models.invocation import invocation_answer_tokens, invocation_minimum_output_tokens
@@ -210,7 +242,7 @@ def attach_generation_budget(model: Any, provider: str, model_id: str, ceiling: 
             continue
         signature = inspect.signature(original)
 
-        def wrap(method, parameters):
+        def wrap(method, parameters, name_of_method):
             async def invoke(*args, **kwargs):
                 bound = parameters.bind(model, *args, **kwargs)
                 values = bound.arguments
@@ -224,9 +256,14 @@ def attach_generation_budget(model: Any, provider: str, model_id: str, ceiling: 
                 )
                 values["self"] = local
                 values[messages_key] = messages
+                if (name_of_method == "structured_output" and model._cyber_provider in {"litellm", "gemini"}
+                        and getattr(model, "_cyber_native_schema", False)):
+                    async for event in _native_schema_events(local, output_model, messages, values.get("system_prompt")):
+                        yield event
+                    return
                 async for event in method(*bound.args, **bound.kwargs):
                     yield event
             return invoke
 
-        setattr(model, name, wrap(original, signature))
+        setattr(model, name, wrap(original, signature, name))
     return model

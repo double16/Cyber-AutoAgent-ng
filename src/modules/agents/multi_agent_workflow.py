@@ -87,6 +87,11 @@ from modules.agents.hypothesis_review import (
     validate_review,
 )
 from modules.agents.hypothesis_tasks import build_assignments
+from modules.agents.native_structured import (
+    StructuredPayload,
+    invoke_structured,
+    retained_finalization_prompt,
+)
 from modules.agents.prompt_context import (
     PromptInputTooLarge,
     TaskPromptBudget,
@@ -810,21 +815,25 @@ def default_structured_runner(runtime: AgentRuntimeResources) -> AgentStructured
         )
         try:
             _attach_role_prompt_fitter(agent, runtime, role, prompt)
-            result = agent(prompt, structured_output_model=output_model)
-            artifact_read_limit_hook = getattr(agent, "_cyber_evaluator_artifact_read_limit_hook", None)
-            if getattr(artifact_read_limit_hook, "exhausted", False):
-                callback = getattr(agent, "_cyber_callback_handler", None)
-                journal = getattr(callback, "tool_outcome_journal", None)
-                error = EvaluatorArtifactReadLimitExceeded(
-                    "role exceeded its bounded artifact allowance twice",
-                    journal.entries() if journal is not None else [],
-                )
-                error.limit_events = tuple(getattr(artifact_read_limit_hook, "limit_events", ()))
-                raise error
+            def check_artifact_limit():
+                artifact_read_limit_hook = getattr(agent, "_cyber_evaluator_artifact_read_limit_hook", None)
+                if getattr(artifact_read_limit_hook, "exhausted", False):
+                    callback = getattr(agent, "_cyber_callback_handler", None)
+                    journal = getattr(callback, "tool_outcome_journal", None)
+                    error = EvaluatorArtifactReadLimitExceeded(
+                        "role exceeded its bounded artifact allowance twice",
+                        journal.entries() if journal is not None else [],
+                    )
+                    error.limit_events = tuple(getattr(artifact_read_limit_hook, "limit_events", ()))
+                    raise error
+            result = invoke_structured(
+                agent, prompt, output_model, investigate=bool(tools), before_finalize=check_artifact_limit,
+            )
+            check_artifact_limit()
             output = getattr(result, "structured_output", None)
             if output is None:
                 raise StructuredOutputUnavailableError("Strands returned no structured output")
-            return structured_output_dict(output)
+            return StructuredPayload(structured_output_dict(output), getattr(agent, "messages", []))
         except MaxTokensReachedException as error:
             sanitize_sdk_error(error)
             from modules.config.models.agent_profiles import get_agent_settings_registry
@@ -16786,6 +16795,7 @@ Allowed evidence references:
                         role, current_prompt, system_prompt, attempt_tools, output_model,
                     )
                 data: dict[str, Any] | None = None
+                finalization_messages = None
                 from modules.config.models.agent_profiles import get_agent_settings_registry
                 from modules.config.models.generation_budget import schema_answer_tokens
                 from modules.config.models.invocation import model_output_budget
@@ -16814,6 +16824,7 @@ Allowed evidence references:
                                 system_prompt,
                                 output_model,
                             )
+                            finalization_messages = getattr(data, "finalization_messages", None)
                             response = json.dumps(data, ensure_ascii=False)
                             self._log_workflow("json agent role=%s output_mode=structured", role)
                         except Exception as error:
@@ -16967,6 +16978,10 @@ Allowed evidence references:
                     role,
                     self._short(error),
                 )
+                retained_prompt = retained_finalization_prompt(prompt, error)
+                if retained_prompt is not None:
+                    artifact_synthesis_active = True
+                    current_prompt = retained_prompt
                 retry_base_prompt = current_prompt if artifact_synthesis_active else prompt
                 current_prompt = self._json_retry_prompt(retry_base_prompt, error, "")
                 continue
@@ -17047,6 +17062,10 @@ Allowed evidence references:
                     self._short(error),
                     self._short(response),
                 )
+                if finalization_messages is not None:
+                    error.native_finalization_messages = finalization_messages
+                    current_prompt = retained_finalization_prompt(prompt, error)
+                    artifact_synthesis_active = True
                 retry_base_prompt = current_prompt if artifact_synthesis_active else prompt
                 current_prompt = self._json_retry_prompt(
                     retry_base_prompt,
@@ -17089,6 +17108,10 @@ Allowed evidence references:
                     self._short(error),
                     self._short(response),
                 )
+                if finalization_messages is not None:
+                    error.native_finalization_messages = finalization_messages
+                    current_prompt = retained_finalization_prompt(prompt, error)
+                    artifact_synthesis_active = True
                 retry_base_prompt = current_prompt if artifact_synthesis_active else prompt
                 current_prompt = self._json_retry_prompt(
                     retry_base_prompt,

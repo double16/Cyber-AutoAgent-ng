@@ -588,12 +588,24 @@ class OllamaModel(Model):
 
             try:
                 capture.response(response)
+                if getattr(response, "done_reason", None) == "length":
+                    from strands.types.exceptions import MaxTokensReachedException
+
+                    raise MaxTokensReachedException("Native structured generation reached its output limit")
+                if all(getattr(response, key, None) is not None
+                       for key in ("prompt_eval_count", "eval_count", "total_duration")):
+                    yield self.format_chunk({"chunk_type": "metadata", "data": response})
                 content = response.message.content.strip()
+                # Some Ollama-compatible chat parsers expose the terminal control token as text.
+                # Strip only the observed terminal marker; arbitrary prose remains invalid JSON.
+                if content.endswith("<|eot|>"):
+                    content = content.removesuffix("<|eot|>").rstrip()
+                    logger.info("Normalized trailing chat terminator on native structured response")
                 validated = output_model.model_validate_json(content)
                 success = True
                 yield {"output": validated}
-            except Exception as e:
-                raise ValueError(f"Failed to parse or load content into model: {e}") from e
+            except (ValueError, TypeError) as e:
+                raise ValueError("Failed to parse or validate native structured content") from e
         finally:
             capture.finish(success)
             try:

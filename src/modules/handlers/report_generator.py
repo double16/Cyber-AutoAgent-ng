@@ -29,6 +29,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ValidationError
 from strands.types.exceptions import MaxTokensReachedException
 
+from modules.agents.native_structured import invoke_structured
 from modules.agents.prompt_context import PromptInputTooLarge, ReviewBudget
 from modules.agents.report_agent import ReportGenerator
 from modules.agents.structured_outputs import (
@@ -2767,8 +2768,9 @@ def _invoke_report_agent(
             "limits": _REPORT_AGENT_LIMITS,
         }
         if output_model is not None:
-            invocation_kwargs["structured_output_model"] = output_model
-        result = agent(prompt, **invocation_kwargs)
+            result = invoke_structured(agent, prompt, output_model, invocation_kwargs=invocation_kwargs)
+        else:
+            result = agent(prompt, **invocation_kwargs)
         if getattr(result, "stop_reason", None) == "limit_turns":
             raise RuntimeError("report agent exceeded its configured turn limit")
         return result

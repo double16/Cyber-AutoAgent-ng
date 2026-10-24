@@ -477,3 +477,112 @@ async def test_ollama_normalizes_errors_during_stream_iteration(monkeypatch, ove
             pass
     assert client.chat.await_count == 1
     client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_native_schema_output_emits_usage_and_preserves_nested_types(monkeypatch):
+    class Nested(BaseModel):
+        rows: list[dict[str, str]]
+        instructions: str | None
+
+    seen = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat(self, **request):
+            seen.append(request)
+            return mod.ChatResponse(message={"role": "assistant", "content":
+                '{"rows":[{"verdict":"adequate"}],"instructions":null}'}, done=True,
+                done_reason="stop", prompt_eval_count=12, eval_count=8, total_duration=1000000)
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", Client)
+    events = [event async for event in _model().structured_output(Nested, [])]
+    assert seen[0]["format"] == Nested.model_json_schema()
+    assert not seen[0]["tools"]
+    assert events[0]["metadata"]["usage"]["totalTokens"] == 20
+    assert events[-1]["output"].rows == [{"verdict": "adequate"}]
+    assert events[-1]["output"].instructions is None
+
+
+@pytest.mark.asyncio
+async def test_native_schema_token_exhaustion_is_not_a_parse_failure(monkeypatch):
+    from strands.types.exceptions import MaxTokensReachedException
+
+    class Output(BaseModel):
+        answer: int
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat(self, **request):
+            return mod.ChatResponse(message={"role": "assistant", "content": '{"answer":'}, done_reason="length")
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", Client)
+    with pytest.raises(MaxTokensReachedException):
+        async for _event in _model().structured_output(Output, []):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content,accepted", [
+    ('{"answer":"literal <|eot|>"}<|eot|>', True),
+    ('{"answer":"literal <|eot|>"}', True),
+    ('{"answer":"literal"} unexpected prose', False),
+    ('{"answer":"incomplete<|eot|>', False),
+])
+async def test_native_chat_terminator_normalization_is_narrow(monkeypatch, content, accepted):
+    class Output(BaseModel):
+        answer: str
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat(self, **request):
+            return mod.ChatResponse(message={"role": "assistant", "content": content}, done_reason="stop")
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", Client)
+    if accepted:
+        events = [event async for event in _model().structured_output(Output, [])]
+        assert events[-1]["output"].answer == "literal <|eot|>"
+    else:
+        with pytest.raises(ValueError, match="Failed to parse"):
+            async for _event in _model().structured_output(Output, []):
+                pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_think", ["low", True])
+async def test_native_schema_survives_thinking_compatibility_fallback(monkeypatch, initial_think):
+    from copy import deepcopy
+
+    class Output(BaseModel):
+        answer: int
+
+    requests = []
+    closed = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat(self, **request):
+            requests.append(deepcopy(request))
+            if request.get("think") is not False:
+                raise mod.ollama.ResponseError("think not supported", status_code=400)
+            return mod.ChatResponse(message={"role": "assistant", "content": '{"answer":7}'}, done_reason="stop")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", Client)
+    model = _model()
+    model.update_config(additional_args={"think": initial_think})
+    events = [event async for event in model.structured_output(Output, [])]
+    assert events[-1]["output"].answer == 7
+    assert all(request["format"] == Output.model_json_schema() for request in requests)
+    assert requests[-1]["think"] is False
+    assert closed == [True]
