@@ -335,6 +335,55 @@ def hypothesis_inspection_journal(task: Any, operation_id: str, output_root: str
     )
 
 
+def missing_subject_context(task: Any, operation_id: str, output_root: str, missing: list[str]) -> str:
+    """Package frozen missing records and related retained results without replaying discovery."""
+    assigned, linked, errors = {}, {}, []
+    for reference in task.acceptance.basis.source_refs:
+        try:
+            manifest, digest = _load_inventory_manifest(reference, persist_normalization=False)
+            if digest != task.acceptance.basis.snapshot_hash:
+                raise ValueError("Frozen inventory snapshot changed")
+            selected = {item["id"]: item for item in manifest["items"] if item["id"] in missing}
+            assigned.update(selected)
+            for item in manifest["items"]:
+                if any(item["id"] == subject.get("attributes", {}).get("endpoint_id")
+                       and item.get("target_id") == subject.get("target_id") for subject in selected.values()):
+                    linked[item["id"]] = item
+        except (OSError, ValueError, TypeError) as error:
+            errors.append({"source_ref": reference, "error": str(error)})
+    records = [*assigned.values(), *linked.values()]
+    key = hashlib.sha256(json.dumps([task.task_uid, task.acceptance.basis.snapshot_hash, missing]).encode()).hexdigest()
+    path = Path(output_root) / "artifacts" / "hypothesis_context" / f"{key}-missing.json"
+    _save(path, {"assigned": list(assigned.values()), "linked": list(linked.values()), "errors": errors})
+    reference = "artifact:" + path.relative_to(output_root).as_posix()
+    rows = [{"id": item["id"], "kind": item["kind"], "value": item["value"],
+             "attributes": item.get("attributes", {})} for item in records]
+    rendered = _rows("missing_subject_context", ("id", "kind", "value", "attributes"), rows)
+    if len(rendered) > 8000:
+        rendered = _rows("missing_subject_context", ("id", "kind", "value"), rows)
+    sources = {ref for item in records for field in ("source_artifact_refs", "implementation_refs")
+               for ref in item.get("attributes", {}).get(field, [])}
+    if not assigned:
+        sources.update(task.acceptance.basis.source_refs)
+    journal = hypothesis_inspection_journal(task, operation_id, output_root)
+    retained = set()
+    for entry in journal._entries():
+        try:
+            record = journal.load_inspection(entry["reference"])
+            if (record.get("parameters", {}).get("item_id") in missing
+                    or sources.intersection(record.get("source_refs", []))):
+                retained.add(entry["reference"])
+        except (OSError, ValueError, KeyError):
+            continue
+    return (
+        "\n## Missing-subject recovery packet\n" + rendered
+        + f"\nComplete frozen records: {reference}. Omitted attributes remain in that artifact.\n"
+        + "Frozen input references: " + json.dumps(list(task.acceptance.basis.source_refs))
+        + "\nUnavailable frozen records: " + json.dumps(errors)
+        + journal.replay_context(16000, len, references=retained)
+    )
+
+
 def publication_review(task: Any, operation_id: str) -> str:
     """Render every current record, independently of acceptance claims and superseded snapshots."""
 

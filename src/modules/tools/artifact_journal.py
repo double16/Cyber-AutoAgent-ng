@@ -59,11 +59,14 @@ class ReturnedArtifactJournal:
             raise ValueError("Inspection result binding or content changed")
         return record
 
-    def replay_context(self, token_budget: int, estimate_tokens: Callable[[str], int]) -> str:
+    def replay_context(
+        self, token_budget: int, estimate_tokens: Callable[[str], int], *, references: set[str] | None = None,
+    ) -> str:
         """Balance exact source content and recoverable slices, retaining bounded evidence anchors."""
         if not self.index.exists():
             return ""
-        header = "\n## Retained inspection evidence\nExact previously returned content, not semantic conclusions:\n"
+        header = ("\n## Retained inspection evidence\nExact previously returned results. availability classifies "
+                  "content only, not semantic support; metadata_only may supplement content-bearing evidence.\n")
         footer = ("\n## Inspection replay access\nUse read_inspection_result for retained evidence or this index: "
                   + self._reference(self.index) + "\nOmitted or unreadable evidence is not negative evidence.\n")
         anchor_heading = ("\n## Inspection evidence anchors\n"
@@ -75,6 +78,8 @@ class ReturnedArtifactJournal:
         omitted = 0
         candidates = []
         for entry in reversed(self._entries()):
+            if references is not None and entry["reference"] not in references:
+                continue
             if entry["content_hash"] in seen:
                 continue
             seen.add(entry["content_hash"])
@@ -110,7 +115,8 @@ class ReturnedArtifactJournal:
             text = inspection_anchor(record)
             if not text:
                 continue
-            block = json.dumps({"inspection_ref": entry["reference"], "verbatim_content_prefix": text},
+            block = json.dumps({"inspection_ref": entry["reference"], "availability": "content_bearing",
+                                "verbatim_content_prefix": text},
                                ensure_ascii=False)
             cost = estimate_tokens(block)
             if cost <= anchor_budget:
@@ -120,13 +126,15 @@ class ReturnedArtifactJournal:
         anchor_section = anchor_heading + "\n".join(anchors) + "\n" if anchors else ""
         share = max(0, remaining // max(1, min(8, len(candidates))))
         for _, entry, record in candidates:
-            block = json.dumps({"inspection_ref": entry["reference"], **record}, ensure_ascii=False)
+            availability = "content_bearing" if inspection_has_content(record) else "metadata_only"
+            block = json.dumps({"inspection_ref": entry["reference"], "availability": availability, **record},
+                               ensure_ascii=False)
             cost = estimate_tokens(block)
             if cost > min(remaining, share):
                 serialized = json.dumps(record, ensure_ascii=False)
                 length = min(len(serialized), 6000)
                 while length:
-                    block = json.dumps({"inspection_ref": entry["reference"], "offset": 0,
+                    block = json.dumps({"inspection_ref": entry["reference"], "availability": availability, "offset": 0,
                                         "next_offset": length, "text": serialized[:length]},
                                        ensure_ascii=False)
                     if estimate_tokens(block) <= min(remaining, share):
@@ -140,13 +148,31 @@ class ReturnedArtifactJournal:
             remaining -= estimate_tokens(block)
         return anchor_section + header + "\n".join(included) + footer + f"Omitted or unreadable returned results: {omitted}.\n"
 
+    def inspection_availability(self, references: list[str] | None = None) -> dict[str, str]:
+        """Classify exact task-bound results without judging their relevance or support."""
+        references = references if references is not None else [entry["reference"] for entry in self._entries()]
+        result = {}
+        for reference in references:
+            try:
+                record = self.load_inspection(reference)
+                result[reference] = "content_bearing" if inspection_has_content(record) else "metadata_only"
+            except (OSError, ValueError, KeyError):
+                result[reference] = "unavailable"
+        return result
+
     def reader(self, max_output_chars: int = 30_000):
         """Allow four cached-result pages; never read original evidence sources."""
         from strands import tool
 
         reads = 0
 
-        @tool(name="read_inspection_result")
+        @tool(name="read_inspection_result", inputSchema={"json": {
+            "type": "object", "properties": {
+                "inspection_ref": {"type": "string"},
+                "offset": {"type": "integer", "minimum": 0, "default": 0},
+                "max_chars": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 4000},
+            }, "required": ["inspection_ref"],
+        }})
         def read_inspection_result(inspection_ref: str, offset: int = 0, max_chars: int = 4000) -> str:
             """Page a retained result or its index from this task and frozen snapshot only."""
             nonlocal reads

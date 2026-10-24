@@ -232,10 +232,13 @@ def semantic_hypothesis_case(review_case, request, tmp_path, monkeypatch):
 
 def test_evaluator_checks_hypothesis_semantics_even_when_publication_is_available(semantic_hypothesis_case):
     _controller, prompt, _valid = semantic_hypothesis_case
-    assert "Positive/control expectations must distinguish the suspected weakness from normal functionality" in (
-        " ".join(prompt.split())
-    )
-    assert "Require correction for that semantic gap" in prompt
+    assembled = " ".join(prompt.split())
+    assert "Under test_discrimination" in assembled
+    assert "would the positive result demonstrate the claimed security consequence" in assembled
+    assert "could normal application behavior produce it" in assembled
+    assert "completed exploitation is not required" in assembled
+    assert "normal remember-me behavior" in assembled
+    assert "Request revise for repairable tests and withdraw for an ungrounded premise" in prompt
     assert "Attacker input is executed" in prompt or "no_testable_hypotheses" in prompt
 
 

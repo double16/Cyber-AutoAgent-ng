@@ -69,6 +69,156 @@ def publish(producer, tmp_path, entries=None):
     return result, tool
 
 
+def correction_fixture(producer, tmp_path, *, count=2, retained=True):
+    entries = [hypothesis(f"input-{index}") for index in range(count + int(retained))]
+    binding, writer = publish(producer, tmp_path, [{
+        "item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": entries,
+    }])
+    publication = hypotheses.load_hypothesis_set(binding["artifact_ref"], producer, "OP_TEST")
+    records = publication.subjects[0].hypotheses
+    selected = records[:count]
+    producer.recovery_context["hypothesis_review"] = {
+        "publication_sha256": binding["sha256"], "subject_reviews": [{
+            "item_id": "subject", "decision": "revise", "reason": "Distinguish a security consequence",
+            "hypotheses": [{"hypothesis_id": item.hypothesis_id, "decision": "revise",
+                            "reason": "Normal behavior can produce this result"} for item in selected],
+        }],
+    }
+
+    def build():
+        return hypotheses.build_revise_hypothesis_tool(
+            producer, "OP_TEST", str(tmp_path),
+            lambda updated: producer.recovery_context["hypothesis_publications"].append(updated),
+            current_task=lambda: producer,
+        )
+
+    return binding, writer, selected, records[count:], build
+
+
+@pytest.mark.parametrize("action", ["https://service.test/input", "tcp://service.test:9000", "/workspace/source"])
+def test_revisions_preserve_siblings_and_resume_pending_corrections(producer, tmp_path, action):
+    original, _, selected, retained, build = correction_fixture(producer, tmp_path)
+    revise = build()
+    replacement = {**selected[0].model_dump(), "positive_expectations": [f"Unauthorized access via {action}"]}
+    first = json.loads(revise(hypothesis_id=selected[0].hypothesis_id, replacement=replacement, reason="Clarify impact"))
+    assert first["sha256"] != original["sha256"]
+    assert list(hypotheses.hypothesis_correction_state(producer)["pending"]) == [selected[1].hypothesis_id]
+    with pytest.raises(ValueError, match="before acceptance"):
+        hypotheses.bind_hypothesis_acceptance(producer, "OP_TEST", {"status": "satisfied"})
+    resumed = build()
+    final = json.loads(resumed(hypothesis_id=selected[1].hypothesis_id, replacement=None, reason="Unsupported"))
+    assert not hypotheses.hypothesis_correction_state(producer)["pending"]
+    publication = hypotheses.load_hypothesis_set(final["artifact_ref"], producer, "OP_TEST")
+    assert retained[0] in publication.subjects[0].hypotheses
+    assert selected[0] not in publication.subjects[0].hypotheses
+    assert len(publication.subjects[0].hypotheses) == 2
+    assert hypotheses.bind_hypothesis_acceptance(producer, "OP_TEST", {
+        "status": "satisfied", "evidence_refs": [],
+    })["evidence_refs"] == [final["artifact_ref"]]
+    # A fresh semantic review supersedes bookkeeping from the previous review.
+    producer.recovery_context["hypothesis_review"] = {"publication_sha256": final["sha256"], "subject_reviews": []}
+    assert not hypotheses.hypothesis_correction_state(producer)["pending"]
+
+
+def test_correction_rejects_unchanged_and_reordered_content(producer, tmp_path):
+    original, _, selected, _, build = correction_fixture(producer, tmp_path, count=1)
+    revise = build()
+    replacement = selected[0].model_dump()
+    replacement["hypothesis_id"] = "cosmetic-id"
+    replacement["preconditions"] = list(reversed(replacement["preconditions"]))
+    with pytest.raises(ValueError, match="unchanged.*Normal behavior"):
+        revise(hypothesis_id=selected[0].hypothesis_id, replacement=replacement, reason="Changed the ID")
+    assert hypotheses.hypothesis_binding(producer)["sha256"] == original["sha256"]
+    assert hypotheses._correction_content({"values": ["b", "a"]}) == {"values": ["a", "b"]}
+
+
+def test_withdraw_last_hypothesis_and_runtime_schema(producer, tmp_path):
+    _, _, selected, _, build = correction_fixture(producer, tmp_path, count=1, retained=False)
+    revise = build()
+    schema = revise.tool_spec["inputSchema"]["json"]
+    validator = Draft202012Validator(schema)
+    arguments = {"hypothesis_id": selected[0].hypothesis_id, "replacement": None, "reason": "No supported boundary"}
+    validator.validate(arguments)
+    validator.validate({**arguments, "replacement": hypothesis()})
+    assert list(validator.iter_errors({**arguments, "hypothesis_id": "foreign"}))
+    assert list(validator.iter_errors({**arguments, "replacement": {"observed_basis": "incomplete"}}))
+    assert "hypothesis_id" not in schema["properties"]["replacement"]["anyOf"][0]["properties"]
+    result = json.loads(revise(**arguments))
+    subject = hypotheses.load_hypothesis_set(result["artifact_ref"], producer, "OP_TEST").subjects[0]
+    assert subject.disposition == "no_testable_hypotheses" and subject.reason == arguments["reason"]
+    assert not subject.hypotheses
+    with pytest.raises(ValueError, match="not awaiting correction"):
+        revise(**arguments)
+
+
+@pytest.mark.parametrize("failure", ["identifier", "reason", "schema", "reference", "stale", "new-review"])
+def test_invalid_corrections_do_not_change_publication(producer, tmp_path, failure):
+    original, writer, selected, _, build = correction_fixture(producer, tmp_path, count=1)
+    revise = build()
+    arguments = {"hypothesis_id": selected[0].hypothesis_id, "replacement": None, "reason": "Withdraw"}
+    if failure == "identifier":
+        arguments["hypothesis_id"] = "unknown"
+    elif failure == "reason":
+        arguments["reason"] = " "
+    elif failure == "schema":
+        arguments["replacement"] = {"observed_basis": "incomplete"}
+    elif failure == "reference":
+        arguments["replacement"] = {**hypothesis(), "supporting_refs": ["artifact:missing.txt"]}
+    elif failure == "stale":
+        writer(subjects=[{"item_id": "subject", "disposition": "hypotheses_supplied",
+                          "hypotheses": [hypothesis("Unrelated newer publication")]}])
+        assert hypotheses.hypothesis_correction_state(producer) == {}
+    else:
+        producer.recovery_context["hypothesis_review"]["publication_sha256"] = "different-review"
+    before = hypotheses.hypothesis_binding(producer)["sha256"]
+    with pytest.raises(ValueError):
+        revise(**arguments)
+    assert hypotheses.hypothesis_binding(producer)["sha256"] == before
+    if failure not in {"stale"}:
+        assert before == original["sha256"]
+
+
+def test_parallel_corrections_preserve_both_updates(producer, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    _, _, selected, retained, build = correction_fixture(producer, tmp_path)
+    revise = build()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda item: revise(
+            hypothesis_id=item.hypothesis_id, replacement=None, reason="Unsupported premise",
+        ), selected))
+    assert len(results) == 2
+    publication = hypotheses.load_hypothesis_set(
+        hypotheses.hypothesis_binding(producer)["artifact_ref"], producer, "OP_TEST",
+    )
+    assert publication.subjects[0].hypotheses == retained
+    assert not hypotheses.hypothesis_correction_state(producer)["pending"]
+
+
+def test_corrections_survive_sqlite_reload(producer, tmp_path):
+    _, _, selected, _, _ = correction_fixture(producer, tmp_path)
+    store = memory.SQLiteApplicationStore(str(tmp_path / "corrections.db"), "target")
+    store.store_task("OP_TEST", producer)
+
+    def current():
+        return store.get_tasks("OP_TEST")[0]
+
+    def persist(binding):
+        store.patch_task("OP_TEST", producer.task_uid, recovery_context_updates={
+            "hypothesis_publications": [*current().recovery_context["hypothesis_publications"], binding],
+        })
+
+    def build():
+        return hypotheses.build_revise_hypothesis_tool(
+            current(), "OP_TEST", str(tmp_path), persist, current_task=current,
+        )
+
+    build()(hypothesis_id=selected[0].hypothesis_id, replacement=None, reason="Unsupported mechanism")
+    assert list(hypotheses.hypothesis_correction_state(current())["pending"]) == [selected[1].hypothesis_id]
+    build()(hypothesis_id=selected[1].hypothesis_id, replacement=None, reason="Unsupported mechanism")
+    assert not hypotheses.hypothesis_correction_state(current())["pending"]
+
+
 @pytest.mark.parametrize("action", [
     "Supply an HTTP query parameter", "Send a protocol frame to tcp://service:9000",
     "Analyze an input read from /workspace/source/config.py",

@@ -102,10 +102,29 @@ def prioritize_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def investigation_page(
     entries: list[dict[str, Any]], *, offset: int, limit: int, header: dict[str, Any], max_chars: int,
+    retain_entry: Callable[[dict[str, Any]], str] | None = None,
 ) -> str:
     """Page complete entries without silently truncating an operation or excerpt."""
 
+    fragments = []
+    chunk_size = max(1, min(1000, max_chars // 4))
+    for entry in entries:
+        if (entry.get("type") != "source_excerpt" or not entry.get("text")
+                or len(json.dumps(entry, ensure_ascii=False)) <= max_chars // 2):
+            fragments.append(entry)
+            continue
+        line, column = entry["line"], entry.get("column", 1)
+        text = entry["text"]
+        for start in range(0, len(text), chunk_size):
+            chunk = text[start:start + chunk_size]
+            end_line = line + chunk.count("\n")
+            fragments.append({**entry, "text": chunk, "line": line, "column": column,
+                              "end_line": end_line, "incomplete": True})
+            column = len(chunk.rsplit("\n", 1)[-1]) + 1 if "\n" in chunk else column + len(chunk)
+            line = end_line
+    entries = fragments
     page = entries[offset:offset + limit]
+    descriptor_used = False
     while True:
         next_offset = offset + len(page)
         navigation = {}
@@ -118,6 +137,13 @@ def investigation_page(
             return encoded
         if not page:
             raise ValueError("Investigation output ceiling is too small for response metadata")
+        if len(page) == 1 and retain_entry is not None and not descriptor_used:
+            entry = page[0]
+            page = [{"type": "oversized_entry", "entry_type": entry["type"],
+                     "entry_ref": retain_entry(entry), "incomplete": True,
+                     "guidance": "Read entry_ref with read_artifact; this descriptor is not inspected source content."}]
+            descriptor_used = True
+            continue
         page.pop()
         if not page and offset < len(entries):
             raise ValueError("Investigation entry exceeds output ceiling; use read_artifact or increase the ceiling")
@@ -146,5 +172,6 @@ def returned_source_ranges(output: Any) -> tuple[dict[str, Any], ...]:
                  | {"characters": len(entry["text"])}
                  | ({"end_line": entry["end_line"]} if "end_line" in entry else {})
                  for entry in entries if isinstance(entry, dict) and entry.get("type") == "source_excerpt"
+                 and not entry.get("incomplete")
                  and all(key in entry for key in ("reference", "line", "column", "sha256", "text"))
                  and isinstance(entry["text"], str))

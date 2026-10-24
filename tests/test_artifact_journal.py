@@ -93,6 +93,34 @@ def test_missing_content_is_not_upgraded_to_semantic_evidence(payload):
     assert not inspection_has_content({"tool": "get_inventory_item", "payload": payload})
 
 
+def test_inspection_availability_is_bound_and_rendered_even_for_sliced_results(tmp_path):
+    journal = bound_journal(tmp_path)
+    content = journal.record_inspection("read_artifact", "read", {}, json.dumps({"content": "x" * 12000}), ())
+    metadata = journal.record_inspection("get_inventory_item", "lookup", {}, '{"item":{}}', ())
+    missing = "artifact:foreign.json"
+    assert journal.inspection_availability([content, metadata, missing]) == {
+        content: "content_bearing", metadata: "metadata_only", missing: "unavailable",
+    }
+    assert journal.inspection_availability() == {content: "content_bearing", metadata: "metadata_only"}
+    context = journal.replay_context(8000, len)
+    assert '"availability": "content_bearing"' in context
+    assert '"availability": "metadata_only"' in context
+    assert '"next_offset"' in context
+    (tmp_path / content.removeprefix("artifact:")).unlink()
+    assert journal.inspection_availability([content]) == {content: "unavailable"}
+
+
+def test_recovery_filters_saved_results_and_advertises_reader_bounds(tmp_path):
+    journal = bound_journal(tmp_path)
+    wanted = journal.record_inspection("read_artifact", "wanted", {}, '{"content":"relevant fact"}', ())
+    other = journal.record_inspection("read_artifact", "other", {}, '{"content":"unrelated fact"}', ())
+    text = journal.replay_context(10000, len, references={wanted})
+    assert "relevant fact" in text and "unrelated fact" not in text and other not in text
+    properties = journal.reader().tool_spec["inputSchema"]["json"]["properties"]
+    assert properties["offset"]["minimum"] == 0
+    assert properties["max_chars"]["maximum"] == 10000
+
+
 def test_tool_boundary_capture_is_immediate_thread_safe_and_ignores_failures(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
 

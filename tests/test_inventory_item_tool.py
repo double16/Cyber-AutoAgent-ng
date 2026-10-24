@@ -67,6 +67,21 @@ def test_schema_advertises_inventory_selectors():
     assert properties["context_limit"]["maximum"] == 50
 
 
+def test_investigation_retains_oversized_entries_with_exact_locator(tmp_path, monkeypatch):
+    import modules.tools.inventory_item as module
+
+    entry = {"type": "input_candidate", "origins": ["large" * 10000]}
+    manifest, reader = _reader_for(tmp_path, max_output_chars=1200)
+    monkeypatch.setattr(module, "investigation_entries", lambda *_args, **_kwargs: [entry])
+    with patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)):
+        result = json.loads(reader("artifact:artifacts/inventory.json", item_id="endpoint-1", view="investigation"))
+    descriptor = result["context_entries"][0]
+    saved = tmp_path / descriptor["entry_ref"].removeprefix("artifact:")
+    assert json.loads(saved.read_text()) == entry
+    assert result["next_context_offset"] is None and descriptor["incomplete"]
+    assert manifest.exists()
+
+
 def test_exact_id_and_endpoint_related_parameter_lookup(tmp_path: Path):
     manifest, reader = _reader_for(tmp_path)
     with patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)):

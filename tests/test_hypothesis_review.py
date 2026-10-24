@@ -65,6 +65,80 @@ def test_metadata_only_reason_routes_to_repair_without_rewriting_semantics(empty
     validate_review(normalized, task, "OP_TEST")
 
 
+@pytest.mark.parametrize("content", ["HTTP response body", "SSH banner", "Filesystem configuration"])
+def test_empty_review_accepts_supplemental_metadata_but_assessments_need_content(empty_review, tmp_path, content):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.agents.hypothesis_review import HypothesisEvidenceError
+
+    task, data = empty_review
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    metadata = journal.record_inspection("get_inventory_item", "metadata", {}, '{"item":{"inputs":[]}}', ())
+    source = journal.record_inspection("read_artifact", "content", {}, json.dumps({"content": content}), ())
+    basis = {"kind": "inspected_evidence", "inspection_refs": [metadata, source], "behavior_assessments": [{
+        "observed_behavior": content, "inspection_refs": [metadata, source], "supports_conditional_test": False,
+        "reasoning": "Inspected example has no supported security consequence",
+    }]}
+    data["subject_reviews"][0]["no_hypothesis_basis"] = basis
+    validate_review(data, task, "OP_TEST")
+    basis["behavior_assessments"][0]["inspection_refs"] = [metadata]
+    with pytest.raises(HypothesisEvidenceError, match="content-bearing") as caught:
+        validate_review(data, task, "OP_TEST")
+    assert caught.value.details["available_content_refs"] == [source]
+    assert caught.value.details["deficient_references"] == [metadata]
+    assert caught.value.details["field_path"].endswith("behavior_assessments[0].inspection_refs")
+
+
+def test_empty_review_correction_identifies_evidence_and_can_request_recovery(empty_review, tmp_path):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.agents.hypothesis_review import (
+        BoundHypothesisReview,
+        HypothesisReviewContractError,
+        HypothesisReviewCorrection,
+    )
+
+    task, data = empty_review
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    metadata = journal.record_inspection("get_inventory_item", "metadata", {}, '{"item":{}}', ())
+    row = data["subject_reviews"][0]
+    row["no_hypothesis_basis"] = {"kind": "inspected_evidence", "inspection_refs": [metadata]}
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    with pytest.raises(HypothesisReviewContractError) as caught:
+        correction.prepare(data, task)
+    feedback = json.loads(str(caught.value).split("Review correction required: ")[1])["errors"][0]
+    assert feedback["item_id"] == "subject"
+    assert feedback["path"] == "subject_reviews[0].no_hypothesis_basis.inspection_refs"
+    assert feedback["reference_availability"] == {metadata: "metadata_only"}
+    assert feedback["available_content_refs"] == []
+    assert "prerequisite_gaps" in feedback["instruction"]
+    row["no_hypothesis_basis"] = {"kind": "necessary_evidence_unreviewed", "inspection_refs": [metadata]}
+    data["prerequisite_gaps"] = [{"criterion_id": "hypotheses", "missing_input": "Inspect supplied source content",
+                                 "item_ids": ["subject"], "source_refs": ["artifact:inventory.json"]}]
+    data["reason"] = "Necessary source content has not been inspected"
+    result = correction.prepare(data, task)
+    assert result["status"] == "partial_failure" and result["repair"]["kind"] == "execution"
+    validate_review(result, task, "OP_TEST")
+
+
+def test_empty_review_corrects_citations_from_retained_content(empty_review, tmp_path):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data = empty_review
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    metadata = journal.record_inspection("get_inventory_item", "metadata", {}, '{"item":{}}', ())
+    source = journal.record_inspection("search_artifact", "content", {}, '{"matches":[{"content":"static"}]}', ())
+    basis = {"kind": "inspected_evidence", "inspection_refs": [metadata],
+             "no_relevant_behavior_reason": "Only inert documentation in inspected content"}
+    data["subject_reviews"][0]["no_hypothesis_basis"] = basis
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    with pytest.raises(ValueError) as caught:
+        correction.prepare(data, task)
+    assert source in str(caught.value)
+    basis["inspection_refs"].append(source)
+    assert correction.prepare(data, task)["status"] == "done"
+    assert len(journal._entries()) == 2
+
+
 def test_necessary_unexamined_evidence_requires_frozen_prerequisite_gap(empty_review):
     from modules.agents.hypothesis_review import normalize_review
 
@@ -309,14 +383,15 @@ def test_repair_supplies_exact_records_and_retained_siblings(producer, tmp_path,
                        for item in subject.hypotheses],
     }, {"item_id": "second", "decision": "retain", "hypotheses": []}]}
     text = repair_context(data, binding["sha256"], publication)
-    payload = json.loads(text.split("## Exact hypothesis repair records\n")[1].split("\nThese complete")[0])
+    payload = json.loads(text.split("## Exact hypothesis repair records\n")[1].split("\nThese are")[0])
     assert payload["publication_sha256"] == binding["sha256"]
-    assert len(payload["affected_subjects"]) == 1
-    row = payload["affected_subjects"][0]
-    assert row["current_subject"] == subject.model_dump(mode="json")
-    assert row["hypotheses_requiring_changes"] == [changed.model_dump(mode="json")]
+    assert len(payload["corrections"]) == 1
+    row = payload["corrections"][0]
+    assert row["current_hypothesis_to_revise"] == changed.model_dump(mode="json")
+    assert "Retained sibling" not in text
+    assert row["review_concern"]["reason"] == "Specific review reason"
     assert f'"decision": "{decision}"' in text and "Specific review reason" in text
-    assert "Omit unaffected subjects; Python preserves them" in text
+    assert "Python preserves all other hypotheses" in text
     assert repair_context(data, "stale", publication) == ""
 
 

@@ -1,8 +1,10 @@
 """Read individual records from a validated current-operation inventory manifest."""
 
+import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from strands import tool
@@ -156,8 +158,21 @@ def create_inventory_item_reader(
                     return cache[canonical]
 
                 entries = investigation_entries(manifest, matches[0], read_source=read_source)
+
+                def retain_entry(entry: dict[str, Any]) -> str:
+                    from modules.tools.memory import _operation_output_root
+
+                    text = json.dumps(entry, ensure_ascii=False, sort_keys=True, indent=2)
+                    key = hashlib.sha256(text.encode()).hexdigest()
+                    root = Path(_operation_output_root())
+                    path = root / "artifacts" / "inventory_context" / f"{key}.json"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text, encoding="utf-8")
+                    return "artifact:" + path.relative_to(root).as_posix()
+
                 return investigation_page(
                     entries, offset=context_offset, limit=context_limit, max_chars=max_output_chars,
+                    retain_entry=retain_entry,
                     header={"status": "found", "view": "investigation", "manifest_ref": reference,
                             "manifest_sha256": digest, "item_id": matches[0]["id"]},
                 )

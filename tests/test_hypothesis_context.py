@@ -14,6 +14,63 @@ from tests.test_hypotheses import hypothesis, no_test, publish
 from tests.test_hypotheses import producer as producer
 
 
+def test_missing_subject_packet_selects_records_and_retained_sources(producer, tmp_path):
+    items = [
+        {"id": "parent", "kind": "endpoint", "target_id": "target-1", "value": "https://target.test", "attributes": {}},
+        {"id": "missing", "kind": "parameter", "target_id": "target-1", "value": "query", "attributes": {
+            "endpoint_id": "parent", "source_artifact_refs": ["artifact:implementation.js"],
+        }},
+        {"id": "complete", "kind": "parameter", "target_id": "target-1", "value": "unrelated-subject", "attributes": {}},
+    ]
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps({"schema_version": 1, "items": items, "unassessed_gaps": []}))
+    _, digest = memory._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    task = replace(producer, acceptance=replace(producer.acceptance, manifest_hash="", basis=replace(
+        producer.acceptance.basis, snapshot_hash=digest, item_ids=("parent", "missing", "complete"),
+        source_refs=("artifact:inventory.json",),
+    )))
+    journal = context.hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    journal.record_inspection("get_inventory_item", "lookup", {"item_id": "missing"}, '{"item":{}}', ())
+    journal.record_inspection("read_artifact", "read", {}, '{"content":"relevant implementation"}',
+                              ("artifact:implementation.js",))
+    journal.record_inspection("read_artifact", "other", {}, '{"content":"unrelated evidence"}', ("artifact:other.js",))
+    unavailable = journal.record_inspection("read_artifact", "deleted", {}, '{"content":"deleted"}', ())
+    (tmp_path / unavailable.removeprefix("artifact:")).unlink()
+    result = context.missing_subject_context(task, "OP_TEST", str(tmp_path), ["missing"])
+    assert "relevant implementation" in result and "unrelated evidence" not in result
+    assert "unrelated-subject" not in result and "parent" in result
+    packet = next((tmp_path / "artifacts/hypothesis_context").glob("*-missing.json"))
+    saved = json.loads(packet.read_text())
+    assert [row["id"] for row in saved["assigned"]] == ["missing"]
+    assert [row["id"] for row in saved["linked"]] == ["parent"]
+    items[1]["attributes"]["large"] = "x" * 10000
+    path.write_text(json.dumps({"schema_version": 1, "items": items, "unassessed_gaps": []}))
+    _, digest = memory._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+        task.acceptance.basis, snapshot_hash=digest,
+    )))
+    result = context.missing_subject_context(task, "OP_TEST", str(tmp_path), ["missing"])
+    assert "x" * 1000 not in result and "Omitted attributes" in result
+    stale = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+        task.acceptance.basis, snapshot_hash="stale",
+    )))
+    assert "Frozen inventory snapshot changed" in context.missing_subject_context(stale, "OP_TEST", str(tmp_path), ["missing"])
+
+
+@pytest.mark.parametrize("content", ["HTTP response", "Network banner", "Filesystem configuration"])
+def test_missing_subject_packet_preserves_noninventory_frozen_evidence(producer, tmp_path, content):
+    (tmp_path / "source.txt").write_text(content)
+    producer = replace(producer, acceptance=replace(producer.acceptance, manifest_hash="", basis=replace(
+        producer.acceptance.basis, source_refs=("artifact:source.txt",),
+    )))
+    journal = context.hypothesis_inspection_journal(producer, "OP_TEST", str(tmp_path))
+    reference = producer.acceptance.basis.source_refs[0]
+    journal.record_inspection("read_artifact", "read", {}, json.dumps({"content": content}), (reference,))
+    result = context.missing_subject_context(producer, "OP_TEST", str(tmp_path), ["subject"])
+    assert content in result
+    assert "Unavailable frozen records" in result
+
+
 @pytest.mark.parametrize("value,kind", [
     ("https://target.test/resource", "endpoint"), ("tcp://target.test:9000", "service"),
     ("/workspace/source", "workflow"),

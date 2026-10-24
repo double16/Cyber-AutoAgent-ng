@@ -1550,6 +1550,55 @@ before freezing that subject. These checks and reasons travel with exact hypothe
 Historical reviews remain readable without these fields; new task-bound reviews require them.
 Schema-derived output budgets include the bounded reasons.
 
+`test_discrimination` judges whether the proposed positive outcomes demonstrate the claimed security
+consequence and whether controls distinguish normal behavior. Missing headers, exposed versions,
+public content, or method/status differences alone do not demonstrate that consequence. Conditional
+test plans remain valid when their mechanism and unresolved preconditions are explicit; completed
+exploitation is not required. This uses the existing review schema, without another review stage.
+
+Semantic correction exposes a task-bound `revise_hypothesis(hypothesis_id, replacement, reason)` tool
+instead of the general publication writer. Its packet pairs each unchanged hypothesis with the review
+concern; the actor supplies a complete replacement or `null` to withdraw it. Python preserves siblings
+and unaffected subjects, serializes same-turn corrections, and recalculates content-derived IDs.
+Unchanged content is rejected immediately with the outstanding concern; serialization order and generated
+IDs do not count as edits. Pending corrections and their publication binding persist in task recovery
+metadata alongside the publication, so continuation can finish remaining edits. Stale tools cannot overwrite
+newer publications. Acceptance remains incomplete while requested edits are pending; changed content still
+receives semantic review. Withdrawing the last hypothesis produces a reasoned empty disposition, subject to
+the existing evidence review. Ordinary publication inputs and historical artifacts remain compatible.
+
+Reviewers ask whether normal application behavior could produce the proposed positive outcome. A SPA shell,
+submitting an email with its password, or remembering a token alone does not establish unauthorized access,
+privilege escalation, or session fixation. Conditional hypotheses remain valid when the access boundary is
+grounded and the proposed controls resolve uncertainty. This is semantic reasoning, not a keyword rejection
+catalog, and introduces no new critic, review fields, retry allowance, or generation limit.
+
+Python classifies task-bound saved inspections as content-bearing, metadata-only, or unavailable.
+Empty-hypothesis reviews may cite supporting metadata alongside content, but require at least one
+content-bearing inspection. Each behavior assessment must also cite content-bearing evidence, and
+source-input coverage remains required. Availability does not establish semantic support.
+Correction feedback names the exact deficient references and available content references. Citation
+corrections reuse retained results with tools closed. If necessary content is missing, the reviewer
+returns an explicit frozen-source prerequisite gap, which uses the existing inspection-recovery path.
+Evidence or decision contract failures are reported separately from output schema failures.
+Existing operation results are unchanged until their tasks are explicitly rerun.
+
+Incomplete publications resume with a publication-only pass for missing subjects. Python packages their
+frozen records, same-target parent records, and related retained inspections, leaving complete records in a
+retrievable artifact when inline context is too large. Previously published subjects remain in place.
+If publication remains incomplete, the existing checkpoint reviewer identifies concrete prerequisites before
+inspection tools reopen for those frozen sources. This introduces no new decision schema or retry cycle.
+Initial investigation checkpoints remain at 16 successful calls; missing-subject recovery checkpoints use
+four. Only a reduction in missing subject IDs resets recovery progress, so rewriting an existing subject
+does not extend investigation. Failed calls do not count and checkpoints wait for the current batch to finish.
+Incomplete terminal results name the remaining subjects.
+
+Inventory investigation pages fragment oversized source excerpts with exact ranges and explicit incomplete
+markers. Partial fragments do not establish complete source-location coverage. Oversized metadata entries
+return a descriptor referencing the complete saved entry, readable through existing artifact byte/line paging;
+the descriptor is not inspected source content. Retained-result readers advertise their existing 10,000-character
+page maximum in their runtime schema. Continuation does not require mapping or reset existing task results.
+
 Authorization proposals must ground the intended operation and access boundary, specify controls
 that distinguish unauthorized access from ordinary behavior, and align execution identities with
 `authentication_requirement`. Client token storage or date filtering does not establish a tenant

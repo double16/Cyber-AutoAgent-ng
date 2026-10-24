@@ -21,9 +21,33 @@ from modules.agents.structured_outputs import (
     TaskReviewDecisionOutput,
 )
 from modules.tools import memory
-from modules.tools.artifact_journal import inspection_has_content
+from modules.tools.artifact_journal import ReturnedArtifactJournal
 from modules.tools.hypotheses import HypothesisSet, hypothesis_binding, load_hypothesis_set
 from modules.tools.inventory_inputs import inspection_covers_input
+
+
+class HypothesisEvidenceError(ValueError):
+    """An evidence contract failure with controller-owned citation repair details."""
+
+    def __init__(self, message: str, path: str, references: list[str], journal: ReturnedArtifactJournal) -> None:
+        super().__init__(message)
+        availability = journal.inspection_availability(references)
+        self.details = {
+            "field_path": path,
+            "reference_availability": availability,
+            "deficient_references": [ref for ref, kind in availability.items() if kind != "content_bearing"],
+            "available_content_refs": [ref for ref, kind in journal.inspection_availability().items()
+                                       if kind == "content_bearing"][:8],
+            "instruction": (
+                "Use relevant retained content to correct citations and assessments. Metadata may supplement "
+                "content. If necessary content is missing, return necessary_evidence_unreviewed with an explicit "
+                "prerequisite_gaps entry naming the frozen criterion, subject, and source; do not claim completion."
+            ),
+        }
+
+
+class HypothesisReviewContractError(ValueError):
+    """A parseable review failed controller evidence or decision requirements."""
 
 
 def semantic_review(data: dict[str, Any]) -> dict[str, Any]:
@@ -94,11 +118,42 @@ def normalize_review(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def repair_context(data: dict[str, Any], digest: str, publication: HypothesisSet | None = None) -> str:
-    """Deliver the full current review to the actor without relying on optional prose."""
-
-    if data.get("publication_sha256") != digest:
+def repair_context(
+    data: dict[str, Any], digest: str, publication: HypothesisSet | None = None,
+    corrections: dict[str, Any] | None = None,
+) -> str:
+    """Pair unchanged records with their concerns instead of supplying duplicate replacement lists."""
+    current = data.get("publication_sha256") == digest
+    resumed = corrections and corrections.get("expected_sha256") == digest
+    if not current and not resumed:
         return ""
+    if publication is not None:
+        pending = corrections.get("pending", {}) if corrections is not None else {
+            item["hypothesis_id"]: {**item, "item_id": row["item_id"], "subject_reason": row.get("reason", "")}
+            for row in data.get("subject_reviews", []) for item in row.get("hypotheses", [])
+            if item.get("decision") in {"revise", "withdraw"}
+        }
+        records = {item.hypothesis_id: (subject.item_id, item) for subject in publication.subjects
+                   for item in subject.hypotheses}
+        affected = []
+        for identifier, concern in pending.items():
+            if identifier not in records or records[identifier][0] != concern["item_id"]:
+                raise ValueError("Hypothesis repair review names an unknown publication "
+                                 + ("hypothesis" if identifier not in records else "subject"))
+            affected.append({"item_id": concern["item_id"], "current_hypothesis_to_revise":
+                             records[identifier][1].model_dump(mode="json"), "review_concern": concern})
+        if affected:
+            return (
+                "\n## Exact hypothesis repair records\n" + json.dumps({
+                    "publication_sha256": digest, "corrections": affected,
+                    "prerequisite_gaps": data.get("prerequisite_gaps", []),
+                    "unresolved_criterion_ids": data.get("unresolved_criterion_ids", []),
+                }, ensure_ascii=False)
+                + "\nThese are unchanged current hypotheses requiring correction, not proposed replacements. "
+                  "Resolve each paired review concern. Call revise_hypothesis with a complete replacement, "
+                  "or replacement=null to withdraw it and explain why. Python preserves all other hypotheses. "
+                  "Do not execute future tests. Then record_task_acceptance."
+            )
     feedback = {key: data[key] for key in (
         "publication_sha256", "subject_reviews", "prerequisite_gaps", "unresolved_criterion_ids",
     ) if key in data}
@@ -107,41 +162,9 @@ def repair_context(data: dict[str, Any], digest: str, publication: HypothesisSet
     text = "\n## Structured hypothesis review feedback\n" + json.dumps(feedback, ensure_ascii=False)
     if publication is None:
         return text
-    subjects = {subject.item_id: subject for subject in publication.subjects}
-    affected = []
-    for row in data.get("subject_reviews", []):
-        changes = [item for item in row.get("hypotheses", []) if item.get("decision") in {"revise", "withdraw"}]
-        if not review_requires_changes({"subject_reviews": [row]}):
-            continue
-        subject = subjects.get(row["item_id"])
-        if subject is None:
-            raise ValueError("Hypothesis repair review names an unknown publication subject")
-        records = {item.hypothesis_id: item for item in subject.hypotheses}
-        if any(item["hypothesis_id"] not in records for item in changes):
-            raise ValueError("Hypothesis repair review names an unknown publication hypothesis")
-        affected.append({
-            "current_subject": subject.model_dump(mode="json"),
-            "hypotheses_requiring_changes": [
-                records[item["hypothesis_id"]].model_dump(mode="json") for item in changes
-            ],
-        })
-    if not affected:
-        if feedback.get("prerequisite_gaps"):
-            return text + (
-                "\nResolve the supplied prerequisite gaps before acceptance. Reuse the current publication "
-                "unless the review requests revisions."
-            )
-        return text + "\nNo hypothesis revisions requested. Reuse the current publication for acceptance."
-    return (
-        text + "\n## Exact hypothesis repair records\n" + json.dumps({
-            "publication_sha256": digest, "affected_subjects": affected,
-        }, ensure_ascii=False)
-        + "\nThese complete current records match the review decisions and reasons above by hypothesis_id. "
-          "They are supplied directly; do not reread the publication to reconstruct "
-          "them. Submit mode=replace with each affected subject's full corrected hypothesis list, retaining "
-          "siblings marked retain. Omit unaffected subjects; Python preserves them. Do not execute future tests. "
-          "Then record_task_acceptance."
-    )
+    if data.get("prerequisite_gaps"):
+        return text + "\nResolve the supplied prerequisite gaps before acceptance. Reuse the current publication."
+    return text + "\nNo hypothesis revisions requested. Reuse the current publication for acceptance."
 
 
 def validate_checkpoint(data: dict[str, Any], task: Any) -> None:
@@ -194,15 +217,31 @@ def validate_subject_review(
             if not basis.inspection_refs:
                 raise ValueError("Inspected-evidence basis requires retained inspection references")
             journal = hypothesis_inspection_journal(task, operation_id, memory._operation_output_root())
-            if not all(inspection_has_content(journal.load_inspection(reference)) for reference in basis.inspection_refs):
-                raise ValueError("Empty disposition requires inspected content, not metadata-only results")
+            availability = journal.inspection_availability(basis.inspection_refs)
+            if "unavailable" in availability.values():
+                raise HypothesisEvidenceError(
+                    "Inspection result is not available to this task and snapshot",
+                    "no_hypothesis_basis.inspection_refs", basis.inspection_refs, journal,
+                )
+            content_refs = {ref for ref, kind in availability.items() if kind == "content_bearing"}
+            if not content_refs:
+                raise HypothesisEvidenceError(
+                    "Empty disposition requires inspected content, not metadata-only results",
+                    "no_hypothesis_basis.inspection_refs", basis.inspection_refs, journal,
+                )
             if not basis.behavior_assessments and not basis.no_relevant_behavior_reason:
                 raise ValueError("Empty review requires behavior assessments or a no-relevant-behavior explanation")
             if basis.behavior_assessments and basis.no_relevant_behavior_reason:
                 raise ValueError("Behavior assessments conflict with a no-relevant-behavior explanation")
-            for assessment in basis.behavior_assessments or []:
+            for index, assessment in enumerate(basis.behavior_assessments or []):
                 if not set(assessment.inspection_refs) <= set(basis.inspection_refs):
                     raise ValueError("Behavior assessment must cite its inspected-evidence basis")
+                if not content_refs.intersection(assessment.inspection_refs):
+                    raise HypothesisEvidenceError(
+                        "Behavior assessment requires a content-bearing inspection",
+                        f"no_hypothesis_basis.behavior_assessments[{index}].inspection_refs",
+                        assessment.inspection_refs, journal,
+                    )
             known = {candidate["candidate_id"]: candidate for candidate in candidates}
             assessed = set()
             for assessment in basis.behavior_assessments or []:
@@ -424,10 +463,13 @@ class HypothesisReviewCorrection:
                 rows.append(canonical)
             except (ValueError, OSError) as error:
                 errors.append({"item_id": item_id, "path": f"subject_reviews[{index}]", "error": str(error)})
+                if isinstance(error, HypothesisEvidenceError):
+                    errors[-1].update(error.details)
+                    errors[-1]["path"] += "." + error.details["field_path"]
         for item_id in sorted(expected.keys() - seen - duplicates):
             errors.append({"item_id": item_id, "path": "subject_reviews", "error": "Assigned subject omitted"})
         if errors:
-            raise ValueError("Review correction required: " + json.dumps({
+            raise HypothesisReviewContractError("Review correction required: " + json.dumps({
                 "publication_sha256": self.binding.digest, "errors": errors,
                 "accepted_subject_reviews": list(self.accepted.values()),
                 "accepted_subject_prerequisites": self.accepted_prerequisites,

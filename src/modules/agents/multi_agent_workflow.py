@@ -74,12 +74,14 @@ from modules.agents.hypothesis_context import (
     frozen_input_context,
     hypothesis_inspection_journal,
     inspection_context,
+    missing_subject_context,
     prerequisite_input_sources,
     publication_review,
     retain_inspections,
 )
 from modules.agents.hypothesis_review import (
     BoundHypothesisReview,
+    HypothesisReviewContractError,
     HypothesisReviewCorrection,
     repair_context,
     review_requires_changes,
@@ -191,8 +193,10 @@ from modules.tools.hypotheses import (
     build_hypothesis_input_reader,
     build_read_hypotheses_tool,
     build_record_hypotheses_tool,
+    build_revise_hypothesis_tool,
     hypothesis_binding,
     hypothesis_contract,
+    hypothesis_correction_state,
     load_hypothesis_set,
     publication_state,
 )
@@ -5070,7 +5074,9 @@ class MultiAgentWorkflowController:
                     "type": "hypothesis_output", "task_uid": task.task_uid, **binding,
                 })
 
-            tools.append(build_record_hypotheses_tool(
+            writer_factory = (build_revise_hypothesis_tool if hypothesis_correction_state(task).get("pending")
+                              else build_record_hypotheses_tool)
+            tools.append(writer_factory(
                 task, self.runtime.operation_id, _operation_output_root(), persist_hypotheses,
                 current_task=current_hypothesis_task,
                 validate_authentication=lambda requirement: self._validate_hypothesis_authentication(
@@ -5943,11 +5949,46 @@ class MultiAgentWorkflowController:
                            if inspection_review is prior_checkpoint else "")
                     )
                 if self._is_hypothesis_producer(task) and policy is task_policy:
+                    recovering_missing = bool(production and production["publication"]
+                                              and production["missing_subject_ids"])
                     policy = replace(
-                        policy, checkpoint_tool_calls=16,
-                        progress_key=lambda: str(hypothesis_binding(next(
+                        policy, checkpoint_tool_calls=4 if recovering_missing else 16,
+                        progress_key=(lambda: json.dumps(self._hypothesis_production_state(next(
+                            item for item in self.state.list_tasks() if item.task_uid == task.task_uid
+                        ))["missing_subject_ids"])) if recovering_missing else lambda: str(hypothesis_binding(next(
                             item for item in self.state.list_tasks() if item.task_uid == task.task_uid
                         )).get("sha256", "")),
+                    )
+                if production and production["publication"] and production["missing_subject_ids"] and inspection_review:
+                    prompt = (
+                        f"Assigned objective: {task.objective}\nPublish only the missing subjects. "
+                        "Do not restart discovery. Resolve only the supplied prerequisite gaps first, then "
+                        "record_hypotheses and record_task_acceptance. Preserve published subjects.\n"
+                        + missing_subject_context(
+                            task, self.runtime.operation_id, _operation_output_root(), production["missing_subject_ids"],
+                        ) + "\nCheckpoint review: " + json.dumps(inspection_review)
+                    )
+                corrections = hypothesis_correction_state(task) if production else {}
+                if corrections.get("pending"):
+                    refreshed = self._resolve_task_executor_base_tools(plan, task, prompt_spec)
+                    revision_tool = next(item for item in refreshed if get_tool_name(item) == "revise_hypothesis")
+                    tool_override = [item for item in (tool_override or tools) if get_tool_name(item) in {
+                        "record_task_acceptance", "read_inspection_result", "read_hypothesis_input",
+                        "get_inventory_item", "read_artifact", "search_artifact",
+                    }]
+                    tool_override.append(revision_tool)
+                    policy = replace(task_policy, checkpoint_tool_calls=0)
+                    prompt = (
+                        f"Assigned objective: {task.objective}\nCorrect only the supplied hypotheses. "
+                        "Use retained evidence; inspect only to resolve a concrete uncertainty. "
+                        "Inspect required missing inputs first when prerequisite gaps are supplied.\n"
+                        + self._hypothesis_repair_context(task)
+                        + "\n"
+                        + hypothesis_inspection_journal(
+                            task, self.runtime.operation_id, _operation_output_root(),
+                        ).replay_context(8000, lambda text: estimate_prompt_tokens(
+                            str(getattr(self.runtime.config, "model_id", "") or ""), extra_content=text,
+                        ))
                     )
                 live_outcomes_reader = getattr(executor, "live_outcomes", None)
                 active_live_outcomes_reader = (
@@ -5961,7 +6002,13 @@ class MultiAgentWorkflowController:
                     ), (capture_inspections(hypothesis_inspection_journal(
                         task, self.runtime.operation_id, _operation_output_root(),
                     )) if production else nullcontext()):
-                        result = (executor(prompt, policy) if tool_override is None
+                        publication_first = bool(
+                            production and production["publication"] and production["missing_subject_ids"]
+                            and not inspection_review
+                        )
+                        result = (TaskExecutorCycleResult(text="Missing subjects require publication", outcomes=[],
+                                                         reason="publication_checkpoint") if publication_first
+                                  else executor(prompt, policy) if tool_override is None
                                   else executor(prompt, policy, tool_override))
                         checkpoint = self._executor_cycle_result(result)
                         if checkpoint.reason != "publication_checkpoint":
@@ -5974,6 +6021,8 @@ class MultiAgentWorkflowController:
                                 "successful_tool_calls_without_progress",
                             ),
                             "checkpoint_threshold": policy.checkpoint_tool_calls,
+                            "stage": "recovery_publication" if publication_first else "inspection_checkpoint",
+                            "missing_subject_ids": self._hypothesis_production_state(task)["missing_subject_ids"],
                         })
                         publication_tools = [tool for tool in tools if get_tool_name(tool) in {
                             "record_hypotheses", "record_task_acceptance",
@@ -5998,8 +6047,14 @@ class MultiAgentWorkflowController:
                             "Up to four read_inspection_result pages can replay saved observations; "
                             "these reads never reopen original sources.\n"
                             + json.dumps(self._hypothesis_production_state(task))
-                            + self._hypothesis_input_context(task)
-                            + self._hypothesis_repair_context(task)
+                            + (missing_subject_context(
+                                task, self.runtime.operation_id, _operation_output_root(),
+                                self._hypothesis_production_state(task)["missing_subject_ids"],
+                            ) if production["publication"] and production["missing_subject_ids"]
+                               else self._hypothesis_input_context(task))
+                            + ("\nPreserve existing subjects; publish only missing dispositions."
+                               if production["publication"] and production["missing_subject_ids"]
+                               else self._hypothesis_repair_context(task))
                         )
                         publication_result = self._executor_cycle_result(executor(
                             self._fit_hypothesis_replay(publication_prompt, system_prompt, publication_tools),
@@ -6023,7 +6078,10 @@ class MultiAgentWorkflowController:
                                 "and frozen source_refs in prerequisite_gaps. Further inspection is limited "
                                 "to those source artifacts. Use blocked and repair.kind=none when unavailable.\n"
                                 + json.dumps(task.acceptance.to_dict())
-                                + self._hypothesis_input_context(task)
+                                + (missing_subject_context(
+                                    task, self.runtime.operation_id, _operation_output_root(),
+                                    production["missing_subject_ids"],
+                                ) if production["publication"] else self._hypothesis_input_context(task))
                                 + "\nWorker response: " + publication_result.text,
                                 [], self._task_evaluator_system_prompt(),
                                 data_validator=lambda data: validate_checkpoint(data, task),
@@ -7849,6 +7907,12 @@ class MultiAgentWorkflowController:
                         cycle,
                         finding_recovery_ref,
                     )
+        remaining_publication = self._hypothesis_production_state(task)
+        if decision.status != "done" and remaining_publication and remaining_publication["missing_subject_ids"]:
+            decision = replace(decision, reason=(
+                decision.reason + " Remaining hypothesis subjects: "
+                + ", ".join(remaining_publication["missing_subject_ids"])
+            ))
         self._log_workflow(
             "task evaluated task=%s status=%s reason=%s",
             self._task_label(task),
@@ -8403,7 +8467,7 @@ by the storage tool or listed above. Do not add criteria or broaden scope.
 
     def _retain_hypothesis_repair(self, task: Task, outcomes: list[ToolOutcome]) -> Task:
         for outcome in reversed(outcomes):
-            if outcome.tool_name not in {"record_hypotheses", "record_task_acceptance"}:
+            if outcome.tool_name not in {"record_hypotheses", "revise_hypothesis", "record_task_acceptance"}:
                 continue
             if (outcome.success and outcome.tool_name == "record_hypotheses"
                 and task.recovery_context.get("hypothesis_repair", {}).get("tool_name") == "record_task_acceptance"):
@@ -8471,6 +8535,14 @@ by the storage tool or listed above. Do not add criteria or broaden scope.
     def _hypothesis_repair_context(self, task: Task) -> str:
         state = self._hypothesis_production_state(task)
         binding = state["publication"] if state else {}
+        corrections = hypothesis_correction_state(task)
+        if corrections.get("pending") and binding and not state["publication_error"]:
+            publication = load_hypothesis_set(
+                binding["artifact_ref"], task, self.runtime.operation_id, require_complete=False,
+            )
+            return repair_context(
+                task.recovery_context.get("hypothesis_review", {}), binding["sha256"], publication, corrections,
+            )
         repair = task.recovery_context.get("hypothesis_repair", {})
         if not binding and not repair:
             return ""
@@ -10351,7 +10423,7 @@ Return exactly one decision for each candidate.
         memory_records: list[dict[str, Any]] | None = None,
     ) -> str:
         memory_catalog = self._memory_selection_catalog(memory_records, task=task)
-        hypothesis_guidance = self._hypothesis_phase_guidance(phase) + self._hypothesis_input_context(task)
+        hypothesis_guidance = self._hypothesis_phase_guidance(phase, task) + self._hypothesis_input_context(task)
         response_schema = (
             '{"prompt": string, "memory_ids": [string], "tools": [string], "shell_commands": [string]}'
             if memory_catalog
@@ -13137,7 +13209,7 @@ expose session material or secret values in text, artifacts, observations, or ta
 
         records = self._task_prompt_memory_records(task, memory_records)
         memory_ids = [self._memory_id(record) for record in records]
-        hypothesis_guidance = self._hypothesis_phase_guidance(phase)
+        hypothesis_guidance = self._hypothesis_phase_guidance(phase, task)
         spec = {
             "prompt": (
                 "Execute only the assigned task using the controller-provided tools. Preserve plan constraints and "
@@ -13295,11 +13367,17 @@ expose session material or secret values in text, artifacts, observations, or ta
             ) for field in fields))
         return "Use read_hypotheses for these assigned subjects.\n" + "\n".join(lines)
 
-    def _hypothesis_phase_guidance(self, phase: PlanPhase) -> str:
+    def _hypothesis_phase_guidance(self, phase: PlanPhase, task: Task | None = None) -> str:
         """Return task guidance only when structured phase metadata requests hypotheses."""
 
         if not phase.produces_hypotheses:
             return ""
+        if task is not None and hypothesis_correction_state(task).get("pending"):
+            return (
+                "Correct the supplied current hypotheses against their paired review concerns. "
+                "Use revise_hypothesis with a complete replacement or null to withdraw; Python preserves "
+                "other records. Then record_task_acceptance. Do not execute future tests.\n"
+            )
         module = str(getattr(self.runtime.config, "module", "") or "")
         module_guidance = ""
         if module:
@@ -13313,15 +13391,18 @@ expose session material or secret values in text, artifacts, observations, or ta
         return """## Hypothesis-Generation Guidance
 Produce detailed, target-specific future test plans rather than merely identifying possible vulnerabilities or
 restating prior hypotheses. Existing hypotheses and memory are context to refine against the assigned frozen inventory,
-never completion. Positive expectations must distinguish the suspected weakness from normal functionality;
-capability discovery alone is not proof of unauthorized behavior or impact. For each path, preserve the
+never completion. Positive expectations must demonstrate the claimed security consequence, with controls
+distinguishing normal functionality. Missing headers, exposed versions, public content, or method/status
+differences alone do not demonstrate that consequence. Conditional plans must name the mechanism and
+unresolved preconditions; completed exploitation is not required. For each path, preserve the
 observed basis and preconditions, suspected mechanism,
 attacker-controlled path, safe later-phase test steps, expected positive and negative/control results, and required
 evidence. Consider unauthenticated attack paths alongside applicable authenticated and identity-comparison
 scenarios; authentication requirements describe execution, not a restriction to authenticated tests.
 Declare authentication_requirement for every hypothesis: comparison=none with roles=[] means
 unauthenticated execution; use a declared role for one session, and account/role/tenant comparison
-when multiple identities are needed. Publish with record_hypotheses; new hypotheses accumulate. Use
+when multiple identities are needed. Publish with record_hypotheses; new hypotheses accumulate. Provide
+one disposition for every assigned subject ID, including parameters discussed in endpoint hypotheses. Use
 mode=replace with each affected subject's full corrected hypothesis list to revise or remove hypotheses;
 omit unaffected subjects, which Python preserves. A reasoned
 no_testable_hypotheses disposition is successful coverage when no supported security-relevant test exists;
@@ -13336,6 +13417,8 @@ applicability or a finding, and published proof of concepts must not be executed
     def _hypothesis_input_context(self, task: Task) -> str:
         if not self._is_hypothesis_producer(task):
             return ""
+        if hypothesis_correction_state(task).get("pending"):
+            return self._hypothesis_repair_context(task) + "\n" + HYPOTHESIS_AUTHORIZATION_GUIDANCE
         context = (
             "\nPublication requirement: hypothesis_set min_count counts published hypothesis-set artifacts, "
             "not individual hypotheses. One publication containing a reasoned no_testable_hypotheses "
@@ -13532,6 +13615,13 @@ applicability or a finding, and published proof of concepts must not be executed
             current_task = next(item for item in self.state.list_tasks() if item.task_uid == task.task_uid)
             return correction.prepare(payload, current_task)
 
+        corrections = hypothesis_correction_state(task) if self._is_hypothesis_producer(task) else {}
+        if corrections.get("pending"):
+            return WorkflowDecision(
+                status="partial_failure", repair_kind="acceptance",
+                reason="Requested hypothesis corrections remain unresolved: " + ", ".join(sorted(corrections["pending"])),
+                instructions=self._hypothesis_repair_context(task),
+            )
         previous_review = task.recovery_context.get("hypothesis_review", {})
         if (self._is_hypothesis_producer(task)
                 and previous_review.get("publication_sha256") == hypothesis_binding(task).get("sha256")
@@ -17103,8 +17193,9 @@ Allowed evidence references:
                 correction_category = "evaluator_correction" if role == "task_evaluator" else "json_retry"
                 self._record_efficiency_correction(correction_category)
                 self._log_workflow(
-                    "json agent role=%s invalid_schema retrying error=%s response_excerpt=%s",
+                    "json agent role=%s %s retrying error=%s response_excerpt=%s",
                     role,
+                    "invalid_review_contract" if isinstance(error, HypothesisReviewContractError) else "invalid_schema",
                     self._short(error),
                     self._short(response),
                 )
@@ -17292,8 +17383,10 @@ criterion. Return the JSON decision immediately.
         """Return a conservative evaluator result after schema retries are exhausted."""
         key_text = ", ".join(response_keys) or "none"
         error_text = sanitize_sdk_error(error) or "invalid evaluator decision schema"
+        contract_failure = isinstance(error, HypothesisReviewContractError)
+        requirement = "evidence or decision contract" if contract_failure else "required decision schema"
         reason = (
-            f"{role} response failed the required decision schema after bounded retries; received keys: {key_text}. "
+            f"{role} response failed the {requirement} after bounded retries; received keys: {key_text}. "
             f"Existing evidence was preserved and the result was marked partial_failure. Error: {error_text}"
         )
         fingerprint = hashlib.sha256(error_text.encode("utf-8", errors="replace")).hexdigest()
@@ -17301,7 +17394,7 @@ criterion. Return the JSON decision immediately.
             "type": "evaluator_fallback",
             "role": role,
             "status": "partial_failure",
-            "source": "schema_validation",
+            "source": "review_contract_validation" if contract_failure else "schema_validation",
             "error_type": error.__class__.__name__ if error else "ValueError",
             "error_fingerprint": fingerprint,
             "received_keys": response_keys,
@@ -18125,7 +18218,7 @@ while planning.
             if hypothesis_source_refs
             else ""
         )
-        hypothesis_guidance = self._hypothesis_phase_guidance(phase) + self._hypothesis_input_context(task)
+        hypothesis_guidance = self._hypothesis_phase_guidance(phase, task) + self._hypothesis_input_context(task)
         memory_catalog = self._memory_selection_catalog(memory_records, task=task)
         memory_selection_guidance = (
             "Memory selection:\n"
@@ -18294,7 +18387,7 @@ Shell command selection guidance:
     ) -> str:
         acceptance_requirement = self._task_terminal_protocol_summary(task)
         task_policy_guidance = self._task_policy_guidance(task)
-        hypothesis_guidance = self._hypothesis_phase_guidance(phase)
+        hypothesis_guidance = self._hypothesis_phase_guidance(phase, task)
         discoveries = self._hypothesis_input_context(task)
         provisioning_critic_guidance = """
 For credential-provisioning tasks, browser navigation, form interaction, client-side DOM/JavaScript/state inspection,
@@ -18426,7 +18519,7 @@ Judge this draft against the assigned task, not the whole operation.
         memory_records: list[dict[str, Any]] | None = None,
     ) -> str:
         memory_catalog = self._memory_selection_catalog(memory_records, task=task)
-        hypothesis_guidance = self._hypothesis_phase_guidance(phase) + self._hypothesis_input_context(task)
+        hypothesis_guidance = self._hypothesis_phase_guidance(phase, task) + self._hypothesis_input_context(task)
         response_schema = (
             '{"prompt": string, "memory_ids": [string], "tools": [string], "shell_commands": [string]}'
             if memory_catalog
@@ -18947,7 +19040,8 @@ Missing execution credentials alone are not a review prerequisite. Return instru
 null, or omit it when no additional instructions are needed. Structured reasons remain authoritative.
 For a subject with no hypotheses include no_hypothesis_basis with kind (inspected_evidence,
 metadata_only, necessary_evidence_unreviewed) and inspection_refs. A retained empty disposition
-requires inspected_evidence and references to exact saved inspection results containing source content.
+requires inspected_evidence and at least one content-bearing saved inspection. Python labels availability;
+metadata-only references may supplement content but cannot establish inspected behavior.
 Only for an empty subject, nest behavior_assessments INSIDE subject_reviews[].no_hypothesis_basis,
 with observed_behavior, inspection_refs, input_candidate_ids, supports_conditional_test, and reasoning.
 Assess every reconciled input candidate ID before retaining an empty result. Match source-derived
@@ -18957,18 +19051,21 @@ Address relevant observed interactions and trust boundaries, including evidence
 returned before the checkpoint; do not rely solely on the publication's chosen citations.
 If inspected content has no relevant behavior, nest no_relevant_behavior_reason inside
 no_hypothesis_basis instead of behavior_assessments.
-Assessments must cite the basis inspection_refs. If any assessment supports a conditional test,
+Each assessment must cite content-bearing basis inspection_refs. If any assessment supports a conditional test,
 request publication repair (repair.kind=acceptance); do not retain completed empty coverage.
 Judge the content's semantic adequacy; a valid reference alone is not support. Metadata-only grounds
 require publication repair; necessary unreviewed evidence requires explicit prerequisite_gaps and
 inspection recovery. Inputs-unrecorded and inferred-operation diagnostics are never independent
 grounds for completed empty coverage. Read saved results with read_inspection_result when needed.
-Distinguish observed preconditions from conditional ones. The mechanism, test steps, controls, and expected results must
-describe the same security outcome. Request focused revision when generic errors, reflection, or
-response differences would count as proof of a stronger claimed weakness. Positive/control expectations
-must distinguish the suspected weakness from normal functionality.
-Hypotheses propose future tests; exploitation need not already be proved. Ordinary content delivery,
-exposed versions or missing headers alone cannot establish impact. Require correction for that semantic gap.
+Under test_discrimination, ask: would the positive result demonstrate the claimed security consequence,
+or could normal application behavior produce it? A SPA shell or visible login form alone does not show
+unauthorized access. Submitting another email and its required password does not establish privilege
+escalation; obtaining a protected resource without the required authority would distinguish it.
+Token persistence alone does not establish session fixation; a test must distinguish attacker control of
+an accepted session from the normal remember-me behavior. Apply this reasoning to the assigned mechanism,
+not a keyword checklist. Request revise for repairable tests and withdraw for an ungrounded premise.
+Conditional hypotheses may leave exploitability unresolved when the access boundary is grounded and
+the proposed controls can resolve the uncertainty; completed exploitation is not required.
 A reasoned no_testable_hypotheses disposition is successful coverage: not every inventory item has a
 supported security implication. Review its reason against frozen observations and the resolved source/inspection
 context, including direct and explicitly linked inputs. Request acceptance repair when the reason

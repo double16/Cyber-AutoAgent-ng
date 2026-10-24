@@ -178,6 +178,42 @@ def test_pagination_respects_character_limit_and_never_loses_entries():
         investigation_page([], offset=0, limit=1, header={"large": "x" * 100}, max_chars=100)
 
 
+def test_oversized_metadata_returns_retrievable_descriptor_without_stalling():
+    entry = {"type": "input_candidate", "origins": ["large" * 10000]}
+    retained = []
+
+    def save(value):
+        retained.append(value)
+        return "artifact:complete-entry.json"
+
+    result = json.loads(investigation_page([entry, {"type": "diagnostic"}], offset=0, limit=2, header={},
+                                           max_chars=600, retain_entry=save))
+    assert retained == [entry]
+    assert result["context_entries"][0]["entry_ref"] == "artifact:complete-entry.json"
+    assert result["context_entries"][0]["incomplete"] is True
+    assert result["next_context_offset"] == 1
+    assert json.loads(investigation_page([entry, {"type": "diagnostic"}], offset=1, limit=2, header={},
+                                         max_chars=600, retain_entry=save))["context_entries"] == [{"type": "diagnostic"}]
+
+
+def test_long_excerpts_page_exact_fragments_with_source_ranges():
+    source = "a" * 1000 + "\n" + "b" * 1000
+    entry = {"type": "source_excerpt", "text": source, "reference": "artifact:source.txt", "line": 10,
+             "end_line": 11, "column": 1, "sha256": "digest"}
+    offset, fragments = 0, []
+    while offset is not None:
+        page = investigation_page([entry], offset=offset, limit=3, header={"view": "investigation"}, max_chars=1000)
+        assert len(page) <= 1000
+        data = json.loads(page)
+        fragments.extend(data["context_entries"])
+        offset = data["next_context_offset"]
+    assert "".join(part["text"] for part in fragments) == source
+    assert all(part["incomplete"] for part in fragments)
+    assert fragments[0]["line"] == 10 and fragments[-1]["line"] == 11
+    assert fragments[1]["column"] == 251
+    assert not returned_source_ranges({"view": "investigation", "context_entries": fragments})
+
+
 @pytest.mark.parametrize("output", [None, [], "not json", {}, {"view": "record"}, {"content": None},
                                    {"view": "investigation", "context_entries": None},
                                    {"view": "investigation", "context_entries": [None,

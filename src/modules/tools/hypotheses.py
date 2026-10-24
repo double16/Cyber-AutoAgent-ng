@@ -5,6 +5,7 @@ import json
 import os
 from collections.abc import Callable
 from pathlib import Path
+from threading import Lock
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -173,6 +174,10 @@ def bind_hypothesis_acceptance(task: Any, operation_id: str, payload: dict[str, 
 
     if payload.get("status") not in {"satisfied", "assessed_negative"}:
         return payload
+    corrections = hypothesis_correction_state(task)
+    if corrections.get("pending"):
+        raise ValueError("Revise or withdraw the requested hypotheses before acceptance: "
+                         + ", ".join(sorted(corrections["pending"])))
     binding = hypothesis_binding(task)
     reference = binding.get("artifact_ref", "")
     if not reference:
@@ -185,6 +190,111 @@ def bind_hypothesis_acceptance(task: Any, operation_id: str, payload: dict[str, 
     obsolete = {item["artifact_ref"] for item in task.recovery_context["hypothesis_publications"][:-1]}
     references = [ref for ref in payload.get("evidence_refs", []) if ref not in obsolete]
     return {**payload, "evidence_refs": list(dict.fromkeys([*references, reference]))}
+
+
+def hypothesis_correction_state(task: Any) -> dict[str, Any]:
+    """Recover task-local correction progress without treating edits as semantic approval."""
+    review = task.recovery_context.get("hypothesis_review", {})
+    digest = review.get("publication_sha256")
+    if not digest:
+        return {}
+    binding = hypothesis_binding(task)
+    if digest != binding.get("sha256"):
+        saved = binding.get("hypothesis_corrections", {})
+        return saved if saved.get("reviewed_sha256") == digest else {}
+    pending = {}
+    for subject in review.get("subject_reviews", []):
+        for item in subject.get("hypotheses", []):
+            if item.get("decision") in {"revise", "withdraw"}:
+                pending[item["hypothesis_id"]] = {
+                    "item_id": subject["item_id"], "decision": item["decision"],
+                    "reason": item.get("reason", ""), "subject_reason": subject.get("reason", ""),
+                    "semantic_checks": item.get("semantic_checks", {}),
+                }
+    return {"reviewed_sha256": digest, "expected_sha256": binding.get("sha256"), "pending": pending}
+
+
+def _correction_content(value: Any) -> Any:
+    """Ignore serialization order and generated identifiers when comparing corrections."""
+    if isinstance(value, dict):
+        return {key: _correction_content(item) for key, item in value.items() if key != "hypothesis_id"}
+    if isinstance(value, list):
+        return sorted((_correction_content(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True))
+    return value
+
+
+def build_revise_hypothesis_tool(
+    task: Any, operation_id: str, output_root: str, persist: Callable[[dict[str, Any]], None],
+    *, current_task: Callable[[], Any],
+    validate_authentication: Callable[[AuthenticationRequirement], None] | None = None,
+) -> Any:
+    """Expose a single-record correction while Python preserves the cumulative publication."""
+    initial = hypothesis_correction_state(task)
+    replacement_schema = Hypothesis.model_json_schema()
+    replacement_schema["properties"].pop("hypothesis_id")
+    definitions = replacement_schema.pop("$defs", {})
+    schema = {"json": {
+        "type": "object", "properties": {
+            "hypothesis_id": {"type": "string", "enum": sorted(initial.get("pending", {}))},
+            "replacement": {"anyOf": [replacement_schema, {"type": "null"}]},
+            "reason": {"type": "string", "minLength": 1},
+        }, "required": ["hypothesis_id", "replacement", "reason"], "additionalProperties": False,
+        "$defs": definitions,
+    }}
+
+    mutation_lock = Lock()
+
+    def apply_revision(hypothesis_id: str, replacement: dict[str, Any] | None, reason: str) -> str:
+        latest = current_task()
+        binding = hypothesis_binding(latest)
+        state = hypothesis_correction_state(latest)
+        if (state.get("reviewed_sha256") != initial.get("reviewed_sha256")
+                or state.get("expected_sha256") != binding.get("sha256")):
+            raise ValueError("Correction publication changed; rebuild the correction tool")
+        target = state.get("pending", {}).get(hypothesis_id)
+        if target is None:
+            raise ValueError("Hypothesis is not awaiting correction in this review")
+        if not reason.strip():
+            raise ValueError("Explain the revision or withdrawal")
+        publication = load_hypothesis_set(binding["artifact_ref"], latest, operation_id, require_complete=False)
+        subject = next(item for item in publication.subjects if item.item_id == target["item_id"])
+        original = next(item for item in subject.hypotheses if item.hypothesis_id == hypothesis_id)
+        revised = Hypothesis.model_validate(replacement) if replacement is not None else None
+        if revised is not None and _correction_content(revised.model_dump()) == _correction_content(original.model_dump()):
+            raise ValueError(f"Hypothesis is unchanged. Resolve this concern or withdraw it: {target['reason']}")
+        remaining = [item for item in subject.hypotheses if item.hypothesis_id != hypothesis_id]
+        if revised is not None:
+            remaining.append(revised)
+        corrected = SubjectHypotheses(
+            item_id=subject.item_id, disposition="hypotheses_supplied" if remaining else "no_testable_hypotheses",
+            reason="" if remaining else reason.strip(), hypotheses=remaining,
+        )
+        pending = {key: value for key, value in state["pending"].items() if key != hypothesis_id}
+
+        def save(updated: dict[str, Any]) -> None:
+            updated["hypothesis_corrections"] = {
+                "reviewed_sha256": state["reviewed_sha256"], "expected_sha256": updated["sha256"],
+                "pending": pending,
+            }
+            persist(updated)
+
+        writer = build_record_hypotheses_tool(
+            latest, operation_id, output_root, save, current_task=current_task,
+            validate_authentication=validate_authentication,
+        )
+        return writer(subjects=[corrected.model_dump(mode="json")], mode="replace")
+
+    @tool(name="revise_hypothesis", inputSchema=schema)
+    def revise_hypothesis(hypothesis_id: str, replacement: dict[str, Any] | None, reason: str) -> str:
+        """Resolve a review concern with a complete replacement, or replacement=null to withdraw it.
+
+        Python preserves all other records. Changed content still requires semantic review.
+        Do not execute the proposed future tests.
+        """
+        with mutation_lock:
+            return apply_revision(hypothesis_id, replacement, reason)
+
+    return revise_hypothesis
 
 
 def build_record_hypotheses_tool(
