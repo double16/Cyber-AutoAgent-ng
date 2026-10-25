@@ -4214,6 +4214,7 @@ def test_bound_acceptance_tool_runtime_schema_accepts_aliases_before_function_va
     )
     store.store_task("op1", task)
     acceptance_tool = mod.build_record_task_acceptance_tool(task.task_uid)
+    assert mod.ASSESSMENT_OUTCOME_GUIDANCE in acceptance_tool.__doc__
 
     validated = acceptance_tool._metadata.validate_input({
         "status": "completed",

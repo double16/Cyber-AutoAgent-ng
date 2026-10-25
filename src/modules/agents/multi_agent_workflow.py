@@ -80,6 +80,7 @@ from modules.agents.hypothesis_context import (
     retain_inspections,
 )
 from modules.agents.hypothesis_review import (
+    HYPOTHESIS_SEMANTIC_GUIDANCE,
     BoundHypothesisReview,
     HypothesisReviewContractError,
     HypothesisReviewCorrection,
@@ -213,6 +214,7 @@ from modules.tools.login_replay import (
     reusable_login_metadata,
 )
 from modules.tools.memory import (
+    ASSESSMENT_OUTCOME_GUIDANCE,
     DISCOVERY_PROCEDURE_LIMIT_KEYS,
     TERMINAL_PLAN_STATUSES,
     AcceptanceBasis,
@@ -5943,6 +5945,7 @@ class MultiAgentWorkflowController:
                         "or read_hypothesis_input when available, "
                         "using the identified source references. Do not restart discovery. "
                         "Do not execute future tests.\n"
+                        + HYPOTHESIS_SEMANTIC_GUIDANCE
                         + self._hypothesis_input_context(task)
                         + self._hypothesis_repair_context(task)
                         + ("\nCheckpoint review: " + json.dumps(inspection_review)
@@ -5967,6 +5970,7 @@ class MultiAgentWorkflowController:
                         + missing_subject_context(
                             task, self.runtime.operation_id, _operation_output_root(), production["missing_subject_ids"],
                         ) + "\nCheckpoint review: " + json.dumps(inspection_review)
+                        + HYPOTHESIS_SEMANTIC_GUIDANCE
                     )
                 corrections = hypothesis_correction_state(task) if production else {}
                 if corrections.get("pending"):
@@ -5982,6 +5986,7 @@ class MultiAgentWorkflowController:
                         f"Assigned objective: {task.objective}\nCorrect only the supplied hypotheses. "
                         "Use retained evidence; inspect only to resolve a concrete uncertainty. "
                         "Inspect required missing inputs first when prerequisite gaps are supplied.\n"
+                        + HYPOTHESIS_SEMANTIC_GUIDANCE
                         + self._hypothesis_repair_context(task)
                         + "\n"
                         + hypothesis_inspection_journal(
@@ -6046,6 +6051,7 @@ class MultiAgentWorkflowController:
                             "without republishing. No source inspection tools are available in this turn. "
                             "Up to four read_inspection_result pages can replay saved observations; "
                             "these reads never reopen original sources.\n"
+                            + HYPOTHESIS_SEMANTIC_GUIDANCE
                             + json.dumps(self._hypothesis_production_state(task))
                             + (missing_subject_context(
                                 task, self.runtime.operation_id, _operation_output_root(),
@@ -7972,6 +7978,50 @@ class MultiAgentWorkflowController:
             return objective_validation_outcome(task)
         return None
 
+    @staticmethod
+    def _replacement_assignment_context(task: Task) -> dict[str, Any]:
+        """Preserve authoritative assignments without replaying task-local completion state."""
+        keys = (
+            "hypothesis_ids", "hypothesis_assignments", "hypothesis_assignment_key",
+            "hypothesis_source_task_uids", "hypothesis_source_artifact_refs", "hypothesis_index",
+            "authentication_requirement", "coverage_family", "phase_task_contract",
+        )
+        return {key: deepcopy(task.recovery_context[key]) for key in keys if key in task.recovery_context}
+
+    def _restore_replacement_assignments(self, task: Task) -> Task:
+        """Restore legacy successors only through matching explicit replacement lineage."""
+        if not task.replacement_of:
+            return task
+        tasks = {item.task_uid: item for item in self.state.list_tasks()}
+        child = task
+        seen = {task.task_uid}
+        inherited: dict[str, Any] = {}
+        while child.replacement_of:
+            parent = tasks.get(child.replacement_of)
+            if parent is None or parent.task_uid in seen:
+                raise ValueError("Replacement assignment lineage unavailable or cyclic")
+            seen.add(parent.task_uid)
+            if (
+                child.acceptance.basis != parent.acceptance.basis
+                or child.target_scope != parent.target_scope
+                or set(child.target_ids) != set(parent.target_ids)
+                or not child.supersedes_criteria
+                or not set(child.supersedes_criteria) <= {item.id for item in parent.acceptance.criteria}
+                or not {item.id for item in child.acceptance.criteria} <= set(child.supersedes_criteria)
+                or any(item not in parent.acceptance.criteria for item in child.acceptance.criteria)
+            ):
+                raise ValueError("Replacement assignment scope or criteria changed")
+            for key, value in self._replacement_assignment_context(parent).items():
+                if key in inherited and inherited[key] != value:
+                    raise ValueError("Conflicting replacement assignment lineage")
+                inherited[key] = value
+            child = parent
+        for key, value in inherited.items():
+            if key in task.recovery_context and task.recovery_context[key] != value:
+                raise ValueError("Conflicting replacement assignment metadata")
+        missing = {key: value for key, value in inherited.items() if key not in task.recovery_context}
+        return self.state.patch_task(task.task_uid, recovery_context_updates=missing) if missing else task
+
     def _create_prompt_replacement_task(
         self,
         task: Task,
@@ -7999,6 +8049,7 @@ class MultiAgentWorkflowController:
                 f"Replacement for {task.task_uid}; apply prompt critic repair: {self._short(feedback, 600)}"
             ),
             evidence=list(task.evidence),
+            recovery_context=self._replacement_assignment_context(task),
             kind=task.kind,
             reference_id=task.reference_id,
             replacement_of=task.task_uid,
@@ -8055,6 +8106,7 @@ class MultiAgentWorkflowController:
             self._replacement_execution_receipts(task, criterion)
         )
         recovery_context = {
+            **self._replacement_assignment_context(task),
             "parent_task_uid": task.task_uid,
             "trigger": "bounded_reasoning_loop",
             "original_objective": task.objective,
@@ -10430,7 +10482,7 @@ Return exactly one decision for each candidate.
             else '{"prompt": string, "tools": [string], "shell_commands": [string]}'
         )
         acquisition_guidance = (
-            "Use supplied frozen observations only; do not add live target acquisition or execute future tests."
+            "Follow the shared hypothesis rubric for evidence acquisition and future tests."
             if self._is_hypothesis_producer(task)
             else "Use an explicit scheme in every URL. For status-only checks, discarding the body is allowed; "
             "for reflection, exploit, validation, or artifact evidence, capture headers and response body "
@@ -13296,12 +13348,14 @@ expose session material or secret values in text, artifacts, observations, or ta
         return bindings
 
     def _prepare_hypothesis_consumer(self, plan: OperationPlan, task: Task) -> Task | None:
-        ids = task.recovery_context.get("hypothesis_source_task_uids", [])
         try:
+            task = self._restore_replacement_assignments(task)
+            ids = task.recovery_context.get("hypothesis_source_task_uids", [])
             self._hypothesis_consumer_bindings(task)
-        except (OSError, TypeError, ValueError):
+        except (OSError, TypeError, ValueError) as error:
             updated = self.state.mark_task(
-                task, "partial_failure", "Assigned hypothesis publication unavailable or changed.",
+                task, "partial_failure",
+                "Assigned hypothesis publication unavailable or changed: " + self._short(str(error), 300),
             )
             self._emit_task_done(updated)
             return None
@@ -13354,6 +13408,41 @@ expose session material or secret values in text, artifacts, observations, or ta
             "hypothesis_source_artifact_refs": sorted(set(references)), "hypothesis_index": index,
         })
 
+    def _hypothesis_consumer_review_context(self, task: Task) -> str:
+        """Supply the exact assigned proposals without asking the reviewer to rediscover them."""
+        if not task.recovery_context.get("hypothesis_assignments"):
+            return ""
+        selected = set(task.recovery_context.get("hypothesis_ids", []))
+        assigned = {identifier for row in task.recovery_context["hypothesis_assignments"]
+                    for identifier in row.get("hypothesis_ids", [])}
+        if not selected or selected != assigned:
+            raise WorkflowInvariantError("Assigned hypothesis review IDs do not match publication bindings")
+        fields = (
+            "hypothesis_id", "observed_basis", "suspected_mechanism", "attacker_controlled_input",
+            "preconditions", "authentication_requirement", "safe_test_steps",
+            "positive_expectations", "negative_expectations", "required_evidence",
+        )
+        rows = []
+        try:
+            for reference, producer in self._hypothesis_consumer_bindings(task):
+                publication = load_hypothesis_set(reference, producer, self.runtime.operation_id)
+                for subject in publication.subjects:
+                    for hypothesis in subject.hypotheses:
+                        if hypothesis.hypothesis_id in selected:
+                            values = hypothesis.model_dump(mode="json")
+                            rows.append("  " + ",".join(sanitize_toon_value(
+                                " | ".join(values[field]) if isinstance(values[field], list)
+                                else json.dumps(values[field]) if isinstance(values[field], dict) else values[field]
+                            ) for field in fields))
+        except (OSError, TypeError, ValueError) as error:
+            raise WorkflowInvariantError("Assigned hypothesis review binding unavailable") from error
+        return (
+            "Review every assigned hypothesis against its test evidence. A baseline alone does not test "
+            "a security hypothesis. Identify untested hypotheses in evidence_gaps, even when acceptance "
+            "is already recorded. An unavailable prerequisite is an explicit gap, not a negative test.\n"
+            f"assigned_hypotheses[{len(rows)}]{{{','.join(fields)}}}:\n" + "\n".join(rows)
+        )
+
     @staticmethod
     def _hypothesis_index_toon(task: Task | None) -> str:
         rows = task.recovery_context.get("hypothesis_index", []) if task else []
@@ -13377,6 +13466,7 @@ expose session material or secret values in text, artifacts, observations, or ta
                 "Correct the supplied current hypotheses against their paired review concerns. "
                 "Use revise_hypothesis with a complete replacement or null to withdraw; Python preserves "
                 "other records. Then record_task_acceptance. Do not execute future tests.\n"
+                + HYPOTHESIS_SEMANTIC_GUIDANCE
             )
         module = str(getattr(self.runtime.config, "module", "") or "")
         module_guidance = ""
@@ -13391,10 +13481,7 @@ expose session material or secret values in text, artifacts, observations, or ta
         return """## Hypothesis-Generation Guidance
 Produce detailed, target-specific future test plans rather than merely identifying possible vulnerabilities or
 restating prior hypotheses. Existing hypotheses and memory are context to refine against the assigned frozen inventory,
-never completion. Positive expectations must demonstrate the claimed security consequence, with controls
-distinguishing normal functionality. Missing headers, exposed versions, public content, or method/status
-differences alone do not demonstrate that consequence. Conditional plans must name the mechanism and
-unresolved preconditions; completed exploitation is not required. For each path, preserve the
+never completion. For each path, preserve the
 observed basis and preconditions, suspected mechanism,
 attacker-controlled path, safe later-phase test steps, expected positive and negative/control results, and required
 evidence. Consider unauthenticated attack paths alongside applicable authenticated and identity-comparison
@@ -13412,7 +13499,7 @@ are advisory. Research public
 intelligence when observed technology, software versions, components, protocols, or behavior provide a useful lead;
 CVEs, advisories, and published proof of concepts inform hypothesis and test design only, do not establish
 applicability or a finding, and published proof of concepts must not be executed.
-""" + module_section
+""" + HYPOTHESIS_SEMANTIC_GUIDANCE + module_section
 
     def _hypothesis_input_context(self, task: Task) -> str:
         if not self._is_hypothesis_producer(task):
@@ -13423,7 +13510,7 @@ applicability or a finding, and published proof of concepts must not be executed
             "\nPublication requirement: hypothesis_set min_count counts published hypothesis-set artifacts, "
             "not individual hypotheses. One publication containing a reasoned no_testable_hypotheses "
             "disposition satisfies hypothesis_set min_count=1. Durable evidence supports the disposition; "
-            "it does not require live target acquisition or completed exploitation.\n"
+            "use retained evidence rather than live target acquisition or completed exploitation.\n"
             + HYPOTHESIS_GROUNDING_GUIDANCE
             + HYPOTHESIS_AUTHORIZATION_GUIDANCE
             + self._hypothesis_identity_context(task)
@@ -13645,20 +13732,21 @@ applicability or a finding, and published proof of concepts must not be executed
             return result
 
         try:
+            evaluator_prompt = self._task_evaluator_prompt(
+                plan, phase, task, worker_context, tool_outcomes, resolved_acceptance_results,
+                review_binding=review_binding,
+            )
+        except WorkflowInvariantError as error:
+            return WorkflowDecision(
+                status="partial_failure", reason=f"Task evaluation input invalid: {self._short(str(error), 300)}",
+            )
+        try:
             with (capture_inspections(hypothesis_inspection_journal(
                 task, self.runtime.operation_id, _operation_output_root(),
             )) if self._is_hypothesis_producer(task) else nullcontext()):
                 data = self._run_json_text_agent(
                     "task_evaluator",
-                    self._task_evaluator_prompt(
-                        plan,
-                        phase,
-                        task,
-                        worker_context,
-                        tool_outcomes,
-                        resolved_acceptance_results,
-                        review_binding=review_binding,
-                    ),
+                    evaluator_prompt,
                     [],
                     self._task_evaluator_system_prompt(),
                     tool_factory=lambda: self._task_evaluator_tools(task, resolved_acceptance_results),
@@ -13687,6 +13775,11 @@ applicability or a finding, and published proof of concepts must not be executed
         decision.repair_kind = repair["kind"]
         decision.unresolved_evidence_gaps = tuple(repair["evidence_gaps"])
         decision.execution_receipt_gaps = tuple(repair["execution_receipt_gaps"])
+        if decision.status == "done" and decision.unresolved_evidence_gaps:
+            decision.status = "partial_failure"
+            decision.reason = "; ".join(decision.unresolved_evidence_gaps)
+            if decision.repair_kind == "none":
+                decision.repair_kind = "execution"
         try:
             assessment = self._comparison_assessment_from_data(
                 data, required=True, allowed_refs=comparison_refs,
@@ -19016,10 +19109,12 @@ established within scope, return inconclusive and request bounded repair or reco
         execution_gate_section = self._controller_execution_gate_section(task, resolved_acceptance_results)
         artifact_limit_section = self._task_evaluator_artifact_limit_section(task, resolved_acceptance_results)
         current_task_findings = self._task_finding_summary(task.task_uid)
+        hypothesis_consumer_review = self._hypothesis_consumer_review_context(task)
         hypothesis_review = (
             publication_review(task, self.runtime.operation_id) if self._is_hypothesis_producer(task) else ""
         )
         if hypothesis_review:
+            hypothesis_review += HYPOTHESIS_SEMANTIC_GUIDANCE
             hypothesis_review += """
 ## Required hypothesis review output
 Python binds publication_sha256; omit it from your response. Always include top-level status
@@ -19035,37 +19130,29 @@ identity_requirements (verdict adequate|revise|not_applicable, reason). Keep eac
 characters and concise. A retain decision requires no revise check. Use not_applicable only when
 identity requirements are irrelevant. Grounding includes the intended access boundary; test_discrimination
 checks controls and outcome specificity; identity_requirements checks declared execution identities.
-Request revise for repairable controls or identity metadata, withdraw for an ungrounded security premise.
-Missing execution credentials alone are not a review prerequisite. Return instructions as a string,
+Return instructions as a string,
 null, or omit it when no additional instructions are needed. Structured reasons remain authoritative.
 For a subject with no hypotheses include no_hypothesis_basis with kind (inspected_evidence,
 metadata_only, necessary_evidence_unreviewed) and inspection_refs. A retained empty disposition
 requires inspected_evidence and at least one content-bearing saved inspection. Python labels availability;
 metadata-only references may supplement content but cannot establish inspected behavior.
-Only for an empty subject, nest behavior_assessments INSIDE subject_reviews[].no_hypothesis_basis,
-with observed_behavior, inspection_refs, input_candidate_ids, supports_conditional_test, and reasoning.
+The bound schema selects the empty-review form. When reconciled input candidates are supplied,
+require behavior_assessments INSIDE subject_reviews[].no_hypothesis_basis, with observed_behavior,
+inspection_refs, input_candidate_ids, supports_conditional_test, and reasoning.
 Assess every reconciled input candidate ID before retaining an empty result. Match source-derived
 candidates to saved inspections of their source locations. An input does not itself require a hypothesis.
 For populated subjects omit no_hypothesis_basis; never add behavior_assessments at the subject level.
 Address relevant observed interactions and trust boundaries, including evidence
 returned before the checkpoint; do not rely solely on the publication's chosen citations.
-If inspected content has no relevant behavior, nest no_relevant_behavior_reason inside
-no_hypothesis_basis instead of behavior_assessments.
+When no reconciled input candidates are supplied, require no_relevant_behavior_reason inside
+no_hypothesis_basis instead of behavior_assessments. Explain why the inspected observations support
+no conditional security test; if they support a test, request publication repair instead.
 Each assessment must cite content-bearing basis inspection_refs. If any assessment supports a conditional test,
 request publication repair (repair.kind=acceptance); do not retain completed empty coverage.
 Judge the content's semantic adequacy; a valid reference alone is not support. Metadata-only grounds
 require publication repair; necessary unreviewed evidence requires explicit prerequisite_gaps and
 inspection recovery. Inputs-unrecorded and inferred-operation diagnostics are never independent
 grounds for completed empty coverage. Read saved results with read_inspection_result when needed.
-Under test_discrimination, ask: would the positive result demonstrate the claimed security consequence,
-or could normal application behavior produce it? A SPA shell or visible login form alone does not show
-unauthorized access. Submitting another email and its required password does not establish privilege
-escalation; obtaining a protected resource without the required authority would distinguish it.
-Token persistence alone does not establish session fixation; a test must distinguish attacker control of
-an accepted session from the normal remember-me behavior. Apply this reasoning to the assigned mechanism,
-not a keyword checklist. Request revise for repairable tests and withdraw for an ungrounded premise.
-Conditional hypotheses may leave exploitability unresolved when the access boundary is grounded and
-the proposed controls can resolve the uncertainty; completed exploitation is not required.
 A reasoned no_testable_hypotheses disposition is successful coverage: not every inventory item has a
 supported security implication. Review its reason against frozen observations and the resolved source/inspection
 context, including direct and explicitly linked inputs. Request acceptance repair when the reason
@@ -19082,9 +19169,9 @@ For revisions or withdrawals without prerequisite gaps use repair.kind=acceptanc
 necessary prerequisite also requires inspection, use repair.kind=execution first and retain all requested
 publication revisions; inspect the identified sources, then republish and review the corrected digest.
 An unavailable external prerequisite is blocked even when publication revisions remain pending.
-Return review feedback only; the actor
-publishes replacements with mode=replace, preserving unaffected records. Do not put replacement
-subjects or mode in the repair object. An empty hypothesis list with a sound reason is valid.
+Return review feedback only; the actor uses revise_hypothesis for requested individual corrections;
+Python preserves unaffected records. Do not put replacement subjects or mode in the repair object.
+An empty hypothesis list with a sound reason is valid.
 Use prerequisite_gaps for concrete information necessary to assess a frozen criterion that is unavailable
 or remains unexamined in supplied evidence, with criterion_id, missing_input,
 item_ids and frozen source_refs. Optional absent metadata is not a prerequisite. Set repair.kind=none
@@ -19143,9 +19230,10 @@ the evaluation target or frozen acceptance results. Follow the controller-provid
 other tools are available.
 
 Controller-observed tool outcomes are authoritative and override contradictory worker narration. Never infer output from
-a failed or rejected invocation. A failed command may support an explicitly described failure or assessed-negative
-result, but it cannot be represented as successful execution. Claims derived from a correctable failure require a later
-successful corrected invocation. Bare `curl -s` output with no captured response status is not proof of absence.
+a failed or rejected invocation. A captured target rejection may support an assessed-negative result when it
+actually exercises the assigned test. Failed acquisition alone does not establish a negative result and cannot be
+represented as successful execution. Claims derived from a correctable failure require a later successful corrected
+invocation. Bare `curl -s` output with no captured response status is not proof of absence.
 
 Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"instructions": string|null,
 "repair": {{"kind":"none|acceptance|execution","evidence_gaps":[string],"execution_receipt_gaps":[string]}},
@@ -19199,6 +19287,12 @@ Return JSON only: {{"status":"done|partial_failure|blocked","reason": string,"in
 {self._task_policy_guidance(task)}
 
 {self._comparison_assessment_prompt(phase, task)}
+
+## Assessment outcome semantics
+{ASSESSMENT_OUTCOME_GUIDANCE}
+
+## Assigned hypothesis tests
+{hypothesis_consumer_review}
 
 ## Frozen acceptance results
 {acceptance_result_section}
@@ -19642,7 +19736,13 @@ support. Do not infer unshown content or turn missing detail into a supported co
             if execution_state is not None and execution_state["required_requirement_ids"]
             else ""
         )
+        hypothesis_semantic_guidance = (
+            HYPOTHESIS_SEMANTIC_GUIDANCE
+            if task is not None and MultiAgentWorkflowController._is_hypothesis_producer(task)
+            else ""
+        )
         return f"""## Task Executor Contract (Controller-owned)
+{ASSESSMENT_OUTCOME_GUIDANCE}
 Execute only the assigned task objective. The objective is one single assigned task unit named by the acceptance
 contract; do not broaden it. Treat plan constraints and module access, safety, execution, evidence, and
 prohibition policies as mandatory guardrails. Operate only on the assigned target scope; do not touch unrelated
@@ -19654,6 +19754,7 @@ phase-wide scan, application-wide vulnerability sweep, or test of unrelated modu
 tasks or later phase objectives. Once the assigned unit's criterion is evidenced, rejected, or blocked, stop; do not
 use remaining time to broaden scope. {persistence_guidance}
 {observation_requirement_guidance}
+{hypothesis_semantic_guidance}
 Use actual registered tool calls for actions; do not simulate calls with pseudo-syntax, Python snippets, or narrated
 `<call:...>` blocks. If the controller supplies a loop or recovery instruction, follow that instruction as the current
 authoritative task context rather than replaying the prior action.

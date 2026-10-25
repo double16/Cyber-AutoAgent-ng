@@ -230,6 +230,16 @@ EvidenceRequirementKind = Literal[
     "verified_finding",
     "memory",
 ]
+ASSESSMENT_OUTCOME_GUIDANCE = """An assessed_negative result requires evidence that the assigned test
+was exercised and its observations support a negative conclusion within that scope. Missing artifacts,
+unexecuted tests, failed acquisition, and unavailable prerequisites are not tested-negative results.
+Record useful observations without claiming a negative assessment; leave unsupported work incomplete.
+Recorded acceptance and execution receipts establish bookkeeping, not semantic adequacy. Review their
+support against the assigned objective. Use partial_failure for unsupported material work, and blocked
+only for a concrete external prerequisite. Repair acceptance only when sufficient evidence already
+exists; otherwise identify the missing execution evidence.
+"""
+
 AcceptanceResultStatus = Literal[
     "satisfied",
     "assessed_negative",
@@ -10739,6 +10749,7 @@ def build_record_task_acceptance_tool(
     candidates, supply every returned finding_ref represented by this acceptance. existing_finding always requires
     an explicit finding reference.
     Use observation for useful non-finding results and no_vulnerability for negative results.
+    {ASSESSMENT_OUTCOME_GUIDANCE}
 
 Current task-created finding candidates: {finding_refs_text}. For finding_candidate, include one or more of these
 references that the acceptance represents.

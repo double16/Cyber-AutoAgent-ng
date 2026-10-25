@@ -572,6 +572,98 @@ def test_bound_empty_review_requires_nested_basis(empty_review):
     assert bound.output_model.model_validate_json(bound.example).repair.kind == "acceptance"
 
 
+@pytest.mark.parametrize("case", ["missing", "null", "empty", "assessment", "metadata", "unreviewed", "valid"])
+def test_native_empty_review_without_candidates_requires_explanation(empty_review, case):
+    from jsonschema import Draft202012Validator
+    from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
+
+    from modules.agents.hypothesis_review import BoundHypothesisReview
+
+    task, data = empty_review
+    bound = BoundHypothesisReview.capture(task, "OP_TEST")
+    data.pop("publication_sha256")
+    basis = {"kind": "inspected_evidence", "inspection_refs": ["artifact:inspection.json"]}
+    if case == "null":
+        basis["no_relevant_behavior_reason"] = None
+    elif case == "empty":
+        basis["no_relevant_behavior_reason"] = ""
+    elif case == "assessment":
+        basis["behavior_assessments"] = []
+    elif case in {"metadata", "unreviewed"}:
+        basis["kind"] = "metadata_only" if case == "metadata" else "necessary_evidence_unreviewed"
+    elif case == "valid":
+        basis["no_relevant_behavior_reason"] = "Inspected source has only inert documentation"
+    data["subject_reviews"][0]["no_hypothesis_basis"] = basis
+    invalid = case in {"missing", "null", "empty", "assessment"}
+    for schema in (bound.output_model.model_json_schema(),
+                   StructuredOutputTool(bound.output_model).tool_spec["inputSchema"]["json"]):
+        assert bool(list(Draft202012Validator(schema).iter_errors(data))) is invalid
+    if invalid:
+        with pytest.raises(ValueError):
+            bound.output_model.model_validate_json(json.dumps(data))
+    else:
+        assert bound.output_model.model_validate_json(json.dumps(data)).subject_reviews[0].no_hypothesis_basis
+    schema = bound.output_model.model_json_schema()["$defs"]["BoundNoHypothesisBasis0"]
+    assert "no_relevant_behavior_reason" in schema["oneOf"][0]["required"]
+    assert schema["properties"]["behavior_assessments"]["type"] == "null"
+
+
+@pytest.mark.parametrize("case", ["missing", "null", "empty", "explanation", "foreign", "valid"])
+def test_native_empty_review_with_candidates_requires_assessments(candidate_review, case):
+    from jsonschema import Draft202012Validator
+    from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
+
+    from modules.agents.hypothesis_review import BoundHypothesisReview
+
+    task, data, basis, _journal = candidate_review
+    bound = BoundHypothesisReview.capture(task, "OP_TEST")
+    data.pop("publication_sha256")
+    if case == "missing":
+        del basis["behavior_assessments"]
+    elif case == "null":
+        basis["behavior_assessments"] = None
+    elif case == "empty":
+        basis["behavior_assessments"] = []
+    elif case == "explanation":
+        basis["no_relevant_behavior_reason"] = "No inputs recorded"
+    elif case == "foreign":
+        basis["behavior_assessments"][0]["input_candidate_ids"] = ["unknown"]
+    for schema in (bound.output_model.model_json_schema(),
+                   StructuredOutputTool(bound.output_model).tool_spec["inputSchema"]["json"]):
+        assert bool(list(Draft202012Validator(schema).iter_errors(data))) is (case != "valid")
+    if case != "valid":
+        with pytest.raises(ValueError):
+            bound.output_model.model_validate_json(json.dumps(data))
+    else:
+        bound.output_model.model_validate_json(json.dumps(data))
+        validate_review({**data, "publication_sha256": bound.digest}, task, "OP_TEST")
+    schema = bound.output_model.model_json_schema()["$defs"]["BoundNoHypothesisBasis0"]
+    assert "behavior_assessments" in schema["oneOf"][0]["required"]
+    assert schema["properties"]["no_relevant_behavior_reason"]["type"] == "null"
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_legacy_behavior_assessments_preserve_semantic_judgments(empty_review, supported):
+    from modules.agents.hypothesis_review import BoundHypothesisReview, normalize_review
+
+    task, data = empty_review
+    basis = {"kind": "inspected_evidence", "inspection_refs": ["artifact:inspection.json"],
+             "behavior_assessments": [{"observed_behavior": "Caller selects a resource",
+                                       "inspection_refs": ["artifact:inspection.json"],
+                                       "supports_conditional_test": supported,
+                                       "reasoning": "Compare the observed behavior to the intended boundary"}]}
+    data["subject_reviews"][0]["no_hypothesis_basis"] = basis
+    result = BoundHypothesisReview.capture(task, "OP_TEST").canonicalize(data, task)
+    assert result["subject_reviews"][0]["no_hypothesis_basis"]["behavior_assessments"][0][
+        "supports_conditional_test"] is supported
+    assert "no_relevant_behavior_reason" not in result["subject_reviews"][0]["no_hypothesis_basis"]
+    assert normalize_review(result)["status"] == ("partial_failure" if supported else "done")
+    assert "input_candidate_ids" not in basis["behavior_assessments"][0]
+    basis["behavior_assessments"][0]["input_candidate_ids"] = ["foreign"]
+    with pytest.raises(ValueError, match="unknown input_candidate_ids"):
+        BoundHypothesisReview.capture(task, "OP_TEST").canonicalize(data, task)
+
+
 def test_bound_review_mixed_subjects(reviewed, monkeypatch):
     from types import SimpleNamespace
 

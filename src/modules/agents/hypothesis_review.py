@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import Field, create_model
+from pydantic import ConfigDict, Field, create_model, model_validator
 
 from modules.agents.hypothesis_context import hypothesis_inspection_journal, review_input_candidates
 from modules.agents.structured_outputs import (
@@ -24,6 +24,43 @@ from modules.tools import memory
 from modules.tools.artifact_journal import ReturnedArtifactJournal
 from modules.tools.hypotheses import HypothesisSet, hypothesis_binding, load_hypothesis_set
 from modules.tools.inventory_inputs import inspection_covers_input
+
+HYPOTHESIS_SEMANTIC_GUIDANCE = """## Hypothesis semantic rubric
+Use frozen inventory and retained source artifacts; inspect explicitly linked retained resources when
+needed. Public research may inform future tests. Do not fetch the live target or execute proposed tests.
+Name concrete necessary missing evidence as a prerequisite gap, not as a negative observation.
+Grounding: connect inspected observations to the assigned subject, proposed mechanism, and intended
+trust boundary. Distinguish observed facts from unresolved preconditions. An explicitly evidenced link
+to a related resource can ground a workflow hypothesis; the tested action need not use the subject's
+literal path. For example, a page can call a backend API. Unrelated resources remain outside the
+assignment. Inferred GET operations and unrecorded inputs do not restrict a subject to its page response.
+Positive expectations must demonstrate the claimed security consequence, with controls distinguishing
+normal functionality.
+Positive expectations describe a security violation; negative/control expectations describe its absence.
+Identical responses, absent reflection, ordinary registration, and public bundle visibility are normal
+observations or controls, not positive evidence of a vulnerability. Withdraw an unsupported security
+premise rather than rewriting normal behavior as a successful security test.
+Under test_discrimination, ask: would the positive result demonstrate the claimed security consequence,
+or could normal application behavior produce it? Require observations and controls that distinguish
+the consequence. A SPA shell or visible login form alone does not show unauthorized access; require
+protected data or an authorization-sensitive action without the required authority. Response differences
+alone are insufficient. Accepting an extra field does not establish mass assignment; the test must
+show an unauthorized effect on a protected property. Submitting another email and its required password
+does not establish privilege escalation. Token persistence alone does not establish session fixation;
+distinguish attacker control of an accepted session from the normal remember-me behavior. Missing
+headers, exposed versions, and public content alone do not demonstrate a security consequence.
+Identity requirements: declared identities and comparisons must match the proposed future tests.
+Missing execution credentials alone do not invalidate a future test plan.
+Retain grounded conditional hypotheses when proposed controls can resolve uncertainty;
+completed exploitation is not required. Request revise for repairable tests and withdraw for an
+ungrounded premise.
+For repairable grounding or identity requirements, request revise. Explain the deficient claim or test
+and the missing distinction in the existing check reason; do not demand execution of future tests.
+Request inspection only for concrete necessary evidence that is missing or unexamined. A reasoned
+empty disposition is valid when inspected observations support no security-relevant test. Apply this
+rubric to the assigned mechanism, not a keyword checklist. Python owns bookkeeping; semantic judgments
+belong to the model.
+"""
 
 
 class HypothesisEvidenceError(ValueError):
@@ -325,6 +362,15 @@ def validate_subject_prerequisites(row: HypothesisSubjectReview, payload: dict, 
     return related
 
 
+def _validate_inspected_basis(basis: NoHypothesisBasis) -> NoHypothesisBasis:
+    """Mirror the native schema's required explanation without deciding semantic support."""
+    if basis.kind == "inspected_evidence" and (
+        not basis.inspection_refs or not (basis.behavior_assessments or basis.no_relevant_behavior_reason)
+    ):
+        raise ValueError("Inspected evidence requires content references and the task-bound explanation")
+    return basis
+
+
 @dataclass(frozen=True)
 class BoundHypothesisReview:
     """Immutable publication identity and model-facing structured review contract."""
@@ -353,9 +399,24 @@ class BoundHypothesisReview:
                 input_candidate_ids=(list[Literal[candidate_ids]] if candidate_ids else list[str],
                                      Field(default_factory=list, **({} if candidate_ids else {"max_length": 0}))),
             )
+            explanation_field = "behavior_assessments" if candidate_ids else "no_relevant_behavior_reason"
+            # Keep conditional requirements inline: the SDK compatibility schema flattener does
+            # not preserve nested union references. Native providers receive these same constraints.
             basis = create_model(
                 f"BoundNoHypothesisBasis{index}", __base__=NoHypothesisBasis,
-                behavior_assessments=(list[assessment] | None, None),
+                __config__=ConfigDict(json_schema_extra={"oneOf": [
+                    {"properties": {"kind": {"const": "inspected_evidence"},
+                                    "inspection_refs": {"minItems": 1},
+                                    explanation_field: {"type": "array", "minItems": 1} if candidate_ids
+                                    else {"type": "string", "minLength": 1}},
+                     "required": ["inspection_refs", explanation_field]},
+                    {"properties": {"kind": {"enum": ["metadata_only", "necessary_evidence_unreviewed"]}}},
+                ]}),
+                __validators__={"inspected_basis": model_validator(mode="after")(_validate_inspected_basis)},
+                behavior_assessments=(list[assessment] | None, Field(default=None, min_length=1))
+                if candidate_ids else (type(None), None),
+                no_relevant_behavior_reason=(type(None), None) if candidate_ids
+                else (str | None, Field(default=None, min_length=1)),
             )
             rows.append(create_model(
                 f"BoundHypothesisSubject{index}", __base__=HypothesisSubjectReview,
@@ -414,7 +475,27 @@ class BoundHypothesisReview:
         """Validate model judgments and produce the existing canonical decision envelope."""
         wire = self.bind(payload, task)
         wire.pop("publication_sha256")
+        # Historical reviews may assess behavior without reconciled input candidates. Keep these
+        # judgments intact while validating identifiers and the rest of the new bound envelope.
+        wire = deepcopy(wire)
+        legacy_bases = {}
+        candidates = review_input_candidates(task)
+        for row in wire.get("subject_reviews", []):
+            basis = row.get("no_hypothesis_basis") or {}
+            if (basis.get("kind") == "inspected_evidence" and basis.get("behavior_assessments")
+                    and not candidates.get(row.get("item_id")) and not basis.get("no_relevant_behavior_reason")):
+                validated = NoHypothesisBasis.model_validate(basis)
+                if any(item.input_candidate_ids for item in validated.behavior_assessments):
+                    raise ValueError("Legacy behavior assessment names unknown input_candidate_ids")
+                legacy_bases[row["item_id"]] = validated.model_dump(exclude_none=True)
+                row["no_hypothesis_basis"] = {
+                    "kind": "inspected_evidence", "inspection_refs": validated.inspection_refs,
+                    "no_relevant_behavior_reason": "Legacy behavior assessments retained in canonical review",
+                }
         result = self.output_model.model_validate(wire).model_dump(exclude_none=True)
+        for row in result["subject_reviews"]:
+            if row["item_id"] in legacy_bases:
+                row["no_hypothesis_basis"] = legacy_bases[row["item_id"]]
         return {**result, "publication_sha256": self.digest}
 
 

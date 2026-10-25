@@ -238,7 +238,7 @@ def test_evaluator_checks_hypothesis_semantics_even_when_publication_is_availabl
     assert "could normal application behavior produce it" in assembled
     assert "completed exploitation is not required" in assembled
     assert "normal remember-me behavior" in assembled
-    assert "Request revise for repairable tests and withdraw for an ungrounded premise" in prompt
+    assert "Request revise for repairable tests and withdraw for an ungrounded premise" in assembled
     assert "Attacker input is executed" in prompt or "no_testable_hypotheses" in prompt
 
 
@@ -406,3 +406,112 @@ def test_live_review_required_research_without_requiring_exact_wording(
         assert any(issue["category"] == "objective" for issue in result["issues"])
     else:
         assert not result["issues"]
+
+
+@pytest.fixture(params=["linked", "unrelated", "ordinary", "consequence", "conditional", "unsupported", "inverted"])
+def workflow_semantic_case(review_case, request, tmp_path, monkeypatch):
+    """Keep semantic expectations as evaluation fixtures, never as a Python classifier."""
+    controller, plan, task, subject = review_case
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    if subject.startswith("https:"):
+        observed = "Assigned page invokes a same-target backend API with caller-controlled fields."
+        normal = "The API accepts an extra display field and returns ordinary public content."
+        consequence = "An unprivileged caller changes a protected role; the baseline preserves the role."
+    elif subject.startswith("tcp:"):
+        observed = "Assigned listener delegates caller-controlled commands to a same-target worker service."
+        normal = "The worker accepts an optional label and returns its public greeting."
+        consequence = "An unprivileged connection reads another account's private record; control is denied."
+    else:
+        observed = "Assigned source entrypoint passes caller-controlled paths to its imported file handler."
+        normal = "The handler accepts an optional label and reads an allowed public file."
+        consequence = "A path escapes the allowed root and reads a private file; the confined control cannot."
+    scenario = request.param
+    record = hypothesis()
+    record.update(
+        observed_basis=observed,
+        suspected_mechanism="A linked handler may fail to enforce the documented protected boundary",
+        positive_expectations=[consequence],
+        negative_expectations=["The control preserves the protected boundary"],
+        supporting_refs=["artifact:observation.txt"],
+    )
+    if scenario == "unrelated":
+        record["observed_basis"] = (
+            "Assigned subject is present. The proposed handler belongs to an unrelated target; no link is observed."
+        )
+    elif scenario == "ordinary":
+        record["positive_expectations"] = [normal]
+    elif scenario == "inverted":
+        record["positive_expectations"] = ["Baseline and modified requests return identical public content"]
+        record["negative_expectations"] = [consequence]
+    elif scenario == "conditional":
+        record["preconditions"] = ["Verify whether the linked handler enforces the protected boundary"]
+    elif scenario == "unsupported":
+        record["observed_basis"] = "Inventory establishes presence only; no handler or interaction is observed."
+        record["suspected_mechanism"] = "Assume an undocumented privileged handler exists and trusts arbitrary fields"
+    task = replace(task, recovery_context={}, acceptance=replace(
+        task.acceptance,
+        criteria=[replace(task.acceptance.criteria[0], description="Publish supported future security tests",
+                          evidence_requirements=[EvidenceRequirement(kind="hypothesis_set")])],
+        manifest_hash="",
+    ))
+    (tmp_path / "observation.txt").write_text(record["observed_basis"])
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
+    (tmp_path / "artifacts" / "inventory.json").write_text("{}")
+    writer = hypotheses.build_record_hypotheses_tool(
+        task, controller.runtime.operation_id, str(tmp_path), lambda _: None,
+    )
+    binding = json.loads(writer(subjects=[{
+        "item_id": "subject-1", "disposition": "hypotheses_supplied", "hypotheses": [record],
+    }]))
+    task = replace(task, evidence=[binding["artifact_ref"]])
+    controller.state.store_task(task)
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="inspect-source", tool_name="read_artifact", success=True, correctable=False,
+        input_summary=json.dumps({"path": "artifact:observation.txt"}),
+        output_summary=json.dumps({"content": record["observed_basis"]}),
+    )
+    acceptance = AcceptanceResult(
+        task.acceptance.criteria[0].id, "satisfied", "observation", "Future test published", (binding["artifact_ref"],),
+    )
+    prompt = controller._task_evaluator_prompt(
+        plan, plan.phases[0], task, tool_outcomes=[outcome], acceptance_results=[acceptance],
+    )
+    return controller, prompt, scenario in {"linked", "consequence", "conditional"}
+
+
+def test_linked_workflow_review_uses_shared_rubric(workflow_semantic_case):
+    from modules.agents.hypothesis_review import HYPOTHESIS_SEMANTIC_GUIDANCE
+    from modules.agents.prompt_context import fit_task_prompt
+
+    _controller, prompt, _expected = workflow_semantic_case
+    assert prompt.count(HYPOTHESIS_SEMANTIC_GUIDANCE) == 1
+    assert "literal path" in prompt and "Unrelated resources remain outside" in prompt
+    assert "protected property" in prompt
+    assert "not positive evidence of a vulnerability" in prompt
+    assert "Do not fetch the live target" in prompt
+    assert "actor uses revise_hypothesis" in prompt
+    fitted = fit_task_prompt(
+        prompt + "\n## Task history\n" + "advisory " * 10000,
+        "system", [], "test-model", len(prompt) + 2000, 0, lambda _: None, estimate_input=len,
+    )
+    assert HYPOTHESIS_SEMANTIC_GUIDANCE in fitted
+
+
+@pytest.mark.ollama
+def test_live_linked_workflow_semantic_pairs(workflow_semantic_case, ollama_taxonomy_client, record_property):
+    """Opt-in model evaluation checks decisions; offline tests check only assembly and contracts."""
+    controller, prompt, expected_done = workflow_semantic_case
+    client, model = ollama_taxonomy_client
+    messages = [{"role": "system", "content": controller._evaluator_system_prompt()},
+                {"role": "user", "content": prompt}]
+    response = client.chat(
+        model=model, stream=False, format=HypothesisTaskDecisionOutput.model_json_schema(),
+        options={"temperature": 0, "num_predict": 9216}, messages=messages,
+    )
+    result = HypothesisTaskDecisionOutput.model_validate(extract_json_object(response.message.content))
+    task = next(item for item in controller.state.list_tasks() if controller._is_hypothesis_producer(item))
+    validate_review(result.model_dump(), task, controller.runtime.operation_id)
+    record_property("expected_done", expected_done)
+    record_property("actual_status", result.status)
+    assert (result.status == "done") == expected_done

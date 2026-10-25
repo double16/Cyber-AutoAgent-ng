@@ -1542,6 +1542,21 @@ Provider-specific empty generation when reasoning is disabled remains a separate
 
 ### Hypothesis semantic review contract
 
+The task-bound native schema selects the empty-review form before generation. With reconciled input
+candidates, an inspected-evidence basis requires non-empty behavior assessments covering every candidate.
+Without candidates, it requires a non-empty explanation of why inspected observations support no
+conditional security test. Metadata-only and necessary-unreviewed bases remain incomplete dispositions.
+Python still validates retained content citations and candidate coverage. Canonical storage remains
+`HypothesisTaskDecisionOutput`; historical behavior assessments remain readable without changing their
+semantic judgments. No migration or automatic reopening of completed tasks is required.
+
+All hypothesis roles use frozen inventory and retained source artifacts, including explicitly linked
+retained resources. Public research may inform future test design. They must not fetch live targets or
+execute proposed tests; concrete necessary missing evidence uses the existing prerequisite path.
+Positive expectations describe the claimed security violation, while controls describe its absence.
+Identical public responses and absent reflection are controls or normal behavior, not positive security
+results. Unsupported security premises should be withdrawn rather than reframed as successful tests.
+
 New hypothesis reviews include `semantic_checks` for every hypothesis. `grounding` and
 `test_discrimination` each contain a verdict (`adequate` or `revise`) and a reason of 1–500
 characters. `identity_requirements` additionally permits `not_applicable`. The critic assesses
@@ -1555,6 +1570,24 @@ consequence and whether controls distinguish normal behavior. Missing headers, e
 public content, or method/status differences alone do not demonstrate that consequence. Conditional
 test plans remain valid when their mechanism and unresolved preconditions are explicit; completed
 exploitation is not required. This uses the existing review schema, without another review stage.
+
+Generation, prompt construction and review, executor contracts, and semantic correction share one rubric
+defined in `hypothesis_review.py`. Grounding connects inspected observations to the assigned subject,
+mechanism, and intended trust boundary. An explicitly evidenced relationship can include a related resource:
+for example, a page invoking its backend API, a network listener delegating to a worker, or a source entrypoint
+calling an imported handler. The proposed action need not use the subject's literal path; unrelated resources
+remain outside the assignment. Inferred GET operations and unrecorded inputs do not restrict reasoning to a
+page response. These relationships do not authorize execution outside the operation's target constraints.
+
+Review uses the existing grounding, test-discrimination, and identity checks. Positive outcomes must show
+protected data or an authorization-sensitive effect when claiming unauthorized access. Accepting an extra
+field alone does not demonstrate mass assignment; the test must distinguish an unauthorized effect on a
+protected property. Grounded conditional plans may leave exploitability unresolved. Review reasons identify
+the deficient claim or test and missing distinction; repairable grounding, controls, or identity requirements
+receive revision feedback, while unsupported premises receive withdrawal feedback. Necessary missing evidence
+uses the existing prerequisite path. No new schema fields, semantic keyword gates, critics, or retries are added.
+Offline tests verify assembled instructions and workflow contracts; opt-in model evaluations compare paired
+HTTP, network, and filesystem proposals. A live continuation is still needed to assess model consistency.
 
 Semantic correction exposes a task-bound `revise_hypothesis(hypothesis_id, replacement, reason)` tool
 instead of the general publication writer. Its packet pairs each unchanged hypothesis with the review
@@ -1658,3 +1691,17 @@ including bound hypothesis and checkpoint schemas. Evaluation policy, rubric jud
 topic extraction explicitly select LangChain native JSON-schema mode where supported; Bedrock retains
 its adapter's tool-based compatibility mode. Narrative task execution, Markdown report writing, and
 free-text evaluation context remain text. Third-party Ragas prompt internals are unchanged.
+
+### Hypothesis consumer recovery and completion
+
+Hypothesis consumers retain their explicit hypothesis IDs, producer artifact hashes, and authentication
+requirements through prompt repair and reasoning-loop recovery. Existing pending replacements recover
+missing assignments from their explicit parent chain only when frozen basis, target scope, and
+superseded criteria agree. Conflicting or unavailable bindings leave the task incomplete.
+
+Evaluators receive the assigned proposals directly and assess each against its retained test evidence.
+An `assessed_negative` record means an evidenced test supports a negative conclusion within its scope;
+a missing artifact, an unexecuted test, or an unavailable prerequisite does not establish that outcome.
+Recorded acceptance and execution receipts do not override semantic evidence gaps. Acceptance repair
+uses existing sufficient evidence; execution repair addresses untested material work. A concrete
+external prerequisite may block a task; otherwise unsupported work remains partially failed.

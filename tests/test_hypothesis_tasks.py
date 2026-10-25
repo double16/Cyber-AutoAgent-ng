@@ -133,6 +133,18 @@ def test_controller_compiles_and_deduplicates_with_sqlite_without_creator(
         controller._hypothesis_consumer_bindings(missing_producer)
     prepared = controller._prepare_hypothesis_consumer(plan, task)
     assert prepared.recovery_context["hypothesis_index"][0]["hypothesis_ids"] == task.recovery_context["hypothesis_ids"]
+    successor = replace(
+        task, task_uid="legacy-successor", replacement_of=task.task_uid,
+        supersedes_criteria=[criterion.id for criterion in task.acceptance.criteria],
+        recovery_context={"trigger": "bounded_reasoning_loop"},
+    )
+    store.store_task("OP_TEST", successor)
+    restored = controller._prepare_hypothesis_consumer(plan, successor)
+    assert restored.recovery_context["hypothesis_assignments"] == task.recovery_context["hypothesis_assignments"]
+    assert restored.recovery_context["authentication_requirement"] == task.recovery_context["authentication_requirement"]
+    assert task.recovery_context["hypothesis_ids"][0] in controller._hypothesis_consumer_review_context(restored)
+    persisted = next(item for item in store.get_tasks("OP_TEST") if item.task_uid == successor.task_uid)
+    assert persisted.recovery_context == restored.recovery_context
     publish(producer, tmp_path, [{
         "item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [hypothesis("Changed test")],
     }])
@@ -140,4 +152,5 @@ def test_controller_compiles_and_deduplicates_with_sqlite_without_creator(
     with pytest.raises(ValueError, match="publication changed"):
         controller._hypothesis_consumer_bindings(task)
     assert controller._prepare_hypothesis_consumer(plan, task) is None
+    assert controller._prepare_hypothesis_consumer(plan, restored) is None
     creator.assert_not_called()

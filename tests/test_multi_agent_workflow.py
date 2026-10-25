@@ -23587,6 +23587,7 @@ def test_hypothesis_correction_prompts_and_partial_progress(worker_flow_case, mo
     for prompt in prompts:
         assert "revise_hypothesis" in prompt
         assert "mode=replace" not in prompt
+        assert workflow_mod.HYPOTHESIS_SEMANTIC_GUIDANCE in prompt
     tools = controller._resolve_task_executor_base_tools(_plan(), task, draft)
     assert "record_hypotheses" not in controller._tool_names(tools)
     revise = next(item for item in tools if workflow_mod.get_tool_name(item) == "revise_hypothesis")
@@ -24379,7 +24380,8 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
         assert "follow its supplied implementation/source references" in prompt
         assert "not individual hypotheses" in prompt
         assert "no_testable_hypotheses" in prompt
-        assert "does not require live target acquisition" in prompt
+        assert "use retained evidence rather than live target acquisition" in prompt
+        assert "Do not fetch the live target or execute proposed tests" in prompt
         assert 'get_inventory_item(view="investigation")' in prompt
         assert "Server implementation is not required" in prompt
         assert "without query/body" in prompt
@@ -24405,6 +24407,8 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
     assert "at least one content-bearing saved inspection" in evaluator
     assert "Each assessment must cite content-bearing" in evaluator
     assert "Under test_discrimination" in evaluator
+    assert "publishes replacements with mode=replace" not in evaluator
+    assert "actor uses revise_hypothesis" in evaluator
     assert "security consequence" in evaluator
     assert "metadata-only references may supplement" in evaluator
     for prompt in prompts[:4]:
@@ -24425,6 +24429,7 @@ def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow
         assert 'get_inventory_item(view="investigation")' in fitted
         assert "Server implementation is not required" in fitted
         assert "Structural mismatches must remain explicit" in fitted
+        assert workflow_mod.HYPOTHESIS_SEMANTIC_GUIDANCE in fitted
         assert "assess concrete observed behavior" in fitted
         assert "future test can resolve" in fitted
         if "Required hypothesis review output" in prompt:
@@ -24494,6 +24499,7 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
             }]))
         else:
             assert prompt.count("## Retained inspection evidence") == 1
+            assert prompt.count(workflow_mod.HYPOTHESIS_SEMANTIC_GUIDANCE) == 1
             assert prompt.count("Controls do not distinguish impact") == 1
             assert prompt.count("The positive expectation proves only ordinary delivery") == 1
             assert "## Exact hypothesis repair records" in prompt
@@ -24515,6 +24521,7 @@ def test_structured_hypothesis_review_reaches_real_actor_replacement(
                 lambda _event: None, estimate_input=lambda text: len(text) + len(system),
             )
             assert records_text in fitted
+            assert workflow_mod.HYPOTHESIS_SEMANTIC_GUIDANCE in fitted
             assert records_text in controller._fit_hypothesis_replay(
                 "## Exact hypothesis repair records\n" + records_text, system, tools,
             )
@@ -24871,3 +24878,189 @@ def test_structured_correction_retains_evidence_and_closes_investigation(target,
     assert calls[1][1] == []
     assert f"Observed boundary at {target}" in calls[1][0]
     assert "Investigation is closed" in calls[1][0]
+
+
+@pytest.mark.parametrize("method", ["prompt", "reasoning"])
+def test_replacement_preserves_assignment_contract_without_completion_state(method):
+    task = _hypothesis_task(status="active")
+    task.recovery_context.update({
+        "hypothesis_ids": ["hyp-1"],
+        "hypothesis_assignments": [{"producer_task_uid": "source", "sha256": "digest"}],
+        "authentication_requirement": {"comparison": "account", "roles": ["user"]},
+        "execution_evidence_receipts": {"old": ["artifact:old"]},
+        "completion_review": {"mode": "capture_only"},
+    })
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state)
+    if method == "prompt":
+        replacement = controller._create_prompt_replacement_task(task, TaskPromptBuildError("repair"))
+    else:
+        replacement = controller._create_reasoning_loop_replacement_task(task, [])
+    assert replacement is not None
+    for key in ("hypothesis_ids", "hypothesis_assignments", "authentication_requirement"):
+        assert replacement.recovery_context[key] == task.recovery_context[key]
+    assert "completion_review" not in replacement.recovery_context
+    assert "old" not in replacement.recovery_context.get("execution_evidence_receipts", {})
+    replacement.recovery_context["hypothesis_ids"].append("other")
+    assert task.recovery_context["hypothesis_ids"] == ["hyp-1"]
+
+
+@pytest.mark.parametrize("case", [
+    "valid", "nested", "conflict", "scope", "snapshot", "criteria", "changed_criterion", "missing", "cycle",
+])
+def test_legacy_replacement_assignment_restoration(case):
+    parent = _hypothesis_task("parent")
+    parent.recovery_context.update({
+        "hypothesis_ids": ["hyp-1"],
+        "authentication_requirement": {"comparison": "none", "roles": []},
+    })
+    child = replace(parent, task_uid="child", replacement_of="parent",
+                    supersedes_criteria=["future-tests"], recovery_context={})
+    tasks = [parent, child]
+    if case == "nested":
+        middle = replace(child, task_uid="middle")
+        child = replace(child, replacement_of="middle")
+        tasks = [parent, middle, child]
+    elif case == "conflict":
+        child.recovery_context["hypothesis_ids"] = ["foreign"]
+    elif case == "scope":
+        child = replace(child, target_ids=["foreign"])
+    elif case == "snapshot":
+        child = replace(child, acceptance=replace(child.acceptance, basis=replace(
+            child.acceptance.basis, snapshot_hash="foreign"), manifest_hash=""))
+    elif case == "criteria":
+        child = replace(child, supersedes_criteria=["foreign"])
+    elif case == "changed_criterion":
+        child = replace(child, acceptance=replace(child.acceptance, criteria=(
+            replace(child.acceptance.criteria[0], description="A different test"),
+        ), manifest_hash=""))
+    elif case == "missing":
+        child = replace(child, replacement_of="missing")
+    elif case == "cycle":
+        parent = replace(parent, replacement_of="child")
+        tasks[0] = parent
+    tasks = [item for item in tasks if item.task_uid != child.task_uid] + [child]
+    state = FakeState(_plan(), tasks=tasks)
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state)
+    if case in {"valid", "nested"}:
+        result = controller._restore_replacement_assignments(child)
+        assert result.recovery_context["hypothesis_ids"] == ["hyp-1"]
+        assert controller._restore_replacement_assignments(result) == result
+        result.recovery_context["hypothesis_ids"].append("other")
+        assert parent.recovery_context["hypothesis_ids"] == ["hyp-1"]
+        assert controller._restore_replacement_assignments(parent) == parent
+    else:
+        with pytest.raises(ValueError, match="Replacement|Conflicting"):
+            controller._restore_replacement_assignments(child)
+
+
+@pytest.mark.parametrize("subject", ["https://target.test/login", "tcp://target.test:22", "/src/auth.py"])
+@pytest.mark.parametrize(("gap", "repair_kind"), [(True, "none"), (False, "none"), (True, "acceptance")])
+def test_recorded_negative_does_not_override_reported_semantic_gap(subject, gap, repair_kind):
+    task = Task("assessment", "Assess assigned test", f"Exercise security test on {subject}", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    state.acceptance_results[task.task_uid] = [AcceptanceResult(
+        criterion_id=task.acceptance.criteria[0].id,
+        status="assessed_negative", disposition="observation",
+        summary="Test assessment is incomplete" if gap else "Assigned controls withheld the protected result",
+        evidence_refs=["artifact:artifacts/baseline.txt"],
+    )]
+    prompts = []
+
+    def evaluate(role, prompt, tools, system_prompt):
+        prompts.append(prompt)
+        return json.dumps({
+            "status": "done", "reason": "Recorded negative",
+            "repair": {"kind": repair_kind, "evidence_gaps": ["Assigned test lacks a supported assessment"] if gap else []},
+        })
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state, text_runner=evaluate,
+    )
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task,
+                                         acceptance_results=state.acceptance_results[task.task_uid])
+    assert decision.status == ("partial_failure" if gap else "done")
+    assert decision.repair_kind == ("acceptance" if repair_kind == "acceptance" else "execution" if gap else "none")
+    assert memory_mod.ASSESSMENT_OUTCOME_GUIDANCE in prompts[0]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_consumer_review_supplies_only_assigned_proposals(worker_flow_case, monkeypatch, failure):
+    from modules.tools.hypotheses import Hypothesis
+
+    controller, task, *_rest = worker_flow_case
+    task.recovery_context.update({"hypothesis_assignments": [{"producer_task_uid": "source", "hypothesis_ids": ["assigned"]}],
+                                 "hypothesis_ids": ["assigned"]})
+    proposal = Hypothesis(
+        hypothesis_id="assigned",
+        authentication_requirement={"comparison": "none", "roles": []},
+        observed_basis="An operation accepts a controllable selector",
+        preconditions=["Selector reaches the sensitive operation"],
+        suspected_mechanism="Boundary bypass",
+        attacker_controlled_input="selector",
+        safe_test_steps=["Exercise the operation with a permitted control and an unauthorized selector"],
+        positive_expectations=["Protected information is disclosed"],
+        negative_expectations=["Protected information is withheld"],
+        required_evidence=["Operation result and control"],
+        supporting_refs=["artifact:artifacts/source.txt"],
+    )
+    publication = SimpleNamespace(subjects=[SimpleNamespace(hypotheses=[
+        proposal, proposal.model_copy(update={"hypothesis_id": "unassigned"}),
+    ])])
+    monkeypatch.setattr(controller, "_hypothesis_consumer_bindings",
+                        Mock(side_effect=ValueError("changed")) if failure else Mock(return_value=[("ref", task)]))
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", Mock(return_value=publication))
+    if failure:
+        with pytest.raises(WorkflowInvariantError, match="binding unavailable"):
+            controller._hypothesis_consumer_review_context(task)
+        decision = controller._evaluate_task(_plan(), _plan().phases[0], task)
+        assert decision.status == "partial_failure"
+        assert "binding unavailable" in decision.reason
+        return
+    context = controller._hypothesis_consumer_review_context(task)
+    assert "assigned_hypotheses[1]" in context
+    assert "unassigned" not in context
+    assert proposal.positive_expectations[0] in context
+    assert proposal.negative_expectations[0] in context
+    assert "authentication_requirement" in context
+    assert "Identify untested hypotheses in evidence_gaps" in context
+    prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
+    assert context in prompt
+    assert memory_mod.ASSESSMENT_OUTCOME_GUIDANCE in prompt
+    executor = controller._task_executor_contract(task, {"record_task_acceptance"})
+    assert memory_mod.ASSESSMENT_OUTCOME_GUIDANCE in executor
+    from modules.agents.prompt_context import fit_task_prompt
+
+    fitted = fit_task_prompt(
+        prompt + "\n## Task history\n" + "advisory " * 10000,
+        "system", [], "test-model", len(prompt) + 2000, 0, lambda _event: None,
+        optional_headings=workflow_mod._prompt_optional_headings("task_evaluator"), estimate_input=len,
+    )
+    assert context in fitted
+    assert memory_mod.ASSESSMENT_OUTCOME_GUIDANCE in fitted
+
+
+def test_replacement_lineage_conflict_is_rejected_before_consumer_preparation(worker_flow_case, monkeypatch):
+    controller, task, *_rest = worker_flow_case
+    parent = replace(task, task_uid="parent", recovery_context={"hypothesis_ids": ["one"]})
+    middle = replace(parent, task_uid="middle", replacement_of="parent",
+                     supersedes_criteria=[item.id for item in parent.acceptance.criteria],
+                     recovery_context={"hypothesis_ids": ["two"]})
+    child = replace(middle, task_uid="child", replacement_of="middle", recovery_context={})
+    for item in (parent, middle, child):
+        controller.state.store_task(item)
+    bindings = Mock()
+    monkeypatch.setattr(controller, "_hypothesis_consumer_bindings", bindings)
+    assert controller._prepare_hypothesis_consumer(_plan(), child) is None
+    bindings.assert_not_called()
+    assert next(item for item in controller.state.tasks if item.task_uid == "child").status == "partial_failure"
+
+
+@pytest.mark.parametrize("ids", [[], ["foreign"]])
+def test_consumer_review_rejects_inconsistent_assignment_ids(worker_flow_case, ids):
+    controller, task, *_rest = worker_flow_case
+    task.recovery_context.update({
+        "hypothesis_assignments": [{"hypothesis_ids": ["assigned"]}], "hypothesis_ids": ids,
+    })
+    with pytest.raises(WorkflowInvariantError, match="IDs do not match"):
+        controller._hypothesis_consumer_review_context(task)
