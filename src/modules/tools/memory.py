@@ -91,15 +91,23 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
 from strands import tool
 
+from modules.authentication_requirements import AuthenticationRequirement, validate_comparison_requirement
 from modules.config.system.logger import get_logger
 from modules.config.types import get_default_base_dir
 from modules.handlers.utils import filter_none_values, sanitize_toon_value
 from modules.storage import SQLiteMigrationRunner
 from modules.storage.credential_encryption import CredentialEncryptionError, CredentialPayloadCipher
+from modules.storage.workflow_json import (
+    StoredWorkflowDataError,
+    decode_workflow_json,
+    validate_workflow_model,
+)
 from modules.tools.artifact_references import (
+    extract_artifact_references,
     normalize_artifact_reference_token,
     split_delimited_reference_values,
 )
+from modules.tools.inventory_provenance import operation_provenance
 from modules.tools.semantic_enum import normalize_semantic_enum
 
 # Set up logging
@@ -122,6 +130,9 @@ class SecretExposure:
 
     kind: str
     digest: str
+    line_number: int
+    column_start: int
+    column_end: int
 
 
 _SECRET_EXPOSURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -148,15 +159,31 @@ def detect_secret_exposures(artifact_ref: str) -> list[SecretExposure]:
         text = Path(_artifact_path_from_ref(reference)).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    matches: set[tuple[str, str]] = set()
+    matches: dict[tuple[str, str], SecretExposure] = {}
     for kind, pattern in _SECRET_EXPOSURE_PATTERNS:
         for match in pattern.finditer(text):
             value = match.group(1) if kind == "named_secret" and match.lastindex else match.group(0)
             value = value.strip()
             if len(value) < 8 or re.fullmatch(r"(?:redacted|masked|example|changeme|\*+)", value, re.IGNORECASE):
                 continue
-            matches.add((kind, hashlib.sha256(value.encode("utf-8")).hexdigest()))
-    return [SecretExposure(kind=kind, digest=digest) for kind, digest in sorted(matches)]
+            match_start = match.start(1) if kind == "named_secret" and match.lastindex else match.start()
+            match_end = match.end(1) if kind == "named_secret" and match.lastindex else match.end()
+            line_start = text.rfind("\n", 0, match_start) + 1
+            key = (kind, hashlib.sha256(value.encode("utf-8")).hexdigest())
+            exposure = SecretExposure(
+                kind=kind,
+                digest=key[1],
+                line_number=text.count("\n", 0, match_start) + 1,
+                column_start=match_start - line_start + 1,
+                column_end=match_end - line_start + 1,
+            )
+            current = matches.get(key)
+            if current is None or (exposure.line_number, exposure.column_start) < (
+                current.line_number,
+                current.column_start,
+            ):
+                matches[key] = exposure
+    return [matches[key] for key in sorted(matches)]
 
 # Global configuration and client
 _MEMORY_CONFIG: dict[str, str] | None = None
@@ -194,6 +221,7 @@ DISCOVERY_PROCEDURE_LIMIT_KEYS = (
     "max_depth",
 )
 EvidenceRequirementKind = Literal[
+    "hypothesis_set",
     "artifact",
     "inventory_manifest",
     "durable_evidence",
@@ -202,6 +230,16 @@ EvidenceRequirementKind = Literal[
     "verified_finding",
     "memory",
 ]
+ASSESSMENT_OUTCOME_GUIDANCE = """An assessed_negative result requires evidence that the assigned test
+was exercised and its observations support a negative conclusion within that scope. Missing artifacts,
+unexecuted tests, failed acquisition, and unavailable prerequisites are not tested-negative results.
+Record useful observations without claiming a negative assessment; leave unsupported work incomplete.
+Recorded acceptance and execution receipts establish bookkeeping, not semantic adequacy. Review their
+support against the assigned objective. Use partial_failure for unsupported material work, and blocked
+only for a concrete external prerequisite. Repair acceptance only when sufficient evidence already
+exists; otherwise identify the missing execution evidence.
+"""
+
 AcceptanceResultStatus = Literal[
     "satisfied",
     "assessed_negative",
@@ -417,7 +455,11 @@ def inventory_manifest_contract_text() -> str:
         f"kind ({kinds}), and an optional attributes object; unassessed_gaps must be a list. "
         "The extraction summary is controller-owned and may be omitted by the producer. "
         "Put item metadata in attributes, not in a metadata field. Optional attributes.interaction is protocol-neutral "
-        "and may contain interface, operations, inputs, success_signals, failure_signals, and evidence_refs. Each input "
+        "and may contain interface, operations, inputs, success_signals, failure_signals, evidence_refs, "
+        "operation_provenance (observed|inferred), operation_provenance_by_operation "
+        "(an authoritative map covering exactly operations with observed|inferred|unknown values), "
+        "and extensions (an object of typed adapter metadata). Legacy aggregate provenance applies only "
+        "when that map is absent. Each input "
         "requires a name and may include location and type. Use HTTP operations and input locations only for HTTP "
         "items; filesystem, code-security, service, workflow, and other modules should use their native operations. "
         "Workflow maps, reports, "
@@ -496,6 +538,7 @@ class EvidenceRequirement:
 
     def __post_init__(self) -> None:
         if self.kind not in (
+            "hypothesis_set",
             "artifact",
             "inventory_manifest",
             "durable_evidence",
@@ -1137,6 +1180,7 @@ class PlanPhase:
     ] = "standard"
     dynamic_kind: str = ""
     provided_workstreams: tuple[str, ...] = ()
+    source_manifest_refs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, int) or self.id < 0:
@@ -1172,6 +1216,11 @@ class PlanPhase:
             isinstance(workstream, str) and workstream.strip() for workstream in self.provided_workstreams
         ):
             raise ValueError("phase.provided_workstreams must contain non-empty strings")
+        if not isinstance(self.source_manifest_refs, tuple) or not all(
+            isinstance(reference, str) and reference.startswith("artifact:")
+            for reference in self.source_manifest_refs
+        ):
+            raise ValueError("phase.source_manifest_refs must contain artifact references")
 
     @staticmethod
     def from_obj(obj: Any) -> "PlanPhase":
@@ -1184,6 +1233,9 @@ class PlanPhase:
             isinstance(workstream, str) and workstream.strip() for workstream in raw_workstreams
         ):
             raise ValueError("phase.provided_workstreams must be a list of non-empty strings")
+        raw_source_refs = obj.get("source_manifest_refs", [])
+        if not isinstance(raw_source_refs, list):
+            raise ValueError("phase.source_manifest_refs must be a list")
         return PlanPhase(
             id=int(obj.get("id")),
             title=str(obj.get("title", "")),
@@ -1197,6 +1249,7 @@ class PlanPhase:
             ),
             dynamic_kind=str(obj.get("dynamic_kind") or ""),
             provided_workstreams=tuple(workstream.strip() for workstream in raw_workstreams),
+            source_manifest_refs=tuple(raw_source_refs),
         )
 
     @staticmethod
@@ -1233,6 +1286,7 @@ class PlanPhase:
             "task_creation_mode": self.task_creation_mode,
             "dynamic_kind": self.dynamic_kind or None,
             "provided_workstreams": list(self.provided_workstreams),
+            "source_manifest_refs": list(self.source_manifest_refs),
         })
 
 
@@ -1581,6 +1635,8 @@ class ApplicationStore(Protocol):
 
     def credential_ids_authorized_by_task(self, operation_id: str, task_uid: str) -> set[str]: ...
 
+    def credential_ids_authorized_for_worker(self, operation_id: str, task_uid: str) -> set[str]: ...
+
     def authorize_credential_for_task(
         self, operation_id: str, credential_id: str, task_uid: str, authorization_kind: str
     ) -> None: ...
@@ -1604,6 +1660,8 @@ class ApplicationStore(Protocol):
         *,
         status: str = "discovered",
     ) -> dict[str, Any]: ...
+
+    def mark_authentication_flow_validated(self, flow_id: str) -> None: ...
 
     def create_credential_rotation_request(
         self, request_operation_id: str, credential_id: str, reason: str, maintenance_operation_id: str
@@ -1678,6 +1736,7 @@ class SQLiteApplicationStore:
         "list_credential_inventory",
         "list_authentication_flows",
         "upsert_authentication_flow",
+        "mark_authentication_flow_validated",
         "create_credential_rotation_request",
         "list_credential_rotation_requests",
         "cancel_credential_rotation_request",
@@ -1816,12 +1875,31 @@ class SQLiteApplicationStore:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             if self._sqlite_integrity_check(str(recovered_path)).lower() != "ok":
                 return False
+            self._validate_workflow_records(str(recovered_path))
             for suffix in ("-wal", "-shm", "-journal"):
                 Path(f"{source}{suffix}").unlink(missing_ok=True)
             os.replace(recovered_path, source)
             return True
         finally:
             recovered_path.unlink(missing_ok=True)
+
+    @classmethod
+    def _validate_workflow_records(cls, db_path: str) -> None:
+        """Check recovered plan/task semantics before installing a candidate database."""
+
+        store = object.__new__(cls)
+        store.db_path = db_path
+        store.read_only = True
+        store._lock = threading.RLock()
+        with closing(store._connect()) as connection:
+            operations = connection.execute(
+                "SELECT logical_target, operation_id FROM plans UNION "
+                "SELECT logical_target, operation_id FROM tasks"
+            ).fetchall()
+        for logical_target, operation_id in operations:
+            store.logical_target = logical_target
+            store.get_plan(operation_id)
+            store.get_tasks(operation_id)
 
     def _replace_with_fresh_database(self) -> None:
         """Create and atomically install a fresh migrated database after failed recovery."""
@@ -2172,9 +2250,9 @@ class SQLiteApplicationStore:
         if (
             purpose == "authentication"
             and descriptor.get("flow_version") is not None
-            and descriptor.get("provenance") != "observed_flow_discovery"
+            and descriptor.get("provenance") != "observed_worker_flow"
         ):
-            raise ValueError("authentication flow descriptor requires observed discovery provenance")
+            raise ValueError("authentication flow descriptor requires observed worker provenance")
         now = datetime.now().isoformat()
         evidence_refs = descriptor.get("evidence_refs") if isinstance(descriptor.get("evidence_refs"), list) else []
         payload = dict(descriptor)
@@ -2186,6 +2264,8 @@ class SQLiteApplicationStore:
                 "evidence_refs, discovered_operation_id, status, created_at, updated_at, last_validated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(flow_id) DO UPDATE SET descriptor = excluded.descriptor, evidence_refs = excluded.evidence_refs, "
+                "target = excluded.target, purpose = excluded.purpose, flow_kind = excluded.flow_kind, "
+                "discovered_operation_id = excluded.discovered_operation_id, "
                 "status = excluded.status, updated_at = excluded.updated_at, last_validated_at = excluded.last_validated_at",
                 (
                     flow_id, self.logical_target, target, purpose, str(payload.get("kind") or ""),
@@ -2194,6 +2274,16 @@ class SQLiteApplicationStore:
                 ),
             )
         return {"flow_id": flow_id, "target": target, "purpose": purpose, "status": status}
+
+    def mark_authentication_flow_validated(self, flow_id: str) -> None:
+        """Refresh validation bookkeeping without replacing approved mapping or historical proof."""
+
+        with self._lock, closing(self._connect()) as conn, conn:
+            conn.execute(
+                "UPDATE authentication_flow_records SET last_validated_at = ? "
+                "WHERE logical_target = ? AND flow_id = ? AND purpose = 'authentication' AND status = 'validated'",
+                (datetime.now().isoformat(), self.logical_target, flow_id),
+            )
 
     def get_credential(self, credential_id: str, *, include_payload: bool = False) -> dict[str, Any] | None:
         """Return one credential only in this logical-target boundary."""
@@ -2769,9 +2859,21 @@ class SQLiteApplicationStore:
 
     def credential_ids_authorized_by_task(self, operation_id: str, task_uid: str) -> set[str]:
         """Return checked-out or controller-authorized context credentials for one task."""
+        return self._task_authorized_credential_ids(operation_id, task_uid, ("reused_authenticated_context",))
 
+    def credential_ids_authorized_for_worker(self, operation_id: str, task_uid: str) -> set[str]:
+        """Return credentials available to a bound authentication worker, including checkout."""
+        return self._task_authorized_credential_ids(
+            operation_id, task_uid, ("authentication_worker", "reused_authenticated_context"),
+        )
+
+    def _task_authorized_credential_ids(
+        self, operation_id: str, task_uid: str, authorization_kinds: tuple[str, ...],
+    ) -> set[str]:
+        """Resolve task permissions without treating worker access as executor context access."""
         if not str(task_uid).strip():
             return set()
+        placeholders = ", ".join("?" for _ in authorization_kinds)
         with self._lock, closing(self._connect()) as conn, conn:
             selected_rows = conn.execute(
                 """
@@ -2781,20 +2883,21 @@ class SQLiteApplicationStore:
                 (self.logical_target, operation_id, task_uid),
             ).fetchall()
             authorized_rows = conn.execute(
-                """
+                f"""
                 SELECT credential_id FROM credential_task_authorizations
                 WHERE logical_target = ? AND operation_id = ? AND task_uid = ?
+                    AND authorization_kind IN ({placeholders})
                 """,
-                (self.logical_target, operation_id, task_uid),
+                (self.logical_target, operation_id, task_uid, *authorization_kinds),
             ).fetchall()
         return {str(row[0]) for row in (*selected_rows, *authorized_rows)}
 
     def authorize_credential_for_task(
         self, operation_id: str, credential_id: str, task_uid: str, authorization_kind: str
     ) -> None:
-        """Record controller authorization to use an already validated task credential context."""
+        """Record worker access or validated context access for a controller-selected credential."""
 
-        if authorization_kind != "reused_authenticated_context":
+        if authorization_kind not in {"authentication_worker", "reused_authenticated_context"}:
             raise ValueError("unsupported task credential authorization kind")
         if not str(task_uid).strip():
             raise ValueError("task_uid is required for task credential authorization")
@@ -2805,7 +2908,12 @@ class SQLiteApplicationStore:
                 INSERT INTO credential_task_authorizations (
                     logical_target, operation_id, task_uid, credential_id, authorization_kind, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(logical_target, operation_id, task_uid, credential_id) DO NOTHING
+                ON CONFLICT(logical_target, operation_id, task_uid, credential_id) DO UPDATE SET
+                    authorization_kind = CASE
+                        WHEN excluded.authorization_kind = 'reused_authenticated_context'
+                        THEN excluded.authorization_kind
+                        ELSE credential_task_authorizations.authorization_kind
+                    END
                 """,
                 (
                     self.logical_target,
@@ -2950,7 +3058,7 @@ class SQLiteApplicationStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"Unknown operation plan: {operation_id}")
-            plan = OperationPlan.from_obj(json.loads(row[0]))
+            plan = self._decode_plan(row[0], operation_id)
             known_phase_ids = {phase.id for phase in plan.phases}
             unknown_phase_ids = sorted(set(updates) - known_phase_ids)
             if unknown_phase_ids:
@@ -2982,6 +3090,45 @@ class SQLiteApplicationStore:
             )
         return patched
 
+    @staticmethod
+    def _decode_plan(raw: Any, operation_id: str) -> OperationPlan:
+        identity = dict(table="plans", operation_id=operation_id, record_id=operation_id, field="plan_data")
+        value = decode_workflow_json(raw, dict, **identity)
+        if (
+            not isinstance(value.get("objective"), str)
+            or type(value.get("current_phase")) is not int
+            or ("assessment_complete" in value and type(value["assessment_complete"]) is not bool)
+            or (
+                "total_phases" in value
+                and (
+                    type(value["total_phases"]) is not int
+                    or not isinstance(value.get("phases"), list)
+                    or value["total_phases"] != len(value["phases"])
+                )
+            )
+        ):
+            raise StoredWorkflowDataError(**identity)
+        return validate_workflow_model(OperationPlan.from_obj, value, **identity)
+
+    @staticmethod
+    def _decode_task_field(raw: Any, field: str, operation_id: str, task_uid: str) -> Any:
+        expected_type = dict if field in {"acceptance_contract", "recovery_context", "auth_context"} else list
+        value = decode_workflow_json(
+            raw, expected_type, table="tasks", operation_id=operation_id, record_id=task_uid,
+            field=field, optional=field != "acceptance_contract",
+        )
+        if field == "acceptance_contract":
+            return validate_workflow_model(
+                AcceptanceContract.from_obj, value, table="tasks", operation_id=operation_id,
+                record_id=task_uid, field=field,
+            )
+        if field == "auth_context":
+            return validate_workflow_model(
+                _normalize_auth_context, value, table="tasks", operation_id=operation_id,
+                record_id=task_uid, field=field,
+            )
+        return value
+
     def get_plan(self, operation_id: str) -> OperationPlan | None:
         """Retrieve a plan by operation_id."""
         with self._lock, closing(self._connect()) as conn, conn:
@@ -2991,7 +3138,7 @@ class SQLiteApplicationStore:
             )
             row = cursor.fetchone()
             if row:
-                return OperationPlan.from_obj(json.loads(row[0]))
+                return self._decode_plan(row[0], operation_id)
         return None
 
     def store_task(self, operation_id: str, task: Task):
@@ -3098,25 +3245,50 @@ class SQLiteApplicationStore:
             evidence = (
                 list(dict.fromkeys(str(item) for item in evidence_replacement if str(item)))
                 if evidence_replacement is not None
-                else list(json.loads(row[6] or "[]"))
+                else list(self._decode_task_field(row[6], "evidence", operation_id, task_uid))
             )
             if evidence_replacement is None:
                 for reference in additions:
                     if reference not in evidence:
                         evidence.append(reference)
-            recovery_context = dict(json.loads(row[12] or "{}"))
+            recovery_context = dict(self._decode_task_field(row[12], "recovery_context", operation_id, task_uid))
             for key in removals:
                 recovery_context.pop(key, None)
             recovery_context.update(updates)
             next_auth_context = (
                 _normalize_auth_context(auth_context)
                 if auth_context is not None
-                else _normalize_auth_context(json.loads(row[13] or "{}"))
+                else _normalize_auth_context(self._decode_task_field(row[13], "auth_context", operation_id, task_uid))
             )
             now = datetime.now().isoformat()
-            next_phase = int(phase) if phase is not None else int(row[3])
+            next_phase = int(phase) if phase is not None else row[3]
             next_status = str(status) if status is not None else str(row[4])
             next_reason = str(status_reason) if status_reason is not None else str(row[5] or "")
+            try:
+                patched_task = Task(
+                    title=row[0],
+                    objective=row[1],
+                    acceptance=self._decode_task_field(row[2], "acceptance_contract", operation_id, task_uid),
+                    phase=next_phase,
+                    status=next_status,
+                    status_reason=next_reason,
+                    evidence=evidence,
+                    task_uid=task_uid,
+                    created_at=row[7],
+                    updated_at=now,
+                    kind=row[8] or "standard",
+                    reference_id=row[9],
+                    replacement_of=row[10],
+                    supersedes_criteria=self._decode_task_field(row[11], "supersedes_criteria", operation_id, task_uid),
+                    recovery_context=recovery_context,
+                    auth_context=next_auth_context,
+                    target_scope=row[14] or "all",
+                    target_ids=self._decode_task_field(row[15], "target_ids", operation_id, task_uid),
+                )
+            except StoredWorkflowDataError:
+                raise
+            except (TypeError, ValueError):
+                raise StoredWorkflowDataError("tasks", operation_id, task_uid, "record") from None
             conn.execute(
                 "UPDATE tasks SET phase = ?, status = ?, status_reason = ?, evidence = ?, "
                 "recovery_context = ?, auth_context = ?, updated_at = ? "
@@ -3134,26 +3306,7 @@ class SQLiteApplicationStore:
                     task_uid,
                 ),
             )
-        return Task(
-            title=row[0],
-            objective=row[1],
-            acceptance=AcceptanceContract.from_obj(json.loads(row[2])),
-            phase=next_phase,
-            status=next_status,
-            status_reason=next_reason,
-            evidence=evidence,
-            task_uid=task_uid,
-            created_at=row[7],
-            updated_at=now,
-            kind=row[8] or "standard",
-            reference_id=row[9],
-            replacement_of=row[10],
-            supersedes_criteria=json.loads(row[11] or "[]"),
-            recovery_context=recovery_context,
-            auth_context=next_auth_context,
-            target_scope=row[14] or "all",
-            target_ids=json.loads(row[15] or "[]"),
-        )
+        return patched_task
 
     def get_tasks(self, operation_id: str) -> list[Task]:
         """Retrieve all tasks for an operation."""
@@ -3167,28 +3320,32 @@ class SQLiteApplicationStore:
                 (self.logical_target, operation_id),
             )
             for row in cursor:
-                tasks.append(
-                    Task(
+                try:
+                    task = Task(
                         title=row[0],
                         objective=row[1],
-                        acceptance=AcceptanceContract.from_obj(json.loads(row[2])),
+                        acceptance=self._decode_task_field(row[2], "acceptance_contract", operation_id, row[7]),
                         phase=row[3],
                         status=row[4],
                         status_reason=row[5],
-                        evidence=json.loads(row[6]),
+                        evidence=self._decode_task_field(row[6], "evidence", operation_id, row[7]),
                         task_uid=row[7],
                         created_at=row[8],
                         updated_at=row[9],
                         kind=row[10] or "standard",
                         reference_id=row[11],
                         replacement_of=row[12],
-                        supersedes_criteria=json.loads(row[13] or "[]"),
-                        recovery_context=json.loads(row[14] or "{}"),
-                        auth_context=json.loads(row[15] or "{}"),
+                        supersedes_criteria=self._decode_task_field(row[13], "supersedes_criteria", operation_id, row[7]),
+                        recovery_context=self._decode_task_field(row[14], "recovery_context", operation_id, row[7]),
+                        auth_context=self._decode_task_field(row[15], "auth_context", operation_id, row[7]),
                         target_scope=row[16] or "all",
-                        target_ids=json.loads(row[17] or "[]"),
+                        target_ids=self._decode_task_field(row[17], "target_ids", operation_id, row[7]),
                     )
-                )
+                except StoredWorkflowDataError:
+                    raise
+                except (TypeError, ValueError):
+                    raise StoredWorkflowDataError("tasks", operation_id, str(row[7]), "record") from None
+                tasks.append(task)
         return tasks
 
     def reset_failed_work(self, operation_id: str) -> tuple[OperationPlan, int, int]:
@@ -3207,7 +3364,7 @@ class SQLiteApplicationStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"Unknown operation plan: {operation_id}")
-            plan = OperationPlan.from_obj(json.loads(row[0]))
+            plan = self._decode_plan(row[0], operation_id)
             failed_tasks = conn.execute(
                 "SELECT task_uid, phase, status, status_reason FROM tasks "
                 "WHERE logical_target = ? AND operation_id = ? AND status IN ('partial_failure', 'blocked')",
@@ -3287,7 +3444,7 @@ class SQLiteApplicationStore:
             ).fetchone()
             if row is None:
                 raise ValueError(f"Unknown operation plan: {operation_id}")
-            plan = OperationPlan.from_obj(json.loads(row[0]))
+            plan = self._decode_plan(row[0], operation_id)
             known_phase_ids = {int(phase.id) for phase in plan.phases}
             unknown_phase_ids = sorted(set(requested_phase_ids) - known_phase_ids)
             if unknown_phase_ids:
@@ -4267,7 +4424,6 @@ def normalize_confidence(conf_val: Any, cap_to: float | None = None) -> str:
     return f"{num:.1f}%"
 
 
-_RE_PROOF_PACK_FILE_PATTERN = re.compile(r"artifact(?:\s+paths?)?:\s*(\S+)", re.IGNORECASE)
 
 
 def _proof_pack_path_from_value(value: Any) -> str:
@@ -4276,6 +4432,7 @@ def _proof_pack_path_from_value(value: Any) -> str:
     reference = str(value or "").strip()
     if not reference:
         raise ValueError("proof-pack path is required")
+    reference = normalize_artifact_reference_token(reference)
     if reference.startswith(("artifact:", "artifact_id:")):
         return _artifact_path_from_ref(reference)
 
@@ -4317,8 +4474,7 @@ def _has_valid_proof_pack(finding: Any) -> bool:
                     pass
                 else:
                     return True
-                matches = _RE_PROOF_PACK_FILE_PATTERN.findall(e_str)
-                file_paths = [path.strip() for paths in matches for path in paths.split(",")]
+                file_paths = extract_artifact_references(e_str, allow_legacy_labels=True)
                 for path in file_paths:
                     try:
                         _proof_pack_path_from_value(path)
@@ -4609,10 +4765,22 @@ def _assertion_matches_artifact(assertion: dict[str, Any], reference: str) -> bo
         if assertion_type == "secret_exposure":
             kind = str(assertion.get("kind") or "")
             digest = str(assertion.get("digest") or "")
-            return any(
-                exposure.kind == kind and exposure.digest == digest
-                for exposure in detect_secret_exposures(reference)
-            )
+            source_location = assertion.get("source_location")
+            for exposure in detect_secret_exposures(reference):
+                if exposure.kind != kind or exposure.digest != digest:
+                    continue
+                # A stored location verifies the original evidence locator. It is
+                # not part of the proof predicate for a fresh validation artifact.
+                if source_location and reference == assertion.get("artifact"):
+                    actual_location = {
+                        "line_number": exposure.line_number,
+                        "column_start": exposure.column_start,
+                        "column_end": exposure.column_end,
+                    }
+                    if source_location != actual_location:
+                        continue
+                return True
+            return False
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
         return False
     return False
@@ -4621,7 +4789,10 @@ def _assertion_matches_artifact(assertion: dict[str, Any], reference: str) -> bo
 def _canonical_assertion_predicate(assertion: dict[str, Any]) -> str:
     """Return an artifact-independent identity for a canonical evidence assertion."""
 
-    predicate = {key: value for key, value in assertion.items() if key not in {"artifact", "marker"}}
+    predicate = {
+        key: value for key, value in assertion.items()
+        if key not in {"artifact", "marker", "source_location"}
+    }
     if not predicate.get("type") and assertion.get("marker"):
         predicate = {"type": "literal_text", "value": str(assertion["marker"])}
     return json.dumps(
@@ -4643,7 +4814,7 @@ def _validated_evidence_assertions(
         assertions = []
     if not isinstance(assertions, list):
         raise ValueError("evidence_assertions must be a list")
-    validated: list[dict[str, str]] = []
+    validated: list[dict[str, Any]] = []
     for assertion in assertions:
         if not isinstance(assertion, dict):
             raise ValueError("each evidence assertion must be an object")
@@ -4685,6 +4856,25 @@ def _validated_evidence_assertions(
             if not kind or not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError("secret_exposure evidence assertion requires kind and SHA-256 digest")
             normalized.update({"kind": kind, "digest": digest})
+            source_location = assertion.get("source_location")
+            if source_location is not None:
+                if not isinstance(source_location, dict):
+                    raise ValueError("secret_exposure source_location must be an object")
+                line_number = source_location.get("line_number")
+                column_start = source_location.get("column_start")
+                column_end = source_location.get("column_end")
+                if any(
+                    isinstance(value, bool) or not isinstance(value, int) or value < 1
+                    for value in (line_number, column_start, column_end)
+                ) or column_end <= column_start:
+                    raise ValueError(
+                        "secret_exposure source_location requires positive line and columns with end after start"
+                    )
+                normalized["source_location"] = {
+                    "line_number": line_number,
+                    "column_start": column_start,
+                    "column_end": column_end,
+                }
         if not _assertion_matches_artifact(normalized, reference):
             raise ValueError(f"evidence assertion was not satisfied by {reference}")
         if normalized not in validated:
@@ -5144,6 +5334,19 @@ def _record_source_task_finding_receipt(
                             "expected": {},
                             "kind": {"type": "string"},
                             "digest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+                            "source_location": {
+                                "type": "object",
+                                "properties": {
+                                    "line_number": {"type": "integer", "minimum": 1},
+                                    "column_start": {"type": "integer", "minimum": 1},
+                                    "column_end": {"type": "integer", "minimum": 2},
+                                },
+                                "required": ["line_number", "column_start", "column_end"],
+                                "additionalProperties": False,
+                                "description": (
+                                    "Optional 1-based source position for the matched evidence; end column is exclusive."
+                                ),
+                            },
                         },
                         "oneOf": [
                             {"required": ["artifact", "marker"]},
@@ -6585,6 +6788,7 @@ class TaskProposalCriterion(_StrictTaskWireModel):
 class TaskProposal(_StrictTaskWireModel):
     """Small model-facing task proposal compiled into an immutable acceptance contract by Python."""
 
+    authentication_requirement: AuthenticationRequirement = Field(default_factory=AuthenticationRequirement)
     title: str = Field(min_length=1)
     objective: str = Field(min_length=1, validation_alias=AliasChoices("objective", "description"))
     basis_description: str | None = Field(default=None, description="Finite boundary; defaults to objective")
@@ -6804,6 +7008,10 @@ class TaskProposal(_StrictTaskWireModel):
 
 
 _TASK_PROPOSAL_FIELD_CORRECTIONS = {
+    "authentication_requirement": (
+        'object with comparison (none, account, role, tenant) and roles array',
+        '"authentication_requirement":{"comparison":"none","roles":["member"]}',
+    ),
     "title": ('non-empty string', '"title":"Assess login"'),
     "objective": ('non-empty string', '"objective":"Test the assigned login route"'),
     "basis_description": ('non-empty string when supplied', '"basis_description":"Bounded login assessment"'),
@@ -6890,7 +7098,7 @@ class TaskProposalValidationError(ValueError):
 
 @dataclass
 class TaskProposalRepairGuard:
-    """Restore previously valid proposals before a corrective task-creation mutation."""
+    """Preserve unaffected proposals while leaving controller-rejected work editable."""
 
     baseline: list[TaskProposal | None] = field(default_factory=list)
     valid_indexes: set[int] = field(default_factory=set)
@@ -6903,7 +7111,7 @@ class TaskProposalRepairGuard:
             return
         if self.valid_indexes and len(tasks) != len(self.baseline):
             return
-        baseline = list(self.baseline) if self.baseline else [None] * len(tasks)
+        baseline = list(self.baseline) if self.valid_indexes else [None] * len(tasks)
         valid_indexes = set(self.valid_indexes)
         for index, task in enumerate(tasks):
             if index in valid_indexes:
@@ -6919,30 +7127,37 @@ class TaskProposalRepairGuard:
         self.valid_indexes = valid_indexes
 
     def mark_rejected(self, error: Exception) -> None:
-        """Allow the model to repair the one proposal rejected by controller validation."""
+        """Unlock an indexed rejection, or the whole batch when its scope is unknown."""
 
         diagnostic = getattr(error, "diagnostic", {})
         proposal_index = diagnostic.get("proposal_index") if isinstance(diagnostic, dict) else None
-        if isinstance(proposal_index, int) and proposal_index in self.valid_indexes:
-            self.valid_indexes.remove(proposal_index)
+        if type(proposal_index) is int and 0 <= proposal_index < len(self.baseline):
+            self.valid_indexes.discard(proposal_index)
+        else:
+            self.valid_indexes.clear()
+            self.baseline.clear()
+
+    @staticmethod
+    def _signature(tasks: TaskProposalList) -> str:
+        return json.dumps(
+            [proposal.model_dump(mode="json") if isinstance(proposal, TaskProposal) else proposal
+             for proposal in tasks],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
 
     def restore(self, tasks: TaskProposalList) -> TaskProposalList:
-        """Prevent an LLM correction from changing proposals that were already valid."""
+        """Preserve unaffected proposals and record every effective submission, even invalid shapes."""
 
-        if not self.valid_indexes:
-            return tasks
-        if len(tasks) != len(self.baseline):
+        self.last_submitted_signature = self._signature(tasks)
+        if self.valid_indexes and len(tasks) != len(self.baseline):
             raise ValueError("task-creator repair must preserve the original proposal count and order")
         restored = list(tasks)
         for index in self.valid_indexes:
             baseline = self.baseline[index]
             if baseline is not None:
                 restored[index] = baseline
-        self.last_submitted_signature = json.dumps(
-            [proposal.model_dump(mode="json") for proposal in restored],
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        self.last_submitted_signature = self._signature(restored)
         return restored
 
 
@@ -6990,6 +7205,7 @@ _TASK_PROPOSAL_INPUT_SCHEMA = {
                 ],
                 "required": ["title", "objective", "criteria"],
                 "properties": {
+                    "authentication_requirement": AuthenticationRequirement.model_json_schema(),
                     "title": {"type": "string", "minLength": 1},
                     "objective": {"type": "string", "minLength": 1},
                     "basis_description": {"type": ["string", "null"]},
@@ -7340,6 +7556,8 @@ def _explicit_service_references(
     url_matches = list(_EXPLICIT_SERVICE_URL_REFERENCE_PATTERN.finditer(text or ""))
     for match in url_matches:
         reference = match.group(0).rstrip(".,;:)]}")
+        if reference.lower() in {"scheme://host:port", "scheme://host", "protocol://host:port"}:
+            continue
         if reference and reference not in seen:
             references.append(reference)
             seen.add(reference)
@@ -7706,6 +7924,7 @@ def _deterministic_inventory_candidates() -> tuple[list[dict[str, Any]], int]:
                     attributes["interaction"] = {
                         "interface": "http",
                         "operations": operations,
+                        "operation_provenance": "observed",
                         "inputs": list({json.dumps(item, sort_keys=True): item for item in inputs}.values()),
                         "evidence_refs": [canonical_artifact_reference(path)],
                     }
@@ -7812,12 +8031,19 @@ def _normalize_inventory_interaction(item_id: str, attributes: dict[str, Any]) -
         "success_signals",
         "failure_signals",
         "evidence_refs",
+        "operation_provenance",
+        "operation_provenance_by_operation",
+        "extensions",
     }
     unknown = sorted(set(interaction) - allowed)
     if unknown:
         raise ValueError(
             f"inventory manifest item {item_id} attributes.interaction has unsupported fields: {', '.join(unknown)}"
         )
+    if "operation_provenance" in interaction and interaction["operation_provenance"] not in ("observed", "inferred"):
+        raise ValueError(f"inventory manifest item {item_id} operation_provenance must be observed|inferred")
+    if "extensions" in interaction and not isinstance(interaction["extensions"], dict):
+        raise ValueError(f"inventory manifest item {item_id} interaction.extensions must be an object")
     changed = False
     interface = interaction.get("interface")
     if interface is not None and not str(interface).strip():
@@ -7835,6 +8061,7 @@ def _normalize_inventory_interaction(item_id: str, attributes: dict[str, Any]) -
         if values != normalized_values:
             interaction[field_name] = normalized_values
             changed = True
+    operation_provenance(interaction)
     inputs = interaction.get("inputs")
     if inputs is not None:
         if not isinstance(inputs, list):
@@ -7868,7 +8095,12 @@ def _normalize_inventory_interaction(item_id: str, attributes: dict[str, Any]) -
     return changed
 
 
-def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> tuple[dict[str, Any], str]:
+def _load_inventory_manifest(
+    reference: str,
+    *,
+    reconcile: bool = False,
+    persist_normalization: bool = True,
+) -> tuple[dict[str, Any], str]:
     path = _artifact_path_from_ref(reference)
     try:
         with open(path, "rb") as manifest_file:
@@ -7913,7 +8145,7 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> tupl
     if missing_schema_version and compatibility_shape:
         manifest["schema_version"] = INVENTORY_MANIFEST_SCHEMA_VERSION
         normalized_root = True
-    if normalized_root:
+    if normalized_root and persist_normalization:
         _write_inventory_manifest_atomically(path, manifest)
     if removed_count:
         logger.info(
@@ -8033,7 +8265,7 @@ def _load_inventory_manifest(reference: str, *, reconcile: bool = False) -> tupl
         )
     if reconcile:
         manifest = _reconcile_inventory_manifest(path, manifest)
-    elif normalized_inventory:
+    elif normalized_inventory and persist_normalization:
         _write_inventory_manifest_atomically(path, manifest)
     canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
     return manifest, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -8075,7 +8307,11 @@ def _canonical_inventory_url(value: str, registered_target: str | None) -> str:
 def _task_evidence_artifact_paths(task: Task) -> set[str]:
     paths = set()
     for evidence in task.evidence:
-        raw_path = str(evidence).removeprefix("artifact:")
+        try:
+            reference = normalize_artifact_reference_token(evidence)
+        except (TypeError, ValueError):
+            continue
+        raw_path = reference.removeprefix("artifact:")
         root = _operation_output_root()
         candidate = raw_path if os.path.isabs(raw_path) else os.path.join(root, raw_path)
         resolved = os.path.realpath(candidate)
@@ -8244,7 +8480,22 @@ def _proposal_procedure_methods(
     _validate_synthesis_execution_model(proposal, phase_task_contract)
     if _is_supported_controller_synthesis(proposal, phase_task_contract):
         return ["controller_synthesis"]
-    return proposal.methods
+    return merge_workstream_procedure_methods(proposal.methods, proposal.workstream, phase_task_contract)
+
+
+def merge_workstream_procedure_methods(
+    methods: Iterable[str],
+    workstream: str,
+    contract: Any | None,
+    targets: Iterable[OperationTarget] = (),
+) -> list[str]:
+    """Apply only the active module's explicitly declared workstream requirements."""
+
+    requirements = getattr(contract, "required_methods_by_workstream", {})
+    required = requirements.get(workstream, ())
+    if not required:
+        return list(methods)
+    return canonical_procedure_methods([*methods, *required], targets)
 
 
 def canonical_procedure_methods(
@@ -8320,7 +8571,9 @@ def _proposal_execution_requirements(
     selected_targets = [target for target in plan.targets if target.target_id in selected_ids]
     routes = _procedure_proposal_endpoint_routes(proposal, selected_targets)
     subjects = routes or [f"target:{target_id}" for target_id in selected_ids]
-    canonical_methods = canonical_procedure_methods(proposal.methods, selected_targets)
+    canonical_methods = canonical_procedure_methods(
+        _proposal_procedure_methods(proposal, phase_task_contract), selected_targets
+    )
     method_text = ", ".join(dict.fromkeys(canonical_methods))
     return tuple(
         ExecutionRequirement(
@@ -8770,7 +9023,7 @@ def _completed_coverage_item_ids(
     completed: set[str] = set()
     store = _get_database_store()
     list_results = getattr(store, "list_task_acceptance_results", None)
-    for task in existing_tasks:
+    for task in current_workflow_tasks(existing_tasks):
         if (
             task.phase != phase
             or task.acceptance.mode != "coverage"
@@ -8868,6 +9121,7 @@ def _create_tasks_from_proposals(
     coverage_item_ids: set[str] | None = None,
     hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
     hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    requires_hypotheses: bool = False,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -8879,7 +9133,9 @@ def _create_tasks_from_proposals(
         [Any, TaskProposal, dict[str, Any], list[str], list[OperationTarget]], str
     ] | None = None,
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
+    task_transformer: Callable[[list[Task], list[Task]], list[Task]] | None = None,
     reject_duplicate_proposals: bool = False,
+    task_sink: Callable[[list[Task]], None] | None = None,
 ) -> str:
     """Create pending tasks for the active phase from concise task proposals.
 
@@ -8909,13 +9165,20 @@ def _create_tasks_from_proposals(
 
         proposals = normalize_contract_bound_task_proposals(proposals)
         validate_phase_task_proposals(phase_task_contract, proposals)
+        proposals = [
+            proposal.model_copy(update={"methods": _proposal_procedure_methods(proposal, phase_task_contract)})
+            if proposal.inferred_basis_kind == "procedure" and proposal.task_role != "synthesis" else proposal
+            for proposal in proposals
+        ]
     if proposal_preflight_validator is not None:
         proposal_preflight_validator(proposals)
     if coverage_item_ids is not None:
         coverage_families = [_proposal_coverage_family(proposal) for proposal in proposals]
-        if any(family == "default" for family in coverage_families):
-            raise ValueError(
-                "controller-bound inventory batch requires every snapshot proposal to declare a non-empty workstream"
+        missing_workstreams = [index for index, family in enumerate(coverage_families) if family == "default"]
+        if missing_workstreams:
+            raise TaskProposalValidationError(
+                "controller-bound inventory batch requires every snapshot proposal to declare a non-empty workstream",
+                proposal_index=missing_workstreams[0] if len(missing_workstreams) == 1 else None,
             )
         if len(set(coverage_families)) != len(coverage_families):
             raise ValueError(
@@ -8935,6 +9198,12 @@ def _create_tasks_from_proposals(
     unresolved_gaps: list[str] = []
 
     for proposal_index, proposal in enumerate(proposals):
+        matrix_expansion = (
+            task_transformer is not None and phase_task_contract is not None
+            and proposal.workstream in phase_task_contract.authentication_matrix_workstreams
+        )
+        if not matrix_expansion:
+            validate_comparison_requirement(proposal.authentication_requirement)
         proposal = _resolve_proposal_snapshot_refs(proposal, existing_tasks)
         title = proposal.title.strip()
         objective = proposal.objective.strip()
@@ -8956,12 +9225,16 @@ def _create_tasks_from_proposals(
             ]
             finding_refs = list(dict.fromkeys(finding_refs))
             if not finding_refs:
-                raise ValueError("finding-dependent task proposal requires at least one canonical finding_refs entry")
+                raise TaskProposalValidationError(
+                    "finding-dependent task proposal requires at least one canonical finding_refs entry",
+                    proposal_index=proposal_index,
+                )
             invalid_finding_refs = sorted(set(finding_refs) - required_finding_refs)
             if invalid_finding_refs:
-                raise ValueError(
+                raise TaskProposalValidationError(
                     "finding-dependent task proposal includes unavailable finding_refs: "
-                    + ", ".join(invalid_finding_refs)
+                    + ", ".join(invalid_finding_refs),
+                    proposal_index=proposal_index,
                 )
         validation_auth_context: dict[str, Any] = {}
         validation_auth_binding: dict[str, Any] = {}
@@ -8980,8 +9253,9 @@ def _create_tasks_from_proposals(
                 for binding in bindings
             }
             if len(binding_signatures) != 1:
-                raise ValueError(
-                    "finding-dependent task proposal mixes incompatible authentication contexts or target scopes"
+                raise TaskProposalValidationError(
+                    "finding-dependent task proposal mixes incompatible authentication contexts or target scopes",
+                    proposal_index=proposal_index,
                 )
             binding = bindings[0]
             auth_context = binding.get("auth_context") if isinstance(binding, dict) else None
@@ -8996,20 +9270,39 @@ def _create_tasks_from_proposals(
         if replacement_of is not None:
             parent = next((task for task in existing_tasks if task.task_uid == replacement_of), None)
             if parent is None:
-                raise ValueError(f"replacement_of references unknown task {replacement_of}")
+                raise TaskProposalValidationError(
+                    f"replacement_of references unknown task {replacement_of}",
+                    proposal_index=proposal_index,
+                )
+            if "authentication_requirement" not in proposal.model_fields_set:
+                proposal = proposal.model_copy(update={
+                    "authentication_requirement": AuthenticationRequirement.model_validate(
+                        parent.recovery_context.get("authentication_requirement", {}),
+                    ),
+                })
             if parent.phase != current_phase:
-                raise ValueError("replacement task must remain in the parent task's phase")
+                raise TaskProposalValidationError(
+                    "replacement task must remain in the parent task's phase",
+                    proposal_index=proposal_index,
+                )
             if parent.status not in {"partial_failure", "blocked"}:
-                raise ValueError("replacement_of must reference a partial_failure or blocked task")
+                raise TaskProposalValidationError(
+                    "replacement_of must reference a partial_failure or blocked task",
+                    proposal_index=proposal_index,
+                )
             parent_criteria = {criterion.id for criterion in parent.acceptance.criteria}
             if not supersedes_criteria or not set(supersedes_criteria).issubset(parent_criteria):
                 allowed_criteria = ", ".join(sorted(parent_criteria)) or "none"
-                raise ValueError(
+                raise TaskProposalValidationError(
                     "supersedes_criteria must identify existing acceptance criteria on the parent task; "
-                    f"allowed criterion IDs: {allowed_criteria}"
+                    f"allowed criterion IDs: {allowed_criteria}",
+                    proposal_index=proposal_index,
                 )
         elif supersedes_criteria:
-            raise ValueError("supersedes_criteria requires replacement_of")
+            raise TaskProposalValidationError(
+                "supersedes_criteria requires replacement_of",
+                proposal_index=proposal_index,
+            )
         proposal_created_count = 0
         proposal_duplicate_count = 0
         target_scope, target_ids = _validate_task_target_scope(
@@ -9020,7 +9313,18 @@ def _create_tasks_from_proposals(
         selected_targets = [
             target for target in plan.targets if not target_ids or target.target_id in set(target_ids)
         ]
-        planning_context = {}
+        planning_context = {"authentication_requirement": proposal.authentication_requirement.model_dump()}
+        if (
+            phase_task_contract is not None
+            and proposal.workstream in phase_task_contract.authentication_comparison_workstreams
+            and not matrix_expansion
+            and proposal.authentication_requirement.comparison == "none"
+            and not validation_auth_binding
+        ):
+            raise TaskProposalValidationError(
+                "comparison workstream requires an explicit authentication comparison kind",
+                proposal_index=proposal_index,
+            )
         if proposal_preflight_validator is not None:
             planning_context["task_preflight_validated"] = True
         if phase_task_contract is not None:
@@ -9049,11 +9353,15 @@ def _create_tasks_from_proposals(
             [*existing_tasks, *staged_tasks],
         )
         if coverage_item_ids is not None and acceptance.mode != "coverage":
-            raise ValueError("task-creation batch requires a snapshot-based proposal")
+            raise TaskProposalValidationError(
+                "task-creation batch requires a snapshot-based proposal",
+                proposal_index=proposal_index,
+            )
         if coverage_item_ids is not None and phase_objective and _is_generic_snapshot_proposal(proposal):
-            raise ValueError(
+            raise TaskProposalValidationError(
                 "snapshot proposal must describe the active phase's distinct objective; "
-                "generic endpoint assessment is not allowed"
+                "generic endpoint assessment is not allowed",
+                proposal_index=proposal_index,
             )
 
         acceptance_groups = [(title, objective, acceptance, target_scope, target_ids)]
@@ -9061,13 +9369,16 @@ def _create_tasks_from_proposals(
             coverage_family = _proposal_coverage_family(proposal)
             artifact_ref = next(ref for ref in acceptance.basis.source_refs if ref.startswith("artifact:"))
             if expected_snapshot_ref is not None and artifact_ref != expected_snapshot_ref:
-                raise ValueError(
+                raise TaskProposalValidationError(
                     "task-creation batch requires snapshot reference "
-                    f"{expected_snapshot_ref}; received {artifact_ref}"
+                    f"{expected_snapshot_ref}; received {artifact_ref}",
+                    proposal_index=proposal_index,
                 )
             manifest, snapshot_hash = _load_inventory_manifest(artifact_ref)
-            completed_ids = _completed_coverage_item_ids(
-                existing_tasks,
+            completed_ids = set() if matrix_expansion else _completed_coverage_item_ids(
+                [task for task in existing_tasks if AuthenticationRequirement.model_validate(
+                    task.recovery_context.get("authentication_requirement", {}),
+                ) == proposal.authentication_requirement],
                 snapshot_hash,
                 current_phase,
                 coverage_family,
@@ -9092,9 +9403,10 @@ def _create_tasks_from_proposals(
                     if group_ids.isdisjoint(coverage_item_ids):
                         continue
                     if not group_ids.issubset(coverage_item_ids):
-                        raise ValueError(
+                        raise TaskProposalValidationError(
                             "task-creation batch split an atomic inventory route group: "
-                            f"{route_label}"
+                            f"{route_label}",
+                            proposal_index=proposal_index,
                         )
                 remaining_ids = [item_id for item_id in item_ids if item_id not in completed_ids]
                 if not remaining_ids:
@@ -9268,6 +9580,20 @@ def _create_tasks_from_proposals(
                 })
                 if source_artifact_refs:
                     group_planning_context["hypothesis_source_artifact_refs"] = source_artifact_refs
+            if requires_hypotheses:
+                if group_acceptance.basis.kind != "snapshot" or not group_acceptance.basis.item_ids:
+                    raise TaskProposalValidationError(
+                        "hypothesis producers require assigned frozen inventory subjects",
+                        proposal_index=proposal_index,
+                    )
+                group_planning_context["hypothesis_operation_id"] = _operation_id()
+                group_acceptance = replace(
+                    group_acceptance, manifest_hash="", criteria=tuple(
+                        replace(criterion, evidence_requirements=(
+                            *criterion.evidence_requirements, EvidenceRequirement(kind="hypothesis_set"),
+                        )) for criterion in group_acceptance.criteria
+                    ),
+                )
             group_identity = _frozen_task_identity(
                 group_title,
                 group_objective,
@@ -9277,7 +9603,7 @@ def _create_tasks_from_proposals(
                 current_phase,
                 coverage_family,
             )
-            if any(
+            if not matrix_expansion and any(
                 _frozen_task_identity(
                     task.title,
                     task.objective,
@@ -9287,6 +9613,9 @@ def _create_tasks_from_proposals(
                     task.phase,
                     _task_coverage_family(task),
                 ) == group_identity
+                and AuthenticationRequirement.model_validate(
+                    task.recovery_context.get("authentication_requirement", {})
+                ) == proposal.authentication_requirement
                 for task in [*existing_tasks, *staged_tasks]
                 if task.status in {"active", "pending", "done"}
             ):
@@ -9302,7 +9631,7 @@ def _create_tasks_from_proposals(
                 group_target_ids,
                 coverage_family,
             )
-            if any(
+            if not matrix_expansion and any(
                 _semantic_cross_phase_task_identity(
                     task.title,
                     task.objective,
@@ -9311,6 +9640,9 @@ def _create_tasks_from_proposals(
                     task.target_ids,
                     _task_coverage_family(task),
                 ) == cross_phase_identity
+                and AuthenticationRequirement.model_validate(
+                    task.recovery_context.get("authentication_requirement", {})
+                ) == proposal.authentication_requirement
                 for task in [*existing_tasks, *staged_tasks]
                 if task.status in {"active", "pending", "done"}
             ):
@@ -9350,8 +9682,14 @@ def _create_tasks_from_proposals(
             "task_preflight:duplicate_task: generated proposal duplicates existing durable workflow work"
         )
 
-    for task in staged_tasks:
-        client.store_task(task=task, user_id=user_id)
+    if task_transformer is not None:
+        staged_tasks = task_transformer(staged_tasks, existing_tasks)
+
+    if task_sink is not None:
+        task_sink(staged_tasks)
+    else:
+        for task in staged_tasks:
+            client.store_task(task=task, user_id=user_id)
 
     response: dict[str, Any] = {
         "complete": True,
@@ -9397,6 +9735,7 @@ def build_create_tasks_submitter(
     coverage_item_ids: set[str] | None = None,
     hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
     hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    requires_hypotheses: bool = False,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -9408,7 +9747,9 @@ def build_create_tasks_submitter(
         [Any, TaskProposal, dict[str, Any], list[str], list[OperationTarget]], str
     ] | None = None,
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
+    task_transformer: Callable[[list[Task], list[Task]], list[Task]] | None = None,
     reject_duplicate_proposals: bool = False,
+    task_sink: Callable[[list[Task]], None] | None = None,
     repair_guard: TaskProposalRepairGuard | None = None,
     invocation_observer: Callable[[dict[str, Any], Any, Exception | None], None] | None = None,
 ) -> Callable[[TaskProposalList], str]:
@@ -9431,6 +9772,7 @@ def build_create_tasks_submitter(
                 coverage_item_ids=coverage_item_ids,
                 hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
                 hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
+                requires_hypotheses=requires_hypotheses,
                 expected_snapshot_ref=expected_snapshot_ref,
                 phase_title=phase_title,
                 phase_objective=phase_objective,
@@ -9440,7 +9782,9 @@ def build_create_tasks_submitter(
                 phase_task_contract=phase_task_contract,
                 execution_owner_resolver=execution_owner_resolver,
                 proposal_preflight_validator=proposal_preflight_validator,
+                task_transformer=task_transformer,
                 reject_duplicate_proposals=reject_duplicate_proposals,
+                task_sink=task_sink,
             )
         except Exception as error:
             if invocation_observer is not None:
@@ -9461,6 +9805,7 @@ def build_create_tasks_tool(
     coverage_item_ids: set[str] | None = None,
     hypothesis_source_task_uids_by_item_id: dict[str, tuple[str, ...]] | None = None,
     hypothesis_source_artifact_refs_by_item_id: dict[str, tuple[str, ...]] | None = None,
+    requires_hypotheses: bool = False,
     expected_snapshot_ref: str | None = None,
     phase_title: str = "",
     phase_objective: str = "",
@@ -9471,6 +9816,7 @@ def build_create_tasks_tool(
         [Any, TaskProposal, dict[str, Any], list[str], list[OperationTarget]], str
     ] | None = None,
     proposal_preflight_validator: Callable[[list[TaskProposal]], None] | None = None,
+    task_transformer: Callable[[list[Task], list[Task]], list[Task]] | None = None,
     reject_duplicate_proposals: bool = False,
     repair_guard: TaskProposalRepairGuard | None = None,
     invocation_observer: Callable[[dict[str, Any], Any, Exception | None], None] | None = None,
@@ -9482,6 +9828,7 @@ def build_create_tasks_tool(
         coverage_item_ids=coverage_item_ids,
         hypothesis_source_task_uids_by_item_id=hypothesis_source_task_uids_by_item_id,
         hypothesis_source_artifact_refs_by_item_id=hypothesis_source_artifact_refs_by_item_id,
+        requires_hypotheses=requires_hypotheses,
         expected_snapshot_ref=expected_snapshot_ref,
         phase_title=phase_title,
         phase_objective=phase_objective,
@@ -9490,6 +9837,7 @@ def build_create_tasks_tool(
         phase_task_contract=phase_task_contract,
         execution_owner_resolver=execution_owner_resolver,
         proposal_preflight_validator=proposal_preflight_validator,
+        task_transformer=task_transformer,
         reject_duplicate_proposals=reject_duplicate_proposals,
         repair_guard=repair_guard,
         invocation_observer=invocation_observer,
@@ -9571,6 +9919,27 @@ def _validate_acceptance_result_evidence(
         else:
             raise _acceptance_evidence_reference_error()
     for requirement in criterion.evidence_requirements:
+        if requirement.kind == "hypothesis_set":
+            from modules.tools.hypotheses import hypothesis_binding, load_hypothesis_set
+
+            bound = hypothesis_binding(task).get("artifact_ref")
+            if bound:
+                load_hypothesis_set(bound, task, _operation_id())
+            matching = 0
+            for reference in references:
+                try:
+                    load_hypothesis_set(reference, task, _operation_id())
+                except (OSError, TypeError, ValueError):
+                    continue
+                matching += 1
+            if matching < requirement.min_count:
+                raise ValueError(
+                    "Include the published hypothesis_set artifact reference returned by record_hypotheses "
+                    "in evidence_refs. The submitted references do not include enough valid hypothesis_set "
+                    "artifacts bound to this task. If already published, reuse its returned artifact reference; "
+                    "otherwise publish it with record_hypotheses first."
+                )
+            continue
         if requirement.kind == "inventory_manifest":
             matching = 0
             rejected = []
@@ -10152,6 +10521,7 @@ def build_record_task_acceptance_tool(
     task_uid: str,
     task: Task | None = None,
     execution_evidence_resolver: Callable[[Task, AcceptanceCriterion], dict[str, list[str]]] | None = None,
+    acceptance_reconciler: Callable[[Task, dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Any:
     """Build a model-facing acceptance tool bound to one controller-selected task."""
 
@@ -10236,11 +10606,23 @@ def build_record_task_acceptance_tool(
     ) -> str:
         status = _normalize_acceptance_status_alias(status)
         disposition = _normalize_acceptance_disposition_alias(disposition)
-        evidence_refs = split_delimited_reference_values(evidence_refs, allow_delimited_strings=True)
         current_task = next(
             (item for item in _get_database_store().get_tasks(_operation_id()) if item.task_uid == normalized_uid),
             task,
         )
+        payload = {"status": status, "disposition": disposition, "summary": summary, "evidence_refs": evidence_refs}
+        if any(requirement.kind == "hypothesis_set" for requirement in criterion.evidence_requirements):
+            from modules.tools.hypotheses import bind_hypothesis_acceptance
+
+            payload = bind_hypothesis_acceptance(current_task, _operation_id(), payload)
+        if acceptance_reconciler is not None:
+            payload = acceptance_reconciler(current_task, payload)
+        status, disposition, summary, evidence_refs = (
+            payload["status"], payload["disposition"], payload["summary"], payload["evidence_refs"]
+        )
+        status = _normalize_acceptance_status_alias(status)
+        disposition = _normalize_acceptance_disposition_alias(disposition)
+        evidence_refs = split_delimited_reference_values(evidence_refs, allow_delimited_strings=True)
         receipts = _task_execution_receipts(current_task, criterion)
         if execution_evidence_resolver is not None:
             resolved = execution_evidence_resolver(current_task, criterion)
@@ -10367,6 +10749,7 @@ def build_record_task_acceptance_tool(
     candidates, supply every returned finding_ref represented by this acceptance. existing_finding always requires
     an explicit finding reference.
     Use observation for useful non-finding results and no_vulnerability for negative results.
+    {ASSESSMENT_OUTCOME_GUIDANCE}
 
 Current task-created finding candidates: {finding_refs_text}. For finding_candidate, include one or more of these
 references that the acceptance represents.
@@ -10969,11 +11352,7 @@ class QdrantMemoryClient:
         """
         op_id = _operation_id(operation_id)
 
-        try:
-            return _get_database_store().get_plan(op_id)
-        except Exception as e:
-            logger.error(f"Error retrieving active plan: {e}")
-            return None
+        return _get_database_store().get_plan(op_id)
 
     def _select_latest_by_uid(
             self, entries: list[dict[str, Any]], uid_key: str

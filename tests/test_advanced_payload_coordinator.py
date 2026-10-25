@@ -116,47 +116,6 @@ def test_advanced_payload_normalizes_supported_aliases(monkeypatch):
         assert result["test_type"] == canonical
 
 
-def test_advanced_payload_retries_xss_with_post_and_keeps_successful_results(monkeypatch):
-    methods = []
-    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": ["dalfox"], "failed": []})
-    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda *_args, **_kwargs: ["query"])
-
-    def xss(request_config, *_args, **_kwargs):
-        methods.append(request_config.http_method)
-        return [] if request_config.http_method == "GET" else [{"vulnerable": True, "parameter": "query"}]
-
-    monkeypatch.setattr(apc, "_coordinate_xss_testing", xss)
-    monkeypatch.setattr(apc, "_analyze_payload_intelligence", lambda _results: {"attack_vectors": []})
-    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda *_args: ["verify"])
-
-    result = json.loads(apc.advanced_payload_coordinator("https://xss-retry.example", test_type="xss"))
-
-    assert methods == ["GET", "POST"]
-    assert result["http_method"] == "POST"
-    assert result["vulnerabilities"] == [{"vulnerable": True, "parameter": "query"}]
-    assert result["recommendations"] == ["verify"]
-
-
-def test_advanced_payload_retries_injection_then_restores_get_when_post_has_no_finding(monkeypatch):
-    methods = []
-    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": ["commix"]})
-    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda *_args, **_kwargs: ["path"])
-
-    def injection(request_config, *_args, **_kwargs):
-        methods.append(request_config.http_method)
-        return [{"vulnerable": False, "parameter": "path"}]
-
-    monkeypatch.setattr(apc, "_coordinate_injection_testing", injection)
-    monkeypatch.setattr(apc, "_analyze_payload_intelligence", lambda _results: {"attack_vectors": []})
-    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda *_args: [])
-
-    result = json.loads(apc.advanced_payload_coordinator("https://lfi-retry.example", test_type="lfi"))
-
-    assert methods == ["GET", "POST"]
-    assert result["http_method"] == "GET"
-    assert result["payload_results"] == [{"vulnerable": False, "parameter": "path"}]
-
-
 # -------------------------
 # _b64
 # -------------------------
@@ -323,7 +282,6 @@ def test_parse_sstimap_output_query_param():
 
 def test_parse_sstimap_output_no_marker_returns_empty():
     assert apc._parse_sstimap_output("nothing here") == []
-
 
 
 # -------------------------
@@ -985,78 +943,6 @@ def test_advanced_payload_coordinator_ssti_runs_only_ssti_injection_and_passes_f
     assert any(v.get("injection_type") == "SSTI" and v.get("vulnerable") is True for v in data["vulnerabilities"])
 
 
-def test_coordinator_ssti_retries_post_when_get_produces_no_ssti_vulns(monkeypatch):
-    calls = {"inj": []}
-
-    # Phase 1: tools setup (avoid tool execution)
-    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"success": True, "tools": [], "failed": []})
-
-    # Phase 2: parameter discovery should return something on GET
-    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda rc, provided_params=None, tools=None: ["name"])
-
-    # XSS/CORS should not run for ssti-only mode
-    monkeypatch.setattr(apc, "_coordinate_xss_testing", lambda *a, **k: (_ for _ in ()).throw(AssertionError("xss should not run for test_type='ssti'")))
-    monkeypatch.setattr(apc, "_test_cors_configurations", lambda *a, **k: (_ for _ in ()).throw(AssertionError("cors should not run for test_type='ssti'")))
-
-    # Phase 5: injection testing — GET yields *no SSTI vulns*, POST yields a vuln
-    def fake_injection_testing(request_config: apc.RequestConfig, parameters, tools=None, focus_injection_types=None, verbose=False):
-        calls["inj"].append(request_config.http_method)
-        assert focus_injection_types == {"SSTI"}
-
-        if request_config.http_method.upper() == "GET":
-            return [
-                {
-                    "vulnerable": False,
-                    "injection_type": "Multiple injection types",
-                    "parameter": "name",
-                    "tool": "fake",
-                }
-            ]
-
-        return [
-            {
-                "vulnerable": True,
-                "injection_type": "SSTI",
-                "parameter": "name",
-                "payload": "{{7*7}}",
-                "url": "http://example.test/page?name=%7B%7B7*7%7D%7D",
-                "method": request_config.http_method,
-                "evidence": "Template evaluation detected",
-                "tool": "fake",
-            }
-        ]
-
-    monkeypatch.setattr(apc, "_coordinate_injection_testing", fake_injection_testing)
-
-    # Keep analysis/recs deterministic
-    monkeypatch.setattr(
-        apc,
-        "_analyze_payload_intelligence",
-        lambda payload_results: {
-            "severity_distribution": {"SSTI": 1},
-            "attack_vectors": ["ssti"],
-            "bypass_techniques": [],
-            "exploitation_chains": [],
-        },
-    )
-    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda test_type, results: ["REC"])
-
-    out = apc.advanced_payload_coordinator(
-        "http://example.test/page",
-        test_type="ssti",
-        http_method="GET",
-    )
-
-    # Injection should run GET then POST (because GET produced no SSTI vulns)
-    assert calls["inj"] == ["GET", "POST"]
-
-    data = json.loads(out)
-    assert data["http_method"] == "POST"
-    assert data["test_type"] == "ssti"
-    assert data["counts"]["vulnerabilities"] == 1
-    assert any(v.get("injection_type") == "SSTI" and v.get("method") == "POST" and v.get("vulnerable") is True for v in data["vulnerabilities"])
-
-
 # -------------------------
 # command_injection test_type orchestration
 # -------------------------
@@ -1133,90 +1019,6 @@ def test_advanced_payload_coordinator_ldap_injection_runs_only_ldap_injection_an
     )
 
 
-def test_coordinator_ldap_injection_retries_post_when_get_produces_no_ldap_injection_vulns(monkeypatch):
-    calls = {"inj": []}
-
-    # Phase 1: tools setup (avoid tool execution)
-    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"success": True, "tools": [], "failed": []})
-
-    # Phase 2: parameter discovery should return something on GET
-    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda rc, provided_params=None, tools=None: ["name"])
-
-    # XSS/CORS should not run for ldap_injection-only mode
-    monkeypatch.setattr(
-        apc,
-        "_coordinate_xss_testing",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("xss should not run for test_type='ldap_injection'")),
-    )
-    monkeypatch.setattr(
-        apc,
-        "_test_cors_configurations",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("cors should not run for test_type='ldap_injection'")),
-    )
-
-    # Phase 5: injection testing — GET yields *no ldap injection vulns*, POST yields a vuln
-    def fake_injection_testing(request_config: apc.RequestConfig, parameters, tools=None, focus_injection_types=None, verbose=False):
-        calls["inj"].append(request_config.http_method)
-        assert focus_injection_types == {"LDAP Injection"}
-
-        if request_config.http_method.upper() == "GET":
-            return [
-                {
-                    "vulnerable": False,
-                    "injection_type": "Multiple injection types",
-                    "parameter": "name",
-                    "tool": "fake",
-                }
-            ]
-
-        return [
-            {
-                "vulnerable": True,
-                "injection_type": "LDAP Injection",
-                "parameter": "name",
-                "payload": "admin*)((|userPassword=*)",
-                "url": "http://example.test/page?name=admin%2A%29%28%28%7CuserPassword%3D%2A%29",
-                "method": request_config.http_method,
-                "evidence": "LDAP error patterns detected",
-                "tool": "fake",
-            }
-        ]
-
-    monkeypatch.setattr(apc, "_coordinate_injection_testing", fake_injection_testing)
-
-    # Keep analysis/recs deterministic
-    monkeypatch.setattr(
-        apc,
-        "_analyze_payload_intelligence",
-        lambda payload_results: {
-            "severity_distribution": {"LDAP Injection": 1},
-            "attack_vectors": ["ldap_injection"],
-            "bypass_techniques": [],
-            "exploitation_chains": [],
-        },
-    )
-    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda test_type, results: ["REC"])
-
-    out = apc.advanced_payload_coordinator(
-        "http://example.test/page",
-        test_type="ldap_injection",
-        http_method="GET",
-    )
-
-    # Injection should run GET then POST (because GET produced no ldap injection vulns)
-    assert calls["inj"] == ["GET", "POST"]
-
-    data = json.loads(out)
-    assert data["http_method"] == "POST"
-    assert data["test_type"] == "ldap_injection"
-    assert data["counts"]["vulnerabilities"] == 1
-    assert any(
-        v.get("injection_type") == "LDAP Injection"
-        and v.get("method") == "POST"
-        and v.get("vulnerable") is True
-        for v in data["vulnerabilities"]
-    )
-
 def test_advanced_payload_coordinator_command_injection_runs_only_cmd_injection_and_passes_focus(monkeypatch):
     calls = {"inj": 0}
 
@@ -1287,372 +1089,6 @@ def test_advanced_payload_coordinator_command_injection_runs_only_cmd_injection_
         v.get("injection_type") == "Command Injection" and v.get("vulnerable") is True
         for v in data["vulnerabilities"]
     )
-
-
-def test_coordinator_command_injection_retries_post_when_get_produces_no_cmd_injection_vulns(monkeypatch):
-    calls = {"inj": []}
-
-    # Phase 1: tools setup (avoid tool execution)
-    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"success": True, "tools": [], "failed": []})
-
-    # Phase 2: parameter discovery should return something on GET
-    monkeypatch.setattr(apc, "advanced_parameter_discovery", lambda rc, provided_params=None, tools=None: ["name"])
-
-    # XSS/CORS should not run for command_injection-only mode
-    monkeypatch.setattr(
-        apc,
-        "_coordinate_xss_testing",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("xss should not run for test_type='command_injection'")),
-    )
-    monkeypatch.setattr(
-        apc,
-        "_test_cors_configurations",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("cors should not run for test_type='command_injection'")),
-    )
-
-    # Phase 5: injection testing — GET yields *no cmd injection vulns*, POST yields a vuln
-    def fake_injection_testing(request_config: apc.RequestConfig, parameters, tools=None, focus_injection_types=None, verbose=False):
-        calls["inj"].append(request_config.http_method)
-        assert focus_injection_types == {"Command Injection"}
-
-        if request_config.http_method.upper() == "GET":
-            return [
-                {
-                    "vulnerable": False,
-                    "injection_type": "Multiple injection types",
-                    "parameter": "name",
-                    "tool": "fake",
-                }
-            ]
-
-        return [
-            {
-                "vulnerable": True,
-                "injection_type": "Command Injection",
-                "parameter": "name",
-                "payload": "; whoami",
-                "url": "http://example.test/page?name=%3B%20whoami",
-                "method": request_config.http_method,
-                "evidence": "Command execution indicators detected",
-                "tool": "fake",
-            }
-        ]
-
-    monkeypatch.setattr(apc, "_coordinate_injection_testing", fake_injection_testing)
-
-    # Keep analysis/recs deterministic
-    monkeypatch.setattr(
-        apc,
-        "_analyze_payload_intelligence",
-        lambda payload_results: {
-            "severity_distribution": {"Command Injection": 1},
-            "attack_vectors": ["cmd_injection"],
-            "bypass_techniques": [],
-            "exploitation_chains": [],
-        },
-    )
-    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda test_type, results: ["REC"])
-
-    out = apc.advanced_payload_coordinator(
-        "http://example.test/page",
-        test_type="command_injection",
-        http_method="GET",
-    )
-
-    # Injection should run GET then POST (because GET produced no cmd injection vulns)
-    assert calls["inj"] == ["GET", "POST"]
-
-    data = json.loads(out)
-    assert data["http_method"] == "POST"
-    assert data["test_type"] == "command_injection"
-    assert data["counts"]["vulnerabilities"] == 1
-    assert any(
-        v.get("injection_type") == "Command Injection"
-        and v.get("method") == "POST"
-        and v.get("vulnerable") is True
-        for v in data["vulnerabilities"]
-    )
-
-
-def test_coordinator_retries_post_when_get_produces_no_param_results(monkeypatch):
-    calls = {"param_discovery": [], "xss": []}
-
-    # Phase 1: tools setup (keep empty to avoid tool execution)
-    monkeypatch.setattr(
-        apc,
-        "setup_payload_tools",
-        lambda: {"success": True, "tools": [], "failed": []},
-    )
-
-    # Phase 2: parameter discovery
-    def fake_param_discovery(request_config: apc.RequestConfig, provided_params=None, tools=None):
-        # record which method was used
-        calls["param_discovery"].append(request_config.http_method)
-        # GET yields no results -> should trigger POST retry
-        if request_config.http_method.upper() == "GET":
-            return []
-        return ["name"]
-
-    monkeypatch.setattr(apc, "advanced_parameter_discovery", fake_param_discovery)
-
-    # Phase 3: XSS testing
-    def fake_xss_testing(request_config: apc.RequestConfig, parameters, tools=None, verbose=False):
-        calls["xss"].append(request_config.http_method)
-        # GET yields no vulns -> should trigger POST retry
-        if request_config.http_method.upper() == "GET":
-            return [{"parameter": "name", "vulnerable": False, "payload_type": "XSS tested", "tool": "fake"}]
-        # POST yields a vuln
-        return [
-            {
-                "parameter": "name",
-                "vulnerable": True,
-                "payload_type": "Advanced XSS (fake)",
-                "payload": "\"><img src=x onerror=alert(1)>",
-                "url": "http://example.test/page?name=%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert%281%29%3E",
-                "method": request_config.http_method,
-                "tool": "fake",
-            }
-        ]
-
-    monkeypatch.setattr(apc, "_coordinate_xss_testing", fake_xss_testing)
-
-    # Avoid unrelated phases doing anything complicated
-    monkeypatch.setattr(apc, "_test_cors_configurations", lambda *a, **k: [])
-    monkeypatch.setattr(apc, "_coordinate_injection_testing", lambda *a, **k: [])
-
-    # Keep analysis/recs deterministic
-    monkeypatch.setattr(
-        apc,
-        "_analyze_payload_intelligence",
-        lambda payload_results: {
-            "severity_distribution": {"Advanced XSS (fake)": 1},
-            "attack_vectors": ["xss"],
-            "bypass_techniques": [],
-            "exploitation_chains": [],
-        },
-    )
-    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda test_type, results: ["REC"])
-
-    out = apc.advanced_payload_coordinator(
-        "http://example.test/page",
-        test_type="xss",
-        http_method="GET",
-    )
-
-    # ---- Assertions: intended fallback behavior ----
-    # Parameter discovery: GET first, then POST (because GET produced no results)
-    assert calls["param_discovery"] == ["GET", "POST"]
-
-    # XSS testing: should also try GET then POST (because GET produced no vulns)
-    assert calls["xss"] == ["POST"]
-
-    data = json.loads(out)
-
-    assert data["http_method"] == "POST"
-    assert data["parameters_discovered"] == ["name"]
-
-    # should contain the POST vuln
-    assert data["counts"]["vulnerabilities"] == 1
-    assert any(v.get("parameter") == "name" and v.get("vulnerable") is True for v in data["vulnerabilities"])
-    assert any(r.get("parameter") == "name" and r.get("method") == "POST" and r.get("vulnerable") is True for r in data["payload_results"])
-
-
-def test_coordinator_retries_post_when_get_produces_no_xss_results(monkeypatch):
-    calls = {"param_discovery": [], "xss": []}
-
-    # Phase 1: tools setup (keep empty to avoid tool execution)
-    monkeypatch.setattr(
-        apc,
-        "setup_payload_tools",
-        lambda: {"success": True, "tools": [], "failed": []},
-    )
-
-    # Phase 2: parameter discovery
-    def fake_param_discovery(request_config: apc.RequestConfig, provided_params=None, tools=None):
-        # record which method was used
-        calls["param_discovery"].append(request_config.http_method)
-        # GET yields no results -> should trigger POST retry
-        return ["name"]
-
-    monkeypatch.setattr(apc, "advanced_parameter_discovery", fake_param_discovery)
-
-    # Phase 3: XSS testing
-    def fake_xss_testing(request_config: apc.RequestConfig, parameters, tools=None, verbose=False):
-        calls["xss"].append(request_config.http_method)
-        # GET yields no vulns -> should trigger POST retry
-        if request_config.http_method.upper() == "GET":
-            return [{"parameter": "name", "vulnerable": False, "payload_type": "XSS tested", "tool": "fake"}]
-        # POST yields a vuln
-        return [
-            {
-                "parameter": "name",
-                "vulnerable": True,
-                "payload_type": "Advanced XSS (fake)",
-                "payload": "\"><img src=x onerror=alert(1)>",
-                "url": "http://example.test/page?name=%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert%281%29%3E",
-                "method": request_config.http_method,
-                "tool": "fake",
-            }
-        ]
-
-    monkeypatch.setattr(apc, "_coordinate_xss_testing", fake_xss_testing)
-
-    # Avoid unrelated phases doing anything complicated
-    monkeypatch.setattr(apc, "_test_cors_configurations", lambda *a, **k: [])
-    monkeypatch.setattr(apc, "_coordinate_injection_testing", lambda *a, **k: [])
-
-    # Keep analysis/recs deterministic
-    monkeypatch.setattr(
-        apc,
-        "_analyze_payload_intelligence",
-        lambda payload_results: {
-            "severity_distribution": {"Advanced XSS (fake)": 1},
-            "attack_vectors": ["xss"],
-            "bypass_techniques": [],
-            "exploitation_chains": [],
-        },
-    )
-    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda test_type, results: ["REC"])
-
-    out = apc.advanced_payload_coordinator(
-        "http://example.test/page",
-        test_type="xss",
-        http_method="GET",
-    )
-
-    # ---- Assertions: intended fallback behavior ----
-    # Parameter discovery: GET first, then POST (because GET produced no results)
-    assert calls["param_discovery"] == ["GET"]
-
-    # XSS testing: should also try GET then POST (because GET produced no vulns)
-    assert calls["xss"] == ["GET", "POST"]
-
-    data = json.loads(out)
-
-    assert data["http_method"] == "POST"
-    assert data["parameters_discovered"] == ["name"]
-
-    # should contain the POST vuln
-    assert data["counts"]["vulnerabilities"] == 1
-    assert any(v.get("parameter") == "name" and v.get("vulnerable") is True for v in data["vulnerabilities"])
-    assert any(
-        r.get("parameter") == "name"
-        and r.get("method") == "POST"
-        and r.get("vulnerable") is True
-        for r in data["payload_results"]
-    )
-
-
-def test_coordinator_phase5_retries_post_when_get_produces_no_injection_vulns(monkeypatch):
-    calls = {"inj": [], "xss": [], "param_discovery": []}
-
-    # Phase 1: tools setup (keep empty to avoid tool execution)
-    monkeypatch.setattr(
-        apc,
-        "setup_payload_tools",
-        lambda: {"success": True, "tools": [], "failed": []},
-    )
-
-    # Phase 2: parameter discovery should return something on GET so we actually proceed cleanly.
-    def fake_param_discovery(request_config: apc.RequestConfig, provided_params=None, tools=None):
-        calls["param_discovery"].append(request_config.http_method)
-        return ["name"]
-
-    monkeypatch.setattr(apc, "advanced_parameter_discovery", fake_param_discovery)
-
-    # Phase 3: XSS can be quiet; return vulns (don’t trigger POST retry here).
-    def fake_xss_testing(request_config: apc.RequestConfig, parameters, tools=None, verbose=False):
-        calls["xss"].append(request_config.http_method)
-        return [{"parameter": "name", "vulnerable": True, "payload_type": "XSS tested", "tool": "fake"}]
-
-    monkeypatch.setattr(apc, "_coordinate_xss_testing", fake_xss_testing)
-
-    # Phase 4: no-op
-    monkeypatch.setattr(apc, "_test_cors_configurations", lambda *a, **k: [])
-
-    # Phase 5: injection testing — GET yields *no vulns*, POST yields a vuln
-    def fake_injection_testing(request_config: apc.RequestConfig, parameters, tools=None, focus_injection_types=None, verbose=False):
-        calls["inj"].append(request_config.http_method)
-
-        if request_config.http_method.upper() == "GET":
-            # No vulnerabilities on GET
-            return [
-                {
-                    "vulnerable": False,
-                    "injection_type": "Multiple injection types",
-                    "parameter": "name",
-                    "tool": "fake",
-                }
-            ]
-
-        # Vulnerability appears on POST retry
-        return [
-            {
-                "vulnerable": True,
-                "injection_type": "Command Injection",
-                "parameter": "name",
-                "payload": "; whoami",
-                "url": "http://example.test/page?name=%3B%20whoami",
-                "method": request_config.http_method,
-                "evidence": "Command execution indicators detected",
-                "tool": "fake",
-            }
-        ]
-
-    monkeypatch.setattr(apc, "_coordinate_injection_testing", fake_injection_testing)
-
-    # Keep analysis/recs deterministic (don’t care about exact content beyond not crashing)
-    monkeypatch.setattr(
-        apc,
-        "_analyze_payload_intelligence",
-        lambda payload_results: {
-            "severity_distribution": {"Command Injection": 1},
-            "attack_vectors": ["cmd_injection"],
-            "bypass_techniques": [],
-            "exploitation_chains": [],
-        },
-    )
-    monkeypatch.setattr(apc, "_generate_payload_recommendations", lambda test_type, results: ["REC"])
-
-    out = apc.advanced_payload_coordinator(
-        "http://example.test/page",
-        test_type="comprehensive",
-        http_method="GET",
-    )
-
-    # ---- Assertions: Phase 5 intended fallback behavior ----
-    # Parameter discovery ran once (no retry needed)
-    assert calls["param_discovery"] == ["GET"]
-
-    # XSS ran once and stayed GET (no vulns, but we intentionally didn't trigger retry path here)
-    assert calls["xss"] == ["GET"]
-
-    # Injection should run GET then POST (because GET produced no injection vulns)
-    assert calls["inj"] == ["GET", "POST"]
-
-    data = json.loads(out)
-
-    # Coordinator should end in POST due to Phase 5 retry
-    assert data["http_method"] == "POST"
-
-    # We should have at least the POST command injection vuln present
-    assert any(
-        v.get("vulnerable") is True
-        and v.get("injection_type") == "Command Injection"
-        and v.get("parameter") == "name"
-        and v.get("method") == "POST"
-        for v in data["vulnerabilities"]
-    ) or any(
-        r.get("vulnerable") is True
-        and r.get("injection_type") == "Command Injection"
-        and r.get("parameter") == "name"
-        and r.get("method") == "POST"
-        for r in data["payload_results"]
-    )
-
-    # Counts should reflect at least 1 vuln
-    assert data["counts"]["vulnerabilities"] >= 1
-
 
 
 def test_advanced_payload_small_helpers_and_normalization(monkeypatch):
@@ -1961,51 +1397,6 @@ def test_xss_dalfox_timeout_uses_partial_results_without_negative_summaries(monk
     assert all(item.get("parameter") != "other" for item in result)
 
 
-def test_top_level_coordinator_exercises_get_to_post_runtime_orchestration(monkeypatch):
-    """Test the controller's retry decisions without invoking external security tools."""
-    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": ["dalfox"]})
-    discovery_methods = []
-
-    def discover(config, _parameters, tools):
-        discovery_methods.append(config.http_method)
-        return [] if config.http_method == "GET" else ["q"]
-
-    xss_methods = []
-
-    def xss(config, parameters, tools=None, verbose=False):
-        xss_methods.append(config.http_method)
-        if config.http_method == "POST":
-            return [{"parameter": parameters[0], "vulnerable": True, "payload_type": "XSS"}]
-        return [{"parameter": parameters[0], "vulnerable": False, "payload_type": "XSS tested"}]
-
-    monkeypatch.setattr(apc, "advanced_parameter_discovery", discover)
-    monkeypatch.setattr(apc, "_coordinate_xss_testing", xss)
-    result = json.loads(apc.advanced_payload_coordinator("https://target.test", test_type="xss"))
-
-    assert discovery_methods == ["GET", "POST"]
-    assert xss_methods == ["POST"]
-    assert result["http_method"] == "POST"
-    assert result["counts"]["vulnerabilities"] == 1
-
-
-def test_top_level_injection_retry_restores_get_when_post_is_not_better(monkeypatch):
-    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": []})
-    injection_methods = []
-
-    def injection(config, parameters, tools=None, focus_injection_types=None, verbose=False):
-        injection_methods.append((config.http_method, focus_injection_types))
-        return [{"parameter": parameters[0], "vulnerable": False, "injection_type": "LFI"}]
-
-    monkeypatch.setattr(apc, "_coordinate_injection_testing", injection)
-    result = json.loads(
-        apc.advanced_payload_coordinator("https://target.test", test_type="lfi", parameters="file")
-    )
-
-    assert injection_methods == [("GET", {"LFI"}), ("POST", {"LFI"})]
-    assert result["http_method"] == "GET"
-    assert result["counts"]["payload_results"] == 1
-
-
 def test_setup_payload_tools_exercises_install_success_failure_and_exceptions(monkeypatch):
     calls = []
 
@@ -2188,3 +1579,72 @@ def test_requests_respect_proxy_env(monkeypatch):
     assert len(recorded_proxies) == 2
     assert recorded_proxies[0] == {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
     assert recorded_proxies[1] == {"http": "http://127.0.0.1:8080", "https": "http://127.0.0.1:8080"}
+
+@pytest.mark.parametrize("method", ["GET", "post", "PUT", "PATCH", "DELETE"])
+@pytest.mark.parametrize(
+    "test_type", ["param_discovery", "xss", "lfi", "ssti", "command_injection", "ldap_injection", "comprehensive"]
+)
+@pytest.mark.parametrize("discovered", [[], ["q"]], ids=["empty-discovery", "discovered-parameter"])
+@pytest.mark.parametrize("vulnerable", [False, True], ids=["negative", "positive"])
+def test_coordinator_preserves_explicit_method_in_every_phase(
+    monkeypatch, method, test_type, discovered, vulnerable
+):
+    calls = []
+    expected_method = method.upper()
+    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": []})
+
+    def discover(config, parameters, tools):
+        calls.append(("discovery", config.http_method))
+        return discovered
+
+    def xss(config, parameters, tools=None, verbose=False):
+        calls.append(("xss", config.http_method))
+        assert parameters == discovered
+        return [{"vulnerable": vulnerable, "payload_type": "XSS", "method": config.http_method}]
+
+    def inject(config, parameters, tools=None, focus_injection_types=None, verbose=False):
+        calls.append(("injection", config.http_method))
+        assert parameters == discovered
+        return [{"vulnerable": vulnerable, "injection_type": "LFI", "method": config.http_method}]
+
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", discover)
+    monkeypatch.setattr(apc, "_coordinate_xss_testing", xss)
+    monkeypatch.setattr(apc, "_coordinate_injection_testing", inject)
+    monkeypatch.setattr(apc, "_test_cors_configurations", lambda *args, **kwargs: [])
+
+    result = json.loads(
+        apc.advanced_payload_coordinator("https://target.test", test_type=test_type, http_method=method)
+    )
+
+    phases = ["discovery"]
+    if test_type in {"xss", "comprehensive"}:
+        phases.append("xss")
+    if test_type in {"lfi", "ssti", "command_injection", "ldap_injection", "comprehensive"}:
+        phases.append("injection")
+    assert calls == [(phase, expected_method) for phase in phases]
+    assert result["errors"] == []
+    assert result["http_method"] == expected_method
+    assert result["parameters_discovered"] == discovered
+    assert all(record["method"] == expected_method for record in result["payload_results"])
+    assert result["counts"]["vulnerabilities"] == (len(phases) - 1 if vulnerable else 0)
+
+
+def test_coordinator_cache_isolates_methods_and_old_fallback_policy(monkeypatch):
+    target = "https://target.test"
+    legacy_key = apc.build_result_cache_key(
+        target_url=target, test_type="param_discovery", parameters="", http_method="GET", cookies={}, headers={}
+    )
+    apc.cache_result("advanced_payload_coordinator", legacy_key, '{"http_method": "POST", "legacy": true}')
+    calls = []
+    monkeypatch.setattr(apc, "setup_payload_tools", lambda: {"tools": [], "failed": []})
+
+    def discover(config, parameters, tools):
+        calls.append(config.http_method)
+        return ["q"]
+
+    monkeypatch.setattr(apc, "advanced_parameter_discovery", discover)
+    for method in ["GET", "POST", "get", "post"]:
+        result = json.loads(apc.advanced_payload_coordinator(target, test_type="param_discovery", http_method=method))
+        assert result["http_method"] == method.upper()
+        assert "legacy" not in result
+    assert calls == ["GET", "POST"]

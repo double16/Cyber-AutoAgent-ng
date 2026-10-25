@@ -48,6 +48,7 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         (10, "0010_credential_rotation_lifecycle.sql"),
         (11, "0011_authentication_flow_records.sql"),
         (12, "0012_task_credential_authorizations.sql"),
+        (13, "0013_authentication_worker_authorizations.sql"),
     ]
     assert {
         "operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts",
@@ -88,7 +89,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with closing(sqlite3.connect(db_path)) as conn, conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 12
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 13
 
 
 def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):
@@ -246,3 +247,34 @@ def test_statement_splitter_handles_quoted_semicolons_and_rejects_incomplete_sql
 
     monkeypatch.setattr("modules.storage.sqlite.sqlite3.complete_statement", lambda _sql: True)
     assert SQLiteMigrationRunner._split_statements("SELECT 1") == ["SELECT 1"]
+
+
+def test_worker_authorization_migration_preserves_existing_permissions(tmp_path, monkeypatch):
+    from modules.tools.memory import SQLiteApplicationStore
+
+    db_path = str(tmp_path / "authorization-upgrade.db")
+    migrations = SQLiteMigrationRunner._load_migrations()
+    monkeypatch.setattr(SQLiteMigrationRunner, "_load_migrations", staticmethod(lambda: migrations[:-1]))
+    store = SQLiteApplicationStore(db_path, "target")
+    credential = store.store_credential("op", {
+        "credential_type": "username_password", "target": "https://target.test", "role": "member",
+        "payload": {"username": "member", "password": "migration-secret"},
+        "origin": "provided", "management_policy": "user", "status": "unknown",
+    })
+    store.authorize_credential_for_task("op", credential["credential_id"], "task", "reused_authenticated_context")
+    with closing(sqlite3.connect(db_path)) as conn:
+        before = conn.execute("SELECT * FROM credential_task_authorizations").fetchall()
+    monkeypatch.setattr(SQLiteMigrationRunner, "_load_migrations", staticmethod(lambda: migrations))
+    SQLiteMigrationRunner(db_path).migrate()
+    with closing(sqlite3.connect(db_path)) as conn, conn:
+        assert conn.execute("SELECT * FROM credential_task_authorizations").fetchall() == before
+        conn.execute(
+            "INSERT INTO credential_task_authorizations VALUES (?, ?, ?, ?, ?, ?)",
+            ("target", "op", "new-task", credential["credential_id"], "authentication_worker", "now"),
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO credential_task_authorizations VALUES (?, ?, ?, ?, ?, ?)",
+                ("target", "op", "bad-task", credential["credential_id"], "unknown", "now"),
+            )
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []

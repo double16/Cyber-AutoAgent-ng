@@ -3,6 +3,18 @@ import json
 from modules.prompts import factory
 
 
+def test_prompt_construction_system_is_role_specific_and_idempotent():
+    original = "Execute attacks now. <tools_and_capabilities>Discover tools</tools_and_capabilities>"
+    for role in ("task_prompt_builder", "task_prompt_critic"):
+        system = factory.get_role_system_prompt(original, role)
+        assert "Execute attacks now" not in system
+        assert "Discover tools" not in system
+        assert "reference data" in system
+        assert "controller-owned constraints and acceptance" in system
+        assert factory.get_role_system_prompt(system, role) == system
+    assert factory.get_role_system_prompt(original, "task_executor") == original
+
+
 def test_langfuse_helpers_and_cache_cover_disabled_expired_and_chat_prompts(monkeypatch):
     monkeypatch.setenv("ENABLE_OBSERVABILITY", "true")
     monkeypatch.setenv("ENABLE_LANGFUSE_PROMPTS", "true")

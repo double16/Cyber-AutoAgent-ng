@@ -413,6 +413,10 @@ def test_setup_logging_redirects_streams_and_registers_cleanup(monkeypatch, tmp_
             for handler in logger.handlers
             if isinstance(handler, logging.FileHandler)
         )
+        logger.info("Generation allocation: role=%s model=%s %s", "task_executor", "test-model", {
+            "generation_tokens": 8192, "input_tokens": 12345, "reasoning_tokens": 1024, "output_ceiling": None,
+        })
+        logger.info("Invalid allocation: %s", {"input_tokens": "hidden-token-value"})
         logger.info("Structured diagnostic: %s", {"api_key": "structured-log-secret"})
         logger.info("Mapping diagnostic: %(api_key)s", {"api_key": "mapping-log-secret"})
     finally:
@@ -422,6 +426,9 @@ def test_setup_logging_redirects_streams_and_registers_cleanup(monkeypatch, tmp_
     assert sys.stdout is sys.__stdout__
     assert sys.stderr is sys.__stderr__
     assert "CYBER-AUTOAGENT SESSION STARTED" in log_file.read_text()
+    assert "'generation_tokens': 8192" in log_file.read_text()
+    assert "'input_tokens': 12345" in log_file.read_text()
+    assert "hidden-token-value" not in log_file.read_text()
     assert "structured-log-secret" not in log_file.read_text()
     assert "mapping-log-secret" not in log_file.read_text()
     assert "[REDACTED]" in log_file.read_text()

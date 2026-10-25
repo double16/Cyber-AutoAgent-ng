@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 
@@ -129,6 +130,18 @@ def create_authentication_app(state: AuthenticationFixtureState) -> FastAPI:
             raise HTTPException(status_code=401, detail="invalid client")
         return {"access_token": "fixture-access-token", "token_type": "Bearer", "expires_in": 300}
 
+    @app.get("/spa", response_class=HTMLResponse)
+    def spa():
+        return "<!doctype html><main id=app>Same public application shell</main>"
+
+    @app.get("/session-data")
+    def session_data(request: Request):
+        header = request.headers.get("x-session") or request.headers.get("tauser")
+        cookie = request.cookies.get("session")
+        if header != "opaque-session" and cookie != "opaque-session":
+            raise HTTPException(status_code=401, detail="session required")
+        return {"account": "alice"}
+
     @app.get("/api-key")
     def api_key(x_api_key: str | None = Header(default=None)):
         if x_api_key != "fixture-api-key":
@@ -170,3 +183,61 @@ def running_authentication_app() -> Iterator[tuple[str, AuthenticationFixtureSta
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+@dataclass
+class RegistrationWizardState:
+    submissions: list[str] = field(default_factory=list)
+    pending: dict[str, str] = field(default_factory=dict)
+    accounts: dict[str, str] = field(default_factory=dict)
+
+
+def registration_wizard_app(state: RegistrationWizardState) -> FastAPI:
+    """A connected wizard whose next form is unavailable until the preceding submission."""
+    from fastapi import Request
+    from fastapi.responses import HTMLResponse, RedirectResponse
+
+    app = FastAPI()
+
+    @app.get("/signup", response_class=HTMLResponse)
+    def start_page():
+        return '<form><input name="email"></form>'
+
+    @app.post("/signup")
+    async def start(request: Request):
+        payload = await request.json()
+        state.pending["email"] = payload["email"]
+        state.submissions.append("identity")
+        return RedirectResponse("/signup/profile", status_code=303)
+
+    @app.get("/signup/profile", response_class=HTMLResponse)
+    def profile_page():
+        if "email" not in state.pending:
+            raise HTTPException(status_code=409, detail="identity required")
+        return '<form><input name="displayName"></form>'
+
+    @app.post("/signup/profile")
+    async def profile(request: Request):
+        payload = await request.json()
+        state.pending["displayName"] = payload["displayName"]
+        state.submissions.append("profile")
+        return RedirectResponse("/signup/confirm", status_code=303)
+
+    @app.get("/signup/confirm", response_class=HTMLResponse)
+    def confirm_page():
+        if "displayName" not in state.pending:
+            raise HTTPException(status_code=409, detail="profile required")
+        return '<form><input name="password" type="password"></form>'
+
+    @app.post("/signup/confirm")
+    async def confirm(request: Request):
+        payload = await request.json()
+        state.accounts[state.pending["email"]] = payload["password"]
+        state.submissions.append("confirmation")
+        return RedirectResponse("/login", status_code=303)
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page():
+        return '<form><input name="email"><input name="password"></form>'
+
+    return app

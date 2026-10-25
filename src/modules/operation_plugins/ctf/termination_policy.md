@@ -13,6 +13,11 @@ requires a flag.
 
 ### Phase-1 task fan-out
 
+Include bounded POST method discovery for relevant in-scope endpoints when permitted by module,
+objective, and task constraints, even if no form or API declaration identifies POST. Assign this
+explicitly to endpoint/workflow mapping tasks. Retain method, inputs, response artifacts, and
+evidence-backed exclusions or coverage gaps; GET results alone do not establish POST coverage.
+
 Create separate artifact-producing tasks for at least three applicable workstreams: challenge hints, endpoint and
 capability discovery, access-context mapping, and flag-path investigation. Queue one challenge-surface synthesis task
 after the mapping tasks. A one-task direct flag path is allowed only when its structured exception records a concrete

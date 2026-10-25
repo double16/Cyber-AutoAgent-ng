@@ -1005,8 +1005,44 @@ def test_workflow_max_token_recovery_orchestrates_reasoning_repair_and_token_esc
         max_duration=None,
         logger=Mock(),
     ) == recovered
-    assert token_registry.boosts
-    assert token_registry.successes
+    assert not token_registry.boosts
+    assert not token_registry.successes
+
+
+@pytest.mark.parametrize("recover", [True, False])
+def test_executor_dynamic_token_retry_is_scoped_even_on_failure(monkeypatch, recover):
+    import modules.config.models.agent_profiles as profiles
+    from modules.config.models.generation_budget import model_generation_request
+    from modules.config.models.invocation import invocation_output_tokens
+    from modules.handlers.max_token_recovery import MaxTokenClassification
+    from tests.test_generation_budget import Transport
+
+    registry = SimpleNamespace(get_settings=lambda _role: SimpleNamespace(reasoning_level=profiles.ReasoningLevel.NONE))
+    monkeypatch.setattr(profiles, "get_agent_settings_registry", lambda: registry)
+    classification = MaxTokenClassification("output_truncation", 0.0, "hash", 2000)
+    monkeypatch.setattr(cyberautoagent, "classify_and_discard_max_token_output", lambda *_a, **_kw: (classification, 0))
+    agent = SimpleNamespace(model=Transport(), messages=[], _cyber_agent_type="task_executor")
+    calls = []
+    result = cyberautoagent.AgentRunResult("task_executor_done", "done")
+
+    def run(**kwargs):
+        calls.append((invocation_output_tokens("task_executor"), model_generation_request(agent.model, 100).preferred_tokens))
+        if len(calls) == 1 or not recover:
+            raise MaxTokensReachedException("length")
+        return result
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", run)
+    arguments = dict(agent=agent, prompt="assigned task", run_policy=None, callback_handler=SimpleNamespace(),
+                     initial_prompt="assigned task", budget_cfg=cyberautoagent.BudgetConfig(max_duration_minutes=1),
+                     operation_start=0, max_duration=None, logger=Mock())
+    if recover:
+        assert cyberautoagent.run_workflow_agent_with_max_token_recovery(**arguments) == result
+    else:
+        with pytest.raises(MaxTokensReachedException):
+            cyberautoagent.run_workflow_agent_with_max_token_recovery(**arguments)
+    assert calls == [(None, 8192), (10240, 10240)]
+    assert invocation_output_tokens("task_executor") is None
+    assert agent.model._cyber_preferred_output_tokens == 8192
 
 
 def test_finalization_and_cleanup_orchestrate_completion_health_and_memory_lifecycle(monkeypatch):
@@ -4035,3 +4071,115 @@ def test_cli_main_workflow_runner_omits_policy_message_when_no_agent_final_text(
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("purpose", ["authentication", "registration"])
+@pytest.mark.parametrize("missing_recorder", [False, True])
+def test_cli_discovery_session_reads_production_recording_hook(
+    monkeypatch, tmp_path, purpose, missing_recorder,
+):
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    callback = CliCallback()
+    placeholder = CallableCliAgent()
+    config_manager = _patch_cli_common(monkeypatch, tmp_path, placeholder, callback)
+    role = "authentication_agent"
+    created = []
+
+    def construct(**kwargs):
+        agent = create_outcome_agent(monkeypatch, kwargs["agent_type"], kwargs["tools"])
+        if missing_recorder:
+            del agent._cyber_tool_outcome_recording_hook
+        created.append(agent)
+        return agent
+
+    monkeypatch.setattr(cyberautoagent, "create_agent", construct)
+
+    def run_agent(**kwargs):
+        complete_tool_call(
+            kwargs["agent"], "browser_get_page_html", {}, "HTML content saved to artifact: artifacts/login.html",
+        )
+        return cyberautoagent.AgentRunResult("discovery_done", "mapped")
+
+    monkeypatch.setattr(cyberautoagent, "run_agent_until_terminal_state", run_agent)
+    monkeypatch.setattr(cyberautoagent.sys, "argv", [
+        "cyberautoagent", "--target", "example.com", "--objective", "test", "--max-duration", "60",
+        "--provider", "ollama",
+    ])
+
+    def run_workflow():
+        factory = config_manager.workflow_controller.call_args.kwargs["executor_session_factory"]
+        if missing_recorder:
+            with pytest.raises(cyberautoagent.WorkflowInvariantError, match="outcome recorder"):
+                with factory(role, [], "system"):
+                    pytest.fail("discovery must not start")
+            return
+        with factory(role, [], "system") as execute:
+            first = execute("map", cyberautoagent.AgentRunPolicy())
+            second = execute("correct", cyberautoagent.AgentRunPolicy())
+            assert len(first.outcomes) == len(second.outcomes) == 1
+            assert first.outcomes[0].artifact_refs == ("artifact:artifacts/login.html",)
+            assert len(execute.live_outcomes()) == 2
+            assert not first.recovery_required
+
+    config_manager.workflow.run.side_effect = run_workflow
+    cyberautoagent.main()
+    created[0].cleanup.assert_called_once()
+
+
+@pytest.mark.parametrize("tool_name", ["browser_context", "api_context", "unrelated", ""])
+def test_run_policy_accepts_any_successful_required_tool(tool_name):
+    policy = cyberautoagent.AgentRunPolicy(
+        required_tool_names={"browser_context", "api_context"}, required_tool_match="any", min_tool_calls=1,
+    )
+    handler = SimpleNamespace(
+        tool_counts={tool_name: 1} if tool_name else {},
+        successful_tool_completions={(tool_name, "call")} if tool_name else set(),
+    )
+    expected = tool_name in policy.required_tool_names
+    assert cyberautoagent._required_tools_satisfied(handler, policy) is expected
+    assert cyberautoagent._successful_required_tools_satisfied(handler, policy, 0) is expected
+    handler.successful_tool_completions = set()
+    assert not cyberautoagent._successful_required_tools_satisfied(handler, policy, 0)
+
+
+def test_run_policy_rejects_unknown_required_tool_match():
+    with pytest.raises(ValueError, match="required_tool_match"):
+        cyberautoagent.AgentRunPolicy(required_tool_match="unknown")
+
+
+@pytest.mark.parametrize("reason", ["worker_done", "credential_rejected"])
+@pytest.mark.parametrize("reported", [False, True])
+def test_controller_terminal_reason_survives_sdk_limits_and_successful_tool_status(monkeypatch, reason, reported):
+    from modules.handlers.terminal_tool import TerminalToolHook
+
+    callback = CliCallback()
+    callback.should_stop = Mock(return_value=False)
+    ready = {"reason": None}
+    policy = cyberautoagent.AgentRunPolicy(
+        required_tool_names={"capture"}, terminal_after_required_tools=True,
+        require_successful_required_tools=True, terminal_reason="worker_done", terminal_message="Worker completed",
+        terminal_check=lambda: ready["reason"],
+    )
+
+    class PolicyAgent:
+        def __init__(self):
+            self.messages = []
+            self._cyber_terminal_tool_hook = TerminalToolHook("worker")
+
+        def __call__(self, _message, **kwargs):
+            assert self._cyber_terminal_tool_hook.policy is policy
+            assert kwargs["limits"]["turns"] == policy.max_model_turns
+            ready["reason"] = reason
+            return SimpleNamespace(
+                metrics=None, stop_reason="limit_turns",
+                state={"policy_terminal": {"reason": reason}} if reported else {},
+            )
+
+    monkeypatch.setattr(cyberautoagent, "interrupted", False)
+    monkeypatch.setattr(cyberautoagent, "print_status", Mock())
+    monkeypatch.setattr(cyberautoagent, "_ensure_prompt_within_budget", Mock())
+    result = _run_agent_helper(PolicyAgent(), callback, run_policy=policy)
+    assert result.reason == reason
+    assert result.message == ("Worker completed" if reason == "worker_done" else reason)
+    assert result.details == ({"reason": reason} if reported else None)

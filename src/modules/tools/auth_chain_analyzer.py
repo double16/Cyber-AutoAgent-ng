@@ -17,6 +17,7 @@ import requests
 import urllib3
 from strands import tool
 
+from modules.tools.auth_protocol_evidence import authentication_indicators
 from modules.tools.client_auth_extraction import extract_storage_header_bindings
 from modules.tools.result_cache import (
     build_result_cache_key,
@@ -27,7 +28,7 @@ from modules.utils.proxy import resolve_request_proxies
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-_AUTH_CHAIN_ANALYSIS_VERSION = 3
+_AUTH_CHAIN_ANALYSIS_VERSION = 4
 _CLIENT_SCRIPT_PATTERN = re.compile(
     r"<script\b[^>]*\bsrc\s*=\s*[\"'](?P<src>[^\"']+)[\"'][^>]*>", re.IGNORECASE
 )
@@ -148,7 +149,8 @@ def auth_chain_analyzer(
     - attack_surface_context: controller-provided, target-scoped endpoints and JavaScript URLs from frozen inventory
 
     RETURNS (JSON)
-    - summary: mechanism/token types, confirmed_exploits count; mapping_only never confirms exploits
+    - summary: observed mechanism/token types, candidate mechanisms and indicators; no login validation
+    - Path classifications, HTTP success, cookies and password forms do not establish a protocol or flow
     - evidence: endpoints/mechanisms/tokens/flow mapping plus deterministic same-origin client JavaScript header bindings
     - candidate_bypass_surfaces[]: observed surfaces or auth-chain properties that may justify a later validation task
     - findings[]: observed/confirmed auth bypass or controls + evidence; populated only in validation mode
@@ -179,7 +181,7 @@ def auth_chain_analyzer(
         attack_surface_context=attack_surface,
     )
     cached_result = get_cached_result("auth_chain_analyzer", cache_key)
-    if cached_result:
+    if cached_result and _cached_protocol_evidence_available(cached_result):
         cached_payload = json.loads(cached_result)
         report = cached_payload.get("report", cached_payload)
         cached_analysis = cached_payload.get("inventory_source")
@@ -240,6 +242,8 @@ def auth_chain_analyzer(
         report["evidence"]["auth_mechanisms"] = {
             "count_total": len(auth_mechanisms),
             "items": auth_mechanisms,
+            "candidate_mechanisms": [m for m in auth_mechanisms if m.get("evidence_status") == "candidate"],
+            "observed_indicators": [m for m in auth_mechanisms if m.get("evidence_status") == "observed_indicator"],
         }
 
         # Phase 3: Token and session analysis
@@ -341,8 +345,9 @@ def auth_chain_analyzer(
         report["next_steps"] = next_steps
 
         # High-level summary and routing hints
-        mech_types = [m.get("type") for m in (results.get("auth_mechanisms") or []) if
-                      isinstance(m, dict) and m.get("type")]
+        mech_types = [m.get("type") for m in (results.get("auth_mechanisms") or [])
+                      if isinstance(m, dict) and m.get("evidence_status") == "observed_indicator"
+                      and m.get("supports_mechanism") and m.get("type")]
         token_types = [t.get("type") for t in (results.get("tokens_discovered") or []) if
                        isinstance(t, dict) and t.get("type")]
         confirmed = [f for f in report.get("findings", []) if isinstance(f, dict) and f.get("status") == "confirmed"]
@@ -350,6 +355,10 @@ def auth_chain_analyzer(
         report["summary"] = {
             "auth_endpoints": len(results.get("auth_endpoints", []) or []),
             "mechanisms": sorted(set(mech_types)),
+            "candidate_mechanisms": sorted({m["type"] for m in auth_mechanisms
+                                            if m.get("evidence_status") == "candidate"}),
+            "observed_indicators": sorted({m["indicator"] for m in auth_mechanisms if m.get("indicator")}),
+            "validated_authentication_flow": False,
             "tokens": sorted(set(token_types)),
             "confirmed_exploits": len(confirmed),
             "high_confidence_hypotheses": len(
@@ -414,6 +423,32 @@ def auth_chain_analyzer(
 
     _write_result_file(output_file, output)
     return output
+
+
+def _cached_protocol_evidence_available(cached_result: str) -> bool:
+    """Reuse observed protocol summaries only with unchanged current-operation responses."""
+
+    from modules.tools.artifact import resolve_operation_artifact_path
+
+    try:
+        payload = json.loads(cached_result)
+        report = payload.get("report", payload)
+        items = (report.get("evidence", {}).get("auth_mechanisms", {}) or {}).get("items", [])
+        for item in items:
+            if item.get("evidence_status") != "observed_indicator":
+                continue
+            evidence = item["response_evidence"]
+            with open(resolve_operation_artifact_path(evidence["artifact_ref"]), encoding="utf-8") as artifact:
+                content = artifact.read()
+                response = json.loads(content)
+            if (hashlib.sha256(content.encode()).hexdigest() != evidence.get("artifact_sha256")
+                    or response["url"] != evidence["url"]
+                    or response["status_code"] != evidence["status_code"]
+                    or hashlib.sha256(response["body"].encode()).hexdigest() != evidence["body_sha256"]):
+                return False
+    except (AttributeError, KeyError, OSError, TypeError, ValueError):
+        return False
+    return True
 
 
 def _write_result_file(output_file: str | None, result: str) -> None:
@@ -1047,93 +1082,63 @@ def _classify_auth_endpoint(path: str, headers: str) -> str:
     return "Generic Authentication"
 
 
+def _save_authentication_response(url: str, response: requests.Response) -> tuple[str, str]:
+    """Retain exact response evidence separately from the analyzer's compact result."""
+
+    from modules.tools.memory import _operation_output_root, canonical_artifact_reference
+
+    payload = json.dumps({"url": url, "status_code": response.status_code,
+                          "headers": dict(response.headers), "body": response.text or ""}, sort_keys=True)
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    path = os.path.join(_operation_output_root(), "artifacts", "auth_protocol_observations", f"{digest}.json")
+    _write_result_file(path, payload)
+    return canonical_artifact_reference(path), digest
+
+
 def _analyze_auth_mechanisms(target_url: str, auth_endpoints: list[dict], auth_type: str) -> list[dict[str, Any]]:
-    """Analyze authentication mechanisms in detail"""
+    """Keep route-based candidates separate from structurally observed authentication indicators."""
+
+    type_map = {"jwt": "JWT", "oauth": "OAuth", "saml": "SAML", "session": "Session-based"}
+    requested = type_map.get(auth_type.lower())
     mechanisms = []
-
-    for endpoint in auth_endpoints[:10]:  # Analyze first 10 endpoints
+    endpoints = auth_endpoints[:10] or ([{"full_url": target_url, "path": "/", "type": "unknown"}]
+                                      if auth_type == "auto" else [])
+    for endpoint in endpoints:
+        if requested and endpoint.get("type") != requested:
+            continue
+        candidate_type = endpoint.get("type", "unknown")
+        if candidate_type in type_map.values():
+            mechanisms.append({"type": candidate_type, "endpoint": endpoint["path"],
+                               "description": "Candidate classified from endpoint path.",
+                               "confidence": "low", "evidence_status": "candidate",
+                               "supports_mechanism": False, "validated_flow": False})
         try:
-            # Get the endpoint content
-            resp = _http_request("GET", endpoint["full_url"], timeout=10.0)
-            if resp is not None:
-                content = resp.text or ""
-
-                # If a specific auth_type is requested, skip non-matching endpoint types.
-                # Map user-facing auth_type values to internal endpoint classifications.
-                type_map = {
-                    "jwt": "JWT",
-                    "oauth": "OAuth",
-                    "saml": "SAML",
-                    "session": "Session-based",
-                }
-                requested = type_map.get(auth_type.lower()) if isinstance(auth_type, str) else None
-                if requested and endpoint.get("type") != requested:
+            response = _http_request("GET", endpoint["full_url"], timeout=10.0)
+            if response is None:
+                continue
+            content = response.text or ""
+            if len(content.encode()) > _MAX_CLIENT_SCRIPT_BYTES:
+                continue
+            indicators = authentication_indicators(content, dict(response.headers), endpoint["full_url"],
+                                                    response.status_code)
+            if not indicators:
+                continue
+            response_ref, response_digest = _save_authentication_response(endpoint["full_url"], response)
+            for indicator in indicators:
+                if requested and indicator["type"] != requested:
                     continue
-
-                # Analyze based on endpoint type and content
-                if endpoint["type"] == "JWT":
-                    jwt_mechanism = _analyze_jwt_mechanism(endpoint, content)
-                    if jwt_mechanism:
-                        mechanisms.append(jwt_mechanism)
-
-                elif endpoint["type"] == "OAuth":
-                    oauth_mechanism = _analyze_oauth_mechanism(endpoint, content)
-                    if oauth_mechanism:
-                        mechanisms.append(oauth_mechanism)
-
-                elif endpoint["type"] == "SAML":
-                    saml_mechanism = _analyze_saml_mechanism(endpoint, content)
-                    if saml_mechanism:
-                        mechanisms.append(saml_mechanism)
-
-                elif endpoint["type"] == "Session-based":
-                    session_mechanism = _analyze_session_mechanism(endpoint, content)
-                    if session_mechanism:
-                        mechanisms.append(session_mechanism)
+                properties = (_analyze_jwt_mechanism(endpoint, content).get("properties", {})
+                              if indicator["indicator"] == "jwt_structure" else {})
+                mechanisms.append({**indicator, "endpoint": endpoint["path"], "confidence": "high",
+                                   "properties": properties,
+                                   "description": "Observed authentication indicator; login is not validated.",
+                                   "evidence_status": "observed_indicator", "validated_flow": False,
+                                   "response_evidence": {**indicator["response_evidence"],
+                                                         "status_code": response.status_code,
+                                                         "artifact_ref": response_ref,
+                                                         "artifact_sha256": response_digest}})
         except Exception:
             continue
-
-    # Auto-detect only when requested
-    if auth_type == "auto" and not mechanisms:
-        # Try to detect mechanisms from main page
-        try:
-            resp = _http_request("GET", target_url, timeout=10.0)
-            if resp is not None:
-                content = resp.text or ""
-
-                # Look for authentication indicators
-                if "jwt" in content.lower() or "bearer" in content.lower():
-                    _append_unique(mechanisms,
-                        {
-                            "type": "JWT",
-                            "description": "JWT tokens detected in application",
-                            "location": "Application JavaScript/Headers",
-                            "confidence": "medium",
-                        }
-                    )
-
-                if "oauth" in content.lower() or "client_id" in content.lower():
-                    _append_unique(mechanisms,
-                        {
-                            "type": "OAuth",
-                            "description": "OAuth flow indicators detected",
-                            "location": "Application content",
-                            "confidence": "medium",
-                        }
-                    )
-
-                if any(keyword in content.lower() for keyword in ["session", "csrf", "xsrf"]):
-                    _append_unique(mechanisms,
-                        {
-                            "type": "Session-based",
-                            "description": "Session-based authentication detected",
-                            "location": "Form/Cookie analysis",
-                            "confidence": "high",
-                        }
-                    )
-        except Exception:
-            pass
-
     return mechanisms
 
 
@@ -1322,7 +1327,8 @@ def _analyze_tokens_and_sessions(target_url: str, mechanisms: list[dict]) -> dic
         pass
 
     # Use jwt_tool if available for JWT analysis
-    jwt_mechanisms = [m for m in mechanisms if m["type"] == "JWT"]
+    jwt_mechanisms = [m for m in mechanisms if m["type"] == "JWT"
+                      and m.get("evidence_status") == "observed_indicator" and m.get("supports_mechanism")]
     if jwt_mechanisms:
         jwt_tokens = _analyze_jwt_with_tools(target_url, jwt_mechanisms)
         token_analysis["tokens"].extend(jwt_tokens)
@@ -1628,8 +1634,12 @@ def _map_authentication_flows(target_url: str, results: dict) -> dict[str, Any]:
 
     # Map authentication steps based on discovered mechanisms
     for mechanism in results.get("auth_mechanisms", []):
-        steps = _generate_auth_steps(mechanism)
-        flow_analysis["authentication_steps"].extend(steps)
+        if mechanism.get("evidence_status") == "observed_indicator" and mechanism.get("supports_mechanism"):
+            steps = _generate_auth_steps(mechanism)
+            flow_analysis["authentication_steps"].extend(
+                {**step, "evidence_status": "hypothetical_protocol_step", "validated_flow": False}
+                for step in steps
+            )
 
     # Identify bypass opportunities
     bypass_opportunities = []

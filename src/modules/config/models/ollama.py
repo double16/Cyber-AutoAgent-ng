@@ -6,8 +6,10 @@
 import inspect
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any, TypeVar, Unpack, cast, override
 
 import ollama
@@ -24,6 +26,8 @@ from strands.types.exceptions import ContextWindowOverflowException
 from strands.types.streaming import StopReason, StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 from typing_extensions import TypedDict
+
+from modules.config.models.provider_capture import ProviderResponseCapture
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +107,8 @@ class OllamaModel(Model):
             ollama_client_args: Additional arguments for the Ollama client.
             **model_config: Configuration options for the Ollama model.
         """
+        self.capture_directory: Path | None = None
+        self.capture_role = "unknown"
         self.host = host
         self.client_args = dict(ollama_client_args or {})
         self.client_args.setdefault("trust_env", False)
@@ -149,7 +155,8 @@ class OllamaModel(Model):
             return [{"role": role, "content": content["text"]}]
 
         if "reasoningContent" in content:
-            return [{"role": role, "reasoningContent": content["reasoningContent"]}]
+            # Prior thinking is diagnostic data, not input to the next Ollama turn.
+            return []
 
         if "image" in content:
             return [{"role": role, "images": [content["image"]["source"]["bytes"]]}]
@@ -366,7 +373,19 @@ class OllamaModel(Model):
         )
         return True, fallback_value
 
-    async def _chat_with_fallback(self, client: ollama.AsyncClient, request: dict[str, Any]) -> Any:
+    @classmethod
+    def _raise_context_overflow(cls, error: ollama.ResponseError) -> None:
+        """Normalize recognized provider input-capacity failures for every response path."""
+
+        message = str(error).lower()
+        if any(marker in message for marker in cls.OVERFLOW_MESSAGES) or re.search(
+            r"input length\s*\([\d,]+\s+tokens?\)\s+exceeds the model.s maximum context length",
+            message,
+        ):
+            raise ContextWindowOverflowException(str(error)) from error
+
+    async def _chat_with_fallback(self, client: ollama.AsyncClient, request: dict[str, Any],
+                                  capture: ProviderResponseCapture | None = None) -> Any:
         """Execute chat request with progressive parameter stripping upon provider errors."""
         from modules.config.models.agent_profiles import get_agent_settings_registry
         registry = get_agent_settings_registry()
@@ -378,6 +397,8 @@ class OllamaModel(Model):
 
         while True:
             try:
+                if capture is not None:
+                    capture.request(current_request)
                 response = await client.chat(**current_request)
                 if pending_think_fallback is not None:
                     registry.record_parameter_fallback(
@@ -389,6 +410,8 @@ class OllamaModel(Model):
                     )
                 return response
             except Exception as exc:
+                if isinstance(exc, ollama.ResponseError):
+                    self._raise_context_overflow(exc)
                 if isinstance(exc, RecursionError):
                     logger.error(
                         "Ollama request failed for %s with RecursionError; no parameter fallback will be attempted",
@@ -469,10 +492,14 @@ class OllamaModel(Model):
 
         client = ollama.AsyncClient(self.host, **self.client_args)
         response = None
+        capture = ProviderResponseCapture(self.capture_directory, self.capture_role, self.config["model_id"])
+        success = False
         try:
-            response = await self._chat_with_fallback(client, request)
+            response = await self._chat_with_fallback(client, request, capture)
 
             logger.debug("got response from model")
+            if isinstance(response, ChatResponse):
+                capture.response(response)
             yield self.format_chunk({"chunk_type": "message_start"})
             yield self.format_chunk({"chunk_type": "content_start", "data_type": "text"})
 
@@ -496,6 +523,7 @@ class OllamaModel(Model):
             last_event = None
             if hasattr(response, "__aiter__"):
                 async for event in response:
+                    capture.response(event)
                     last_event = event
                     for se in produce_chunks(event):
                         yield se
@@ -509,6 +537,8 @@ class OllamaModel(Model):
             yield self.format_chunk({"chunk_type": "content_stop", "data_type": "text"})
 
             if last_event is not None:
+                if last_event.done_reason in {"length", "max_tokens"}:
+                    capture.finish(True)
                 yield self.format_chunk(
                     {"chunk_type": "message_stop", "data": "tool_use" if tool_requested[0] else last_event.done_reason}
                 )
@@ -518,8 +548,13 @@ class OllamaModel(Model):
                     {"chunk_type": "message_stop", "data": "end_turn"}
                 )
 
+            success = True
             logger.debug("finished streaming response from model")
+        except ollama.ResponseError as error:
+            self._raise_context_overflow(error)
+            raise
         finally:
+            capture.finish(success)
             try:
                 await _close_async_resource(response)
             finally:
@@ -546,20 +581,33 @@ class OllamaModel(Model):
 
         client = ollama.AsyncClient(self.host, **self.client_args)
         response = None
+        capture = ProviderResponseCapture(self.capture_directory, self.capture_role, self.config["model_id"])
+        success = False
         try:
-            try:
-                response = await self._chat_with_fallback(client, formatted_request)
-            except ollama.ResponseError as error:
-                if any(message in str(error).lower() for message in self.OVERFLOW_MESSAGES):
-                    raise ContextWindowOverflowException(str(error)) from error
-                raise
+            response = await self._chat_with_fallback(client, formatted_request, capture)
 
             try:
+                capture.response(response)
+                if getattr(response, "done_reason", None) == "length":
+                    from strands.types.exceptions import MaxTokensReachedException
+
+                    raise MaxTokensReachedException("Native structured generation reached its output limit")
+                if all(getattr(response, key, None) is not None
+                       for key in ("prompt_eval_count", "eval_count", "total_duration")):
+                    yield self.format_chunk({"chunk_type": "metadata", "data": response})
                 content = response.message.content.strip()
-                yield {"output": output_model.model_validate_json(content)}
-            except Exception as e:
-                raise ValueError(f"Failed to parse or load content into model: {e}") from e
+                # Some Ollama-compatible chat parsers expose the terminal control token as text.
+                # Strip only the observed terminal marker; arbitrary prose remains invalid JSON.
+                if content.endswith("<|eot|>"):
+                    content = content.removesuffix("<|eot|>").rstrip()
+                    logger.info("Normalized trailing chat terminator on native structured response")
+                validated = output_model.model_validate_json(content)
+                success = True
+                yield {"output": validated}
+            except (ValueError, TypeError) as e:
+                raise ValueError("Failed to parse or validate native structured content") from e
         finally:
+            capture.finish(success)
             try:
                 await _close_async_resource(response)
             finally:

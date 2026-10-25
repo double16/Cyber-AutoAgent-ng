@@ -12,6 +12,7 @@ from modules.config.models.agent_profiles import (
     mutate_agent_model_reasoning,
     reset_agent_settings_registry,
 )
+from modules.config.models.invocation import invocation_output_tokens, invocation_reasoning
 from modules.handlers import max_token_recovery as recovery
 from modules.handlers.max_token_recovery import (
     MaxTokenClassification,
@@ -184,9 +185,11 @@ def test_json_agent_workflow_adaptation_recovery():
     assert registry.get_settings("task_creator").reasoning_level == ReasoningLevel.MEDIUM
 
     call_count = [0]
+    reasoning_attempts = []
 
     def failing_then_succeeding_runner(role, prompt, tools, system_prompt):
         call_count[0] += 1
+        reasoning_attempts.append(invocation_reasoning(role))
         if call_count[0] == 1:
             err = MaxTokensReachedException("Hit max tokens")
             err.max_token_classification = MaxTokenClassification("reasoning_loop", 0.8, "hash123", 1000, is_reasoning_induced=True)
@@ -211,10 +214,11 @@ def test_json_agent_workflow_adaptation_recovery():
 
     assert result["tasks"][0]["title"] == "Analyze target"
     assert call_count[0] == 2
-    # Verify task_creator has been adapted to reasoning level NONE permanently
-    assert registry.get_settings("task_creator").reasoning_level == ReasoningLevel.NONE
+    assert reasoning_attempts == [None, "none"]
+    assert invocation_reasoning("task_creator") is None
+    assert registry.get_settings("task_creator").reasoning_level == ReasoningLevel.MEDIUM
     records = registry.export_adjustment_records()
-    assert any(r.agent_type == "task_creator" and r.parameter_name == "reasoning_level" and r.new_value == "none" for r in records)
+    assert not any(r.agent_type == "task_creator" and r.parameter_name == "reasoning_level" for r in records)
 
 
 def test_plan_critic_max_tokens_reduction_and_retry():
@@ -222,8 +226,11 @@ def test_plan_critic_max_tokens_reduction_and_retry():
     registry = get_agent_settings_registry()
 
     from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+    from modules.config.models.invocation import invocation_reasoning
+    from tests.test_multi_agent_workflow import _runtime
 
     workflow = MultiAgentWorkflowController.__new__(MultiAgentWorkflowController)
+    workflow.runtime = _runtime()
     workflow.json_retries = 1
     workflow._workflow_activity_listeners = []
     workflow._log_workflow = MagicMock()
@@ -231,13 +238,13 @@ def test_plan_critic_max_tokens_reduction_and_retry():
     workflow._emit_workflow_activity = MagicMock()
     workflow._json_max_token_retry_prompt = lambda prompt, kind: f"RETRY {prompt}"
 
-    # Verify plan_critic initial reasoning level is MEDIUM.
-    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.MEDIUM
+    # Verify plan_critic initial reasoning level is LOW.
+    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.LOW
 
     attempt_reasoning_levels = []
 
     def plan_critic_runner(role, prompt, tools, system_prompt):
-        current_reasoning = registry.get_settings(role).reasoning_level
+        current_reasoning = ReasoningLevel(invocation_reasoning(role) or registry.get_settings(role).reasoning_level)
         attempt_reasoning_levels.append(current_reasoning)
         if len(attempt_reasoning_levels) == 1:
             err = MaxTokensReachedException("Hit max tokens in plan_critic")
@@ -257,15 +264,15 @@ def test_plan_critic_max_tokens_reduction_and_retry():
     )
 
     assert result == {"approved": True, "feedback": []}
-    # First attempt ran with MEDIUM, retry attempt ran with reasoning disabled.
-    assert attempt_reasoning_levels == [ReasoningLevel.MEDIUM, ReasoningLevel.NONE]
-    # Now permanently disabled.
-    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.NONE
+    # First attempt ran with LOW, retry attempt ran with reasoning disabled.
+    assert attempt_reasoning_levels == [ReasoningLevel.LOW, ReasoningLevel.NONE]
+    # Recovery stays local to this review.
+    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.LOW
     records = registry.export_adjustment_records()
-    assert any(
+    assert not any(
         r.agent_type == "plan_critic"
         and r.parameter_name == "reasoning_level"
-        and r.old_value == "medium"
+        and r.old_value == "low"
         and r.new_value == "none"
         for r in records
     )
@@ -277,8 +284,11 @@ def test_active_low_reasoning_max_tokens_retries_with_reasoning_disabled():
     registry.apply_reasoning_repair("plan_critic", ReasoningLevel.LOW, "test setup", permanent=True)
 
     from modules.agents.multi_agent_workflow import MultiAgentWorkflowController
+    from modules.config.models.invocation import invocation_reasoning
+    from tests.test_multi_agent_workflow import _runtime
 
     workflow = MultiAgentWorkflowController.__new__(MultiAgentWorkflowController)
+    workflow.runtime = _runtime()
     workflow.json_retries = 1
     workflow._workflow_activity_listeners = []
     workflow._log_workflow = MagicMock()
@@ -289,7 +299,9 @@ def test_active_low_reasoning_max_tokens_retries_with_reasoning_disabled():
     attempt_reasoning_levels = []
 
     def plan_critic_runner(role, prompt, tools, system_prompt):
-        attempt_reasoning_levels.append(registry.get_settings(role).reasoning_level)
+        attempt_reasoning_levels.append(
+            ReasoningLevel(invocation_reasoning(role) or registry.get_settings(role).reasoning_level)
+        )
         if len(attempt_reasoning_levels) == 1:
             error = MaxTokensReachedException("Hit max tokens in plan_critic")
             error.max_token_classification = MaxTokenClassification(
@@ -309,9 +321,9 @@ def test_active_low_reasoning_max_tokens_retries_with_reasoning_disabled():
 
     assert result == {"approved": True, "feedback": []}
     assert attempt_reasoning_levels == [ReasoningLevel.LOW, ReasoningLevel.NONE]
-    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.NONE
+    assert registry.get_settings("plan_critic").reasoning_level == ReasoningLevel.LOW
     records = registry.export_adjustment_records()
-    assert any(
+    assert not any(
         r.agent_type == "plan_critic"
         and r.parameter_name == "reasoning_level"
         and r.new_value == "none"
@@ -340,7 +352,7 @@ def test_non_reasoning_max_tokens_boost_and_retry():
     attempt_max_tokens = []
 
     def evaluator_runner(role, prompt, tools, system_prompt):
-        current_tokens = registry.get_settings(role).max_tokens
+        current_tokens = invocation_output_tokens(role)
         attempt_max_tokens.append(current_tokens)
         if len(attempt_max_tokens) == 1:
             err = MaxTokensReachedException("Hit output token limit")
@@ -362,5 +374,6 @@ def test_non_reasoning_max_tokens_boost_and_retry():
     assert result == {"cwe": [], "mitre_attack": []}
     # First attempt ran with 4096, retry attempt ran with boosted 6144
     assert attempt_max_tokens == [4096, 6144]
-    # Since 1st recovery (< 3 strikes), baseline remains 4096
+    assert invocation_output_tokens("taxonomy_annotator") is None
+    # Recovery never changes the shared profile.
     assert registry.get_settings("taxonomy_annotator").max_tokens == 4096

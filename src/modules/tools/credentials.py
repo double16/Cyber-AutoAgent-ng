@@ -29,6 +29,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from strands import ToolContext, tool
 
+from modules.authentication_requirements import credential_comparison_matches
 from modules.tools.memory import (
     _get_database_store,
     _operation_id,
@@ -42,6 +43,7 @@ _STATUSES = frozenset({"unknown", "pending", "valid", "invalid", "expired", "rev
 _DURABLE_EVIDENCE_REF_PREFIXES = ("artifact:", "artifact_id:", "memory:", "finding:")
 _OAUTH_CLIENT_AUTH_METHODS = frozenset({"client_secret_basic", "client_secret_post"})
 _FORM_FIELD_NAME_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_.\-\[\]]{0,127}")
+_HTTP_HEADER_NAME_PATTERN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _IMAP_INTERNALDATE_PATTERN = re.compile(r'INTERNALDATE "(?P<timestamp>[^"]+)"')
 _OBJECTIVE_LOGIN_PATTERN = re.compile(
     r"(?is)\b(?:username|user)\s*[:=]\s*(?P<username>[^\s,;]+).*?\b(?:password|pass)\s*[:=]\s*(?P<password>[^\s,;]+)"
@@ -73,7 +75,8 @@ _STORE_CREDENTIAL_INPUT_SCHEMA = {
                 "description": (
                     "Secret payload. username_password requires username and password and accepts optional email; "
                     "email_login requires email, password, and mailbox {host, port?, tls?, folder?}; api_key "
-                    "requires api_key and name; oauth2_client requires client_id and client_secret."
+                    "accepts api_key and name, or headers mapping arbitrary HTTP names to opaque values; "
+                    "oauth2_client requires client_id and client_secret."
                 ),
             },
             "target": {"type": "string", "description": "Exact active target for non-mailbox credentials."},
@@ -278,14 +281,39 @@ def validate_credential_payload(credential_type: str, values: dict[str, Any]) ->
             payload["mfa"] = mfa
         return payload
     if kind == "api_key":
+        if "headers" in values:
+            if any(key in values for key in ("api_key", "name", "prefix", "placement")):
+                raise ValueError("headers cannot be combined with single API key fields")
+            supplied = values["headers"]
+            if not isinstance(supplied, dict) or not supplied:
+                raise ValueError("headers must be a nonempty object")
+            names: set[str] = set()
+            headers: dict[str, str] = {}
+            for name, value in supplied.items():
+                if not isinstance(name, str) or not _HTTP_HEADER_NAME_PATTERN.fullmatch(name):
+                    raise ValueError("credential header name is invalid")
+                if name.lower() in names:
+                    raise ValueError("credential header names must be unique ignoring case")
+                if not isinstance(value, str) or not value or "\r" in value or "\n" in value:
+                    raise ValueError("credential header value is invalid")
+                names.add(name.lower())
+                headers[name] = value
+            return {"headers": headers}
         placement = str(values.get("placement") or "header").strip().lower()
         if placement not in {"header", "query"}:
             raise ValueError("API key placement must be header or query")
+        name = _require_string(values, "name")
+        if placement == "header" and not _HTTP_HEADER_NAME_PATTERN.fullmatch(name):
+            raise ValueError("credential header name is invalid")
+        prefix = str(values.get("prefix") or "")
+        api_key = _require_string(values, "api_key")
+        if placement == "header" and ("\r" in prefix + api_key or "\n" in prefix + api_key):
+            raise ValueError("credential header value is invalid")
         return {
-            "api_key": _require_string(values, "api_key"),
+            "api_key": api_key,
             "placement": placement,
-            "name": _require_string(values, "name"),
-            "prefix": str(values.get("prefix") or ""),
+            "name": name,
+            "prefix": prefix,
         }
     client_auth_method = str(values.get("client_auth_method") or "client_secret_basic").strip()
     if client_auth_method not in _OAUTH_CLIENT_AUTH_METHODS:
@@ -398,6 +426,10 @@ def store_user_credential(
     if kind != "email_login" and not str(role or "").strip():
         raise ValueError("role is required for target credentials")
     payload = validate_credential_payload(kind, values)
+    if kind == "username_password" and not account_label:
+        account_label = hashlib.sha256(
+            f"{target}|{payload['username']}".encode()
+        ).hexdigest()[:24]
     if account_label:
         payload["account_label"] = str(account_label).strip()
     if tenant_label:
@@ -551,16 +583,9 @@ def _credential_comparison_pairs(records: list[dict[str, Any]]) -> list[dict[str
         for right in records[index + 1 :]:
             left_id = str(left["credential_id"])
             right_id = str(right["credential_id"])
-            left_account = str(left.get("account_label") or "")
-            right_account = str(right.get("account_label") or "")
-            left_tenant = str(left.get("tenant_label") or "")
-            right_tenant = str(right.get("tenant_label") or "")
-            if left_account and right_account and left_account != right_account:
-                comparisons.append({"kind": "account", "left_credential_id": left_id, "right_credential_id": right_id})
-            if str(left.get("role") or "") != str(right.get("role") or ""):
-                comparisons.append({"kind": "role", "left_credential_id": left_id, "right_credential_id": right_id})
-            if left_tenant and right_tenant and left_tenant != right_tenant:
-                comparisons.append({"kind": "tenant", "left_credential_id": left_id, "right_credential_id": right_id})
+            for kind in ("account", "role", "tenant"):
+                if credential_comparison_matches(left, right, kind):
+                    comparisons.append({"kind": kind, "left_credential_id": left_id, "right_credential_id": right_id})
     unique_comparisons = {
         (item["kind"], item["left_credential_id"], item["right_credential_id"]): item for item in comparisons
     }
@@ -627,7 +652,12 @@ def _active_task_target_values(store: Any, operation_id: str) -> tuple[Any, set[
 
     active_task = active_credential_task(store, operation_id)
     if active_task is None:
-        raise ValueError("an active task is required for credential access")
+        active_count = sum(task.status == "active" for task in store.get_tasks(operation_id))
+        if active_count > 1:
+            raise ValueError(
+                "credential access requires exactly one active task; multiple active tasks make task context ambiguous"
+            )
+        raise ValueError("credential access requires an active task; no active task was found")
     target_values = set(_task_resolved_targets(store, operation_id, active_task))
     if not target_values:
         raise ValueError("active task does not have a resolved target scope")
@@ -1344,6 +1374,9 @@ def _register_credential_payload_secrets(record: dict[str, Any]) -> None:
     for key in ("password", "api_key", "client_secret"):
         if isinstance(payload.get(key), str):
             register_runtime_secret(payload[key])
+    for value in (payload.get("headers") or {}).values():
+        if isinstance(value, str):
+            register_runtime_secret(value)
     mfa = payload.get("mfa") if isinstance(payload.get("mfa"), dict) else {}
     if isinstance(mfa.get("secret"), str):
         register_runtime_secret(mfa["secret"])

@@ -7,6 +7,9 @@ the shared global conversation manager for context reduction.
 
 import types
 
+import pytest
+from strands.types.exceptions import ContextWindowOverflowException
+
 from modules.handlers.conversation_budget import (
     _ensure_prompt_within_budget,
     clear_shared_conversation_manager,
@@ -45,7 +48,8 @@ def test_shared_conversation_manager_is_used_when_agent_has_none():
     agent = AgentStub(messages, limit=1000)
 
     try:
-        _ensure_prompt_within_budget(agent)
+        with pytest.raises(ContextWindowOverflowException):
+            _ensure_prompt_within_budget(agent)
     finally:
         clear_shared_conversation_manager()
 

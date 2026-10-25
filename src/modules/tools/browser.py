@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import builtins
 import contextlib
 import contextvars
 import csv
@@ -29,6 +30,7 @@ from playwright.async_api import (
     Response,
     TimeoutError,
 )
+from playwright.async_api import Error as PlaywrightError
 from pymitter import EventEmitter
 from six import StringIO
 from stagehand import Stagehand, StagehandConfig, StagehandPage
@@ -61,6 +63,13 @@ def latest_browser_interaction_receipts() -> list[dict[str, Any]]:
     """Return secret-free response receipts from the most recent browser action."""
 
     return [dict(receipt) for receipt in _LAST_INTERACTION_RECEIPTS]
+
+
+def set_browser_interaction_receipts(receipts: list[dict[str, Any]]) -> None:
+    """Share secret-free current-action response metadata across browser action implementations."""
+
+    global _LAST_INTERACTION_RECEIPTS
+    _LAST_INTERACTION_RECEIPTS = [dict(receipt) for receipt in receipts]
 
 
 async def _interaction_response_receipts(requests: list[Request]) -> list[dict[str, Any]]:
@@ -1270,19 +1279,27 @@ class BrowserService(EventEmitter):
                                     {"name": cookie[0], "value": cookie[1].value}
                                 )
 
-                    with suppress(asyncio.TimeoutError):
-                        async with asyncio.timeout(
-                                60
-                        ):  # Wait for up to 60 seconds for the response body to be available
+                    har_entry_response["_body_capture_status"] = "unavailable"
+                    try:
+                        async with asyncio.timeout(60):
                             content = await response.body()
-                            har_entry_response["bodySize"] = len(content)
-                            content_type = all_response_headers.get("content-type", "")
-                            har_entry_response["content"] = form_har_body(
-                                content_type, content
-                            )
+                        har_entry_response["bodySize"] = len(content)
+                        content_type = all_response_headers.get("content-type", "")
+                        har_entry_response["content"] = form_har_body(content_type, content)
+                        har_entry_response["_body_capture_status"] = "available"
+                    except builtins.TimeoutError:
+                        har_entry_response["_body_capture_status"] = "timeout"
+                    except PlaywrightError as error:
+                        if "No resource with given identifier found" in str(error):
+                            logger.debug("Browser response body is no longer available")
+                        else:
+                            logger.exception("Could not retrieve browser response body")
+                    except Exception:
+                        logger.exception("Could not retrieve browser response body")
 
                     simplified_response = [
                         f"Status Code: `{response.status}`",
+                        f"Body Capture: `{har_entry_response["_body_capture_status"]}`",
                     ]
                     if formatted_response_headers := format_headers(
                             all_response_headers
@@ -1310,6 +1327,7 @@ class BrowserService(EventEmitter):
                         "path": parsed_url.path or "/",
                         "status": response.status if response else "n/a",
                         "bytes": body_size,
+                        "body_status": har_entry.get("response", {}).get("_body_capture_status", "unavailable"),
                     }
                 )
 
@@ -1337,7 +1355,7 @@ class BrowserService(EventEmitter):
 
         toon_section = format_toon_table(
             "network_calls",
-            ["#", "method", "host", "path", "status", "bytes"],
+            ["#", "method", "host", "path", "status", "bytes", "body_status"],
             summary_rows[:_TOON_PREVIEW_LIMIT],
         )
         segments = [
@@ -1540,6 +1558,7 @@ async def get_browser():
 async def reset_authentication_browser_session() -> None:
     """Clear authentication state without destroying the shared browser service."""
 
+    set_browser_interaction_receipts([])
     async with get_browser() as browser:
         async def _reset() -> None:
             page_url = str(browser.page.url or "")
@@ -1704,8 +1723,8 @@ async def browser_goto_url(url: str):
         - Browser state persists across calls.
         - Browser tools share a single browser instance and should be treated as
           sequential and stateful.
-        - Navigation automatically captures relevant browser artifacts such as
-          network traffic, console logs, dialogs, and downloads.
+        - Navigation saves the rendered page before subsequent interactions and returns its artifact reference.
+        - Navigation also captures network traffic, console logs, dialogs, and downloads.
         - Large artifacts may be saved to disk; inspect only relevant portions
           with shell tools.
         - If a HAR artifact is returned, extract only needed entries, for
@@ -1847,6 +1866,7 @@ async def browser_goto_url(url: str):
                 ) as interaction_context:
                     async with browser.timeout():
                         await browser.page.goto(url)
+                    snapshot = await _save_rendered_page(browser)
 
                     async with browser.timeout():
                         observations = "\n".join(
@@ -1857,7 +1877,7 @@ async def browser_goto_url(url: str):
                                 )
                         )
                     summary = await interaction_context.summarize()
-                    return f"<observations>\n{observations}\n</observations>\n{summary}"
+                    return f"<observations>\n{observations}\n</observations>\n{snapshot}\n{summary}"
 
             return await browser.run_in_browser_loop(_impl)
 
@@ -1904,6 +1924,19 @@ async def browser_goto_url(url: str):
         return await _http_fallback("retry attempts exhausted")
 
 
+async def _save_rendered_page(browser: BrowserService) -> str:
+    """Save the current DOM before another interaction can replace it."""
+
+    if not browser.artifacts_dir:
+        return ""
+    async with browser.timeout():
+        page_html = await browser.page.content()
+    html_artifact_file = os.path.join(browser.artifacts_dir, f"browser_page_{time.time_ns()}.html")
+    with open(html_artifact_file, "w", encoding="utf-8") as artifact:
+        artifact.write(page_html)
+    return f"HTML content saved to artifact: {html_artifact_file}"
+
+
 @tool
 async def browser_get_page_html() -> str:
     """
@@ -1924,18 +1957,7 @@ async def browser_get_page_html() -> str:
     """
     logger.info("browser_get_page_html")
     async with get_browser() as browser:
-        async def _impl():
-            async with browser.timeout():
-                return await browser.page.content()
-
-        page_html = await browser.run_in_browser_loop(_impl)
-        html_artifact_file = os.path.join(
-            browser.artifacts_dir, f"browser_page_{time.time_ns()}.html"
-        )
-        with open(html_artifact_file, "w", encoding="utf-8") as f:
-            f.write(page_html)
-        logger.info("browser_get_page_html: %s", html_artifact_file)
-        return f"HTML content saved to artifact: {html_artifact_file}"
+        return await browser.run_in_browser_loop(lambda: _save_rendered_page(browser))
 
 
 @tool
@@ -2250,8 +2272,7 @@ async def browser_perform_action(
                 return observations, summary, page_change, str(browser.page.url), receipts
 
         observations, summary, page_change, final_url, receipts = await browser.run_in_browser_loop(_impl)
-        global _LAST_INTERACTION_RECEIPTS
-        _LAST_INTERACTION_RECEIPTS = receipts
+        set_browser_interaction_receipts(receipts)
         logger.info("browser_perform_action: %s action done", action_category)
         page_change_result = ""
         if page_change is not None:

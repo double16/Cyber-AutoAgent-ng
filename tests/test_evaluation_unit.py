@@ -945,7 +945,7 @@ def test_chat_structured_helper_binds_output_schema(monkeypatch):
     result = ev._chat_invoke_structured("system", "user", mod.EvaluationPolicyOutput)
 
     assert result == {"caps": {"evidence": 0.5}, "disable": []}
-    with_structured_output.assert_called_once_with(mod.EvaluationPolicyOutput)
+    with_structured_output.assert_called_once_with(mod.EvaluationPolicyOutput, method="json_schema")
     structured.assert_called_once()
 
 
@@ -1354,11 +1354,12 @@ async def test_continuous_public_rubric_skips_insufficient_evidence(monkeypatch)
 
 
 def test_setup_models_supports_all_configured_providers(monkeypatch):
+    monkeypatch.setattr(mod, "require_prompt_token_limit", lambda *_args: 40000)
     class Config:
         def __init__(self, provider):
             self.provider = provider
             self.server = SimpleNamespace(
-                evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model")),
+                evaluation=SimpleNamespace(llm=SimpleNamespace(model_id="eval-model"), judge_max_tokens=800),
                 embedding=SimpleNamespace(model_id="embed-model"),
             )
 
@@ -1373,6 +1374,9 @@ def test_setup_models_supports_all_configured_providers(monkeypatch):
 
         def get_default_region(self):
             return "us-east-1"
+
+        def getenv_int(self, _name, default=0):
+            return default
 
     class Model:
         instances = []
@@ -1906,3 +1910,25 @@ async def test_score_upload_uses_create_score_and_shutdown_legacy_paths(monkeypa
     await ev._upload_scores_to_langfuse("trace", {"answer_relevancy": 0.4})
     legacy.assert_called_once()
     ev.langfuse.shutdown.assert_called_once()
+
+
+def test_successful_native_evaluation_records_capability_after_validation(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._chat_invoke_structured = Mock(return_value={"caps": {}, "disable": []})
+    assert ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput) == {
+        "caps": {}, "disable": [],
+    }
+    assert ev._native_structured_output_available is True
+
+
+def test_bedrock_evaluation_retains_explicit_tool_compatibility(monkeypatch):
+    ev = evaluator(monkeypatch)
+    ev._evaluation_provider = "bedrock"
+    bound = Mock()
+    bound.invoke.return_value = mod.EvaluationPolicyOutput(caps={}, disable=[])
+    factory = Mock(return_value=bound)
+    ev._chat_model = SimpleNamespace(with_structured_output=factory)
+    ev._chat_invoke_structured("system", "user", mod.EvaluationPolicyOutput)
+    factory.assert_called_once_with(mod.EvaluationPolicyOutput)
+    ev._chat_invoke_evaluation_json("system", "user", mod.EvaluationPolicyOutput)
+    assert ev._native_structured_output_available is None

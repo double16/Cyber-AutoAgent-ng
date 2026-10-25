@@ -1,6 +1,7 @@
 """Read-only access to artifacts produced by the current operation."""
 
 import ast
+import codecs
 import os
 import re
 from collections.abc import Iterable, Mapping
@@ -9,7 +10,10 @@ from typing import Any
 
 from strands import tool
 
+from modules.tools.artifact_journal import ReturnedArtifactJournal
+from modules.tools.artifact_references import normalize_artifact_reference_token
 from modules.tools.memory import _artifact_path_from_ref, _operation_output_root
+from modules.tools.tool_result_policy import bounded_inline_result
 
 ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER = "ARTIFACT_TOTAL_READ_LIMIT_REACHED"
 ARTIFACT_PAGE_LIMIT_REACHED_MARKER = "ARTIFACT_PAGE_LIMIT_REACHED"
@@ -27,8 +31,37 @@ TOOL_RESULT_CONTEXT_FRACTION = 0.10
 TOOL_RESULT_CHARS_PER_TOKEN = 4
 TOOL_RESULT_MAX_CHARS = 30_000
 ARTIFACT_SEARCH_MAX_PATTERN_CHARS = 512
-ARTIFACT_SEARCH_MAX_CONTEXT_LINES = 10
+ARTIFACT_SEARCH_MAX_CONTEXT_LINES = 20
 ARTIFACT_SEARCH_MAX_MATCHES = 50
+_SEARCH_ARTIFACT_INPUT_SCHEMA = {
+    "json": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Current-operation artifact path or reference"},
+            "search_pattern": {"type": "string", "description": "Literal text or regular expression to find"},
+            "search_regex": {"type": "boolean", "default": False},
+            "context_lines": {
+                "type": "integer",
+                "default": 2,
+                "minimum": 0,
+                "maximum": ARTIFACT_SEARCH_MAX_CONTEXT_LINES,
+                "description": (
+                    "Number of lines before and after each match "
+                    f"(0 through {ARTIFACT_SEARCH_MAX_CONTEXT_LINES}; default 2)"
+                ),
+            },
+            "max_matches": {
+                "type": "integer",
+                "default": 25,
+                "minimum": 1,
+                "maximum": ARTIFACT_SEARCH_MAX_MATCHES,
+                "description": f"Maximum matches to return (1 through {ARTIFACT_SEARCH_MAX_MATCHES}; default 25)",
+            },
+            "match_offset": {"type": "integer", "default": 0},
+        },
+        "required": ["path", "search_pattern"],
+    }
+}
 
 
 def artifact_max_bytes_for_context_window(context_window_tokens: int) -> int:
@@ -66,6 +99,15 @@ def resolve_tool_result_max_chars(
     return configured if configured > 0 else computed
 
 
+def _complete_utf8_prefix(content: bytes, *, final: bool = False) -> bytes:
+    """Defer incomplete trailing UTF-8 characters to the next byte page."""
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    decoder.decode(content, final=final)
+    pending, _ = decoder.getstate()
+    return content[:-len(pending)] if pending else content
+
+
 def _resolved_operation_path(candidate: str, root: str) -> str:
     """Resolve one candidate and reject paths that escape the operation root."""
 
@@ -83,6 +125,7 @@ def resolve_operation_artifact_path(path: str) -> str:
     fall back to the operation output directory itself.
     """
 
+    path = normalize_artifact_reference_token(path)
     root = os.path.realpath(_operation_output_root())
     if str(path).startswith(("artifact:", "artifact_id:")):
         resolved = _resolved_operation_path(_artifact_path_from_ref(path), root)
@@ -106,7 +149,7 @@ def _resolve_operation_directory_path(path: str) -> str | None:
     """Resolve an existing in-scope directory supplied to the artifact reader."""
 
     root = os.path.realpath(_operation_output_root())
-    text = str(path or "").strip()
+    text = normalize_artifact_reference_token(path)
     if text.startswith("artifact_id:"):
         artifact_id = text.split(":", 1)[1]
         if not artifact_id or artifact_id != os.path.basename(artifact_id):
@@ -127,8 +170,15 @@ def _resolve_operation_directory_path(path: str) -> str | None:
     return None
 
 
-def _directory_read_guidance(directory: str, root: str, max_output_chars: int | None = None) -> str:
-    """Return a bounded, non-recursive file listing for a directory read attempt."""
+def _directory_read_guidance(
+    directory: str,
+    root: str,
+    max_output_chars: int | None = None,
+    *,
+    tool_name: str = "read_artifact",
+    allowed_paths: set[str] | None = None,
+) -> str:
+    """Return a bounded, non-recursive listing after an artifact tool receives a directory."""
 
     files = []
     for entry in os.scandir(directory):
@@ -136,7 +186,7 @@ def _directory_read_guidance(directory: str, root: str, max_output_chars: int | 
             resolved = _resolved_operation_path(entry.path, root)
         except ValueError:
             continue
-        if entry.is_file() and os.path.isfile(resolved):
+        if entry.is_file() and os.path.isfile(resolved) and (allowed_paths is None or resolved in allowed_paths):
             files.append(f"artifact:{os.path.relpath(resolved, root).replace(os.sep, '/')}")
     files.sort()
     listed_files = files[:ARTIFACT_DIRECTORY_LISTING_LIMIT]
@@ -144,7 +194,7 @@ def _directory_read_guidance(directory: str, root: str, max_output_chars: int | 
     def payload_for(references: list[str]) -> dict[str, Any]:
         return {
             "status": "directory",
-            "message": "read_artifact requires one file. Retry with one listed artifact_ref.",
+            "message": f"{tool_name} requires one file. Retry with one listed artifact_ref.",
             "directory": f"artifact:{os.path.relpath(directory, root).replace(os.sep, '/')}",
             "artifact_refs": references,
             "omitted_file_count": len(files) - len(references),
@@ -252,7 +302,14 @@ def _read_artifact_with_limit(
         lines.pop()
         payload = payload_for(lines)
     if max_output_chars is not None and original_line_count and not lines:
-        raise ValueError("artifact reader output limit is too small for one complete line")
+        return _read_artifact_bytes(
+            resolved,
+            selected_start_byte,
+            max_bytes,
+            max_output_chars=max_output_chars,
+            page_start_line=start_line,
+            page_max_lines=max_lines,
+        )
     if max_output_chars is not None and len(str(payload)) > max_output_chars:
         raise ValueError("artifact reader output limit is too small for result metadata")
     return str(payload)
@@ -313,7 +370,10 @@ def _read_artifact_bytes(
             line_end = newline + 1
         content_end = line_end
 
-    content = byte_page[content_start:content_end]
+    content = _complete_utf8_prefix(
+        byte_page[content_start:content_end], final=start_byte + content_end >= byte_size
+    )
+    had_content = content_end > content_start
 
     def payload_for(page_content: bytes) -> dict[str, Any]:
         page_end = content_start + len(page_content)
@@ -355,23 +415,25 @@ def _read_artifact_bytes(
         lower, upper = 0, len(content)
         while lower < upper:
             midpoint = (lower + upper + 1) // 2
-            candidate = payload_for(content[:midpoint])
+            candidate = payload_for(_complete_utf8_prefix(content[:midpoint]))
             if len(str(candidate)) <= max_output_chars:
                 lower = midpoint
             else:
                 upper = midpoint - 1
-        content = content[:lower]
+        content = _complete_utf8_prefix(content[:lower])
         payload = payload_for(content)
         if content and payload["next_start_byte"] is not None:
             payload["truncated"] = True
             payload["truncation_reason"] = "output_limit_reached"
             while content and len(str(payload)) > max_output_chars:
-                content = content[:-1]
+                content = _complete_utf8_prefix(content[:-1])
                 payload = payload_for(content)
                 payload["truncated"] = True
                 payload["truncation_reason"] = "output_limit_reached"
     if max_output_chars is not None and len(str(payload)) > max_output_chars:
         raise ValueError("artifact reader output limit is too small for result metadata")
+    if had_content and not content:
+        raise ValueError("artifact reader output/page limit is too small for metadata plus one complete character")
     return str(payload)
 
 
@@ -404,8 +466,16 @@ def _search_artifact(
         matcher = re.compile(pattern) if regex else None
     except re.error as error:
         raise ValueError(f"invalid regular expression: {error}") from error
-    resolved = resolve_operation_artifact_path(path)
     root = os.path.realpath(_operation_output_root())
+    directory = _resolve_operation_directory_path(path)
+    if directory is not None:
+        return _directory_read_guidance(
+            directory,
+            root,
+            max_output_chars,
+            tool_name="search_artifact",
+        )
+    resolved = resolve_operation_artifact_path(path)
     matching_lines: list[tuple[int, int, int]] = []
     total_lines = 0
     scanned_bytes = 0
@@ -583,7 +653,7 @@ def create_artifact_reader(context_window_tokens: int, *, max_output_chars: int 
                 return _directory_read_guidance(directory, root, max_output_chars)
             raise
 
-    return read_artifact
+    return bounded_inline_result(read_artifact)
 
 
 def create_artifact_searcher(*, max_output_chars: int | None = None) -> Any:
@@ -592,7 +662,7 @@ def create_artifact_searcher(*, max_output_chars: int | None = None) -> Any:
     if max_output_chars is not None and max_output_chars < 1:
         raise ValueError("max_output_chars must be at least 1")
 
-    @tool(name="search_artifact")
+    @tool(name="search_artifact", inputSchema=_SEARCH_ARTIFACT_INPUT_SCHEMA)
     def search_artifact(
         path: str,
         search_pattern: str,
@@ -613,7 +683,7 @@ def create_artifact_searcher(*, max_output_chars: int | None = None) -> Any:
             max_output_chars=max_output_chars,
         )
 
-    return search_artifact
+    return bounded_inline_result(search_artifact)
 
 
 def create_bounded_artifact_searcher(
@@ -622,6 +692,7 @@ def create_bounded_artifact_searcher(
     allowed_artifact_refs: Iterable[str] | None = None,
     max_searches_per_artifact: int | None = None,
     max_output_chars: int | None = None,
+    returned_journal: ReturnedArtifactJournal | None = None,
 ) -> Any:
     """Create a scoped full-artifact search tool with optional path and call limits."""
 
@@ -641,8 +712,9 @@ def create_bounded_artifact_searcher(
     )
     calls = 0
     searches_by_path: dict[str, int] = {}
+    limit_state: dict[str, Any] = {}
 
-    @tool(name="search_artifact")
+    @tool(name="search_artifact", inputSchema=_SEARCH_ARTIFACT_INPUT_SCHEMA)
     def search_artifact(
         path: str,
         search_pattern: str,
@@ -654,6 +726,17 @@ def create_bounded_artifact_searcher(
         """Search an entire allowed artifact and return bounded matching context."""
 
         nonlocal calls
+        limit_state.clear()
+        root = os.path.realpath(_operation_output_root())
+        directory = _resolve_operation_directory_path(path)
+        if directory is not None:
+            return _directory_read_guidance(
+                directory,
+                root,
+                max_output_chars,
+                tool_name="search_artifact",
+                allowed_paths=allowed_paths,
+            )
         try:
             resolved = resolve_operation_artifact_path(path)
         except (OSError, TypeError, ValueError) as error:
@@ -665,12 +748,24 @@ def create_bounded_artifact_searcher(
                 f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: Artifact is not available to this evaluator"
             )
         if calls >= max_searches:
-            raise RuntimeError(f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: Search limit reached")
+            limit_state.update(scope="total", used=calls, allowed=max_searches)
+            raise RuntimeError(
+                f"{ARTIFACT_TOTAL_READ_LIMIT_REACHED_MARKER}: search_artifact has used {calls}/{max_searches} "
+                "searches across all artifacts for this invocation. Changing files, patterns, or pagination "
+                "cannot restore searches. Use already-returned evidence or another available tool."
+            )
         if (
             max_searches_per_artifact is not None
             and searches_by_path.get(resolved, 0) >= max_searches_per_artifact
         ):
-            raise RuntimeError(f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: Artifact search limit reached")
+            limit_state.update(scope="artifact", path=resolved, used=searches_by_path[resolved],
+                               allowed=max_searches_per_artifact)
+            raise RuntimeError(
+                f"{ARTIFACT_PAGE_LIMIT_REACHED_MARKER}: search_artifact has used "
+                f"{searches_by_path[resolved]}/{max_searches_per_artifact} searches for this artifact. "
+                "Changing patterns or pagination cannot restore searches for it. "
+                "Use already-returned evidence, another allowed artifact, or another available tool."
+            )
         try:
             result = _search_artifact(
                 resolved,
@@ -685,9 +780,16 @@ def create_bounded_artifact_searcher(
             raise RuntimeError(f"{ARTIFACT_READ_POLICY_VIOLATION_MARKER}: {error}") from error
         calls += 1
         searches_by_path[resolved] = searches_by_path.get(resolved, 0) + 1
+        if search_artifact.returned_artifact_journal is not None:
+            search_artifact.returned_artifact_journal.record("search_artifact", {
+                "path": path, "search_pattern": search_pattern, "search_regex": search_regex,
+                "context_lines": context_lines, "max_matches": max_matches, "match_offset": match_offset,
+            }, result)
         return result
 
-    return search_artifact
+    search_artifact.returned_artifact_journal = returned_journal
+    search_artifact.artifact_limit_state = limit_state
+    return bounded_inline_result(search_artifact)
 
 
 def create_bounded_artifact_reader(
@@ -700,6 +802,7 @@ def create_bounded_artifact_reader(
     max_lines_per_read: int | None = None,
     max_output_chars: int | None = None,
     context_reduction_state: dict[str, int] | None = None,
+    returned_journal: ReturnedArtifactJournal | None = None,
 ) -> Any:
     """Create an agent-local artifact reader with optional path and page limits."""
 
@@ -728,6 +831,7 @@ def create_bounded_artifact_reader(
     }
     calls = 0
     reads_by_path: dict[str, int] = {}
+    limit_state: dict[str, Any] = {}
     seen_pages: set[tuple[Any, ...]] = set()
     returned_ranges: dict[tuple[str, str], list[tuple[int, int]]] = {}
     guided_requests: set[tuple[str, tuple[Any, ...]]] = set()
@@ -763,6 +867,8 @@ def create_bounded_artifact_reader(
             payload = ast.literal_eval(record["result"])
             payload["compression_recovery"] = True
             payload["compression_recovery_epoch"] = epoch
+            if max_output_chars is not None and len(str(payload)) > max_output_chars:
+                raise ValueError("artifact reader output limit is too small for compression recovery metadata")
             replayed_epochs.setdefault(state_key, set()).add(epoch)
             return str(payload)
         return None
@@ -776,7 +882,10 @@ def create_bounded_artifact_reader(
                 f"{ARTIFACT_READ_REPEAT_GUARD_MARKER}: Repeated artifact read guidance for {reason}"
             )
         guided_requests.add(key)
-        return _bounded_read_guidance(resolved, os.path.realpath(_operation_output_root()), reason, message)
+        result = _bounded_read_guidance(resolved, os.path.realpath(_operation_output_root()), reason, message)
+        if max_output_chars is not None and len(result) > max_output_chars:
+            raise ValueError("artifact reader output limit is too small for read guidance metadata")
+        return result
 
     @tool(name="read_artifact")
     def bounded_read_artifact(
@@ -789,6 +898,7 @@ def create_bounded_artifact_reader(
         """Read a bounded current-operation artifact with line or byte paging."""
 
         nonlocal calls
+        limit_state.clear()
         try:
             resolved = resolve_operation_artifact_path(path)
         except (OSError, TypeError, ValueError) as error:
@@ -870,6 +980,10 @@ def create_bounded_artifact_reader(
             if byte_mode
             else (resolved, start_line, max_lines)
         )
+        # Leave room for replay metadata when context-reduction recovery is enabled.
+        page_output_chars = max_output_chars
+        if page_output_chars is not None and context_reduction_state is not None:
+            page_output_chars -= 80 + len(str(reduction_epoch()))
         try:
             result = (
                 _read_artifact_bytes(
@@ -878,7 +992,7 @@ def create_bounded_artifact_reader(
                     max_bytes,
                     start_line,
                     byte_max_lines,
-                    max_output_chars,
+                    page_output_chars,
                 )
                 if byte_mode
                 else _read_artifact_with_limit(
@@ -886,7 +1000,7 @@ def create_bounded_artifact_reader(
                     start_line,
                     max_lines,
                     resolved_max_bytes,
-                    max_output_chars,
+                    page_output_chars,
                 )
             )
         except ValueError as error:
@@ -939,18 +1053,25 @@ def create_bounded_artifact_reader(
                 f"This byte page is within {ARTIFACT_NEARBY_BYTE_PAGE_GAP} bytes of content already returned.",
             )
         if calls >= max_reads:
+            limit_state.update(scope="total", used=calls, allowed=max_reads)
             return guide_once(
                 resolved,
                 page,
                 "evaluator_read_budget_exhausted",
-                f"The evaluator-wide successful-read budget ({max_reads}) is exhausted.",
+                f"read_artifact has used {calls}/{max_reads} reads across all artifacts for this invocation. "
+                "Changing files or pagination cannot restore reads. "
+                "Use already-returned evidence or another available tool.",
             )
         if max_reads_per_artifact is not None and reads_by_path.get(resolved, 0) >= max_reads_per_artifact:
+            limit_state.update(scope="artifact", path=resolved, used=reads_by_path[resolved],
+                               allowed=max_reads_per_artifact)
             return guide_once(
                 resolved,
                 page,
                 "artifact_page_budget_exhausted",
-                f"This artifact has reached its successful-page budget ({max_reads_per_artifact}).",
+                f"read_artifact has used {reads_by_path[resolved]}/{max_reads_per_artifact} reads for this artifact. "
+                "Changing pagination cannot restore reads for it. "
+                "Use already-returned evidence, another allowed artifact, or another available tool.",
             )
         calls += 1
         reads_by_path[resolved] = reads_by_path.get(resolved, 0) + 1
@@ -961,8 +1082,15 @@ def create_bounded_artifact_reader(
             "range": page_range,
             "result": result,
         })
+        if bounded_read_artifact.returned_artifact_journal is not None:
+            bounded_read_artifact.returned_artifact_journal.record("read_artifact", {
+                "path": path, "start_line": start_line, "max_lines": max_lines,
+                "start_byte": start_byte, "max_bytes": max_bytes,
+            }, result)
         return result
 
+    bounded_read_artifact.returned_artifact_journal = returned_journal
     bounded_read_artifact.__name__ = "read_artifact"
     bounded_read_artifact._cyber_context_reduction_state = reduction_state
-    return bounded_read_artifact
+    bounded_read_artifact.artifact_limit_state = limit_state
+    return bounded_inline_result(bounded_read_artifact)

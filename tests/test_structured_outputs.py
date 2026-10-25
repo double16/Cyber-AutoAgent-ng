@@ -149,3 +149,73 @@ def test_structured_output_dict_accepts_models_and_dicts_but_rejects_text():
     assert structured_output_dict({"status": "complete"}) == {"status": "complete"}
     with pytest.raises(ValueError, match="Pydantic model or dict"):
         structured_output_dict("complete")
+
+
+@pytest.mark.parametrize("role", ["authentication_flow_critic", "registration_flow_critic"])
+def test_flow_discovery_critique_schema_advertises_supporting_selection(role):
+    from modules.agents.structured_outputs import WORKFLOW_OUTPUT_MODELS, FlowCritiqueOutput
+
+    model = WORKFLOW_OUTPUT_MODELS[role]
+    assert model is FlowCritiqueOutput
+    assert "supporting_evidence_refs" in model.model_json_schema()["properties"]
+    value = model(approved=True, feedback=[], supporting_evidence_refs=["artifact:form.html"])
+    assert structured_output_dict(value)["supporting_evidence_refs"] == ["artifact:form.html"]
+    with pytest.raises(ValidationError):
+        model(approved=True, supporting_evidence_refs=[7])
+    with pytest.raises(ValidationError):
+        model(approved=True, unrelated_field=True)
+
+
+def test_general_critique_schema_does_not_accept_discovery_selection():
+    from modules.agents.structured_outputs import WORKFLOW_OUTPUT_MODELS
+
+    for role in ("plan_critic", "task_prompt_critic"):
+        with pytest.raises(ValidationError):
+            WORKFLOW_OUTPUT_MODELS[role](approved=True, supporting_evidence_refs=["artifact:form.html"])
+
+
+def test_evaluator_receipt_gaps_are_typed_separately_from_semantic_gaps():
+    from modules.agents.structured_outputs import EvaluatorRepairOutput
+
+    repair = EvaluatorRepairOutput(kind="execution", execution_receipt_gaps=["requirement-1"],
+                                   evidence_gaps=["Unsupported comparison"])
+    assert repair.execution_receipt_gaps == ["requirement-1"]
+    assert repair.evidence_gaps == ["Unsupported comparison"]
+    assert "execution_receipt_gaps" in EvaluatorRepairOutput.model_json_schema()["properties"]
+    with pytest.raises(ValidationError):
+        EvaluatorRepairOutput(execution_receipt_gaps=[123])
+
+
+@pytest.mark.parametrize("value", [None, "", "Keep meaningful feedback"])
+def test_review_instructions_normalize_nullable_wire_values(value):
+    from modules.agents.structured_outputs import TaskReviewDecisionOutput
+
+    model = TaskReviewDecisionOutput.model_validate({"status": "done", "instructions": value})
+    assert model.instructions == ("" if value is None else value)
+    assert TaskReviewDecisionOutput.model_validate({"status": "done"}).instructions == ""
+
+
+@pytest.mark.parametrize("value", [False, 12, [], {}])
+def test_review_instructions_reject_non_string_values(value):
+    from modules.agents.structured_outputs import TaskReviewDecisionOutput
+
+    with pytest.raises(ValidationError):
+        TaskReviewDecisionOutput.model_validate({"status": "done", "instructions": value})
+
+
+@pytest.mark.parametrize("fault", ["unknown", "empty_reason", "long_reason", "missing_check"])
+def test_semantic_checks_are_closed_and_bounded(fault):
+    from modules.agents.structured_outputs import HypothesisSemanticChecks
+
+    checks = {key: {"verdict": "adequate", "reason": "Grounded proposal"}
+              for key in ("grounding", "test_discrimination", "identity_requirements")}
+    if fault == "unknown":
+        checks["grounding"]["verdict"] = "probably"
+    elif fault == "empty_reason":
+        checks["grounding"]["reason"] = ""
+    elif fault == "long_reason":
+        checks["grounding"]["reason"] = "x" * 501
+    else:
+        del checks["grounding"]
+    with pytest.raises(ValidationError):
+        HypothesisSemanticChecks.model_validate(checks)

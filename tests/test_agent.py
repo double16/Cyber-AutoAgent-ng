@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
+from strands.tools.executors import SequentialToolExecutor
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -592,10 +593,12 @@ def test_build_role_tools_excludes_create_tasks_by_default_and_accepts_tuple_nam
     ) == [create_tasks, other_tool, create_tasks]
 
 
-def test_create_agent_reuses_runtime_resources(monkeypatch):
+@pytest.mark.parametrize("native_ollama", [False, True])
+def test_create_agent_reuses_runtime_resources(monkeypatch, tmp_path, native_ollama):
     class FakeAgent:
         def __init__(self, **kwargs):
             self.init_kwargs = kwargs
+            self.system_prompt = kwargs["system_prompt"]
             self.tool_registry = Mock()
 
     config = AgentConfig(target="example.com", objective="test", provider="ollama", model_id="llama")
@@ -618,9 +621,16 @@ def test_create_agent_reuses_runtime_resources(monkeypatch):
         prompt_token_limit=123,
     )
 
+    from modules.config.models.ollama import OllamaModel
+
+    runtime.provider_capture_directory = tmp_path
+    model = OllamaModel(None, model_id="llama") if native_ollama else SimpleNamespace(stateful=False)
     monkeypatch.setattr(cyber_agent_module, "create_agent_runtime_resources", Mock(side_effect=AssertionError))
-    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=SimpleNamespace(stateful=False)))
-    monkeypatch.setattr(cyber_agent_module, "create_agent_with_stateful_retry", Mock(return_value=FakeAgent()))
+    monkeypatch.setattr(cyber_agent_module, "create_strands_model", Mock(return_value=model))
+    monkeypatch.setattr(
+        cyber_agent_module, "create_agent_with_stateful_retry",
+        Mock(side_effect=lambda kwargs, *_args: FakeAgent(**kwargs)),
+    )
     monkeypatch.setattr(cyber_agent_module, "get_capabilities", Mock(return_value=SimpleNamespace(supports_reasoning=True)))
     monkeypatch.setattr(cyber_agent_module, "tool_catalog_wrapper", Mock(return_value="catalog"))
 
@@ -628,12 +638,16 @@ def test_create_agent_reuses_runtime_resources(monkeypatch):
 
     kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
     assert kwargs["conversation_manager"] is conversation_manager
+    assert kwargs["hooks"][0] is agent._cyber_terminal_tool_hook
     assert kwargs["callback_handler"] is callback_handler
     assert kwargs["trace_attributes"]["operation.id"] == "OP_TEST"
     assert kwargs["trace_attributes"]["cyber.agent.run_id"] == str(callback_handler.agent_run_id)
     assert agent._prompt_token_limit == 123
-    assert agent.system_prompt == "system text"
+    assert agent.system_prompt == "system payload"
     assert runtime.callback_handler is callback_handler
+    if native_ollama:
+        assert model.capture_directory == tmp_path
+        assert model.capture_role == "task_executor"
 
 
 def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
@@ -677,19 +691,22 @@ def test_create_agent_strips_executor_protocols_for_prompt_builder(monkeypatch):
 
     kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
     assert "tool_catalog" not in kwargs["system_prompt"]
-    assert "controller support role" in kwargs["system_prompt"]
+    assert "You construct or review task-specific execution guidance" in kwargs["system_prompt"]
+    assert "Do not execute the assessment" in kwargs["system_prompt"]
 
 
 @pytest.mark.parametrize(
     ("agent_type", "uses_fail_fast_executor"),
     [
         ("task_evaluator", True),
+                ("authentication_flow_critic", False),
+        ("registration_flow_critic", False),
         ("plan_critic", True),
         ("task_prompt_critic", True),
         ("task_executor", False),
     ],
 )
-def test_create_agent_assigns_review_roles_a_fail_fast_executor(
+def test_create_agent_assigns_fail_fast_executor_to_configured_roles(
     monkeypatch,
     agent_type,
     uses_fail_fast_executor,
@@ -731,10 +748,12 @@ def test_create_agent_assigns_review_roles_a_fail_fast_executor(
     )
 
     kwargs = cyber_agent_module.create_agent_with_stateful_retry.call_args.args[0]
-    if agent_type == "task_evaluator":
+    if agent_type == "task_evaluator" or "flow_critic" in agent_type:
         assert agent._cyber_evaluator_artifact_read_limit_hook in kwargs["hooks"]
         assert agent._cyber_evaluator_artifact_read_limit_hook.exhausted is False
-    if uses_fail_fast_executor:
+    if agent_type in {"task_executor", "authentication_agent"} or "flow_critic" in agent_type:
+        assert isinstance(kwargs["tool_executor"], SequentialToolExecutor)
+    elif uses_fail_fast_executor:
         assert isinstance(kwargs["tool_executor"], FailFastSequentialToolExecutor)
     else:
         assert kwargs["tool_executor"] is runtime.tool_executor
@@ -1081,6 +1100,7 @@ def test_create_agent_runtime_resources_builds_integrated_runtime_with_module_fa
     runtime = cyber_agent_module.create_agent_runtime_resources("example.test", "assess", config)
 
     assert runtime.operation_id == "OP_INTEGRATED"
+    assert runtime.provider_capture_directory == tmp_path / "diagnostics" / "provider_responses"
     assert runtime.config.model_id == "default-model"
     assert runtime.config.region_name == "us-test-1"
     assert runtime.sdk_context_manager is None
@@ -1209,3 +1229,39 @@ def test_create_agent_runtime_resources_handles_degraded_integrations(monkeypatc
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.parametrize("role", [
+    "authentication_agent",
+    "authentication_flow_critic", "registration_flow_critic",
+    "task_evaluator", "task_executor", "source_module_agent",
+])
+def test_production_agents_record_sdk_tool_outcomes_once(monkeypatch, role):
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    agent = create_outcome_agent(monkeypatch, role)
+    journal = agent._cyber_callback_handler.tool_outcome_journal
+    assert agent._cyber_tool_outcome_recording_hook.journal is journal
+    assert hasattr(agent, "_cyber_failure_recovery_hook") == (role == "task_executor")
+    snapshot = journal.snapshot()
+    complete_tool_call(
+        agent, "browser_get_page_html", {}, "HTML content saved to artifact: artifacts/login.html",
+    )
+    outcomes = journal.since(snapshot)
+    assert len(outcomes) == 1
+    assert outcomes[0].success
+    assert outcomes[0].artifact_refs == ("artifact:artifacts/login.html",)
+    assert journal.since(journal.snapshot()) == []
+
+
+def test_production_outcome_recording_precedes_recovery_rewrites(monkeypatch):
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    agent = create_outcome_agent(monkeypatch, "task_executor")
+    text = "service target is outside the assigned task boundary"
+    event = complete_tool_call(agent, "shell", {"command": "cat /missing.txt"}, text, status="error")
+    outcome = agent._cyber_callback_handler.tool_outcome_journal.entries()[0]
+    assert outcome.raw_output_summary == text
+    assert not outcome.success
+    assert event.result["content"][0]["text"] != text
+    assert len(agent._cyber_callback_handler.tool_outcome_journal.entries()) == 1

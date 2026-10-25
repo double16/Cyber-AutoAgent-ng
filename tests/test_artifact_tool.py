@@ -38,6 +38,65 @@ def test_artifact_read_and_search_tools_have_separate_schemas():
     assert SEARCH_ARTIFACT.tool_name == "search_artifact"
     assert {"search_pattern", "match_offset", "max_matches"} <= search_schema.keys()
     assert "start_line" not in search_schema
+    bounded_schema = create_bounded_artifact_searcher(max_searches=1).tool_spec["inputSchema"]["json"]["properties"]
+    for schema in (search_schema, bounded_schema):
+        assert schema["context_lines"]["minimum"] == 0
+        assert schema["context_lines"]["maximum"] == 20
+        assert "0 through 20" in schema["context_lines"]["description"]
+        assert schema["context_lines"]["default"] == 2
+        assert schema["max_matches"]["minimum"] == 1
+        assert schema["max_matches"]["maximum"] == 50
+        assert schema["max_matches"]["default"] == 25
+        assert "1 through 50" in schema["max_matches"]["description"]
+
+
+def test_search_artifact_context_range_accepts_twenty_inclusive(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("needle\n", encoding="utf-8")
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        assert "'match_count': 1" in SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=0)
+        assert "'match_count': 1" in SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=10)
+        assert "'match_count': 1" in SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=20)
+        with pytest.raises(ValueError, match="context_lines must be between 0 and 20"):
+            SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=21)
+        with pytest.raises(ValueError, match="context_lines must be between 0 and 20"):
+            SEARCH_ARTIFACT("evidence.txt", "needle", context_lines=-1)
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_search_artifact_returns_twenty_lines_before_and_after_match(tmp_path: Path, bounded):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("before\n" * 20 + "needle\n" + "after\n" * 20, encoding="utf-8")
+    searcher = create_bounded_artifact_searcher(max_searches=1) if bounded else SEARCH_ARTIFACT
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        result = ast.literal_eval(searcher("evidence.txt", "needle", context_lines=20))
+    assert [line["line"] for line in result["matches"][0]["context"]] == list(range(1, 42))
+
+
+def test_search_artifact_match_limit_boundaries_and_validation(tmp_path: Path):
+    artifact = tmp_path / "evidence.txt"
+    artifact.write_text("needle\n" * 51, encoding="utf-8")
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        minimum = ast.literal_eval(SEARCH_ARTIFACT("evidence.txt", "needle", max_matches=1))
+        maximum = ast.literal_eval(SEARCH_ARTIFACT("evidence.txt", "needle", max_matches=50))
+
+        assert len(minimum["matches"]) == 1
+        assert minimum["match_limit_reached"] is True
+        assert len(maximum["matches"]) == 50
+        assert maximum["match_limit_reached"] is True
+        with pytest.raises(ValueError, match="max_matches must be between 1 and 50"):
+            SEARCH_ARTIFACT("evidence.txt", "needle", max_matches=0)
+        with pytest.raises(ValueError, match="max_matches must be between 1 and 50"):
+            SEARCH_ARTIFACT("evidence.txt", "needle", max_matches=51)
 
 
 def test_artifact_page_budget_scales_with_context_window_and_clamps():
@@ -475,6 +534,8 @@ def test_resolve_operation_artifact_path_accepts_canonical_and_absolute_referenc
         patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
     ):
         assert resolve_operation_artifact_path("artifact:artifacts/evidence.txt") == str(artifact)
+        assert resolve_operation_artifact_path("artifact: artifacts/evidence.txt") == str(artifact)
+        assert resolve_operation_artifact_path("artifact_id: evidence.txt") == str(artifact)
         assert resolve_operation_artifact_path(str(artifact)) == str(artifact)
 
         with pytest.raises(ValueError, match="Artifact does not exist"):
@@ -499,6 +560,63 @@ def test_read_artifact_lists_immediate_files_when_given_a_directory(tmp_path: Pa
     assert "artifact:artifacts/zeta.txt" in result
     assert result.index("artifact:artifacts/alpha.txt") < result.index("artifact:artifacts/zeta.txt")
     assert "hidden.txt" not in result
+
+
+def test_search_artifact_lists_files_when_given_a_directory(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "evidence.txt").write_text("needle", encoding="utf-8")
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        result = ast.literal_eval(SEARCH_ARTIFACT("artifacts", "needle"))
+
+    assert result["status"] == "directory"
+    assert "search_artifact requires one file" in result["message"]
+    assert result["artifact_refs"] == ["artifact:artifacts/evidence.txt"]
+
+
+def test_bounded_search_directory_lists_only_allowed_files_without_spending_search(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    allowed = artifacts / "allowed.txt"
+    denied = artifacts / "denied.txt"
+    allowed.write_text("needle", encoding="utf-8")
+    denied.write_text("needle", encoding="utf-8")
+    allowed_ref = "artifact:artifacts/allowed.txt"
+
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        searcher = create_bounded_artifact_searcher(max_searches=1, allowed_artifact_refs=[allowed_ref])
+        directory_result = ast.literal_eval(searcher("artifacts", search_pattern="needle"))
+        search_result = ast.literal_eval(searcher(allowed_ref, search_pattern="needle"))
+
+    assert directory_result["status"] == "directory"
+    assert directory_result["artifact_refs"] == [allowed_ref]
+    assert "denied.txt" not in str(directory_result)
+    assert search_result["match_count"] == 1
+
+
+def test_bounded_search_directory_guidance_respects_output_limit(tmp_path: Path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    evidence = artifacts / "evidence.txt"
+    evidence.write_text("needle", encoding="utf-8")
+    with (
+        patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)),
+        patch("modules.tools.memory._operation_output_root", return_value=str(tmp_path)),
+    ):
+        searcher = create_bounded_artifact_searcher(
+            max_searches=1,
+            allowed_artifact_refs=["artifact:artifacts/evidence.txt"],
+            max_output_chars=1,
+        )
+        with pytest.raises(ValueError, match="output limit is too small"):
+            searcher("artifacts", search_pattern="needle")
 
 
 def test_artifact_directory_guidance_rejects_unrepresentable_output(tmp_path: Path):
@@ -969,3 +1087,226 @@ def test_bounded_reader_requires_explicit_byte_page_for_large_artifact(tmp_path:
         assert "max_lines" in str(error.value)
         assert "'start_byte': 0" in reader("artifact:artifacts/minified.js", max_bytes=19_200)
         assert "proof" in reader("artifact:artifacts/evidence.txt")
+
+
+@pytest.mark.parametrize("scope", ["total", "artifact"])
+def test_artifact_search_limit_explains_scope_and_exposes_controller_state(tmp_path, scope):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("needle\n")
+    second.write_text("needle\n")
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        search = create_bounded_artifact_searcher(
+            max_searches=1 if scope == "total" else 3, max_searches_per_artifact=1,
+        )
+        search(path=str(first), search_pattern="needle")
+        with pytest.raises(RuntimeError) as caught:
+            search(path=str(second if scope == "total" else first), search_pattern="changed")
+        assert "1/1" in str(caught.value)
+        assert "cannot restore searches" in str(caught.value)
+        assert search.artifact_limit_state["scope"] == scope
+        if scope == "artifact":
+            assert "another allowed artifact" in str(caught.value)
+            assert "needle" in search(path=str(second), search_pattern="needle")
+            assert search.artifact_limit_state == {}
+        else:
+            assert "across all artifacts" in str(caught.value)
+
+
+@pytest.mark.parametrize("scope", ["total", "artifact"])
+def test_artifact_read_limit_guidance_explains_scope(tmp_path, scope):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("one\ntwo\nthree\n")
+    second.write_text("other\n")
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        read = create_bounded_artifact_reader(
+            max_reads=1 if scope == "total" else 3, max_reads_per_artifact=1, context_window_tokens=48_000,
+        )
+        read(path=str(first), start_line=1, max_lines=1)
+        guidance = read(path=str(second if scope == "total" else first), start_line=2, max_lines=1)
+        assert "1/1" in guidance
+        assert "cannot restore reads" in guidance
+        assert read.artifact_limit_state["scope"] == scope
+        if scope == "artifact":
+            assert "other" in read(path=str(second), start_line=1, max_lines=1)
+            assert read.artifact_limit_state == {}
+
+
+@pytest.mark.parametrize("name", ["read_artifact", "search_artifact"])
+def test_runtime_artifact_limits_keep_counts_and_controller_state(tmp_path, name):
+    from strands.hooks.events import AfterToolCallEvent
+
+    from modules.handlers.tool_recovery import EvaluatorArtifactReadLimitHook
+
+    path = tmp_path / "evidence.txt"
+    path.write_text("needle\nsecond\nthird\n")
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        item = (
+            create_bounded_artifact_searcher(max_searches=1)
+            if name == "search_artifact"
+            else create_bounded_artifact_reader(max_reads=1, context_window_tokens=48_000)
+        )
+        hook = EvaluatorArtifactReadLimitHook([item])
+
+        async def run():
+            for ordinal in range(3):
+                inputs = {"path": str(path)}
+                if name == "search_artifact":
+                    inputs["search_pattern"] = f"pattern-{ordinal}"
+                else:
+                    inputs.update(start_line=ordinal + 1, max_lines=1)
+                use = {"toolUseId": str(ordinal), "name": name, "input": inputs}
+                results = [result async for result in item.stream(use, {})]
+                event = AfterToolCallEvent(
+                    agent=None, selected_tool=item, tool_use=use, invocation_state={}, result=results[-1],
+                )
+                hook._after_tool(event)
+                if ordinal == 1:
+                    assert "1/1" in str(event.result)
+                    assert not hook.exhausted
+                if ordinal == 2:
+                    assert hook.exhausted
+                    assert event.invocation_state["request_state"]["stop_event_loop"]
+
+        asyncio.run(run())
+
+def _assert_inline_inspection(output, tool_name, tmp_path, selected_tool, ceiling=16000, threshold=5334):
+    result = {"status": "success", "toolUseId": "inspect", "content": [{"text": output}]}
+    event = types.SimpleNamespace(result=result, tool_use={"name": tool_name}, selected_tool=selected_tool)
+    artifacts = tmp_path / "router-results"
+    hook = ToolRouterHook(max_result_chars=ceiling, artifact_threshold=threshold, artifacts_dir=artifacts)
+    asyncio.run(hook._truncate_large_results_async(event))
+    assert event.result is result
+    assert event.result["content"][0]["text"] == output
+    assert len(output) <= ceiling
+    assert not artifacts.exists()
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+@pytest.mark.parametrize("source_kind", ["http", "network", "filesystem"])
+def test_inspection_pages_stay_inline_through_router(tmp_path, bounded, source_kind):
+    path = tmp_path / f"{source_kind}.txt"
+    path.write_text("needle: 'quoted' \\" + "é界🙂" * 8000, encoding="utf-8")
+    budget = resolve_tool_result_max_chars(40000)
+    reader = (create_bounded_artifact_reader(context_window_tokens=40000, max_output_chars=budget)
+              if bounded else create_artifact_reader(40000, max_output_chars=budget))
+    searcher = (create_bounded_artifact_searcher(max_output_chars=budget)
+                if bounded else create_artifact_searcher(max_output_chars=budget))
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        output = reader(path.name)
+        _assert_inline_inspection(output, "read_artifact", tmp_path, reader)
+        payload = ast.literal_eval(output)
+        assert payload["content"].startswith("needle:")
+        assert payload["next_start_byte"] > 0
+        output = searcher(path.name, "needle")
+        _assert_inline_inspection(output, "search_artifact", tmp_path, searcher)
+        assert ast.literal_eval(output)["matches"][0]["content"].startswith("needle:")
+
+
+@pytest.mark.parametrize("max_bytes", [101, 1024, 10000])
+def test_byte_pagination_reconstructs_unicode_without_gaps(tmp_path, max_bytes):
+    source = "é界🙂\\'\n" * 400
+    path = tmp_path / "source.txt"
+    path.write_text(source, encoding="utf-8")
+    reader = create_artifact_reader(40000, max_output_chars=1000)
+    offset = 0
+    pages = []
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        while True:
+            output = reader(path.name, start_byte=offset, max_bytes=max_bytes)
+            payload = ast.literal_eval(output)
+            assert len(output) <= 1000
+            assert payload["end_byte"] > offset
+            assert payload["end_byte"] == offset + len(payload["content"].encode("utf-8"))
+            pages.append(payload["content"])
+            if payload["eof"]:
+                assert payload["next_start_byte"] is None
+                break
+            offset = payload["next_start_byte"]
+    assert "".join(pages) == source
+
+
+def test_oversized_line_for_inline_budget_returns_byte_page(tmp_path):
+    path = tmp_path / "source.txt"
+    path.write_text("x" * 3000 + "\nlast\n", encoding="utf-8")
+    reader = create_artifact_reader(40000, max_output_chars=1000)
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        payload = ast.literal_eval(reader(path.name))
+    assert payload["content"]
+    assert payload["next_start_byte"] == len(payload["content"])
+    assert payload["truncation_reason"] == "output_limit_reached"
+
+
+def test_search_pagination_keeps_all_matches_inline(tmp_path):
+    path = tmp_path / "source.txt"
+    path.write_text("\n".join(f"needle {index} " + "x" * 500 for index in range(30)), encoding="utf-8")
+    searcher = create_artifact_searcher(max_output_chars=1000)
+    offset = 0
+    lines = []
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        while True:
+            output = searcher(path.name, "needle", match_offset=offset)
+            _assert_inline_inspection(output, "search_artifact", tmp_path, searcher, threshold=1000)
+            payload = ast.literal_eval(output)
+            lines.extend(match["line"] for match in payload["matches"])
+            if payload["next_match_offset"] is None:
+                break
+            assert payload["next_match_offset"] > offset
+            offset = payload["next_match_offset"]
+        output = searcher(path.name, "absent")
+        _assert_inline_inspection(output, "search_artifact", tmp_path, searcher, threshold=1000)
+        assert ast.literal_eval(output)["matches"] == []
+    assert lines == list(range(1, 31))
+
+
+def test_reader_rejects_nonprogressing_unicode_page(tmp_path):
+    path = tmp_path / "source.txt"
+    path.write_text("🙂", encoding="utf-8")
+    reader = create_artifact_reader(40000, max_output_chars=1000)
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        with pytest.raises(ValueError, match="one complete character"):
+            reader(path.name, start_byte=0, max_bytes=1)
+        payload = ast.literal_eval(reader(path.name, start_byte=4, max_bytes=4))
+        assert payload["content"] == ""
+        assert payload["eof"] is True
+
+
+def test_reader_rejects_budget_that_only_fits_metadata(tmp_path):
+    path = tmp_path / "source.txt"
+    path.write_text("🙂" * 1000, encoding="utf-8")
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        # An unusable budget must fail rather than yield a stalled page.
+        from modules.tools.artifact import _read_artifact_bytes
+
+        with pytest.raises(ValueError, match="too small"):
+            _read_artifact_bytes(path.name, 0, 1000, max_output_chars=1)
+
+
+def test_bounded_recovery_result_stays_within_inline_budget(tmp_path):
+    path = tmp_path / "source.txt"
+    path.write_text("x" * 2000, encoding="utf-8")
+    state = {"epoch": 0}
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        reader = create_bounded_artifact_reader(
+            context_window_tokens=40000, max_output_chars=1000, context_reduction_state=state
+        )
+        first = reader(path.name, start_byte=0, max_bytes=2000)
+        state["epoch"] = 1
+        replay = reader(path.name, start_byte=0, max_bytes=2000)
+        _assert_inline_inspection(replay, "read_artifact", tmp_path, reader, threshold=1000)
+    assert ast.literal_eval(replay)["content"] == ast.literal_eval(first)["content"]
+    assert ast.literal_eval(replay)["compression_recovery"] is True
+
+
+def test_metadata_only_budget_cannot_return_stalled_page(tmp_path):
+    path = tmp_path / "source.txt"
+    path.write_text("🙂" * 1000, encoding="utf-8")
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        reader = create_artifact_reader(40000)
+        metadata = ast.literal_eval(reader(path.name, start_byte=0, max_bytes=1000))
+        metadata.update(content="", end_byte=0, next_start_byte=0, truncation_reason="line_limit_reached")
+        metadata["pagination"]["start_byte"] = 0
+        constrained_reader = create_artifact_reader(40000, max_output_chars=len(str(metadata)))
+        with pytest.raises(ValueError, match="one complete character"):
+            constrained_reader(path.name, start_byte=0, max_bytes=1000)

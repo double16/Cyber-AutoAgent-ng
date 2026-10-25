@@ -4,7 +4,6 @@ from modules.tools.artifact import create_artifact_reader, create_artifact_searc
 from modules.tools.authentication import (
     authenticated_http_request,
     capture_browser_authenticated_context,
-    ensure_authenticated_context,
     establish_credential_authenticated_context,
     record_authentication_flow,
 )
@@ -49,6 +48,7 @@ from modules.tools.credentials import (
     store_credential,
     store_user_credential,
 )
+from modules.tools.inventory_item import create_inventory_item_reader
 from modules.tools.mcp import (
     discover_mcp_tools,
 )
@@ -105,9 +105,9 @@ __all__ = [
     "consolidate_recon_artifacts",
     "create_artifact_reader",
     "create_artifact_searcher",
+    "create_inventory_item_reader",
     "create_tasks",
     "discover_mcp_tools",
-    "ensure_authenticated_context",
     "establish_credential_authenticated_context",
     "fail_credential_rotation",
     "generate_mfa_code",
@@ -131,8 +131,8 @@ __all__ = [
     "record_authentication_flow",
     "record_finding_validation",
     "record_objective_validation",
-    "resolve_browser_proxy",
     "request_mfa_code",
+    "resolve_browser_proxy",
     "retrieve_email_mfa_code",
     "rotate_credential",
     "set_task_auth_context",

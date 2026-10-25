@@ -75,3 +75,24 @@ def test_register_runtime_secret_ignores_generic_field_values():
     register_runtime_secret("key")
 
     assert redact_text("password secret api_key") == "password secret api_key"
+
+
+def test_token_count_fields_are_numeric_only_in_nested_exports():
+    from modules.utils.redaction import _TOKEN_COUNT_KEYS
+
+    counts = {key: 8192 for key in _TOKEN_COUNT_KEYS}
+    counts["output_ceiling"] = None
+    assert redact({"allocation": counts, "api_token": "secret-value"}) == {
+        "allocation": counts, "api_token": REDACTED,
+    }
+    for invalid in ("8192", "secret-value", True, False, -1, 1.5, {}, [], None):
+        assert redact({"generation_tokens": invalid}) == {"generation_tokens": REDACTED}
+    assert redact({"input_tokens_extra": 123}) == {"input_tokens_extra": REDACTED}
+    assert redact({"input_tokens": 0}) == {"input_tokens": 0}
+
+
+def test_registered_secret_still_wins_at_the_final_text_boundary(monkeypatch):
+    from modules.utils import redaction
+
+    monkeypatch.setattr(redaction, "_RUNTIME_SECRETS", {"12345"})
+    assert "12345" not in redact_text(str(redact({"input_tokens": 12345})))

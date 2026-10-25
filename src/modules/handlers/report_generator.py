@@ -29,6 +29,8 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ValidationError
 from strands.types.exceptions import MaxTokensReachedException
 
+from modules.agents.native_structured import invoke_structured
+from modules.agents.prompt_context import PromptInputTooLarge, ReviewBudget
 from modules.agents.report_agent import ReportGenerator
 from modules.agents.structured_outputs import (
     ReportCritiqueOutput,
@@ -64,7 +66,14 @@ from modules.prompts.factory import (
     is_reportable_tool,
     safe_truncate,
 )
-from modules.tools.artifact_references import normalize_artifact_reference_token
+from modules.storage.workflow_json import StoredWorkflowDataError
+from modules.tools.artifact_references import (
+    extract_absolute_artifact_paths,
+    extract_artifact_references,
+    iter_artifact_reference_matches,
+    normalize_artifact_reference_token,
+    replace_artifact_references,
+)
 from modules.tools.memory import (
     OperationTarget,
     _artifact_path_from_ref,
@@ -120,14 +129,6 @@ _BUDGET_LABELS = {
     "tokens": "Tokens",
     "cost": "Cost (USD)",
 }
-_ARTIFACT_REFERENCE = re.compile(
-    r"(?<![A-Za-z0-9_:/.-])"
-    r"(?:artifact:(?:artifacts|outputs)/[A-Za-z0-9._~+/=-]+|"
-    r"artifact_id:[A-Za-z0-9._-]+|"
-    r"(?:artifacts|outputs)/[A-Za-z0-9._~+/=-]+)"
-    r"(?=$|[\s`\"'\])},;:])",
-    re.IGNORECASE,
-)
 _INVENTORY_ENDPOINT_ID = re.compile(r"\bendpoint-\d+\b")
 _INVENTORY_IDENTIFIER_FIELDS = frozenset(
     {
@@ -145,8 +146,7 @@ _INVENTORY_IDENTIFIER_FIELDS = frozenset(
     }
 )
 _GENERIC_PATH_REFERENCE = re.compile(
-    r"(?:artifact:(?:artifacts/)?[^\s\"'\])]+|"
-    r"(?:^|[\s\"'\[(])(?:/[^\s\"'\])]+|(?:artifacts?|outputs?)/[^\s\"'\])]+))",
+    r"(?:^|[\s\"'\[(])(?:artifacts?|outputs?)/[^\s\"'\])]+",
     re.IGNORECASE,
 )
 _EXCERPT_TOKEN = re.compile(r"[A-Za-z0-9_'-]{4,}")
@@ -223,6 +223,14 @@ def _write_redacted_report_text(path: str, content: Any) -> None:
 
     with open(path, "w", encoding="utf-8") as report_file:
         report_file.write(redact_text(content))
+
+
+def _redact_objective_candidate(value: Any) -> str:
+    """Hide a candidate value while retaining a braced format cue in the report."""
+
+    candidate = str(value or "")
+    match = re.fullmatch(r"([^{}]+\{)[^{}]+(\})", candidate)
+    return f"{match.group(1)}[REDACTED]{match.group(2)}" if match else "[REDACTED]"
 
 
 def _write_redacted_report_json(path: str, payload: Any) -> None:
@@ -333,7 +341,11 @@ def _has_artifact_reference(value: Any) -> bool:
     """Return whether free-form evidence text contains an artifact-like path."""
 
     if isinstance(value, str):
-        return bool(_GENERIC_PATH_REFERENCE.search(value))
+        return bool(
+            _artifact_references(value)
+            or extract_absolute_artifact_paths(value)
+            or _GENERIC_PATH_REFERENCE.search(value)
+        )
     if isinstance(value, dict):
         return any(_has_artifact_reference(item) for item in value.values())
     if isinstance(value, (list, tuple, set)):
@@ -342,17 +354,11 @@ def _has_artifact_reference(value: Any) -> bool:
 
 
 def _artifact_references(value: Any) -> set[str]:
-    references: set[str] = set()
-    if isinstance(value, str):
-        for match in _ARTIFACT_REFERENCE.finditer(value):
-            references.add(_normalize_artifact_reference(match.group(0)))
-    elif isinstance(value, dict):
-        for item in value.values():
-            references.update(_artifact_references(item))
-    elif isinstance(value, (list, tuple, set)):
-        for item in value:
-            references.update(_artifact_references(item))
-    return references
+    return {
+        _normalize_artifact_reference(reference)
+        for reference in extract_artifact_references(value, include_bare_paths=True)
+        if _is_report_artifact_reference(reference)
+    }
 
 
 def _omit_cross_operation_artifact_references(value: Any) -> tuple[Any, int]:
@@ -364,10 +370,10 @@ def _omit_cross_operation_artifact_references(value: Any) -> tuple[Any, int]:
     """
 
     if isinstance(value, str):
-        omitted = len(_ARTIFACT_REFERENCE.findall(value))
-        if not omitted:
-            return value, 0
-        return _ARTIFACT_REFERENCE.sub("[prior-operation artifact omitted]", value), omitted
+        return replace_artifact_references(
+            value, lambda _reference: "[prior-operation artifact omitted]", include_bare_paths=True,
+            accept_reference=_is_report_artifact_reference,
+        )
     if isinstance(value, dict):
         sanitized: dict[Any, Any] = {}
         omitted = 0
@@ -424,11 +430,20 @@ def _normalize_artifact_reference(reference: str) -> str:
     return normalized
 
 
+def _is_report_artifact_reference(reference: str) -> bool:
+    """Exclude prose labels while retaining explicit file paths and artifact IDs."""
+
+    normalized = _normalize_artifact_reference(reference)
+    payload = normalized.removeprefix("artifact:")
+    return "/" in payload or "." in payload
+
+
 def _artifact_reference_matches(value: str) -> list[tuple[str, str]]:
     """Return raw and normalized artifact references from one text value."""
     return [
-        (match.group(0), _normalize_artifact_reference(match.group(0)))
-        for match in _ARTIFACT_REFERENCE.finditer(value)
+        (match.raw, _normalize_artifact_reference(match.reference))
+        for match in iter_artifact_reference_matches(value, include_bare_paths=True)
+        if _is_report_artifact_reference(match.reference)
     ]
 
 
@@ -1244,7 +1259,11 @@ def _validate_report_consistency(
 ) -> list[str]:
     """Reconcile report summaries against their canonical workflow and evidence inputs."""
 
-    errors: list[str] = []
+    errors: list[str] = list(sections.get("workflow_storage_errors") or [])
+    if errors:
+        completion_status["assessment_complete"] = False
+        completion_status["workflow_complete"] = False
+        completion_status["incomplete_reason"] = "Workflow coverage is unavailable or partial due to damaged stored records."
     evidence = sections.get("raw_evidence", [])
     evidence = evidence if isinstance(evidence, list) else []
     verified_count = sum(1 for item in evidence if isinstance(item, dict) and item.get("category") == "finding")
@@ -1429,6 +1448,7 @@ def _canonical_report_data(sections: dict[str, Any]) -> dict[str, Any]:
         "completion_status": sections.get("completion_status") or {},
         "artifact_references": artifacts,
         "evidence_integrity_errors": sections.get("evidence_integrity_errors") or [],
+        "workflow_storage_errors": sections.get("workflow_storage_errors") or [],
         "execution_history": sections.get("execution_history") or "",
         "execution_history_rows": sections.get("execution_history_rows") or {},
         "credentials_used": sections.get("credentials_used") or [],
@@ -2748,13 +2768,14 @@ def _invoke_report_agent(
             "limits": _REPORT_AGENT_LIMITS,
         }
         if output_model is not None:
-            invocation_kwargs["structured_output_model"] = output_model
-        result = agent(prompt, **invocation_kwargs)
+            result = invoke_structured(agent, prompt, output_model, invocation_kwargs=invocation_kwargs)
+        else:
+            result = agent(prompt, **invocation_kwargs)
         if getattr(result, "stop_reason", None) == "limit_turns":
             raise RuntimeError("report agent exceeded its configured turn limit")
         return result
     except Exception as error:
-        if isinstance(error, (MaxTokensReachedException, NotImplementedError, AttributeError, ValidationError)) or (
+        if isinstance(error, (MaxTokensReachedException, PromptInputTooLarge, NotImplementedError, AttributeError, ValidationError)) or (
             is_structured_output_unavailable(error)
         ):
             raise
@@ -2806,6 +2827,52 @@ new facts, evidence, counts, or report sections. Return only the complete revise
 """
 
 
+def _invoke_budgeted_report_critic(
+    agent: Any, prompt: str, section_label: str, circuit_breaker: Any,
+    output_model: type[BaseModel] | None, reasoning: str | None,
+) -> tuple[Any, Any]:
+    """Fit the actual review request and replace only this agent's model for the call."""
+    from strands.tools.structured_output.structured_output_tool import StructuredOutputTool
+
+    from modules.agents.prompt_context import attach_live_prompt_fitter
+
+    budget = getattr(agent, "_cyber_review_budget", None)
+    if not isinstance(budget, ReviewBudget):
+        # Lightweight injected runners own their transport/settings; production agents always carry a policy.
+        return _invoke_report_agent(agent, prompt, section_label, circuit_breaker, output_model), None
+    model_id = agent._cyber_review_model_id
+    schema = output_model or ReportCritiqueOutput
+    prompt, tokens = budget.fit(
+        prompt, str(agent.system_prompt or ""), [StructuredOutputTool(schema).tool_spec], model_id,
+        lambda details: logger.info("REPORT_REVIEW_BUDGET section=%s details=%s", section_label, details),
+    )
+    previous_model = agent.model
+    previous_messages = list(agent.messages)
+    previous_fitter = getattr(agent, "_cyber_prompt_fitter", None)
+    try:
+        agent.model = agent._cyber_review_model_factory(tokens, reasoning)
+        # Prior sections are not evidence for the currently assigned review unit.
+        agent.messages = []
+        attach_live_prompt_fitter(
+            agent, prompt, lambda details: logger.info("REPORT_REVIEW_INPUT %s", details),
+            ("Task history", "Eligible Semantic Memories"), reserve_safety=True,
+            minimum_output_tokens=budget.guidance_tokens + 1024,
+        )
+        result = _invoke_report_agent(agent, prompt, section_label, circuit_breaker, output_model)
+        return result, budget
+    except MaxTokensReachedException as error:
+        from modules.handlers.max_token_recovery import capture_and_discard_max_token_output
+
+        classification, _, snapshot = capture_and_discard_max_token_output(agent, reasoning)
+        error.max_token_classification = classification
+        error.max_token_failure_snapshot = snapshot
+        raise
+    finally:
+        agent.model = previous_model
+        agent.messages = previous_messages
+        agent._cyber_prompt_fitter = previous_fitter
+
+
 def _run_report_critic(
     critic_agent: Any,
     prompt: str,
@@ -2818,22 +2885,26 @@ def _run_report_critic(
     remaining_json_retries = json_retries
     max_token_retry_used = False
     legacy_fallback_active = False
+    reasoning = None
+
+    def invoke(output_model=None):
+        nonlocal active_budget
+        result, active_budget = _invoke_budgeted_report_critic(
+            critic_agent, current_prompt, section_label, circuit_breaker, output_model, reasoning,
+        )
+        return result
+
+    active_budget = None
     while True:
         try:
             if legacy_fallback_active:
                 response = _extract_text_from_result(
-                    _invoke_report_agent(critic_agent, current_prompt, section_label, circuit_breaker)
+                    invoke()
                 )
                 data = parse_json_response(response, require_object=True)
             else:
                 try:
-                    result = _invoke_report_agent(
-                        critic_agent,
-                        current_prompt,
-                        section_label,
-                        circuit_breaker,
-                        ReportCritiqueOutput,
-                    )
+                    result = invoke(ReportCritiqueOutput)
                     output = getattr(result, "structured_output", None)
                     if isinstance(output, (BaseModel, dict)):
                         data = structured_output_dict(output)
@@ -2846,14 +2917,25 @@ def _run_report_critic(
                     legacy_fallback_active = True
                     logger.info("Report critic using JSON compatibility output after structured-output failure: %s", error)
                     response = _extract_text_from_result(
-                        _invoke_report_agent(critic_agent, current_prompt, section_label, circuit_breaker)
+                        invoke()
                     )
                     data = parse_json_response(response, require_object=True)
+            if active_budget is not None:
+                active_budget.validate(data, critic_agent._cyber_review_model_id)
             return _validate_report_critique(data)
-        except MaxTokensReachedException:
+        except PromptInputTooLarge:
+            raise
+        except MaxTokensReachedException as error:
+            snapshot = getattr(error, "max_token_failure_snapshot", None)
+            visibility = ("unavailable" if snapshot is None else
+                          "visible_output" if snapshot.partial_output else
+                          "reasoning_only" if snapshot.recorded_reasoning else "empty_response")
+            logger.warning("REPORT_REVIEW_EXHAUSTION section=%s visibility=%s", section_label, visibility)
             if not max_token_retry_used:
                 max_token_retry_used = True
-                reset_agent_conversation_for_recovery(critic_agent)
+                reasoning = "none"
+                if not isinstance(getattr(critic_agent, "_cyber_review_budget", None), ReviewBudget):
+                    reset_agent_conversation_for_recovery(critic_agent)
                 current_prompt = """The previous critique exhausted its token limit and was discarded.
 Return only JSON matching {"approved": bool, "feedback": [string]}. Do not include analysis. Use no more than five
 short feedback items. Review request:\n""" + prompt
@@ -2881,12 +2963,7 @@ Original review request:
 """
                 continue
             break
-    return {
-        "approved": False,
-        "feedback": [
-            f"The report critic did not return a valid structured review after {json_retries + 1} attempt(s)."
-        ],
-    }
+    raise ValueError(f"Report critic did not return a valid review after {json_retries + 1} attempt(s)")
 
 
 def _run_report_refinement(
@@ -2912,7 +2989,7 @@ def _run_report_refinement(
         return content, None
 
     final_rejection = None
-    for cycle in range(1, refinement_cycles + 1):
+    for cycle in range(1, refinement_cycles + 2):
         if callable(efficiency_callback):
             efficiency_callback("critic_cycle")
         try:
@@ -2930,6 +3007,8 @@ def _run_report_refinement(
             logger.info("Report critic approved %s on cycle %s", section_label, cycle)
             return content, None
 
+        if cycle > refinement_cycles:
+            return content, critique
         logger.info("Report critic requested revision for %s on cycle %s", section_label, cycle)
         try:
             revised = _extract_text_from_result(_invoke_report_agent(
@@ -3288,7 +3367,7 @@ def _run_next_steps_refinement(
         return _apply_next_steps_budget_scope(data, configured_budget, source), None
 
     final_rejection = None
-    for cycle in range(1, refinement_cycles + 1):
+    for cycle in range(1, refinement_cycles + 2):
         if callable(efficiency_callback):
             efficiency_callback("critic_cycle")
         try:
@@ -3311,6 +3390,8 @@ def _run_next_steps_refinement(
             ), None
         if critique["approved"]:
             return _apply_next_steps_budget_scope(data, configured_budget, source), None
+        if cycle > refinement_cycles:
+            return _apply_next_steps_budget_scope(data, configured_budget, source), critique
         revision_prompt = f"""Revise the structured Appendix B result using every applicable critic feedback item.
 Return only the complete JSON object required by the original request.
 
@@ -4566,7 +4647,7 @@ Finding narrative context:
                         f"- **Validator:** {metadata.get('validator', 'Not recorded')}",
                         f"- **Reason:** {metadata.get('validation_reason') or metadata.get('summary') or 'Not recorded'}",
                         "",
-                        f"**Candidate:** `{metadata.get('candidate_value') or item.get('content', '')}`",
+                        f"**Candidate:** `{_redact_objective_candidate(metadata.get('candidate_value') or item.get('content', ''))}`",
                         "",
                         "**Evidence artifacts:**",
                         *(f"- `{artifact}`" for artifact in artifacts if artifact),
@@ -5433,8 +5514,17 @@ def build_report_sections(
         if not cross_operation:
             logger.info(f"Filtering evidence for current operation_id: {operation_id}")
 
-        operation_plan = memory_client.get_active_plan(operation_id=operation_id)
-        task_records = memory_client.list_tasks(operation_id=operation_id)
+        workflow_storage_errors = []
+        try:
+            operation_plan = memory_client.get_active_plan(operation_id=operation_id)
+        except StoredWorkflowDataError as error:
+            operation_plan = None
+            workflow_storage_errors.append(str(error))
+        try:
+            task_records = memory_client.list_tasks(operation_id=operation_id)
+        except StoredWorkflowDataError as error:
+            task_records = []
+            workflow_storage_errors.append(str(error))
         list_credential_usage = getattr(memory_client, "list_credential_usage", None)
         credential_usage = (
             list_credential_usage(operation_id=operation_id)
@@ -5891,6 +5981,12 @@ def build_report_sections(
             }
 
         # Build complete sections dictionary
+        execution_history = _format_execution_history(task_history_rows, acceptance_history_rows)
+        if workflow_storage_errors:
+            execution_history += (
+                "\n\nWorkflow coverage is unavailable or partial due to damaged stored records.\n"
+                + "\n".join(workflow_storage_errors)
+            )
         target_coverage = _format_target_coverage(operation_plan, task_records, evidence, target_values)
         attack_surface = _build_attack_surface(
             inventory_items,
@@ -5971,7 +6067,8 @@ def build_report_sections(
                 ),
                 "items": operation_tasks,
             },
-            "execution_history": _format_execution_history(task_history_rows, acceptance_history_rows),
+            "execution_history": execution_history,
+            "workflow_storage_errors": workflow_storage_errors,
             "execution_history_rows": {
                 "tasks": task_history_rows,
                 "acceptance": acceptance_history_rows,

@@ -930,6 +930,58 @@ async def test_llm_json_patch_handles_empty_and_non_list_choices_without_rewriti
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("artifacts_enabled", [True, False])
+async def test_navigation_preserves_rendered_page_before_next_interaction(monkeypatch, tmp_path, artifacts_enabled):
+    events = []
+
+    class Page:
+        async def goto(self, url):
+            events.append(("goto", url))
+
+        async def content(self):
+            events.append("snapshot")
+            return '<form><input name="identity 👤"></form>'
+
+        async def observe(self, _instruction):
+            events.append("observe")
+            return [SimpleNamespace(description="Login controls")]
+
+    class Browser:
+        artifacts_dir = str(tmp_path) if artifacts_enabled else None
+        page_domain = "example.com"
+        page = Page()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        @asynccontextmanager
+        async def timeout(self):
+            yield
+
+        @asynccontextmanager
+        async def interaction_context_capture(self, **_kwargs):
+            yield SimpleNamespace(summarize=AsyncMock(return_value="Network observations"))
+
+        async def run_in_browser_loop(self, function):
+            return await function()
+
+    monkeypatch.setattr(mod, "get_browser", Browser)
+    result = await mod.browser_goto_url("https://example.com/login")
+    assert "Login controls" in result and "Network observations" in result
+    saved = list(tmp_path.glob("browser_page_*.html"))
+    if artifacts_enabled:
+        assert events == [("goto", "https://example.com/login"), "snapshot", "observe"]
+        assert len(saved) == 1 and str(saved[0]) in result
+        assert "identity 👤" in saved[0].read_text()
+    else:
+        assert events == [("goto", "https://example.com/login"), "observe"]
+        assert not saved
+
+
+@pytest.mark.asyncio
 async def test_browser_goto_url_uses_http_fallback_after_non_retriable_navigation_error(monkeypatch, tmp_path):
     class Timeout:
         async def __aenter__(self):
@@ -1137,8 +1189,9 @@ async def test_reset_authentication_browser_session_clears_state_without_closing
     assert browser.page.navigations == ["about:blank"]
 
 
+@pytest.mark.parametrize("body_result", ["success", "empty", "timeout", "missing", "protocol", "unexpected"])
 @pytest.mark.asyncio
-async def test_simplify_requests_for_llm_writes_har_and_network_summary(tmp_path):
+async def test_simplify_requests_for_llm_writes_har_and_network_summary(tmp_path, caplog, body_result):
     service = mod.BrowserService.__new__(mod.BrowserService)
     service.artifacts_dir = str(tmp_path)
     service.stagehand = SimpleNamespace(
@@ -1163,7 +1216,14 @@ async def test_simplify_requests_for_llm_writes_har_and_network_summary(tmp_path
             }
 
         async def body(self):
-            return b"<html>redirect</html>"
+            if body_result == "timeout":
+                raise TimeoutError
+            if body_result in {"missing", "protocol"}:
+                message = "No resource with given identifier found" if body_result == "missing" else "Protocol error"
+                raise mod.PlaywrightError(message)
+            if body_result == "unexpected":
+                raise RuntimeError("unexpected body failure")
+            return b"" if body_result == "empty" else b"<html>redirect</html>"
 
     class FakeRequest:
         method = "POST"
@@ -1192,9 +1252,16 @@ async def test_simplify_requests_for_llm_writes_har_and_network_summary(tmp_path
         async def response(self):
             return FakeResponse()
 
-    summary = await service.simplify_requests_for_llm([FakeRequest()])
+    class HealthyRequest(FakeRequest):
+        async def response(self):
+            response = FakeResponse()
+            response.body = AsyncMock(return_value=b"second response")
+            return response
 
-    assert "network_calls[1]" in summary
+    with caplog.at_level("DEBUG", logger=mod.__name__):
+        summary = await service.simplify_requests_for_llm([FakeRequest(), HealthyRequest()])
+
+    assert "network_calls[2]" in summary
     assert "`POST` `https://example.com/login?next=%2Fadmin`" in summary
     assert "Status Code: `302`" in summary
     har_files = list(tmp_path.glob("network_calls_*.har"))
@@ -1204,6 +1271,22 @@ async def test_simplify_requests_for_llm_writes_har_and_network_summary(tmp_path
     assert entry["request"]["queryString"] == [{"name": "next", "value": "/admin"}]
     assert entry["request"]["cookies"][0]["name"] == "sid"
     assert entry["response"]["redirectURL"] == "https://example.com/next"
+
+    expected = "available" if body_result in {"success", "empty"} else (
+        "timeout" if body_result == "timeout" else "unavailable"
+    )
+    assert entry["response"]["_body_capture_status"] == expected
+    assert f"Body Capture: `{expected}`" in summary
+    assert 'har-entry-index="0"' in summary and 'har-entry-index="1"' in summary
+    assert len(har["log"]["entries"]) == 2
+    assert entry["response"]["bodySize"] == (
+        len(b"<html>redirect</html>") if body_result == "success" else 0 if body_result == "empty" else -1
+    )
+    assert ("content" in entry["response"]) is (expected == "available")
+    assert har["log"]["entries"][1]["response"]["_body_capture_status"] == "available"
+    assert har["log"]["entries"][1]["response"]["bodySize"] == len(b"second response")
+    errors = [record for record in caplog.records if record.levelname == "ERROR"]
+    assert bool(errors) is (body_result in {"protocol", "unexpected"})
 
 
 @pytest.mark.asyncio

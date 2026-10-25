@@ -15,6 +15,8 @@ from urllib.parse import parse_qsl, urljoin, urlparse, urlunparse
 
 from strands import tool
 
+from modules.tools.inventory_provenance import merge_operation_provenance, set_operation_provenance
+
 SUPPORTED_RECON_FORMATS = (
     "katana",
     "feroxbuster",
@@ -111,7 +113,7 @@ def _stable_id(kind: str, target_id: str, value: str) -> str:
 def _record(
     url: str,
     *,
-    method: str = "GET",
+    method: str | None = None,
     status: Any = None,
     content_type: Any = None,
     technologies: Any = None,
@@ -124,6 +126,7 @@ def _record(
     record = {
         "url": url,
         "method": str(method or "GET").upper(),
+        "operation_provenance": "observed" if method else "inferred",
         "status": int(status) if str(status or "").isdigit() else None,
         "technologies": technologies if isinstance(technologies, list) else [],
     }
@@ -178,7 +181,7 @@ def _parse_katana(text: str) -> list[dict[str, Any]]:
             content_type = content_type or response_headers.get("content-type") or response_headers.get("Content-Type")
             records.append(_record(
                 url,
-                method=request.get("method", "GET"),
+                method=request.get("method"),
                 status=response.get("status_code"),
                 content_type=content_type,
             ))
@@ -194,7 +197,7 @@ def _parse_feroxbuster(text: str) -> list[dict[str, Any]]:
                 records.append(
                     _record(
                         item.get("url") or item.get("target"),
-                        method=item.get("method", "GET"),
+                        method=item.get("method"),
                         status=item.get("status") or item.get("status_code"),
                     )
                 )
@@ -218,7 +221,7 @@ def _parse_ffuf(text: str) -> list[dict[str, Any]]:
                     _record(
                         url,
                         status=item.get("status"),
-                        method=item.get("method", "GET"),
+                        method=item.get("method"),
                         response_length=item.get("length"),
                         words=item.get("words"),
                         lines=item.get("lines"),
@@ -229,7 +232,7 @@ def _parse_ffuf(text: str) -> list[dict[str, Any]]:
     try:
         for row in csv.DictReader(io.StringIO(text)):
             if row.get("url"):
-                records.append(_record(row["url"], status=row.get("status"), method=row.get("method", "GET")))
+                records.append(_record(row["url"], status=row.get("status"), method=row.get("method")))
     except csv.Error:
         pass
     return records or _urls_from_text(text)
@@ -328,8 +331,22 @@ def _parse_auth_chain(text: str) -> list[dict[str, Any]]:
             continue
         url = endpoint.get("full_url") or endpoint.get("url")
         if url:
-            records.append(_record(url, method=endpoint.get("method", "GET"), status=endpoint.get("status")))
+            records.append(_record(url, method=endpoint.get("method"), status=endpoint.get("status")))
     return records
+
+
+def classify_client_route(path: str) -> str:
+    """Distinguish concrete web paths from patterns, templates, and syntax fragments."""
+
+    if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+        return "fragment"
+    if "${" in path or re.search(r"(?:^|/):[A-Za-z_]", path):
+        return "template"
+    if "*" in path.split("?", 1)[0]:
+        return "pattern"
+    if any(character in path for character in "<>\\\n\r\t") or path.split("?", 1)[0] in {"/$", "/$^"}:
+        return "fragment"
+    return "concrete"
 
 
 def _parse_client_bundle_inventory(text: str) -> list[dict[str, Any]]:
@@ -353,10 +370,53 @@ def _parse_client_bundle_inventory(text: str) -> list[dict[str, Any]]:
 
     records = [_record(target)]
     for path in [*api_paths, *spa_routes]:
-        if not isinstance(path, str) or not path.startswith("/"):
+        if classify_client_route(path) != "concrete":
             continue
         records.append(_record(urljoin(target.rstrip("/") + "/", path.lstrip("/"))))
     return records
+
+
+def load_inventory_target_bindings(reference: str) -> dict[str, str | None]:
+    """Read declared analysis scope, not every resource mentioned in an inventory."""
+
+    from modules.tools.memory import _artifact_path_from_ref, _load_inventory_manifest
+
+    with open(_artifact_path_from_ref(reference), encoding="utf-8") as stream:
+        text = stream.read(16_000_001)
+    if len(text) > 16_000_000:
+        raise ValueError("Inventory scope exceeds inspection limit")
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("Not an inventory scope artifact")
+    if payload.get("schema_version") == "client_bundle_inventory_v2":
+        target_id = payload.get("target_id")
+        if not isinstance(target_id, str) or not target_id or not _parse_client_bundle_inventory(text):
+            raise ValueError("Invalid client extraction scope")
+        return {target_id: _canonical_url(payload["target"])}
+    _load_inventory_manifest(reference, persist_normalization=False)
+    target_ids = [item["target_id"] for item in payload["items"]]
+    if any(not isinstance(target_id, str) or not target_id for target_id in target_ids):
+        raise ValueError("Invalid inventory target binding")
+    return dict.fromkeys(target_ids)
+
+
+def attach_client_bundle_evidence(
+    manifest: dict[str, Any], payload: dict[str, Any], *, target: str | None = None, target_id: str | None = None
+) -> None:
+    """Merge client declarations and provenance without asserting successful execution."""
+
+    from modules.tools.client_request_extraction import attach_request_operations
+
+    attach_request_operations(manifest, payload, target=target, target_id=target_id)
+    reference = payload.get("analysis_artifact")
+    if not isinstance(reference, str) or not reference.startswith("artifact:"):
+        return
+    for item in manifest["items"]:
+        attributes = item.setdefault("attributes", {})
+        references = attributes.setdefault("source_artifact_refs", [])
+        if reference not in references:
+            references.append(reference)
+        attributes["implementation_refs"] = [reference]
 
 
 _REGISTRATION_ROUTE_TOKENS = ("register", "signup", "sign-up", "create-account")
@@ -382,7 +442,7 @@ def client_bundle_workflows(
 
     workflows = []
     for route in routes:
-        if not isinstance(route, str) or not route.startswith("/"):
+        if classify_client_route(route) != "concrete":
             continue
         normalized_route = route.split("?", 1)[0].casefold()
         url = urljoin(target.rstrip("/") + "/", route.lstrip("/"))
@@ -436,7 +496,7 @@ def _parse_technology_inventory(text: str) -> list[dict[str, Any]]:
         records.append(
             _record(
                 str(entry["url"]),
-                method=entry.get("method", "GET"),
+                method=entry.get("method"),
                 status=entry.get("response_status", entry.get("status")),
                 content_type=entry.get("content_type") or entry.get("mime_type"),
                 technologies=entry.get("technology_clues", entry.get("technologies")),
@@ -617,6 +677,7 @@ def records_to_inventory_manifest(
                         "interaction": {
                             "interface": "http",
                             "operations": [str(record.get("method") or "GET").upper()],
+                "operation_provenance": record.get("operation_provenance", "inferred"),
                             "inputs": [],
                             "success_signals": [],
                             "failure_signals": [],
@@ -630,6 +691,7 @@ def records_to_inventory_manifest(
             interaction = {
                 "interface": "http",
                 "operations": [str(record.get("method") or "GET").upper()],
+                "operation_provenance": record.get("operation_provenance", "inferred"),
                 "inputs": [],
                 "success_signals": ([f"HTTP {record['status']}"] if record.get("status") else []),
                 "failure_signals": [],
@@ -677,6 +739,7 @@ def records_to_inventory_manifest(
                         "interaction": {
                             "interface": "http",
                             "operations": [str(record.get("method") or "GET").upper()],
+                "operation_provenance": record.get("operation_provenance", "inferred"),
                             "inputs": [{"name": name, "location": "query"}],
                             "success_signals": [],
                             "failure_signals": [],
@@ -724,6 +787,7 @@ def records_to_inventory_manifest(
                     "interaction": {
                         "interface": "http",
                         "operations": ["GET"],
+                        "operation_provenance": "inferred",
                         "inputs": [{"name": name, "location": "unknown"}],
                         "success_signals": [],
                         "failure_signals": [],
@@ -848,7 +912,7 @@ def _canonicalize_inventory_manifest_source(
     fields before consolidation; merging arbitrary ``items`` JSON is unsafe.
     """
 
-    from modules.tools.memory import INVENTORY_MANIFEST_ITEM_KINDS
+    from modules.tools.memory import INVENTORY_MANIFEST_ITEM_KINDS, _normalize_inventory_interaction
 
     normalized = json.loads(json.dumps(manifest))
     schema_version = normalized.get("schema_version")
@@ -886,8 +950,39 @@ def _canonicalize_inventory_manifest_source(
         item_ids.add(item_id)
         if "attributes" in item and not isinstance(item["attributes"], dict):
             raise ValueError(f"inventory_manifest source item {item_id} attributes must be an object")
-        item.setdefault("attributes", {})
+        attributes = item.setdefault("attributes", {})
+        _normalize_inventory_interaction(item_id, attributes)
+        interaction = attributes.get("interaction", {})
+        if isinstance(interaction, dict) and interaction.get("interface") == "http":
+            from modules.operation_plugins.web.comparison import inventory_comparison_contract
+
+            inventory_comparison_contract([item], [item_id])
     normalized["schema_version"] = 1
+    excluded_ids = set()
+    retained = []
+    candidates = normalized.setdefault("route_candidates", [])
+    if not isinstance(candidates, list):
+        raise ValueError("inventory_manifest route_candidates must be a list")
+    for item in items:
+        attributes = item["attributes"]
+        client_route = attributes.get("client_route")
+        registration = attributes.get("registration")
+        route = client_route.get("url") if isinstance(client_route, dict) else None
+        if not route and isinstance(registration, dict):
+            route = registration.get("url")
+        if item["kind"] == "endpoint":
+            route = item["value"]
+        parsed = urlparse(str(route or ""))
+        classification = classify_client_route(parsed.path) if parsed.scheme in {"http", "https"} else "concrete"
+        if classification != "concrete":
+            excluded_ids.add(item["id"])
+            if classification != "fragment":
+                candidates.append({"value": route, "classification": classification})
+        else:
+            retained.append(item)
+    normalized["items"] = [
+        item for item in retained if item["attributes"].get("endpoint_id") not in excluded_ids
+    ]
     return normalized
 
 
@@ -949,6 +1044,17 @@ def _read_inventory_source(
         technologies=technologies,
         parameters=parameters,
     )
+    if normalized_format == "client_bundle_inventory":
+        payload = _json_values(text)[0]
+        attach_client_bundle_evidence(manifest, payload, target=bound_target, target_id=resolved_target_id)
+        manifest["route_candidates"] = [
+            {"value": route, "classification": classify_client_route(route)}
+            for route in [*payload["api_paths"], *payload["spa_routes"]]
+            if classify_client_route(route) in {"pattern", "template"}
+        ]
+        for candidate in payload.get("route_candidates", []):
+            if candidate not in manifest["route_candidates"]:
+                manifest["route_candidates"].append(candidate)
     if not manifest["items"]:
         raise ValueError("Recon output produced no in-scope inventory items")
     return source_ref, normalized_format, manifest
@@ -964,8 +1070,18 @@ def _inventory_item_identity(item: dict[str, Any]) -> str:
         # aligned with that identity so sources that spell a technology differently
         # do not survive as separate items with the same deterministic ID.
         value = str(value or "").casefold()
+    identity = {"target_id": item.get("target_id"), "kind": kind, "value": value}
+    if kind == "parameter":
+        attributes = item.get("attributes", {})
+        identity["endpoint_id"] = attributes.get("endpoint_id")
+        inputs = attributes.get("interaction", {}).get("inputs", [])
+        identity["locations"] = sorted({entry["location"] for entry in inputs
+                                        if entry.get("name") == value and entry.get("location")})
+        # Unbound legacy parameters must not collapse across unrelated source records.
+        if not identity["endpoint_id"]:
+            identity["unbound_id"] = item.get("id")
     return json.dumps(
-        {"target_id": item.get("target_id"), "kind": kind, "value": value},
+        identity,
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -979,6 +1095,13 @@ def _merge_inventory_value(existing: Any, incoming: Any) -> Any:
     if isinstance(existing, dict) and isinstance(incoming, dict):
         merged = json.loads(json.dumps(existing))
         for key, value in incoming.items():
+            if key == "http_comparison":
+                if merged.get("http_comparison_conflict"):
+                    continue
+                if key in merged and merged[key] != value:
+                    merged.pop(key)
+                    merged["http_comparison_conflict"] = True
+                    continue
             merged[key] = _merge_inventory_value(merged[key], value) if key in merged else value
         return merged
     if isinstance(existing, list) and isinstance(incoming, list):
@@ -993,8 +1116,16 @@ def _merge_inventory_manifests(sources: Iterable[tuple[str, dict[str, Any]]]) ->
     gaps: list[Any] = []
     source_count = 0
     candidate_count = 0
+    route_candidates = []
+    mapping_coverage = []
     for source_ref, manifest in sources:
         source_count += 1
+        for candidate in manifest.get("route_candidates", []):
+            if candidate not in route_candidates:
+                route_candidates.append(candidate)
+        for coverage in manifest.get("mapping_coverage", []):
+            if coverage not in mapping_coverage:
+                mapping_coverage.append(coverage)
         for gap in manifest.get("unassessed_gaps", []):
             if gap not in gaps:
                 gaps.append(gap)
@@ -1013,8 +1144,13 @@ def _merge_inventory_manifests(sources: Iterable[tuple[str, dict[str, Any]]]) ->
                 items_by_identity[identity] = item
                 continue
             existing = items_by_identity[identity]
-            existing_attributes = existing.get("attributes") if isinstance(existing.get("attributes"), dict) else {}
-            existing["attributes"] = _merge_inventory_value(existing_attributes, attributes)
+            existing_attrs = existing.get("attributes") if isinstance(existing.get("attributes"), dict) else {}
+            existing["attributes"] = _merge_inventory_value(existing_attrs, attributes)
+            if isinstance(existing_attrs.get("interaction"), dict) and isinstance(attributes.get("interaction"), dict):
+                set_operation_provenance(
+                    existing["attributes"]["interaction"],
+                    merge_operation_provenance(existing_attrs["interaction"], attributes["interaction"]),
+                )
     items = [items_by_identity[identity] for identity in sorted(items_by_identity)]
     if not items:
         raise ValueError("No valid in-scope inventory items were available for consolidation")
@@ -1022,6 +1158,8 @@ def _merge_inventory_manifests(sources: Iterable[tuple[str, dict[str, Any]]]) ->
         "schema_version": 1,
         "items": items,
         "unassessed_gaps": gaps,
+        "route_candidates": route_candidates,
+        "mapping_coverage": mapping_coverage,
         "extraction": {
             "source_artifact_count": source_count,
             "candidate_count": candidate_count,
@@ -1036,6 +1174,7 @@ def consolidate_recon_artifacts(
     *,
     target_id: str = "target-1",
     target: str = "",
+    mapping_coverage: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Create one validated inventory manifest from supported operation artifacts.
 
@@ -1060,6 +1199,14 @@ def consolidate_recon_artifacts(
         processed.append((source_ref, manifest))
         processed_details.append({"source_artifact": source_ref, "source_format": _source_format})
     manifest = _merge_inventory_manifests(processed)
+    if mapping_coverage is not None:
+        manifest["mapping_coverage"] = mapping_coverage
+        manifest["unassessed_gaps"].extend(
+            f"Mapping workstream {coverage['workstream']} is incomplete: "
+            + ("; ".join(str(task.get("reason") or task["status"]) for task in coverage["tasks"])
+               or "no terminal provider evidence")
+            for coverage in mapping_coverage if not coverage["complete"]
+        )
     result = write_inventory_manifest(output_file, manifest)
     result.update(
         {

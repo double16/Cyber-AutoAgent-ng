@@ -153,11 +153,14 @@ flowchart LR
 ### Comprehensive hypothesis testing
 
 When a plan places a hypothesis-producing phase before vulnerability discovery, the controller uses
-`hypothesis_dependent` task creation for the testing phase. It creates one route-scoped testing task for every completed
-hypothesis coverage group and records the source hypothesis task IDs and artifact references with each test task.
-Executors must assess every documented hypothesis in those source artifacts for the assigned group. If a hypothesis
-producer is failed, blocked, missing, or does not cover an assigned group, task creation stops with an explicit coverage
-error; the operation does not silently treat that group as tested.
+`hypothesis_dependent` task creation for the testing phase. It creates a subject-scoped testing task for every completed
+group with validated hypothesis output and records the producer IDs, artifact references, and digests with each task.
+Hypothesis producers use `record_hypotheses` for every assigned subject, supplying safe tests or an explicit reason
+that no testable hypothesis exists. This works for HTTP, network, and source/filesystem modules. Testing executors
+use bounded `read_hypotheses` access and assess every documented hypothesis for their assigned subjects. Older
+continuations repair missing typed output in a separate task while preserving completed historical contracts. If a
+producer fails, is blocked, is missing, or lacks valid output for an assigned group, the controller records that
+prerequisite coverage gap. Testing continues for covered groups; uncovered groups remain unassessed.
 
 ## Deployment modes
 
@@ -223,8 +226,11 @@ export GEMINI_API_KEY=your_key
 See `docs/deployment.md` and `src/modules/config/README.md` for environment-variable details. Do not commit
 credentials to configuration files.
 
-Browser operations use a 240-second default timeout. Set `BROWSER_DEFAULT_TIMEOUT` to an integer number of
-milliseconds when a permitted target requires a different bound; the Docker Compose configuration forwards this value.
+Browser operations and typed login actions share the following timeout. Docker Compose forwards this setting.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BROWSER_DEFAULT_TIMEOUT` | `240000` | Browser timeout in milliseconds, including typed login actions. |
 
 ## Operation modules
 
@@ -280,7 +286,7 @@ read independently by an unrelated task.
 Credentials created by an operation can be rotated by the agent when the authorized flow supports it; rotation creates
 a new credential record and retires the old one instead of overwriting history. User-provided credential payloads are
 never changed by an agent. Before an authenticated request, a controller-owned authentication worker checks out only
-the controller-selected credential, completes the mapped browser/API/MFA flow, and validates an opaque session or
+the controller-selected credential, completes the mapped browser/MFA flow or applies a supplied API credential, and validates an opaque session or
 authorization context. The controller binds that context to the task only after validation succeeds; normal task
 executors receive the opaque authenticated-request tool, never credential lookup, raw session material, or a shell for
 authentication. Failed setup becomes an explicit coverage gap and cannot be retried by searching memory, files, or the
@@ -346,13 +352,35 @@ available, the controller records an authenticated coverage gap without launchin
 authorization tokens remain only in an operation-memory context and are discarded on controller restart. The task
 executor receives no checkout, MFA, cookie-extraction, token-extraction, or token-preparation tools; it receives
 `authenticated_http_request` only after the controller has a valid context.
-The controller selects one reusable, validated target-scoped authentication-flow descriptor before checking out
-credentials. When none exists, it tries one observed discovered candidate at a time, retiring a candidate that fails
-context validation; only after no candidate remains does a credential-free discovery worker map and record one
-bounded flow. If discovery cannot identify a usable flow, credential authentication is skipped and recorded as a flow
-coverage gap. The controller then runs one isolated worker per credential, so a missing flow or a rejected credential
-cannot cause that worker to try another identity. For same-origin API-form flows,
-`ensure_authenticated_context` resolves the controller-selected flow ID rather than searching the stored inventory.
+The controller runs one worker per selected credential. A completed current-version flow is supplied as a starting
+point. If no flow exists, the worker uses assigned navigation hints and discovers the steps while logging in.
+It may correct an existing mapping when the application changes. The selected credential remains fixed; a definitive
+rejection ends that attempt. Username/password workers use the observed browser flow.
+
+Provisioning workers likewise follow the registration entry point and its observed connected steps, including
+multi-page forms and verification. They retain the same identity and browser progress during correction. A flow
+records ordered URLs, actions, and field names without submitted values. A pending verification or failed account
+creation does not publish a completed registration flow.
+
+Dedicated authentication and registration critics review each worker's staged mapping against current-task evidence.
+The default is three worker/critic cycles. JSON repair and one transient critic retry are separate from those cycles.
+Only functional success plus critic approval publishes a reusable mapping. Once login or account creation succeeds,
+correction tools are restricted to observations and metadata recording; they cannot repeat submission or login.
+If review remains unresolved, the controller records a mapping coverage gap and preserves the successful context
+or registered credential. Registration task evaluation remains separate from flow review.
+
+Authentication descriptors use version 10 and registration descriptors use version 4. There is no compatibility path
+for older contracts or standalone discovery agents. Browser capture consumes staged header-binding metadata;
+it does not require a persisted flow ID.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CYBER_WORKFLOW_FLOW_REFINEMENT_CYCLES` | `3` | Maximum flow-critic reviews per attempt; minimum one. Initial recording does not consume a review. |
+| `CYBER_WORKFLOW_FLOW_REFINEMENT_SEARCH_LIMIT` | `16` | Searches per worker invocation or per distinct authorized artifact for critics; minimum one. |
+
+Artifact errors explain the exhausted read or search allowance. Critics synthesize from returned evidence when
+access is exhausted; JSON repair and transient retry keep artifact access closed.
+
 For mapped self-registration, the provisioning worker fills the mapped identity fields and every visible required
 control in that same form, including required profile fields beyond username, password, and email. Optional controls
 remain untouched unless the flow or server validation requires them. A reusable synthetic profile is retained only in
@@ -360,20 +388,22 @@ the task-local context for bounded validation-repair retries; secret-free field 
 descriptor for later operations.
 Attack-surface mapping supplies secret-free navigation, protected-resource, and JavaScript header-binding hints.
 Those endpoints are not executable authority and do not identify a flow start. When no reusable descriptor is
-available, the discovery worker must observe a start-to-validation relationship before recording a target-scoped
-descriptor, and the controller validates it before reuse. Later operations for the same canonical target can reuse a
-validated descriptor. For username/password API forms, the worker can establish a context directly from the recorded
-mapped pair. Username/password browser, redirect, and MFA flows must complete in the shared browser and then capture
-cookies and any observed named browser-storage bearer token internally. The flow descriptor records only the storage
-key name, never its value. Its validation URL must succeed for the bound credential role; 401, 403, and 404 responses
-reject the context. Browser flows cannot fall back to direct HTTP form login. Authentication and registration flow
-descriptors are versioned; descriptors from older flow contracts are ignored and rediscovered. The authentication
+available, the login worker observes the start-to-validation relationship during its assigned interaction before
+staging a target-scoped descriptor. The controller publishes it only after functional success and critic approval. Later operations for the same canonical target can reuse a
+validated descriptor. Username/password browser, redirect, and MFA flows complete in the shared browser and then capture
+cookies and observed credential headers internally. Header names can be recorded without a browser storage key;
+values stay in the opaque context. The validation response must differ meaningfully from an anonymous response;
+HTTP success alone does not establish authentication. Authentication and registration flow
+descriptors are versioned; only the current contract is accepted. The authentication
 worker also has scoped shell access for commands targeting only mapped authentication origins. No session material is
 persisted in SQLite, artifacts, reports, or task text. If a
 multi-credential setup is only partially successful, the executor is bound only to the credential IDs whose opaque
 contexts validated; the remaining IDs are reported as coverage gaps.
 OAuth2 client credentials and configured API keys use the same opaque context: the worker exchanges or applies the
 stored credential internally, validates the protected route, and exposes only the authenticated request wrapper.
+User supplied API credentials can contain `values.headers` such as
+`{"X-Session":"opaque-value","Tauser":"other-value"}`. Header names and values are used as supplied; a JWT or
+`Authorization` header is not required. API credentials do not have registration or username/password login flows.
 For IDOR specialist replay that needs two authenticated sessions, agents use the planned comparison pair's checked-out
 credential IDs directly with the observed login field names. The specialist builds only task-local login contexts,
 requires the login endpoint to share the resolved target origin, and records credential use by ID instead of accepting
@@ -432,3 +462,16 @@ stops the assessment before agents and tools start.
 | Bedrock requests fail | Verify AWS credentials and `AWS_REGION` |
 | Configuration is invalid | Review `~/.cyber-autoagent/config.json` and the active provider settings |
 | Assessment is rejected before starting | Review the target preflight event and authorization scope |
+
+### Damaged continuation state
+
+A continuation stops with `Invalid stored workflow data` when an existing plan or task cannot be
+validated. The message identifies the operation, record, and field; the controller does not create
+a replacement plan or retry unchanged malformed data. Empty optional task JSON fields use their
+existing empty defaults. A database that passes SQLite integrity checks can still contain malformed
+workflow values.
+
+Use the [workflow repair tool](../support/README.md#repair-workflow-statepy) to diagnose the operation
+and preview validated snapshot replacements. Stop database writers before applying repairs.
+Reports preserve available observations and explicitly mark workflow coverage as incomplete when
+stored workflow records are damaged.

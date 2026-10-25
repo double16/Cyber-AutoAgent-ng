@@ -585,3 +585,11 @@ describe('StreamDisplay broad event rendering', () => {
     }
   });
 });
+
+it('renders the existing output event for task-creation counts exactly once', async () => {
+  const {EventLine, render} = await load();
+  const content = 'Phase 4 task creation: created 64 tasks.';
+  const view = render(<EventLine event={{type: 'output', content} as any} animationsEnabled={false} />);
+  expect(view.lastFrame()?.split(content).length).toBe(2);
+  view.unmount();
+});

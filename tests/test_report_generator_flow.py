@@ -1,5 +1,6 @@
 import hashlib
 import json
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1828,6 +1829,7 @@ def test_report_refinement_feeds_each_critic_rejection_back_to_actor():
             {"approved": false, "feedback": ["Fix the "risk" wording",],}
             ```'''),
             _agent_result('{"approved": false, "feedback": ["Cite the evidence artifact"]}'),
+            _agent_result('{"approved": false, "feedback": ["Clarify the final claim"]}'),
         ]
     )
 
@@ -1842,9 +1844,10 @@ def test_report_refinement_feeds_each_critic_rejection_back_to_actor():
     )
 
     assert content == "## Final draft"
-    assert final_critique == {"approved": False, "feedback": ["Cite the evidence artifact"]}
+    assert final_critique == {"approved": False, "feedback": ["Clarify the final claim"]}
     assert actor.call_count == 3
-    assert critic.call_count == 2
+    assert critic.call_count == 3
+    assert "## Final draft" in critic.call_args_list[-1].args[0]
     assert "## Draft one" in actor.call_args_list[1].args[0]
     assert 'Fix the \\"risk\\" wording' in actor.call_args_list[1].args[0]
     assert "## Draft two" in actor.call_args_list[2].args[0]
@@ -1995,14 +1998,11 @@ def test_report_refinement_retries_invalid_critic_json_without_failing_report():
         json_retries=1,
     )
 
-    assert content == "Revised draft"
-    assert final_critique == {
-        "approved": False,
-        "feedback": ["The report critic did not return a valid structured review after 2 attempt(s)."],
-    }
+    assert content == ""
+    assert final_critique is None
+    assert actor.call_count == 1  # A transport failure supplies no semantic actor correction.
     assert critic.call_count == 2
     assert "could not be parsed" in critic.call_args_list[1].args[0]
-    assert final_critique["feedback"][0] in actor.call_args_list[1].args[0]
 
 
 def test_inline_report_review_note_keeps_feedback_in_originating_section():
@@ -3183,6 +3183,13 @@ def test_generate_security_report_success(mock_get_config, mock_build_sections, 
     mock_result.message = {"content": [{"text": "## Section Content\n"}]}
     mock_agent.return_value = mock_result
 
+    def invoke_report_fixture(_prompt, **kwargs):
+        schema = kwargs.get("structured_output_model")
+        if schema is report_generator_module.ReportCritiqueOutput:
+            return SimpleNamespace(structured_output=schema(approved=False, feedback=["Clarify the claim"]))
+        return mock_result
+
+    mock_agent.side_effect = invoke_report_fixture
     report_file = tmp_path / "final_report.md"
     
     generate_security_report(
@@ -3805,3 +3812,30 @@ def test_report_metrics_callback_and_circuit_breaker_cover_noop_paths():
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_final_actor_revision_is_reviewed_before_approval(structured):
+    if structured:
+        first = _next_steps_data({"duration": 60})
+        final = {**first, "coverage_gaps": ["Corrected evidence-backed gap"]}
+        outputs = [json.dumps(first), json.dumps(final)]
+    else:
+        outputs = ["Initial section", "Corrected evidence-backed section"]
+    actor = MagicMock(side_effect=[_agent_result(text) for text in outputs])
+    critic = MagicMock(side_effect=[
+        _agent_result('{"approved":false,"feedback":["Cite the missing evidence"]}'),
+        _agent_result('{"approved":true,"feedback":[]}'),
+    ])
+    if structured:
+        result, rejection = _run_next_steps_refinement(
+            actor, critic, "Assigned section", "Requirements", {"duration": 60}, {}, 1, 0,
+        )
+        assert result["coverage_gaps"] == final["coverage_gaps"]
+    else:
+        result, rejection = _run_report_refinement(actor, critic, "Assigned section", "Summary", "Requirements", 1, 0)
+        assert result == outputs[-1]
+    assert rejection is None
+    assert critic.call_count == 2 and actor.call_count == 2
+    assert "Cite the missing evidence" in actor.call_args_list[-1].args[0]
+    assert "Corrected evidence-backed" in critic.call_args_list[-1].args[0]

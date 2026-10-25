@@ -22,9 +22,14 @@ from strands.hooks.events import (
 from modules import __version__
 from modules.agents.factory import create_agent_with_stateful_retry
 from modules.agents.patches import ToolUseIdHook
+from modules.agents.prompt_context import ReviewBudget
 from modules.config.manager import get_config_manager
-from modules.config.models.factory import create_strands_model
+from modules.config.models.agent_profiles import get_agent_settings_registry
+from modules.config.models.capabilities import allows_reasoning_content_replay, get_model_output_limit
+from modules.config.models.factory import create_strands_model, require_prompt_token_limit
+from modules.config.models.invocation import model_output_budget
 from modules.config.system.logger import get_logger
+from modules.handlers.conversation_budget import _ensure_prompt_within_budget, _strip_reasoning_content
 
 logger = get_logger("Agents.ReportAgent")
 
@@ -51,6 +56,14 @@ class ReportExecutionTelemetryHook(HookProvider):
         registry.add_callback(AfterInvocationEvent, self.after_invocation)
 
     def before_model_call(self, event: BeforeModelCallEvent) -> None:
+        agent = getattr(event, "agent", None)
+        if agent is not None:
+            _strip_reasoning_content(agent)
+        fitter = getattr(agent, "_cyber_prompt_fitter", None)
+        if callable(fitter):
+            fitter(agent)
+        if isinstance(getattr(getattr(agent, "model", None), "_cyber_preferred_output_tokens", None), int):
+            _ensure_prompt_within_budget(agent)
         logger.info(
             "Report model turn started: section=%s projected_input_tokens=%s",
             self._section(event.invocation_state),
@@ -189,8 +202,28 @@ class ReportGenerator:
             "callback_handler": callback_handler or NoOpCallbackHandler(),
             "hooks": [ReportExecutionTelemetryHook(), ToolUseIdHook()],
         }
-        return create_agent_with_stateful_retry(
+        agent = create_agent_with_stateful_retry(
             agent_kwargs,
             model_id=mid,
             agent_cls=Agent,
         )
+        agent._allow_reasoning_content = allows_reasoning_content_replay(prov, mid)
+
+        if is_critic:
+            ceilings = [get_model_output_limit(mid, include_environment=False), *[
+                cfg.getenv_int(name, 0) for name in ("MAX_TOKENS", "MAX_COMPLETION_TOKENS")
+            ]]
+            ceilings = [value for value in ceilings if isinstance(value, int) and value > 0]
+            agent._cyber_review_budget = ReviewBudget.resolve(
+                require_prompt_token_limit(prov, mid), get_agent_settings_registry().get_settings(role).max_tokens,
+                min(ceilings) if ceilings else None, role=role,
+            )
+            agent._prompt_token_limit = agent._cyber_review_budget.context_window
+            def review_model(tokens: int, reasoning: str | None):
+                guidance = agent._cyber_review_budget.guidance_tokens
+                with model_output_budget(role, tokens, reasoning, minimum_tokens=guidance + 1024,
+                                         answer_tokens=guidance):
+                    return create_strands_model(prov, mid, role)
+            agent._cyber_review_model_factory = review_model
+            agent._cyber_review_model_id = mid
+        return agent

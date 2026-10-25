@@ -10,6 +10,137 @@ from modules.tools import recon_inventory_manifest as manifest_tool
 from modules.tools.recon_inventory_manifest import recon_output_to_inventory_manifest
 
 
+@pytest.mark.parametrize("difference", ["endpoint", "location", "target", "unbound", "none"])
+def test_parameter_consolidation_preserves_parent_and_location_identity(difference):
+    def parameter(uid, endpoint_id="endpoint-a", location="query", target="target-1"):
+        return {"id": uid, "kind": "parameter", "target_id": target, "value": "path",
+                "attributes": {"endpoint_id": endpoint_id, "interaction": {
+                    "inputs": [{"name": "path", "location": location}],
+                    "operations": ["GET"], "operation_provenance": "inferred",
+                }}}
+
+    first = parameter("first", endpoint_id=None if difference == "unbound" else "endpoint-a")
+    second = parameter("second", endpoint_id=(None if difference == "unbound" else
+                                             "endpoint-b" if difference == "endpoint" else "endpoint-a"),
+                       location="header" if difference == "location" else "query",
+                       target="target-2" if difference == "target" else "target-1")
+    second["attributes"]["extra"] = "complementary"
+    merged = manifest_tool._merge_inventory_manifests([
+        ("artifact:first.json", {"items": [first]}), ("artifact:second.json", {"items": [second]}),
+    ])
+    assert len(merged["items"]) == (1 if difference == "none" else 2)
+    if difference == "none":
+        assert merged["items"][0]["id"] == "first"
+        assert merged["items"][0]["attributes"]["extra"] == "complementary"
+        assert merged["items"][0]["attributes"]["source_artifact_refs"] == ["artifact:first.json", "artifact:second.json"]
+    else:
+        assert {item["id"] for item in merged["items"]} == {"first", "second"}
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"schema_version": "client_bundle_inventory_v2", "target_id": "target-1",
+      "target": "https://target.test", "api_paths": ["/child"], "spa_routes": []},
+     {"target-1": "https://target.test/"}),
+    ({"schema_version": 1, "items": [{"id": "child", "kind": "endpoint", "target_id": "target-1",
+      "value": "https://target.test/child", "attributes": {}}], "unassessed_gaps": []}, {"target-1": None}),
+    ([], None), ({}, None),
+    ({"schema_version": "client_bundle_inventory_v2", "target_id": "target-1", "target": "invalid",
+      "api_paths": [], "spa_routes": []}, None),
+    ({"schema_version": "client_bundle_inventory_v2", "target": "https://target.test",
+      "api_paths": [], "spa_routes": []}, None),
+])
+def test_inventory_scope_loader_uses_declared_targets_not_endpoint_urls(tmp_path, monkeypatch, payload, expected):
+    path = tmp_path / "scope.json"
+    path.write_text(json.dumps(payload))
+    monkeypatch.setattr(memory, "_artifact_path_from_ref", lambda _reference: str(path))
+    before = path.read_bytes()
+    if expected is None:
+        with pytest.raises(ValueError):
+            manifest_tool.load_inventory_target_bindings("artifact:scope.json")
+    else:
+        assert manifest_tool.load_inventory_target_bindings("artifact:scope.json") == expected
+    assert path.read_bytes() == before
+
+
+def test_inventory_scope_loader_bounds_artifact_reads(tmp_path, monkeypatch):
+    path = tmp_path / "large.json"
+    path.write_text(" " * 16_000_001)
+    monkeypatch.setattr(memory, "_artifact_path_from_ref", lambda _reference: str(path))
+    with pytest.raises(ValueError, match="inspection limit"):
+        manifest_tool.load_inventory_target_bindings("artifact:large.json")
+
+
+def test_nested_adapter_metadata_is_not_treated_as_an_inventory_interaction():
+    first = {"extensions": {"interaction": {"value": "first"}}}
+    second = {"extensions": {"interaction": {"other": "second"}}}
+    assert manifest_tool._merge_inventory_value(first, second) == {
+        "extensions": {"interaction": {"value": "first", "other": "second"}},
+    }
+
+
+@pytest.mark.parametrize(("route", "classification"), [
+    ("/", "concrete"), ("/usersignup", "concrete"), ("/api/search?q=a$b", "concrete"),
+    ("/foo$", "concrete"), ("/*", "pattern"), ("/foo/*", "pattern"),
+    ("/${user}/login", "template"), ("/:id/signup", "template"),
+    ("/$", "fragment"), ("/>", "fragment"), ("//other/login", "fragment"),
+    (None, "fragment"), ("login", "fragment"),
+])
+def test_client_route_classification(route, classification):
+    assert manifest_tool.classify_client_route(route) == classification
+
+
+def test_existing_bundle_extraction_and_manifest_filter_non_concrete_routes():
+    payload = {
+        "schema_version": "client_bundle_inventory_v2", "target": "https://target.test",
+        "api_paths": ["/api/users", "/api/${id}"],
+        "spa_routes": ["/userlogin", "/usersignup", "/*", "/$", "/>", "/:id/signup"],
+    }
+    records = manifest_tool._parse_client_bundle_inventory(json.dumps(payload))
+    assert {record["url"] for record in records} == {
+        "https://target.test/", "https://target.test/api/users",
+        "https://target.test/userlogin", "https://target.test/usersignup",
+    }
+    workflows = manifest_tool.client_bundle_workflows(payload)
+    assert len(workflows) == 2
+    raw = {
+        "schema_version": 1, "unassessed_gaps": [], "items": [
+            {"id": "valid", "target_id": "target-1", "kind": "endpoint", "value": "https://target.test/login"},
+            {"id": "pattern", "target_id": "target-1", "kind": "endpoint", "value": "https://target.test/*"},
+            {"id": "fragment", "target_id": "target-1", "kind": "endpoint", "value": "https://target.test/>"},
+            {"id": "param", "target_id": "target-1", "kind": "parameter", "value": "id",
+             "attributes": {"endpoint_id": "pattern"}},
+            {"id": "workflow", "target_id": "target-1", "kind": "workflow", "value": "Signup",
+             "attributes": {"registration": {"url": "https://target.test/${id}/signup"}}},
+        ],
+    }
+    normalized = manifest_tool._canonicalize_inventory_manifest_source(raw, target_id="target-1")
+    assert [item["id"] for item in normalized["items"]] == ["valid"]
+    assert {candidate["classification"] for candidate in normalized["route_candidates"]} == {"pattern", "template"}
+    assert len(raw["items"]) == 5
+    merged = manifest_tool._merge_inventory_manifests([("artifact:a", normalized), ("artifact:b", normalized)])
+    assert merged["route_candidates"] == normalized["route_candidates"]
+
+
+def test_consolidation_persists_mapping_gaps_and_registration_workflow(monkeypatch, tmp_path):
+    monkeypatch.setattr(artifact, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory, "_operation_output_root", lambda: str(tmp_path))
+    source = tmp_path / "bundle.json"
+    source.write_text(json.dumps({
+        "schema_version": "client_bundle_inventory_v2", "target": "https://target.test",
+        "api_paths": [], "spa_routes": ["/usersignup", "/userlogin"],
+    }))
+    coverage = [{"workstream": "crawl", "complete": False, "tasks": [
+        {"task_uid": "crawl-task", "status": "partial_failure", "reason": "Prompt rejected"},
+    ]}]
+    manifest_tool.consolidate_recon_artifacts(
+        [str(source)], "artifacts/inventory.json", target="https://target.test", mapping_coverage=coverage,
+    )
+    manifest = json.loads((tmp_path / "artifacts/inventory.json").read_text())
+    assert manifest["mapping_coverage"] == coverage
+    assert "Prompt rejected" in manifest["unassessed_gaps"][0]
+    assert any(item["kind"] == "workflow" and item["attributes"].get("registration") for item in manifest["items"])
+
+
 @pytest.mark.parametrize(
     ("source_format", "text", "expected_url", "expected_status"),
     [
@@ -96,7 +227,8 @@ def test_ffuf_wildcard_responses_become_auditable_gaps_not_endpoints():
 def test_gobuster_parser_extracts_default_relative_path_output():
     records = manifest_tool._parse_gobuster("/admin (Status: 301) [Size: 0]")
 
-    assert records == [{"url": "/admin", "method": "GET", "status": 301, "technologies": []}]
+    assert records == [{"url": "/admin", "method": "GET", "operation_provenance": "inferred",
+                        "status": 301, "technologies": []}]
 
 
 def test_format_inference_handles_structured_formats_and_url_lists():
@@ -548,6 +680,7 @@ def test_converter_recognizes_client_bundle_inventory_extraction(
                 "schema_version": "client_bundle_inventory_v2",
                 "target": "https://target.test",
                 "target_id": "target-1",
+                "analysis_artifact": "artifact:artifacts/implementation.js",
                 "api_paths": ["/api/products"],
                 "spa_routes": ["/usersignup", "/userlogin", "/newuserlogin"],
                 "auth_indicators": [],
@@ -574,6 +707,9 @@ def test_converter_recognizes_client_bundle_inventory_extraction(
 
     manifest = json.loads(output.read_text(encoding="utf-8"))
     assert result["source_format"] == "client_bundle_inventory"
+    assert all(item["attributes"]["implementation_refs"] == [
+        "artifact:artifacts/implementation.js"
+    ] for item in manifest["items"])
     assert {
         item["value"]
         for item in manifest["items"]
@@ -878,3 +1014,17 @@ def test_converter_source_artifact_rejects_operation_root_escapes(tmp_path, monk
         manifest_tool.recon_output_to_inventory_manifest(
             "artifact:artifacts/escaped-link.txt", "artifacts/inventory.json", source_format="url_list"
         )
+
+
+@pytest.mark.parametrize("reference", [None, 7, "https://remote.test/code", "artifact:artifacts/implementation.js"])
+def test_bundle_implementation_provenance_is_explicit_and_deduplicated(reference):
+    manifest = {"items": [{"kind": "endpoint", "value": "https://target.test/hidden-upload"}]}
+    payload = {"analysis_artifact": reference}
+    manifest_tool.attach_client_bundle_evidence(manifest, payload)
+    manifest_tool.attach_client_bundle_evidence(manifest, payload)
+    if isinstance(reference, str) and reference.startswith("artifact:"):
+        assert manifest["items"][0]["attributes"] == {
+            "source_artifact_refs": [reference], "implementation_refs": [reference],
+        }
+    else:
+        assert "attributes" not in manifest["items"][0]

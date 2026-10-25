@@ -29,6 +29,20 @@ def _proposal(workstream, role="mapping", depends=(), reason=None, output_kind="
     )
 
 
+def test_partial_synthesis_is_module_local_and_strictly_validated():
+    assert load_phase_task_contract("web", 1).allow_partial_synthesis is True
+    assert load_phase_task_contract("web_recon", 1).allow_partial_synthesis is False
+    raw = {
+        "phase_id": 1, "mode": "fanout", "min_mapping_tasks": 1,
+        "mapping_workstreams": ["source"],
+    }
+    assert contracts._parse_contract("fixture", raw).allow_partial_synthesis is False
+    with pytest.raises(ValueError, match="boolean"):
+        contracts._parse_contract("fixture", {**raw, "allow_partial_synthesis": "true"})
+    with pytest.raises(ValueError, match="requires fanout_with_synthesis"):
+        contracts._parse_contract("fixture", {**raw, "allow_partial_synthesis": True})
+
+
 def test_enabled_web_modules_declare_credential_coverage_phase_contracts():
     assert load_phase_task_contract("web", 1) is not None
     assert load_phase_task_contract("web_recon", 1) is not None
@@ -39,6 +53,38 @@ def test_enabled_web_modules_declare_credential_coverage_phase_contracts():
     assert load_phase_task_contract("code_security", 1) is None
     assert load_phase_task_contract("context_navigator", 1) is None
     assert load_phase_task_contract("threat_emulation", 1) is None
+
+
+@pytest.mark.parametrize("matrix", [[], {"other": ["account"]}, {"coverage": []},
+                                    {"coverage": "role"}, {"coverage": ["unknown"]}])
+def test_authentication_matrix_declarations_are_strict(matrix):
+    raw = {"phase_id": 1, "mode": "fanout", "min_mapping_tasks": 1,
+           "mapping_workstreams": ["coverage"], "authentication_matrix_workstreams": matrix}
+    with pytest.raises(ValueError, match="authentication_matrix_workstreams"):
+        contracts._parse_contract("fixture", raw)
+
+
+def test_modules_declare_comparison_matrices():
+    for module, phase, single, pairs in [
+        ("web", 3, "authenticated_credential_coverage", "authorization_comparison"),
+        ("web_recon", 2, "authenticated_access_coverage", "read_only_authorization_comparison"),
+    ]:
+        contract = load_phase_task_contract(module, phase)
+        assert contract.authentication_matrix_workstreams == {single: ("none",), pairs: ("account", "role")}
+
+
+@pytest.mark.parametrize("module,phase_id,workstreams", [
+    ("web", 1, ["entrypoint_technology", "auth_workflow", "client_side_api"]),
+    ("web_recon", 1, ["service_entrypoints", "technology_trust_boundary", "access_context_session",
+                      "workflow_high_value_areas", "safe_read_only_verification"]),
+    ("web_recon", 2, ["unauthenticated_posture", "authenticated_access_coverage",
+                      "read_only_authorization_comparison"]),
+])
+def test_web_workstreams_declare_source_acquisition(module, phase_id, workstreams):
+    contract = load_phase_task_contract(module, phase_id)
+    for workstream in workstreams:
+        assert contract.required_methods_by_workstream[workstream] == ("request", "analyze")
+    assert "request" not in load_phase_task_contract("ctf", 1).required_methods_by_workstream
 
 
 def test_planning_contract_loaders_ignore_empty_and_unknown_modules():
@@ -88,7 +134,9 @@ def test_web_phase_metadata_requires_inventory_snapshot_task_creation():
 def test_web_phase_three_declares_controller_owned_baseline_workstream():
     contract = load_phase_task_contract("web", 3)
 
-    assert contract.controller_mapping_workstreams == {"unauthenticated_baseline"}
+    assert contract.controller_mapping_workstreams == {
+        "unauthenticated_baseline", "authenticated_credential_coverage", "authorization_comparison",
+    }
     assert contract.exclude_public_static_assets is True
 
 
@@ -593,3 +641,126 @@ def test_task_proposal_schema_exposes_planning_metadata():
     assert proposal.workstream == "bounded_crawl"
     assert proposal.task_role == "mapping"
     assert {"workstream", "task_role", "depends_on_workstreams", "inapplicability_reason"} <= set(properties)
+
+
+@pytest.mark.parametrize("raw_methods", [[], {"unknown": ["request"]}, {"a": []}, {"a": "request"},
+                                        {"a": [""]}, {"a": [123]}, {1: ["request"]},
+                                        {"a": ["request"], " A ": ["analyze"]}])
+def test_required_methods_reject_invalid_configuration(raw_methods):
+    with pytest.raises(ValueError, match="required"):
+        contracts._parse_contract("fixture", {
+            "phase_id": 1, "mode": "fanout", "min_mapping_tasks": 1, "mapping_workstreams": ["a"],
+            "required_methods_by_workstream": raw_methods,
+        })
+
+
+def test_required_methods_are_module_local_and_deduplicated():
+    contract = contracts._parse_contract("fixture", {
+        "phase_id": 1, "mode": "fanout", "min_mapping_tasks": 1, "mapping_workstreams": ["a"],
+        "required_methods_by_workstream": {" A ": ["read", "read", "analyze"]},
+    })
+    assert contract.required_methods_by_workstream == {"a": ("read", "analyze")}
+    assert load_phase_task_contract("web", 1).required_methods_by_workstream == {
+        "client_side_api": ("request", "analyze"),
+        "entrypoint_technology": ("request", "analyze"),
+        "auth_workflow": ("request", "analyze"),
+    }
+    recon = load_phase_task_contract("web_recon", 1)
+    assert set(recon.required_methods_by_workstream) == set(recon.mapping_workstreams)
+    assert load_phase_task_contract("ctf", 1).required_methods_by_workstream == {}
+
+
+@pytest.mark.parametrize("target,method", [
+    ("https://target.test", "request"), ("tcp://target.test:9000", "enumerate"), ("/workspace/src", "read"),
+])
+def test_source_acquisition_methods_freeze_with_execution_requirements(target, method):
+    from modules.tools.memory import merge_workstream_procedure_methods
+
+    contract = contracts.PhaseTaskContract(
+        module="fixture", phase_id=1, mode="fanout", min_mapping_tasks=1,
+        mapping_workstreams=frozenset({"source_analysis"}),
+        required_methods_by_workstream={"source_analysis": (method, "analyze")},
+    )
+    proposal = TaskProposal(
+        title="Analyze source", objective="Extract source metadata", methods=["analyze"],
+        criteria=[{"description": "Extract metadata"}], workstream="source_analysis", target_ids=["target-1"],
+    )
+    plan = OperationPlan(objective="Assess", current_phase=1, total_phases=1,
+                         phases=[PlanPhase(id=1, title="Mapping", status="active")],
+                         targets=[OperationTarget("target-1", target, "filesystem" if target.startswith("/") else "network")])
+    acceptance = _proposal_acceptance_contract(proposal, plan, phase_task_contract=contract)
+    assert set(acceptance.basis.procedure.methods) == {method, "analyze"}
+    assert method in acceptance.criteria[0].execution_requirements[0].description
+    assert merge_workstream_procedure_methods(["analyze", method], "source_analysis", contract, plan.targets) == [
+        "analyze", method,
+    ]
+    assert merge_workstream_procedure_methods(["analyze"], "other", contract, plan.targets) == ["analyze"]
+    assert merge_workstream_procedure_methods(["analyze"], "source_analysis", None, plan.targets) == ["analyze"]
+
+
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_workstream_methods_are_merged_before_proposal_preflight(snapshot):
+    from modules.tools.memory import _create_tasks_from_proposals
+
+    contract = contracts.PhaseTaskContract(
+        module="fixture", phase_id=1, mode="fanout", min_mapping_tasks=1,
+        mapping_workstreams=frozenset({"source_analysis"}),
+        required_methods_by_workstream={"source_analysis": ("request", "analyze")},
+    )
+    observed = []
+
+    def preflight(proposals):
+        observed.extend(proposals)
+        raise RuntimeError("stop before persistence")
+
+    with pytest.raises(RuntimeError, match="stop before persistence"):
+        _create_tasks_from_proposals([{
+            "title": "Analyze source", "objective": "Extract metadata",
+            "methods": [] if snapshot else ["analyze"],
+            "snapshot_refs": ["artifact:inventory.json"] if snapshot else [],
+            "workstream": "source_analysis", "task_role": "mapping",
+            "criteria": [{"description": "Extract metadata"}],
+        }], prompt_token_limit=48_000, phase_task_contract=contract, proposal_preflight_validator=preflight)
+    assert observed[0].methods == ([] if snapshot else ["analyze", "request"])
+
+
+
+def test_acquisition_normalization_preserves_controller_synthesis_proposal():
+    from modules.tools.memory import _create_tasks_from_proposals
+
+    contract = contracts.PhaseTaskContract(
+        module="fixture", phase_id=1, mode="fanout_with_synthesis", min_mapping_tasks=1,
+        mapping_workstreams=frozenset({"source_analysis"}), synthesis_workstream="inventory_synthesis",
+        synthesis_output_kind="inventory_manifest", synthesis_execution="controller",
+        required_methods_by_workstream={"source_analysis": ("request", "analyze")},
+    )
+    observed = []
+
+    def preflight(proposals):
+        observed.extend(proposals)
+        raise RuntimeError("stop before persistence")
+
+    with pytest.raises(RuntimeError, match="stop before persistence"):
+        _create_tasks_from_proposals([
+            {"title": "Analyze", "objective": "Extract", "methods": ["analyze"],
+             "workstream": "source_analysis", "task_role": "mapping", "criteria": [{"description": "Extract"}]},
+            {"title": "Synthesize", "objective": "Merge inventory", "methods": [],
+             "workstream": "inventory_synthesis", "task_role": "synthesis", "output_kind": "inventory_manifest",
+             "depends_on_workstreams": ["source_analysis"], "criteria": [{"description": "Merge inventory"}]},
+        ], prompt_token_limit=48_000, phase_task_contract=contract, proposal_preflight_validator=preflight)
+    assert observed[0].methods == ["analyze", "request"]
+    assert observed[1].methods == []
+
+
+@pytest.mark.parametrize("value", ["authorization", ["undeclared"], [""], [1]])
+def test_authentication_comparison_contract_rejects_invalid_workstreams(value):
+    with pytest.raises(ValueError):
+        contracts._parse_contract("fixture", {
+            "phase_id": 1, "mode": "fanout", "min_mapping_tasks": 1,
+            "mapping_workstreams": ["authorization"], "authentication_comparison_workstreams": value,
+        })
+
+
+def test_authentication_comparison_contract_is_module_local():
+    assert load_phase_task_contract("web", 3).authentication_comparison_workstreams == {"authorization_comparison"}
+    assert load_phase_task_contract("web_recon", 2).authentication_comparison_workstreams == set()

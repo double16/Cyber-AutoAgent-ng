@@ -20,6 +20,7 @@
       <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/ragas/0.3.2-py3-none-any" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/.uv-cache/wheels-v6/pypi/botocore/1.43.74-py3-none-any/botocore/vendored/requests/packages" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.uv-cache" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>

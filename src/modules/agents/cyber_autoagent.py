@@ -16,7 +16,7 @@ from typing import Any
 
 from strands import Agent
 from strands.hooks import HookProvider
-from strands.tools.executors import ConcurrentToolExecutor
+from strands.tools.executors import ConcurrentToolExecutor, SequentialToolExecutor
 
 # These tools are modules, not functions, the following imports MUST import the module
 from strands_tools import (
@@ -65,11 +65,13 @@ from modules.handlers.conversation_budget import (
     register_conversation_manager,
 )
 from modules.handlers.credential_usage import CredentialUsageHook
+from modules.handlers.preview_copy import PreviewCopyGuard
 from modules.handlers.react import AgentEventHandler
 from modules.handlers.terminal_tool import TerminalToolHook
 from modules.handlers.tool_recovery import (
     EvaluatorArtifactReadLimitHook,
     TaskFailureRecoveryHook,
+    ToolOutcomeRecordingHook,
 )
 from modules.handlers.tool_repeat_guard import (
     DEFAULT_TOOL_REPEAT_MAX_CYCLE_LENGTH,
@@ -93,7 +95,6 @@ from modules.tools.auth_chain_analyzer import auth_chain_analyzer
 from modules.tools.authentication import (
     authenticated_http_request,
     capture_browser_authenticated_context,
-    ensure_authenticated_context,
     establish_credential_authenticated_context,
     record_authentication_flow,
 )
@@ -142,6 +143,7 @@ from modules.tools.credentials import (
 )
 from modules.tools.editor import create_absolute_path_editor
 from modules.tools.idor_specialist import idor_specialist
+from modules.tools.inventory_item import create_inventory_item_reader
 from modules.tools.mcp import (
     discover_mcp_tools,
 )
@@ -218,6 +220,7 @@ class AgentRuntimeResources:
     quarantined_shell_commands: set[str] = field(default_factory=set)
     structured_output_fallbacks: dict[str, str] = field(default_factory=dict)
     termination_policy: str = ""
+    provider_capture_directory: Path | None = None
 
 
 def _tool_names(tools: list[Any]) -> set[str]:
@@ -339,6 +342,7 @@ def create_agent_runtime_resources(
 
     # Ensure unified output directories (root + artifacts + tools) exist before any tools run
     paths: dict[str, str] = {}
+    provider_capture_directory = None
     try:
         paths = config_manager.ensure_operation_output_dirs(
             config.provider, target_name, operation_id, module=config.module
@@ -357,6 +361,7 @@ def create_agent_runtime_resources(
             tools_path = paths.get("tools")
             if isinstance(root_path, str) and root_path:
                 os.environ["CYBER_OPERATION_ROOT"] = root_path
+                provider_capture_directory = Path(root_path) / "diagnostics" / "provider_responses"
             if isinstance(artifacts_path, str) and artifacts_path:
                 os.environ["CYBER_ARTIFACTS_DIR"] = artifacts_path
             if isinstance(tools_path, str) and tools_path:
@@ -645,6 +650,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         memory_list,
         create_artifact_reader(prompt_token_limit, max_output_chars=max_result_chars),
         create_artifact_searcher(max_output_chars=max_result_chars),
+        create_inventory_item_reader(max_output_chars=max_result_chars),
         create_tasks,
         sleep,
         python_repl,
@@ -654,7 +660,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     optional_tools_list = [
         recon_output_to_inventory_manifest,
         authenticated_http_request, capture_browser_authenticated_context, establish_credential_authenticated_context,
-        ensure_authenticated_context, record_authentication_flow,
+        record_authentication_flow,
         store_credential, query_credentials, checkout_credential, exchange_oauth2_client_credentials,
         set_task_auth_context, mark_credential_status, plan_access_control_comparisons,
         plan_authenticated_coverage, prepare_api_key_authentication, prepare_login_form_authentication,
@@ -899,6 +905,10 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         artifacts_dir=paths.get("artifacts"),
         artifact_threshold=artifact_threshold,
     ) if sdk_context_manager is None else None
+    preview_copy_guard = (
+        PreviewCopyGuard(Path(paths["artifacts"]) if paths.get("artifacts") else None)
+        if tool_router_hook is None else None
+    )
 
     # hooks to include in agents, order is important
     hooks: list[HookProvider] = list(
@@ -909,6 +919,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
                 artifact_reference_input_normalization_hook,
                 tool_repeat_guard_hook,
                 tool_router_hook,
+                preview_copy_guard,
                 react_hooks,
                 credential_usage_hook,
                 prompt_budget_hook,
@@ -923,6 +934,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
                 artifact_reference_input_normalization_hook,
                 tool_repeat_guard_hook,
                 tool_router_hook,
+                preview_copy_guard,
                 react_hooks,
                 credential_usage_hook,
                 prompt_budget_hook,
@@ -1094,6 +1106,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         trace_attributes=trace_attributes,
         prompt_token_limit=prompt_token_limit,
         termination_policy=module_termination_policy.strip(),
+        provider_capture_directory=provider_capture_directory,
     )
 
 
@@ -1120,6 +1133,11 @@ def create_agent(
     agent_logger.debug("Creating autonomous agent")
 
     model = create_strands_model(config.provider, config.model_id, agent_type or "task_executor")
+    from modules.config.models.ollama import OllamaModel
+
+    if isinstance(model, OllamaModel):
+        model.capture_directory = runtime.provider_capture_directory
+        model.capture_role = agent_type or "task_executor"
 
     trace_attributes = dict(runtime.trace_attributes)
     if agent_type:
@@ -1165,8 +1183,11 @@ def create_agent(
     agent_hooks = list(runtime.hooks) if runtime.hooks else []
     failure_recovery_hook = None
     evaluator_artifact_read_limit_hook = None
-    if agent_type == "task_evaluator":
-        evaluator_artifact_read_limit_hook = EvaluatorArtifactReadLimitHook()
+    if agent_type in {
+        "task_evaluator", "authentication_agent",
+        "authentication_flow_critic", "registration_flow_critic",
+    }:
+        evaluator_artifact_read_limit_hook = EvaluatorArtifactReadLimitHook(tools or [])
         agent_hooks.append(evaluator_artifact_read_limit_hook)
     if agent_type == "task_executor" and isinstance(callback_handler, AgentEventHandler):
         max_policy_violations = runtime.config_manager.getenv_int(
@@ -1199,11 +1220,25 @@ def create_agent(
             efficiency_callback=callback_handler.record_efficiency_event,
         )
         agent_hooks.append(failure_recovery_hook)
-    if agent_type == "task_executor":
-        agent_hooks.append(TerminalToolHook(agent_type))
+    outcome_recording_hook = None
+    if isinstance(callback_handler, AgentEventHandler):
+        outcome_recording_hook = ToolOutcomeRecordingHook(
+            callback_handler.tool_outcome_journal,
+            recovery_role=failure_recovery_hook.recovery_role_for if failure_recovery_hook is not None else None,
+        )
+        # Capture original results before recovery or presentation hooks can rewrite them.
+        agent_hooks.insert(0, outcome_recording_hook)
+    terminal_tool_hook = TerminalToolHook(agent_type)
+    # Cleanup callbacks run in reverse: recovery and safety stops must settle before checkpoints.
+    agent_hooks.insert(0, terminal_tool_hook)
 
     tool_executor = runtime.tool_executor
-    if agent_type in _FAIL_FAST_TOOL_ROLES:
+    if agent_type in {
+        "task_executor", "authentication_agent",
+        "authentication_flow_critic", "registration_flow_critic",
+    }:
+        tool_executor = SequentialToolExecutor()
+    elif agent_type in _FAIL_FAST_TOOL_ROLES:
         tool_executor = FailFastSequentialToolExecutor()
 
     agent_kwargs = {
@@ -1252,6 +1287,9 @@ def create_agent(
         agent._cyber_agent_name = agent_kwargs["name"]
         agent._cyber_agent_type = agent_type or getattr(callback_handler, "agent_type", "agent")
         agent._cyber_callback_handler = callback_handler
+        agent._cyber_terminal_tool_hook = terminal_tool_hook
+        if outcome_recording_hook is not None:
+            agent._cyber_tool_outcome_recording_hook = outcome_recording_hook
         if failure_recovery_hook is not None:
             agent._cyber_failure_recovery_hook = failure_recovery_hook
         if evaluator_artifact_read_limit_hook is not None:
@@ -1262,10 +1300,6 @@ def create_agent(
             agent._cyber_parent_agent_run_id = callback_handler.parent_agent_run_id
     except Exception:
         pass
-    # Ensure legacy-compatible system prompt is directly accessible for tests
-    with contextlib.suppress(Exception):
-        agent.system_prompt = runtime.system_prompt
-
     if include_tool_catalog and agent_kwargs["tools"]:
         agent.tool_registry.register_tool(tool_catalog_wrapper(agent, config.available_tools))
 

@@ -156,3 +156,42 @@ def test_state_bag_prefers_event_dict_attributes_then_falls_back_to_agent_hook_s
     bag2 = hook._state_bag(e2)
     assert isinstance(bag2, dict)
     assert agent._hook_state is bag2
+
+
+@pytest.mark.parametrize("wrapped", ['["opaque"]', '["opaque"'])
+def test_canonical_arguments_reach_repeat_guard_and_literal_strings_stay_literal(caplog, wrapped):
+    import asyncio
+    import json
+    from unittest.mock import Mock
+
+    from strands import Agent, tool
+    from strands.tools.executors import SequentialToolExecutor
+
+    from modules.handlers.tool_repeat_guard import ToolRepeatGuardHook
+
+    calls = []
+
+    @tool
+    def runtime_tool(values: list[str], document: str) -> str:
+        """Process a structured list and a literal document."""
+        calls.append((values, document))
+        return "processed"
+
+    agent = Agent(model=Mock(), tools=[runtime_tool],
+                  hooks=[tcrh.AgentRepairHook(), ToolRepeatGuardHook(repeat_threshold=2)], callback_handler=None)
+    uses = [{"toolUseId": "wrapped", "name": "runtime_tool", "input": {"values": wrapped, "document": "[]"}},
+            {"toolUseId": "native", "name": "runtime_tool", "input": {"values": ["opaque"], "document": "[]"}}]
+    results = []
+
+    async def collect():
+        return [event async for event in SequentialToolExecutor()._execute(
+            agent, uses, results, Mock(), Mock(), {},
+        )]
+
+    with caplog.at_level("INFO"):
+        asyncio.run(collect())
+    assert calls == [(["opaque"], "[]")]
+    assert [result["status"] for result in results] == ["success", "success"]
+    assert "Normalized JSON containers" in caplog.text
+    assert "opaque" not in " ".join(record.message for record in caplog.records if "Normalized JSON" in record.message)
+    assert "Repeated tool-call cycle" in json.dumps(results)

@@ -435,3 +435,50 @@ def test_report_builder_only_has_info_evidence(mock_client_cls):
         0,
         0,
     )
+
+
+@pytest.mark.parametrize("damaged_component", ["plan", "tasks", "both"])
+@patch("modules.tools.memory.QdrantMemoryClient")
+def test_report_preserves_observations_when_workflow_records_are_damaged(mock_client_cls, damaged_component):
+    from modules.handlers.report_generator import _validate_report_consistency
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    client = mock_client_cls.return_value
+    client.list_memories.return_value = [{
+        "id": "observation", "memory": "[OBSERVATION] The service responds to HTTP",
+        "metadata": {"category": "observation", "operation_id": "OP_STORAGE"},
+    }]
+    client.get_active_plan.return_value = None
+    client.list_tasks.return_value = []
+    if damaged_component in {"plan", "both"}:
+        client.get_active_plan.side_effect = StoredWorkflowDataError("plans", "OP_STORAGE", "OP_STORAGE", "plan_data")
+    if damaged_component in {"tasks", "both"}:
+        client.list_tasks.side_effect = StoredWorkflowDataError("tasks", "OP_STORAGE", "task", "evidence")
+    sections = build_report_sections("OP_STORAGE", "example.com", "Check scope")
+    assert "error" not in sections
+    assert sections["observation_count"] == 1
+    assert sections["raw_evidence"][0]["id"] == "observation"
+    assert len(sections["workflow_storage_errors"]) == (2 if damaged_component == "both" else 1)
+    assert "coverage is unavailable or partial" in sections["execution_history"]
+    completion = {"assessment_complete": True, "workflow_complete": True}
+    errors = _validate_report_consistency(sections, completion)
+    assert completion["assessment_complete"] is False
+    assert completion["workflow_complete"] is False
+    assert "damaged stored records" in completion["incomplete_reason"]
+    assert any("Invalid stored workflow data" in error for error in errors)
+
+
+def test_report_reference_matching_and_omission_share_spaced_parser():
+    from modules.handlers.report_generator import (
+        _artifact_reference_matches,
+        _artifact_references,
+        _omit_cross_operation_artifact_references,
+    )
+
+    text = 'Proof artifact: /tmp/response.txt, screenshot `artifact: "artifacts/page one.png"`.'
+    assert _artifact_references(text) == {"artifact:/tmp/response.txt", "artifact:artifacts/page one.png"}
+    matches = _artifact_reference_matches(text)
+    assert matches[0] == ("artifact: /tmp/response.txt", "artifact:/tmp/response.txt")
+    omitted, count = _omit_cross_operation_artifact_references(text)
+    assert count == 2
+    assert omitted == "Proof [prior-operation artifact omitted], screenshot [prior-operation artifact omitted]."

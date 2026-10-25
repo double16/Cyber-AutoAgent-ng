@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from strands.hooks import AfterToolCallEvent, HookProvider, HookRegistry
+from strands.hooks import AfterToolCallEvent, AfterToolsEvent, BeforeToolCallEvent, HookProvider, HookRegistry
 
+from modules.agents.run_policy import AgentRunPolicy
 from modules.handlers.tool_recovery import _result_success, _result_text
 
 TERMINAL_TOOL_COMPLETED_STATE_KEY = "terminal_tool_completed"
 TERMINAL_TOOL_REJECTED_STATE_KEY = "terminal_tool_rejected"
+POLICY_TERMINAL_STATE_KEY = "policy_terminal"
 
 
 class TerminalToolHook(HookProvider):
@@ -18,9 +20,103 @@ class TerminalToolHook(HookProvider):
 
     def __init__(self, agent_type: str) -> None:
         self.agent_type = agent_type
+        self.policy: AgentRunPolicy | None = None
+        self.successful_tools: set[str] = set()
+        self.called_tools: set[str] = set()
+        self.tool_count = 0
+        self.checkpoint_count = 0
+        self.progress_key = ""
+
+    def configure(self, policy: AgentRunPolicy) -> None:
+        """Install invocation-local completion criteria and reset prior completions."""
+        self.policy = policy
+        self.successful_tools.clear()
+        self.called_tools.clear()
+        self.tool_count = 0
+        self.checkpoint_count = 0
+        self.progress_key = policy.progress_key() if policy.progress_key else ""
 
     def register_hooks(self, registry: HookRegistry) -> None:
         registry.add_callback(AfterToolCallEvent, self._after_tool)
+        registry.add_callback(BeforeToolCallEvent, self._before_tool)
+        registry.add_callback(AfterToolsEvent, self._after_tools)
+
+    def _after_tools(self, event: AfterToolsEvent) -> None:
+        """Apply publication checkpoints only after the current batch has finished."""
+        policy = self.policy
+        if policy is None or not policy.checkpoint_tool_calls or self.checkpoint_count < policy.checkpoint_tool_calls:
+            return
+        if getattr(event, "end_turn", False):
+            return
+        state = event.invocation_state.setdefault("request_state", {})
+        if not isinstance(state, dict) or state.get("stop_event_loop") or any(key in state for key in (
+            POLICY_TERMINAL_STATE_KEY, TERMINAL_TOOL_COMPLETED_STATE_KEY, TERMINAL_TOOL_REJECTED_STATE_KEY,
+        )):
+            return
+        state["stop_event_loop"] = True
+        state[POLICY_TERMINAL_STATE_KEY] = {
+            "reason": "publication_checkpoint", "successful_tool_calls_without_progress": self.checkpoint_count,
+        }
+        event.end_turn = (
+            "Hypothesis publication checkpoint reached after successful tool calls without publication "
+            "progress. The current tool batch has finished. Return control to the workflow controller "
+            "for the publication-only pass; this checkpoint does not mark the task complete."
+        )
+
+    def _before_tool(self, event: BeforeToolCallEvent) -> None:
+        """Cancel queued calls after a terminal result in this sequential batch."""
+        state = event.invocation_state.get("request_state")
+        if isinstance(state, dict) and any(
+            key in state
+            for key in (
+                POLICY_TERMINAL_STATE_KEY,
+                TERMINAL_TOOL_COMPLETED_STATE_KEY,
+                TERMINAL_TOOL_REJECTED_STATE_KEY,
+            )
+        ):
+            terminal = state.get(POLICY_TERMINAL_STATE_KEY)
+            if isinstance(terminal, dict) and terminal.get("reason") == "publication_checkpoint":
+                event.cancel_tool = (
+                    "Queued tool call canceled: hypothesis publication checkpoint reached after "
+                    "successful tool calls without publication progress. Return control to the workflow controller "
+                    "for the publication-only pass; this checkpoint does not mark the task complete."
+                )
+            else:
+                event.cancel_tool = "Worker completed; return control to the workflow controller."
+
+    def _policy_terminal(self, event: AfterToolCallEvent, tool_name: str) -> bool:
+        policy = self.policy
+        if policy is None:
+            return False
+        self.called_tools.add(tool_name)
+        if tool_name not in policy.ignored_terminal_tool_names:
+            self.tool_count += 1
+        success = _result_success(event.result, event.exception)
+        if success:
+            self.successful_tools.add(tool_name)
+        reason = policy.terminal_check() if policy.terminal_check is not None else None
+        if policy.checkpoint_tool_calls:
+            progress = policy.progress_key() if policy.progress_key else ""
+            if progress != self.progress_key:
+                self.progress_key = progress
+                self.checkpoint_count = 0
+            elif success:
+                self.checkpoint_count += 1
+        # A controller predicate is authoritative when supplied: tool availability
+        # or a successful tool status alone cannot establish functional completion.
+        if policy.terminal_check is None and policy.terminal_after_required_tools and policy.required_tool_names:
+            completed = self.successful_tools if policy.require_successful_required_tools else self.called_tools
+            matches = (name in completed for name in policy.required_tool_names)
+            satisfied = any(matches) if policy.required_tool_match == "any" else all(matches)
+            if satisfied and self.tool_count >= policy.min_tool_calls:
+                reason = policy.terminal_reason
+        if not reason:
+            return False
+        state = event.invocation_state.setdefault("request_state", {})
+        if isinstance(state, dict):
+            state["stop_event_loop"] = True
+            state[POLICY_TERMINAL_STATE_KEY] = {"reason": reason}
+        return True
 
     def _after_tool(self, event: AfterToolCallEvent) -> None:
         tool_name = str(event.tool_use.get("name", ""))
@@ -28,7 +124,8 @@ class TerminalToolHook(HookProvider):
             "task_creator": "create_tasks",
             "task_executor": "record_task_acceptance",
         }.get(self.agent_type)
-        if tool_name != expected_tool:
+        if tool_name != expected_tool or (self.policy is not None and self.policy.terminal_check is not None):
+            self._policy_terminal(event, tool_name)
             return
         if not _result_success(event.result, event.exception):
             self._record_terminal_failure(event, tool_name)

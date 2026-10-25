@@ -70,6 +70,87 @@ The former `auto` and `fresh` values are no longer CLI values. Persisted React c
 
 ## Storage options
 
+### Investigating frozen inventory records
+
+`get_inventory_item` reads current-operation inventory manifests without changing their frozen contents.
+Its default `view="record"` preserves the full-record lookup. Use `view="investigation"` with an exact
+`item_id` to retrieve explicitly linked records, operation provenance, client request declarations,
+structural diagnostics, and source excerpts:
+
+```python
+get_inventory_item(
+    manifest_ref="artifact:artifacts/inventory.json",
+    item_id="endpoint-example",
+    view="investigation",
+    context_offset=0,
+    context_limit=20,
+)
+```
+
+Follow `next_context_offset` until it is null; `context_limit` accepts 1–50 entries. Pages also respect
+the tool's output ceiling. An entry that cannot fit produces an explicit error rather than silently
+losing fields; inspect that record with `read_artifact`. Ambiguous selectors return candidate IDs rather
+than expanding several subjects. The aliases `raw` and `context` normalize to `record` and `investigation`
+inside the tool; the advertised schema uses canonical values.
+
+An investigation joins only explicit same-target relationships. HTTP client declarations are interpreted
+by a dedicated adapter. Their URLs are compared by origin and path, with query and fragment removed;
+different paths remain distinct. An `operation_endpoint_mismatch` preserves both the assigned endpoint
+and the conflicting declaration. Existing frozen manifests are never repaired in place. New inventory
+consolidation keeps parameter names separate by parent endpoint and input location.
+
+Excerpts use recorded source locations, span at most 200 lines and 8,000 characters per operation, and split long lines into
+bounded pieces. An `excerpt_limit` diagnostic identifies any remaining range for a targeted artifact read.
+Source digests are verified when recorded by the client extractor; legacy excerpts explicitly report
+`digest_verification="unrecorded"`. Sources outside the current operation or the evaluator's allowlist
+are unavailable. Source files over 16 MB require a separate targeted artifact inspection.
+
+Client route context also follows source-backed JSX and compiled React route declarations into uniquely
+resolved local components and request helpers. Conditional branches and callbacks retain their source
+locations. Traversal stops after four local call edges or 32 definitions per route; unresolved bindings,
+imports, cycles, and limits remain explicit. API requests reachable from a client route are separate from
+operations implemented by that route. No JavaScript is executed and no server authorization conclusion
+is inferred. Existing saved bundles are indexed lazily under `artifacts/client_route_indexes`, keyed by
+source digest and extractor version, so this context does not require rerunning mapping or changing a
+frozen inventory. Identical source copies share analysis rather than repeating their excerpts.
+
+These records describe evidence availability and provenance, not security conclusions. Empty inputs mean
+unrecorded inputs; inferred methods are not exhaustive; frontend requests do not prove server handling.
+Hypothesis workers use this context before searching raw artifacts. A necessary missing input goes through
+structured prerequisite review, not `no_testable_hypotheses`. When review requires both inspection and
+publication revision, inspection runs first within the existing bounds, followed by publication and review
+of the new digest. The 16-call discovery checkpoint is unchanged.
+
+### Preserving inspected evidence across hypothesis turns
+
+Successful inspection tools save their exact returned text beneath `artifacts/hypothesis_context/returned_results`.
+Each result binds the operation, task, frozen snapshot, tool-call ID, arguments, source references, and content
+digest. The controller captures results immediately, before shortened outcome summaries replace them.
+These are sensitive internal artifacts, subject to the same handling as other non-report evidence.
+
+Fresh hypothesis workers, checkpoint publication, repairs, and evaluators receive up to 4,000 tokens of
+complete recent results, with duplicate content grouped and omissions disclosed. Prompt fitting can omit
+replay bodies while retaining the saved-result index and the required publication instructions. Older ledgers
+that recorded only arguments explicitly identify their missing content; they are never treated as observations.
+
+`read_inspection_result(inspection_ref, offset=0, max_chars=4000)` pages a saved result or its index. The
+maximum page size is 10,000 characters, additionally bounded by the tool-output ceiling. Follow `next_offset`
+for further pages. The tool permits four reads per instance and cannot reopen original evidence, read another
+task or snapshot, or restart discovery. Checkpoint publication has an eight-model-turn ceiling to accommodate
+the saved-result reads and publication calls. Ordinary discovery still checkpoints at 16 calls.
+
+For newly evaluated empty hypothesis publications, subject review includes `no_hypothesis_basis`:
+
+| Basis kind | Required behavior |
+| --- | --- |
+| `inspected_evidence` | Cite retained `inspection_refs` containing inspected content; the evaluator must judge its semantic adequacy. |
+| `metadata_only` | Repair the publication; unrecorded inputs and inferred operations cannot establish completed empty coverage. |
+| `necessary_evidence_unreviewed` | Identify concrete frozen-source `prerequisite_gaps` and use focused inspection recovery. |
+
+A valid inspection reference establishes provenance and content availability only. It does not independently
+prove support, contradiction, or the absence of a vulnerability. Existing terminal publications remain unchanged;
+the stronger review contract applies when a task is newly evaluated or explicitly rerun.
+
 ### Embedded filesystem storage
 
 No service configuration is required. The default layout is:
@@ -187,3 +268,29 @@ validation outcomes.
 - **No shared results:** target values must match exactly. A URL and hostname are distinct unless both are explicit
   `OperationTarget` values.
 - **Service connection failure:** check `QDRANT_URL`, credentials, network access, and the service health endpoint.
+
+
+### Reviewing empty hypothesis outcomes
+
+Investigation pages prioritize subject declarations and source excerpts before broad references and
+metadata diagnostics. The additive `remaining_context` map identifies the first remaining offset for
+each context type; continue with `context_offset` when relevant evidence is outside the first page.
+
+Checkpoint replay balances returned content across sources and retains small verbatim evidence anchors
+when optional replay bodies are removed during prompt fitting. Large results include serialized-result
+slice offsets for recovery through `read_inspection_result`; complete results remain in the scoped journal.
+These excerpts establish what was inspected, not whether a security conclusion is supported.
+
+New empty-result reviews must provide evidence-linked `behavior_assessments` (observed behavior,
+inspection references, whether it supports a conditional test, and reasoning), or
+`no_relevant_behavior_reason` when inspected content contains no relevant behavior. An assessment
+supporting a conditional test requires publication repair. Historical reviews remain readable.
+Missing server observations and unrecorded inputs do not independently prohibit proposing future tests.
+
+Hypothesis evaluation uses a task-bound structured-output schema when supported by the provider.
+Python binds the publication digest and constrains review identifiers to the current publication and
+frozen criteria. The evaluator still supplies `status`, semantic judgments, and repair instructions.
+For empty subjects, behavior assessments belong inside `subject_reviews[].no_hypothesis_basis`;
+populated subjects omit that basis. JSON compatibility and correction paths use the same schema,
+and corrections return a complete decision while preserving already valid judgments. Stored reviews
+retain the canonical `HypothesisTaskDecisionOutput` format, including the controller-bound digest.

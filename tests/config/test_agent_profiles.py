@@ -69,7 +69,7 @@ def test_recommended_agent_defaults():
     # plan_critic
     plan_critic = registry.get_settings("plan_critic")
     assert plan_critic.temperature == 0.0
-    assert plan_critic.reasoning_level == ReasoningLevel.MEDIUM
+    assert plan_critic.reasoning_level == ReasoningLevel.LOW
     assert plan_critic.max_tokens == 4096
 
     # task_creator
@@ -87,7 +87,7 @@ def test_recommended_agent_defaults():
     # task_prompt_critic
     prompt_critic = registry.get_settings("task_prompt_critic")
     assert prompt_critic.temperature == 0.0
-    assert prompt_critic.reasoning_level == ReasoningLevel.MEDIUM
+    assert prompt_critic.reasoning_level == ReasoningLevel.LOW
     assert prompt_critic.max_tokens == 4096
 
     # task_executor
@@ -99,9 +99,9 @@ def test_recommended_agent_defaults():
     # task_evaluator / phase_evaluator have independent active state.
     evaluator = registry.get_settings("task_evaluator")
     assert evaluator.temperature == 0.0
-    assert evaluator.reasoning_level == ReasoningLevel.MEDIUM
+    assert evaluator.reasoning_level == ReasoningLevel.LOW
     assert evaluator.max_tokens == 4096
-    assert registry.get_settings("phase_evaluator").reasoning_level == ReasoningLevel.MEDIUM
+    assert registry.get_settings("phase_evaluator").reasoning_level == ReasoningLevel.LOW
 
     # report_agent / report_critic
     report_agent = registry.get_settings("report_agent")
@@ -112,7 +112,7 @@ def test_recommended_agent_defaults():
     report_critic = registry.get_settings("report_critic")
     assert report_critic.temperature == 0.0
     assert report_critic.reasoning_level == ReasoningLevel.LOW
-    assert report_critic.max_tokens == 2048
+    assert report_critic.max_tokens == 4096
 
     # taxonomy_annotator and attack_enricher
     tax = registry.get_settings("taxonomy_annotator")
@@ -141,7 +141,7 @@ def test_phase_evaluator_adaptation_does_not_modify_task_evaluator():
     registry.apply_reasoning_repair("phase_evaluator", ReasoningLevel.LOW, "phase recovery")
 
     assert registry.get_settings("phase_evaluator").reasoning_level is ReasoningLevel.LOW
-    assert registry.get_settings("task_evaluator").reasoning_level is ReasoningLevel.MEDIUM
+    assert registry.get_settings("task_evaluator").reasoning_level is ReasoningLevel.LOW
 
 
 def test_reasoning_repair_and_permanent_lock():
@@ -329,3 +329,16 @@ def test_agent_profile_mutators_cover_bedrock_cleanup_and_token_parameter_source
     params_model = type("Params", (), {"params": {"max_tokens": 10}})()
     assert profiles.mutate_agent_model_max_tokens(params_model, 5) == 15
     assert params_model.params["max_tokens"] == 15
+
+
+
+def test_worker_flow_critics_have_independent_profiles():
+    registry = AgentSettingsRegistry()
+    for purpose in ("authentication", "registration"):
+        critic_role = f"{purpose}_flow_critic"
+        assert normalize_agent_type(critic_role) == critic_role
+        assert registry.get_settings(critic_role).temperature == 0.0
+        assert registry.get_settings(critic_role).max_tokens == 4096
+        registry.apply_reasoning_repair(critic_role, ReasoningLevel.LOW, "test")
+        assert registry.get_settings("task_executor").reasoning_level == ReasoningLevel.MEDIUM
+        assert registry.get_settings(critic_role).reasoning_level == ReasoningLevel.LOW

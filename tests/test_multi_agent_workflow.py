@@ -1,16 +1,18 @@
 import ast
 import asyncio
+import hashlib
 import inspect
 import json
 from contextlib import contextmanager
 from dataclasses import replace
 from email.message import Message
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from strands.types.exceptions import MaxTokensReachedException
+from strands.types.exceptions import ContextWindowOverflowException, MaxTokensReachedException
 
 from modules.agents import multi_agent_workflow as workflow_mod
 from modules.agents.cyber_autoagent import build_role_tools
@@ -31,7 +33,6 @@ from modules.handlers.tool_recovery import (
     ToolOutcome,
     ToolOutcomeJournal,
 )
-from modules.handlers.utils import get_tool_spec
 from modules.tools import memory as memory_mod
 from modules.tools import optional_tool_selection as credential_selection
 from modules.tools.memory import (
@@ -52,6 +53,18 @@ from modules.tools.optional_tool_selection import (
     CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES,
     CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES,
 )
+
+_REAL_REFINE_WORKER_FLOW = MultiAgentWorkflowController._refine_worker_flow
+
+
+def _semantic_checks():
+    return {key: {"verdict": "adequate", "reason": "Grounded controls and identity context"}
+            for key in ("grounding", "test_discrimination", "identity_requirements")}
+
+
+@pytest.fixture(autouse=True)
+def isolate_worker_flow_review(monkeypatch):
+    monkeypatch.setattr(MultiAgentWorkflowController, "_refine_worker_flow", Mock(return_value=[]))
 
 
 def _acceptance(criterion_id="task-outcome"):
@@ -371,6 +384,127 @@ def _tool(name):
     return tool_func
 
 
+@pytest.mark.asyncio
+async def test_bound_credential_tool_schema_and_dispatch_rejects_override():
+    calls = []
+
+    @workflow_mod.strands_tool(name="checkout_credential")
+    def checkout_credential(credential_id: str, purpose: str) -> str:
+        calls.append((credential_id, purpose))
+        return "selected"
+
+    bound = workflow_mod._bind_single_choice_tool(
+        checkout_credential, {"credential_id": "selected-id", "purpose": "authentication setup"}
+    )
+
+    assert bound.tool_spec["inputSchema"]["json"] == {
+        "properties": {}, "required": [], "type": "object", "additionalProperties": False,
+    }
+    assert bound._metadata.input_model.model_fields == {}
+    events = [event async for event in bound.stream({
+        "toolUseId": "checkout-test", "name": "checkout_credential", "input": {},
+    }, {})]
+    assert events[-1]["tool_result"]["status"] == "success"
+    assert events[-1]["tool_result"]["content"] == [{"text": "selected"}]
+    assert calls == [("selected-id", "authentication setup")]
+    override_events = [event async for event in bound.stream({
+        "toolUseId": "checkout-override", "name": "checkout_credential",
+        "input": {"credential_id": "other-id"},
+    }, {})]
+    assert override_events[-1]["tool_result"]["status"] == "error"
+    assert calls[-1] == ("selected-id", "authentication setup")
+    assert bound() == "selected"
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        bound(credential_id="other-id")
+    assert calls == [("selected-id", "authentication setup")] * 2
+
+
+@pytest.mark.asyncio
+async def test_bound_browser_capture_retains_observed_url_and_selected_ids():
+    calls = []
+
+    @workflow_mod.strands_tool(name="capture_browser_authenticated_context")
+    async def capture_browser_authenticated_context(
+        credential_id: str, flow_id: str, validation_url: str
+    ) -> str:
+        calls.append((credential_id, flow_id, validation_url))
+        return "captured"
+
+    bound = workflow_mod._bind_single_choice_tool(
+        capture_browser_authenticated_context, {"credential_id": "selected-id", "flow_id": "selected-flow"}
+    )
+
+    schema = bound.tool_spec["inputSchema"]["json"]
+    assert set(schema["properties"]) == {"validation_url"}
+    assert schema["required"] == ["validation_url"]
+    assert set(bound._metadata.input_model.model_fields) == {"validation_url"}
+    missing_url_events = [event async for event in bound.stream({
+        "toolUseId": "capture-missing", "name": "capture_browser_authenticated_context", "input": {},
+    }, {})]
+    assert missing_url_events[-1]["tool_result"]["status"] == "error"
+    assert calls == []
+    captured_events = [event async for event in bound.stream({
+        "toolUseId": "capture-test", "name": "capture_browser_authenticated_context",
+        "input": {"validation_url": "https://target.test/verified"},
+    }, {})]
+    assert captured_events[-1]["tool_result"]["status"] == "success"
+    assert calls == [("selected-id", "selected-flow", "https://target.test/verified")]
+    assert await bound(validation_url="https://target.test/verified") == "captured"
+    assert calls == [("selected-id", "selected-flow", "https://target.test/verified")] * 2
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        await bound(flow_id="other-flow", validation_url="https://target.test/verified")
+
+
+
+
+def test_authentication_worker_hides_standalone_totp_arguments(monkeypatch):
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        get_credential=lambda *_args, **_kwargs: {"payload": {"mfa": {"type": "totp"}}},
+    ))
+    @workflow_mod.strands_tool(name="generate_mfa_code")
+    def generate_mfa_code(
+        credential_id: str, provisioning_secret: str | None = None, digits: int = 6,
+        period: int = 30, algorithm: str = "SHA1",
+    ) -> str:
+        assert provisioning_secret is None
+        return credential_id
+
+    tools = MultiAgentWorkflowController._authentication_credential_worker_tools(
+        [generate_mfa_code],
+        {"credential_id": "credential-1", "credential_type": "username_password"},
+        {"flow_id": "flow-1", "kind": "browser_mfa"},
+    )
+
+    assert tools[0].tool_spec["inputSchema"]["json"]["properties"] == {}
+    assert tools[0]() == "credential-1"
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        tools[0](provisioning_secret="unexpected")
+
+
+def test_authentication_worker_binds_configured_email_mailbox(monkeypatch):
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        get_credential=lambda *_args, **_kwargs: {
+            "payload": {"mfa": {"type": "email", "mailbox_credential_id": "mailbox-1"}}
+        },
+    ))
+
+    @workflow_mod.strands_tool(name="begin_email_mfa_retrieval")
+    def begin_email_mfa_retrieval(mailbox_credential_id: str) -> str:
+        return mailbox_credential_id
+
+    tools = MultiAgentWorkflowController._authentication_credential_worker_tools(
+        [begin_email_mfa_retrieval, _tool("generate_mfa_code")],
+        {"credential_id": "credential-1", "credential_type": "username_password"},
+        {"flow_id": "flow-1", "kind": "browser_mfa"},
+    )
+
+    assert [workflow_mod.get_tool_name(item) for item in tools] == ["begin_email_mfa_retrieval"]
+    assert tools[0].tool_spec["inputSchema"]["json"]["properties"] == {}
+    assert tools[0]() == "mailbox-1"
+    with pytest.raises(ValueError, match="cannot be overridden"):
+        tools[0](mailbox_credential_id="other-mailbox")
+
+
 def test_authenticated_executor_filter_preserves_shell_but_excludes_credential_material():
     tools = [
         _tool(name)
@@ -378,7 +512,6 @@ def test_authenticated_executor_filter_preserves_shell_but_excludes_credential_m
             "authenticated_http_request",
             "checkout_credential",
             "generate_mfa_code",
-            "ensure_authenticated_context",
             "capture_browser_authenticated_context",
             "browser_get_cookies",
             "browser_evaluate_js",
@@ -408,7 +541,7 @@ def test_executor_filter_grants_registered_future_checkout_consumer(monkeypatch)
     )
     tools = [_tool(name) for name in (
         "future_auth_consumer", "checkout_credential", "authenticated_http_request",
-        "ensure_authenticated_context", "browser_get_cookies", "shell",
+        "browser_get_cookies", "shell",
     )]
 
     filtered = MultiAgentWorkflowController._executor_tools_without_authentication_material(tools, task)
@@ -417,11 +550,12 @@ def test_executor_filter_grants_registered_future_checkout_consumer(monkeypatch)
 
 
 def test_controller_runs_privileged_authentication_worker_with_separate_tool_bundle(monkeypatch):
+    from modules.tools.browser import browser_goto_url, browser_perform_action
+
     available_names = {
         "authenticated_http_request",
         "capture_browser_authenticated_context",
             "establish_credential_authenticated_context",
-            "ensure_authenticated_context",
             "checkout_credential",
             "generate_mfa_code",
             "query_credentials",
@@ -435,7 +569,9 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
         "browser_evaluate_js",
     }
     runtime = _runtime()
-    runtime.optional_tools_list = [_tool(name) for name in available_names]
+    browser_tools = {"browser_goto_url": browser_goto_url, "browser_perform_action": browser_perform_action}
+    runtime.optional_tools_list = [browser_tools[name] if name in browser_tools else _tool(name)
+                                   for name in available_names]
     calls = []
 
     def runner(role, prompt, tools, system_prompt, policy):
@@ -449,7 +585,7 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
         state_store=FakeState(plan),
         text_runner=runner,
     )
-    credential_store = SimpleNamespace(list_credentials=Mock(return_value=[
+    credential_store = SimpleNamespace(authorize_credential_for_task=Mock(), list_credentials=Mock(return_value=[
         {"credential_id": "credential-1", "credential_type": "username_password", "role": "member"}
     ]))
     monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: credential_store)
@@ -487,24 +623,33 @@ def test_controller_runs_privileged_authentication_worker_with_separate_tool_bun
     role, prompt, tool_names, policy = calls[0]
     assert role == "authentication_agent"
     assert "authentication_setup" in prompt
-    assert "credential-1" in prompt
+    assert "credential-1" not in prompt
     assert "https://target.test/login" in prompt
-    assert "token" in prompt
+    assert "flow-1" not in prompt
+    assert "token" not in prompt
+    assert "flow_version" not in prompt
+    assert "authentication_flow_hints" not in prompt
+    assert "authentication_discovery_endpoints" not in prompt
+    assert "login_scope" in prompt
+    assert "perform_login_action" in tool_names
+    assert "inspect_login_controls" in tool_names
+    assert "https://target.test/account" not in prompt
     assert "capture_browser_authenticated_context" in prompt
-    assert "with the supplied flow ID" in prompt
-    assert "Do not supply `authorization_storage_key` or `storage_header_bindings`" in prompt
-    assert {"checkout_credential", "generate_mfa_code"}.issubset(tool_names)
+    assert "Python supplies validation metadata" in prompt
+    assert "checkout_credential" in tool_names
+    assert "generate_mfa_code" not in tool_names
     assert "set_task_auth_context" not in tool_names
     assert "query_credentials" not in tool_names
     assert "store_credential" not in tool_names
     assert "authenticated_http_request" not in tool_names
-    assert "establish_credential_authenticated_context" in tool_names
+    assert "establish_credential_authenticated_context" not in tool_names
     assert "browser_get_cookies" not in tool_names
     assert "browser_evaluate_js" not in tool_names
     assert "shell" in tool_names
     assert "ensure_authenticated_context" not in tool_names
     assert policy.max_agent_calls == 12
     assert policy.required_tool_names == {"capture_browser_authenticated_context"}
+    assert policy.required_tool_match == "any"
     assert policy.terminal_after_required_tools is True
     assert policy.require_successful_required_tools is True
     reset_session.assert_awaited_once()
@@ -529,7 +674,7 @@ def test_authentication_browser_reset_failure_prevents_credential_worker(monkeyp
     monkeypatch.setattr(
         workflow_mod,
         "_get_database_store",
-        lambda: SimpleNamespace(list_credentials=Mock(return_value=[
+        lambda: SimpleNamespace(authorize_credential_for_task=Mock(), list_credentials=Mock(return_value=[
             {"credential_id": "credential-1", "credential_type": "username_password", "role": "member"},
         ])),
     )
@@ -598,39 +743,7 @@ def test_authentication_worker_skips_agent_when_no_eligible_credentials(monkeypa
     assert setup_events[-1]["status"] == "unavailable"
 
 
-def test_authentication_worker_uses_hints_for_on_demand_flow_discovery(monkeypatch):
-    plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
-    runner = Mock()
-    controller = MultiAgentWorkflowController(
-        runtime=_runtime(),
-        budget=BudgetConfig(max_duration_minutes=60),
-        state_store=FakeState(plan),
-        text_runner=runner,
-    )
-    controller.runtime.optional_tools_list = [_tool("checkout_credential"), _tool("authenticated_http_request")]
-    monkeypatch.setattr(
-        workflow_mod,
-        "_get_database_store",
-        lambda: SimpleNamespace(list_credentials=Mock(return_value=[
-            {"credential_id": "credential-1", "credential_type": "username_password", "role": "member"}
-        ])),
-    )
-    task = Task(
-        task_uid="missing-auth-flow",
-        title="Authenticated coverage",
-        objective="Compare protected route behavior",
-        phase=1,
-        status="active",
-        recovery_context={"phase_task_contract": {"workstream": "authenticated_credential_coverage"}},
-    )
-
-    result = controller._run_authentication_agent(plan, task)
-
-    assert result.status == "failed"
-    assert result.reason == "no_usable_authentication_flow"
-    runner.assert_called_once()
-    assert "authentication_flow_hints" in runner.call_args.args[1]
-    assert runner.call_args.args[0] == "authentication_flow_discovery_agent"
+    # Credential workers cannot run when discovery has no navigation capability.
 
 
 def test_authentication_discovery_endpoints_separate_navigation_from_protected_candidates(monkeypatch):
@@ -829,127 +942,8 @@ def test_controller_builds_target_scoped_attack_surface_context(monkeypatch):
     }
 
 
-def test_authentication_flow_discovery_receives_bounded_paged_artifact_reader(monkeypatch):
-    plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
-    controller = MultiAgentWorkflowController(
-        runtime=_runtime(env_ints={"CYBER_TASK_EVALUATOR_ARTIFACT_PAGES_PER_FILE": 7}),
-        budget=BudgetConfig(max_duration_minutes=60),
-        state_store=FakeState(plan),
-        text_runner=Mock(),
-    )
-    setup = workflow_mod.AuthenticationSetupRequest(
-        task_uid="flow-discovery-reader",
-        workstream="authenticated_credential_coverage",
-        targets=("https://target.test",),
-        allowed_origins=("https://target.test",),
-        credentials=(),
-        discovery_endpoints=(
-            {"role": "navigation", "url": "https://target.test/login", "method": "GET"},
-            {
-                "role": "validation_candidate",
-                "url": "https://target.test/api/products",
-                "method": "GET",
-                "status": 403,
-            },
-        ),
-    )
-    reader = _tool("read_artifact")
-    reader_factory = Mock(return_value=reader)
-    worker = Mock()
-    monkeypatch.setattr(workflow_mod, "create_bounded_artifact_reader", reader_factory)
-    monkeypatch.setattr(controller, "_run_worker_agent", worker)
-    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
-
-    controller._run_authentication_flow_discovery(
-        plan,
-        Task(
-            task_uid="flow-discovery-reader",
-            title="Discover authentication flow",
-            objective="Map the login flow",
-            phase=1,
-            status="active",
-        ),
-        setup,
-        "https://target.test",
-        [_tool("browser_get_page_html"), _tool("http_request"), _tool("shell")],
-    )
-
-    reader_factory.assert_called_once_with(
-        max_reads=7,
-        context_window_tokens=controller._artifact_context_window_tokens(),
-        max_reads_per_artifact=7,
-        max_lines_per_read=200,
-        max_output_chars=controller._artifact_router_max_chars(),
-    )
-    supplied_names = {workflow_mod.get_tool_name(tool) for tool in worker.call_args.args[2]}
-    assert "read_artifact" in supplied_names
-    assert "search_artifact" in supplied_names
-    assert "browser_get_page_html" in supplied_names
-    assert "record_authentication_flow" not in supplied_names
-    assert {
-        "record_browser_form_authentication_flow",
-        "record_browser_mfa_authentication_flow",
-        "record_browser_redirect_authentication_flow",
-    } <= supplied_names
-    assert "http_request" in supplied_names
-    assert "shell" not in supplied_names
-    assert "saved HTML artifacts" in worker.call_args.args[1]
-    assert "search_artifact" in worker.call_args.args[1]
-    assert "full saved HTML" in worker.call_args.args[1]
-    assert "controller-bound recorder" in worker.call_args.args[1]
-    assert "browser navigation is limited" in worker.call_args.args[1]
-    assert "never load it with a browser tool" in worker.call_args.args[1]
-    assert "authentication_discovery_endpoints[2]" in worker.call_args.args[1]
-    assert "validation_candidate,https://target.test/api/products,GET,403" in worker.call_args.args[1]
-    assert "client_storage_header_bindings" in worker.call_args.args[1]
-    assert "do not scan, execute, or infer" in worker.call_args.args[1]
-    assert "When client JavaScript reads" not in worker.call_args.args[1]
-    assert worker.call_args.args[4].max_model_turns == 32
-
-
-def test_authentication_flow_discovery_binds_hinted_kind_to_one_recorder(monkeypatch):
-    plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
-    controller = MultiAgentWorkflowController(
-        runtime=_runtime(),
-        budget=BudgetConfig(max_duration_minutes=60),
-        state_store=FakeState(plan),
-        text_runner=Mock(),
-    )
-    setup = workflow_mod.AuthenticationSetupRequest(
-        task_uid="hinted-flow-discovery",
-        workstream="authenticated_credential_coverage",
-        targets=("https://target.test",),
-        allowed_origins=("https://target.test",),
-        credentials=(),
-        authentication_flow_hints=({
-            "kind": "api_form",
-            "login_url": "https://target.test/login",
-        },),
-    )
-    worker = Mock()
-    monkeypatch.setattr(controller, "_run_worker_agent", worker)
-    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
-
-    controller._run_authentication_flow_discovery(
-        plan,
-        Task(
-            task_uid="hinted-flow-discovery",
-            title="Discover authentication flow",
-            objective="Map the login flow",
-            phase=1,
-            status="active",
-        ),
-        setup,
-        "https://target.test",
-        [_tool("browser_get_page_html")],
-    )
-
-    supplied_names = [workflow_mod.get_tool_name(tool) for tool in worker.call_args.args[2]]
-    assert "record_authentication_flow" in supplied_names
-    assert not any(name.startswith("record_api_form_") for name in supplied_names)
-
-
 def test_authentication_workers_receive_one_credential_each(monkeypatch):
+    monkeypatch.setattr(workflow_mod, "reset_authentication_browser_session", AsyncMock())
     plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")])
     calls = []
     controller = MultiAgentWorkflowController(
@@ -959,12 +953,12 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
         text_runner=lambda role, prompt, tools, system_prompt, policy: calls.append((role, prompt)),
     )
     controller.runtime.optional_tools_list = [_tool(name) for name in {
-        "checkout_credential", "ensure_authenticated_context", "record_authentication_flow",
+        "checkout_credential", "capture_browser_authenticated_context", "record_authentication_flow",
     }]
     monkeypatch.setattr(
         workflow_mod,
         "_get_database_store",
-        lambda: SimpleNamespace(list_credentials=Mock(return_value=[
+        lambda: SimpleNamespace(authorize_credential_for_task=Mock(), list_credentials=Mock(return_value=[
             {"credential_id": "credential-1", "credential_type": "username_password", "role": "member"},
             {"credential_id": "credential-2", "credential_type": "username_password", "role": "member"},
         ])),
@@ -973,7 +967,7 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
         controller,
         "_authentication_flow_descriptors",
         lambda *_args, **_kwargs: ({
-            "flow_id": "flow-1", "kind": "api_form", "login_url": "https://target.test/login",
+            "flow_id": "flow-1", "kind": "browser_form", "login_url": "https://target.test/login",
             "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
             "validation_url": "https://target.test/account", "allowed_origins": ["https://target.test"],
         },),
@@ -987,13 +981,11 @@ def test_authentication_workers_receive_one_credential_each(monkeypatch):
         recovery_context={"phase_task_contract": {"workstream": "authenticated_credential_coverage"}},
     )
 
+    controller.state.store_task(task)
     controller._run_authentication_agent(plan, task)
 
     assert [role for role, _prompt in calls] == ["authentication_agent", "authentication_agent"]
-    assert "credential-1" in calls[0][1]
-    assert "credential-2" not in calls[0][1]
-    assert "credential-2" in calls[1][1]
-    assert "credential-1" not in calls[1][1]
+    assert all("credential-1" not in prompt and "credential-2" not in prompt for _, prompt in calls)
 
 
 def test_invalid_credential_schedules_prioritized_same_role_registration(monkeypatch):
@@ -1066,12 +1058,13 @@ def test_authentication_setup_selects_one_validated_flow_per_target(monkeypatch)
         state_store=FakeState(plan),
     )
     descriptor = {
-        "kind": "api_form",
+        "kind": "browser_form",
         "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
         "login_url": "https://target.test/login",
         "validation_url": "https://target.test/account",
         "allowed_origins": ["https://target.test"],
-        "provenance": "observed_flow_discovery",
+        "provenance": "observed_worker_flow",
+        "discovery_review": {"operation_id": "OP_TEST"},
     }
     store = SimpleNamespace(
         list_credentials=Mock(return_value=[
@@ -1175,8 +1168,12 @@ def _refresh_setup_controller(monkeypatch, credential_ids=("first", "second")):
         },),
     )
     monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda _task: ("checkout_credential",))
-    monkeypatch.setattr(controller, "_authentication_setup_request", lambda *_args: setup)
-    monkeypatch.setattr(controller, "_mark_authentication_flows_validated", Mock())
+    def select_setup(*_args, excluded_credential_ids=()):
+        if excluded_credential_ids:
+            raise workflow_mod.AuthenticationSelectionError("comparison_credentials_unavailable")
+        return setup
+
+    monkeypatch.setattr(controller, "_authentication_setup_request", select_setup)
     monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
         authorize_credential_for_task=Mock(),
     ))
@@ -1186,12 +1183,155 @@ def _refresh_setup_controller(monkeypatch, credential_ids=("first", "second")):
     return controller, plan, task
 
 
+@pytest.mark.parametrize("credential_ids,expected_bound", [(["first"], True), (["first", "second"], False)])
+def test_executor_binds_credential_arguments_only_for_one_authorized_id(
+    monkeypatch, credential_ids, expected_bound
+):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, tuple(credential_ids))
+    task = replace(task, auth_context={"mode": "authenticated", "credential_ids": credential_ids})
+
+    @workflow_mod.strands_tool(name="authenticated_http_request")
+    def authenticated_http_request(method: str, url: str, credential_id: str = "") -> str:
+        return credential_id
+
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [authenticated_http_request])
+    tools = controller._resolve_task_executor_base_tools(plan, task, {"tools": []})
+    by_name = {workflow_mod.get_tool_name(item): item for item in tools}
+    request_schema = by_name["authenticated_http_request"].tool_spec["inputSchema"]["json"]
+    assert ("credential_id" not in request_schema["properties"]) is expected_bound
+    refresh_schema = by_name["refresh_authenticated_context"].tool_spec["inputSchema"]["json"]
+    assert ("credential_id" not in refresh_schema["properties"]) is expected_bound
+    if expected_bound:
+        assert by_name["authenticated_http_request"](method="GET", url="https://target.test") == "first"
+        with pytest.raises(ValueError, match="cannot be overridden"):
+            by_name["authenticated_http_request"](
+                method="GET", url="https://target.test", credential_id="second"
+            )
+
+
+def test_controller_refreshes_only_task_authorized_credential(monkeypatch):
+    controller, plan, original_task = _refresh_setup_controller(monkeypatch, ("first", "second"))
+    task = replace(original_task, auth_context={"mode": "authenticated", "credential_ids": ["first"]})
+    authorized_ids = {"first"}
+    worker = Mock(return_value=workflow_mod.AuthenticationWorkerResult(True))
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: worker.call_count > 0)
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        credential_ids_authorized_by_task=lambda *_args: authorized_ids,
+    ))
+
+    assert controller._refresh_authenticated_context_for_task(plan, task, "second")["reason"] == "not_authorized"
+    assert controller._refresh_authenticated_context_for_task(plan, task, "first") == {
+        "credential_id": "first", "status": "ready", "reason": "refreshed",
+    }
+    refresh_events = [
+        event for event in controller.runtime.callback_handler.events
+        if event["type"] == "authentication_context_refresh"
+    ]
+    assert [(event["credential_id"], event["status"]) for event in refresh_events] == [
+        ("second", "unavailable"), ("first", "ready"),
+    ]
+    assert worker.call_count == 1
+    assert worker.call_args.args[2]["credential_id"] == "first"
+    monkeypatch.setattr(workflow_mod, "_get_database_store", Mock(side_effect=RuntimeError("store unavailable")))
+    assert controller._refresh_authenticated_context_for_task(plan, task, "first") == {
+        "status": "unavailable", "reason": "authorization_unavailable",
+    }
+
+
+def test_controller_refresh_reports_failed_context_without_secrets(monkeypatch):
+    controller, plan, original_task = _refresh_setup_controller(monkeypatch, ("first",))
+    task = replace(original_task, auth_context={"mode": "authenticated", "credential_ids": ["first"]})
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        credential_ids_authorized_by_task=lambda *_args: {"first"},
+    ))
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", Mock(
+        return_value=workflow_mod.AuthenticationWorkerResult(True),
+    ))
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: False)
+
+    result = controller._refresh_authenticated_context_for_task(plan, task, "first")
+
+    assert result == {"credential_id": "first", "status": "unavailable", "reason": "context_validation_failed"}
+    assert controller._refresh_authenticated_context_for_task(plan, task, "first")["reason"] == (
+        "refresh_already_attempted"
+    )
+
+
+def test_refresh_tool_returns_only_controller_status(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
+    refresh = Mock(return_value={"credential_id": "first", "status": "ready", "reason": "refreshed"})
+    monkeypatch.setattr(controller, "_refresh_authenticated_context_for_task", refresh)
+
+    tool = controller._build_refresh_authenticated_context_tool(plan, task)
+    result = json.loads(tool("first"))
+
+    assert workflow_mod.get_tool_name(tool) == "refresh_authenticated_context"
+    assert result == {"credential_id": "first", "status": "ready", "reason": "refreshed"}
+    refresh.assert_called_once_with(plan, task, "first")
+
+
+@pytest.mark.parametrize("outcome", ["success", "refresh_failed", "retry_failed"])
+def test_executor_tools_recover_stale_request_for_one_credential(monkeypatch, outcome):
+    controller, plan, original_task = _refresh_setup_controller(monkeypatch, ("first", "second"))
+    task = replace(original_task, auth_context={"mode": "authenticated", "credential_ids": ["first", "second"]})
+    calls = []
+
+    def authenticated_http_request(credential_id):
+        calls.append(("request", credential_id))
+        if credential_id == "first" and (
+            calls.count(("request", "first")) == 1 or outcome == "retry_failed"
+        ):
+            raise ValueError("AUTH_CONTEXT_REFRESH_REQUIRED")
+        return json.dumps({"status_code": 200})
+
+    controller.runtime.optional_tools_list.append(authenticated_http_request)
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        credential_ids_authorized_by_task=lambda *_args: {"first", "second"},
+    ))
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", lambda *_args: (
+        calls.append(("worker", "first")) or workflow_mod.AuthenticationWorkerResult(True)
+    ))
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: ("worker", "first") in calls and outcome != "refresh_failed")
+
+    tools = controller._resolve_task_executor_base_tools(plan, task, {"tools": []})
+    by_name = {workflow_mod.get_tool_name(item): item for item in tools}
+    assert "refresh_authenticated_context" in by_name
+    with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
+        by_name["authenticated_http_request"]("first")
+    assert json.loads(by_name["authenticated_http_request"]("second"))["status_code"] == 200
+    result = json.loads(by_name["refresh_authenticated_context"]("first"))
+    assert result["status"] == ("unavailable" if outcome == "refresh_failed" else "ready")
+    if outcome == "success":
+        assert json.loads(by_name["authenticated_http_request"]("first"))["status_code"] == 200
+    elif outcome == "retry_failed":
+        with pytest.raises(ValueError, match="AUTH_CONTEXT_REFRESH_REQUIRED"):
+            by_name["authenticated_http_request"]("first")
+    else:
+        assert calls.count(("request", "first")) == 1
+    assert calls.count(("worker", "first")) == 1
+    assert json.loads(by_name["refresh_authenticated_context"]("unknown"))["reason"] == "not_authorized"
+
+
+def test_prompt_review_uses_actual_authentication_recovery_tool_catalog(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
+    controller.runtime.optional_tools_list.append(_tool("authenticated_http_request"))
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda *_args: ["checkout_credential"])
+    prompt_spec = {"prompt": "Use refresh_authenticated_context if context expires", "tools": []}
+
+    critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, prompt_spec)
+    builder = controller._task_prompt_builder_prompt(plan, plan.phases[0], task)
+
+    assert "task_executor_tools" in critic
+    assert "refresh_authenticated_context" in critic
+    assert "refresh_authenticated_context" in builder
+
+
 @pytest.mark.parametrize(
     ("flow_kind", "expected_terminal_tool"),
     [
         ("browser_form", "capture_browser_authenticated_context"),
         ("browser_mfa", "capture_browser_authenticated_context"),
-        ("api_form", "ensure_authenticated_context"),
     ],
 )
 def test_authentication_worker_policy_requires_successful_context_tool(
@@ -1200,7 +1340,7 @@ def test_authentication_worker_policy_requires_successful_context_tool(
     controller, _plan_value, task = _refresh_setup_controller(monkeypatch, ("first",))
     target = "https://target.test"
     credential = {"credential_id": "first", "credential_type": "username_password", "role": "member", "target": target}
-    flow = {"flow_id": "flow", "kind": flow_kind, "login_url": f"{target}/login"}
+    flow = {"flow_id": "flow", "kind": flow_kind, "login_url": f"{target}/login", "request_format": ""}
     setup = workflow_mod.AuthenticationSetupRequest(
         task_uid=task.task_uid, workstream="authenticated_credential_coverage", targets=(target,),
         allowed_origins=(target,), credentials=(credential,), authentication_flows=(flow,),
@@ -1218,9 +1358,14 @@ def test_authentication_worker_policy_requires_successful_context_tool(
     assert result.tool_names == frozenset({"checkout_credential"})
     assert result.stalled_before_login is True
     policy = worker_runner.call_args.args[4]
-    assert policy.required_tool_names == {expected_terminal_tool}
+    assert expected_terminal_tool in policy.required_tool_names
+    assert policy.required_tool_match == "any"
     assert policy.terminal_after_required_tools is True
     assert policy.require_successful_required_tools is True
+    if flow_kind.startswith("browser_"):
+        assert "unknown\ntransport details" in worker_runner.call_args.args[1]
+    else:
+        assert "staged or existing flow" in worker_runner.call_args.args[1]
 
 
 @pytest.mark.parametrize(
@@ -1318,7 +1463,8 @@ def test_authentication_setup_caps_repair_at_two_worker_runs(monkeypatch):
 
     result = controller._run_authentication_agent(plan, task)
 
-    assert result.status == "partial"
+    assert result.status == "failed"
+    assert result.ready is False
     assert result.credential_ids == ("second",)
     assert calls == ["first", "second", "first"]
 
@@ -1381,7 +1527,7 @@ def test_authentication_refresh_accepts_valid_capture_even_if_worker_stalls(monk
     worker_call.assert_called_once()
 
 
-def test_authentication_refresh_requires_validation_url_after_capture(monkeypatch):
+def test_authentication_refresh_accepts_valid_context_without_reusable_mapping_url(monkeypatch):
     controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
     valid = {"first": False}
     monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, cid: valid[cid])
@@ -1395,8 +1541,7 @@ def test_authentication_refresh_requires_validation_url_after_capture(monkeypatc
 
     result = controller._run_authentication_agent(plan, task)
 
-    assert result.status == "failed"
-    assert result.reason == "missing_validation_url"
+    assert result.status == "established"
 
 
 def test_authentication_refresh_does_not_retry_rejected_credential(monkeypatch):
@@ -1412,48 +1557,6 @@ def test_authentication_refresh_does_not_retry_rejected_credential(monkeypatch):
     assert result.status == "unavailable"
     assert result.reason == "credential_replacement_unavailable"
     worker.assert_called_once()
-
-
-def test_authentication_refresh_updates_only_selected_flow(monkeypatch):
-    controller = object.__new__(MultiAgentWorkflowController)
-    controller.runtime = SimpleNamespace(operation_id="OP_TEST")
-    store = SimpleNamespace(
-        list_authentication_flows=Mock(return_value=[
-            {"flow_id": "other", "descriptor": {"kind": "browser_form"}},
-            {"flow_id": "selected", "descriptor": {"kind": "browser_form", "login_url": "https://target.test/login"}},
-        ]),
-        upsert_authentication_flow=Mock(),
-    )
-    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
-
-    controller._mark_authentication_flows_validated(
-        "https://target.test", ({"flow_id": "selected"},), "https://target.test/account"
-    )
-
-    store.upsert_authentication_flow.assert_called_once_with(
-        "OP_TEST",
-        {
-            "kind": "browser_form", "login_url": "https://target.test/login",
-            "validation_url": "https://target.test/account",
-        },
-        status="validated",
-    )
-    store.upsert_authentication_flow.reset_mock()
-    controller._mark_authentication_flows_invalid("https://target.test", ({"flow_id": "selected"},))
-    store.upsert_authentication_flow.assert_called_once_with(
-        "OP_TEST", {"kind": "browser_form", "login_url": "https://target.test/login"}, status="invalid"
-    )
-
-
-def test_authentication_refresh_flow_updates_tolerate_missing_store_methods(monkeypatch):
-    controller = object.__new__(MultiAgentWorkflowController)
-    controller.runtime = SimpleNamespace(operation_id="OP_TEST")
-    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace())
-
-    controller._mark_authentication_flows_validated(
-        "https://target.test", ({"flow_id": "selected"},), "https://target.test/account"
-    )
-    controller._mark_authentication_flows_invalid("https://target.test", ({"flow_id": "selected"},))
 
 
 def test_authentication_setup_persists_only_valid_credential_subset():
@@ -1616,27 +1719,24 @@ def test_authentication_discovery_http_request_is_read_only_and_same_origin():
         scoped("GET", "https://other.test/login")
 
 
-def test_authentication_worker_tool_bundle_allows_http_login_only_for_mapped_api_forms():
+@pytest.mark.parametrize("kind,expected", [
+    ("browser_form", {"browser_goto_url", "checkout_credential"}),
+    ("api_key", {"checkout_credential"}),
+])
+def test_authentication_worker_tool_bundle_uses_browser_only_for_browser_flows(kind, expected):
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=FakeState(_plan()),
     )
-    tools = [_tool("ensure_authenticated_context"), _tool("browser_goto_url")]
+    tools = [_tool("checkout_credential"), _tool("browser_goto_url")]
 
     browser_tools = controller._authentication_agent_tools(
         tools,
         ("https://target.test",),
-        ({"kind": "browser_form"},),
+        ({"kind": kind},),
     )
-    api_tools = controller._authentication_agent_tools(
-        tools,
-        ("https://target.test",),
-        ({"kind": "api_form"},),
-    )
-
-    assert {workflow_mod.get_tool_name(tool) for tool in browser_tools} == {"browser_goto_url"}
-    assert {workflow_mod.get_tool_name(tool) for tool in api_tools} == {"ensure_authenticated_context"}
+    assert {workflow_mod.get_tool_name(tool) for tool in browser_tools} == expected
 
 
 def test_default_text_runner_cleans_role_agent(monkeypatch):
@@ -1898,7 +1998,15 @@ def test_controller_seeds_secret_candidate_only_from_target_scoped_tool_outcomes
     monkeypatch.setattr(
         workflow_mod,
         "detect_secret_exposures",
-        lambda _ref: [SimpleNamespace(kind="connection_string", digest="a" * 64)],
+        lambda _ref: [
+            SimpleNamespace(
+                kind="connection_string",
+                digest="a" * 64,
+                line_number=3,
+                column_start=4,
+                column_end=12,
+            )
+        ],
     )
     monkeypatch.setattr(
         workflow_mod,
@@ -1927,6 +2035,11 @@ def test_controller_seeds_secret_candidate_only_from_target_scoped_tool_outcomes
     assert len(stored) == 1
     assert stored[0]["target"] == "http://target.test/api/config"
     assert stored[0]["evidence_assertions"][0]["digest"] == "a" * 64
+    assert stored[0]["evidence_assertions"][0]["source_location"] == {
+        "line_number": 3,
+        "column_start": 4,
+        "column_end": 12,
+    }
     assert any(event["type"] == "secret_exposure_candidate_created" for event in controller.runtime.callback_handler.events)
 
 
@@ -2712,6 +2825,21 @@ def _plan():
     )
 
 
+
+def _checklist_response(legacy):
+    """Build new wire fixtures while retaining assertions on canonical critique results."""
+    data = json.loads(legacy)
+    result = {name: {"status": "pass", "issue": None} for name in (
+        "task_coverage", "scope", "execution_policy", "evidence", "capability_fit",
+    )}
+    names = {"objective": "task_coverage", "scope": "scope", "execution_policy": "execution_policy",
+             "evidence": "evidence", "tool_availability": "capability_fit"}
+    for issue in data["issues"]:
+        result[names[issue["category"]]] = {
+            "status": "fail", "issue": {**issue, "requirement_ref": "task", "draft_excerpt": ""},
+        }
+    return json.dumps({**result, "repairable": data.get("repairable", True)})
+
 def _runtime(progress=0, env_ints=None, env_floats=None):
     env_ints = {
         "CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 0,
@@ -2722,6 +2850,7 @@ def _runtime(progress=0, env_ints=None, env_floats=None):
         config=SimpleNamespace(target="target", objective="assess", available_tools=[]),
         operation_id="OP_TEST",
         system_prompt="base prompt",
+        prompt_token_limit=48_000,
         termination_policy="",
         config_manager=SimpleNamespace(
             getenv_int=lambda name, default=0: env_ints.get(name, default),
@@ -3581,6 +3710,338 @@ def test_controller_matches_root_route_to_target_url_without_trailing_slash():
     )
 
     assert MultiAgentWorkflowController._outcome_matches_execution_subject(plan, task, "/", outcome)
+
+
+@pytest.mark.parametrize("value,kind,subject", [
+    ("https://target.test:8443", "network", "/"),
+    ("tcp://target.test:9000", "network", "target:target-1"),
+    ("/workspace/source", "filesystem", "target:target-1"),
+])
+@pytest.mark.parametrize("payload,expected", [
+    ({"target_id": "target-1"}, True),
+    ({"target_ids": ["target-1"]}, True),
+    ({"target": "target:target-1"}, True),
+    ({"target_id": "other"}, False),
+    ({"target_ids": "target-1"}, False),
+    ({"target_id": "target-1", "url": "https://elsewhere.test"}, False),
+])
+def test_execution_explicit_bindings_override_truncated_or_incidental_summaries(value, kind, subject, payload, expected):
+    plan = replace(_plan(), targets=[OperationTarget("target-1", value, kind)])
+    task = Task("binding", "Analyze", "Analyze", phase=1, status="active",
+                target_scope="subset", target_ids=["target-1"])
+    outcome = ToolOutcome(1, "analysis", "mcp_analysis", True, False, "truncated",
+                          f"incidental documentation mentions {value}", structured_input=payload)
+    assert MultiAgentWorkflowController._outcome_matches_execution_subject(plan, task, subject, outcome) is expected
+
+
+@pytest.fixture
+def execution_binding_case(worker_flow_case, tmp_path, monkeypatch):
+    controller, task, *_ = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", "https://target.test:8443", "network"),
+                                     OperationTarget("target-2", "https://other.test", "network")])
+    criterion = AcceptanceCriterion("criterion", "Acquire and analyze", evidence_requirements=[
+        EvidenceRequirement(kind="artifact"),
+    ], execution_requirements=[
+        ExecutionRequirement("proof", "Acquire and analyze the assigned root", "/"),
+    ])
+    task = replace(task, target_scope="subset", target_ids=["target-1"], acceptance=AcceptanceContract(
+        mode="outcome", basis=AcceptanceBasis(kind="procedure", description="Acquire and analyze",
+                                              source_refs=["target:target-1"], procedure={
+            "methods": ["request", "analyze"], "limits": {"max_requests": 5},
+            "stop_condition": "first_limit_reached", "gap_policy": "record_unassessed", "output_kind": "artifact",
+        }), criteria=[criterion],
+    ))
+    controller.state.store_plan(plan)
+    controller.state.store_task(task)
+    root = tmp_path / "artifacts"
+    root.mkdir(exist_ok=True)
+    for name in ("source.txt", "analysis.json", "unrelated.txt", "third.json"):
+        (root / name).write_text("{}")
+    producer = ToolOutcome(1, "acquire", "browser_goto_url", True, False, "truncated", "saved",
+                           artifact_refs=("artifact:artifacts/source.txt",),
+                           structured_input={"url": "https://target.test:8443/"})
+    analysis = ToolOutcome(2, "analysis", "client_bundle_inventory", True, False, "truncated", "saved",
+                          artifact_refs=("artifact:artifacts/analysis.json",),
+                          structured_input={"source_artifact": str(root / "source.txt")})
+    events = []
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+    return controller, plan, task, criterion, producer, analysis, root, events
+
+
+@pytest.mark.parametrize("destination", ["null", "external_tmp", "configured_tmp", "dynamic_tmp"])
+def test_execution_shell_non_artifact_destinations_preserve_valid_evidence(
+    execution_binding_case, tmp_path, monkeypatch, destination, external_shell_tmp,
+):
+    controller, plan, task, criterion, producer, analysis, _root, _events = execution_binding_case
+    external = tmp_path.parent / f"{tmp_path.name}-scratch"
+    external.mkdir(exist_ok=True)
+    scratch = external / "response.txt"
+    scratch.write_text("scratch")
+    tmp_scratch = external_shell_tmp / "response.txt"
+    tmp_scratch.write_text("scratch")
+    monkeypatch.setenv("TMPDIR", str(external))
+    paths = {"null": "/dev/null", "external_tmp": str(tmp_scratch),
+             "configured_tmp": str(Path(str(external)) / "response.txt"), "dynamic_tmp": "$TMPDIR/response.txt"}
+    producer = replace(producer, tool_name="shell", output_summary="200 https://target.test:8443/",
+                       artifact_refs=(*producer.artifact_refs, f"artifact:{scratch}", "artifact:/dev/null",
+                                      "artifact:artifacts/missing.txt"),
+                       structured_input={"command": f'curl -sS -o "{paths[destination]}" '
+                           '-w "%{http_code} %{url_effective}\\n" https://target.test:8443/'})
+    assert controller._execution_output_refs(producer) == {"artifact:artifacts/source.txt"}
+    assert "request" in controller._outcome_execution_capabilities(producer)
+    assert "proof" in controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis])
+    assert scratch.read_text() == "scratch"
+
+
+@pytest.fixture
+def external_shell_tmp():
+    with TemporaryDirectory(prefix="caa-output-test-", dir="/tmp") as directory:
+        yield Path(directory)
+
+
+@pytest.mark.parametrize("path_kind,accepted", [
+    ("absolute", True), ("relative", True), ("internal_tmp", True), ("internal_symlink", True),
+    ("external_symlink", False), ("missing", False), ("directory", False), ("null", False),
+    ("malformed", False), ("dangling_symlink", False),
+])
+def test_safe_execution_artifacts_respect_resolved_operation_boundary(execution_binding_case, tmp_path, path_kind, accepted):
+    controller, _plan_value, _task, _criterion, _producer, _analysis, root, _events = execution_binding_case
+    path = root / "source.txt"
+    if path_kind == "relative":
+        path = "artifact:artifacts/source.txt"
+    elif path_kind == "internal_tmp":
+        path = root / "tmp" / "scratch.txt"
+        path.parent.mkdir()
+        path.write_text("retained within operation")
+    elif path_kind in {"internal_symlink", "external_symlink", "dangling_symlink"}:
+        destination = root / "source.txt"
+        if path_kind == "external_symlink":
+            destination = tmp_path.parent / f"{tmp_path.name}-external.txt"
+            destination.write_text("external")
+        elif path_kind == "dangling_symlink":
+            destination = root / "missing.txt"
+        path = root / "linked.txt"
+        path.symlink_to(destination)
+    elif path_kind == "missing":
+        path = root / "missing.txt"
+    elif path_kind == "directory":
+        path = root
+    elif path_kind == "null":
+        path = "/dev/null"
+    elif path_kind == "malformed":
+        path = "artifact:artifacts/invalid\x00.txt"
+    result = controller._safe_execution_artifact_reference(str(path))
+    assert (result is not None) is accepted
+    if accepted:
+        assert result.startswith("artifact:artifacts/")
+
+
+@pytest.mark.parametrize("error", [OSError("unreadable"), ValueError("invalid"), TypeError("invalid type"),
+                                    RuntimeError("symlink resolution failed")])
+def test_optional_execution_artifact_resolution_errors_are_local(execution_binding_case, monkeypatch, error):
+    controller, _plan_value, _task, _criterion, producer, _analysis, _root, _events = execution_binding_case
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", Mock(side_effect=error))
+    assert controller._safe_execution_artifact_reference("artifact:artifacts/source.txt") is None
+    assert controller._execution_output_refs(replace(producer, tool_name="shell", structured_input={
+        "command": "curl https://target.test:8443/ -o /dev/null",
+    })) == set()
+
+
+def test_safe_execution_artifacts_recheck_operation_membership(execution_binding_case, monkeypatch):
+    controller, *_rest = execution_binding_case
+    monkeypatch.setattr(controller.__class__, "_execution_artifact_is_current_operation", staticmethod(lambda _ref: False))
+    assert controller._safe_execution_artifact_reference("artifact:artifacts/source.txt") is None
+
+
+@pytest.mark.parametrize("binding", ["input", "manifest", "extraction", "artifact", "unknown_tool"])
+def test_execution_analysis_uses_existing_scope_and_artifact_bindings(execution_binding_case, binding):
+    controller, plan, task, criterion, producer, analysis, root, events = execution_binding_case
+    if binding == "input":
+        analysis = replace(analysis, structured_input={"target_id": "target-1"})
+    elif binding == "manifest":
+        (root / "analysis.json").write_text(json.dumps({"schema_version": 1, "items": [{
+            "id": "endpoint", "kind": "endpoint", "target_id": "target-1",
+            "value": "https://target.test:8443/child", "attributes": {},
+        }], "unassessed_gaps": []}))
+        analysis = replace(analysis, structured_input={})
+    elif binding == "extraction":
+        (root / "analysis.json").write_text(json.dumps({"schema_version": "client_bundle_inventory_v2",
+            "target_id": "target-1", "target": "https://target.test:8443", "api_paths": [], "spa_routes": [],
+        }))
+        analysis = replace(analysis, structured_input={})
+    elif binding == "unknown_tool":
+        analysis = replace(analysis, tool_name="mcp_future_analysis",
+                           structured_input={"document": "artifact:artifacts/source.txt"})
+    resolved = controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis])
+    assert "proof" in resolved
+    assert "artifact:artifacts/analysis.json" in resolved["proof"]
+    diagnostics = events[-1]["requirement_diagnostics"]["proof"]
+    assert diagnostics["subject_matched_tool_use_ids"] == ["acquire", "analysis"]
+    assert diagnostics["missing_capabilities"] == (["analyze"] if binding == "unknown_tool" else [])
+    # Reloading retained outcomes requires no new acquisition or changed acceptance contract.
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis]) == resolved
+    assert controller._all_execution_requirements_resolved(plan, task, [producer, analysis])
+    assert task.acceptance.criteria == (criterion,)
+    if binding in {"artifact", "unknown_tool"}:
+        assert diagnostics["linked_analysis_tool_use_ids"] == ["analysis"]
+
+
+@pytest.mark.parametrize("failure", [
+    "failed_producer", "failed_analysis", "missing_source", "unrelated_input", "mixed_inputs", "wrong_id",
+    "different_route", "different_port", "future_producer", "output_conflict", "input_output_conflict", "cross_operation",
+    "shell_batch", "input_echo",
+])
+def test_execution_analysis_rejects_unproven_bindings(execution_binding_case, tmp_path, failure):
+    controller, plan, task, criterion, producer, analysis, root, events = execution_binding_case
+    if failure == "failed_producer":
+        producer = replace(producer, success=False)
+    elif failure == "failed_analysis":
+        analysis = replace(analysis, success=False)
+    elif failure == "missing_source":
+        (root / "source.txt").unlink()
+    elif failure == "unrelated_input":
+        analysis = replace(analysis, structured_input={"document": "artifact:artifacts/unrelated.txt"})
+    elif failure == "mixed_inputs":
+        analysis = replace(analysis, structured_input={"documents": [
+            "artifact:artifacts/source.txt", "artifact:artifacts/unrelated.txt",
+        ]})
+    elif failure == "wrong_id":
+        analysis = replace(analysis, structured_input={"target_id": "target-2"})
+    elif failure in {"different_route", "different_port"}:
+        url = "https://target.test:8443/child" if failure == "different_route" else "https://target.test:9443/"
+        analysis = replace(analysis, structured_input={"url": url, "target_id": "target-1"})
+    elif failure == "future_producer":
+        producer = replace(producer, sequence=3)
+    elif failure in {"output_conflict", "input_output_conflict"}:
+        (root / "analysis.json").write_text(json.dumps({"schema_version": "client_bundle_inventory_v2",
+            "target_id": "target-1", "target": "https://target.test:9443", "api_paths": [], "spa_routes": [],
+        }))
+        if failure == "input_output_conflict":
+            analysis = replace(analysis, structured_input={"target_id": "target-1"})
+    elif failure == "cross_operation":
+        other = tmp_path.parent / "other-operation.txt"
+        other.write_text("data")
+        producer = replace(producer, artifact_refs=(f"artifact:{other}",))
+        analysis = replace(analysis, structured_input={"source_artifact": f"artifact:{other}"})
+    elif failure == "shell_batch":
+        producer = replace(producer, tool_name="shell", artifact_refs=(), structured_input={"command":
+            f"curl https://target.test:8443/ -o {root / 'source.txt'} && "
+            f"curl https://target.test:8443/other -o {root / 'unrelated.txt'}"})
+        matched, linked = controller._execution_subject_matches(plan, task, "/", [
+            (producer, controller._outcome_execution_capabilities(producer)), (analysis, frozenset({"analyze"})),
+        ])
+        assert [outcome.tool_use_id for outcome, _caps in matched] == ["acquire"]
+        assert not linked
+        return  # The shell's own catalog capabilities remain independent of artifact linking.
+    elif failure == "input_echo":
+        producer = replace(producer, artifact_refs=(), structured_input={
+            "url": "https://target.test:8443/", "source_artifact": "artifact:artifacts/source.txt",
+        })
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis]) == {}
+    diagnostic = events[-1]["requirement_diagnostics"]["proof"]
+    assert diagnostic["missing_capabilities"]
+    assert events[-1]["missing_requirement_ids"] == ["proof"]
+
+
+def test_execution_scope_output_does_not_claim_every_inventory_endpoint_was_analyzed(execution_binding_case):
+    controller, plan, task, _criterion, _producer, analysis, root, _events = execution_binding_case
+    (root / "analysis.json").write_text(json.dumps({"schema_version": "client_bundle_inventory_v2",
+        "target_id": "target-1", "target": "https://target.test:8443", "api_paths": ["/child"], "spa_routes": [],
+    }))
+    analysis = replace(analysis, structured_input={})
+    matched, _linked = controller._execution_subject_matches(plan, task, "/child", [(analysis, frozenset({"analyze"}))])
+    assert not matched
+
+
+def test_execution_binding_applies_to_inventory_output_contract(execution_binding_case):
+    controller, plan, task, criterion, producer, analysis, root, _events = execution_binding_case
+    criterion = replace(criterion, evidence_requirements=[EvidenceRequirement(kind="inventory_manifest")])
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(task.acceptance.basis, procedure={
+        "methods": ["request", "analyze"], "limits": {"max_requests": 5},
+        "stop_condition": "first_limit_reached", "gap_policy": "record_unassessed", "output_kind": "inventory_manifest",
+    }), criteria=[criterion]))
+    controller.state.store_task(task)
+    (root / "analysis.json").write_text(json.dumps({"schema_version": 1, "items": [{
+        "id": "endpoint", "kind": "endpoint", "target_id": "target-1",
+        "value": "https://target.test:8443/child", "attributes": {},
+    }], "unassessed_gaps": []}))
+    analysis = replace(analysis, structured_input={"target_id": "target-1"})
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis]) == {
+        "proof": ["artifact:artifacts/analysis.json"],
+    }
+
+
+def test_execution_artifact_fallback_is_one_step_only(execution_binding_case):
+    controller, plan, task, criterion, producer, analysis, _root, events = execution_binding_case
+    third = replace(analysis, sequence=3, tool_use_id="third", artifact_refs=("artifact:artifacts/third.json",),
+                    structured_input={"source_artifact": "artifact:artifacts/analysis.json"})
+    controller._resolve_controller_execution_evidence(plan, task, criterion, [producer, analysis, third])
+    diagnostic = events[-1]["requirement_diagnostics"]["proof"]
+    assert diagnostic["linked_analysis_tool_use_ids"] == ["analysis"]
+    assert diagnostic["unbound_analysis_tool_use_ids"] == ["third"]
+
+
+@pytest.mark.parametrize("value,kind", [
+    ("https://target.test:8443", "network"), ("tcp://target.test:9000", "network"),
+    ("/workspace/source", "filesystem"),
+])
+def test_execution_one_step_artifact_binding_is_protocol_neutral(execution_binding_case, value, kind):
+    controller, plan, task, _criterion, producer, analysis, _root, _events = execution_binding_case
+    plan = replace(plan, targets=[OperationTarget("target-1", value, kind)])
+    producer = replace(producer, tool_name="mcp_acquisition", structured_input={"target": value})
+    candidates = [(producer, frozenset({"request"})), (analysis, frozenset({"analyze"}))]
+    matched, linked = controller._execution_subject_matches(plan, task, "target:target-1", candidates)
+    assert [outcome.tool_use_id for outcome, _caps in matched] == ["acquire", "analysis"]
+    assert linked == ["analysis"]
+
+
+def test_execution_analysis_ignores_incidental_urls_and_prior_task_artifact(execution_binding_case):
+    controller, plan, task, criterion, _producer, analysis, _root, events = execution_binding_case
+    analysis = replace(analysis, output_summary="Documentation: https://target.test:8443/")
+    assert controller._resolve_controller_execution_evidence(plan, task, criterion, [analysis]) == {}
+    assert events[-1]["requirement_diagnostics"]["proof"]["subject_matched_tool_use_ids"] == []
+
+
+@pytest.mark.parametrize("mode", ["unbound", "complete"])
+def test_execution_recovery_assembled_prompt_reuses_acquisition_and_matches_available_tools(execution_binding_case, mode):
+    from modules.agents.prompt_context import fit_task_prompt
+
+    controller, plan, task, _criterion, producer, analysis, _root, _events = execution_binding_case
+    if mode == "unbound":
+        analysis = replace(analysis, structured_input={"source_artifact": "artifact:artifacts/unrelated.txt"})
+    prompt = controller._execution_prerequisite_recovery_prompt(
+        plan, task, [], next_cycle=2, tool_outcomes=[producer, analysis],
+    )
+    contract = controller._task_executor_contract(task, {"http_request", "client_bundle_inventory"}, plan=plan,
+                                                 task_policy=controller._task_policy_guidance(task))
+    assembled = controller.runtime.system_prompt + "\n" + prompt + "\n" + contract
+    fitted = fit_task_prompt(assembled + "\n## Task history\n" + "advisory " * 1000,
+                             "", [], "", len(assembled) + 500, 0, lambda _details: None, estimate_input=len)
+    assert "execution_bindings[1]" in fitted
+    assert "missing_capabilities" in fitted and "acquire" in fitted
+    assert "Reuse matched acquisition and analysis" in fitted
+    assert "The controller owns acceptance reconciliation for this turn" in fitted
+    assert "For the assigned task, call `record_task_acceptance`" not in fitted
+    assert "when record_task_acceptance is called" not in fitted
+    row = next(line.strip().split(",", 3) for line in fitted.splitlines() if line.startswith("  proof,"))
+    if mode == "unbound":
+        assert row[1:3] == ['["request"]', '["analyze"]']
+    else:
+        assert "analyze" in row[1] and "request" in row[1] and row[2] == "[]"
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("/workspace/source/app.py", True), ("/workspace/source-other/app.py", False),
+    ("/workspace/Source/app.py", False),
+])
+def test_execution_source_bindings_preserve_case_and_directory_boundaries(path, expected):
+    plan = replace(_plan(), targets=[OperationTarget("target-1", "/workspace/source", "filesystem")])
+    task = Task("source", "Analyze", "Analyze", phase=1, status="active", target_ids=["target-1"])
+    outcome = ToolOutcome(1, "analysis", "python_repl", True, False, "truncated", "analysis complete",
+                          structured_input={"path": path})
+    assert MultiAgentWorkflowController._outcome_matches_execution_subject(
+        plan, task, "target:target-1", outcome,
+    ) is expected
 
 
 def test_controller_matches_root_url_with_trailing_slash_from_structured_shell_input():
@@ -4495,11 +4956,13 @@ def test_task_evaluator_completed_alias_does_not_abort_workflow():
     assert decision.status == "done"
 
 
-def test_task_evaluator_cannot_reopen_controller_accepted_execution_gate():
+@pytest.mark.parametrize("semantic_gap", [False, True])
+@pytest.mark.parametrize("subject", ["https://target.test", "tcp://target.test:22", "/src/application"])
+def test_task_evaluator_cannot_reopen_controller_accepted_execution_gate(semantic_gap, subject):
     plan = _plan()
     criterion = AcceptanceCriterion(
         id="criterion-1",
-        description="Crawl the assigned target",
+        description=f"Exercise the assigned operation on {subject}",
         evidence_requirements=[EvidenceRequirement(kind="artifact")],
         execution_requirements=[ExecutionRequirement(
             "criterion-1-execution-1",
@@ -4548,11 +5011,12 @@ def test_task_evaluator_cannot_reopen_controller_accepted_execution_gate():
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
         state_store=state,
-        text_runner=lambda *args: (
-            '{"status":"partial_failure","reason":"The prior acceptance call lacked execution evidence.",'
-            '"instructions":"Gather crawl evidence.",'
-            '"repair":{"kind":"execution","evidence_gaps":["crawl receipt"]}}'
-        ),
+        text_runner=lambda *args: json.dumps({
+            "status": "partial_failure", "reason": "Review needs evidence",
+            "repair": {"kind": "execution",
+                       "execution_receipt_gaps": ["criterion-1-execution-1"],
+                       "evidence_gaps": ["The intended operation was not exercised"] if semantic_gap else []},
+        }),
     )
 
     decision = controller._evaluate_task(
@@ -4562,13 +5026,13 @@ def test_task_evaluator_cannot_reopen_controller_accepted_execution_gate():
         acceptance_results=state.list_task_acceptance_results(task.task_uid),
     )
 
-    assert decision.status == "done"
-    assert "Controller acceptance is authoritative" in decision.reason
+    assert decision.status == ("partial_failure" if semantic_gap else "done")
+    assert ("Controller acceptance is authoritative" in decision.reason) is not semantic_gap
     assert any(
         event["type"] == "evaluator_execution_gate_reconciled"
         and event["outcome"] == "suppressed_stale_execution_feedback"
         for event in controller.runtime.callback_handler.events
-    )
+    ) is not semantic_gap
 
 
 def test_task_evaluator_execution_feedback_remains_when_controller_receipt_is_missing():
@@ -5763,8 +6227,10 @@ def test_controller_requires_available_metadata_selected_optional_tools():
     assert controller._required_optional_tool_names(inventory_task) == ["auth_chain_analyzer"]
 
 
-def test_controller_injects_bundle_inventory_for_client_side_api_workstream():
+@pytest.mark.parametrize("module", ["web", "web_recon"])
+def test_controller_injects_bundle_inventory_for_client_side_api_workstream(module):
     runtime = _runtime()
+    runtime.config.module = module
     runtime.optional_tools_list = [_tool("client_bundle_inventory")]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -5788,7 +6254,66 @@ def test_controller_injects_bundle_inventory_for_client_side_api_workstream():
     )} >= {"client_bundle_inventory"}
     guidance = controller._client_bundle_execution_guidance_for_task(task)
     assert "client_bundle_inventory" in guidance
-    assert "do not attempt account registration" in guidance
+    if module == "web":
+        assert "Registration discovery belongs to the assigned provisioning worker" in controller._task_policy_guidance(task)
+    policy = controller._task_policy_guidance(task)
+    assert "unresolved_requests" in policy
+    assert "before inventory synthesis" in " ".join(policy.split())
+    assert "client-source declarations do not prove server execution" in policy
+
+
+@pytest.mark.parametrize("module", ["web", "web_recon"])
+def test_mapping_review_policy_survives_all_assembled_prompt_paths(worker_flow_case, monkeypatch, module):
+    from modules.agents.prompt_context import fit_task_prompt
+    from modules.prompts import factory as prompt_factory
+
+    controller, task, *_ = worker_flow_case
+    controller.runtime.config.module = module
+    controller.runtime.optional_tools_list = [_tool("client_bundle_inventory")]
+    templates = Path("src/modules/prompts/templates")
+    monkeypatch.setattr(prompt_factory, "load_prompt_template", lambda name: (templates / name).read_text())
+    controller.runtime.system_prompt = prompt_factory.get_system_prompt(
+        "https://target.test", "Map assigned application calls", "OP_TEST",
+    )
+    task = replace(task, recovery_context={"phase_task_contract": {"workstream": "client_side_api"}})
+    controller.state.store_task(task)
+    plan = _plan()
+    phase = plan.phases[0]
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    draft = {"prompt": "Map assigned client calls and explain remaining gaps", "tools": [], "shell_commands": []}
+    result = ToolOutcome(
+        sequence=1, tool_use_id="bundle", tool_name="client_bundle_inventory", success=True, correctable=False,
+        input_summary="saved source", output_summary=json.dumps({
+            "request_operation_count": 0, "unresolved_request_count": 3, "request_analysis_status": "complete",
+        }), artifact_refs=("artifact:artifacts/extraction.json",),
+    )
+    prompts = [
+        controller._task_prompt_builder_prompt(plan, phase, task),
+        controller._task_prompt_critic_prompt(plan, phase, task, draft),
+        controller._task_prompt_revision_prompt(plan, phase, task, draft, ["Inspect relevant gaps"]),
+        controller._task_prompt_bounded_repair_prompt(plan, phase, task, draft, ["Inspect relevant gaps"]),
+        controller._task_evaluator_prompt(plan, phase, task, tool_outcomes=[result]),
+        controller._task_executor_contract(task, {"client_bundle_inventory", "record_task_acceptance"},
+                                           plan=plan, task_policy=controller._task_policy_guidance(task)),
+    ]
+    roles = ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_builder",
+             "task_evaluator", "task_executor"]
+    for role, prompt in zip(roles, prompts, strict=True):
+        assembled = prompt_factory.get_role_system_prompt(controller.runtime.system_prompt, role) + "\n" + prompt
+        fitted = fit_task_prompt(
+            assembled + "\n## Task history\n" + "advisory " * 10_000,
+            "", [], "", len(assembled) + 1000, 0, lambda _details: None, estimate_input=len,
+        )
+        normalized = " ".join(fitted.split())
+        assert "Inspect related call sites and their shared wrapper together" in normalized
+        assert "Caller candidates are unverified declarations, not resolved operations" in normalized
+        assert "Explain limits only when structured analysis status records them" in normalized
+        assert "zero resolved operations alone is not failure" in normalized
+        assert "not prove server execution" in normalized
+    evaluator = " ".join(prompts[-2].split())
+    assert "review worker compliance, do not execute these instructions" in evaluator
+    assert '"request_operation_count": 0' in evaluator
+    assert '"unresolved_request_count": 3' in evaluator
 
 
 def test_credential_provisioning_executor_receives_interactive_browser_tools_only():
@@ -5846,70 +6371,22 @@ def test_credential_provisioning_executor_receives_interactive_browser_tools_onl
     assert controller._task_executor_persistence_tool_names(task) == {"store_observation"}
 
 
-def test_credential_provisioning_executor_binds_registration_flow_recorder():
+def test_credential_provisioning_prompt_accepts_registration_email_tool(tmp_path, monkeypatch):
     runtime = _runtime()
     runtime.optional_tools_list = [
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
     ]
-    task = Task(
-        task_uid="credential-provisioning",
-        title="Provision identities",
-        objective="Register the missing test identities",
-        phase=1,
-        status="active",
-        recovery_context={
-            "conditional_phase": {
-                "kind": "credential_provisioning",
-                "registration_flow": {
-                    "target": "http://target.test",
-                    "roles": ["standard_user"],
-                },
-            },
-        },
-    )
-    state = FakeState(_plan(), tasks=[task])
-    captured = {}
+    from modules.tools import browser
+    from modules.tools.credentials import store_credential
 
-    def text_runner(role, *_args):
-        if role == "task_prompt_builder":
-            return '{"prompt":"register the identity","tools":["record_authentication_flow"]}'
-        if role == "task_evaluator":
-            return '{"status":"done","reason":"completed"}'
-        raise AssertionError(role)
-
-    def work_runner(_role, _prompt, tools, _system_prompt, _run_policy):
-        captured["recorder"] = next(tool for tool in tools if tool.__name__ == "record_authentication_flow")
-
-    controller = MultiAgentWorkflowController(
-        runtime=runtime,
-        budget=BudgetConfig(max_duration_minutes=60),
-        state_store=state,
-        text_runner=text_runner,
-        work_runner=work_runner,
-    )
-
-    controller._run_task(_plan(), _plan().phases[0], task)
-
-    schema = get_tool_spec(captured["recorder"])["inputSchema"]["json"]
-    assert set(schema["properties"]) == {
-        "login_url",
-        "request_format",
-        "success_redirect_url",
-        "identity_fields",
-        "required_fields",
-        "optional_fields",
-    }
-    assert "kind" not in schema["properties"]
-    assert "purpose" not in schema["properties"]
-    assert "target" not in schema["properties"]
-
-
-def test_credential_provisioning_prompt_accepts_registration_email_tool():
-    runtime = _runtime()
+    store = SQLiteApplicationStore(str(tmp_path / "selection.db"), "target")
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
     runtime.optional_tools_list = [
-        *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
-        *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
+        store_credential if tool.__name__ == "store_credential" else
+        browser.__dict__[tool.__name__] if tool.__name__ in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES else tool
+        for tool in runtime.optional_tools_list
     ]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -5922,7 +6399,11 @@ def test_credential_provisioning_prompt_accepts_registration_email_tool():
         objective="Register the missing test identities",
         phase=1,
         status="pending",
-        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+        recovery_context={"conditional_phase": {
+            "kind": "credential_provisioning",
+            "registration_flow": {"target": "https://target.test", "roles": ["member"]},
+            "credential_slot": {"role": "member"},
+        }},
     )
 
     normalized = controller._normalize_task_prompt_spec(
@@ -5934,18 +6415,29 @@ def test_credential_provisioning_prompt_accepts_registration_email_tool():
         task,
     )
 
-    assert normalized["tools"] == ["generate_password", "generate_registration_email"]
+    assert normalized["tools"] == []
 
 
 @pytest.mark.parametrize("tools", [["checkout_credential"]])
 def test_credential_provisioning_prompt_rejects_out_of_scope_tool_selection(
-    tools,
+    tools, tmp_path, monkeypatch,
 ):
     runtime = _runtime()
     runtime.optional_tools_list = [
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
         _tool("checkout_credential"),
+    ]
+    from modules.tools import browser
+    from modules.tools.credentials import store_credential
+
+    store = SQLiteApplicationStore(str(tmp_path / "selection.db"), "target")
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    runtime.optional_tools_list = [
+        store_credential if tool.__name__ == "store_credential" else
+        browser.__dict__[tool.__name__] if tool.__name__ in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES else tool
+        for tool in runtime.optional_tools_list
     ]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -5958,10 +6450,14 @@ def test_credential_provisioning_prompt_rejects_out_of_scope_tool_selection(
         objective="Register the missing test identities",
         phase=1,
         status="pending",
-        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+        recovery_context={"conditional_phase": {
+            "kind": "credential_provisioning",
+            "registration_flow": {"target": "https://target.test", "roles": ["member"]},
+            "credential_slot": {"role": "member"},
+        }},
     )
 
-    with pytest.raises(TaskPromptBuildError, match="controller-authorized registration tools"):
+    with pytest.raises(TaskPromptBuildError, match="unknown or unavailable selection"):
         controller._normalize_task_prompt_spec(
             {
                 "prompt": "Register the missing identities",
@@ -5972,12 +6468,23 @@ def test_credential_provisioning_prompt_rejects_out_of_scope_tool_selection(
         )
 
 
-def test_credential_provisioning_prompt_accepts_target_scoped_shell_selection():
+def test_credential_provisioning_prompt_accepts_target_scoped_shell_selection(tmp_path, monkeypatch):
     runtime = _runtime()
     runtime.config.available_tools = ["curl"]
     runtime.optional_tools_list = [
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
         *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
+    ]
+    from modules.tools import browser
+    from modules.tools.credentials import store_credential
+
+    store = SQLiteApplicationStore(str(tmp_path / "selection.db"), "target")
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    runtime.optional_tools_list = [
+        store_credential if tool.__name__ == "store_credential" else
+        browser.__dict__[tool.__name__] if tool.__name__ in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES else tool
+        for tool in runtime.optional_tools_list
     ]
     controller = MultiAgentWorkflowController(
         runtime=runtime,
@@ -5990,7 +6497,11 @@ def test_credential_provisioning_prompt_accepts_target_scoped_shell_selection():
         objective="Register the missing test identities",
         phase=1,
         status="pending",
-        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+        recovery_context={"conditional_phase": {
+            "kind": "credential_provisioning",
+            "registration_flow": {"target": "https://target.test", "roles": ["member"]},
+            "credential_slot": {"role": "member"},
+        }},
     )
 
     normalized = controller._normalize_task_prompt_spec(
@@ -6005,11 +6516,18 @@ def test_credential_provisioning_prompt_accepts_target_scoped_shell_selection():
     assert normalized["shell_commands"] == ["curl"]
 
 
-def test_credential_provisioning_prompt_builder_omits_generic_finding_and_swarm_guidance():
+def test_credential_provisioning_prompt_builder_omits_generic_finding_and_swarm_guidance(monkeypatch):
+    from strands import tool
+
+    from modules.tools.credentials import store_credential
+
+    store = Mock(list_authentication_flows=lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
     runtime = _runtime()
     runtime.optional_tools_list = [
-        *[_tool(name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
-        *[_tool(name) for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
+        *[tool(_tool(name), name=name) for name in CREDENTIAL_PROVISIONING_BROWSER_TOOL_NAMES],
+        *[store_credential if name == "store_credential" else _tool(name)
+          for name in CREDENTIAL_PROVISIONING_OPTIONAL_TOOL_NAMES],
     ]
     plan = _plan()
     controller = MultiAgentWorkflowController(
@@ -6023,7 +6541,11 @@ def test_credential_provisioning_prompt_builder_omits_generic_finding_and_swarm_
         objective="Register the missing test identities",
         phase=1,
         status="pending",
-        recovery_context={"conditional_phase": {"kind": "credential_provisioning"}},
+        recovery_context={"conditional_phase": {
+            "kind": "credential_provisioning",
+            "registration_flow": {"target": "https://target.test", "roles": ["member"]},
+            "credential_slot": {"role": "member", "ordinal": 1},
+        }},
     )
 
     prompt = controller._task_prompt_builder_prompt(plan, plan.phases[0], task)
@@ -6483,7 +7005,7 @@ def test_completed_contract_synthesis_replacement_reconciles_owner_phase():
         objective="Build inventory",
         phase=1,
         status="partial_failure",
-        acceptance=_acceptance("criterion-1"),
+        acceptance=_artifact_acceptance("criterion-1"),
         recovery_context={
             "phase_task_contract": {
                 **contract_context,
@@ -6671,11 +7193,12 @@ def test_contract_prerequisite_repairs_failed_synthesis_from_retained_recon_evid
     def consolidate(source_artifacts, output_file, **kwargs):
         assert source_artifacts == ["artifact:artifacts/katana_output.txt"]
         converted.append(kwargs)
-        assert output_file == "artifacts/contract_recovery/failed-synthesis-inventory_manifest.json"
+        assert output_file.startswith("artifacts/inventory_synthesis/")
         return {
             "artifact_ref": "artifact:artifacts/contract_recovery/inventory_manifest.json",
             "item_count": 1,
             "skipped_artifacts": [],
+            "processed_artifacts": [],
         }
 
     def load_manifest(_plan, reference):
@@ -6685,15 +7208,29 @@ def test_contract_prerequisite_repairs_failed_synthesis_from_retained_recon_evid
 
     monkeypatch.setattr(workflow_mod, "consolidate_recon_artifacts", consolidate)
     monkeypatch.setattr(controller, "_load_controller_inventory_manifest", load_manifest)
+    original_record = state.record_task_acceptance
+
+    def record_active(task, payload):
+        assert next(item for item in state.tasks if item.task_uid == task.task_uid).status == "active"
+        assert task.task_uid != failed_synthesis.task_uid
+        return original_record(task, payload)
+
+    monkeypatch.setattr(state, "record_task_acceptance", record_active)
 
     assert controller._repair_failed_contract_prerequisites(plan, plan.phases[1]) is True
-    assert converted == [{"target_id": "target-1", "target": ""}]
+    assert converted[0]["target_id"] == "target-1"
+    assert converted[0]["mapping_coverage"]
     repaired = next(task for task in state.tasks if task.task_uid == "failed-synthesis")
-    assert repaired.status == "done"
-    assert state.acceptance_results[repaired.task_uid][0].evidence_refs == (
+    assert repaired.status != "done"
+    replacement = next(task for task in state.tasks if task.replacement_of == repaired.task_uid)
+    assert replacement.status == "done"
+    assert state.acceptance_results[replacement.task_uid][0].evidence_refs == (
         "artifact:artifacts/contract_recovery/inventory_manifest.json",
     )
     assert [phase.status for phase in state.plan.phases] == ["done", "active"]
+    assert controller._repair_failed_contract_prerequisites(state.plan, state.plan.phases[1]) is False
+    assert len([task for task in state.tasks if task.replacement_of == repaired.task_uid]) == 1
+    assert repaired.acceptance == failed_synthesis.acceptance
 
 
 def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(monkeypatch):
@@ -6776,7 +7313,13 @@ def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(m
         (
             ["artifact:artifacts/katana.json"],
             "artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
-            {"target_id": "target-1", "target": "https://target.test"},
+            {
+                "target_id": "target-1", "target": "https://target.test",
+                "mapping_coverage": [{
+                    "workstream": "bounded_crawl", "complete": True,
+                    "tasks": [{"task_uid": "crawl", "status": "done", "reason": None}],
+                }],
+            },
         )
     ]
     completed = next(task for task in state.tasks if task.task_uid == "synthesis")
@@ -6799,6 +7342,122 @@ def test_web_inventory_synthesis_runs_in_controller_without_prompt_or_executor(m
         "manifest_ref": "artifact:artifacts/inventory_synthesis/synthesis-inventory_manifest.json",
         "item_count": 2,
     } in runtime.callback_handler.events
+
+
+@pytest.mark.parametrize(("mapping_status", "allow_partial", "expected_status"), [
+    ("done", True, "done"), ("partial_failure", True, "done"),
+    ("blocked", True, "done"), ("pending", True, "blocked"),
+    ("partial_failure", False, "blocked"),
+])
+def test_inventory_synthesis_partial_policy_and_provider_gate(
+    monkeypatch, mapping_status, allow_partial, expected_status,
+):
+    plan = OperationPlan(
+        objective="assess", current_phase=2, total_phases=2,
+        phases=[PlanPhase(id=1, title="Mapping", status="partial_failure"),
+                PlanPhase(id=2, title="Provision", status="active")],
+        targets=[OperationTarget("target-1", "https://target.test", "network")],
+    )
+    context = {"module": "web", "phase_id": 1}
+    mapping = Task(
+        task_uid="crawl", title="Crawl", objective="Crawl scoped routes", phase=1, status=mapping_status,
+        status_reason="Crawl gap" if mapping_status != "done" else None,
+        evidence=["artifact:artifacts/routes.json"],
+        recovery_context={"phase_task_contract": {**context, "task_role": "mapping", "workstream": "bounded_crawl"}},
+    )
+    auth = Task(
+        task_uid="auth", title="Auth", objective="Map authentication", phase=1, status="done",
+        recovery_context={"phase_task_contract": {**context, "task_role": "mapping", "workstream": "auth_workflow"}},
+    )
+    synthesis = Task(
+        task_uid="synthesis", title="Inventory", objective="Consolidate", phase=1,
+        status="active", target_ids=["target-1"],
+        acceptance=_acceptance("inventory"),
+        recovery_context={"phase_task_contract": {
+            **context, "task_role": "synthesis", "workstream": "inventory_synthesis",
+            "depends_on_workstreams": ["bounded_crawl", "auth_workflow"],
+        }},
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    archived = replace(mapping, task_uid="old-crawl", status="superseded")
+    state = FakeState(plan, tasks=[archived, mapping, auth, synthesis], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+    )
+    contract = replace(controller._phase_task_contract(plan.phases[0]), allow_partial_synthesis=allow_partial)
+    monkeypatch.setattr(controller, "_phase_task_contract", lambda _phase: contract)
+    calls = []
+
+    def consolidate(*_args, **kwargs):
+        calls.append(kwargs)
+        return {"artifact_ref": "artifact:artifacts/inventory.json", "item_count": 1,
+                "skipped_artifacts": [], "processed_artifacts": []}
+
+    monkeypatch.setattr(workflow_mod, "consolidate_recon_artifacts", consolidate)
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", lambda *_args, **_kwargs: (
+        {"items": [{"kind": "workflow"}]}, "hash",
+    ))
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
+    controller._run_controller_inventory_synthesis(plan, plan.phases[0], synthesis)
+    assert next(task for task in state.tasks if task.task_uid == "synthesis").status == expected_status
+    assert state.plan.phases[0].status == ("done" if mapping_status == "done" else "partial_failure")
+    providers = controller._completed_provider_workstreams(
+        plan, 2, frozenset({"inventory_synthesis", "auth_workflow"}),
+    )
+    if expected_status == "done":
+        assert calls[0]["mapping_coverage"][1]["complete"] is (mapping_status == "done")
+        assert len(calls[0]["mapping_coverage"][1]["tasks"]) == 1
+        assert providers == {"inventory_synthesis": {1}, "auth_workflow": {1}}
+    else:
+        assert calls == []
+        assert providers == {"inventory_synthesis": set(), "auth_workflow": set()}
+
+
+@pytest.mark.parametrize("iterations", [2, 3])
+def test_scope_only_prompt_repairs_preserve_crawl_selections(monkeypatch, iterations):
+    plan = _plan()
+    plan = replace(plan, targets=[OperationTarget("target-1", "http://target.test:3001", "network")])
+    task = Task(
+        task_uid="active", title="Crawl", objective="Crawl", phase=1, status="active",
+        target_scope="subset", target_ids=["target-1"],
+    )
+    drafts = iter([
+        {"prompt": "Crawl http://other.test:3001", "tools": ["specialized_recon_orchestrator"],
+         "shell_commands": ["katana"], "memory_ids": ["memory-1"]},
+        {"prompt": "Crawl http://target.test:3001", "tools": [], "shell_commands": [], "memory_ids": []},
+    ])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": iterations}),
+        budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, tasks=[task]),
+    )
+    monkeypatch.setattr(controller, "_normalize_task_prompt_spec", lambda spec, *_args: spec)
+    monkeypatch.setattr(controller, "_filter_repairable_shell_selections", lambda spec: spec)
+    critiques = iter([
+        {"issues": [{"category": "scope", "message": "Probe only the assigned target", "tool_names": []}]},
+        {"issues": []},
+    ])
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda role, *_args, **_kwargs: (
+        next(drafts) if role == "task_prompt_builder" else next(critiques)
+    ))
+    spec = controller._build_task_prompt(plan, plan.phases[0], task)
+    assert spec["tools"] == ["specialized_recon_orchestrator"]
+    assert spec["shell_commands"] == ["katana"]
+    assert spec["memory_ids"] == ["memory-1"]
+    assert spec["prompt"] == "Crawl http://target.test:3001"
+    critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, spec)
+    assert "Judge scoped capabilities, not a tool's unrelated features" in critic
+
+
+@pytest.mark.parametrize("prompt", [
+    "Acquire http://target.test:3001/source", "Enumerate service.test:4280", "Read artifact:artifacts/source.txt",
+])
+def test_scope_repair_selection_preservation_is_protocol_neutral(prompt):
+    original = {"prompt": prompt, "tools": ["runtime_tool"], "shell_commands": ["runtime_command"]}
+    repaired = {"prompt": "Corrected target boundary", "tools": [], "shell_commands": []}
+    result = MultiAgentWorkflowController._preserve_scope_repair_selections(original, repaired)
+    assert result == {**original, "prompt": repaired["prompt"]}
+    assert original["prompt"] == prompt
 
 
 def test_controller_baseline_redirect_handler_allows_in_scope_redirects():
@@ -7097,6 +7756,171 @@ def test_web_workflow_baseline_runs_in_controller_without_prompt_or_executor(mon
     assert state.acceptance_results["baseline"][0].evidence_refs[0].startswith("artifact:artifacts/controller_baseline/")
 
 
+@pytest.mark.parametrize(
+    ("workstream", "methods", "kind", "expected_owner"),
+    [
+        ("authenticated_credential_coverage", ["GET"], "endpoint", "controller"),
+        ("authenticated_credential_coverage", ["POST"], "endpoint", "executor"),
+        ("authenticated_credential_coverage", ["GET"], "workflow", "executor"),
+        ("authorization_comparison", ["GET"], "endpoint", "controller"),
+    ],
+)
+def test_controller_authenticated_coverage_ownership_uses_frozen_read_only_interaction(
+    workstream, methods, kind, expected_owner
+):
+    owner = MultiAgentWorkflowController._controller_web_baseline_execution_owner(
+        SimpleNamespace(module="web"),
+        SimpleNamespace(workstream=workstream),
+        {"items": [{
+            "id": "endpoint-1", "kind": kind, "target_id": "target-1",
+            "value": "https://target.test/private",
+            "attributes": {"interaction": {"operations": methods}},
+        }]},
+        ["endpoint-1"],
+        [OperationTarget("target-1", "https://target.test", "network")],
+    )
+
+    assert owner == expected_owner
+
+
+@pytest.mark.parametrize("request_succeeds", [True, False, "refresh", "refresh_failed"])
+def test_controller_authenticated_coverage_reuses_validated_context_without_executor(
+    monkeypatch, tmp_path, request_succeeds
+):
+    plan = OperationPlan(
+        objective="assess", current_phase=3, total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Credential Provisioning", status="not_applicable"),
+            PlanPhase(id=3, title="Authentication Coverage", status="active"),
+        ],
+        targets=[OperationTarget("target-1", "https://target.test", "network")],
+    )
+    task = Task(
+        task_uid="authenticated-coverage", title="Cover private endpoint", objective="Capture authenticated response",
+        phase=3, status="active", target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot", description="Frozen endpoint inventory",
+                source_refs=["artifact:artifacts/inventory.json"], snapshot_hash="inventory-hash",
+                item_ids=["endpoint-private"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="coverage", description="Capture authenticated response",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+        recovery_context={"phase_task_contract": {
+            "module": "web", "phase_id": 3, "workstream": "authenticated_credential_coverage",
+            "task_role": "mapping", "execution_owner": "controller",
+        }},
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=state)
+    calls = []
+
+    def authenticate(_plan, _task):
+        calls.append("authentication")
+        return workflow_mod.AuthenticationSetupResult("reused", ("credential-1",))
+
+    monkeypatch.setattr(controller, "_run_authentication_agent", authenticate)
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda *_args: ["authenticated_http_request"])
+    monkeypatch.setattr(workflow_mod, "_load_inventory_manifest", lambda *_args: ({"items": [{
+        "id": "endpoint-private", "kind": "endpoint", "target_id": "target-1",
+        "value": "https://target.test/private",
+        "attributes": {"interaction": {"operations": ["GET"]}},
+    }]}, "inventory-hash"))
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+
+    def request(method, url, credential_id, *, allow_redirects):
+        calls.append("request")
+        assert (method, url, credential_id, allow_redirects) == (
+            "GET", "https://target.test/private", "credential-1", False,
+        )
+        if request_succeeds is False:
+            raise ValueError("AUTH_CONTEXT_UNAVAILABLE")
+        if request_succeeds in {"refresh", "refresh_failed"} and calls.count("request") == 1:
+            raise ValueError("AUTH_CONTEXT_REFRESH_REQUIRED")
+        return json.dumps({"status_code": 200, "body": "private response"})
+
+    monkeypatch.setattr(workflow_mod, "authenticated_http_request", request)
+    monkeypatch.setattr(
+        controller, "_refresh_authenticated_context_for_task",
+        lambda *_args: calls.append("refresh") or {
+            "status": "unavailable" if request_succeeds == "refresh_failed" else "ready",
+            "reason": "context_validation_failed" if request_succeeds == "refresh_failed" else "refreshed",
+        },
+    )
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: pytest.fail("controller task must bypass prompt"))
+
+    controller._run_task_in_trace(plan, plan.phases[2], task)
+
+    completed = state.tasks[0]
+    succeeded = request_succeeds is True or request_succeeds == "refresh"
+    assert completed.status == ("done" if succeeded else "partial_failure")
+    expected_calls = ["authentication", "request"]
+    if request_succeeds in {"refresh", "refresh_failed"}:
+        expected_calls.append("refresh")
+    if request_succeeds == "refresh":
+        expected_calls.append("request")
+    assert calls == expected_calls
+    assert bool(state.acceptance_results.get(task.task_uid)) is succeeded
+    artifact = tmp_path / "artifacts" / "controller_authenticated_coverage" / "authenticated-coverage.json"
+    payload = json.loads(artifact.read_text())
+    assert len(payload["responses"]) == (1 if succeeded else 0)
+    assert bool(payload["coverage_gaps"]) is not succeeded
+
+
+def test_controller_authenticated_coverage_stops_when_authentication_is_unavailable(monkeypatch):
+    plan = OperationPlan(
+        objective="assess", current_phase=3, total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Credential Provisioning", status="not_applicable"),
+            PlanPhase(id=3, title="Authentication Coverage", status="active"),
+        ],
+        targets=[OperationTarget("target-1", "https://target.test", "network")],
+    )
+    task = Task(
+        task_uid="auth-unavailable", title="Cover private endpoint", objective="Capture authenticated response",
+        phase=3, status="active", target_ids=["target-1"],
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot", description="Frozen endpoint inventory",
+                source_refs=["artifact:artifacts/inventory.json"], snapshot_hash="inventory-hash",
+                item_ids=["endpoint-private"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="coverage", description="Capture authenticated response",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+        recovery_context={"phase_task_contract": {
+            "module": "web", "phase_id": 3, "workstream": "authenticated_credential_coverage",
+            "task_role": "mapping", "execution_owner": "controller",
+        }},
+    )
+    runtime = _runtime()
+    runtime.config.module = "web"
+    state = FakeState(plan, tasks=[task])
+    controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=state)
+    monkeypatch.setattr(controller, "_run_authentication_agent", lambda *_args: workflow_mod.AuthenticationSetupResult(
+        "unavailable", reason="no_eligible_credentials",
+    ))
+    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda *_args: ["authenticated_http_request"])
+    monkeypatch.setattr(workflow_mod, "_load_inventory_manifest", lambda *_args: pytest.fail("no inventory read"))
+    monkeypatch.setattr(workflow_mod, "authenticated_http_request", lambda *_args, **_kwargs: pytest.fail("no request"))
+
+    assert controller._run_controller_web_authenticated_coverage(plan, plan.phases[2], task)
+    assert state.tasks[0].status == "partial_failure"
+    assert "no_eligible_credentials" in state.tasks[0].status_reason
+
+
 def test_controller_baseline_authentication_failure_stops_before_inventory_read(monkeypatch):
     plan = OperationPlan(
         objective="assess",
@@ -7301,7 +8125,8 @@ def test_controller_resolves_planned_credential_provisioning_phase(monkeypatch):
     } == {1, 2}
 
 
-def test_credential_registration_uses_durable_descriptor_before_inventory_hints(monkeypatch):
+@pytest.mark.parametrize("stale_version", [0, 6, 7, None])
+def test_credential_registration_uses_durable_descriptor_before_inventory_hints(monkeypatch, stale_version):
     plan = OperationPlan(
         objective="Test",
         current_phase=1,
@@ -7318,14 +8143,14 @@ def test_credential_registration_uses_durable_descriptor_before_inventory_hints(
         list_authentication_flows=Mock(return_value=[
             {
                 "descriptor": {
-                    "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION - 1,
+                    "flow_version": stale_version,
                     "url": "https://target.test/old-register",
                     "roles": ["member"],
                 },
             },
             {
                 "descriptor": {
-                    "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+                    "flow_version": workflow_mod.REGISTRATION_FLOW_VERSION,
                     "url": "https://target.test/register",
                     "roles": ["member"],
                 },
@@ -7341,9 +8166,13 @@ def test_credential_registration_uses_durable_descriptor_before_inventory_hints(
         "target_id": "target-1",
         "url": "https://target.test/register",
         "roles": ("member",),
-        "flow_version": workflow_mod.AUTHENTICATION_FLOW_VERSION,
+        "flow_version": workflow_mod.REGISTRATION_FLOW_VERSION,
+        "flow_id": None,
+        "steps": [],
     }]
-    assert store.list_authentication_flows.call_args.kwargs == {"purpose": "registration"}
+    assert store.list_authentication_flows.call_args.kwargs == {
+        "purpose": "registration", "statuses": ("validated",),
+    }
 
 
 def test_credential_provisioning_creates_one_task_per_missing_role_credential():
@@ -7675,9 +8504,9 @@ def test_credential_flow_deficits_require_two_usable_credentials_per_role(monkey
         state_store=FakeState(None),
     )
     records = [
-        {"role": "user", "status": "valid"},
-        {"role": "user", "status": "unknown"},
-        {"role": "admin", "status": "invalid"},
+        {"role": "user", "status": "valid", "origin": "registered", "account_label": "alice"},
+        {"role": "user", "status": "unknown", "origin": "registered", "account_label": "bob"},
+        {"role": "admin", "status": "invalid", "origin": "registered", "account_label": "carol"},
     ]
     monkeypatch.setattr(
         workflow_mod,
@@ -7763,7 +8592,7 @@ def test_web_inventory_synthesis_does_not_retry_unchanged_failed_inputs(monkeypa
     )
 
 
-def test_contract_prerequisite_does_not_replace_failed_synthesis_when_conversion_is_unavailable(monkeypatch):
+def test_contract_prerequisite_failed_recovery_is_not_repeated_without_new_inputs(monkeypatch):
     plan = OperationPlan(
         objective="assess",
         current_phase=2,
@@ -7804,7 +8633,10 @@ def test_contract_prerequisite_does_not_replace_failed_synthesis_when_conversion
     )
 
     assert controller._repair_failed_contract_prerequisites(plan, plan.phases[1]) is False
-    assert controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is not None
+    assert controller._contract_prerequisite_resume_candidate(plan, plan.phases[1]) is None
+    replacements = [task for task in controller.state.tasks if task.replacement_of == failed_synthesis.task_uid]
+    assert len(replacements) == 1
+    assert replacements[0].status == "partial_failure"
 
 
 def test_contract_prerequisite_blocks_dependent_task_creation_for_ambiguous_failed_synthesis(monkeypatch):
@@ -8193,6 +9025,100 @@ def _execution_requirement_task(methods, requirements):
     )
 
 
+@pytest.mark.parametrize("resolved", [(), ("first",), ("first", "second")])
+@pytest.mark.parametrize("method,subject", [("request", "/"), ("connect", "host:22"), ("read", "source.py")])
+def test_execution_proof_state_is_independent_of_acceptance(resolved, method, subject):
+    task = _execution_requirement_task([method], [
+        ExecutionRequirement("first", "Produce first proof", subject),
+        ExecutionRequirement("second", "Produce second proof", subject + "-other"),
+    ])
+    stored = replace(task, recovery_context={
+        "execution_evidence_receipts": {key: ["artifact:proof.txt"] for key in resolved},
+        "inherited_execution_receipts": {key: {"parent_task_uid": "parent"} for key in resolved},
+    })
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[stored], acceptance_complete=False),
+    )
+    state = controller._controller_execution_state(task)
+    assert state["resolved_requirement_ids"] == list(resolved)
+    assert state["unresolved_requirement_ids"] == sorted({"first", "second"} - set(resolved))
+    assert state["status"] == ("satisfied" if len(resolved) == 2 else "incomplete")
+    assert controller._controller_execution_gate_status(task, [])[0] is False
+    contract = controller._task_executor_contract(task, {"http_request"}, execution_state=state)
+    assert ("## Execution Evidence Prerequisite" in contract) is (len(resolved) < 2)
+    providers = contract.split("## Execution Requirements and Available Providers", 1)
+    assert (len(providers) == 2) is (len(resolved) < 2)
+    if len(providers) == 2:
+        assert (f"Frozen subject: `{subject}`" in providers[1]) is ("first" not in resolved)
+
+
+@pytest.mark.parametrize("receipt", [None, [], ["artifact:proof.txt"]])
+def test_continuation_instructions_follow_execution_proof(receipt):
+    task = _execution_requirement_task(["request"], [ExecutionRequirement("proof", "Request root", "/")])
+    task = replace(task, evidence=["artifact:proof.txt"], recovery_context={
+        "execution_evidence_receipts": {"proof": receipt} if receipt is not None else {},
+    })
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+    evidence = [{"reference": "artifact:proof.txt", "source": "task_evidence"}]
+    compact = controller._task_executor_critic_guidance(
+        _plan(), task, ["criterion-1"], evidence, next_cycle=2,
+    )
+    missing = controller._missing_acceptance_recovery_prompt(_plan(), task, ["criterion-1"], evidence)
+    if receipt:
+        assert "Do not perform network discovery" in compact
+        assert "Do not repeat discovery" in missing
+        assert "Complete only the unresolved execution requirements" not in compact + missing
+    else:
+        assert "Complete only the unresolved execution requirements" in compact
+        assert "Complete only the unresolved execution requirements" in missing
+        assert "Do not perform network discovery" not in compact
+        assert "Do not repeat discovery" not in missing
+
+
+@pytest.mark.parametrize("trigger", [None, "unknown", "bounded_reasoning_loop", "required_procedure_methods",
+                                    "contract_prerequisite_recovery"])
+def test_recovery_contract_requires_a_recognized_trigger(trigger):
+    task = replace(_execution_requirement_task(["analyze"], []), recovery_context={
+        "phase_task_contract": {"workstream": "mapping"}, "trigger": trigger,
+        "unresolved_criteria": [], "procedure_methods": [],
+    })
+    prompt = MultiAgentWorkflowController._recovery_contract_guidance(task)
+    assert bool(prompt) is (trigger not in {None, "unknown"})
+    assert "Unresolved acceptance work:" not in prompt
+    assert "Required procedure capabilities:" not in prompt
+    task = replace(task, recovery_context={**task.recovery_context,
+                                          "unresolved_criteria": ["criterion-1"], "procedure_methods": ["read"]})
+    prompt = MultiAgentWorkflowController._recovery_contract_guidance(task)
+    if trigger not in {None, "unknown"}:
+        assert "Unresolved acceptance work: criterion-1" in prompt
+        assert "Required procedure capabilities: read" in prompt
+
+
+@pytest.mark.parametrize("module", ["web", "web_recon", "code_security", "unknown_module", "../web", ""])
+def test_task_policy_is_shared_by_prompt_roles(module):
+    task = _execution_requirement_task(["analyze"], [])
+    runtime = _runtime()
+    runtime.config.module = module
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan(), tasks=[task]),
+    )
+    policy = controller._task_policy_guidance(task)
+    builder = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
+    critic = controller._task_prompt_critic_prompt(_plan(), _plan().phases[0], task, {"prompt": "Map", "tools": []})
+    executor = controller._task_executor_contract(task, set(), task_policy=policy)
+    for prompt in (builder, critic, executor):
+        assert policy in prompt
+        assert "Do not invent a blanket workspace prohibition" in prompt
+    assert ("preserve endpoints, concrete routes, and workflows" in policy) is (module in {"web", "web_recon"})
+    assert ("do not automatically register accounts" in policy) is (module == "web_recon")
+    runtime.termination_policy = "Map only."
+    assert controller._workspace_access_guidance() in controller._module_termination_policy_section()
+
+
 def test_task_executor_contract_lists_only_matching_execution_requirement_providers(monkeypatch):
     monkeypatch.setattr(
         workflow_mod,
@@ -8551,6 +9477,34 @@ def test_phase_inventory_merge_deduplicates_and_preserves_source_provenance(monk
     ) == reference
 
 
+@pytest.mark.parametrize("operations,interface", [
+    (("GET", "POST"), "http"), (("connect", "send"), "tcp"), (("read", "write"), "filesystem"),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_phase_inventory_merge_preserves_each_operations_provenance(operations, interface, reverse):
+    first_operation, second_operation = operations
+    first = {
+        "id": "subject", "target_id": "target", "kind": "endpoint", "value": "assigned-subject",
+        "attributes": {"interaction": {
+            "interface": interface, "operations": [first_operation], "operation_provenance": "observed",
+        }},
+    }
+    second = {
+        **first, "attributes": {"interaction": {
+            "interface": interface, "operations": list(operations), "operation_provenance": "inferred",
+        }},
+    }
+    if reverse:
+        first, second = second, first
+    merged = MultiAgentWorkflowController._merge_inventory_item(first, second, "artifact:source")
+    interaction = merged["attributes"]["interaction"]
+    assert interaction["operation_provenance_by_operation"] == {
+        first_operation: "observed", second_operation: "inferred",
+    }
+    assert interaction["operation_provenance"] == "inferred"
+    assert not merged["attributes"].get("merge_conflicts")
+
+
 def test_endpoint_evidence_recovery_allows_changed_evidence_before_evaluation(monkeypatch):
     runtime = _runtime(
         env_ints={
@@ -8668,7 +9622,7 @@ def test_task_roles_share_task_trace_attributes(monkeypatch):
         if role == "task_prompt_builder":
             return '{"prompt":"execute active","tools":[]}'
         if role == "task_prompt_critic":
-            return '{"approved":true,"feedback":[]}'
+            return _checklist_response('{"issues":[]}')
         if role == "task_evaluator":
             return '{"status":"done","reason":"completed"}'
         raise AssertionError(role)
@@ -8723,41 +9677,6 @@ def test_task_roles_share_task_trace_attributes(monkeypatch):
         assert attrs["workflow.phase.id"] == 1
         assert "workflow-task" in attrs["langfuse.trace.tags"]
     assert runtime.trace_attributes == {"operation.id": "OP_TEST"}
-
-
-def test_executor_task_authentication_failure_follows_prompt_build_and_stops_execution(monkeypatch):
-    plan = _plan()
-    task = Task(task_uid="auth-failed", title="Authenticated task", objective="Assess access", phase=1, status="active")
-    state = FakeState(plan, tasks=[task])
-    controller = MultiAgentWorkflowController(
-        runtime=_runtime(),
-        budget=BudgetConfig(max_duration_minutes=60),
-        state_store=state,
-    )
-    order = []
-
-    def build_prompt(*_args):
-        order.append("prompt_builder")
-        return {"prompt": "Assess access", "tools": [], "shell_commands": []}
-
-    def authenticate(*_args):
-        order.append("authentication")
-        return workflow_mod.AuthenticationSetupResult("failed", reason="context_validation_failed")
-
-    monkeypatch.setattr(controller, "_build_task_prompt", build_prompt)
-    monkeypatch.setattr(controller, "_run_authentication_agent", authenticate)
-    monkeypatch.setattr(controller, "_authentication_agent_tool_names", lambda *_args: ["checkout_credential"])
-    monkeypatch.setattr(
-        workflow_mod,
-        "build_role_tools",
-        lambda *_args, **_kwargs: pytest.fail("executor tools must not be built after failed authentication"),
-    )
-
-    controller._run_task_in_trace(plan, plan.phases[0], task)
-
-    assert order == ["prompt_builder", "authentication"]
-    assert state.tasks[0].status == "partial_failure"
-    assert "context_validation_failed" in state.tasks[0].status_reason
 
 
 def test_different_tasks_get_distinct_task_trace_attributes():
@@ -9955,8 +10874,8 @@ def test_task_executor_appends_selected_memories_from_prompt_spec():
     )
     state.client = SimpleNamespace(
         list_memories=lambda **kwargs: [
-            {"id": "m2", "memory": "memory for m2"},
-            {"id": "m1", "memory": "memory for m1"},
+            {"id": "m2", "memory": "memory for m2", "metadata": {"category": "knowledge"}},
+            {"id": "m1", "memory": "memory for m1", "metadata": {"category": "knowledge"}},
         ]
     )
     captured = {}
@@ -9984,8 +10903,8 @@ def test_task_executor_appends_selected_memories_from_prompt_spec():
     assert captured["prompt"].startswith("execute active\n\n## Frozen Task Acceptance Contract (Controller-owned)")
     assert "## Selected Memory Context\n" in captured["prompt"]
     assert "memories[2]{id,category,source,origin_operation,evidence_status,memory}:" in captured["prompt"]
-    assert "m2,general,,unknown,prior_operation_advisory,memory for m2" in captured["prompt"]
-    assert "m1,general,,unknown,prior_operation_advisory,memory for m1" in captured["prompt"]
+    assert "m2,knowledge,,unknown,prior_operation_advisory,memory for m2" in captured["prompt"]
+    assert "m1,knowledge,,unknown,prior_operation_advisory,memory for m1" in captured["prompt"]
 
 
 def test_task_executor_omits_memory_sections_without_selected_memory_ids():
@@ -10065,8 +10984,8 @@ def test_task_prompt_normalization_uses_only_canonical_memory_ids():
     state = FakeState(_plan())
     state.client = SimpleNamespace(
         list_memories=lambda **kwargs: [
-            {"id": "memory-1", "memory": "first"},
-            {"id": "memory-2", "memory": "second"},
+            {"id": "memory-1", "memory": "first", "metadata": {"category": "knowledge"}},
+            {"id": "memory-2", "memory": "second", "metadata": {"category": "knowledge"}},
         ]
     )
     controller = MultiAgentWorkflowController(
@@ -10150,7 +11069,7 @@ def test_malformed_memory_id_reaches_prompt_critic_with_valid_prompt():
                 '["98d09291-78dc-443c-aba2-f2c4b467fc"],"tools":[],"shell_commands":[]}'
             )
         if role == "task_prompt_critic":
-            return '{"approved":true,"feedback":[]}'
+            return _checklist_response('{"issues":[]}')
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -10411,7 +11330,7 @@ def test_task_evaluator_uses_memory_as_evidence_without_inventing_a_requirement(
             {
                 "id": "obs-1",
                 "memory": "[OBSERVATION] /login returned 200 and /admin returned 403",
-                "metadata": {"category": "observation"},
+                "metadata": {"category": "observation", "source_task_uid": "active", "operation_id": "OP_TEST"},
             }
         ]
     )
@@ -10527,7 +11446,11 @@ def test_task_executor_recovers_in_same_session_and_evaluator_receives_authorita
         "enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)"
     )
     assert captured["executor_prompts"][0].endswith(
-        controller._task_executor_contract(state.tasks[0], {"store_finding"})
+        controller._task_executor_contract(
+            state.tasks[0], {"store_finding", "record_task_acceptance"},
+            execution_state=controller._controller_execution_state(state.tasks[0]),
+            task_policy=controller._task_policy_guidance(state.tasks[0]),
+        )
         + "\n\n"
         + controller._tool_selection_policy()
     )
@@ -11229,7 +12152,11 @@ def test_task_executor_unresolved_recovery_is_partial_without_evaluator_approval
 
     assert executor_calls[0].startswith("enumerate paths\n\n## Frozen Task Acceptance Contract (Controller-owned)")
     assert executor_calls[0].endswith(
-        controller._task_executor_contract(state.tasks[0], {"store_finding"})
+        controller._task_executor_contract(
+            state.tasks[0], {"store_finding", "record_task_acceptance"},
+            execution_state=controller._controller_execution_state(state.tasks[0]),
+            task_policy=controller._task_policy_guidance(state.tasks[0]),
+        )
         + "\n\n"
         + controller._tool_selection_policy()
     )
@@ -14988,6 +15915,19 @@ def test_hypothesis_dependent_batches_cover_every_completed_hypothesis(monkeypat
         state_store=FakeState(plan, [hypothesis_task("hypothesis-1", "endpoint-1"), hypothesis_task("hypothesis-2", "endpoint-2")]),
         text_runner=lambda *_args: "{}",
     )
+    for producer in list(controller.state.tasks):
+        if producer.status == "done":
+            controller.state.store_task(workflow_mod.hypothesis_contract(producer))
+            controller.state.patch_task(producer.task_uid, recovery_context_updates={
+                "hypothesis_publications": [{"artifact_ref": producer.evidence[0], "sha256": "fixture-digest"}],
+            })
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda _ref, task, *_args: SimpleNamespace(
+        subjects=[
+            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace(hypothesis_id=f"hyp-{item}",
+                authentication_requirement=workflow_mod.AuthenticationRequirement())])
+            for item in task.acceptance.basis.item_ids
+        ],
+    ))
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
     monkeypatch.setattr(
         controller,
@@ -15003,8 +15943,13 @@ def test_hypothesis_dependent_batches_cover_every_completed_hypothesis(monkeypat
         ],
     )
 
+    unrelated = replace(hypothesis_task("validation", "endpoint-1"), kind="finding_validation")
+    controller.state.store_task(unrelated)
+    repair = Mock()
+    monkeypatch.setattr(controller, "_repair_hypothesis_producer", repair)
     batches = controller._task_creation_batches(plan, plan.phases[2], "system")
 
+    repair.assert_not_called()
     assert len(batches) == 1
     assert batches[0].item_ids == {"endpoint-1", "endpoint-2"}
     assert batches[0].hypothesis_source_task_uids == {
@@ -15034,6 +15979,7 @@ def test_hypothesis_dependent_batches_record_gaps_and_use_covered_groups(monkeyp
         objective="Record a testable hypothesis",
         phase=2,
         status="done",
+        evidence=["artifact:artifacts/hypothesis-1.json"],
         acceptance=AcceptanceContract(
             mode="coverage",
             basis=AcceptanceBasis(
@@ -15056,6 +16002,19 @@ def test_hypothesis_dependent_batches_record_gaps_and_use_covered_groups(monkeyp
         state_store=FakeState(plan, [source]),
         text_runner=lambda *_args: "{}",
     )
+    for producer in list(controller.state.tasks):
+        if producer.status == "done":
+            controller.state.store_task(workflow_mod.hypothesis_contract(producer))
+            controller.state.patch_task(producer.task_uid, recovery_context_updates={
+                "hypothesis_publications": [{"artifact_ref": producer.evidence[0], "sha256": "fixture-digest"}],
+            })
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda _ref, task, *_args: SimpleNamespace(
+        subjects=[
+            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace(hypothesis_id=f"hyp-{item}",
+                authentication_requirement=workflow_mod.AuthenticationRequirement())])
+            for item in task.acceptance.basis.item_ids
+        ],
+    ))
     monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda reference: reference)
     monkeypatch.setattr(
         controller,
@@ -15186,8 +16145,134 @@ def test_hypothesis_dependent_batches_require_valid_assigned_manifest():
         text_runner=lambda *_args: "{}",
     )
 
-    with pytest.raises(ValueError, match="requires an assigned prior inventory manifest"):
-        controller._task_creation_batches(plan, plan.phases[1], "system")
+    assert controller._task_creation_batches(plan, plan.phases[1], "system") == []
+    assert any(
+        event["type"] == "hypothesis_prerequisite_gap" and event["reason"] == "missing_inventory_manifest"
+        for event in controller.runtime.callback_handler.events
+    )
+
+
+def test_missing_hypothesis_manifest_finishes_as_incomplete_coverage():
+    plan = OperationPlan(
+        objective="assess", current_phase=2, total_phases=2,
+        phases=[
+            PlanPhase(id=1, title="Hypotheses", status="partial_failure", produces_hypotheses=True),
+            PlanPhase(id=2, title="Test", status="active", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    state = FakeState(plan)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+        text_runner=lambda *_args: pytest.fail("task creator must not run without a manifest"),
+    )
+
+    controller.run()
+
+    assert state.plan.phases[1].status == "partial_failure"
+    assert controller.runtime.callback_handler.termination_events[0][0] == "partial_failure"
+
+
+def test_hypothesis_inventory_binding_survives_empty_producer_phase(monkeypatch):
+    reference = "artifact:artifacts/inventory.json"
+    plan = OperationPlan(
+        objective="assess", current_phase=2, total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Hypotheses", status="active", produces_hypotheses=True),
+            PlanPhase(id=3, title="Test", status="pending", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    inventory = Task(
+        task_uid="inventory", title="Inventory", objective="Map target", phase=1, status="done",
+        evidence=[reference], acceptance=_acceptance(),
+    )
+    state = FakeState(plan, [inventory])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+    )
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda value: value)
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", lambda *_args: ({"items": []}, "hash"))
+    monkeypatch.setattr(
+        workflow_mod, "_coverage_route_groups",
+        lambda *_args, **_kwargs: [("target-1", "endpoint", "http://target.test/one", ["endpoint-1"])],
+    )
+
+    bound = controller._bind_hypothesis_inventory(plan, plan.phases[1])
+
+    assert bound.phases[1].source_manifest_refs == (reference,)
+    restored = OperationPlan.from_obj(bound.to_dict())
+    assert restored.phases[1].source_manifest_refs == (reference,)
+    assert controller._task_creation_batches(restored, restored.phases[2], "system") == []
+    coverage = next(
+        event for event in controller.runtime.callback_handler.events if event["type"] == "hypothesis_coverage"
+    )
+    assert coverage["missing_groups"] == ["http://target.test/one"]
+
+
+def test_hypothesis_inventory_binding_preserves_separate_manifest_item_ids(monkeypatch):
+    references = ("artifact:artifacts/one.json", "artifact:artifacts/two.json")
+    plan = OperationPlan(
+        objective="assess", current_phase=3, total_phases=3,
+        phases=[
+            PlanPhase(id=1, title="Inventory", status="done"),
+            PlanPhase(id=2, title="Hypotheses", status="done", produces_hypotheses=True),
+            PlanPhase(id=3, title="Test", status="active", task_creation_mode="hypothesis_dependent"),
+        ],
+    )
+    tasks = [
+        Task(
+            task_uid=f"hypothesis-{index}", title="Hypothesis", objective="Assess route", phase=2,
+            status="done", evidence=[f"artifact:artifacts/hypothesis-{index}.json"],
+            acceptance=AcceptanceContract(
+                mode="coverage",
+                basis=AcceptanceBasis(
+                    kind="snapshot", description="Frozen endpoint", source_refs=[reference],
+                    snapshot_hash=f"hash-{index}", item_ids=[f"endpoint-{index}"],
+                ),
+                criteria=[AcceptanceCriterion(
+                    id="hypothesis", description="Record hypothesis",
+                    evidence_requirements=[EvidenceRequirement(kind="artifact")],
+                )],
+            ),
+        )
+        for index, reference in enumerate(references, start=1)
+    ]
+    state = FakeState(plan, tasks)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+    )
+    for producer in list(controller.state.tasks):
+        if producer.status == "done":
+            controller.state.store_task(workflow_mod.hypothesis_contract(producer))
+            controller.state.patch_task(producer.task_uid, recovery_context_updates={
+                "hypothesis_publications": [{"artifact_ref": producer.evidence[0], "sha256": "fixture-digest"}],
+            })
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", lambda _ref, task, *_args: SimpleNamespace(
+        subjects=[
+            SimpleNamespace(item_id=item, hypotheses=[SimpleNamespace(hypothesis_id=f"hyp-{item}",
+                authentication_requirement=workflow_mod.AuthenticationRequirement())])
+            for item in task.acceptance.basis.item_ids
+        ],
+    ))
+    monkeypatch.setattr(workflow_mod, "canonical_artifact_reference", lambda value: value)
+    monkeypatch.setattr(
+        controller, "_load_controller_inventory_manifest",
+        lambda _plan, reference: ({"reference": reference}, f"hash-{references.index(reference) + 1}"),
+    )
+    monkeypatch.setattr(
+        workflow_mod, "_coverage_route_groups",
+        lambda manifest, **_kwargs: [(
+            "target-1", "endpoint", manifest["reference"],
+            [f"endpoint-{references.index(manifest['reference']) + 1}"],
+        )],
+    )
+
+    bound = controller._bind_hypothesis_inventory(plan, plan.phases[1])
+    batches = controller._task_creation_batches(bound, bound.phases[2], "system")
+
+    assert bound.phases[1].source_manifest_refs == references
+    assert len(batches) == 2
+    assert {item_id for batch in batches for item_id in batch.item_ids} == {"endpoint-1", "endpoint-2"}
 
 
 def test_hypothesis_phase_partial_status_without_unfinished_tasks_is_not_reported_as_coverage_gap():
@@ -16366,15 +17451,18 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
         ),
         (
             controller._task_prompt_builder_prompt(plan, phase, task),
-            [("## Phase", phase_json), ("## Task", task_json)],
+            [("## Active phase (context only)", json.dumps({"id": phase.id, "title": phase.title})),
+             ("## Task", task_json)],
         ),
         (
             controller._task_prompt_critic_prompt(plan, phase, task, prompt_spec),
-            [("## Active phase", phase_json), ("## Assigned task", task_json)],
+            [("## Active phase (context only)", json.dumps({"id": phase.id, "title": phase.title})),
+             ("## Assigned task and frozen acceptance [ref: task]", task_json)],
         ),
         (
             controller._task_prompt_revision_prompt(plan, phase, task, prompt_spec, ["Add evidence"]),
-            [("## Active phase", phase_json), ("## Assigned task", task_json)],
+            [("## Active phase (context only)", json.dumps({"id": phase.id, "title": phase.title})),
+             ("## Assigned task", task_json)],
         ),
         (
             controller._task_creator_prompt(plan, phase),
@@ -16383,8 +17471,13 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
         (
             controller._task_evaluator_prompt(plan, phase, task),
             [
-                ("## Evaluation target: active task", task_json),
-                ("## Context only: active phase", phase_json),
+                ("## Evaluation target: active task", json.dumps({
+                    key: value for key, value in task.to_dict().items()
+                    if key not in {"recovery_context", "auth_context"}
+                } | {"authentication_requirement": {}, "credential_ids": []}, sort_keys=True)),
+                ("## Context only: active phase", json.dumps({
+                    "id": phase.id, "title": phase.title, "status": phase.status,
+                })),
             ],
         ),
         (
@@ -16400,12 +17493,12 @@ def test_workflow_prompts_serialize_single_tasks_and_phases_as_json():
     builder_prompt = prompts_and_objects[1][0]
     creator_prompt = prompts_and_objects[4][0]
     phase_evaluator_prompt = prompts_and_objects[6][0]
-    assert "## Plan\nplan_overview[1]" in builder_prompt
-    assert "plan_phases[1]{id,title,status,criteria}:" in builder_prompt
+    assert "## Plan\n{" in builder_prompt
+    assert '"current_phase": 1' in builder_prompt
     assert "## Existing Tasks Across All Phases\ntask_phase_status_counts[1]" in creator_prompt
     assert "task_creation_relevant_tasks[1]" in creator_prompt
-    assert "## Canonical task acceptance ledger\n[" in phase_evaluator_prompt
-    assert '"manifest_hash"' in phase_evaluator_prompt
+    assert '## Canonical task acceptance ledger\n{"acceptance_status_counts"' in phase_evaluator_prompt
+    assert "criteria[1]{task_uid,task_status,criterion_id" in phase_evaluator_prompt
 
 
 def test_phase_evaluator_uses_accepted_artifact_instead_of_predicted_task_evidence(
@@ -16457,7 +17550,8 @@ def test_phase_evaluator_uses_accepted_artifact_instead_of_predicted_task_eviden
 
     assert decision.status == "done"
     assert "artifact:artifacts/accepted.json" in captured["prompt"]
-    assert str(accepted_artifact) in captured["prompt"]
+    assert str(accepted_artifact) not in captured["prompt"]
+    assert "read_path" not in captured["prompt"]
     assert "artifact:artifacts/predicted.json" not in captured["prompt"]
 
 
@@ -16473,7 +17567,7 @@ def test_optional_tool_catalog_uses_tool_spec_name_and_description():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    catalog = controller._optional_tool_catalog()
+    catalog = controller._tool_catalog("optional_tools", runtime.optional_tools_list)
 
     assert catalog.startswith("optional_tools[1]{name,description}:")
     assert "spec_name,Spec description." in catalog
@@ -16501,19 +17595,19 @@ def test_task_prompt_builder_lists_core_and_optional_tool_capabilities_separatel
 
     prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
 
-    assert "core_tools[4]{name,description}:" in prompt
+    assert "core_tools[" in prompt and "{name,description}:" in prompt
     assert "spec_shell,Execute shell commands." in prompt
-    assert "optional_tools[2]{name,description}:" in prompt
+    assert "optional_tools[" in prompt
     assert "spec_scan,Run a targeted scan." in prompt
     assert "`tools` JSON field contains optional-tool names only" in prompt
     assert "Never return core-tool names in `tools`" in prompt
     assert "Overlapping capabilities are allowed" in prompt
     assert "capability required by the task that supplied native tools do not provide" not in prompt
-    assert "mandatory execution guardrail" in prompt
-    assert "plan_constraints[1]{constraint}:" in prompt
-    assert 'curl -sS -o /dev/null -w "%{http_code} %{url_effective}\\n" <url>' in prompt
-    assert "curl -sS -D - -o /dev/null <url>" in prompt
-    assert "Do not rely on bare `curl -s <url>` as evidence" in prompt
+    assert "## Controller-Appended Operation Constraints" in prompt
+    assert '"constraints": [' not in controller._task_prompt_plan_context(_plan(), _plan().phases[0], task)
+    assert "require explicit HTTP status and effective URL" in prompt
+    assert "Empty body output alone does not establish accessibility" in prompt
+    assert "the executor chooses" in prompt
 
 
 def test_finding_validation_prompt_separates_payload_markers_from_target_scope():
@@ -16609,7 +17703,72 @@ def test_finding_validation_context_documents_secret_exposure_manifest_schema():
     assert "version" not in context["confirmation_manifest_rule"]
 
 
-def test_task_prompt_builder_requires_reusable_acceptance_summaries():
+def test_finding_validation_context_backfills_legacy_locator_and_includes_prior_result(tmp_path, monkeypatch):
+    source = tmp_path / "source.js"
+    secret = "named-secret-value-123"
+    source.write_text(f"const label = 'secret';\npassword=\"{secret}\"\n", encoding="utf-8")
+    source_ref = "artifact:artifacts/source.js"
+    fingerprint = hashlib.sha256(source.read_bytes()).hexdigest()
+    monkeypatch.setattr(workflow_mod, "_artifact_path_from_ref", lambda _reference: str(source))
+    monkeypatch.setattr(memory_mod, "_artifact_path_from_ref", lambda _reference: str(source))
+    exposure = next(
+        item for item in memory_mod.detect_secret_exposures(source_ref) if item.kind == "named_secret"
+    )
+    task = TaskModel(
+        task_uid="verify-legacy",
+        title="Verify legacy candidate",
+        objective="Verify candidate",
+        acceptance=_acceptance(),
+        phase=1,
+        status="active",
+        kind="finding_validation",
+        reference_id="finding-legacy",
+    )
+    record = {
+        "finding_uid": "finding-legacy",
+        "resolution": "validation_failure",
+        "candidate_data": {
+            "verification_packet": {
+                "target": "http://target.test/",
+                "technique": "secret exposure",
+                "evidence_assertions": [{
+                    "artifact": source_ref,
+                    "type": "secret_exposure",
+                    "kind": exposure.kind,
+                    "digest": exposure.digest,
+                }],
+                "artifacts": [source_ref],
+                "artifact_fingerprints": {source_ref: fingerprint},
+            }
+        },
+        "validation_data": {
+            "outcome": "not_confirmed",
+            "summary": "Prior validation did not reproduce the claim.",
+            "evidence_artifacts": ["artifact:artifacts/prior-response.txt"],
+            "evidence_artifact_fingerprints": {"artifact:artifacts/prior-response.txt": "b" * 64},
+        },
+    }
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task], finding_records=[record]),
+        text_runner=lambda role, prompt, tools, system_prompt: "{}",
+    )
+
+    context = json.loads(controller._finding_validation_context(task))
+
+    assert context["evidence_assertions"][0]["source_location"] == {
+        "line_number": exposure.line_number,
+        "column_start": exposure.column_start,
+        "column_end": exposure.column_end,
+    }
+    assert context["prior_resolution"] == "validation_failure"
+    assert context["prior_validation"]["outcome"] == "not_confirmed"
+    assert context["prior_validation"]["historical_only"] is True
+    assert context["prior_validation_rule"].endswith("fresh evidence.")
+
+
+def test_task_prompt_builder_delegates_reusable_acceptance_summaries_to_controller():
     controller = MultiAgentWorkflowController(
         runtime=_runtime(),
         budget=BudgetConfig(max_duration_minutes=60),
@@ -16626,10 +17785,12 @@ def test_task_prompt_builder_requires_reusable_acceptance_summaries():
 
     prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], task)
 
-    assert "Require every acceptance summary to state the concrete result or negative result" in prompt
-    assert "publishes" in prompt
+    assert "Describe required actions and results" in prompt
+    assert "Do not restate those controller-owned requirements here" in prompt
+    contract = controller._task_executor_contract(task, set())
+    assert "Successful acceptance publishes the summary" in contract
     assert "store_observation" not in prompt
-    assert "store_finding" in prompt
+    assert "Store each security claim with `store_finding`" not in prompt
 
 
 def test_task_prompt_builder_adds_bounded_task_scoped_swarm_contract():
@@ -16685,6 +17846,8 @@ def test_task_prompt_builder_and_fallback_preserve_credential_execution_rules():
     for prompt in (builder_prompt, fallback_prompt, executor_contract):
         assert "unauthenticated baseline" in prompt
         assert "authenticated_http_request" in prompt
+        assert "opaque" in prompt.lower()
+        assert "secret" in prompt
         assert "store_credential" not in prompt
         assert "generate_password" not in prompt
         assert "checkout_credential" not in prompt
@@ -16693,7 +17856,87 @@ def test_task_prompt_builder_and_fallback_preserve_credential_execution_rules():
         assert "prepare_api_key_authentication" not in prompt
         assert "prepare_login_form_authentication" not in prompt
         assert "plan_access_control_comparisons" not in prompt
-        assert "Authorization headers" in prompt
+        assert "Authorization header" in prompt
+        assert "do not perform credential setup, an unauthenticated baseline" not in prompt
+        assert "do not obtain, construct, or copy cookies or Authorization headers" not in prompt
+
+
+def test_task_prompt_builder_scopes_baseline_and_header_guidance_to_assigned_task():
+    plan = replace(
+        _plan(),
+        constraints=["Do not send cookies or Authorization headers to target-1; target-2 permits normal login."],
+        targets=[
+            OperationTarget(target_id="target-1", value="https://restricted.test", type="network"),
+            OperationTarget(target_id="target-2", value="https://login.test", type="network"),
+        ],
+    )
+    runtime = _runtime()
+    runtime.optional_tools_list = [_tool("authenticated_http_request")]
+    controller = MultiAgentWorkflowController(
+        runtime=runtime,
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(plan),
+    )
+    task = Task(
+        task_uid="login-comparison",
+        title="Compare access to login.test",
+        objective="Capture an unauthenticated baseline and compare authenticated access",
+        phase=1,
+        status="active",
+        target_scope="subset",
+        target_ids=["target-2"],
+        acceptance=_artifact_acceptance("comparison"),
+        recovery_context={"phase_task_contract": {"workstream": "authenticated_credential_coverage"}},
+    )
+
+    builder = controller._task_prompt_builder_prompt(plan, plan.phases[0], task)
+    critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, {"prompt": "Compare access"})
+    credential_rules = controller._credential_execution_guidance_for_task(task)
+
+    assert "short sections for task-specific actions" in builder
+    assert "only when the assigned operation or target constraints specify them" in builder
+    assert "https://login.test" in builder
+    assert "The controller performs credential setup" in credential_rules
+    assert "use an unauthenticated request method for any unauthenticated baseline required" in credential_rules
+    assert "do not obtain, construct, or copy cookies or Authorization headers" not in credential_rules
+    assert "Do not reject a draft for omitting" in critic
+    assert "Do not send cookies or Authorization headers to target-1" in critic
+
+
+def test_task_prompt_builder_references_finding_contract_without_repeating_persistence_rules():
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan()),
+    )
+    coverage = Task(
+        task_uid="coverage", title="Map access", objective="Record access coverage", phase=1,
+        status="active", acceptance=_artifact_acceptance(),
+    )
+    finding = replace(
+        coverage,
+        task_uid="finding",
+        acceptance=replace(
+            coverage.acceptance,
+            manifest_hash="",
+            criteria=[AcceptanceCriterion(
+                id="finding", description="Record a confirmed issue",
+                evidence_requirements=[
+                    EvidenceRequirement(kind="artifact"),
+                    EvidenceRequirement(kind="finding_candidate"),
+                ],
+            )],
+        ),
+    )
+
+    coverage_prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], coverage)
+    finding_prompt = controller._task_prompt_builder_prompt(_plan(), _plan().phases[0], finding)
+
+    assert "Store each security claim with `store_finding`" not in coverage_prompt
+    assert "Store each security claim with `store_finding`" not in finding_prompt
+    assert '"kind": "finding_candidate"' in finding_prompt
+    assert '"kind": "finding_candidate"' not in coverage_prompt
+    assert "Do not restate those controller-owned requirements" in finding_prompt
 
 
 def test_prompt_building_treats_prior_authentication_context_as_unvalidated():
@@ -16788,7 +18031,7 @@ def test_task_prompts_delegate_loop_recovery_to_controller_without_retry_ceiling
 
     combined = f"{builder_prompt}\n{executor_contract}"
     assert "actual registered tool calls" in combined
-    assert "controller-owned executor contract supplies the terminal acceptance protocol" in combined
+    assert "task policy, the acceptance contract, evidence requirements" in builder_prompt
     assert "controller supplies a loop or recovery instruction" in executor_contract
     assert "one correction" not in combined
     assert "correction fails" not in combined
@@ -16817,8 +18060,8 @@ def test_task_prompt_critic_checks_pseudo_calls_and_tool_selection_limits():
         {"prompt": "Use the target.", "memory_ids": [], "tools": [], "shell_commands": []},
     )
 
-    assert "actual registered tool calls" in prompt
-    assert "pseudo-syntax" in prompt
+    assert "Natural-language steps are valid" in prompt
+    assert "simulated execution" in prompt
     assert "Controller-Appended Terminal Protocol" in prompt
     assert "record_task_acceptance` exactly once" in prompt
     assert "Do not reject a draft for omitting" in prompt
@@ -16847,9 +18090,9 @@ def test_task_prompt_critic_has_tool_agnostic_mapping_validation_boundary():
     )
 
     assert "observable candidate security surfaces" in prompt
-    assert "must not treat those observations as findings" in prompt
-    assert "changed HTTP methods" in prompt
-    assert "injected headers" in prompt
+    assert "do not treat those observations as findings" in prompt
+    assert "Do not test controls unless the assigned task explicitly authorizes testing or validation" in prompt
+    assert "changed HTTP methods" not in prompt
     assert "auth_chain_analyzer" not in prompt.split("## Proposed task prompt draft", maxsplit=1)[0]
 
 
@@ -16870,7 +18113,7 @@ def test_task_prompt_builder_can_omit_controller_owned_acceptance_requirements()
             return '{"prompt":"Inspect the assigned entry points and capture the results.","tools":[],"shell_commands":[]}'
         if role == "task_prompt_critic":
             captured["critic"] = prompt
-            return '{"approved":true,"feedback":[]}'
+            return _checklist_response('{"issues":[]}')
         if role == "task_evaluator":
             return '{"status":"partial_failure","reason":"no acceptance was recorded"}'
         raise AssertionError(role)
@@ -16887,6 +18130,8 @@ def test_task_prompt_builder_can_omit_controller_owned_acceptance_requirements()
 
     assert "Do not reject a draft for omitting" in captured["critic"]
     assert "## Frozen Task Acceptance Contract (Controller-owned)" in captured["executor"]
+    assert "## Operation Constraints (Controller-owned)" in captured["executor"]
+    assert "Stay within the authorized target scope" in captured["executor"]
     assert '"kind": "artifact"' in captured["executor"]
     assert "## Task Executor Contract (Controller-owned)" in captured["executor"]
 
@@ -17203,8 +18448,9 @@ def test_task_prompt_scope_mismatch_is_revised_before_the_executor_can_run():
     responses = iter(
         [
             '{"prompt":"Probe custom-scheme://service.example:4200/health","memory_ids":[],"tools":[],"shell_commands":[]}',
+            _checklist_response('{"issues":[{"category":"scope","message":"Wrong service port","tool_names":[]}]}'),
             '{"prompt":"Probe custom-scheme://service.example:4280/health","memory_ids":[],"tools":[],"shell_commands":[]}',
-            '{"approved":true,"feedback":[]}',
+            _checklist_response('{"issues":[]}'),
         ]
     )
     calls = []
@@ -17223,13 +18469,11 @@ def test_task_prompt_scope_mismatch_is_revised_before_the_executor_can_run():
     prompt_spec = controller._build_task_prompt(plan, plan.phases[0], task)
 
     assert prompt_spec["prompt"] == "Probe custom-scheme://service.example:4280/health"
-    assert calls == ["task_prompt_builder", "task_prompt_builder", "task_prompt_critic"]
-    event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "task_scope_validation")
-    assert event["stage"] == "prompt_draft"
-    assert event["decision"] == "revision_requested"
+    assert calls == ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_critic"]
+    assert not any(event["type"] == "task_scope_validation" for event in controller.runtime.callback_handler.events)
 
 
-def test_immutable_task_scope_mismatch_fails_without_prompt_generation():
+def test_unknown_structured_task_target_fails_without_prompt_generation():
     plan = OperationPlan(
         objective="assess custom-scheme://service.example:4280",
         current_phase=1,
@@ -17244,7 +18488,7 @@ def test_immutable_task_scope_mismatch_fails_without_prompt_generation():
         phase=1,
         status="active",
         target_scope="subset",
-        target_ids=["target-1"],
+        target_ids=["unknown-target"],
     )
     calls = []
     controller = MultiAgentWorkflowController(
@@ -17254,7 +18498,7 @@ def test_immutable_task_scope_mismatch_fails_without_prompt_generation():
         text_runner=lambda *args: calls.append(args) or "{}",
     )
 
-    with pytest.raises(workflow_mod.TaskPromptBuildError, match="Task content exceeds") as error:
+    with pytest.raises(workflow_mod.TaskPromptBuildError, match="Task assignment exceeds") as error:
         controller._build_task_prompt(plan, plan.phases[0], task)
 
     assert error.value.repairable is False
@@ -17264,7 +18508,7 @@ def test_immutable_task_scope_mismatch_fails_without_prompt_generation():
     assert event["decision"] == "blocked"
 
 
-def test_task_executor_blocks_an_out_of_scope_prompt_that_bypasses_prompt_building(monkeypatch):
+def test_task_executor_blocks_unknown_assignment_that_bypasses_prompt_building(monkeypatch):
     plan = OperationPlan(
         objective="assess custom-scheme://service.example:4280",
         current_phase=1,
@@ -17279,7 +18523,7 @@ def test_task_executor_blocks_an_out_of_scope_prompt_that_bypasses_prompt_buildi
         phase=1,
         status="active",
         target_scope="subset",
-        target_ids=["target-1"],
+        target_ids=["unknown-target"],
     )
     state = FakeState(plan, tasks=[task])
     worker_prompts = []
@@ -17304,7 +18548,8 @@ def test_task_executor_blocks_an_out_of_scope_prompt_that_bypasses_prompt_buildi
     event = next(event for event in controller.runtime.callback_handler.events if event["type"] == "task_scope_validation")
     assert event["stage"] == "pre_executor"
     assert event["decision"] == "blocked"
-    assert event["violations"][0]["literal"] == "custom-scheme://service.example:4200"
+    assert event["target_ids"] == ["unknown-target"]
+    assert event["validation_source"] == "structured_assignment"
 
 
 def test_task_scope_validation_adds_safe_event_to_active_task_trace(monkeypatch):
@@ -17322,7 +18567,7 @@ def test_task_scope_validation_adds_safe_event_to_active_task_trace(monkeypatch)
         phase=1,
         status="active",
         target_scope="subset",
-        target_ids=["target-1"],
+        target_ids=["unknown-target"],
     )
     span = Mock()
     tracer = Mock()
@@ -17343,7 +18588,6 @@ def test_task_scope_validation_adds_safe_event_to_active_task_trace(monkeypatch)
     controller._emit_task_scope_validation(
         plan,
         task,
-        "Probe custom-scheme://service.example:4200/health",
         "prompt_draft",
         "revision_requested",
     )
@@ -17692,11 +18936,11 @@ def test_task_prompts_reject_host_wide_scans_for_explicit_url_service_targets():
     assert "explicit `scheme://host:port` URL" in normalized
     assert "preserve that exact scheme, host, and port boundary" in normalized
     assert "host-only" in normalized
-    assert "all open ports" in normalized
+    assert "host-wide enumeration" in normalized
     assert "omitted-port" in normalized
     assert "`-p-`" in normalized
     assert "`1-65535`" in normalized
-    assert "scheme-appropriate service tooling" in normalized
+    assert "scheme or exact host:port service" in normalized
     assert "separate executable host or network target authorizes that scope" in normalized
 
 
@@ -17734,7 +18978,7 @@ def test_task_prompt_critic_permits_http_request_and_curl_overlap(monkeypatch):
     assert "http_request" in prompt
     assert "curl" in prompt
     assert "Tool overlap is permitted" in prompt
-    assert "Core tools are supplied automatically and must not appear in `tools`" in prompt
+    assert "Python validates membership and schemas" in prompt
     assert "relevant and available" not in prompt
 
 
@@ -18059,8 +19303,8 @@ def test_tool_catalog_renders_empty_lists_and_rejects_unknown_structure_names():
         text_runner=lambda role, prompt, tools, system_prompt: "{}",
     )
 
-    assert controller._core_tool_catalog() == "core_tools[0]{name,description}:\n"
-    assert controller._optional_tool_catalog() == "optional_tools[0]{name,description}:\n"
+    assert controller._tool_catalog("core_tools", []) == "core_tools[0]{name,description}:\n"
+    assert controller._tool_catalog("optional_tools", []) == "optional_tools[0]{name,description}:\n"
     with pytest.raises(ValueError, match="Unsupported tool catalog structure"):
         controller._tool_catalog("tools", [])
 
@@ -18229,6 +19473,61 @@ def test_task_evaluator_artifact_reader_allows_one_read_per_distinct_recorded_ar
     page_limit = ast.literal_eval(tools[0](artifact_refs[0], start_line=5))
     assert page_limit["status"] == "not_directly_readable"
     assert page_limit["reason"] == "artifact_page_budget_exhausted"
+
+
+def test_snapshot_evaluator_gets_lookup_scoped_to_frozen_manifest(monkeypatch, tmp_path):
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+    manifest_path = artifact_root / "inventory.json"
+    manifest_path.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [{
+            "id": "endpoint-1",
+            "target_id": "target-1",
+            "kind": "endpoint",
+            "value": "https://example.test/",
+            "attributes": {},
+        }],
+        "unassessed_gaps": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+    _manifest, snapshot_digest = memory_mod._load_inventory_manifest("artifact:artifacts/inventory.json")
+    task = Task(
+        task_uid="snapshot-evaluator-lookup",
+        title="Review frozen inventory item",
+        objective="Review the endpoint evidence",
+        phase=1,
+        status="active",
+        acceptance=AcceptanceContract(
+            mode="coverage",
+            basis=AcceptanceBasis(
+                kind="snapshot",
+                description="Frozen inventory",
+                source_refs=["artifact:artifacts/inventory.json"],
+                snapshot_hash=snapshot_digest,
+                item_ids=["endpoint-1"],
+            ),
+            criteria=[AcceptanceCriterion(
+                id="coverage",
+                description="Review endpoint",
+                evidence_requirements=[EvidenceRequirement(kind="artifact")],
+            )],
+        ),
+    )
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=FakeState(_plan(), tasks=[task]),
+    )
+
+    tools = controller._task_evaluator_tools(task, [])
+
+    assert [tool.__name__ for tool in tools] == ["get_inventory_item"]
+    found = json.loads(tools[0]("artifact:artifacts/inventory.json", item_id="endpoint-1"))
+    assert found["status"] == "found"
+    with pytest.raises(RuntimeError, match="not available"):
+        tools[0]("artifact:artifacts/other.json", item_id="endpoint-1")
 
 
 def test_task_evaluator_prompt_scales_artifact_budget_from_authorized_evidence(monkeypatch, tmp_path):
@@ -18588,9 +19887,9 @@ def test_prompt_builder_context_includes_task_history():
     assert "preserve it as task-local durable context" in prompt
     assert "do not investigate or execute that follow-up work" in prompt
     assert "Python workflow will decide whether to create another task" not in prompt
-    assert "Worked" in prompt
-    assert "Blocked" in prompt
-    assert "requires credentials" in prompt
+    assert '"status_counts": {"active": 1, "blocked": 1, "done": 1}' in prompt
+    assert "Worked" not in prompt
+    assert "requires credentials" not in prompt
 
 
 def test_task_prompt_critic_approves_initial_draft():
@@ -18602,7 +19901,7 @@ def test_task_prompt_critic_approves_initial_draft():
         if role == "task_prompt_builder":
             return '{"prompt":"approved execution","memory_ids":[],"tools":[],"shell_commands":[]}'
         if role == "task_prompt_critic":
-            return '{"approved":true,"feedback":[]}'
+            return _checklist_response('{"issues":[]}')
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -18617,7 +19916,7 @@ def test_task_prompt_critic_approves_initial_draft():
     assert prompt_spec["prompt"] == "approved execution"
     assert [call[0] for call in calls] == ["task_prompt_builder", "task_prompt_critic"]
     assert all(call[2] == [] for call in calls)
-    assert all(call[3] == "base prompt" for call in calls)
+    assert all("You construct or review task-specific execution guidance" in call[3] for call in calls)
     assert "Proposed task prompt draft" in calls[1][1]
     assert "approved execution" in calls[1][1]
     activities = [
@@ -18632,7 +19931,7 @@ def test_task_prompt_critic_approves_initial_draft():
     ]
 
 
-def test_task_prompt_critic_rejection_runs_revision_until_approved():
+def test_task_prompt_critic_rejection_runs_revision_until_approved(monkeypatch):
     task = Task(task_uid="active", title="Active", objective="run active", phase=1, status="active")
     calls = []
     builder_responses = iter(
@@ -18643,8 +19942,11 @@ def test_task_prompt_critic_rejection_runs_revision_until_approved():
     )
     critic_responses = iter(
         [
-            '{"approved":false,"feedback":["Add the relevant validation tool"]}',
-            '{"approved":true,"feedback":[]}',
+            _checklist_response(
+                "{\"issues\":[{\"category\":\"execution_policy\",\"message\":\"Add the relevant va"
+                "lidation tool\",\"tool_names\":[]}]}"
+            ),
+            _checklist_response('{"issues":[]}'),
         ]
     )
 
@@ -18663,7 +19965,23 @@ def test_task_prompt_critic_rejection_runs_revision_until_approved():
         text_runner=text_runner,
     )
 
+    policies = []
+    critic_policies = []
+    run = controller._run_json_text_agent
+
+    def track_policy(role, *args, **kwargs):
+        if role == "task_prompt_builder":
+            policies.append(kwargs["task_prompt_budget"])
+        if role == "task_prompt_critic":
+            critic_policies.append(kwargs["task_prompt_budget"])
+        return run(role, *args, **kwargs)
+
+    monkeypatch.setattr(controller, "_run_json_text_agent", track_policy)
     prompt_spec = controller._build_task_prompt(_plan(), _plan().phases[0], task)
+    assert len(policies) == 2 and policies[0] is policies[1]
+    assert len(critic_policies) == 2 and critic_policies[0] is critic_policies[1]
+    assert all("within 4096 estimated tokens" in prompt for role, prompt in calls
+               if role == "task_prompt_builder")
 
     assert prompt_spec["prompt"] == "revised"
     assert [role for role, _prompt in calls] == [
@@ -18700,7 +20018,10 @@ def test_task_prompt_final_rejection_marks_task_partial_failure_without_executio
         if role == "task_prompt_builder":
             return '{"prompt":"unsafe draft","tools":[]}'
         if role == "task_prompt_critic":
-            return '{"approved":false,"feedback":["Prompt broadens scope outside target boundary"]}'
+            return _checklist_response(
+                       "{\"issues\":[{\"category\":\"scope\",\"message\":\"Prompt broadens scope outside "
+                       "target boundary\",\"tool_names\":[]}]}"
+                   )
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -18733,8 +20054,12 @@ def test_task_prompt_repairable_rejection_runs_one_bounded_repair():
         '{"prompt":"capture response body with an explicit http URL","tools":[],"shell_commands":[]}',
     ])
     critics = iter([
-        '{"approved":false,"repairable":true,"feedback":["The response body is required for artifact evidence"]}',
-        '{"approved":true,"repairable":false,"feedback":[]}',
+        _checklist_response(
+            "{\"issues\": [{\"category\": \"execution_policy\", \"message\": \"The response bo"
+            "dy is required for artifact evidence\", \"tool_names\": []}], \"repairable\":"
+            " true}"
+        ),
+        _checklist_response('{"issues": [], "repairable": false}'),
     ])
 
     def text_runner(role, prompt, tools, system_prompt):
@@ -18768,7 +20093,10 @@ def test_task_prompt_repairable_rejection_uses_deterministic_template():
         if role == "task_prompt_builder":
             return '{"prompt":"unsafe","tools":[],"shell_commands":[]}'
         if role == "task_prompt_critic":
-            return '{"approved":false,"repairable":true,"feedback":["Add an explicit URL scheme"]}'
+            return _checklist_response(
+                       "{\"issues\": [{\"category\": \"execution_policy\", \"message\": \"Add an explicit"
+                       " URL scheme\", \"tool_names\": []}], \"repairable\": true}"
+                   )
         raise AssertionError(role)
 
     controller = MultiAgentWorkflowController(
@@ -18855,6 +20183,7 @@ def test_invalid_task_prompt_builder_json_uses_deterministic_template():
 
     assert executed_prompts
     assert "Assigned task" in executed_prompts[0]
+    assert executed_prompts[0].count("Reuse complete artifacts returned by tools directly") == 1
     assert state.tasks[0].status == "partial_failure"
     fallback = next(
         event for event in controller.runtime.callback_handler.events
@@ -19010,7 +20339,9 @@ def test_json_text_agent_retry_can_be_disabled():
 
 def test_json_text_agent_raises_after_configured_retries():
     runtime = _runtime()
-    runtime.config_manager = SimpleNamespace(getenv_int=lambda _name, default=0: 2)
+    runtime.config_manager = SimpleNamespace(
+        getenv_int=lambda name, default=0: 2 if name.startswith("CYBER_WORKFLOW_") else default,
+    )
     task = Task(task_uid="active", title="Active", objective="run", phase=1, status="active")
     calls = []
 
@@ -19408,6 +20739,94 @@ def test_task_scoped_observation_metadata_forces_controller_provenance():
         "prompt_scope": "task_control",
         "source_task_uid": "credential-slot-1",
     }
+
+
+def test_task_prompt_memory_selection_uses_structured_task_links():
+    plan = _plan()
+    basis = replace(
+        _artifact_acceptance().basis, kind="snapshot", procedure=None,
+        source_refs=("task:parent",), item_ids=("route-a",),
+    )
+    task = Task(
+        task_uid="current", title="Assess route A", objective="Assess assigned route A", phase=1,
+        status="active", acceptance=replace(_artifact_acceptance(), basis=basis, manifest_hash=""),
+        target_scope="subset", target_ids=["target-1"],
+    )
+    parent = replace(task, task_uid="parent", acceptance=replace(
+        task.acceptance, basis=replace(basis, source_refs=("artifact:parent",), item_ids=("other",)),
+        manifest_hash="",
+    ))
+    same_item = replace(task, task_uid="same-item", acceptance=replace(
+        task.acceptance, basis=replace(basis, source_refs=("artifact:same",)), manifest_hash=""
+    ))
+    other_item = replace(task, task_uid="other-item", acceptance=replace(
+        task.acceptance, basis=replace(basis, source_refs=("artifact:other",), item_ids=("route-b",)),
+        manifest_hash="",
+    ))
+    other_target = replace(same_item, task_uid="other-target", target_ids=["target-2"])
+    records = [
+        {"id": uid, "memory": uid, "metadata": {"category": "observation", "source_task_uid": uid}}
+        for uid in ("current", "parent", "same-item", "other-item", "other-target")
+    ] + [
+        {"id": "unscoped-observation", "memory": "unrelated route", "metadata": {"category": "observation"}},
+        {"id": "general-knowledge", "memory": "capture evidence", "metadata": {"category": "knowledge"}},
+        {"id": "prior-run-task", "memory": "stale evidence", "metadata": {
+            "category": "observation", "source_task_uid": "current", "operation_id": "prior-operation",
+        }},
+    ]
+    state = FakeState(plan, tasks=[parent, same_item, other_item, other_target])
+    state.client = SimpleNamespace(list_memories=lambda **kwargs: records)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+    )
+
+    selected = controller._prompt_memory_records(task=task)
+    assert [record["id"] for record in selected] == ["current", "parent", "same-item", "general-knowledge"]
+    catalog = controller._memory_selection_catalog(selected, task=task)
+    assert "source_task_uid,target_ids,item_ids,memory" in catalog
+    assert "unrelated route" not in catalog
+    prompts = (
+        controller._task_prompt_builder_prompt(plan, plan.phases[0], task, records),
+        controller._task_prompt_critic_prompt(plan, plan.phases[0], task, {"prompt": "Assess"}, records),
+        controller._task_prompt_revision_prompt(
+            plan, plan.phases[0], task, {"prompt": "Assess"}, ["Refine"], records
+        ),
+        controller._task_prompt_bounded_repair_prompt(
+            plan, plan.phases[0], task, {"prompt": "Assess"}, ["Refine"], records
+        ),
+    )
+    assert all("general-knowledge" in prompt and "unscoped-observation" not in prompt for prompt in prompts)
+    fallback = controller._deterministic_task_prompt_spec(
+        plan, plan.phases[0], task, RuntimeError("unavailable"), records
+    )
+    assert fallback["memory_ids"] == ["current", "parent", "same-item", "general-knowledge"]
+    normalized = controller._normalize_task_prompt_spec(
+        {"prompt": "Assess route A", "memory_ids": ["same-item", "other-item"]}, task, records
+    )
+    assert normalized["memory_ids"] == ["same-item"]
+    assert "other-item" not in controller._selected_memory_context(
+        ["other-item"], selected, task_uid=task.task_uid
+    )
+
+
+def test_task_observation_provenance_overrides_agent_scope_fields():
+    basis = replace(
+        _artifact_acceptance().basis, kind="snapshot", procedure=None,
+        source_refs=("artifact:inventory",), item_ids=("route-a",),
+    )
+    task = Task(
+        task_uid="current", title="Current", objective="Inspect", phase=1, status="active",
+        acceptance=replace(_artifact_acceptance(), basis=basis, manifest_hash=""),
+        target_scope="subset", target_ids=["target-1"],
+    )
+    metadata = MultiAgentWorkflowController._task_scoped_observation_metadata(
+        task.task_uid, "operation_fact",
+        {"source_task_uid": "other", "target_ids": ["target-2"], "basis_item_ids": ["route-b"]},
+        task=task,
+    )
+    assert metadata["source_task_uid"] == "current"
+    assert metadata["target_ids"] == ["target-1"]
+    assert metadata["basis_item_ids"] == ["route-a"]
 
 
 def test_task_scoped_observation_tool_rejects_unknown_prompt_scope():
@@ -20059,6 +21478,38 @@ def test_execution_prerequisite_recovery_failure_when_execution_ids_unresolved(m
         "Execution prerequisite recovery did not produce task-local proof for: criterion-1-execution-1"
         in state.tasks[0].status_reason
     )
+
+
+def test_replanned_replacement_does_not_block_fresh_reasoning_loop_replacement():
+    task = Task(
+        task_uid="looping-task",
+        title="Loop task",
+        objective="Run the assigned check",
+        phase=1,
+        status="active",
+        acceptance=_artifact_acceptance("criterion-1"),
+    )
+    archived_replacement = Task(
+        task_uid="archived-replacement",
+        title="Archived replacement",
+        objective="Retry the assigned check",
+        phase=1,
+        status="replanned",
+        acceptance=_artifact_acceptance("criterion-2"),
+        replacement_of=task.task_uid,
+    )
+    state = FakeState(_plan(), tasks=[task, archived_replacement], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(),
+        budget=BudgetConfig(max_duration_minutes=60),
+        state_store=state,
+    )
+
+    replacement = controller._create_reasoning_loop_replacement_task(task, [])
+
+    assert replacement is not None
+    assert replacement.replacement_of == task.task_uid
+    assert replacement.status == "pending"
 
 
 def test_output_prerequisite_recovery_failure_when_output_ids_unresolved(monkeypatch):
@@ -20894,3 +22345,2722 @@ def test_provisioning_prompt_contains_structured_registration_binding_and_no_mem
     contract = MultiAgentWorkflowController._task_executor_contract(task)
     assert "Controller-owned registration flow" in contract
     assert "generate_registration_profile" in contract
+    assert "`login_url` set to the controller-mapped `registration_url`" in contract
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+    )
+    plan = _plan()
+    builder = controller._task_prompt_builder_prompt(plan, plan.phases[0], task)
+    critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, {"prompt": "Register"})
+    revision = controller._task_prompt_revision_prompt(
+        plan, plan.phases[0], task, {"prompt": "Register"}, ["Clarify URL"]
+    )
+    assert "`login_url` set to the controller-mapped `registration_url`" in builder
+    assert "`login_url` parameter means the mapped `registration_url`" in critic
+    assert "`record_authentication_flow.login_url` means the mapped `registration_url`" in revision
+
+
+@pytest.fixture
+def worker_flow_case(tmp_path, monkeypatch):
+    from modules.tools import artifact as artifact_mod
+
+    task = Task("flow-review", "Map flow", "Map flow", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+        text_runner=lambda *_args: '{"approved": true, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]}',
+    )
+    monkeypatch.setattr(workflow_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(artifact_mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(memory_mod, "_operation_output_root", lambda: str(tmp_path))
+    path = tmp_path / "form.html"
+    path.write_text('<form><input name="username"><input name="password"></form>')
+    reference = f"artifact:{path}"
+    store = SimpleNamespace(upsert_authentication_flow=Mock(return_value={"flow_id": "approved-flow"}))
+    from modules.tools import authentication
+
+    store.get_tasks = lambda _operation: controller.state.tasks
+    store.get_plan = lambda _operation: replace(
+        _plan(), targets=[OperationTarget(target_id="target-1", value="https://target.test", type="network")],
+    )
+    monkeypatch.setattr(authentication, "_get_database_store", lambda: store)
+    monkeypatch.setattr(authentication, "_operation_id", lambda: "OP_TEST")
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    sinks = []
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="observe-form", tool_name="browser_get_page_html", success=True,
+        correctable=False, input_summary="assigned page", output_summary=reference, artifact_refs=(reference,),
+    )
+
+    def tool_factory(sink):
+        sinks.append(sink)
+        return [_tool("browser_goto_url")]
+
+    def actor(_role, _prompt, _tools, _system, _policy):
+        sinks[-1]({"target": "https://target.test", "login_url": "https://target.test/start", "kind": "browser_form"})
+        return workflow_mod.TaskExecutorCycleResult(text="mapped", outcomes=[outcome])
+
+    worker = Mock(side_effect=actor)
+    monkeypatch.setattr(controller, "_run_worker_agent", worker)
+    return controller, task, tool_factory, worker, store, reference
+
+
+@pytest.mark.parametrize("target,origin", [
+    ("https://TARGET.test:443/path", "https://target.test"),
+    ("http://[::1]:80/path", "http://[::1]"), ("http://target.test:bad", ""),
+    ("tcp://target.test:9000", ""), ("/workspace/src", ""), ("http://[invalid", ""),
+])
+def test_authentication_canonical_origin(target, origin):
+    assert MultiAgentWorkflowController._authentication_origin(target) == origin
+
+
+def _hypothesis_task(uid="producer", phase=1, status="done"):
+    return Task(
+        uid, "Hypotheses", "Develop safe tests", phase=phase, status=status,
+        acceptance=AcceptanceContract(mode="coverage", basis=AcceptanceBasis(
+            kind="snapshot", description="Frozen subject", source_refs=["artifact:form.html"],
+            snapshot_hash="subject-digest", item_ids=["subject"],
+        ), criteria=[AcceptanceCriterion(
+            id="future-tests", description="Develop testable hypotheses",
+            evidence_requirements=[EvidenceRequirement(kind="artifact")],
+        )]),
+    )
+
+
+def _publish_controller_hypotheses(controller, task):
+    from modules.tools.hypotheses import build_record_hypotheses_tool
+
+    def persist(binding):
+        controller.state.patch_task(task.task_uid, recovery_context_updates={
+            "hypothesis_publications": [binding], "hypothesis_operation_id": controller.runtime.operation_id,
+        })
+
+    tool = build_record_hypotheses_tool(task, controller.runtime.operation_id, workflow_mod._operation_output_root(), persist)
+    return json.loads(tool(subjects=[{
+        "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No safe probe in current scope",
+    }]))
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_hypothesis_repair_is_durable_and_preserves_historical_contract(worker_flow_case, monkeypatch, valid):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    original = _hypothesis_task()
+    controller.state.store_task(original)
+
+    def execute(_plan, _phase, repair):
+        if valid:
+            _publish_controller_hypotheses(controller, repair)
+        controller.state.patch_task(repair.task_uid, status="done" if valid else "partial_failure")
+
+    runner = Mock(side_effect=execute)
+    monkeypatch.setattr(controller, "_run_task", runner)
+    repair = controller._repair_hypothesis_producer(_plan(), _plan().phases[0], original)
+    repeated = controller._repair_hypothesis_producer(_plan(), _plan().phases[0], original)
+    assert repair.task_uid == repeated.task_uid
+    assert runner.call_count == 1
+    assert next(task for task in controller.state.tasks if task.task_uid == original.task_uid) == original
+    assert repair.acceptance.manifest_hash != original.acceptance.manifest_hash
+    assert any(req.kind == "hypothesis_set" for req in repair.acceptance.criteria[0].evidence_requirements)
+
+
+@pytest.mark.parametrize("case", ["valid", "foreign_snapshot", "failed_repair", "missing_producer", "malformed"])
+def test_hypothesis_consumers_require_frozen_typed_outputs(worker_flow_case, monkeypatch, case):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    producer = workflow_mod.hypothesis_contract(_hypothesis_task())
+    controller.state.store_task(producer)
+    if case != "failed_repair":
+        binding = _publish_controller_hypotheses(controller, producer)
+    consumer = replace(_hypothesis_task("consumer", phase=2, status="active"), recovery_context={
+        "hypothesis_source_task_uids": ["missing" if case == "missing_producer" else producer.task_uid],
+        "hypothesis_source_artifact_refs": ["artifact:form.html"],
+    })
+    if case == "malformed":
+        monkeypatch.setattr(workflow_mod, "load_hypothesis_set", Mock(side_effect=ValueError("Invalid hypothesis output")))
+    if case == "foreign_snapshot":
+        consumer = replace(consumer, acceptance=replace(consumer.acceptance, basis=replace(
+            consumer.acceptance.basis, snapshot_hash="different",
+        ), manifest_hash=""))
+    controller.state.store_task(consumer)
+    monkeypatch.setattr(controller, "_run_task", lambda _plan, _phase, task: controller.state.patch_task(
+        task.task_uid, status="partial_failure",
+    ))
+    result = controller._prepare_hypothesis_consumer(_plan(), consumer)
+    if case == "valid":
+        assert result.recovery_context["hypothesis_source_artifact_refs"] == [binding["artifact_ref"]]
+        index = result.recovery_context["hypothesis_index"][0]
+        assert index["item_id"] == "subject" and index["sha256"] == binding["sha256"]
+        assert index["hypothesis_ids"] == []
+        assert "hypothesis_subjects[1]" in controller._hypothesis_index_toon(result)
+        bindings = controller._hypothesis_consumer_bindings(result)
+        assert len(bindings) == 1
+        assert bindings[0][0] == binding["artifact_ref"]
+    else:
+        assert result is None
+        assert next(task for task in controller.state.tasks if task.task_uid == "consumer").status == "partial_failure"
+    assert controller._hypothesis_index_toon(None) == ""
+
+
+def test_hypothesis_bound_tools_and_direct_repair_dispatch(worker_flow_case, monkeypatch):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    tools = controller._resolve_task_executor_base_tools(_plan(), task, {"tools": []})
+    writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+    result = json.loads(writer(subjects=[{
+        "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No safe test",
+    }]))
+    updated = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
+    assert result["artifact_ref"] in updated.evidence
+    assert updated.recovery_context["hypothesis_publications"][-1]["sha256"] == result["sha256"]
+    consumer = replace(_hypothesis_task("consumer"), recovery_context={"hypothesis_source_task_uids": [task.task_uid]})
+    controller.state.patch_task(task.task_uid, status="done")
+    controller.state.store_task(consumer)
+    assert "read_hypotheses" in {
+        workflow_mod.get_tool_name(tool) for tool in controller._resolve_task_executor_base_tools(_plan(), consumer, {})
+    }
+    consumer = replace(consumer, recovery_context={
+        **consumer.recovery_context, "hypothesis_source_artifact_refs": [result["artifact_ref"]],
+    })
+    assert controller._task_evaluator_artifact_refs(consumer, []) == [result["artifact_ref"]]
+    assert consumer.evidence == []  # Review inputs do not become evidence that testing occurred.
+
+
+
+def test_hypothesis_recovery_adapter_requires_bound_output(worker_flow_case):
+    controller, _consumer, _factory, _worker, _store, reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task())
+    controller.state.store_task(task)
+    assert not controller._recovery_evidence_satisfies_acceptance(task, [{"reference": reference}])
+    binding = _publish_controller_hypotheses(controller, task)
+    updated = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
+    assert controller._recovery_evidence_satisfies_acceptance(updated, [{"reference": binding["artifact_ref"]}])
+
+
+@pytest.mark.parametrize("status", ["discovered", "validated"])
+@pytest.mark.parametrize("review_operation", [None, "OP_OLD", "OP_TEST"])
+@pytest.mark.parametrize("version", [workflow_mod.AUTHENTICATION_FLOW_VERSION, workflow_mod.AUTHENTICATION_FLOW_VERSION - 1])
+def test_stored_current_flow_can_start_worker_across_operations(
+    worker_flow_case, monkeypatch, status, review_operation, version,
+):
+    controller, task, _factory, _worker, store, _reference = worker_flow_case
+    descriptor = {
+        "flow_id": "stored-flow", "kind": "browser_form", "flow_version": version,
+        "provenance": "observed_worker_flow", "login_url": "https://target.test/login", "validation_url": "",
+        "worker_review": {} if review_operation is None else {"operation_id": review_operation},
+    }
+    if status == "validated":
+        descriptor["validation_url"] = "https://target.test/account"
+    store.list_authentication_flows = Mock(return_value=[{"status": status, "descriptor": descriptor}])
+    flows = controller._authentication_flow_descriptors(
+        _plan(), task, ("https://target.test",), statuses=(status,),
+    )
+    assert bool(flows) == (version == workflow_mod.AUTHENTICATION_FLOW_VERSION)
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_default_discovery_runner_carries_returned_evidence_on_artifact_hard_stop(
+    worker_flow_case, monkeypatch, structured,
+):
+    controller, _task, _factory, _worker, _store, _reference = worker_flow_case
+    outcomes = [workflow_mod.ToolOutcome(
+        sequence=1, tool_use_id="read", tool_name="search_artifact", success=True,
+        correctable=False, input_summary="evidence", output_summary="observed input name=username",
+    )]
+    limits = [{"tool": "search_artifact", "scope": "total", "used": 4, "allowed": 4}]
+    agent = Mock()
+    agent._cyber_evaluator_artifact_read_limit_hook = SimpleNamespace(exhausted=True, limit_events=limits)
+    agent._cyber_callback_handler = SimpleNamespace(tool_outcome_journal=SimpleNamespace(entries=lambda: outcomes))
+    agent.return_value = SimpleNamespace(structured_output={"approved": True, "feedback": [], "supporting_evidence_refs": ["artifact:form.html"]})
+    monkeypatch.setattr(workflow_mod, "create_agent", Mock(return_value=agent))
+    with pytest.raises(workflow_mod.EvaluatorArtifactReadLimitExceeded) as caught:
+        if structured:
+            workflow_mod.default_structured_runner(controller.runtime)(
+                "authentication_flow_critic", "prompt", [], "system",
+                workflow_mod.WORKFLOW_OUTPUT_MODELS["authentication_flow_critic"],
+            )
+        else:
+            workflow_mod.default_text_runner(controller.runtime)(
+                "authentication_flow_critic", "prompt", [], "system",
+            )
+    assert caught.value.outcomes == outcomes
+    assert caught.value.limit_events == tuple(limits)
+    agent.cleanup.assert_called_once()
+
+
+def test_damaged_continuation_plan_does_not_trigger_plan_creation(monkeypatch):
+    from modules.storage.workflow_json import StoredWorkflowDataError
+
+    state = FakeState(None)
+    monkeypatch.setattr(state, "get_plan", Mock(side_effect=StoredWorkflowDataError(
+        "plans", "OP_TEST", "OP_TEST", "plan_data"
+    )))
+    runner = Mock(side_effect=AssertionError("A damaged plan must not be replaced by the LLM"))
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+        text_runner=runner,
+    )
+    with pytest.raises(StoredWorkflowDataError):
+        controller._ensure_plan()
+    runner.assert_not_called()
+
+
+def test_required_prompt_overflow_stops_without_model_retry():
+    runner = Mock(spec=lambda role, prompt, tools, system_prompt: "")
+    runtime = _runtime()
+    runtime.prompt_token_limit = 100
+    controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(_plan()), text_runner=runner)
+    with pytest.raises(TaskPromptBuildError, match="PROMPT_REQUIRED_INPUT_TOO_LARGE"):
+        controller._run_json_text_agent("task_prompt_builder", "required" * 1000, [], "system")
+    runner.assert_not_called()
+    assert not any(event.get("type") == "model_max_token_exhaustion"
+                   for event in runtime.callback_handler.events)
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_builder_initial_budget_and_oversize_repair_preserve_operation_context(monkeypatch, structured):
+    from modules.agents import prompt_context
+    from modules.config.models.invocation import invocation_output_tokens
+
+    runtime = _runtime()
+    runtime.prompt_token_limit = 40000
+    runtime.config.model_id = "test-model"
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", lambda _model, **_kwargs: None)
+    original = prompt_context.estimate_prompt_tokens
+    monkeypatch.setattr(prompt_context, "estimate_prompt_tokens", lambda model, **kwargs: (
+        len(kwargs["extra_content"]) // 4 if "extra_content" in kwargs else original(model, **kwargs)
+    ))
+    calls = []
+    discovery = "## Retained inspection evidence\nartifact:current-flow.log shows an account-dependent operation.\n"
+
+    def runner(role, prompt, tools, system_prompt, *_args):
+        calls.append(prompt)
+        assert invocation_output_tokens(role) == 17024
+        assert discovery in prompt
+        assert "within 4000 estimated tokens" in prompt
+        assert "You construct or review" in system_prompt
+        result = {"prompt": "x" * 17000 if len(calls) == 1 else "Compare the account-dependent operation.",
+                  "tools": ["related_tool"], "shell_commands": ["related_command"]}
+        return result if structured else json.dumps(result)
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=runner,
+    )
+    controller.structured_runner = runner if structured else None
+    result = controller._run_json_text_agent("task_prompt_builder", "Build guidance.\n" + discovery, [], "executor")
+    assert len(calls) == 2
+    assert "concise complete replacement" in calls[1]
+    assert calls[1].count("## Builder output budget") == 1
+    assert result["prompt"] == "Compare the account-dependent operation."
+    assert result["tools"] == ["related_tool"]
+    assert result["shell_commands"] == ["related_command"]
+    assert invocation_output_tokens("task_prompt_builder") is None
+
+
+@pytest.mark.parametrize("known,configured,expected", [(6000, 10000, 6000), (10000, 6000, 6000), (None, 0, 17408)])
+def test_builder_respects_known_and_configured_output_ceilings(monkeypatch, known, configured, expected):
+    def known_ceiling(_model, *, include_environment):
+        assert not include_environment
+        return known
+
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", known_ceiling)
+    runtime = _runtime(env_ints={"MAX_TOKENS": configured})
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=lambda *_args: "{}",
+    )
+    assert controller._task_prompt_budget().desired_generation_tokens == expected
+
+
+@pytest.mark.parametrize("partial,reasoning,visibility", [
+    ("", "", "empty_response"), ("", "analysis", "reasoning_only"), ("partial", "", "visible_output"),
+])
+def test_builder_exhaustion_recovery_is_local_and_reports_visibility(monkeypatch, partial, reasoning, visibility):
+    from modules.config.models.agent_profiles import get_agent_settings_registry
+    from modules.config.models.invocation import invocation_output_tokens, invocation_reasoning
+    from modules.handlers.max_token_recovery import MaxTokenFailureSnapshot
+
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", lambda _model, **_kwargs: None)
+    registry = get_agent_settings_registry()
+    before = registry.get_settings("task_prompt_builder").to_dict()
+    calls = []
+
+    def runner(role, *_args):
+        calls.append((invocation_output_tokens(role), invocation_reasoning(role)))
+        if len(calls) == 1:
+            error = MaxTokensReachedException("max_tokens")
+            error.max_token_failure_snapshot = MaxTokenFailureSnapshot(reasoning, partial, {})
+            raise error
+        return '{"prompt":"Use the observed flow", "tools":[]}'
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=runner,
+    )
+    result = controller._run_json_text_agent("task_prompt_builder", "Build", [], "executor")
+    assert result["prompt"] == "Use the observed flow"
+    assert calls == [(17408, None), (17408, "none")]
+    assert registry.get_settings("task_prompt_builder").to_dict() == before
+    assert invocation_output_tokens("task_prompt_builder") is None
+    event = next(event for event in controller.runtime.callback_handler.events
+                 if event["type"] == "task_prompt_builder_exhaustion")
+    assert event["response_visibility"] == visibility
+
+
+@pytest.mark.parametrize("target", ["https://example.test:8080", "example.test:22", "/src/application"])
+def test_prompt_history_bounds_related_tasks_without_losing_contract(target):
+    assigned = Task("assigned", "Assess", f"Assess {target}", phase=1, status="active", acceptance=_acceptance())
+    related = Task("producer", "Producer", "Map", phase=1, status="done", status_reason="related evidence")
+    assigned = replace(assigned, acceptance=AcceptanceContract(
+        mode="outcome", criteria=assigned.acceptance.criteria, basis=AcceptanceBasis(
+            kind="snapshot", description="Assigned frozen subject", item_ids=["subject"],
+            source_refs=["artifact:inventory.json", "task:producer"],
+        ),
+    ))
+    unrelated = [Task(f"unrelated-{i}", "Unrelated", "Other work", phase=1, status="done",
+                      status_reason="huge unrelated context" * 500) for i in range(300)]
+    plan = _plan()
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(plan, [assigned, related, *unrelated]))
+    prompt = controller._task_prompt_builder_prompt(plan, plan.phases[0], assigned)
+    assert target in prompt and assigned.acceptance.criteria[0].description in prompt
+    assert "related evidence" in prompt
+    assert "huge unrelated context" not in prompt
+    assert len(controller._task_prompt_history_context(1, assigned)) < 1000
+
+
+def test_prompt_plan_projection_keeps_only_assigned_targets():
+    targets = [OperationTarget("assigned", "https://assigned.test", "network"),
+               OperationTarget("other", "/unrelated/source", "filesystem")]
+    plan = OperationPlan("Assess both", current_phase=1, total_phases=1, targets=targets,
+                         phases=[PlanPhase(id=1, title="Assess", status="active")])
+    task = Task("task", "Assess assigned", "Assess assigned", phase=1, status="active",
+                target_scope="subset", target_ids=["assigned"])
+    context = MultiAgentWorkflowController._task_prompt_plan_context(plan, plan.phases[0], task)
+    assert "https://assigned.test" in context
+    assert "/unrelated/source" not in context
+    context = MultiAgentWorkflowController._task_prompt_plan_context(plan, plan.phases[0], replace(task, target_scope="all"))
+    assert "/unrelated/source" in context
+
+
+@pytest.mark.parametrize("initial_status", ["pending", "active", "done", "partial_failure"])
+def test_hypothesis_repair_uses_real_state_lifecycle(worker_flow_case, monkeypatch, initial_status):
+    controller, *_rest = worker_flow_case
+    backing = controller.state
+    client = SimpleNamespace(
+        get_active_plan=lambda **_kwargs: backing.get_plan(),
+        list_tasks=lambda **kwargs: backing.list_tasks(**kwargs),
+        store_task=lambda *, task: backing.store_task(task),
+        patch_task=None,
+    )
+    monkeypatch.setattr(WorkflowStateStore, "client", property(lambda _state: client))
+    controller.state = WorkflowStateStore("OP_TEST")
+    original = workflow_mod.hypothesis_contract(_hypothesis_task())
+    controller.state.store_task(original)
+    runner = Mock(side_effect=lambda _plan, _phase, task: controller.state.mark_task(task, "done"))
+    monkeypatch.setattr(controller, "_run_task", runner)
+    # First create the deduplicated repair without executing it.
+    monkeypatch.setattr(controller, "_run_task", Mock())
+    repair = controller._repair_hypothesis_producer(_plan(), _plan().phases[0], original)
+    controller.state.patch_task(repair.task_uid, status=initial_status)
+    activation = Mock(wraps=controller._activate_task)
+    monkeypatch.setattr(controller, "_activate_task", activation)
+    monkeypatch.setattr(controller, "_run_task", runner)
+    result = controller._repair_hypothesis_producer(_plan(), _plan().phases[0], original)
+    assert result.task_uid == repair.task_uid
+    assert activation.call_count == (initial_status == "pending")
+    assert runner.call_count == (initial_status in {"pending", "active"})
+    assert result.status == ("done" if initial_status in {"pending", "active"} else initial_status)
+    assert next(task for task in backing.tasks if task.task_uid == original.task_uid) == original
+    with pytest.raises(ValueError, match="terminal"):
+        controller.state.mark_task(original, "active")
+
+
+@pytest.mark.parametrize("kind", ["finding_validation", "objective_validation", "standard"])
+@pytest.mark.parametrize("target", ["https://target.test", "tcp://target.test:9000", "/workspace/src"])
+def test_non_producer_execution_in_hypothesis_phase(worker_flow_case, monkeypatch, kind, target):
+    controller, *_rest = worker_flow_case
+    task = replace(_hypothesis_task(status="active"), kind=kind, objective=f"Assess {target}")
+    controller.state.store_task(task)
+    repair = Mock()
+    monkeypatch.setattr(controller, "_repair_hypothesis_producer", repair)
+    normal_execution = Mock(return_value=True)
+    monkeypatch.setattr(controller, "_run_controller_inventory_synthesis", normal_execution)
+    controller._run_task_in_trace(_plan(), replace(_plan().phases[0], produces_hypotheses=True), task)
+    repair.assert_not_called()
+    normal_execution.assert_called_once()
+    assert not controller._is_hypothesis_producer(task)
+    assert controller._is_hypothesis_producer(workflow_mod.hypothesis_contract(task))
+
+
+@pytest.mark.parametrize("kind", ["finding_validation", "objective_validation", "standard"])
+def test_hypothesis_consumer_excludes_non_producers(worker_flow_case, monkeypatch, kind):
+    controller, *_rest = worker_flow_case
+    unrelated = replace(_hypothesis_task(), kind=kind)
+    controller.state.store_task(unrelated)
+    consumer = replace(_hypothesis_task("consumer", phase=2, status="active"), recovery_context={
+        "hypothesis_source_task_uids": [unrelated.task_uid],
+    })
+    controller.state.store_task(consumer)
+    repair = Mock()
+    monkeypatch.setattr(controller, "_repair_hypothesis_producer", repair)
+    assert controller._hypothesis_consumer_bindings(consumer) == []
+    assert controller._prepare_hypothesis_consumer(_plan(), consumer) is None
+    repair.assert_not_called()
+
+
+@pytest.mark.parametrize("target,method", [
+    ("https://target.test", "request"), ("tcp://target.test:9000", "enumerate"), ("/workspace/src", "read"),
+])
+def test_continuation_acquisition_replacement_preserves_and_deduplicates(worker_flow_case, monkeypatch, target, method):
+    from modules.operation_plugins.planning_contracts import PhaseTaskContract
+
+    controller, *_rest = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", target,
+                                                    "filesystem" if target.startswith("/") else "network")])
+    contract = PhaseTaskContract(module="fixture", phase_id=1, mode="fanout", min_mapping_tasks=1,
+                                 mapping_workstreams=frozenset({"source_analysis"}),
+                                 required_methods_by_workstream={"source_analysis": (method, "analyze")})
+    monkeypatch.setattr(controller, "_phase_task_contract", lambda _phase: contract)
+    original = _acceptance()
+    acceptance = replace(original, basis=replace(original.basis, procedure=replace(
+        original.basis.procedure, methods=("analyze",),
+    )), criteria=(replace(original.criteria[0], execution_requirements=(ExecutionRequirement(
+        "execution", "Analyze source", "target:target-1",
+    ),)),), manifest_hash="")
+    task = Task("source", "Analyze", "Extract source metadata", phase=1, status="active", acceptance=acceptance,
+                recovery_context={"phase_task_contract": {"module": "fixture", "phase_id": 1,
+                                                         "workstream": "source_analysis", "task_role": "mapping"},
+                                  "execution_evidence_receipts": {"execution": ["old"]}})
+    controller.state.store_task(task)
+    prompt = Mock()
+    monkeypatch.setattr(controller, "_build_task_prompt", prompt)
+    controller._run_task_in_trace(plan, plan.phases[0], task)
+    prompt.assert_not_called()
+    assert controller._replace_missing_procedure_methods(plan, plan.phases[0], task)
+    replacements = [item for item in controller.state.tasks if item.replacement_of == task.task_uid]
+    assert len(replacements) == 1
+    replacement = replacements[0]
+    assert set(replacement.acceptance.basis.procedure.methods) == {method, "analyze"}
+    assert replacement.supersedes_criteria == [acceptance.criteria[0].id]
+    assert "execution_evidence_receipts" not in replacement.recovery_context
+    assert next(item for item in controller.state.tasks if item.task_uid == task.task_uid).acceptance == acceptance
+    assert not controller._replace_missing_procedure_methods(plan, plan.phases[0], replacement)
+
+
+def test_required_acquisition_capability_is_checked_in_preflight(worker_flow_case, monkeypatch):
+    from modules.operation_plugins.planning_contracts import load_phase_task_contract
+
+    controller, *_rest = worker_flow_case
+    monkeypatch.setattr(controller, "_phase_task_contract", lambda _phase: load_phase_task_contract("web", 1))
+    monkeypatch.setattr(controller, "_available_task_execution_capabilities", lambda: {"analyze"})
+    proposal = SimpleNamespace(inferred_basis_kind="procedure", task_role="mapping", workstream="client_side_api",
+                               methods=["analyze"], target_ids=[])
+    with pytest.raises(ValueError, match="request"):
+        controller._validate_generated_task_proposals(_plan().phases[0], [proposal])
+    monkeypatch.setattr(controller, "_available_task_execution_capabilities", lambda: {"analyze", "request"})
+    controller._validate_generated_task_proposals(_plan().phases[0], [proposal])
+
+
+def test_source_acquisition_guidance_is_protocol_neutral(worker_flow_case):
+    controller, task, *_rest = worker_flow_case
+    plan = _plan()
+    builder = controller._task_prompt_builder_prompt(plan, plan.phases[0], task)
+    critic = controller._task_prompt_critic_prompt(plan, plan.phases[0], task, {"prompt": "Analyze"})
+    for prompt in (builder, critic):
+        assert "workspace resources, not target access" in prompt
+        assert "Acquire missing source data within declared capabilities and scope" in prompt
+        assert "Acquisition alone is not" in prompt
+        assert "Reuse complete artifacts returned by tools directly" in prompt
+        assert "save source data only when it has not already been persisted" in prompt
+        assert "Derive transformed inputs from the complete saved source" in prompt
+    assert "Incomplete processing requires a coverage gap" in critic
+    assert "zero extracted items or failed optional formatting alone do not establish failure" in critic
+    assert "Do not test controls unless the assigned task explicitly authorizes testing or validation" in critic
+
+
+@pytest.mark.parametrize("context", [
+    None, {"module": "other", "phase_id": 1, "workstream": "client_side_api"},
+    {"module": "web", "phase_id": 9, "workstream": "client_side_api"},
+    {"module": "web", "phase_id": 1, "workstream": "bounded_crawl"},
+])
+def test_continuation_acquisition_policy_uses_only_matching_metadata(worker_flow_case, monkeypatch, context):
+    from modules.operation_plugins.planning_contracts import load_phase_task_contract
+
+    controller, *_rest = worker_flow_case
+    monkeypatch.setattr(controller, "_phase_task_contract", lambda _phase: load_phase_task_contract("web", 1))
+    task = Task("unrelated", "client_side_api", "Fetch source", phase=1, status="active", acceptance=_acceptance(),
+                recovery_context={"phase_task_contract": context})
+    assert not controller._replace_missing_procedure_methods(_plan(), _plan().phases[0], task)
+    assert not any(candidate.replacement_of == task.task_uid for candidate in controller.state.tasks)
+
+
+@pytest.mark.parametrize("scope", [None, "OP_TEST"])
+def test_registration_success_uses_task_local_storage_for_shared_and_operation_credentials(scope, monkeypatch):
+    controller, _plan_value, task = _refresh_setup_controller(monkeypatch, ("first",))
+    record = {"origin": "registered", "target": "https://target.test", "role": "member",
+              "status": "unknown", "operation_id": scope}
+    store = SimpleNamespace(get_credential=Mock(return_value=record))
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="store", tool_name="store_credential", success=True, correctable=False,
+        input_summary="", output_summary=json.dumps({"stored": True, "credential": {"credential_id": "first"}}),
+    )
+    assert controller._registered_worker_success(task, record["target"], ("member",), [outcome])
+    assert not controller._registered_worker_success(task, record["target"], ("member",), [])
+    assert not controller._registered_worker_success(task, "https://other.test", ("member",), [outcome])
+    assert not controller._registered_worker_success(task, record["target"], ("other",), [outcome])
+
+
+@pytest.mark.parametrize("success", [True, False])
+def test_flow_review_keeps_functional_success_separate_from_mapping(worker_flow_case, monkeypatch, success):
+    controller, task, _factory, _worker, store, reference = worker_flow_case
+    monkeypatch.setattr(MultiAgentWorkflowController, "_refine_worker_flow", _REAL_REFINE_WORKER_FLOW)
+    candidate = {"target": "https://target.test", "kind": "browser_registration",
+                 "steps": [{"action": "form_submission", "url": "https://target.test/signup",
+                            "field_names": ["Email 📧", "🔐 Password"]}]}
+    attempt = {"reviewed": False, "successful": success, "candidate": candidate, "recorder_names": {"record_flow"}}
+    outcome = ToolOutcome(sequence=1, tool_use_id="form", tool_name="browser_get_page_html", success=True,
+                          correctable=False, input_summary="", output_summary=reference, artifact_refs=(reference,))
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: {
+        "approved": True, "feedback": [], "supporting_evidence_refs": [reference],
+    })
+    repair = Mock(return_value=workflow_mod.TaskExecutorCycleResult(text="", outcomes=[]))
+    controller._refine_worker_flow(task, "https://target.test", "registration", attempt, [outcome], repair,
+                                   [_tool("record_flow"), _tool("browser_perform_action")])
+    if success:
+        repair.assert_not_called()
+        store.upsert_authentication_flow.assert_called_once()
+        assert attempt["mapping_approved"] is True
+    else:
+        store.upsert_authentication_flow.assert_not_called()
+        assert repair.call_count == controller.flow_refinement_cycles - 1
+
+
+def test_successful_flow_metadata_repairs_cannot_repeat_submission(worker_flow_case, monkeypatch):
+    controller, task, _factory, _worker, _store, reference = worker_flow_case
+    monkeypatch.setattr(MultiAgentWorkflowController, "_refine_worker_flow", _REAL_REFINE_WORKER_FLOW)
+    attempt = {"reviewed": False, "successful": True, "candidate": {"kind": "browser_registration"},
+               "recorder_names": {"record_flow"}}
+    outcome = ToolOutcome(sequence=1, tool_use_id="form", tool_name="browser_get_page_html", success=True,
+                          correctable=False, input_summary="", output_summary=reference, artifact_refs=(reference,))
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: {
+        "approved": False, "feedback": ["Preserve observed Unicode controls"], "supporting_evidence_refs": [],
+    })
+    repair = Mock(return_value=workflow_mod.TaskExecutorCycleResult(text="", outcomes=[]))
+    controller._refine_worker_flow(task, "https://target.test", "registration", attempt, [outcome], repair,
+                                   [_tool("record_flow"), _tool("browser_perform_action"), _tool("shell")])
+    assert repair.call_count == controller.flow_refinement_cycles - 1
+    for call in repair.call_args_list:
+        assert {workflow_mod.get_tool_name(tool) for tool in call.args[1]} == {"record_flow"}
+        assert "do not create another account" in call.args[0]
+
+
+def test_flow_publication_failure_preserves_functional_success_as_mapping_gap(worker_flow_case, monkeypatch):
+    controller, task, _factory, _worker, store, reference = worker_flow_case
+    monkeypatch.setattr(MultiAgentWorkflowController, "_refine_worker_flow", _REAL_REFINE_WORKER_FLOW)
+    attempt = {"reviewed": False, "successful": True, "candidate": {"kind": "browser_registration"}}
+    outcome = ToolOutcome(sequence=1, tool_use_id="form", tool_name="browser_get_page_html", success=True,
+                          correctable=False, input_summary="", output_summary=reference, artifact_refs=(reference,))
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: {
+        "approved": True, "feedback": [], "supporting_evidence_refs": [reference],
+    })
+    store.upsert_authentication_flow.side_effect = OSError("unavailable")
+    repair = Mock()
+    controller._refine_worker_flow(task, "https://target.test", "registration", attempt, [outcome], repair, [])
+    repair.assert_not_called()
+    assert not attempt.get("mapping_approved")
+    persisted = next(item for item in controller.state.tasks if item.task_uid == task.task_uid)
+    assert persisted.recovery_context["registration_flow_gap"]["functional_success"] is True
+
+
+@pytest.mark.parametrize("comparison,expected", [("none", ["credential-b"]),
+                                                 ("account", ["credential-b", "credential-a"])])
+def test_authentication_setup_selects_minimum_required_sessions(monkeypatch, comparison, expected):
+    target = "https://target.test"
+    plan = replace(_plan(), targets=[OperationTarget(target_id="target-1", value=target, type="network")])
+    task = Task(task_uid="minimum-auth", title="Check", objective="Check", phase=1, status="active",
+                target_ids=["target-1"], recovery_context={
+                    "authentication_requirement": {"comparison": comparison, "roles": ["member"]},
+                })
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                              state_store=FakeState(plan, [task]))
+    records = [
+        {"credential_id": "credential-a", "role": "member", "account_label": "first"},
+        {"credential_id": "credential-b", "role": "member", "account_label": "second"},
+        {"credential_id": "admin", "role": "admin", "account_label": "third"},
+    ]
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        list_credentials=lambda *_args, **_kwargs: records,
+    ))
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(controller, "_authentication_flow_hints", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_discovery_endpoints", lambda *_args: ())
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid",
+                        lambda _op, _target, credential_id: credential_id == "credential-b")
+    setup = controller._authentication_setup_request(plan, task)
+    assert [credential["credential_id"] for credential in setup.credentials] == expected
+    assert setup.comparison == comparison
+    if comparison == "none":
+        alternate = controller._authentication_setup_request(
+            plan, task, excluded_credential_ids=("credential-b",),
+        )
+        assert [credential["credential_id"] for credential in alternate.credentials] == ["credential-a"]
+    else:
+        with pytest.raises(workflow_mod.AuthenticationSelectionError):
+            controller._authentication_setup_request(plan, task, excluded_credential_ids=("credential-a",))
+
+
+@pytest.mark.parametrize("replacement_round,frozen", [(1, False), (0, True)])
+def test_authentication_selection_retry_preserves_bounds_and_frozen_bindings(monkeypatch, replacement_round, frozen):
+    plan = _plan()
+    task = Task(task_uid="selection", status="active", title="Check", objective="Check", phase=1, recovery_context={
+        "validation_auth_context": {"credential_ids": ["a"]} if frozen else {},
+    })
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                              state_store=FakeState(plan, [task]))
+    lookup = Mock()
+    monkeypatch.setattr(controller, "_authentication_setup_request", lookup)
+    assert controller._retry_authentication_selection(plan, task, ("a",), (), replacement_round) is None
+    lookup.assert_not_called()
+
+
+def test_authentication_selection_retry_excludes_failed_ids(monkeypatch):
+    plan = _plan()
+    task = Task(task_uid="selection", status="active", title="Check", objective="Check", phase=1)
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                              state_store=FakeState(plan, [task]))
+    monkeypatch.setattr(controller, "_authentication_setup_request", Mock())
+    run = Mock(return_value=workflow_mod.AuthenticationSetupResult("established", ("b",)))
+    monkeypatch.setattr(controller, "_run_authentication_agent", run)
+    assert controller._retry_authentication_selection(plan, task, ("a",), ("old",), 0).ready
+    run.assert_called_once_with(plan, task, excluded_credential_ids=("old", "a"), replacement_round=1)
+    monkeypatch.setattr(controller, "_authentication_setup_request", Mock(
+        side_effect=workflow_mod.AuthenticationSelectionError("unavailable"),
+    ))
+    assert controller._retry_authentication_selection(plan, task, ("a",), (), 0) is None
+
+
+@pytest.mark.parametrize("comparison,reject_first,expected", [
+    ("none", False, ["a"]), ("none", True, ["a", "b"]),
+    ("account", False, ["a", "b"]), ("account", True, ["a", "b", "c"]),
+])
+def test_authentication_worker_runs_only_selected_accounts(monkeypatch, comparison, reject_first, expected):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("a", "b", "c"))
+    task = replace(task, recovery_context={
+        "authentication_requirement": {"comparison": comparison, "roles": ["member"]},
+    })
+    controller.state.tasks = [task]
+    target = "https://target.test"
+    records = [{"credential_id": name, "credential_type": "username_password", "role": "member",
+                "account_label": name, "target": target} for name in ("a", "b", "c")]
+    store = SimpleNamespace(list_credentials=lambda *_args, **_kwargs: records, authorize_credential_for_task=Mock(),
+                            record_credential_status=Mock(), record_credential_usage=Mock())
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: store)
+    flow = {"kind": "browser_form", "login_url": f"{target}/login", "allowed_origins": [target]}
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: (flow,))
+    monkeypatch.setattr(controller, "_authentication_flow_hints", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_discovery_endpoints", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_setup_request",
+                        lambda *args, **kwargs: MultiAgentWorkflowController._authentication_setup_request(
+                            controller, *args, **kwargs,
+                        ))
+    valid = set()
+    calls = []
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda _op, _target, name: name in valid)
+
+    def worker(_task, _setup, credential, _flows, _tools):
+        name = credential["credential_id"]
+        calls.append(name)
+        if name != "a" or not reject_first:
+            valid.add(name)
+        return workflow_mod.AuthenticationWorkerResult(True)
+
+    monkeypatch.setattr(workflow_mod, "authentication_attempt_result",
+                        lambda _op, _target, name: {"outcome": "credential_rejected"}
+                        if name == "a" and reject_first else None)
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", worker)
+    result = controller._run_authentication_agent(plan, task)
+    assert result.ready
+    if reject_first:
+        assert store.record_credential_status.call_args.args[1:3] == ("a", "invalid")
+    else:
+        store.record_credential_status.assert_not_called()
+    assert calls == expected
+    assert len(result.credential_ids) == (2 if comparison == "account" else 1)
+    assert "a" not in result.credential_ids if reject_first else "a" in result.credential_ids
+
+
+def test_authentication_setup_keeps_frozen_ids_and_reports_missing_pair(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch)
+    task = replace(task, recovery_context={"validation_auth_context": {"credential_ids": ["first", "second"]}})
+    monkeypatch.setattr(controller, "_authentication_setup_request", Mock(
+        side_effect=workflow_mod.AuthenticationSelectionError("frozen_credentials_unavailable"),
+    ))
+    result = controller._run_authentication_agent(plan, task)
+    assert not result.ready
+    assert result.reason == "frozen_credentials_unavailable"
+
+
+def test_authentication_setup_matches_assigned_target_with_trailing_slash(monkeypatch):
+    controller, plan, task = _refresh_setup_controller(monkeypatch, ("first",))
+    plan = replace(plan, targets=[OperationTarget(target_id="target-1", value="https://target.test/", type="network")])
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        list_credentials=lambda *_args, **_kwargs: [
+            {"credential_id": "first", "target": "https://target.test", "role": "member"},
+        ],
+    ))
+    monkeypatch.setattr(controller, "_authentication_flow_descriptors", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(controller, "_authentication_flow_hints", lambda *_args: ())
+    monkeypatch.setattr(controller, "_authentication_discovery_endpoints", lambda *_args: ())
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: False)
+    setup = MultiAgentWorkflowController._authentication_setup_request(controller, plan, task)
+    assert setup.targets == ("https://target.test",)
+    assert setup.credentials[0]["credential_id"] == "first"
+
+
+def test_evaluator_unknown_receipt_ids_are_rejected():
+    data = {"status": "partial_failure", "repair": {
+        "kind": "execution", "execution_receipt_gaps": ["unknown"], "evidence_gaps": [],
+    }}
+    with pytest.raises(ValueError, match="frozen execution requirements"):
+        MultiAgentWorkflowController._validate_task_evaluator_decision_payload(
+            data, allowed=("partial_failure",), execution_requirement_ids=("required",),
+        )
+
+
+@pytest.mark.parametrize("oversized_required", [False, True])
+def test_evaluator_bounds_input_and_preserves_mandatory_acceptance(oversized_required):
+    from modules.agents.prompt_context import PromptInputTooLarge
+
+    plan = _plan()
+    task = Task(task_uid="bounded-evaluator", title="Evaluate operation",
+                objective="mandatory" * 40000 if oversized_required else "Required objective",
+                phase=1, status="active", recovery_context={"large_bookkeeping": "x" * 300000})
+    runtime = _runtime()
+    runtime.prompt_token_limit = 40000
+    seen = []
+    def run(_role, prompt, _tools, _system):
+        seen.append(prompt)
+        return '{"status":"done","reason":"Supported"}'
+    controller = MultiAgentWorkflowController(runtime=runtime, budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(plan, [task]), text_runner=run)
+    before = controller.state.list_task_acceptance_results(task.task_uid)
+    decision = controller._evaluate_task(plan, plan.phases[0], task, worker_context="advisory" * 40000)
+    if oversized_required:
+        assert decision.status == "blocked" and "evaluator_input_capacity" in decision.reason
+        assert seen == []
+    else:
+        assert decision.status == "done"
+        assert "large_bookkeeping" not in seen[0]
+        assert "Required objective" in seen[0] and "Frozen acceptance results" in seen[0]
+        assert "Omitted to fit input capacity" in seen[0]
+    assert controller.state.list_task_acceptance_results(task.task_uid) == before
+    events = [event for event in runtime.callback_handler.events if event["type"] == "task_prompt_input_budget"]
+    assert events and events[0]["input_limit"] < 40000
+    if not oversized_required:
+        assert events[0]["estimated_tokens_after"] <= events[0]["input_limit"]
+    assert issubclass(PromptInputTooLarge, ValueError)
+
+
+def test_authorized_refresh_reuses_context_with_sufficient_lifetime(monkeypatch):
+    controller, plan, original_task = _refresh_setup_controller(monkeypatch, ("first",))
+    task = replace(original_task, auth_context={"mode": "authenticated", "credential_ids": ["first"]})
+    monkeypatch.setattr(workflow_mod, "_get_database_store", lambda: SimpleNamespace(
+        credential_ids_authorized_by_task=lambda *_args: {"first"},
+    ))
+    monkeypatch.setattr(workflow_mod, "authentication_context_is_valid", lambda *_args: True)
+    monkeypatch.setattr(controller, "_run_authentication_credential_worker", lambda *_args: pytest.fail("valid session"))
+    assert controller._refresh_authenticated_context_for_task(plan, task, "first") == {
+        "credential_id": "first", "status": "ready", "reason": "reused",
+    }
+
+
+@pytest.mark.parametrize("target,target_type", [
+    ("https://target.test:8443", "network"),
+    ("tcp://target.test:9000", "network"),
+    ("/workspace/source", "filesystem"),
+])
+@pytest.mark.parametrize("comparison,roles,matrix,workstream,accounts,anonymous,baseline", [
+    ("account", ["member 🔑"], False, "authorization_comparison", 2, False, False),
+    ("role", ["member", "admin"], False, "authorization_comparison", 1, False, False),
+    ("tenant", ["member"], False, "authorization_comparison", 1, False, False),
+    ("none", ["member"], True, "authenticated_credential_coverage", 1, True, False),
+    ("none", ["member"], False, "authenticated_credential_coverage", 1, False, False),
+    ("none", [], False, "unauthenticated_baseline", 0, False, True),
+    ("none", [], False, "source_analysis", 0, False, False),
+])
+def test_prompt_roles_share_frozen_requirements_without_phase_expansion(
+    target, target_type, comparison, roles, matrix, workstream, accounts, anonymous, baseline,
+):
+    plan = replace(_plan(), constraints=["Unique target execution boundary"], targets=[
+        OperationTarget("target-1", target, target_type),
+    ])
+    phase = replace(plan.phases[0], criteria="Phase-wide requirement must not become task work")
+    state = FakeState(plan)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+    )
+    task = Task("assigned", "Assigned", "Perform assigned work", phase=phase.id, status="active",
+                target_scope="subset", target_ids=["target-1"], acceptance=_artifact_acceptance("result"),
+                recovery_context={"authentication_requirement": {"comparison": comparison, "roles": roles},
+                                  "authentication_matrix": matrix,
+                                  "phase_task_contract": {"workstream": workstream}})
+    completed = replace(task, task_uid="completed-baseline", status="done", recovery_context={
+        "phase_task_contract": {"workstream": "unauthenticated_baseline"},
+    })
+    state.store_task(completed)
+    state.store_task(replace(completed, task_uid="wrong-target", target_ids=["other-target"]))
+    state.store_task(replace(completed, task_uid="pending-baseline", status="pending"))
+    state.store_task(replace(completed, task_uid="other-snapshot", acceptance=replace(
+        completed.acceptance, basis=replace(completed.acceptance.basis, snapshot_hash="other-snapshot"),
+        manifest_hash="",
+    )))
+    shared = controller._task_prompt_requirements_context(task)
+    facts = json.loads(shared.splitlines()[1])
+    assert facts["accounts_per_role"] == accounts
+    assert facts["anonymous_comparison_required"] is anonymous
+    assert facts["baseline_task"] is baseline
+    assert facts["completed_baseline_task_uids"] == ["completed-baseline"]
+    assert facts["roles"] == roles
+    spec = {"prompt": "Perform assigned work", "tools": []}
+    prompts = [
+        controller._task_prompt_builder_prompt(plan, phase, task),
+        controller._task_prompt_critic_prompt(plan, phase, task, spec),
+        controller._task_prompt_revision_prompt(plan, phase, task, spec, ["Clarify inputs"]),
+    ]
+    for prompt in prompts:
+        assert prompt.count(shared) == 1
+        assert prompt.count("Unique target execution boundary") == 1
+        assert prompt.count("## Task Policy (Controller-owned)") == 1
+        assert "Phase-wide requirement must not become task work" not in prompt
+    fallback = controller._deterministic_task_prompt_spec(plan, phase, task, RuntimeError("failed"))["prompt"]
+    assert fallback.count(shared) == 1
+    assert "Phase-wide requirement must not become task work" not in fallback
+    assert "swarm` only when" not in prompts[1]
+    assert "not stylistic preferences or optional refinements" in prompts[1]
+    assert "do not reopen resolved checks" in prompts[1]
+
+
+@pytest.mark.parametrize("module", ["web", "web_recon"])
+def test_web_task_policy_keeps_baseline_and_mapping_work_task_local(module):
+    runtime = _runtime()
+    runtime.config.module = module
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+    )
+    task = Task("mapping", "Map", "Map assigned surface", phase=1, status="active")
+    policy = controller._task_policy_guidance(task)
+    assert "do not add anonymous requests to account, role, or tenant comparisons" in policy
+    assert "changed HTTP methods" in policy
+    assert "injected headers" in policy
+    assert "unless the assigned task authorizes that testing" in policy
+
+
+@pytest.mark.parametrize("target,target_type", [
+    ("https://target.test:8443", "network"), ("tcp://target.test:9000", "network"),
+    ("/workspace/source", "filesystem"),
+])
+def test_large_phase_ledger_preserves_all_criteria_and_stored_evidence(monkeypatch, target, target_type):
+    import csv
+
+    plan = replace(_plan(), targets=[OperationTarget("target-1", target, target_type)])
+    tasks = [Task(f"task-{i}", "Repeated long title " * 50, "Assigned work", phase=1, status="done",
+                  acceptance=_artifact_acceptance(f"criterion-{i}"), status_reason="Long narrative " * 2000)
+             for i in range(129)]
+    state = FakeState(plan, tasks=tasks)
+    for i, task in enumerate(tasks):
+        state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=f"criterion-{i}", status="satisfied", disposition="observation",
+            summary="Recorded result " * 2000,
+            evidence_refs=[f"artifact:artifacts/{i},a.txt", f"artifact:artifacts/{i}-b.txt",
+                           f"artifact:artifacts/{i}-c.txt"],
+        )]
+    before = [result.to_dict() for results in state.acceptance_results.values() for result in results]
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=state)
+    ledger = controller._phase_acceptance_ledger(1)
+    counts = json.loads(ledger.splitlines()[0])
+    assert counts["task_count"] == counts["criterion_count"] == 129
+    assert counts["acceptance_status_counts"] == {"satisfied": 129}
+    rows = list(csv.reader(ledger.splitlines()[2:], escapechar="\\", skipinitialspace=True))
+    assert {row[0] for row in rows} == {task.task_uid for task in tasks}
+    assert {row[2] for row in rows} == {f"criterion-{i}" for i in range(129)}
+    for i, row in enumerate(rows):
+        assert len(row[6]) == 600 and row[7] == "true"
+        assert json.loads(row[8]) == [f"artifact:artifacts/{i},a.txt", f"artifact:artifacts/{i}-b.txt"]
+        assert row[9] == "1"
+    assert [result.to_dict() for results in state.acceptance_results.values() for result in results] == before
+    prompt = controller._phase_evaluator_prompt(plan, plan.phases[0])
+    fitted = controller._fit_task_prompt_input("phase_evaluator", prompt, "system", [])
+    assert ledger in fitted
+    assert "## Task history" not in prompt
+    assert "Long narrative" not in prompt
+    assert "Artifact availability alone does not establish" in prompt
+
+
+@pytest.mark.parametrize("entrypoint", ["normal", "creation_stalled", "hard_cap"])
+@pytest.mark.parametrize("failure", ["input", "provider"])
+@pytest.mark.parametrize("task_status,expected", [
+    ("done", "done"), ("pending", "continue"), ("blocked", "blocked"), ("partial_failure", "partial_failure"),
+])
+def test_phase_capacity_failure_uses_guarded_durable_fallback(
+    monkeypatch, entrypoint, failure, task_status, expected,
+):
+    plan = _plan()
+    task = Task("phase-task", "Assigned", "Assigned work", phase=1, status=task_status,
+                acceptance=_artifact_acceptance())
+    state = FakeState(plan, tasks=[task])
+    calls = []
+
+    def runner(*args):
+        calls.append(args[0])
+        raise ContextWindowOverflowException("Provider input exceeds capacity")
+
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=state, text_runner=runner)
+    if failure == "input":
+        monkeypatch.setattr(controller, "_artifact_context_window_tokens", lambda: 1)
+    if entrypoint == "creation_stalled":
+        creation = workflow_mod.TaskCreationOutcome(created_count=0, attempts=1, failure_reason="No new work")
+        decision = controller._evaluate_phase_after_task_creation_failure(plan, plan.phases[0], creation)
+    else:
+        decision = controller._evaluate_phase_with_policy(
+            plan, plan.phases[0], hard_cap=100 if entrypoint == "hard_cap" else None,
+        )
+    if entrypoint == "hard_cap" and task_status == "pending":
+        expected = "partial_failure"
+    assert decision.status == expected
+    assert len(calls) == (1 if failure == "provider" else 0)
+    assert task.status == task_status
+    assert state.acceptance_results == {}
+    event = next(e for e in controller.runtime.callback_handler.events if e["type"] == "evaluator_fallback")
+    assert event["failure_kind"] == ("input_capacity" if failure == "input" else "context_overflow")
+    assert "deterministic durable-state" in decision.reason
+
+
+def test_phase_fitter_keeps_required_ledger_and_drops_optional_memories(monkeypatch):
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(_plan()))
+    required = "## Canonical task acceptance ledger\ncriteria[1]{task_uid,status}:\n  task,unrecorded\n"
+    prompt = required + "## Eligible Semantic Memories\n" + "advisory memory " * 20000
+    fitted = controller._fit_task_prompt_input("phase_evaluator", prompt, "system", [])
+    assert required in fitted
+    assert "advisory memory" not in fitted
+    event = next(e for e in controller.runtime.callback_handler.events if e["type"] == "task_prompt_input_budget")
+    assert event["role"] == "phase_evaluator"
+    assert event["reductions"] == ["Eligible Semantic Memories"]
+    assert event["estimated_tokens_after"] <= event["input_limit"]
+
+
+def test_phase_retry_growth_is_fitted_before_another_provider_call(monkeypatch):
+    state = FakeState(_plan())
+    calls = []
+
+    def runner(*args):
+        calls.append(args[0])
+        return "invalid JSON"
+
+    controller = MultiAgentWorkflowController(runtime=_runtime(env_ints={"CYBER_WORKFLOW_JSON_RETRIES": 1}),
+                                             budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+                                             text_runner=runner)
+    monkeypatch.setattr(controller, "_json_retry_prompt", lambda *_args, **_kwargs: "required retry " * 200000)
+    decision = controller._evaluate_phase(_plan(), _plan().phases[0])
+    assert decision.status == "partial_failure"
+    assert calls == ["phase_evaluator"]
+    event = next(e for e in controller.runtime.callback_handler.events if e["type"] == "evaluator_fallback")
+    assert event["failure_kind"] == "input_capacity"
+
+
+def test_phase_capacity_fallback_retains_earlier_phase_terminal_guard():
+    plan = replace(_plan(), total_phases=2, current_phase=2, phases=[PlanPhase(1, "Prior", "done"), PlanPhase(2, "Current", "active")])
+    tasks = [Task("prior", "Prior", "Prior work", phase=1, status="pending"),
+             Task("current", "Current", "Current work", phase=2, status="done")]
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(plan, tasks=tasks))
+    decision = controller._phase_evaluator_fallback(plan.phases[1], ContextWindowOverflowException("overflow"))
+    assert decision.status == "partial_failure"
+    assert "overridden" in decision.reason
+
+
+def test_phase_ledger_keeps_unresolved_criteria_and_coverage_without_mutation():
+    import csv
+
+    plan = _plan()
+    acceptance = _artifact_acceptance("recorded")
+    acceptance = replace(acceptance, criteria=(*acceptance.criteria, replace(
+        acceptance.criteria[0], id="unrecorded", description="Unresolved required work",
+    )), manifest_hash="")
+    task = Task("assigned", "Assigned", "Assigned work", phase=1, status="partial_failure", acceptance=acceptance)
+    result = AcceptanceResult("recorded", "inaccessible", "observation", "Missing operation proof",
+                              ("artifact:artifacts/one.txt",), coverage=(
+                                  CoverageResult("item-1", "satisfied", ("artifact:artifacts/one.txt",)),
+                                  CoverageResult("item-2", "inaccessible", ("artifact:artifacts/two.txt",)),
+                                  CoverageResult("item-3", "assessed_negative", ("artifact:artifacts/three.txt",)),
+                              ))
+    state = FakeState(plan, tasks=[task])
+    state.acceptance_results[task.task_uid] = [result]
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=state)
+    ledger = controller._phase_acceptance_ledger(1)
+    counts = json.loads(ledger.splitlines()[0])
+    assert counts["acceptance_status_counts"] == {"inaccessible": 1, "unrecorded": 1}
+    rows = list(csv.reader(ledger.splitlines()[2:], escapechar="\\", skipinitialspace=True))
+    assert rows[0][4] == "inaccessible" and rows[1][4] == "unrecorded"
+    assert rows[0][7] == "false" and rows[0][9] == "1"
+    assert json.loads(rows[0][10]) == {"satisfied": 1, "inaccessible": 1, "assessed_negative": 1}
+    assert state.acceptance_results[task.task_uid] == [result]
+
+
+def test_phase_capacity_fallback_reconciles_successful_replacement(monkeypatch):
+    plan = _plan()
+    original = Task("original", "Original", "Assigned work", phase=1, status="partial_failure",
+                    acceptance=_artifact_acceptance("criterion"))
+    replacement = replace(original, task_uid="replacement", status="done", replacement_of="original",
+                          supersedes_criteria=["criterion"])
+    state = FakeState(plan, tasks=[original, replacement])
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=state,
+                                             text_runner=lambda *_args: pytest.fail("input must be rejected locally"))
+    monkeypatch.setattr(controller, "_artifact_context_window_tokens", lambda: 1)
+    decision = controller._evaluate_phase(plan, plan.phases[0])
+    assert decision.status == "done"
+    assert next(task for task in state.tasks if task.task_uid == "original").status == "superseded"
+
+
+def test_phase_evaluation_preserves_unrelated_provider_errors():
+    def runner(*_args):
+        raise RuntimeError("backend unavailable")
+
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60),
+                                             state_store=FakeState(_plan()), text_runner=runner)
+    with pytest.raises(RuntimeError, match="backend unavailable"):
+        controller._evaluate_phase(_plan(), _plan().phases[0])
+    assert not any(e["type"] == "evaluator_fallback" for e in controller.runtime.callback_handler.events)
+
+
+@pytest.mark.parametrize("kind", ["publication", "acceptance", "invalid_input", "success", "unrelated"])
+def test_hypothesis_repair_context_retains_exact_submission(worker_flow_case, kind):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    binding = _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    payload = {"subjects": [{"item_id": "subject", "disposition": "none", "reason": "Correct this"}]}
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="rejected", tool_name=(
+            "record_task_acceptance" if kind == "acceptance" else "read_artifact" if kind == "unrelated"
+            else "record_hypotheses"
+        ), success=kind == "success", correctable=False,
+        input_summary="not JSON" if kind == "invalid_input" else json.dumps(payload),
+        output_summary="Subject subject hypotheses[0].supporting_refs: invalid memory reference",
+    )
+    updated = controller._retain_hypothesis_repair(task, [outcome])
+    text = controller._hypothesis_repair_context(updated)
+    assert binding["artifact_ref"] in text
+    assert "Do not restart inventory discovery" in text
+    if kind in {"publication", "acceptance", "invalid_input"}:
+        repair = updated.recovery_context["hypothesis_repair"]
+        assert repair["error"] == outcome.output_summary
+        assert repair["submission"] == (None if kind == "invalid_input" else payload)
+    else:
+        assert not updated.recovery_context.get("hypothesis_repair")
+    unbound = replace(task, recovery_context={})
+    assert controller._hypothesis_repair_context(unbound) == ""
+    assert controller._retain_hypothesis_repair(unbound, []) is unbound
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_historical_publication_repair_normalizes_coverage_and_excludes_stale_review(worker_flow_case, stale):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    binding = _publish_controller_hypotheses(controller, task)
+    legacy = {key: value for key, value in binding.items()
+              if key not in {"total_published_subject_ids", "last_updated_subject_ids"}}
+    legacy["missing_subject_ids"] = ["subject"]
+    task = controller.state.patch_task(task.task_uid, recovery_context_updates={
+        "hypothesis_publications": [legacy], "hypothesis_review": {
+            "publication_sha256": "stale" if stale else binding["sha256"],
+            "subject_reviews": [{"item_id": "subject", "decision": "retain", "hypotheses": [],
+                                 "reason": "Review marker"}],
+        },
+    })
+    state = controller._hypothesis_production_state(task)
+    assert state["mode"] == "acceptance" and state["missing_subject_ids"] == []
+    assert state["publication"]["total_published_subject_ids"] == ["subject"]
+    assert state["publication"]["missing_subject_ids"] == []
+    text = controller._hypothesis_repair_context(task)
+    assert '"published_subject_ids"' not in text
+    assert ("Review marker" in text) is not stale
+    if stale:
+        assert "Stale review feedback was excluded" in text
+    else:
+        assert "Reuse the current publication for acceptance" in text
+
+
+@pytest.mark.parametrize("case", ["absent", "partial", "complete", "corrupt", "malformed", "ordinary"])
+def test_hypothesis_production_state_validates_output_not_input(worker_flow_case, case):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    if case == "partial":
+        task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+            task.acceptance.basis, item_ids=["subject", "second"],
+        )))
+    controller.state.store_task(task)
+    if case in {"partial", "complete", "corrupt"}:
+        binding = _publish_controller_hypotheses(controller, task)
+        task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+        if case == "corrupt":
+            from modules.tools.artifact import resolve_operation_artifact_path
+
+            Path(resolve_operation_artifact_path(binding["artifact_ref"])).write_text("corrupt")
+    if case == "malformed":
+        task = replace(task, recovery_context={"hypothesis_publications": "invalid"})
+    if case == "ordinary":
+        task = Task("ordinary", "Ordinary", "Inspect", phase=1, status="active")
+        assert controller._hypothesis_production_state(task) is None
+        return
+    result = controller._hypothesis_production_state(task)
+    assert result["mode"] == ("acceptance" if case == "complete" else "production")
+    assert result["source_refs"] == list(task.acceptance.basis.source_refs)
+    if case == "partial":
+        assert result["missing_subject_ids"] == ["second"]
+    if case in {"partial", "complete"}:
+        assert result["publication"]["total_published_subject_ids"] == ["subject"]
+        assert result["publication"]["last_updated_subject_ids"] == ["subject"]
+        assert "published_subject_ids" not in result["publication"]
+        assert "subject_ids" not in result["publication"]
+    if case in {"corrupt", "malformed"}:
+        assert result["publication_error"]
+        assert controller._hypothesis_repair_context(task) is not None
+
+
+@pytest.mark.parametrize("subject", ["https://target.test/resource", "tcp://target.test:9000", "/workspace/source"])
+def test_hypothesis_continuation_preserves_protocol_neutral_inputs(worker_flow_case, subject):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(replace(_hypothesis_task(), objective=f"Derive tests for {subject}"))
+    text = controller._hypothesis_production_prompt(task, controller._hypothesis_production_state(task))
+    assert subject in text
+    assert "artifact:form.html" in text
+    assert '"subject"' in text
+    assert "record_hypotheses" in text
+    assert "no_testable_hypotheses" in text
+    assert "not proof of completed work" in text
+
+
+def test_hypothesis_correction_prompts_and_partial_progress(worker_flow_case, monkeypatch):
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    tools = controller._resolve_task_executor_base_tools(_plan(), task, {"tools": []})
+    writer = next(item for item in tools if workflow_mod.get_tool_name(item) == "record_hypotheses")
+    binding = json.loads(writer(subjects=[{
+        "item_id": "subject", "disposition": "hypotheses_supplied",
+        "hypotheses": [{**hypothesis(action), "supporting_refs": ["artifact:form.html"]}
+                       for action in ["first input", "second input", "retained input"]],
+    }]))
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    publication = workflow_mod.load_hypothesis_set(binding["artifact_ref"], task, "OP_TEST")
+    records = publication.subjects[0].hypotheses
+    review = {"publication_sha256": binding["sha256"], "subject_reviews": [{
+        "item_id": "subject", "decision": "revise", "reason": "Clarify impact",
+        "hypotheses": [{"hypothesis_id": item.hypothesis_id, "decision": "revise", "reason": "Normal behavior"}
+                       for item in records[:2]],
+    }]}
+    task = controller.state.patch_task(task.task_uid, recovery_context_updates={"hypothesis_review": review})
+    phase = replace(_plan().phases[0], produces_hypotheses=True)
+    draft = {"prompt": "Correct the supplied hypotheses", "tools": [], "shell_commands": []}
+    prompts = [
+        controller._task_prompt_builder_prompt(_plan(), phase, task),
+        controller._task_prompt_critic_prompt(_plan(), phase, task, draft),
+        controller._task_prompt_revision_prompt(_plan(), phase, task, draft, ["Clarify correction"]),
+        controller._task_prompt_bounded_repair_prompt(_plan(), phase, task, draft, ["Clarify correction"]),
+        controller._deterministic_task_prompt_spec(_plan(), phase, task, ValueError("fixture"))["prompt"],
+    ]
+    for prompt in prompts:
+        assert "revise_hypothesis" in prompt
+        assert "mode=replace" not in prompt
+        assert workflow_mod.HYPOTHESIS_SEMANTIC_GUIDANCE in prompt
+    tools = controller._resolve_task_executor_base_tools(_plan(), task, draft)
+    assert "record_hypotheses" not in controller._tool_names(tools)
+    revise = next(item for item in tools if workflow_mod.get_tool_name(item) == "revise_hypothesis")
+    revise(hypothesis_id=records[0].hypothesis_id, replacement=None, reason="No supported premise")
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    controller.text_runner = Mock(side_effect=AssertionError("Pending corrections must not be rejudged"))
+    decision = controller._evaluate_task(_plan(), phase, task, acceptance_results=[])
+    assert decision.status == "partial_failure" and decision.repair_kind == "acceptance"
+    assert records[1].hypothesis_id in decision.instructions
+    assert records[0].hypothesis_id not in decision.instructions
+    assert records[2].hypothesis_id not in decision.instructions
+
+
+def test_hypothesis_recovery_state_survives_sqlite_reload(worker_flow_case, tmp_path):
+    from modules.tools.hypotheses import build_record_hypotheses_tool
+
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+        task.acceptance.basis, item_ids=["subject", "second"],
+    )))
+    store = memory_mod.SQLiteApplicationStore(str(tmp_path / "recovery.db"), "target")
+    store.store_task("OP_TEST", task)
+
+    def current():
+        return store.get_tasks("OP_TEST")[0]
+
+    def persist(binding):
+        store.patch_task("OP_TEST", task.task_uid, recovery_context_updates={
+            "hypothesis_publications": [*current().recovery_context.get("hypothesis_publications", []), binding],
+        })
+
+    writer = build_record_hypotheses_tool(task, "OP_TEST", str(tmp_path), persist, current_task=current)
+    writer(subjects=[{"item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No safe test"}])
+    partial = controller._hypothesis_production_state(current())
+    assert partial["mode"] == "production"
+    assert partial["missing_subject_ids"] == ["second"]
+    writer(subjects=[{"item_id": "second", "disposition": "no_testable_hypotheses", "reason": "No safe test"}])
+    assert controller._hypothesis_production_state(current())["mode"] == "acceptance"
+
+
+@pytest.mark.parametrize("case", ["none", "supplied", "missing", "corrupt", "uncovered", "mixed"])
+def test_no_hypothesis_subjects_do_not_create_downstream_gaps_or_tests(worker_flow_case, monkeypatch, case):
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_rest = worker_flow_case
+    controller.state.tasks = []
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="done"))
+    if case == "mixed":
+        task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+            task.acceptance.basis, item_ids=["subject", "second"],
+        )))
+    controller.state.store_task(task)
+    plan = OperationPlan(objective="Assess", current_phase=2, total_phases=2, phases=[
+        PlanPhase(id=1, title="Hypotheses", status="done", produces_hypotheses=True,
+                  source_manifest_refs=("artifact:form.html",)),
+        PlanPhase(id=2, title="Tests", status="active", task_creation_mode="hypothesis_dependent"),
+    ])
+    controller.state.plan = plan
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    writer = next(tool for tool in controller._resolve_task_executor_base_tools(plan, task, {})
+                  if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+    supplied = {"item_id": "subject", "disposition": "hypotheses_supplied", "hypotheses": [
+        {**hypothesis(), "supporting_refs": ["artifact:form.html"]},
+    ]}
+    entries = [{"item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No supported security test"}]
+    if case == "supplied":
+        entries = [supplied]
+    if case == "mixed":
+        entries.append({**supplied, "item_id": "second"})
+    if case != "missing":
+        binding = json.loads(writer(subjects=entries))
+        if case == "corrupt":
+            from modules.tools.artifact import resolve_operation_artifact_path
+
+            Path(resolve_operation_artifact_path(binding["artifact_ref"])).write_text("corrupt")
+    ids = ["subject", "second"] if case in {"mixed", "uncovered"} else ["subject"]
+    manifest = {"items": [{"id": item, "target_id": "target-1", "kind": "service", "value": f"tcp://host/{item}"}
+                          for item in ids]}
+    monkeypatch.setattr(controller, "_load_controller_inventory_manifest", lambda *_args: (
+        manifest, task.acceptance.basis.snapshot_hash,
+    ))
+    monkeypatch.setattr(controller, "_repair_hypothesis_producer", lambda *_args: task)
+    assert controller._hypothesis_testing_unnecessary(plan, plan.phases[1]) == (case == "none")
+    batches = controller._task_creation_batches(plan, plan.phases[1], "system")
+    actual_ids = {item for batch in batches for item in batch.item_ids}
+    assert actual_ids == ({"subject"} if case == "supplied" else {"second"} if case == "mixed" else set())
+    if case in {"none", "mixed"}:
+        event = next(
+            e for e in reversed(controller.runtime.callback_handler.events) if e["type"] == "hypothesis_coverage"
+        )
+        assert event["missing_group_count"] == 0
+        assert "subject" in event["no_hypothesis_subject_ids"]
+    if case == "none":
+        decision, _counts = controller._classify_phase_from_durable_state(plan.phases[1])
+        assert decision.status == "not_applicable"
+        creator = Mock(side_effect=AssertionError("No test task should be created"))
+        monkeypatch.setattr(controller, "_create_tasks", creator)
+        controller.run()
+        creator.assert_not_called()
+        assert controller.state.get_plan().phases[1].status == "not_applicable"
+
+
+@pytest.mark.parametrize("status", ["done", "partial_failure"])
+def test_hypothesis_evaluator_reviews_current_records_and_preserves_semantic_repair(
+    worker_flow_case, monkeypatch, status,
+):
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    capture = []
+
+    def evaluate(_role, prompt, *_args, **_kwargs):
+        capture.append(prompt)
+        return {"status": status, "reason": "Reviewed current disposition", "instructions": (
+            "Correct the published positive/control expectations" if status == "partial_failure" else ""
+        ), "comparison_assessment": {"outcome": "inconclusive", "reason": "Not applicable"},
+            "repair": {"kind": "acceptance", "evidence_gaps": ["semantic gap"]}
+            if status == "partial_failure" else {"kind": "none"}}
+
+    monkeypatch.setattr(controller, "_run_json_text_agent", evaluate)
+    guard = Mock(return_value=True)
+    monkeypatch.setattr(controller, "_evaluator_reopens_resolved_execution_gate", guard)
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
+    assert decision.status == status
+    guard.assert_not_called()
+    if status == "partial_failure":
+        assert decision.repair_kind == "acceptance"
+    assert "Authoritative current hypothesis publication" in capture[0]
+    assert "no_testable_hypotheses" in capture[0]
+    assert "not every inventory item" in capture[0]
+    assert "finding_recommendation" not in capture[0]
+    assert "comparison_assessment" not in capture[0]
+    assert "closure/schema defect" not in capture[0]
+    assert "Under test_discrimination" in capture[0]
+    assert "would the positive result demonstrate the claimed" in capture[0]
+    assert "not completed exploitation" in capture[0]
+
+
+def test_semantic_hypothesis_repair_keeps_publisher_after_complete_publication(worker_flow_case, monkeypatch):
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive tests", "tools": []})
+    monkeypatch.setattr(controller, "_evaluate_task", Mock(side_effect=[
+        workflow_mod.WorkflowDecision(status="partial_failure", reason="Normal output does not establish impact",
+                                     instructions="Replace the unsupported hypothesis with a no-hypothesis disposition",
+                                     repair_kind="acceptance"),
+        workflow_mod.WorkflowDecision(status="done", reason="Supported no-hypothesis disposition"),
+    ]))
+    calls = []
+
+    def actor(_role, prompt, tools, _system, _policy):
+        calls.append(prompt)
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        if len(calls) == 1:
+            binding = json.loads(writer(subjects=[{
+                "item_id": "subject", "disposition": "supplied", "hypotheses": [
+                    {**hypothesis(), "supporting_refs": ["artifact:form.html"]},
+                ],
+            }]))
+        else:
+            assert "mode=replace" in prompt and "Do not execute future tests" in prompt
+            assert "unsupported hypothesis" in prompt
+            binding = json.loads(writer(subjects=[{
+                "item_id": "subject", "disposition": "no_testable_hypotheses",
+                "reason": "Available observations support no discriminating security test",
+            }], mode="replace"))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id="future-tests", status="satisfied", disposition="observation",
+            summary="Published disposition", evidence_refs=(binding["artifact_ref"],),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[ToolOutcome(
+            sequence=len(calls), tool_use_id=f"accepted-{len(calls)}", tool_name="record_task_acceptance",
+            success=True, correctable=False, input_summary="{}", output_summary='{"complete":true}',
+        )])
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    assert len(calls) == 2
+    updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert updated.status == "done"
+    assert workflow_mod.load_hypothesis_set(
+        workflow_mod.hypothesis_binding(updated)["artifact_ref"], updated, "OP_TEST",
+    ).subjects[0].disposition == "no_testable_hypotheses"
+
+
+@pytest.mark.parametrize("first_result", ["read_only", "rejected_acceptance", "policy_recovery", "loop"])
+def test_hypothesis_actor_continuation_retains_publisher(worker_flow_case, monkeypatch, first_result):
+    controller, _consumer, _factory, _worker, _store, reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [_tool("get_inventory_item")])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive hypotheses", "tools": []})
+    monkeypatch.setattr(controller, "_evaluate_task", lambda *_args, **_kwargs: workflow_mod.WorkflowDecision(
+        status="done", reason="Published and reviewed",
+    ))
+    prompts = []
+
+    def actor(_role, prompt, tools, _system, policy):
+        prompts.append(prompt)
+        names = {workflow_mod.get_tool_name(tool) for tool in tools}
+        assert "record_hypotheses" in names
+        assert "get_inventory_item" in names
+        if len(prompts) == 1:
+            outcome = ToolOutcome(
+                sequence=1, tool_use_id="input", tool_name="read_artifact", success=True,
+                correctable=False, input_summary=json.dumps({"path": reference}),
+                output_summary="Inventory observations", artifact_refs=(reference,),
+            )
+            if first_result == "rejected_acceptance":
+                outcome = replace(
+                    outcome, tool_name="record_task_acceptance", success=False,
+                    input_summary=json.dumps({"status": "satisfied"}),
+                    output_summary="Publish assigned subjects with record_hypotheses before successful acceptance",
+                )
+            return workflow_mod.TaskExecutorCycleResult(
+                text="Input inspected", outcomes=[outcome],
+                recovery_required=first_result == "policy_recovery",
+                recovery_guidance="Repair the missing acceptance",
+                repeat_loop_detected=first_result == "loop", repeat_loop_signature="read-loop",
+            )
+        assert "artifact:form.html" in prompt
+        assert "subject" in prompt
+        assert "record_hypotheses" in prompt
+        assert policy.required_tool_names != {"record_task_acceptance"} or policy.max_model_turns > 6
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        binding = json.loads(writer(subjects=[{
+            "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No safe test supported",
+        }]))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id="future-tests", status="satisfied", disposition="observation",
+            summary="No safe test supported", evidence_refs=(binding["artifact_ref"],),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[ToolOutcome(
+            sequence=2, tool_use_id="accepted", tool_name="record_task_acceptance", success=True,
+            correctable=False, input_summary="{}", output_summary='{"complete":true}',
+        )])
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    assert len(prompts) == 2
+    updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert updated.status == "done"
+    assert controller._hypothesis_production_state(updated)["mode"] == "acceptance"
+
+
+@pytest.mark.parametrize("case", ["repair", "already_bound", "no_binding", "success", "other_error", "empty"])
+def test_hypothesis_acceptance_replay_is_limited_to_reference_omission(worker_flow_case, case):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    binding = _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    payload = {"status": "satisfied", "disposition": "observation", "summary": "Existing semantic decision",
+               "evidence_refs": [binding["artifact_ref"]] if case == "already_bound" else []}
+    outcome = ToolOutcome(
+        sequence=1, tool_use_id="rejected", tool_name="record_task_acceptance", success=case == "success",
+        correctable=False, input_summary=json.dumps(payload),
+        output_summary=("semantic rejection" if case == "other_error"
+                        else "Include the published hypothesis_set artifact reference returned by record_hypotheses"),
+    )
+    if case == "no_binding":
+        task = replace(task, recovery_context={})
+    recorded = []
+    controller._replay_hypothesis_acceptance(task, lambda **values: recorded.append(values),
+                                            [] if case == "empty" else [outcome])
+    assert recorded == ([payload] if case == "repair" else [])
+    controller._replay_hypothesis_acceptance(task, None, [outcome])
+
+
+@pytest.mark.parametrize("subject", ["https://target.test:8443", "tcp://target.test:9000", "/workspace/source"])
+def test_quoted_external_evidence_reaches_critic_without_scope_rewrite(subject):
+    plan = replace(_plan(), targets=[OperationTarget(
+        "target-1", subject, "filesystem" if subject.startswith("/") else "network",
+    )])
+    task = Task("quoted", "Inspect recorded data", "Review a value containing https://outside.test", phase=1,
+                status="active", target_scope="subset", target_ids=["target-1"])
+    seen = []
+
+    def runner(role, prompt, tools, system):
+        seen.append(role)
+        if role == "task_prompt_builder":
+            return json.dumps({"prompt": "Inspect assigned data; observed value was https://outside.test", "tools": []})
+        assert "Quoted observations, redirect destinations" in " ".join(prompt.split())
+        return _checklist_response('{"issues":[]}')
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(env_ints={"CYBER_WORKFLOW_TASK_PROMPT_REFINEMENT_ITERATIONS": 3}),
+        budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(plan, [task]), text_runner=runner,
+    )
+    assert "https://outside.test" in controller._build_task_prompt(plan, plan.phases[0], task)["prompt"]
+    assert seen == ["task_prompt_builder", "task_prompt_critic"]
+    assert not any(event["type"] == "task_scope_validation" for event in controller.runtime.callback_handler.events)
+    controller._emit_task_scope_validation(plan, task, "pre_executor", "allowed")
+    event = controller.runtime.callback_handler.events[-1]
+    assert event["violations"] == []
+    assert event["assignment_errors"] == []
+    assert event["validation_source"] == "structured_assignment"
+
+
+def test_successful_publication_preserves_pending_hypothesis_acceptance(worker_flow_case):
+    controller, _consumer, _factory, _worker, _store, _reference = worker_flow_case
+    repair = {"tool_name": "record_task_acceptance", "submission": {"summary": "Keep my decision"},
+              "error": "Missing publication reference"}
+    task = replace(workflow_mod.hypothesis_contract(_hypothesis_task(status="active")),
+                   recovery_context={"hypothesis_repair": repair})
+    controller.state.store_task(task)
+    outcome = ToolOutcome(sequence=1, tool_use_id="published", tool_name="record_hypotheses", success=True,
+                          correctable=False, input_summary="{}", output_summary="Published")
+    updated = controller._retain_hypothesis_repair(task, [outcome])
+    assert updated.recovery_context["hypothesis_repair"] == repair
+
+
+@pytest.mark.parametrize("checkpoint_outcome", ["published", "blocked", "inspect", "publish"])
+def test_hypothesis_checkpoint_forces_publication_and_scopes_followup(
+    worker_flow_case, monkeypatch, checkpoint_outcome,
+):
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [_tool("shell")])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive hypotheses", "tools": []})
+    monkeypatch.setattr(controller, "_evaluate_task", lambda *_args, **_kwargs: workflow_mod.WorkflowDecision(
+        status="done", reason="Published and reviewed",
+    ))
+    review = {"status": "blocked" if checkpoint_outcome == "blocked" else "partial_failure",
+              "reason": "Required source absent" if checkpoint_outcome == "blocked" else "Use existing inputs",
+              "instructions": "Publish from retained input", "repair": {
+                  "kind": "none" if checkpoint_outcome == "blocked" else "execution"
+                  if checkpoint_outcome == "inspect" else "acceptance",
+              }, "prerequisite_gaps": [{
+                  "criterion_id": task.acceptance.criteria[0].id, "missing_input": "Required source section",
+                  "item_ids": ["subject"], "source_refs": ["artifact:form.html"],
+              }] if checkpoint_outcome in {"blocked", "inspect"} else []}
+    critiques = []
+
+    def critic(_role, _prompt, *_args, **kwargs):
+        kwargs["data_validator"](review)
+        critiques.append(True)
+        return review
+
+    monkeypatch.setattr(controller, "_run_json_text_agent", critic)
+    calls = []
+
+    def actor(_role, prompt, tools, _system, policy):
+        calls.append(prompt)
+        names = controller._tool_names(tools)
+        if len(calls) == 1:
+            assert policy.checkpoint_tool_calls == 16
+            assert policy.progress_key() == ""
+            from modules.handlers.tool_recovery import ToolOutcomeJournal
+
+            outcome = ToolOutcomeJournal().append(
+                tool_use_id="observed", tool_name="read_artifact", success=True, correctable=False,
+                tool_input={"path": "artifact:form.html"},
+                output=json.dumps({"artifact_ref": "artifact:form.html", "content": "Client observed guarded catalog"}),
+            )
+            assert outcome.inspection_result_ref
+            return workflow_mod.TaskExecutorCycleResult(
+                text="Inspected", outcomes=[outcome], reason="publication_checkpoint",
+                details={"successful_tool_calls_without_progress": 18},
+            )
+        assert "shell" not in names
+        if len(calls) == 2:
+            assert "Publication checkpoint" in prompt
+            assert "Use get_inventory_item" not in prompt
+            assert "No source inspection tools" in prompt
+            assert policy.max_model_turns == 8
+            assert "Client observed guarded catalog" in prompt
+            assert "read_inspection_result" in names
+            if checkpoint_outcome != "published":
+                return workflow_mod.TaskExecutorCycleResult(text="Missing input described", outcomes=[])
+        if len(calls) > 2:
+            assert ("read_hypothesis_input" in names) == (checkpoint_outcome == "inspect")
+            assert "Use get_inventory_item" not in prompt
+            assert "Do not restart discovery" in prompt
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        binding = json.loads(writer(subjects=[{
+            "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No supported security test",
+        }]))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id, status="satisfied",
+            disposition="observation", summary="Published reasoned disposition",
+            evidence_refs=[binding["artifact_ref"]],
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[])
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert updated.status == ("blocked" if checkpoint_outcome == "blocked" else "done")
+    assert len(calls) == (2 if checkpoint_outcome in {"published", "blocked"} else 3)
+    assert bool(critiques) == (checkpoint_outcome != "published")
+    checkpoint = next(event for event in controller.runtime.callback_handler.events
+                      if event["type"] == "hypothesis_publication_checkpoint")
+    assert checkpoint["successful_tool_calls_without_progress"] == 18
+    assert checkpoint["checkpoint_threshold"] == 16
+
+
+@pytest.mark.parametrize("inspection_required", [False, True])
+def test_partial_publication_recovers_only_missing_subjects(worker_flow_case, monkeypatch, inspection_required):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+        task.acceptance.basis, item_ids=("subject", "parameter-a", "parameter-b"),
+    )))
+    controller.state.store_task(task)
+    initial = _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    if inspection_required:
+        controller.state.patch_task(task.task_uid, recovery_context_updates={"hypothesis_checkpoint": {
+            "status": "partial_failure", "repair": {"kind": "execution"}, "prerequisite_gaps": [{
+                "criterion_id": task.acceptance.criteria[0].id, "item_ids": ["parameter-a", "parameter-b"],
+                "source_refs": list(task.acceptance.basis.source_refs), "missing_input": "Inspect supplied source",
+            }],
+        }})
+        task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive", "tools": []})
+    monkeypatch.setattr(controller, "_evaluate_task", lambda *_args, **_kwargs: workflow_mod.WorkflowDecision(
+        status="done", reason="Reviewed publication",
+    ))
+    calls = []
+
+    def actor(_role, prompt, tools, _system, policy):
+        calls.append(prompt)
+        names = controller._tool_names(tools)
+        assert "Missing-subject recovery packet" in prompt
+        assert "shell" not in names and "search_artifact" not in names
+        assert "parameter-a" in prompt and "parameter-b" in prompt
+        assert policy.checkpoint_tool_calls == (4 if inspection_required else 0)
+        assert ("read_hypothesis_input" in names) == inspection_required
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        if inspection_required:
+            key = policy.progress_key()
+            writer(subjects=[{"item_id": "subject", "disposition": "no_testable_hypotheses",
+                              "reason": "Updated existing subject"}], mode="replace")
+            assert policy.progress_key() == key
+        result = json.loads(writer(subjects=[{
+            "item_id": uid, "disposition": "no_testable_hypotheses", "reason": "No supported security test",
+        } for uid in ("parameter-a", "parameter-b")]))
+        if inspection_required:
+            assert policy.progress_key() != key
+        assert result["missing_subject_ids"] == []
+        assert "subject" in result["total_published_subject_ids"]
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id, status="satisfied", disposition="observation",
+            summary="All assigned subjects published", evidence_refs=[result["artifact_ref"]],
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[])
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert len(calls) == 1 and current.status == "done"
+    assert Path(workflow_mod.resolve_operation_artifact_path(initial["artifact_ref"])).exists()
+
+
+@pytest.mark.parametrize("roles", [[], ["member"], ["unknown"]])
+def test_hypothesis_authentication_roles_are_scoped_to_declared_targets(worker_flow_case, monkeypatch, roles):
+    controller, task, *_rest = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", "https://target.test", "network"),
+                                     OperationTarget("target-2", "tcp://target.test:9000", "network")])
+    task = replace(task, target_scope="subset", target_ids=["target-1"])
+    monkeypatch.setattr(controller, "_authentication_role_catalog", lambda _plan: {
+        "https://target.test": {"member": []},
+    })
+    requirement = workflow_mod.AuthenticationRequirement(roles=roles)
+    if roles == ["unknown"]:
+        with pytest.raises(ValueError, match="declared"):
+            controller._validate_hypothesis_authentication(plan, task, requirement)
+    else:
+        controller._validate_hypothesis_authentication(plan, task, requirement)
+
+
+@pytest.mark.parametrize("target", ["https://target.test", "tcp://target.test:9000", "/workspace/source"])
+@pytest.mark.parametrize("roles", [[], ["member"], ["member", "reviewer"]])
+def test_hypothesis_identity_context_scopes_declared_roles_without_session_setup(
+    worker_flow_case, monkeypatch, target, roles,
+):
+    controller, task, *_ = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", target, "network"),
+                                     OperationTarget("target-2", "https://other.test", "network")])
+    controller.state.store_plan(plan)
+    task = replace(task, target_scope="subset", target_ids=["target-1"])
+    catalog = Mock(return_value={
+        workflow_mod.canonicalize_credential_target(target): {
+            role: [f"credential:{role}-declared"] for role in roles
+        }, "https://other.test": {"unrelated-role": ["credential:other"]},
+    })
+    monkeypatch.setattr(controller, "_authentication_role_catalog", catalog)
+    monkeypatch.setattr(controller, "_run_authentication_agent", Mock(side_effect=AssertionError("No login")))
+    rendered = controller._hypothesis_identity_context(task)
+    assert f"declared_identity_roles[{len(roles)}]" in rendered
+    assert "unrelated-role" not in rendered and "https://other.test" not in rendered
+    assert "not session validation" in rendered
+    assert "not that authentication is absent" in rendered
+    for role in roles:
+        assert role in rendered and f"credential:{role}-declared" in rendered
+    assert [t.target_id for t in catalog.call_args.args[0].targets] == ["target-1"]
+
+
+def test_hypothesis_identity_context_without_plan_or_targets(worker_flow_case, monkeypatch):
+    controller, task, *_ = worker_flow_case
+    catalog = Mock(side_effect=AssertionError("No targets to resolve"))
+    monkeypatch.setattr(controller, "_authentication_role_catalog", catalog)
+    for plan in (None, _plan()):
+        controller.state.store_plan(plan)
+        assert "declared_identity_roles[0]" in controller._hypothesis_identity_context(task)
+
+
+def test_hypothesis_identity_context_includes_unknown_and_expired_role_declarations(worker_flow_case, monkeypatch):
+    controller, task, *_rest, store, _ref = worker_flow_case
+    plan = replace(_plan(), targets=[OperationTarget("target-1", "https://target.test", "network")])
+    controller.state.store_plan(plan)
+    store.list_credentials = Mock(return_value=[
+        {"credential_id": "unknown-id", "role": "member", "status": "unknown"},
+        {"credential_id": "expired-id", "role": "reviewer", "status": "expired"},
+    ])
+    monkeypatch.setattr(controller, "_credential_registration_flows", lambda *_args: [])
+    rendered = controller._hypothesis_identity_context(task)
+    assert "member" in rendered and "reviewer" in rendered
+    assert "credential:unknown-id" in rendered and "credential:expired-id" in rendered
+    assert "unknown" in store.list_credentials.call_args.kwargs["statuses"]
+    assert "expired" in store.list_credentials.call_args.kwargs["statuses"]
+    assert "do not establish valid credentials" in rendered
+
+
+def test_hypothesis_task_batch_rejects_atomically_before_any_persistence(worker_flow_case, monkeypatch):
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_rest = worker_flow_case
+    producer = workflow_mod.hypothesis_contract(_hypothesis_task(status="done"))
+    controller.state.store_task(producer)
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(controller, "_authentication_role_catalog", lambda _plan: {})
+    writer = next(tool for tool in controller._resolve_task_executor_base_tools(_plan(), producer, {})
+                  if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+    second = hypothesis("Other input")
+    second["authentication_requirement"] = {"comparison": "none", "roles": ["member"]}
+    for entry in (second,):
+        entry["supporting_refs"] = ["artifact:form.html"]
+    first = {**hypothesis(), "supporting_refs": ["artifact:form.html"]}
+    binding = json.loads(writer(subjects=[{
+        "item_id": "subject", "disposition": "supplied", "hypotheses": [first, second],
+    }]))
+    batch = workflow_mod.TaskCreationBatch(
+        1, 1, "artifact:form.html", (("target-1", "service", "tcp://target.test:9000", ("subject",)),), 0,
+        (("subject", (producer.task_uid,)),), (("subject", (binding["artifact_ref"],)),),
+    )
+    calls = []
+
+    def compile_batch(_phase, _batch, *, assignment_transformer, task_sink):
+        def submit(_proposals):
+            calls.append(True)
+            if len(calls) == 2:
+                raise ValueError("Invalid second proposal")
+            staged = replace(producer, task_uid="must-not-persist", kind="standard", phase=2, status="pending")
+            task_sink(assignment_transformer([staged], []))
+            return '{"created_count":1}'
+        return submit
+
+    monkeypatch.setattr(controller, "_task_creator_submitter", compile_batch)
+    with pytest.raises(ValueError, match="second proposal"):
+        controller._create_hypothesis_tasks(
+            PlanPhase(id=2, title="Tests", status="active", task_creation_mode="hypothesis_dependent"), [batch],
+        )
+    assert not any(task.task_uid == "must-not-persist" for task in controller.state.list_tasks())
+
+
+def test_hypothesis_noop_critic_prose_does_not_trigger_another_actor(worker_flow_case, monkeypatch):
+    controller, *_rest = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive hypotheses", "tools": []})
+    monkeypatch.setattr(controller, "_evaluate_task", lambda *_args, **_kwargs: workflow_mod.WorkflowDecision(
+        status="partial_failure", reason="Optional metadata absent", instructions="No further task work required",
+        repair_kind="none",
+    ))
+    calls = []
+
+    def actor(_role, _prompt, tools, _system, _policy):
+        calls.append(True)
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        binding = json.loads(writer(subjects=[{
+            "item_id": "subject", "disposition": "no_testable_hypotheses", "reason": "No supported security test",
+        }]))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id=task.acceptance.criteria[0].id, status="satisfied", disposition="observation",
+            summary="No supported hypotheses", evidence_refs=[binding["artifact_ref"]],
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[])
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("mode", ["standard", "hypothesis_dependent"])
+@pytest.mark.parametrize("created_count,batches,attempts", [(0, 1, 2), (1, 1, 2), (64, 3, 4)])
+def test_task_creation_reports_aggregate_persisted_count_once(monkeypatch, caplog, mode, created_count, batches, attempts):
+    plan = _plan()
+    plan.phases[0] = replace(plan.phases[0], task_creation_mode=mode)
+    archived = [Task(f"old-{index}", "Historical", "Previous work", phase=1, status="replanned")
+                for index in range(73)]
+    state = FakeState(plan, tasks=archived)
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state,
+        text_runner=lambda *_args: pytest.fail("Task creation summary must not invoke a model"),
+    )
+
+    def create(_plan, _phase):
+        for index in range(created_count):
+            state.store_task(Task(f"new-{index}", "New task", "Assigned work", phase=1, status="pending"))
+        return workflow_mod.TaskCreationOutcome(
+            created_count=created_count, attempts=attempts, batch_count=batches,
+            failure_reason="Rejected batch" if not created_count else "",
+        )
+
+    monkeypatch.setattr(controller, "_create_tasks", create)
+    caplog.set_level("INFO", logger=workflow_mod.__name__)
+    if created_count:
+        class SummaryObserved(Exception):
+            """Stop at the next boundary without executing newly queued work."""
+
+        monkeypatch.setattr(controller, "_get_or_activate_task", Mock(side_effect=SummaryObserved))
+        with pytest.raises(SummaryObserved):
+            controller.run()
+    else:
+        with pytest.raises(workflow_mod.WorkflowInvariantError, match="Rejected batch"):
+            controller.run()
+    word = "task" if created_count == 1 else "tasks"
+    expected = f"Phase 1 task creation: created {created_count} {word}."
+    outputs = [event["content"] for event in controller.runtime.callback_handler.events
+               if event["type"] == "output" and event.get("content", "").startswith("Phase 1 task creation:")]
+    assert outputs == [expected]
+    assert sum(expected in record.getMessage() for record in caplog.records) == 1
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("correction", ["preserve", "reverse", "unexplained", "blocked", "remove_gap"])
+def test_hypothesis_schema_correction_preserves_semantic_feedback(worker_flow_case, monkeypatch, structured, correction):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    binding = _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    row = {"item_id": "subject", "decision": "revise", "reason": "Unsupported claim needs replacement",
+           "hypotheses": []}
+    if correction in {"preserve", "reverse"}:
+        row["no_hypothesis_basis"] = {"kind": "metadata_only", "inspection_refs": []}
+    initial = {"status": "done", "publication_sha256": binding["sha256"], "subject_reviews": [row],
+               "repair": {"kind": "acceptance", "mode": "replace"}}
+    corrected = {**initial, "repair": {"kind": "acceptance"}}
+    if correction == "reverse":
+        corrected["subject_reviews"] = [{**row, "decision": "retain", "reason": "Now acceptable"}]
+    if correction in {"unexplained", "blocked"}:
+        initial = {"status": "partial_failure" if correction == "unexplained" else "blocked",
+                   "publication_sha256": binding["sha256"],
+                   "subject_reviews": [{**row, "decision": "retain"}]}
+        corrected = initial
+    if correction == "remove_gap":
+        initial = {**initial, "subject_reviews": [{**row, "decision": "retain"}], "prerequisite_gaps": [{
+            "criterion_id": "future-tests", "missing_input": "Explicitly required source unavailable",
+            "item_ids": ["subject"], "source_refs": ["artifact:form.html"],
+        }]}
+        corrected = {**initial, "repair": {"kind": "none"}, "prerequisite_gaps": []}
+    responses = iter([initial, corrected])
+    prompts = []
+
+    def runner(_role, prompt, *_args):
+        prompts.append(prompt)
+        result = next(responses)
+        return result if structured else json.dumps(result)
+
+    controller.text_runner = runner
+    controller.structured_runner = runner if structured else None
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
+    assert decision.status == "partial_failure"
+    assert len(prompts) == 2
+    stored = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    feedback = stored.recovery_context["hypothesis_review"]
+    if correction != "preserve":
+        # Invalid subjects are not frozen into canonical feedback when bounded correction fails.
+        assert "subject_reviews" not in feedback
+        assert decision.repair_kind == "none"
+        return
+    assert feedback["subject_reviews"] == initial["subject_reviews"]
+    if correction == "preserve":
+        assert decision.repair_kind == "acceptance"
+        assert row["reason"] in decision.instructions
+        assert row["reason"] in controller._hypothesis_repair_context(stored)
+        # An unchanged publication cannot clear an unresolved semantic judgment on another review.
+        controller.text_runner = Mock(side_effect=AssertionError("Do not rejudge unchanged rejected publication"))
+        again = controller._evaluate_task(_plan(), _plan().phases[0], stored, acceptance_results=[])
+        assert again.status == "partial_failure" and again.repair_kind == "acceptance"
+        assert row["reason"] in again.instructions
+    else:
+        assert "schema" in decision.reason
+        assert decision.repair_kind == "none"
+
+
+@pytest.mark.parametrize("module", ["web", "web_recon", "ctf", "code_security", ""])
+def test_complete_hypothesis_prompts_agree_on_publication_and_repair(worker_flow_case, monkeypatch, module):
+    from modules.prompts import factory as prompt_factory
+
+    controller, *_ = worker_flow_case
+    controller.runtime.config.module = module
+    controller.state.store_plan(replace(_plan(), targets=[
+        OperationTarget("target-1", "https://service.test", "network"),
+    ]))
+    monkeypatch.setattr(controller, "_authentication_role_catalog", lambda _plan: {
+        "https://service.test": {"member": ["registration_flow:declared-flow"]},
+    })
+    templates = Path("src/modules/prompts/templates")
+    monkeypatch.setattr(prompt_factory, "load_prompt_template", lambda name: (templates / name).read_text())
+    controller.runtime.system_prompt = prompt_factory.get_system_prompt(
+        "https://service.test", "Assess frozen observations", "OP_TEST",
+    )
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    root = Path(workflow_mod._operation_output_root())
+    (root / "inventory.json").write_text(json.dumps({"schema_version": 1, "unassessed_gaps": [], "items": [{
+        "id": "subject", "kind": "endpoint", "target_id": "target-1", "value": "https://service.test/upload?fileName=example",
+        "attributes": {"source_artifact_refs": ["artifact:summary.json"],
+                       "interaction": {"interface": "http", "operations": ["GET"], "inputs": []}},
+    }]}))
+    (root / "summary.json").write_text(json.dumps({"analysis_artifact": "artifact:implementation.js"}))
+    (root / "implementation.js").write_text("upload(file, fileName); renderHtml(fileName)")
+    from modules.tools.inventory_inputs import input_candidates
+
+    manifest, digest = memory_mod._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    candidate_id = input_candidates(manifest, manifest["items"][0], [])[0]["candidate_id"]
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+        task.acceptance.basis, source_refs=["artifact:inventory.json"], snapshot_hash=digest,
+    )))
+    workflow_mod.retain_inspections(task, [ToolOutcome(
+        sequence=1, tool_use_id="summary", tool_name="read_artifact", success=True, correctable=False,
+        input_summary="summary read", output_summary="implementation reference returned",
+        artifact_refs=("artifact:implementation.js",), structured_input={"path": "artifact:summary.json"},
+    )], str(root))
+    controller.state.store_task(task)
+    _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    plan = _plan()
+    phase = replace(plan.phases[0], produces_hypotheses=True)
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    draft = {"prompt": "Derive proposals from frozen observations", "tools": [], "shell_commands": []}
+    prompts = [
+        controller._task_prompt_builder_prompt(plan, phase, task),
+        controller._task_prompt_critic_prompt(plan, phase, task, draft),
+        controller._task_prompt_revision_prompt(plan, phase, task, draft, ["Clarify proposal"]),
+        controller._task_prompt_bounded_repair_prompt(plan, phase, task, draft, ["Clarify proposal"]),
+        controller._task_evaluator_system_prompt() + controller._task_evaluator_prompt(plan, phase, task),
+        controller.runtime.system_prompt + controller._hypothesis_input_context(task)
+        + controller._task_executor_contract(task, {"record_hypotheses", "record_task_acceptance"}),
+    ]
+    roles = ["task_prompt_builder", "task_prompt_critic", "task_prompt_builder", "task_prompt_builder"]
+    for index, role in enumerate(roles):
+        prompts[index] = prompt_factory.get_role_system_prompt(controller.runtime.system_prompt, role) + prompts[index]
+    for prompt in prompts:
+        assert candidate_id in prompt
+        assert "inventory_url" in prompt
+        assert "artifact:implementation.js" in prompt
+        assert "artifact:summary.json" in prompt
+        assert "Returned references alone are not inspected" in prompt
+        assert prompt.count("Already inspected sources and recorded lookup arguments") == 1
+        assert "inferred GET does not mean GET-only" in prompt
+        assert "operation provenance is unknown" in prompt
+        assert "Empty input lists" in prompt
+        assert "declared_identity_roles[1]" in prompt
+        assert "registration_flow:declared-flow" in prompt
+        assert "generation only, not proposed future tests" in prompt
+        assert "One role is not a cross-role gap" in prompt
+        assert "Missing session readiness does not justify an empty" in prompt
+        assert "explicitly linked parameter records" in prompt
+        assert "its presence alone does not require a hypothesis" in prompt
+        assert "do not invent hypotheses or require a minimum count" in prompt
+        assert "inspection limits do not themselves justify" in prompt
+        assert "follow its supplied implementation/source references" in prompt
+        assert "not individual hypotheses" in prompt
+        assert "no_testable_hypotheses" in prompt
+        assert "use retained evidence rather than live target acquisition" in prompt
+        assert "Do not fetch the live target or execute proposed tests" in prompt
+        assert 'get_inventory_item(view="investigation")' in prompt
+        assert "Server implementation is not required" in prompt
+        assert "without query/body" in prompt
+        assert "Structural mismatches must remain explicit" in prompt
+        assert "separately contracted follow-up task" not in prompt
+    evaluator = prompts[-2]
+    assert "input_candidate_ids" in evaluator
+    assert "accepted subject reviews" in evaluator
+    assert "Do not require every available source to be inspected" in evaluator
+    assert "contradicts recorded inputs" in evaluator
+    assert "authenticated, same-role account, different-role, or tenant scenarios" in evaluator
+    assert "execution of identity comparisons" in evaluator
+    assert "Do not request findings or identity comparisons" not in evaluator
+    assert "behavior_assessments" in evaluator
+    assert "supports_conditional_test" in evaluator
+    assert "no_relevant_behavior_reason" in evaluator
+    assert "before the checkpoint" in evaluator
+    assert "Python binds publication_sha256; omit it" in evaluator
+    assert "Always include top-level status" in evaluator
+    assert "INSIDE subject_reviews[].no_hypothesis_basis" in evaluator
+    assert "Complete shape example using the bound IDs" in evaluator
+    assert "read_inspection_result" in controller._task_evaluator_system_prompt()
+    assert "at least one content-bearing saved inspection" in evaluator
+    assert "Each assessment must cite content-bearing" in evaluator
+    assert "Under test_discrimination" in evaluator
+    assert "publishes replacements with mode=replace" not in evaluator
+    assert "actor uses revise_hypothesis" in evaluator
+    assert "security consequence" in evaluator
+    assert "metadata-only references may supplement" in evaluator
+    for prompt in prompts[:4]:
+        assert "Positive expectations must demonstrate the claimed security consequence" in prompt
+        assert "completed exploitation is not required" in prompt
+    assert "request focused prerequisite inspection" in evaluator
+    assert "Do not put replacement" in evaluator
+    assert "closure/schema defect" not in evaluator
+    assert "capture headers and response body" not in prompts[3]
+    from modules.agents.prompt_context import fit_task_prompt
+
+    for prompt in prompts:
+        fitted = fit_task_prompt(
+            prompt + "\n## Task history\n" + "advisory " * 10000,
+            "system", [], "test-model", len(prompt) + 2000, 0, lambda _event: None, estimate_input=len,
+        )
+        assert candidate_id in fitted
+        assert 'get_inventory_item(view="investigation")' in fitted
+        assert "Server implementation is not required" in fitted
+        assert "Structural mismatches must remain explicit" in fitted
+        assert workflow_mod.HYPOTHESIS_SEMANTIC_GUIDANCE in fitted
+        assert "assess concrete observed behavior" in fitted
+        assert "future test can resolve" in fitted
+        if "Required hypothesis review output" in prompt:
+            assert "Always include top-level status" in fitted
+            assert "INSIDE subject_reviews[].no_hypothesis_basis" in fitted
+            assert "Complete shape example using the bound IDs" in fitted
+
+
+@pytest.mark.parametrize("subject", ["https://service.test/entry", "tcp://service.test:1234", "/workspace/source.py"])
+@pytest.mark.parametrize("needs_input", [False, True])
+@pytest.mark.parametrize("continuation", [False, True])
+def test_structured_hypothesis_review_reaches_real_actor_replacement(
+    worker_flow_case, monkeypatch, subject, needs_input, continuation,
+):
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(replace(
+        _hypothesis_task(status="active"), title=f"Hypotheses for {subject}",
+        objective=f"Derive supported future tests for {subject}",
+    ))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive tests", "tools": []})
+    actors = []
+    reviews = []
+
+    def evaluator(role, _prompt, *_args):
+        assert role == "task_evaluator"
+        if _prompt:  # Empty only when constructing the retained continuation review fixture.
+            assert "semantic_checks contains grounding and test_discrimination" in _prompt
+            assert "do not establish ownership, tenants, or missing authorization" in _prompt
+            assert "Missing execution credentials alone" in _prompt
+        current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+        binding = workflow_mod.hypothesis_binding(current)
+        publication = workflow_mod.load_hypothesis_set(binding["artifact_ref"], current, "OP_TEST")
+        row = publication.subjects[0]
+        reviews.append(binding["sha256"])
+        journal = workflow_mod.hypothesis_inspection_journal(current, "OP_TEST", workflow_mod._operation_output_root())
+        inspected = journal.record_inspection("read_artifact", "fixture", {},
+                                              json.dumps({"content": "Observed benign target behavior"}), ())
+        return json.dumps({
+            "status": "done", "instructions": None, "publication_sha256": binding["sha256"], "subject_reviews": [{
+                "item_id": "subject", "decision": "revise" if row.hypotheses else "retain",
+                "reason": "Controls do not distinguish impact" if row.hypotheses else "Sound empty disposition",
+                "hypotheses": [{"hypothesis_id": item.hypothesis_id, "decision": "withdraw", "semantic_checks": _semantic_checks(),
+                                "reason": "The positive expectation proves only ordinary delivery"}
+                               for item in row.hypotheses],
+                **({"no_hypothesis_basis": {"kind": "inspected_evidence", "inspection_refs": [inspected],
+                                           "no_relevant_behavior_reason": "Inspected static material has no interaction"}}
+                   if not row.hypotheses else {}),
+            }],
+            "prerequisite_gaps": [{"criterion_id": "future-tests", "missing_input": "Inspect the frozen form",
+                                   "item_ids": ["subject"], "source_refs": ["artifact:form.html"]}]
+            if needs_input and row.hypotheses else [],
+        })
+
+    def actor(_role, prompt, tools, system, _policy):
+        actors.append((prompt, system))
+        if len(actors) == 1 and not continuation:
+            writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+            binding = json.loads(writer(subjects=[{
+                "item_id": "subject", "disposition": "supplied", "hypotheses": [
+                    {**hypothesis(), "supporting_refs": ["artifact:form.html"]},
+                ],
+            }]))
+        else:
+            assert prompt.count("## Retained inspection evidence") == 1
+            assert prompt.count(workflow_mod.HYPOTHESIS_SEMANTIC_GUIDANCE) == 1
+            assert prompt.count("Controls do not distinguish impact") == 1
+            assert prompt.count("The positive expectation proves only ordinary delivery") == 1
+            assert "## Exact hypothesis repair records" in prompt
+            records_text = prompt.split("## Exact hypothesis repair records\n", 1)[1].split("\nThese are", 1)[0]
+            records = json.loads(records_text)
+            assert records["publication_sha256"] == reviews[0]
+            correction = records["corrections"][0]
+            current = correction["current_hypothesis_to_revise"]
+            assert correction["item_id"] == "subject"
+            assert current["observed_basis"] == hypothesis()["observed_basis"]
+            assert "record_hypotheses" not in controller._tool_names(tools)
+            assert "mode=replace" not in prompt
+            assert '"published_subject_ids"' not in prompt
+            from modules.agents.prompt_context import fit_task_prompt
+
+            fitted = fit_task_prompt(
+                prompt + "\n## Task history\n" + "advisory " * 10000,
+                system, [], "test-model", len(prompt) + len(system) + 2000, 0,
+                lambda _event: None, estimate_input=lambda text: len(text) + len(system),
+            )
+            assert records_text in fitted
+            assert workflow_mod.HYPOTHESIS_SEMANTIC_GUIDANCE in fitted
+            assert records_text in controller._fit_hypothesis_replay(
+                "## Exact hypothesis repair records\n" + records_text, system, tools,
+            )
+            assert reviews[0] in prompt
+            assert "semantic_checks" in prompt and "identity_requirements" in prompt
+            assert "Do not execute future tests" in prompt
+            if needs_input:
+                assert "Inspect required missing inputs first" in prompt
+                assert "shell" not in controller._tool_names(tools)
+                reader = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "read_hypothesis_input")
+                assert "username" in reader(source_ref="artifact:form.html")
+                with pytest.raises(ValueError, match="identified source_ref"):
+                    reader(source_ref="artifact:unrelated.txt")
+            revise = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "revise_hypothesis")
+            binding = json.loads(revise(
+                hypothesis_id=current["hypothesis_id"], replacement=None,
+                reason="Frozen observations support no test that distinguishes unauthorized behavior",
+            ))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id="future-tests", status="satisfied", disposition="observation",
+            summary="Published disposition", evidence_refs=(binding["artifact_ref"],),
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[ToolOutcome(
+            sequence=len(actors), tool_use_id=f"accepted-{len(actors)}", tool_name="record_task_acceptance",
+            success=True, correctable=False, input_summary="{}", output_summary='{"complete":true}',
+        )])
+
+    if continuation:
+        from modules.agents.hypothesis_review import normalize_review
+        from modules.tools.hypotheses import build_record_hypotheses_tool
+
+        def persist(binding):
+            controller.state.patch_task(task.task_uid, recovery_context_updates={"hypothesis_publications": [binding]})
+
+        writer = build_record_hypotheses_tool(task, "OP_TEST", workflow_mod._operation_output_root(), persist)
+        writer(subjects=[{"item_id": "subject", "disposition": "supplied", "hypotheses": [
+            {**hypothesis(), "supporting_refs": ["artifact:form.html"]},
+        ]}])
+        controller.state.patch_task(task.task_uid, recovery_context_updates={
+            "hypothesis_review": normalize_review(json.loads(evaluator("task_evaluator", ""))),
+        })
+    controller.text_runner = evaluator
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    updated = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert updated.status == "done"
+    assert len(actors) == (1 if continuation else 2) and len(reviews) == 2
+    assert reviews[0] != reviews[1]
+
+
+def test_legacy_route_inspection_survives_fresh_checkpoint_and_supports_hypothesis(worker_flow_case, monkeypatch):
+    from modules.handlers.tool_recovery import ToolOutcomeJournal
+    from tests.test_client_route_extraction import source
+    from tests.test_hypotheses import hypothesis
+
+    controller, *_ = worker_flow_case
+    root = Path(workflow_mod._operation_output_root())
+    (root / "legacy.js").write_text(source())
+    manifest_path = root / "inventory.json"
+    manifest_path.write_text(json.dumps({"schema_version": 1, "unassessed_gaps": [], "items": [{
+        "id": "subject", "kind": "endpoint", "target_id": "target-1", "value": "https://target.test/control",
+        "attributes": {"implementation_refs": ["artifact:legacy.js"], "interaction": {
+            "inputs": [], "operations": ["GET"], "operation_provenance": "inferred",
+        }},
+    }]}))
+    original = manifest_path.read_bytes()
+    _, digest = memory_mod._load_inventory_manifest("artifact:inventory.json", persist_normalization=False)
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    task = replace(task, acceptance=replace(task.acceptance, manifest_hash="", basis=replace(
+        task.acceptance.basis, source_refs=["artifact:inventory.json"], snapshot_hash=digest,
+    )))
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(workflow_mod, "build_role_tools", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive tests", "tools": []})
+    calls, retained = [], []
+
+    def actor(_role, prompt, tools, _system, policy):
+        calls.append(prompt)
+        if len(calls) == 1:
+            getter = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "get_inventory_item")
+            arguments = {"manifest_ref": "artifact:inventory.json", "item_id": "subject",
+                         "view": "investigation", "context_limit": 50}
+            result = getter(**arguments)
+            assert "sessionStorage" in result and "/api/catalog" in result
+            outcome = ToolOutcomeJournal().append(tool_use_id="inspect", tool_name="get_inventory_item",
+                success=True, correctable=False, tool_input=arguments, output=result)
+            retained.append((outcome.inspection_result_ref, result))
+            assert policy.checkpoint_tool_calls == 16
+            return workflow_mod.TaskExecutorCycleResult(text="Inspected", outcomes=[outcome], reason="publication_checkpoint")
+        assert "sessionStorage" in prompt and "/api/catalog" in prompt
+        assert "get_inventory_item" not in controller._tool_names(tools)
+        replay = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "read_inspection_result")
+        page = json.loads(replay(retained[0][0], max_chars=10000))
+        assert "sessionStorage" in page["text"]
+        writer = next(tool for tool in tools if workflow_mod.get_tool_name(tool) == "record_hypotheses")
+        binding = json.loads(writer(subjects=[{"item_id": "subject", "disposition": "hypotheses_supplied",
+            "hypotheses": [{**hypothesis(), "observed_basis": "Client component calls catalog and permission helpers",
+                            "supporting_refs": ["artifact:legacy.js"]}]}]))
+        controller.state.acceptance_results[task.task_uid] = [AcceptanceResult(
+            criterion_id="future-tests", status="satisfied", disposition="observation",
+            summary="Conditional future test", evidence_refs=[binding["artifact_ref"]],
+        )]
+        return workflow_mod.TaskExecutorCycleResult(text="Published", outcomes=[])
+
+    def evaluator(role, prompt, *_args):
+        assert role == "task_evaluator" and "sessionStorage" in prompt
+        current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+        binding = workflow_mod.hypothesis_binding(current)
+        return json.dumps({"status": "done", "instructions": None, "publication_sha256": binding["sha256"], "subject_reviews": [{
+            "item_id": "subject", "decision": "retain", "reason": "Grounded conditional future test",
+            "hypotheses": [{"hypothesis_id": binding["hypothesis_ids_by_subject"]["subject"][0],
+                            "decision": "retain", "reason": "Mechanism and controls agree", "semantic_checks": _semantic_checks()}],
+        }]})
+
+    controller.text_runner = evaluator
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert current.status == "done" and len(calls) == 2
+    assert manifest_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("failure", ["missing_status", "misnested_basis", "malformed_json"])
+def test_bound_hypothesis_contract_repairs_full_envelope(worker_flow_case, monkeypatch, structured, failure):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    calls = []
+
+    def runner(_role, prompt, _tools, _system, *models):
+        calls.append(prompt)
+        if models:
+            schema = models[0].model_json_schema()
+            assert "publication_sha256" not in schema["properties"]
+            assert "status" in schema["required"]
+        valid = {"status": "partial_failure", "reason": "Inspect relevant implementation before accepting emptiness",
+                 "repair": {"kind": "acceptance"}, "subject_reviews": [{
+                     "item_id": "subject", "decision": "revise", "reason": "Metadata alone is insufficient",
+                     "hypotheses": [], "no_hypothesis_basis": {"kind": "metadata_only", "inspection_refs": []},
+                 }]}
+        if len(calls) == 1:
+            if failure == "missing_status":
+                valid.pop("status")
+            elif failure == "misnested_basis":
+                valid["subject_reviews"][0]["behavior_assessments"] = []
+            elif not structured:
+                return '{"status":"done",'
+            else:
+                # A malformed structured payload fails schema validation rather than JSON parsing.
+                valid.pop("status")
+        return valid if structured else json.dumps(valid)
+
+    controller.text_runner = runner
+    controller.structured_runner = runner if structured else None
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
+    assert len(calls) == 2
+    assert decision.status == "partial_failure" and decision.repair_kind == "acceptance"
+    assert "complete object" in calls[1]
+    assert "INSIDE subject_reviews[].no_hypothesis_basis" in calls[0]
+    stored = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert stored.recovery_context["hypothesis_review"]["publication_sha256"] == (
+        workflow_mod.hypothesis_binding(task)["sha256"]
+    )
+
+
+@pytest.mark.parametrize("recover_inspection", [False, True])
+def test_native_hypothesis_evidence_correction_reuses_results_or_routes_recovery(worker_flow_case, recover_inspection):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    _publish_controller_hypotheses(controller, task)
+    task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    journal = workflow_mod.hypothesis_inspection_journal(
+        task, controller.runtime.operation_id, workflow_mod._operation_output_root(),
+    )
+    metadata = journal.record_inspection("get_inventory_item", "metadata", {}, '{"item":{}}', ())
+    source = None if recover_inspection else journal.record_inspection(
+        "read_artifact", "content", {}, '{"content":"inert documentation"}', (),
+    )
+    calls = []
+
+    def runner(_role, prompt, tools, _system, _model):
+        calls.append(tools)
+        if len(calls) == 2:
+            assert tools == []
+            assert "deficient_references" in prompt and metadata in prompt
+            assert "necessary_evidence_unreviewed" in prompt and "prerequisite_gaps" in prompt
+            if source:
+                assert source in prompt
+        basis = {"kind": "inspected_evidence", "inspection_refs": [metadata],
+                 "no_relevant_behavior_reason": "Only inert documentation in inspected content"}
+        result = {"status": "done", "reason": "No supported conditional security test", "subject_reviews": [{
+            "item_id": "subject", "decision": "retain", "reason": "Reviewed relevant source",
+            "hypotheses": [], "no_hypothesis_basis": basis,
+        }]}
+        if len(calls) == 2:
+            if recover_inspection:
+                result["reason"] = "Necessary content not inspected"
+                basis.update(kind="necessary_evidence_unreviewed", no_relevant_behavior_reason=None)
+                result["prerequisite_gaps"] = [{
+                    "criterion_id": task.acceptance.criteria[0].id, "item_ids": ["subject"],
+                    "source_refs": list(task.acceptance.basis.source_refs), "missing_input": "Inspect frozen source",
+                }]
+            else:
+                basis["inspection_refs"].append(source)
+        return workflow_mod.StructuredPayload(result, [{"role": "assistant", "content": [{"text": "Retained"}]}])
+
+    controller.structured_runner = runner
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
+    assert len(calls) == 2
+    assert decision.status == ("partial_failure" if recover_inspection else "done")
+    assert decision.repair_kind == ("execution" if recover_inspection else "none")
+    assert len(journal._entries()) == (1 if recover_inspection else 2)
+
+
+@pytest.mark.parametrize("contract", [False, True])
+def test_evaluator_fallback_distinguishes_contract_and_schema_failures(contract):
+    error = (workflow_mod.HypothesisReviewContractError("Metadata has no content") if contract
+             else ValueError("Missing required field"))
+    fallback = MultiAgentWorkflowController._evaluator_schema_fallback("task_evaluator", error, ["status"], {})
+    assert fallback["event"]["source"] == ("review_contract_validation" if contract else "schema_validation")
+    assert ("evidence or decision contract" if contract else "required decision schema") in fallback["data"]["reason"]
+
+
+@pytest.mark.parametrize("partial,reasoning,visibility", [
+    ("", "", "empty_response"), ("", "analysis", "reasoning_only"), ("partial", "", "visible_output"),
+])
+def test_critic_exhaustion_recovery_is_local_and_reports_visibility(monkeypatch, partial, reasoning, visibility):
+    from modules.config.models.agent_profiles import get_agent_settings_registry
+    from modules.config.models.invocation import invocation_output_tokens, invocation_reasoning
+    from modules.handlers.max_token_recovery import MaxTokenFailureSnapshot
+
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", lambda _model, **_kwargs: None)
+    registry = get_agent_settings_registry()
+    before = registry.get_settings("task_prompt_critic").to_dict()
+    calls = []
+
+    def runner(role, *_args):
+        calls.append((invocation_output_tokens(role), invocation_reasoning(role)))
+        if len(calls) == 1:
+            error = MaxTokensReachedException("max_tokens")
+            error.max_token_failure_snapshot = MaxTokenFailureSnapshot(reasoning, partial, {})
+            raise error
+        return _checklist_response('{"issues":[],"repairable":true}')
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=runner,
+    )
+    result = controller._run_json_text_agent("task_prompt_critic", "Build", [], "executor")
+    assert result["issues"] == []
+    assert calls == [(9216, None), (9216, "none")]
+    assert registry.get_settings("task_prompt_critic").to_dict() == before
+    assert invocation_output_tokens("task_prompt_critic") is None
+    event = next(event for event in controller.runtime.callback_handler.events
+                 if event["type"] == "task_prompt_critic_exhaustion")
+    assert event["response_visibility"] == visibility
+
+
+
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("subject", ["https://target.test:8443", "tcp://target.test:9000", "/workspace/source"])
+def test_critic_oversize_repair_preserves_discoveries(monkeypatch, structured, subject):
+    from modules.agents import prompt_context
+    from modules.config.models.invocation import invocation_output_tokens
+
+    runtime = _runtime()
+    runtime.prompt_token_limit = 40000
+    runtime.config.model_id = "fixture/critic"
+    monkeypatch.setattr("modules.config.models.capabilities.get_model_output_limit", lambda *_args, **_kw: None)
+    estimate = prompt_context.estimate_prompt_tokens
+    monkeypatch.setattr(prompt_context, "estimate_prompt_tokens", lambda model, **kwargs: (
+        len(kwargs["extra_content"]) if "extra_content" in kwargs else estimate(model, **kwargs)
+    ))
+    discovery = f"## Retained inspection evidence\nObserved task-local behavior for {subject}.\n"
+    calls = []
+
+    def runner(role, prompt, tools, system, *_args):
+        calls.append(prompt)
+        assert invocation_output_tokens(role) == 9024
+        assert discovery in prompt
+        assert prompt.count("## Critic output budget") == 1
+        result = {"issues": [{"category": "objective", "message": "x" * 490, "tool_names": ["tool"] * 2000}],
+                  "repairable": True} if len(calls) == 1 else {"issues": [], "repairable": True}
+        wire = _checklist_response(json.dumps(result))
+        return json.loads(wire) if structured else wire
+
+    controller = MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=runner,
+    )
+    controller.structured_runner = runner if structured else None
+    assert controller._run_json_text_agent("task_prompt_critic", "Review.\n" + discovery, [], "system")["issues"] == []
+    assert len(calls) == 2
+    assert "concise complete replacement" in calls[1]
+    events = [e for e in runtime.callback_handler.events if e["type"] == "task_prompt_critic_budget"
+              and "generation_allowance" in e]
+    assert len(events) == 2
+    assert events[0]["generation_allowance"] == 9024
+    assert invocation_output_tokens("task_prompt_critic") is None
+
+
+@pytest.mark.parametrize("instructions", [None, "", "Correct the identity controls"])
+def test_decision_conversion_normalizes_optional_instructions(instructions):
+    controller = object.__new__(MultiAgentWorkflowController)
+    result = controller._decision_from_data({"status": "done", "instructions": instructions}, allowed=("done",))
+    assert result.instructions == ("" if instructions is None else instructions)
+    assert controller._decision_from_data({"status": "done"}, allowed=("done",)).instructions == ""
+
+
+@pytest.mark.parametrize("instructions", [False, 12, [], {}])
+def test_decision_conversion_rejects_invalid_instructions(instructions):
+    controller = object.__new__(MultiAgentWorkflowController)
+    with pytest.raises(ValueError):
+        controller._decision_from_data({"status": "done", "instructions": instructions}, allowed=("done",))
+
+
+@pytest.mark.parametrize("target", ["https://target.test/resource", "tcp://target.test:123", "/src/handler.py"])
+@pytest.mark.parametrize("failure_stage", ["native", "consistency"])
+def test_structured_correction_retains_evidence_and_closes_investigation(target, failure_stage):
+    from modules.agents.native_structured import StructuredPayload
+
+    calls = []
+    messages = [{"role": "assistant", "content": [{"text": f"Observed boundary at {target}"}]}]
+
+    def runner(role, prompt, tools, system, model):
+        calls.append((prompt, tools))
+        if len(calls) == 1:
+            if failure_stage == "native":
+                error = ValueError("invalid nested array")
+                error.native_finalization_messages = messages
+                raise error
+            return StructuredPayload({"status": "done", "reason": "Revise controls"}, messages)
+        return {"status": "done", "reason": "Controls corrected"}
+
+    def validate(data):
+        if data["reason"] == "Revise controls":
+            raise ValueError("A retained hypothesis cannot have a revise semantic check")
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=FakeState(_plan()),
+        text_runner=lambda *_args: pytest.fail("Text fallback must not run"), structured_runner=runner,
+    )
+    output = controller._run_json_text_agent(
+        "task_evaluator", f"Review {target}", ["investigation_tool"], "system", data_validator=validate,
+    )
+    assert output["reason"] == "Controls corrected"
+    assert len(calls) == 2
+    assert calls[0][1] == ["investigation_tool"]
+    assert calls[1][1] == []
+    assert f"Observed boundary at {target}" in calls[1][0]
+    assert "Investigation is closed" in calls[1][0]
+
+
+@pytest.mark.parametrize("method", ["prompt", "reasoning"])
+def test_replacement_preserves_assignment_contract_without_completion_state(method):
+    task = _hypothesis_task(status="active")
+    task.recovery_context.update({
+        "hypothesis_ids": ["hyp-1"],
+        "hypothesis_assignments": [{"producer_task_uid": "source", "sha256": "digest"}],
+        "authentication_requirement": {"comparison": "account", "roles": ["user"]},
+        "execution_evidence_receipts": {"old": ["artifact:old"]},
+        "completion_review": {"mode": "capture_only"},
+    })
+    state = FakeState(_plan(), tasks=[task], acceptance_complete=False)
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state)
+    if method == "prompt":
+        replacement = controller._create_prompt_replacement_task(task, TaskPromptBuildError("repair"))
+    else:
+        replacement = controller._create_reasoning_loop_replacement_task(task, [])
+    assert replacement is not None
+    for key in ("hypothesis_ids", "hypothesis_assignments", "authentication_requirement"):
+        assert replacement.recovery_context[key] == task.recovery_context[key]
+    assert "completion_review" not in replacement.recovery_context
+    assert "old" not in replacement.recovery_context.get("execution_evidence_receipts", {})
+    replacement.recovery_context["hypothesis_ids"].append("other")
+    assert task.recovery_context["hypothesis_ids"] == ["hyp-1"]
+
+
+@pytest.mark.parametrize("case", [
+    "valid", "nested", "conflict", "scope", "snapshot", "criteria", "changed_criterion", "missing", "cycle",
+])
+def test_legacy_replacement_assignment_restoration(case):
+    parent = _hypothesis_task("parent")
+    parent.recovery_context.update({
+        "hypothesis_ids": ["hyp-1"],
+        "authentication_requirement": {"comparison": "none", "roles": []},
+    })
+    child = replace(parent, task_uid="child", replacement_of="parent",
+                    supersedes_criteria=["future-tests"], recovery_context={})
+    tasks = [parent, child]
+    if case == "nested":
+        middle = replace(child, task_uid="middle")
+        child = replace(child, replacement_of="middle")
+        tasks = [parent, middle, child]
+    elif case == "conflict":
+        child.recovery_context["hypothesis_ids"] = ["foreign"]
+    elif case == "scope":
+        child = replace(child, target_ids=["foreign"])
+    elif case == "snapshot":
+        child = replace(child, acceptance=replace(child.acceptance, basis=replace(
+            child.acceptance.basis, snapshot_hash="foreign"), manifest_hash=""))
+    elif case == "criteria":
+        child = replace(child, supersedes_criteria=["foreign"])
+    elif case == "changed_criterion":
+        child = replace(child, acceptance=replace(child.acceptance, criteria=(
+            replace(child.acceptance.criteria[0], description="A different test"),
+        ), manifest_hash=""))
+    elif case == "missing":
+        child = replace(child, replacement_of="missing")
+    elif case == "cycle":
+        parent = replace(parent, replacement_of="child")
+        tasks[0] = parent
+    tasks = [item for item in tasks if item.task_uid != child.task_uid] + [child]
+    state = FakeState(_plan(), tasks=tasks)
+    controller = MultiAgentWorkflowController(runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state)
+    if case in {"valid", "nested"}:
+        result = controller._restore_replacement_assignments(child)
+        assert result.recovery_context["hypothesis_ids"] == ["hyp-1"]
+        assert controller._restore_replacement_assignments(result) == result
+        result.recovery_context["hypothesis_ids"].append("other")
+        assert parent.recovery_context["hypothesis_ids"] == ["hyp-1"]
+        assert controller._restore_replacement_assignments(parent) == parent
+    else:
+        with pytest.raises(ValueError, match="Replacement|Conflicting"):
+            controller._restore_replacement_assignments(child)
+
+
+@pytest.mark.parametrize("subject", ["https://target.test/login", "tcp://target.test:22", "/src/auth.py"])
+@pytest.mark.parametrize(("gap", "repair_kind"), [(True, "none"), (False, "none"), (True, "acceptance")])
+def test_recorded_negative_does_not_override_reported_semantic_gap(subject, gap, repair_kind):
+    task = Task("assessment", "Assess assigned test", f"Exercise security test on {subject}", phase=1, status="active")
+    state = FakeState(_plan(), tasks=[task])
+    state.acceptance_results[task.task_uid] = [AcceptanceResult(
+        criterion_id=task.acceptance.criteria[0].id,
+        status="assessed_negative", disposition="observation",
+        summary="Test assessment is incomplete" if gap else "Assigned controls withheld the protected result",
+        evidence_refs=["artifact:artifacts/baseline.txt"],
+    )]
+    prompts = []
+
+    def evaluate(role, prompt, tools, system_prompt):
+        prompts.append(prompt)
+        return json.dumps({
+            "status": "done", "reason": "Recorded negative",
+            "repair": {"kind": repair_kind, "evidence_gaps": ["Assigned test lacks a supported assessment"] if gap else []},
+        })
+
+    controller = MultiAgentWorkflowController(
+        runtime=_runtime(), budget=BudgetConfig(max_duration_minutes=60), state_store=state, text_runner=evaluate,
+    )
+    decision = controller._evaluate_task(_plan(), _plan().phases[0], task,
+                                         acceptance_results=state.acceptance_results[task.task_uid])
+    assert decision.status == ("partial_failure" if gap else "done")
+    assert decision.repair_kind == ("acceptance" if repair_kind == "acceptance" else "execution" if gap else "none")
+    assert memory_mod.ASSESSMENT_OUTCOME_GUIDANCE in prompts[0]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_consumer_review_supplies_only_assigned_proposals(worker_flow_case, monkeypatch, failure):
+    from modules.tools.hypotheses import Hypothesis
+
+    controller, task, *_rest = worker_flow_case
+    task.recovery_context.update({"hypothesis_assignments": [{"producer_task_uid": "source", "hypothesis_ids": ["assigned"]}],
+                                 "hypothesis_ids": ["assigned"]})
+    proposal = Hypothesis(
+        hypothesis_id="assigned",
+        authentication_requirement={"comparison": "none", "roles": []},
+        observed_basis="An operation accepts a controllable selector",
+        preconditions=["Selector reaches the sensitive operation"],
+        suspected_mechanism="Boundary bypass",
+        attacker_controlled_input="selector",
+        safe_test_steps=["Exercise the operation with a permitted control and an unauthorized selector"],
+        positive_expectations=["Protected information is disclosed"],
+        negative_expectations=["Protected information is withheld"],
+        required_evidence=["Operation result and control"],
+        supporting_refs=["artifact:artifacts/source.txt"],
+    )
+    publication = SimpleNamespace(subjects=[SimpleNamespace(hypotheses=[
+        proposal, proposal.model_copy(update={"hypothesis_id": "unassigned"}),
+    ])])
+    monkeypatch.setattr(controller, "_hypothesis_consumer_bindings",
+                        Mock(side_effect=ValueError("changed")) if failure else Mock(return_value=[("ref", task)]))
+    monkeypatch.setattr(workflow_mod, "load_hypothesis_set", Mock(return_value=publication))
+    if failure:
+        with pytest.raises(WorkflowInvariantError, match="binding unavailable"):
+            controller._hypothesis_consumer_review_context(task)
+        decision = controller._evaluate_task(_plan(), _plan().phases[0], task)
+        assert decision.status == "partial_failure"
+        assert "binding unavailable" in decision.reason
+        return
+    context = controller._hypothesis_consumer_review_context(task)
+    assert "assigned_hypotheses[1]" in context
+    assert "unassigned" not in context
+    assert proposal.positive_expectations[0] in context
+    assert proposal.negative_expectations[0] in context
+    assert "authentication_requirement" in context
+    assert "Identify untested hypotheses in evidence_gaps" in context
+    prompt = controller._task_evaluator_prompt(_plan(), _plan().phases[0], task)
+    assert context in prompt
+    assert memory_mod.ASSESSMENT_OUTCOME_GUIDANCE in prompt
+    executor = controller._task_executor_contract(task, {"record_task_acceptance"})
+    assert memory_mod.ASSESSMENT_OUTCOME_GUIDANCE in executor
+    from modules.agents.prompt_context import fit_task_prompt
+
+    fitted = fit_task_prompt(
+        prompt + "\n## Task history\n" + "advisory " * 10000,
+        "system", [], "test-model", len(prompt) + 2000, 0, lambda _event: None,
+        optional_headings=workflow_mod._prompt_optional_headings("task_evaluator"), estimate_input=len,
+    )
+    assert context in fitted
+    assert memory_mod.ASSESSMENT_OUTCOME_GUIDANCE in fitted
+
+
+def test_replacement_lineage_conflict_is_rejected_before_consumer_preparation(worker_flow_case, monkeypatch):
+    controller, task, *_rest = worker_flow_case
+    parent = replace(task, task_uid="parent", recovery_context={"hypothesis_ids": ["one"]})
+    middle = replace(parent, task_uid="middle", replacement_of="parent",
+                     supersedes_criteria=[item.id for item in parent.acceptance.criteria],
+                     recovery_context={"hypothesis_ids": ["two"]})
+    child = replace(middle, task_uid="child", replacement_of="middle", recovery_context={})
+    for item in (parent, middle, child):
+        controller.state.store_task(item)
+    bindings = Mock()
+    monkeypatch.setattr(controller, "_hypothesis_consumer_bindings", bindings)
+    assert controller._prepare_hypothesis_consumer(_plan(), child) is None
+    bindings.assert_not_called()
+    assert next(item for item in controller.state.tasks if item.task_uid == "child").status == "partial_failure"
+
+
+@pytest.mark.parametrize("ids", [[], ["foreign"]])
+def test_consumer_review_rejects_inconsistent_assignment_ids(worker_flow_case, ids):
+    controller, task, *_rest = worker_flow_case
+    task.recovery_context.update({
+        "hypothesis_assignments": [{"hypothesis_ids": ["assigned"]}], "hypothesis_ids": ids,
+    })
+    with pytest.raises(WorkflowInvariantError, match="IDs do not match"):
+        controller._hypothesis_consumer_review_context(task)

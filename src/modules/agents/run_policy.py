@@ -1,6 +1,6 @@
 """Agent run-loop completion policy."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -15,10 +15,13 @@ class AgentRunPolicy:
     asking for tool calls until normal callback termination, stall detection, or
     another fatal condition occurs. Roles with a known terminal tool sequence can
     require specific tools and then allow a final text-only response.
+    A controller terminal_check returns a stop reason after each tool result, or
+    None to continue. Its decision takes precedence over required-tool status.
     """
 
     min_tool_calls: int = 0
     required_tool_names: frozenset[str] = field(default_factory=frozenset)
+    required_tool_match: Literal["all", "any"] = "all"
     terminal_after_required_tools: bool = False
     require_successful_required_tools: bool = False
     allow_text_final_after_tools: bool = True
@@ -34,11 +37,15 @@ class AgentRunPolicy:
     recovery_objective: str = ""
     recovery_next_action: str = ""
     recovery_allowed_tool_names: frozenset[str] = field(default_factory=frozenset)
+    terminal_check: Callable[[], str | None] | None = None
+    checkpoint_tool_calls: int = 0
+    progress_key: Callable[[], str] | None = None
 
     def __init__(
         self,
         min_tool_calls: int = 0,
         required_tool_names: Iterable[str] = frozenset(),
+        required_tool_match: Literal["all", "any"] = "all",
         terminal_after_required_tools: bool = False,
         require_successful_required_tools: bool = False,
         allow_text_final_after_tools: bool = True,
@@ -54,9 +61,15 @@ class AgentRunPolicy:
         recovery_objective: str = "",
         recovery_next_action: str = "",
         recovery_allowed_tool_names: Iterable[str] = frozenset(),
+        terminal_check: Callable[[], str | None] | None = None,
+        checkpoint_tool_calls: int = 0,
+        progress_key: Callable[[], str] | None = None,
     ):
         object.__setattr__(self, "min_tool_calls", min_tool_calls)
         object.__setattr__(self, "required_tool_names", frozenset(required_tool_names))
+        if required_tool_match not in {"all", "any"}:
+            raise ValueError("required_tool_match must be all|any")
+        object.__setattr__(self, "required_tool_match", required_tool_match)
         object.__setattr__(self, "terminal_after_required_tools", terminal_after_required_tools)
         object.__setattr__(self, "require_successful_required_tools", require_successful_required_tools)
         object.__setattr__(self, "allow_text_final_after_tools", allow_text_final_after_tools)
@@ -74,3 +87,6 @@ class AgentRunPolicy:
         object.__setattr__(self, "recovery_objective", str(recovery_objective or ""))
         object.__setattr__(self, "recovery_next_action", str(recovery_next_action or ""))
         object.__setattr__(self, "recovery_allowed_tool_names", frozenset(recovery_allowed_tool_names))
+        object.__setattr__(self, "terminal_check", terminal_check)
+        object.__setattr__(self, "checkpoint_tool_calls", max(0, int(checkpoint_tool_calls)))
+        object.__setattr__(self, "progress_key", progress_key)

@@ -2,19 +2,21 @@
 """Tests for ToolRouterHook.
 
 This module tests:
-1. Hook registration: output handling only, with no unknown-tool fallback
+1. Hook registration: output handling and preview-copy guarding, with no unknown-tool fallback
 2. AfterToolCallEvent: Large result truncation with SDK contract compliance
 3. Thread safety: Artifact count atomicity
 4. Schema validation: ToolResult structure validation
 """
 import asyncio
 import copy
+import json
+import re
 import threading
 import types
 from typing import Any
 
 import pytest
-from strands.hooks import AfterToolCallEvent
+from strands.hooks import AfterToolCallEvent, BeforeToolCallEvent
 
 from modules.handlers.tool_router import ToolRouterHook
 
@@ -84,7 +86,7 @@ def create_tool_result(text: str, tool_use_id: str = "test_id") -> dict:
 # ============================================================================
 
 
-def test_tool_router_registers_only_after_tool_output_handling():
+def test_tool_router_registers_output_handling_and_preview_guard():
     """Unknown tool calls must remain unresolved instead of falling back to shell."""
     hook = ToolRouterHook()
     registry = types.SimpleNamespace(add_callback=lambda event_type, callback: registrations.append((event_type, callback)))
@@ -92,7 +94,10 @@ def test_tool_router_registers_only_after_tool_output_handling():
 
     hook.register_hooks(registry)
 
-    assert registrations == [(AfterToolCallEvent, hook._truncate_large_results_async)]
+    assert registrations == [
+        (AfterToolCallEvent, hook._truncate_large_results_async),
+        (BeforeToolCallEvent, hook._preview_copy_guard.before_tool),
+    ]
     assert not hasattr(hook, "_on_before_tool_async")
 
 
@@ -106,7 +111,10 @@ def test_router_initialization_registration_and_artifact_references(tmp_path, ca
     hook.register_hooks(registry)
 
     assert hook._artifact_dir == tmp_path
-    assert registrations == [(AfterToolCallEvent, hook._truncate_large_results_async)]
+    assert registrations == [
+        (AfterToolCallEvent, hook._truncate_large_results_async),
+        (BeforeToolCallEvent, hook._preview_copy_guard.before_tool),
+    ]
     assert "artifact_threshold" in caplog.text
     assert hook._artifact_reference(tmp_path / "nested" / "evidence.log") == (
         f"artifact:{tmp_path.name}/nested/evidence.log"
@@ -152,6 +160,85 @@ def test_router_creates_inline_summary_when_externalization_fails(tmp_path, monk
 
     assert "persistence disabled" in event.result["content"][0]["text"]
     assert "[Inline: 12 chars]" in event.result["content"][0]["text"]
+
+
+@pytest.mark.parametrize("block_type", ["text", "json"])
+@pytest.mark.parametrize("tool_name", ["http_request", "network_scanner", "filesystem_reader", "mcp_late_tool"])
+@pytest.mark.parametrize("payload_size", [80, 200])
+def test_externalized_results_reference_complete_source_without_body(tmp_path, block_type, tool_name, payload_size):
+    payload = "BODY_PAYLOAD:" + "x" * payload_size + ":END"
+    hook = ToolRouterHook(max_result_chars=100, artifacts_dir=tmp_path, artifact_threshold=50)
+    result = {
+        "status": "success", "toolUseId": "producer", "extra": {"retained": True},
+        "content": [{"text": "Status: available"}, {block_type: payload}, {"json": {"count": 1}}],
+    }
+    original = copy.deepcopy(result)
+    event = MockAfterToolCallEvent(result, {"name": tool_name})
+
+    asyncio.run(hook._truncate_large_results_async(event))
+
+    artifacts = list(tmp_path.glob("*.artifact.*"))
+    assert len(artifacts) == 1
+    assert artifacts[0].read_text() == payload
+    assert event.result["status"] == "success"
+    assert event.result["toolUseId"] == "producer"
+    assert event.result["extra"] == {"retained": True}
+    assert event.result["content"][0] == original["content"][0]
+    assert event.result["content"][-1] == original["content"][-1]
+    assert result == original
+    summary = event.result["content"][1]["text"]
+    assert f"Complete output: {hook._artifact_reference(artifacts[0])}" in summary
+    assert f"Artifact ID: artifact_id:{artifacts[0].name}" in summary
+    assert f"{len(payload)} chars" in summary
+    assert "BODY_PAYLOAD" not in summary
+    assert "INCOMPLETE PREVIEW" not in summary
+    assert not hook._preview_copy_guard.records_dir.exists()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_unsaved_large_output_warns_and_does_not_advertise_complete_artifact(tmp_path, monkeypatch, configured):
+    hook = ToolRouterHook(max_result_chars=10, artifacts_dir=tmp_path if configured else None, artifact_threshold=5)
+    if configured:
+        monkeypatch.setattr(hook, "_persist_artifact", lambda *_args: None)
+    event = MockAfterToolCallEvent(create_tool_result("abcdefghij-missing-tail"))
+
+    asyncio.run(hook._truncate_large_results_async(event))
+
+    summary = event.result["content"][0]["text"]
+    assert "persistence disabled" in summary
+    assert "[Truncated: 23 chars total]" in summary
+    assert "abcdefghij" in summary
+    assert "missing-tail" not in summary
+    assert "Complete output:" not in summary
+
+
+@pytest.mark.parametrize("routes", [[], ["/account/login", "/account/signup", "/api/profile"]])
+def test_returned_artifact_preserves_routes_beyond_former_preview_boundary(tmp_path, monkeypatch, routes):
+    from modules.tools import client_bundle_inventory as bundle_tool
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    source = "/*" + "framework code " * 1500 + "*/\n" + json.dumps(routes) + ";"
+    hook = ToolRouterHook(max_result_chars=16000, artifacts_dir=artifacts)
+    event = MockAfterToolCallEvent(create_tool_result(source), {"name": "runtime_bundle_fetcher"})
+    asyncio.run(hook._truncate_large_results_async(event))
+    summary = event.result["content"][0]["text"]
+    reference = re.search(r"\[Complete output: ([^\]]+)\]", summary).group(1)
+    monkeypatch.setattr("modules.tools.artifact._operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr("modules.tools.memory._operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(bundle_tool, "resolve_inventory_target", lambda *_args: ("https://target.test", "target-1"))
+    monkeypatch.setattr(bundle_tool, "_format_bundle_with_webcrack", lambda *_args: (None, "failed"))
+
+    result = json.loads(bundle_tool.client_bundle_inventory(
+        reference, "artifacts/extraction.json", "artifacts/inventory.json",
+    ))
+    extraction = json.loads((artifacts / "extraction.json").read_text())
+    assert extraction["analysis_artifact"] == reference
+    assert extraction["api_paths"] == (["/api/profile"] if routes else [])
+    assert extraction["spa_routes"] == (["/account/login", "/account/signup"] if routes else [])
+    assert result["registration_route_count"] == (1 if routes else 0)
+    assert result["format_status"] == "failed"
+    assert "framework code" not in summary
 
 
 # ============================================================================
@@ -748,3 +835,63 @@ class TestToolRouterIntegration:
             assert "Artifact persistence disabled" in text
 
         asyncio.run(_test())
+
+
+@pytest.mark.parametrize("tool_name", ["http_excerpt", "network_excerpt", "filesystem_excerpt", "mcp_runtime_excerpt"])
+@pytest.mark.parametrize("size", [50, 51, 100, 101])
+def test_code_owned_inline_declaration_respects_maximum(tmp_path, tool_name, size):
+    from modules.tools.tool_result_policy import bounded_inline_result
+
+    selected_tool = bounded_inline_result(types.SimpleNamespace())
+    result = {"status": "success", "toolUseId": "id", "content": [{"text": "x" * size}]}
+    event = types.SimpleNamespace(result=result, tool_use={"name": tool_name}, selected_tool=selected_tool)
+    hook = ToolRouterHook(max_result_chars=100, artifact_threshold=50, artifacts_dir=tmp_path / "artifacts")
+    asyncio.run(hook._truncate_large_results_async(event))
+    if size <= 100:
+        assert event.result is result
+        assert not (tmp_path / "artifacts").exists()
+    else:
+        assert event.result["status"] == "success"
+        assert event.result["toolUseId"] == "id"
+        assert "[Complete output:" in event.result["content"][0]["text"]
+        assert "x" * size not in event.result["content"][0]["text"]
+        assert next((tmp_path / "artifacts").iterdir()).read_text() == "x" * size
+
+
+@pytest.mark.parametrize("declaration", [None, False, "true", 1])
+def test_result_and_tool_arguments_cannot_enable_inline_policy(tmp_path, declaration):
+    selected_tool = types.SimpleNamespace(_cyber_bounded_inline_result=declaration)
+    result = {"bounded_inline_result": True, "content": [{"text": "x" * 80}]}
+    event = types.SimpleNamespace(
+        result=result, selected_tool=selected_tool,
+        tool_use={"name": "read_artifact", "input": {"bounded_inline_result": True}},
+    )
+    hook = ToolRouterHook(max_result_chars=100, artifact_threshold=50, artifacts_dir=tmp_path / "artifacts")
+    asyncio.run(hook._truncate_large_results_async(event))
+    assert "[Complete output:" in event.result["content"][0]["text"]
+
+
+def test_registered_tool_declaration_survives_sdk_event(tmp_path):
+    from strands import tool
+    from strands.tools.registry import ToolRegistry
+
+    from modules.tools.tool_result_policy import bounded_inline_result
+
+    @bounded_inline_result
+    @tool
+    def inspection_excerpt() -> str:
+        """Return a bounded excerpt."""
+        return "x" * 80
+
+    registry = ToolRegistry()
+    registry.process_tools([inspection_excerpt])
+    registered = registry.registry["inspection_excerpt"]
+    result = {"status": "success", "toolUseId": "sdk-id", "content": [{"text": registered()}]}
+    event = AfterToolCallEvent(
+        agent=types.SimpleNamespace(), selected_tool=registered,
+        tool_use={"name": "inspection_excerpt", "toolUseId": "sdk-id", "input": {}},
+        invocation_state={}, result=result,
+    )
+    hook = ToolRouterHook(max_result_chars=100, artifact_threshold=50, artifacts_dir=tmp_path / "artifacts")
+    asyncio.run(hook._truncate_large_results_async(event))
+    assert event.result is result

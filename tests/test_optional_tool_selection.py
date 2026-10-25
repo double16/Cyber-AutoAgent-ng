@@ -114,6 +114,7 @@ def test_authenticated_validation_tasks_receive_only_opaque_request_tool():
     names = selection.required_optional_tool_names(task)
 
     assert names == ["authenticated_http_request"]
+    assert "refresh_authenticated_context" in selection.credential_tool_names()
     auth_agent_names = selection.authentication_agent_optional_tool_names(task)
     assert "checkout_credential" in auth_agent_names
     assert "set_task_auth_context" not in auth_agent_names

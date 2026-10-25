@@ -223,6 +223,18 @@ class ToolRepeatGuardHook(HookProvider):
                 self.repeat_threshold,
                 self.max_cycle_length,
             )
+            # Artifact inspection loops often interleave identical searches with other reads.
+            # Count exact successful reader calls within the existing bounded history; paging
+            # and changed patterns have different fingerprints and remain independent.
+            reader_repeats = 0
+            if (
+                repeated_cycle is None
+                and event.tool_use.get("name") in {"read_artifact", "search_artifact"}
+                and state.completed_results.get(fingerprint, {}).get("status") == "success"
+            ):
+                reader_repeats = state.history.count(fingerprint)
+                if reader_repeats >= self.repeat_threshold:
+                    repeated_cycle = ((fingerprint,), (fingerprint,), reader_repeats)
             if repeated_cycle is None:
                 state.active_cycle = ()
                 state.suppressed = 0
@@ -263,6 +275,8 @@ class ToolRepeatGuardHook(HookProvider):
                 return
 
             state.suppressed += 1
+            if reader_repeats:
+                state.suppressed = max(state.suppressed, reader_repeats - self.repeat_threshold + 1)
             event.selected_tool = _CachedResultTool(
                 event.selected_tool,
                 completed_result,

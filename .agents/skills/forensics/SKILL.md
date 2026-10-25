@@ -265,6 +265,7 @@ sqlite3 -readonly -header -column outputs/cyber_autoagent.db \
       AND operation_id = 'OPERATION_ID'
     ORDER BY created_at, usage_id;
 
+   -- authentication_worker grants worker access; reused_authenticated_context grants validated context access.
    SELECT task_uid, credential_id, authorization_kind, created_at
      FROM credential_task_authorizations
     WHERE logical_target = 'TARGET'

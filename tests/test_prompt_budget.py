@@ -3,6 +3,7 @@ import types
 from unittest.mock import Mock
 
 import pytest
+from strands.types.exceptions import ContextWindowOverflowException
 
 import modules.handlers.conversation_budget as cb
 from modules.handlers.conversation_budget import (
@@ -58,7 +59,8 @@ def test_estimate_prompt_tokens_counts_text_blocks():
 def test_ensure_prompt_reduces_context_when_near_limit():
     messages = [_make_message("x" * 4000) for _ in range(10)]
     agent = AgentStub(messages, limit=1000)
-    _ensure_prompt_within_budget(agent)
+    with pytest.raises(ContextWindowOverflowException, match="available input"):
+        _ensure_prompt_within_budget(agent)
     assert agent.conversation_manager.calls, "Expected reduce_context to be invoked"
 
 
@@ -600,3 +602,60 @@ def test_budget_compactors_and_mapper_cover_invalid_and_noop_runtime_shapes(monk
     monkeypatch.setattr(cb, "PROMPT_TOKEN_FALLBACK_LIMIT", 0)
     assert cb._get_prompt_token_limit(types.SimpleNamespace(_prompt_token_limit=None, model=None)) is None
     monkeypatch.setattr(cb, "PROMPT_TOKEN_FALLBACK_LIMIT", old_fallback)
+
+
+@pytest.mark.parametrize("compactor", [
+    cb._compact_stale_tool_outputs, cb._compact_failed_tool_outputs,
+])
+@pytest.mark.parametrize("artifact,expected", [
+    ("/tmp/page.html", "artifact:/tmp/page.html"),
+    ("\"/tmp/page with spaces.html\"", "artifact:/tmp/page with spaces.html"),
+])
+def test_compaction_preserves_spaced_artifact_and_other_references(compactor, artifact, expected):
+    text = f"HTML content saved to artifact: {artifact} memory:one finding:two " + "x" * 10000
+    agent = types.SimpleNamespace(messages=[
+        {"content": [{"toolResult": {"status": "error", "content": [{"text": text}]}}]},
+        {"content": []},
+    ])
+    assert compactor(agent, preserve_recent=1) == 1
+    references = agent.messages[0]["content"][0]["toolResult"]["content"][0]["json"]["references"]
+    assert references == [expected, "memory:one", "finding:two"]
+
+
+@pytest.mark.parametrize("tokens,overflow", [(1001, True), (1000, False), (900, False)])
+@pytest.mark.parametrize("manager", ["noop", "absent", "failed", "exhausted"])
+def test_oversized_single_message_stops_after_bounded_reduction(monkeypatch, tokens, overflow, manager):
+    agent = AgentStub([_make_message("single immutable prompt")], limit=1100, output_tokens=100)
+    monkeypatch.setattr(cb, "safe_estimate_tokens", lambda _agent: tokens)
+    monkeypatch.setattr(cb, "_SHARED_CONVERSATION_MANAGER", None)
+    if manager == "absent":
+        agent.conversation_manager = None
+    elif manager in {"failed", "exhausted"}:
+        error = RuntimeError("reduction failed") if manager == "failed" else ContextWindowOverflowException("exhausted")
+        agent.conversation_manager.reduce_context = Mock(side_effect=error)
+    if overflow:
+        with pytest.raises(ContextWindowOverflowException, match="available input is 1000"):
+            _ensure_prompt_within_budget(agent)
+    else:
+        _ensure_prompt_within_budget(agent)
+    if manager == "noop":
+        assert 0 < len(agent.conversation_manager.calls) <= 1 + cb.ESCALATION_MAX_PASSES
+
+
+def test_budget_allows_successful_reduction_before_submission(monkeypatch):
+    agent = AgentStub([_make_message("large prompt")], limit=1000)
+    tokens = [1200]
+    monkeypatch.setattr(cb, "safe_estimate_tokens", lambda _agent: tokens[0])
+    agent.conversation_manager.reduce_context = lambda _agent: tokens.__setitem__(0, 500)
+    _ensure_prompt_within_budget(agent)
+    assert tokens == [500]
+
+
+def test_budget_hook_propagates_irreducible_input_failure(monkeypatch):
+    agent = AgentStub([_make_message("single prompt")], limit=1000)
+    agent.conversation_manager.apply_management = Mock()
+    monkeypatch.setattr(cb, "safe_estimate_tokens", lambda _agent: 1200)
+    hook = cb.PromptBudgetHook(_ensure_prompt_within_budget)
+    with pytest.raises(ContextWindowOverflowException):
+        hook._on_before_model_call(types.SimpleNamespace(agent=agent))
+    agent.conversation_manager.apply_management.assert_called_once_with(agent)

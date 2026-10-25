@@ -14,9 +14,12 @@ from strands import tool
 
 from modules.tools.artifact import resolve_operation_artifact_path
 from modules.tools.client_auth_extraction import extract_storage_header_bindings
+from modules.tools.client_request_extraction import extract_client_requests
 from modules.tools.memory import canonical_artifact_reference
 from modules.tools.recon_inventory_manifest import (
     _canonical_url,
+    attach_client_bundle_evidence,
+    classify_client_route,
     client_bundle_workflows,
     records_to_inventory_manifest,
     resolve_inventory_target,
@@ -158,6 +161,7 @@ def _is_candidate_route(path: str) -> bool:
         or parsed.netloc
         or not path.startswith("/")
         or path.startswith("//")
+        or classify_client_route(path) != "concrete"
     ):
         return False
     normalized_path = parsed.path or "/"
@@ -176,8 +180,14 @@ def _bundle_inventory(text: str, target: str) -> dict[str, Any]:
 
     api_paths = set()
     spa_routes = set()
+    route_candidates = []
     for match in _QUOTED_PATH_PATTERN.finditer(text):
         path = match.group(1).split("#", 1)[0]
+        classification = classify_client_route(path)
+        if classification in {"pattern", "template"}:
+            candidate = {"value": path, "classification": classification}
+            if candidate not in route_candidates:
+                route_candidates.append(candidate)
         if not _is_candidate_route(path):
             continue
         if path.startswith("/api/"):
@@ -210,9 +220,12 @@ def _bundle_inventory(text: str, target: str) -> dict[str, Any]:
         }.items()
         if present
     )
+    requests = extract_client_requests(text)
     return {
+        **requests,
         "api_paths": sorted(api_paths),
         "spa_routes": sorted(spa_routes),
+        "route_candidates": route_candidates,
         "auth_storage_keys": storage_keys,
         "auth_storage_header_bindings": extract_storage_header_bindings(text),
         "auth_indicators": auth_indicators,
@@ -309,6 +322,8 @@ def client_bundle_inventory(
         source_ref=extraction_ref,
         workflows=workflows,
     )
+    attach_client_bundle_evidence(manifest, extraction_payload)
+    manifest["route_candidates"] = extracted["route_candidates"]
     manifest_result = write_inventory_manifest(inventory_manifest, manifest)
     return json.dumps(
         {
@@ -316,6 +331,11 @@ def client_bundle_inventory(
             "inventory_manifest": manifest_result,
             "formatted_artifact": formatted_ref,
             "format_status": format_status,
+            "request_operation_count": len(extracted["operations"]),
+            "unresolved_request_count": len(extracted["unresolved_requests"]),
+            "request_analysis_status": extracted["request_analysis_status"],
+            "request_analysis_note": "complete means analysis finished, not that all requests were resolved; "
+                                     "inspect relevant unresolved_requests in the extraction artifact",
             "api_path_count": len(extracted["api_paths"]),
             "spa_route_count": len(extracted["spa_routes"]),
             "registration_route_count": sum(

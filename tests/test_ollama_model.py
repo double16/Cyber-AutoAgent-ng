@@ -3,6 +3,7 @@ import re
 from unittest.mock import AsyncMock
 
 import pytest
+from ollama._types import ChatRequest
 from pydantic import BaseModel
 from strands.types.exceptions import ContextWindowOverflowException
 
@@ -115,15 +116,30 @@ def test_format_request_uses_configured_non_streaming_mode():
 def test_format_request_supports_reasoning_and_images_and_rejects_unknown_content():
     model = _model()
 
-    assert model._format_request_message_contents("assistant", {"reasoningContent": {"text": "why"}}) == [
-        {"role": "assistant", "reasoningContent": {"text": "why"}}
-    ]
+    assert model._format_request_message_contents("assistant", {"reasoningContent": {"text": "why"}}) == []
     assert model._format_request_message_contents(
         "user", {"image": {"source": {"bytes": b"image-bytes"}}}
     ) == [{"role": "user", "images": [b"image-bytes"]}]
 
     with pytest.raises(TypeError, match="unsupported type"):
         model._format_request_message_contents("user", {"document": "bad"})
+
+
+def test_serialized_ollama_request_omits_prior_reasoning():
+    request = _model().format_request([
+        {"role": "assistant", "content": [{"reasoningContent": {"text": "private"}}]},
+        {"role": "assistant", "content": [
+            {"reasoningContent": {"text": "private"}}, {"text": "visible"},
+            {"toolUse": {"toolUseId": "call", "name": "inspect", "input": {}}},
+        ]},
+        {"role": "user", "content": [{"toolResult": {
+            "toolUseId": "call", "content": [{"text": "evidence"}],
+        }}]},
+    ])
+    wire = ChatRequest(model="test", messages=request["messages"]).model_dump(exclude_none=True)
+    assert "private" not in str(wire)
+    assert [message["role"] for message in wire["messages"]] == ["assistant", "assistant", "tool"]
+    assert wire["messages"][-1]["content"] == "evidence"
 
 
 def test_format_chunk_translates_all_supported_chunk_types():
@@ -413,3 +429,160 @@ async def test_structured_output_preserves_non_overflow_response_error(monkeypat
     with pytest.raises(mod.ollama.ResponseError, match="model is unavailable"):
         async for _chunk in _model().structured_output(Output, [{"role": "user", "content": [{"text": "go"}]}]):
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["stream", "complete", "structured"])
+@pytest.mark.parametrize("message,overflow", [
+    ("input length (172235 tokens) exceeds the model's maximum context length (131072 tokens)", True),
+    ("Input length (172,235 tokens) exceeds the model’s maximum context length (131,072 tokens)", True),
+    ("The input length exceeds the context length", True),
+    ("model is unavailable", False),
+    ("context configuration could not be loaded", False),
+])
+async def test_ollama_capacity_errors_are_consistent_across_response_modes(monkeypatch, mode, message, overflow):
+    class Output(BaseModel):
+        answer: int
+
+    client = type("Client", (), {"chat": AsyncMock(side_effect=mod.ollama.ResponseError(message, status_code=400)),
+                                 "aclose": AsyncMock()})()
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda *_args, **_kwargs: client)
+    model = _non_streaming_model()
+    if mode == "stream":
+        model.update_config(stream=True)
+    messages = [{"role": "user", "content": [{"text": "review"}]}]
+    generator = model.structured_output(Output, messages) if mode == "structured" else model.stream(messages)
+    with pytest.raises(ContextWindowOverflowException if overflow else mod.ollama.ResponseError):
+        async for _event in generator:
+            pass
+    assert client.chat.await_count == 1
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overflow", [True, False])
+async def test_ollama_normalizes_errors_during_stream_iteration(monkeypatch, overflow):
+    message = ("input length (99 tokens) exceeds the model's maximum context length (50 tokens)"
+               if overflow else "model is unavailable")
+
+    async def responses():
+        raise mod.ollama.ResponseError(message, status_code=400)
+        yield  # pragma: no cover
+
+    response = responses()
+    client = type("Client", (), {"chat": AsyncMock(return_value=response), "aclose": AsyncMock()})()
+    monkeypatch.setattr(mod.ollama, "AsyncClient", lambda *_args, **_kwargs: client)
+    with pytest.raises(ContextWindowOverflowException if overflow else mod.ollama.ResponseError):
+        async for _event in _model().stream([{"role": "user", "content": [{"text": "review"}]}]):
+            pass
+    assert client.chat.await_count == 1
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_native_schema_output_emits_usage_and_preserves_nested_types(monkeypatch):
+    class Nested(BaseModel):
+        rows: list[dict[str, str]]
+        instructions: str | None
+
+    seen = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat(self, **request):
+            seen.append(request)
+            return mod.ChatResponse(message={"role": "assistant", "content":
+                '{"rows":[{"verdict":"adequate"}],"instructions":null}'}, done=True,
+                done_reason="stop", prompt_eval_count=12, eval_count=8, total_duration=1000000)
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", Client)
+    events = [event async for event in _model().structured_output(Nested, [])]
+    assert seen[0]["format"] == Nested.model_json_schema()
+    assert not seen[0]["tools"]
+    assert events[0]["metadata"]["usage"]["totalTokens"] == 20
+    assert events[-1]["output"].rows == [{"verdict": "adequate"}]
+    assert events[-1]["output"].instructions is None
+
+
+@pytest.mark.asyncio
+async def test_native_schema_token_exhaustion_is_not_a_parse_failure(monkeypatch):
+    from strands.types.exceptions import MaxTokensReachedException
+
+    class Output(BaseModel):
+        answer: int
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat(self, **request):
+            return mod.ChatResponse(message={"role": "assistant", "content": '{"answer":'}, done_reason="length")
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", Client)
+    with pytest.raises(MaxTokensReachedException):
+        async for _event in _model().structured_output(Output, []):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content,accepted", [
+    ('{"answer":"literal <|eot|>"}<|eot|>', True),
+    ('{"answer":"literal <|eot|>"}', True),
+    ('{"answer":"literal"} unexpected prose', False),
+    ('{"answer":"incomplete<|eot|>', False),
+])
+async def test_native_chat_terminator_normalization_is_narrow(monkeypatch, content, accepted):
+    class Output(BaseModel):
+        answer: str
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat(self, **request):
+            return mod.ChatResponse(message={"role": "assistant", "content": content}, done_reason="stop")
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", Client)
+    if accepted:
+        events = [event async for event in _model().structured_output(Output, [])]
+        assert events[-1]["output"].answer == "literal <|eot|>"
+    else:
+        with pytest.raises(ValueError, match="Failed to parse"):
+            async for _event in _model().structured_output(Output, []):
+                pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_think", ["low", True])
+async def test_native_schema_survives_thinking_compatibility_fallback(monkeypatch, initial_think):
+    from copy import deepcopy
+
+    class Output(BaseModel):
+        answer: int
+
+    requests = []
+    closed = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def chat(self, **request):
+            requests.append(deepcopy(request))
+            if request.get("think") is not False:
+                raise mod.ollama.ResponseError("think not supported", status_code=400)
+            return mod.ChatResponse(message={"role": "assistant", "content": '{"answer":7}'}, done_reason="stop")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(mod.ollama, "AsyncClient", Client)
+    model = _model()
+    model.update_config(additional_args={"think": initial_think})
+    events = [event async for event in model.structured_output(Output, [])]
+    assert events[-1]["output"].answer == 7
+    assert all(request["format"] == Output.model_json_schema() for request in requests)
+    assert requests[-1]["think"] is False
+    assert closed == [True]

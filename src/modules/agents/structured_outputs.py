@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StrictBool, model_validator
 
+from modules.tools.artifact_references import require_artifact_reference
 from modules.tools.memory import TaskProposal
 from modules.utils.json_repair import normalize_json_key_case
 
@@ -86,6 +87,46 @@ class CritiqueOutput(StrictStructuredOutput):
     repairable: bool | None = None
 
 
+class TaskPromptIssueOutput(StrictStructuredOutput):
+    category: Literal["scope", "objective", "evidence", "execution_policy", "tool_availability"]
+    message: str = Field(min_length=1, max_length=500)
+    tool_names: list[str] = Field(default_factory=list)
+
+
+class TaskPromptCritiqueOutput(StrictStructuredOutput):
+    issues: list[TaskPromptIssueOutput] = Field(max_length=5)
+    repairable: bool = True
+
+
+class TaskPromptChecklistIssueOutput(TaskPromptIssueOutput):
+    requirement_ref: str = Field(min_length=1)
+    draft_excerpt: str = Field(max_length=300)
+
+
+class TaskPromptCheckOutput(StrictStructuredOutput):
+    status: Literal["pass", "fail"]
+    issue: TaskPromptChecklistIssueOutput | None
+
+    @model_validator(mode="after")
+    def validate_status(self) -> TaskPromptCheckOutput:
+        if (self.status == "fail") != (self.issue is not None):
+            raise ValueError("Failed checks require an issue; passing checks require issue=null")
+        return self
+
+
+class TaskPromptChecklistOutput(StrictStructuredOutput):
+    task_coverage: TaskPromptCheckOutput
+    scope: TaskPromptCheckOutput
+    execution_policy: TaskPromptCheckOutput
+    evidence: TaskPromptCheckOutput
+    capability_fit: TaskPromptCheckOutput
+    repairable: bool = True
+
+
+class FlowCritiqueOutput(CritiqueOutput):
+    supporting_evidence_refs: list[str] = Field(default_factory=list)
+
+
 class TaskPromptOutput(StrictStructuredOutput):
     prompt: str
     memory_ids: list[str] | None = None
@@ -106,6 +147,7 @@ class TaskPhaseClassificationOutput(StrictStructuredOutput):
 class EvaluatorRepairOutput(StrictStructuredOutput):
     kind: Literal["none", "acceptance", "execution"] = "none"
     evidence_gaps: list[str] = Field(default_factory=list)
+    execution_receipt_gaps: list[str] = Field(default_factory=list)
 
 
 class FindingRecommendationOutput(StrictStructuredOutput):
@@ -114,12 +156,116 @@ class FindingRecommendationOutput(StrictStructuredOutput):
     reason: str = ""
 
 
-class WorkflowDecisionOutput(StrictStructuredOutput):
+ArtifactEvidenceReference = Annotated[str, BeforeValidator(require_artifact_reference), Field(
+    pattern=r"^artifact(?:_id)?:\s*\S",
+    description="Current-task artifact: or artifact_id: reference only; memory: and other kinds are unsupported.",
+)]
+
+
+class OperationSupportOutput(StrictStructuredOutput):
+    status: Literal["established", "unestablished"]
+    basis: Literal["observed_intended_behavior", "established_access_policy", "availability_only", "unestablished"]
+    evidence_refs: list[ArtifactEvidenceReference] = Field(default_factory=list)
+
+
+class ComparisonAssessmentOutput(StrictStructuredOutput):
+    """Semantic support for an intended operation and its identity comparison."""
+
+    outcome: Literal["supported", "inconclusive"]
+    operation_support: OperationSupportOutput
+    operation_evidence_refs: list[ArtifactEvidenceReference] = Field(default_factory=list)
+    comparison_evidence_refs: list[ArtifactEvidenceReference] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+
+class TaskReviewDecisionOutput(StrictStructuredOutput):
     status: str
     reason: str = ""
-    instructions: str = ""
+    instructions: str | None = ""
     repair: EvaluatorRepairOutput | None = None
+
+    @model_validator(mode="after")
+    def normalize_instructions(self) -> TaskReviewDecisionOutput:
+        if self.instructions is None:
+            self.instructions = ""
+        return self
+
+
+class WorkflowDecisionOutput(TaskReviewDecisionOutput):
+    comparison_assessment: ComparisonAssessmentOutput | None = None
     finding_recommendation: FindingRecommendationOutput | None = None
+
+
+class ComparisonTaskDecisionOutput(WorkflowDecisionOutput):
+    comparison_assessment: ComparisonAssessmentOutput
+
+
+class HypothesisSemanticCheck(StrictStructuredOutput):
+    verdict: Literal["adequate", "revise"]
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class HypothesisIdentityCheck(StrictStructuredOutput):
+    verdict: Literal["adequate", "revise", "not_applicable"]
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class HypothesisSemanticChecks(StrictStructuredOutput):
+    grounding: HypothesisSemanticCheck
+    test_discrimination: HypothesisSemanticCheck
+    identity_requirements: HypothesisIdentityCheck
+
+
+class HypothesisRecordReview(StrictStructuredOutput):
+    semantic_checks: HypothesisSemanticChecks | None = None
+    hypothesis_id: str
+    decision: Literal["retain", "revise", "withdraw"]
+    reason: str = Field(min_length=1)
+
+
+class HypothesisBehaviorAssessment(StrictStructuredOutput):
+    input_candidate_ids: list[str] = Field(default_factory=list)
+    observed_behavior: str = Field(min_length=1)
+    inspection_refs: list[ArtifactEvidenceReference] = Field(min_length=1)
+    supports_conditional_test: bool
+    reasoning: str = Field(min_length=1)
+
+
+class NoHypothesisBasis(StrictStructuredOutput):
+    kind: Literal["inspected_evidence", "metadata_only", "necessary_evidence_unreviewed"]
+    inspection_refs: list[ArtifactEvidenceReference] = Field(default_factory=list)
+    behavior_assessments: list[HypothesisBehaviorAssessment] | None = Field(
+        default=None, description="Only inside an empty subject's no_hypothesis_basis; assess observed behavior.",
+    )
+    no_relevant_behavior_reason: str | None = Field(default=None, min_length=1)
+
+
+class HypothesisSubjectReview(StrictStructuredOutput):
+    item_id: str
+    decision: Literal["retain", "revise", "withdraw"]
+    reason: str = Field(min_length=1)
+    hypotheses: list[HypothesisRecordReview]
+    no_hypothesis_basis: NoHypothesisBasis | None = Field(
+        default=None, description="Only for subjects with no hypotheses; nest behavior assessments here.",
+    )
+
+
+class HypothesisPrerequisiteGap(StrictStructuredOutput):
+    criterion_id: str
+    missing_input: str = Field(min_length=1)
+    item_ids: list[str] = Field(min_length=1)
+    source_refs: list[ArtifactEvidenceReference] = Field(min_length=1)
+
+
+class HypothesisTaskDecisionOutput(TaskReviewDecisionOutput):
+    publication_sha256: str
+    subject_reviews: list[HypothesisSubjectReview]
+    prerequisite_gaps: list[HypothesisPrerequisiteGap] = Field(default_factory=list)
+    unresolved_criterion_ids: list[str] = Field(default_factory=list)
+
+
+class HypothesisCheckpointDecisionOutput(TaskReviewDecisionOutput):
+    prerequisite_gaps: list[HypothesisPrerequisiteGap]
 
 
 class TaxonomyMappingOutput(StrictStructuredOutput):
@@ -184,8 +330,10 @@ WORKFLOW_OUTPUT_MODELS: dict[str, type[BaseModel]] = {
     "task_creator": TaskProposalBatchOutput,
     "plan_creator": PlanOutput,
     "plan_critic": CritiqueOutput,
+    "authentication_flow_critic": FlowCritiqueOutput,
+    "registration_flow_critic": FlowCritiqueOutput,
     "task_prompt_builder": TaskPromptOutput,
-    "task_prompt_critic": CritiqueOutput,
+    "task_prompt_critic": TaskPromptChecklistOutput,
     "task_phase_classifier": TaskPhaseClassificationOutput,
     "task_evaluator": WorkflowDecisionOutput,
     "phase_evaluator": WorkflowDecisionOutput,
@@ -197,6 +345,9 @@ WORKFLOW_OUTPUT_MODELS: dict[str, type[BaseModel]] = {
 def structured_output_dict(value: Any) -> dict[str, Any]:
     """Normalize a structured result without reparsing model text."""
 
+    if isinstance(value, TaskPromptChecklistOutput):
+        # Null issues are required pass decisions, not optional metadata.
+        return value.model_dump()
     if isinstance(value, BaseModel):
         return value.model_dump(exclude_none=True, exclude_unset=True)
     if isinstance(value, dict):

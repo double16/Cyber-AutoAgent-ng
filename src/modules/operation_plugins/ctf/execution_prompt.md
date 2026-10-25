@@ -12,6 +12,9 @@ confirmation. A vulnerability or intermediate capability is progress, not succes
 </access_and_scope>
 
 <module_execution_policy>
+- During endpoint/workflow mapping, include bounded POST discovery when permitted by the objective
+  and assigned task, including relevant endpoints without declared POST support. Follow the module
+  task policy for minimal benign inputs, evidence retention, and coverage gaps.
 - Extract literal hints and test the simplest plausible interpretation before more expensive exploitation chains.
 - Record discovered hosts, endpoints, parameters, roles, and capability classes with artifact references so the workflow
   can assess them.

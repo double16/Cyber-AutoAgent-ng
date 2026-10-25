@@ -66,7 +66,7 @@ def test_search_duckduckgo_maps_ddgs_results(monkeypatch):
 
         def text(self, query, backend, max_results):
             assert query == "python"
-            assert backend == "brave,duckduckgo"
+            assert backend == "auto"
             assert max_results == 2
             return [
                 {"title": "Python", "href": "https://python.org", "body": "Language"},

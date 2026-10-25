@@ -404,6 +404,30 @@ def test_typed_payload_validation_rejects_incomplete_and_unsafe_mailbox_configur
         validate_credential_payload("bearer", {"token": "secret"})
 
 
+def test_api_credential_accepts_multiple_opaque_named_headers():
+    assert validate_credential_payload("api_key", {
+        "headers": {"X-Session": "opaque-value", "Tauser": "another-value"},
+    }) == {"headers": {"X-Session": "opaque-value", "Tauser": "another-value"}}
+
+
+@pytest.mark.parametrize("headers,match", [
+    ({"X-Session": "value", "x-session": "another"}, "unique"),
+    ({"Bad Header": "value"}, "header name"),
+    ({"Tauser": "value\r\nInjected: bad"}, "header value"),
+    ({}, "nonempty"),
+])
+def test_api_credential_rejects_unsafe_header_sets(headers, match):
+    with pytest.raises(ValueError, match=match):
+        validate_credential_payload("api_key", {"headers": headers})
+
+
+def test_single_api_key_header_rejects_unsafe_name_and_value():
+    with pytest.raises(ValueError, match="header name"):
+        validate_credential_payload("api_key", {"api_key": "secret", "name": "Bad Header"})
+    with pytest.raises(ValueError, match="header value"):
+        validate_credential_payload("api_key", {"api_key": "secret", "name": "Tauser", "prefix": "bad\n"})
+
+
 def test_objective_credentials_are_extracted_and_sanitized_before_agent_use():
     sanitized, drafts = extract_objective_credentials(
         "Assess app. username=alice password=secret-value email=bob@example.test password=email-secret "
@@ -587,7 +611,7 @@ def test_access_control_comparisons_only_offer_distinct_account_role_or_tenant_p
     result = json.loads(plan_access_control_comparisons("https://app.example.test"))
     coverage = json.loads(plan_authenticated_coverage("https://app.example.test"))
 
-    assert {item["kind"] for item in result["comparisons"]} == {"account", "role", "tenant"}
+    assert {item["kind"] for item in result["comparisons"]} == {"role", "tenant"}
     assert {member["credential_id"], admin["credential_id"]} == {
         result["comparisons"][0]["left_credential_id"], result["comparisons"][0]["right_credential_id"]
     }
@@ -597,7 +621,7 @@ def test_access_control_comparisons_only_offer_distinct_account_role_or_tenant_p
         member["credential_id"],
         admin["credential_id"],
     }
-    assert {item["kind"] for item in coverage["comparisons"]} == {"account", "role", "tenant"}
+    assert {item["kind"] for item in coverage["comparisons"]} == {"role", "tenant"}
     assert coverage["authenticated_coverage_gap"] is None
     assert coverage["comparison_coverage_gap"] is None
     assert "must-not-leak" not in json.dumps(coverage)
@@ -1740,12 +1764,12 @@ def test_idor_login_contexts_reject_unplanned_unbound_and_cross_origin_pairs(tmp
         )
 
     set_task_auth_context([left["credential_id"], right["credential_id"]])
-    with pytest.raises(ValueError, match="planned account, role, or tenant"):
-        build_checked_out_idor_login_contexts(
-            [left["credential_id"], right["credential_id"]],
-            "https://app.example.test/api",
-            "https://app.example.test/login",
-        )
+    contexts = build_checked_out_idor_login_contexts(
+        [left["credential_id"], right["credential_id"]],
+        "https://app.example.test/api",
+        "https://app.example.test/login",
+    )
+    assert {item["credential_id"] for item in contexts} == {left["credential_id"], right["credential_id"]}
     with pytest.raises(ValueError, match="login_url must share"):
         build_checked_out_idor_login_contexts(
             [left["credential_id"], right["credential_id"]],
@@ -1851,3 +1875,43 @@ def test_mfa_tools_reject_missing_configuration_and_mailbox_errors(tmp_path, mon
         request_mfa_code(plain_credential["credential_id"], code_pattern="[")
     with pytest.raises(ValueError, match="not configured by an active"):
         retrieve_email_mfa_code(plain_credential["credential_id"])
+
+
+def test_worker_authorization_is_separate_and_promotes_without_downgrading(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "worker-permissions.db"), "logical-target")
+    credential = store.store_credential("op-1", {
+        "credential_type": "username_password", "target": "https://target.test", "role": "user",
+        "payload": {"username": "alice", "password": "internal-secret"}, "origin": "provided",
+        "management_policy": "user", "status": "unknown",
+    })
+    identifier = credential["credential_id"]
+    store.authorize_credential_for_task("op-1", identifier, "task-1", "authentication_worker")
+    assert store.credential_ids_authorized_for_worker("op-1", "task-1") == {identifier}
+    assert store.credential_ids_authorized_by_task("op-1", "task-1") == set()
+    assert store.credential_ids_selected_by_task("op-1", "task-1") == set()
+    assert store.credential_ids_authorized_for_worker("op-2", "task-1") == set()
+    other_target_store = SQLiteApplicationStore(str(tmp_path / "worker-permissions.db"), "other-target")
+    assert other_target_store.credential_ids_authorized_for_worker("op-1", "task-1") == set()
+    assert store.credential_ids_authorized_for_worker("op-1", "task-2") == set()
+    assert store.credential_ids_authorized_for_worker("op-1", "") == set()
+    assert store.credential_ids_authorized_by_task("op-1", "") == set()
+    store.authorize_credential_for_task("op-1", identifier, "task-1", "reused_authenticated_context")
+    store.authorize_credential_for_task("op-1", identifier, "task-1", "authentication_worker")
+    assert store.credential_ids_authorized_by_task("op-1", "task-1") == {identifier}
+    assert store.credential_ids_authorized_for_worker("op-1", "task-1") == {identifier}
+    assert store.credential_ids_used_by_task("op-1", "task-1", [identifier]) == set()
+    for kind, task in [("unknown", "task-1"), ("authentication_worker", "")]:
+        with pytest.raises(ValueError):
+            store.authorize_credential_for_task("op-1", identifier, task, kind)
+
+
+def test_checked_out_credentials_remain_available_to_bound_workers(tmp_path):
+    store = SQLiteApplicationStore(str(tmp_path / "checkout.db"), "logical-target")
+    credential = store.store_credential("op-1", {
+        "credential_type": "username_password", "target": "https://target.test", "role": "user",
+        "payload": {"username": "alice", "password": "internal-secret"}, "origin": "provided",
+        "management_policy": "user", "status": "unknown",
+    })
+    identifier = credential["credential_id"]
+    store.record_credential_usage("op-1", identifier, task_uid="task-1", outcome="selected")
+    assert store.credential_ids_authorized_for_worker("op-1", "task-1") == {identifier}
