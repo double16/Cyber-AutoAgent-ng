@@ -23,6 +23,7 @@ import { resolveRecordingMode } from './utils/recordingMode.js';
 import { formatAutoRunMemoryEvent } from './utils/memoryEventFormatting.js';
 import { formatToolDiscoveryEvent } from './utils/toolDiscoveryEventFormatting.js';
 import { formatWorkflowActivityEvent } from './utils/workflowActivityFormatting.js';
+import { formatTechniqueEvent, techniqueEventSeverity } from './utils/techniqueEventFormatting.js';
 import { formatAutoRunReportProgress } from './utils/reportProgressFormatting.js';
 import { appendOperationHealth, isPostAssessmentStage } from './utils/operationHealthFormatting.js';
 import { setOperationTerminalTitle } from './utils/terminalTitle.js';
@@ -444,7 +445,12 @@ const runAutoAssessment = async () => {
       executionService.on('event', (event: any) => {
         const memoryEventMessage = formatAutoRunMemoryEvent(event);
         const toolDiscoveryMessage = formatToolDiscoveryEvent(event);
-        if (memoryEventMessage) {
+        const techniqueMessage = formatTechniqueEvent(event);
+        if (techniqueMessage) {
+          if (techniqueEventSeverity(event) === 'warning') loggingService.warn(techniqueMessage);
+          else loggingService.info(techniqueMessage);
+        }
+        else if (memoryEventMessage) {
           loggingService.info(memoryEventMessage);
         }
         else if (toolDiscoveryMessage) {

@@ -12,6 +12,8 @@ from typing import Any
 
 from strands.types.exceptions import ContextWindowOverflowException
 
+from modules.config.models.structured_output import validate_structured_json
+
 logger = logging.getLogger(__name__)
 _SUMMARIZING: ContextVar[bool] = ContextVar("generation_summarizing", default=False)
 
@@ -223,7 +225,7 @@ async def _native_schema_events(model: Any, output_model: Any, messages: Any, sy
     if stop_reason == "max_tokens":
         raise MaxTokensReachedException("Native structured generation reached its output limit")
     content = "".join(block.get("text", "") for block in message["content"])
-    yield {"output": output_model.model_validate_json(content)}
+    yield {"output": validate_structured_json(output_model, content)}
 
 
 def attach_generation_budget(model: Any, provider: str, model_id: str, ceiling: int | None) -> Any:

@@ -3064,6 +3064,55 @@ def test_hypothesis_producer_requires_frozen_snapshot_before_persistence(fake_me
     assert not store.tasks
 
 
+def test_native_hypothesis_role_repair_still_requires_controller_snapshot_acceptance(fake_memory_client):
+    from modules.agents.structured_outputs import TaskProposalBatchOutput
+    from modules.config.models.structured_output import StructuredOutputValidationError, validate_structured_json
+
+    _client, store = fake_memory_client
+    store.plan = mod.OperationPlan(
+        objective="Develop controlled hypotheses", current_phase=4, total_phases=1,
+        phases=[mod.PlanPhase(id=4, title="Hypotheses", status="active", produces_hypotheses=True)],
+        targets=[mod.OperationTarget(target_id="target-1", value="http://target.test", type="network")],
+    )
+    manifest = Path(mod._operation_output_root()) / "hypothesis-inventory.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({
+        "schema_version": 1,
+        "items": [{"id": "endpoint-1", "target_id": "target-1", "kind": "endpoint",
+                   "value": "http://target.test/route", "attributes": {}}],
+        "unassessed_gaps": [],
+    }))
+    reference = mod.canonical_artifact_reference(str(manifest))
+    payload = {"tasks": [{
+        "title": "Generate controlled hypotheses", "objective": "Develop future tests for the assigned frozen unit",
+        "task_role": "hypothesis", "snapshot_refs": [reference], "methods": [], "limits": {},
+        "workstream": "hypothesis_generation", "criteria": [{"description": "Record hypotheses and controls"}],
+    }]}
+    with pytest.raises(StructuredOutputValidationError, match="task_role"):
+        validate_structured_json(TaskProposalBatchOutput, json.dumps(payload))
+    assert not store.tasks
+
+    payload["tasks"][0]["task_role"] = "mapping"
+    corrected = validate_structured_json(TaskProposalBatchOutput, json.dumps(payload))
+    submit = mod.build_create_tasks_submitter(
+        requires_hypotheses=True, coverage_item_ids={"endpoint-1"}, expected_snapshot_ref=reference,
+    )
+    other_manifest = manifest.with_name("other-inventory.json")
+    other_manifest.write_bytes(manifest.read_bytes())
+    wrong_reference = corrected.tasks[0].model_copy(
+        update={"snapshot_refs": [mod.canonical_artifact_reference(str(other_manifest))]},
+    )
+    with pytest.raises(ValueError, match="snapshot"):
+        submit([wrong_reference])
+    assert not store.tasks
+    assert json.loads(submit(corrected.tasks))["created_count"] == 1
+    task = store.tasks[0]
+    assert task.phase == 4
+    assert task.acceptance.basis.kind == "snapshot"
+    assert task.acceptance.basis.item_ids == ("endpoint-1",)
+    assert any(req.kind == "hypothesis_set" for req in task.acceptance.criteria[0].evidence_requirements)
+
+
 def test_bound_create_tasks_tool_rejects_preflight_batch_before_persisting(fake_memory_client):
     _client, store = fake_memory_client
     store.plan = mod.OperationPlan(
@@ -6581,3 +6630,213 @@ def test_multiple_missing_workstreams_unlock_entire_batch_without_serial_repairs
     corrected = [proposal.model_copy(update={"workstream": f"goal_{index}"})
                  for index, proposal in enumerate(proposals)]
     assert guard.restore(corrected) == corrected
+
+
+@pytest.fixture
+def hypothesis_generation_controller(fake_memory_client, tmp_path, monkeypatch):
+    """Exercise controller batching and compilation against the real workflow database."""
+    from modules.agents import multi_agent_workflow as workflow
+    from modules.config.types import BudgetConfig
+    from tests.test_multi_agent_workflow import _runtime
+
+    store = mod.SQLiteApplicationStore(str(tmp_path / "hypotheses.db"), "target")
+    monkeypatch.setattr(mod, "_get_database_store", lambda: store)
+    monkeypatch.setattr(mod, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow, "_operation_output_root", lambda: str(tmp_path))
+    monkeypatch.setattr(workflow, "_get_database_store", lambda: store)
+    runtime = _runtime()
+    runtime.operation_id = "op1"
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("Hypothesis generation must not invoke a task proposal agent")
+
+    controller = workflow.MultiAgentWorkflowController(
+        runtime=runtime, budget=BudgetConfig(max_duration_minutes=60),
+        state_store=workflow.WorkflowStateStore("op1"),
+        structured_runner=unexpected, text_runner=unexpected,
+    )
+    events = []
+    monkeypatch.setattr(controller, "_emit_workflow_event", events.append)
+    monkeypatch.setattr(controller, "_task_creator_prompt", unexpected)
+
+    def initialize(items, targets=None):
+        phase = mod.PlanPhase(
+            id=2, title="Develop future tests", status="active", produces_hypotheses=True,
+            criteria="Derive evidence-grounded future tests from frozen observations",
+        )
+        plan = mod.OperationPlan(
+            objective="Assess assigned subjects", current_phase=2, total_phases=2,
+            phases=[mod.PlanPhase(id=1, title="Inventory", status="done"), phase],
+            targets=targets or [mod.OperationTarget("target-1", "https://target.test", "network")],
+        )
+        store.store_plan("op1", plan)
+        manifest = tmp_path / "inventory.json"
+        manifest.write_text(json.dumps({"schema_version": 1, "items": items, "unassessed_gaps": []}))
+        store.store_task("op1", mod.Task(
+            task_uid="producer", title="Map subjects", objective="Collect inventory", phase=1, status="done",
+            acceptance=make_acceptance(), evidence=["artifact:inventory.json"],
+        ))
+        return plan, phase, manifest
+
+    return controller, store, initialize, events
+
+
+def test_hypothesis_generation_assigns_74_routes_and_96_items_without_model(hypothesis_generation_controller):
+    controller, store, initialize, events = hypothesis_generation_controller
+    items = [{
+        "id": f"endpoint-{index}", "target_id": "target-1", "kind": "endpoint",
+        "value": f"https://target.test/route/{index}", "attributes": {},
+    } for index in range(74)]
+    items.extend({
+        "id": f"parameter-{index}", "target_id": "target-1", "kind": "parameter", "value": "input",
+        "attributes": {"endpoint_id": f"endpoint-{index}"},
+    } for index in range(22))
+    plan, phase, _manifest = initialize(items)
+
+    outcome = controller._create_tasks(plan, phase)
+
+    tasks = controller.state.list_tasks(phase=2)
+    assert outcome.created_count == 74 and outcome.attempts == 0 and outcome.batch_count == 1
+    assert len(tasks) == 74
+    assert {item for task in tasks for item in task.acceptance.basis.item_ids} == {item["id"] for item in items}
+    assert all(task.recovery_context["coverage_family"] == "hypothesis_generation" for task in tasks)
+    assert all(task.acceptance.basis.source_refs == ("artifact:inventory.json",) for task in tasks)
+    assert all(any(req.kind == "hypothesis_set" for req in task.acceptance.criteria[0].evidence_requirements)
+               for task in tasks)
+    assert all("no_testable_hypotheses" in task.acceptance.criteria[0].description for task in tasks)
+    assert len(tasks[0].acceptance.basis.item_ids) in {1, 2}
+    original_ids = {task.task_uid for task in tasks}
+    for index, task in enumerate(tasks):
+        store.store_task("op1", replace(task, status=["pending", "active", "done"][index % 3]))
+    repeated = controller._create_tasks(plan, phase)
+    assert repeated.created_count == 0 and repeated.attempts == 0 and repeated.batch_count == 0
+    assert {task.task_uid for task in controller.state.list_tasks(phase=2)} == original_ids
+    assert events[-1]["creation_kind"] == "hypothesis_generation"
+    assert events[-1]["batch_count"] == 0
+
+
+@pytest.mark.parametrize("kind,value,target_type", [
+    ("endpoint", "https://target.test/input", "network"),
+    ("service", "tcp://target.test:9000", "network"),
+    ("workflow", "/workspace/source.py", "filesystem"),
+])
+def test_hypothesis_generation_reuses_legacy_assignments_and_new_snapshot(
+    hypothesis_generation_controller, kind, value, target_type,
+):
+    controller, store, initialize, _events = hypothesis_generation_controller
+    plan, phase, manifest = initialize([{
+        "id": "subject", "target_id": "target-1", "kind": kind, "value": value, "attributes": {},
+    }], [mod.OperationTarget("target-1", value, target_type)])
+    assert controller._create_tasks(plan, phase).created_count == 1
+    task = controller.state.list_tasks(phase=2)[0]
+    # Prior model-created work may carry another family and its original acceptance contract.
+    store.store_task("op1", replace(task, recovery_context={**task.recovery_context, "coverage_family": "legacy"}))
+    assert controller._create_tasks(plan, phase).created_count == 0
+    data = json.loads(manifest.read_text())
+    data["items"][0]["attributes"]["observation"] = "fresh evidence"
+    manifest.write_text(json.dumps(data))
+    assert controller._create_tasks(plan, phase).created_count == 1
+    assert len({task.acceptance.basis.snapshot_hash for task in controller.state.list_tasks(phase=2)}) == 2
+
+
+@pytest.mark.parametrize("failure", ["missing", "unreadable", "malformed", "ineligible"])
+def test_hypothesis_generation_missing_inventory_fails_without_model(hypothesis_generation_controller, failure):
+    controller, store, initialize, _events = hypothesis_generation_controller
+    plan, phase, manifest = initialize([{
+        "id": "subject", "target_id": "target-1", "kind": "endpoint", "value": "https://target.test/input",
+    }])
+    if failure == "missing":
+        manifest.unlink()
+    elif failure == "unreadable":
+        manifest.unlink()
+        manifest.mkdir()
+    elif failure == "malformed":
+        manifest.write_text("not-json")
+    else:
+        producer = controller.state.list_tasks(phase=1)[0]
+        store.store_task("op1", replace(producer, status="pending"))
+    with pytest.raises(ValueError, match="requires a completed prior inventory manifest"):
+        controller._create_tasks(plan, phase)
+    assert controller.state.list_tasks(phase=2) == []
+
+
+def test_hypothesis_generation_validates_all_batches_before_persistence(hypothesis_generation_controller, monkeypatch):
+    controller, _store, initialize, _events = hypothesis_generation_controller
+    plan, phase, _manifest = initialize([{
+        "id": f"subject-{index}", "target_id": "target-1", "kind": "endpoint",
+        "value": f"https://target.test/{index}",
+    } for index in range(2)])
+    batch = controller._task_creation_batches(plan, phase, "")[0]
+    first = replace(batch, index=1, total=2, groups=batch.groups[:1])
+    second = replace(batch, index=2, total=2, groups=batch.groups[1:], snapshot_ref="artifact:missing.json")
+    monkeypatch.setattr(controller, "_task_creation_batches", lambda *_args: [first, second])
+    with pytest.raises(ValueError):
+        controller._create_tasks(plan, phase)
+    assert controller.state.list_tasks(phase=2) == []
+    second = replace(second, snapshot_ref=batch.snapshot_ref)
+    assert controller._create_tasks(plan, phase).created_count == 2
+
+
+def test_hypothesis_generation_multiple_targets_batches_and_failed_work(hypothesis_generation_controller):
+    controller, store, initialize, events = hypothesis_generation_controller
+    items = [{
+        "id": f"subject-{index}", "target_id": f"target-{index % 2 + 1}", "kind": "endpoint",
+        "value": f"https://target.test/{index}",
+    } for index in range(30)]
+    plan, phase, _manifest = initialize(items, [
+        mod.OperationTarget("target-1", "https://target.test", "network"),
+        mod.OperationTarget("target-2", "https://target.test", "network"),
+    ])
+    # Input size may partition bookkeeping batches but must not reduce coverage.
+    controller.runtime.prompt_token_limit = 100
+    outcome = controller._create_tasks(plan, phase)
+    assert outcome.created_count == 30 and outcome.attempts == 0 and outcome.batch_count > 1
+    tasks = controller.state.list_tasks(phase=2)
+    by_id = {item["id"]: item for item in items}
+    for task in tasks:
+        assert task.target_ids == [by_id[task.acceptance.basis.item_ids[0]]["target_id"]]
+    failed = tasks[0]
+    store.store_task("op1", replace(failed, status="partial_failure"))
+    assert controller._create_tasks(plan, phase).created_count == 1
+    assert len(controller.state.list_tasks(phase=2)) == 31
+    assert events[-1]["created_count"] == 1
+
+
+@pytest.mark.parametrize("invalid_batch", ["snapshot", "subjects"])
+def test_hypothesis_generation_rejects_unbound_batch(hypothesis_generation_controller, invalid_batch):
+    from modules.agents.multi_agent_workflow import TaskCreationBatch
+
+    controller, _store, initialize, _events = hypothesis_generation_controller
+    _plan, phase, _manifest = initialize([])
+    batch = TaskCreationBatch(
+        1, 1, None if invalid_batch == "snapshot" else "artifact:inventory.json",
+        () if invalid_batch == "subjects" else (("target-1", "endpoint", "https://target.test", ("item",)),), 0,
+    )
+    with pytest.raises(ValueError, match="requires assigned frozen inventory subjects"):
+        controller._create_hypothesis_generation_tasks(phase, [batch])
+    assert controller.state.list_tasks(phase=2) == []
+
+
+def test_hypothesis_generation_uses_pinned_inventory_and_fails_if_unavailable(hypothesis_generation_controller):
+    controller, _store, initialize, _events = hypothesis_generation_controller
+    plan, phase, manifest = initialize([{
+        "id": "subject", "target_id": "target-1", "kind": "endpoint", "value": "https://target.test/input",
+    }])
+    phase = replace(phase, source_manifest_refs=("artifact:inventory.json",))
+    plan = replace(plan, phases=[plan.phases[0], phase])
+    controller.state.store_plan(plan)
+    assert controller._create_tasks(plan, phase).created_count == 1
+    manifest.unlink()
+    with pytest.raises(ValueError):
+        controller._create_tasks(plan, phase)
+    assert len(controller.state.list_tasks(phase=2)) == 1
+
+
+def test_hypothesis_generation_requires_prior_inventory_phase(hypothesis_generation_controller):
+    controller, _store, initialize, _events = hypothesis_generation_controller
+    plan, phase, _manifest = initialize([])
+    phase = replace(phase, id=1)
+    plan = replace(plan, current_phase=1, total_phases=1, phases=[phase])
+    controller.state.store_plan(plan)
+    with pytest.raises(ValueError, match="requires a completed prior inventory manifest"):
+        controller._create_tasks(plan, phase)

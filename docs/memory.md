@@ -1,5 +1,8 @@
 # Memory System
 
+Global [security techniques](techniques.md) use separate Qdrant collections and SQLite lifecycle
+tables. They are independent of target-scoped memories and cannot satisfy operation evidence.
+
 Cyber-AutoAgent uses two complementary persistence layers:
 
 - Qdrant stores semantic memories such as observations, verified findings, validation records, and reusable knowledge.
@@ -244,7 +247,7 @@ them with a purpose-built, reviewed process.
 | `CYBER_MEMORY_MODE` | `operation` | Query scope: `operation` or `shared`. |
 | `QDRANT_URL` | unset | Qdrant service URL. Unset selects filesystem storage. |
 | `QDRANT_API_KEY` | unset | Optional Qdrant service API key. |
-| `QDRANT_COLLECTION` | `cyber_autoagent_memories` | Semantic-memory collection name. |
+| `QDRANT_COLLECTION` | `cyber_autoagent_memories` | Semantic-memory collection name. Unset, empty, or whitespace-only values use the Python default. |
 | `CYBER_AGENT_OUTPUT_DIR` | `./outputs` | Parent of the local `qdrant` directory and operation outputs. |
 | `CYBER_AGENT_EMBEDDING_MODEL` | provider default | Embedding model used for Qdrant vectors. |
 | `MEMORY_LIST_LIMIT` | `100` | Maximum default records returned by bounded list operations. |

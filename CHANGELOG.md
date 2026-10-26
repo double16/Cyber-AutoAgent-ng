@@ -2,6 +2,11 @@
 
 ### Features
 
+- Add a `create-technique` repository skill with collaborative authoring checkpoints, independent
+  source selection and critique, and validation against the module technique document contract.
+- Add global, source-backed security techniques with Qdrant retrieval, module Markdown imports,
+  independent research/selection and actor/critic generation, phase-aware lookup recommendations,
+  JWT detection, evaluator-owned sentiment and deactivation, and the `caa-technique` CLI.
 - Add credential store with typed login/API/OAuth credentials, lifecycle status history, exact
   resolved-target scoping, explicit aliases, agent checkout tools, password/TOTP generation, objective sanitization,
   authentication context for tasks/findings, interactive email-MFA handoff, operation-managed credential rotation,

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create a Technique"
+  short_description: "Craft module techniques with collaborative review"
+  default_prompt: "Use $create-technique to help me research, design, and review a reusable technique for a module."

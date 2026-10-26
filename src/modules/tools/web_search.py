@@ -27,6 +27,7 @@ WEB_SEARCH_CACHE_COLLECTION_PREFIX = "cyber_autoagent_web_search_cache"
 WEB_SEARCH_CACHE_CLEANUP_INTERVAL_SECONDS = 60 * 60
 _WEB_SEARCH_CACHE_NAMESPACE = uuid.UUID("d4a6c017-e41a-42d3-8c9b-7d458563eff4")
 _SENSITIVE_QUERY_PATTERNS = (
+    re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]*){2,4}(?![A-Za-z0-9_.-])"),
     re.compile(r"(?i)-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----"),
     re.compile(r"(?i)\b(?:authorization\s*[:=]\s*(?:bearer|basic)\s+|bearer\s+)[A-Za-z0-9._~+/-]+=*"),
     re.compile(r"(?i)\b(?:api[_-]?key|secret|password|token|access[_-]?key)\s*[:=]\s*[^\s,;]+"),
@@ -76,9 +77,10 @@ class WebSearchHit(BaseModel):
 class SemanticWebSearchCache:
     """Reuse sufficiently similar successful web-search responses from Qdrant."""
 
-    def __init__(self) -> None:
+    def __init__(self, backend: Any | None = None) -> None:
         self._lock = threading.Lock()
         self._last_cleanup: dict[str, float] = {}
+        self._backend = backend
 
     @staticmethod
     def _result_count(result: Any) -> int:
@@ -119,11 +121,10 @@ class SemanticWebSearchCache:
     def _point_id(query: str) -> str:
         return str(uuid.uuid5(_WEB_SEARCH_CACHE_NAMESPACE, query))
 
-    @staticmethod
-    def _memory_client() -> Any | None:
-        """Return the already-initialized operation memory client without auto-initializing it."""
+    def _memory_client(self) -> Any | None:
+        """Use injected global resources or an existing operation client; never auto-initialize."""
 
-        return memory_tools._MEMORY_CLIENT
+        return self._backend if self._backend is not None else memory_tools._MEMORY_CLIENT
 
     def _ensure_collection(self, memory_client: Any, collection_name: str) -> None:
         qdrant = memory_client.qdrant
@@ -340,8 +341,9 @@ def create_web_search_tool(
         """
         Searches the web with the provided query.
 
-        Invoke this tool when the user needs to find general information on vulnerabilities, CVEs, published exploits,
-        and instructions for using tools.
+        Workers use this tool for target-specific public intelligence. When get_technique is available,
+        request reusable methodology, CVE-validation guidance, and tool instructions through that tool.
+        Technique researchers use web search to discover source documents for reusable guidance.
 
         Sensitive credentials, payment-card data, and personally identifiable information are blocked before a search
         provider is called.

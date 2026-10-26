@@ -16,6 +16,7 @@ from strands.tools.registry import ToolRegistry
 
 from modules.agents.structured_outputs import StructuredOutputUnavailableError
 from modules.config.models.generation_budget import is_summary_generation
+from modules.config.models.structured_output import StructuredOutputValidationError
 
 logger = logging.getLogger(__name__)
 _UNSUPPORTED_NATIVE: set[tuple[str, str, str]] = set()
@@ -109,7 +110,12 @@ class NativeFinalizer(Model):
                     self.output_model, messages, system_prompt=system_prompt,
                 ):
                     if "output" in event:
-                        output = self.output_model.model_validate(event["output"])
+                        try:
+                            output = self.output_model.model_validate(event["output"])
+                        except ValidationError as error:
+                            raise StructuredOutputValidationError(
+                                error, json.dumps(event["output"], ensure_ascii=False),
+                            ) from None
                     elif "metadata" in event:
                         metadata.append(event)
                 if output is None:

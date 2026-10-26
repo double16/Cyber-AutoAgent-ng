@@ -28,6 +28,25 @@ and reasons for termination.
 
 ## Playbooks
 
+### Inspect technique use and feedback
+
+Techniques are global guidance, not operation evidence. Inspect source documents in Qdrant and the
+operation's `techniques/` debug directory. Produced copies are saved immediately; evaluated-use copies
+include their independent sentiment and reason. Lifecycle and use provenance are available read-only:
+
+```sql
+SELECT u.operation_id, u.task_uid, u.revision_id, u.score, u.reason,
+       r.lineage, r.origin, r.active, r.inactive_reason, r.score_count, r.score_total,
+       r.pending_sync
+FROM technique_uses AS u
+JOIN technique_revisions AS r ON r.revision_id = u.revision_id
+WHERE u.operation_id = :operation_id
+ORDER BY u.created_at;
+```
+
+A NULL score is pending evaluation, not negative sentiment. An inactive current revision may advertise
+triggers for regeneration, but cannot be returned as guidance. Superseded revisions preserve history.
+
 ### "Find the operation log"
 
 Use these commands to locate the `cyber_operations.log` file.

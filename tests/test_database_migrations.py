@@ -49,6 +49,7 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         (11, "0011_authentication_flow_records.sql"),
         (12, "0012_task_credential_authorizations.sql"),
         (13, "0013_authentication_worker_authorizations.sql"),
+        (14, "0014_techniques.sql"),
     ]
     assert {
         "operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts",
@@ -89,7 +90,7 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with closing(sqlite3.connect(db_path)) as conn, conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 13
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 14
 
 
 def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):

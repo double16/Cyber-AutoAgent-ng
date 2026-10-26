@@ -257,3 +257,21 @@ def test_sdk_summary_retains_text_transport_during_native_finalization():
     events = asyncio.run(collect())
     assert any("contentBlockDelta" in event for event in events)
     assert [call[0] for call in model.calls] == ["tools"]
+
+
+def test_native_finalizer_retains_invalid_provider_payload_for_correction():
+    from modules.config.models.structured_output import StructuredOutputValidationError
+
+    class Invalid(Provider):
+        async def structured_output(self, *args, **kwargs):
+            yield {"output": {"values": "incorrect", "instructions": "original intent"}}
+
+    model = Invalid()
+    agent = Agent(model=model, callback_handler=None)
+    with pytest.raises(StructuredOutputValidationError) as caught:
+        invoke_structured(agent, "Keep assigned task", Answer)
+    assert "original intent" in caught.value.rejected_response
+    assert caught.value.validation_errors[0]["loc"] == ["values"]
+    assert "Keep assigned task" in str(caught.value.native_finalization_messages)
+    assert not _UNSUPPORTED_NATIVE
+    assert agent.model is model
