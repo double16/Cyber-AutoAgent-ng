@@ -1,5 +1,6 @@
 """Fresh, restricted technique agents with normal model profiles and accounting hooks."""
 
+from contextlib import nullcontext
 from typing import Any
 
 from strands.hooks import BeforeModelCallEvent, HookProvider
@@ -11,6 +12,7 @@ from modules.handlers.conversation_budget import (
     MappingConversationManager,
     PromptBudgetHook,
     _ensure_prompt_within_budget,
+    estimate_prompt_tokens,
 )
 
 SYSTEM = """You are a specialist in reusable, source-backed security techniques.
@@ -40,18 +42,36 @@ class RoleTurnLimit(HookProvider):
 
 
 class TechniqueRoleRunner:
-    def __init__(self, provider: str, model_id: str, callback_factory=None, hooks: list | None = None) -> None:
+    def __init__(self, provider: str, model_id: str, callback_factory=None, hooks: list | None = None,
+                 *, diagnostics=None) -> None:
         self.provider = provider
         self.model_id = model_id
         self.callback_factory = callback_factory
         self.hooks = hooks or []
+        self.diagnostics = diagnostics
 
     def __call__(self, role: str, prompt: str, tools: list[Any]) -> str:
-        model = create_strands_model(self.provider, self.model_id, role)
+        scope = self.diagnostics.role(role, self.provider, self.model_id) if self.diagnostics else nullcontext()
+        with scope as diagnostic_hook:
+            return self._run(role, prompt, tools, diagnostic_hook)
+
+    def _run(self, role: str, prompt: str, tools: list[Any], diagnostic_hook) -> str:
+        limit = require_prompt_token_limit(self.provider, self.model_id)
+        if estimate_prompt_tokens(
+            self.model_id, system_prompt=SYSTEM, extra_content=prompt,
+            tool_specs=[item.tool_spec for item in tools],
+        ) > limit:
+            raise ValueError(f"Technique {role} input exceeds configured prompt limit; narrow the component")
+        profile_role = {
+            "technique_planner": "technique_judge",
+            "technique_plan_reviewer": "technique_critic",
+            "technique_applicability_confirmation": "technique_judge",
+        }.get(role, role)
+        model = create_strands_model(self.provider, self.model_id, profile_role)
         callback = (
             self.callback_factory(
                 name=role,
-                agent_type=role,
+                agent_type=profile_role,
                 model_id=self.model_id,
                 provider_id=self.provider,
             )
@@ -66,12 +86,22 @@ class TechniqueRoleRunner:
             "tool_executor": SequentialToolExecutor(),
             "callback_handler": callback,
             "load_tools_from_directory": False,
-            "hooks": [*self.hooks, PromptBudgetHook(_ensure_prompt_within_budget), RoleTurnLimit()],
+            "hooks": [*self.hooks, PromptBudgetHook(_ensure_prompt_within_budget), RoleTurnLimit(),
+                      *([diagnostic_hook] if diagnostic_hook else [])],
             "trace_attributes": {"agent.role": role},
         }
         if not model_uses_server_side_state(model):
             kwargs["conversation_manager"] = MappingConversationManager()
         agent = create_agent_with_stateful_retry(kwargs, self.model_id)
-        agent._prompt_token_limit = require_prompt_token_limit(self.provider, self.model_id)
+        agent._prompt_token_limit = limit
         result = agent(prompt)
+        if self.diagnostics:
+            metrics = getattr(result, "metrics", None)
+            usage = metrics.accumulated_usage if metrics is not None else {}
+            counts = {"input_tokens": usage.get("inputTokens"), "generation_tokens": usage.get("outputTokens"),
+                      "total": usage.get("totalTokens")}
+            self.diagnostics.emit(
+                "role_usage", level="debug", role=role, role_invocation_id=diagnostic_hook.fields["role_invocation_id"],
+                **{key: value for key, value in counts.items() if type(value) is int and value >= 0},
+            )
         return "\n".join(block["text"] for block in result.message.get("content", []) if "text" in block)

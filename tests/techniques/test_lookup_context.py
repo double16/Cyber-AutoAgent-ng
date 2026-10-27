@@ -69,7 +69,7 @@ def test_real_module_guidance_reuses_with_local_context_and_durable_feedback(
     assert "demonstrated contribution" in evaluation
     assert "Unrelated missing research" in evaluation
     assert document.metadata.title in evaluation
-    assert events[0]["applicability"] == "supported"
+    assert next(row for row in events if row["type"] == "technique_resolved")["applicability"] == "supported"
 
 
 def test_request_abstraction_precedes_research_and_phase_guides_author(scripted_service):
@@ -92,9 +92,11 @@ def test_request_abstraction_precedes_research_and_phase_guides_author(scripted_
     state.service.runner = runner
     returned = state.service.tool("op", "task", context)(request="Investigate /private-app/oidc-client")
     assert "Assessment: conditional" in returned and "Establish discovery retrieval" in returned
-    assert state.research_calls == [
+    assert len(state.research_calls) == 1
+    assert state.research_calls[0].startswith(
         "Conditional OIDC discovery hypothesis design using /.well-known/openid-configuration",
-    ]
+    )
+    assert "/private-app/oidc-client" not in state.research_calls[0]
     for role, prompt, _ in state.calls:
         if role in {"technique_author", "technique_critic"}:
             assert "/private-app/oidc-client" not in prompt
@@ -267,7 +269,7 @@ def test_catalog_miss_researches_independently_of_applicability(scripted_service
         phase_contexts=["hypothesis_generation"], subjects=[{"kind": subject}],
     ))(request=method_request)
     assert "Assessment: conditional" in result
-    assert state.research_calls == [method_request]
+    assert len(state.research_calls) == 1 and state.research_calls[0].startswith(method_request)
 
 
 @pytest.mark.parametrize("kind", ["task_constraint", "contradicted_prerequisite"])
@@ -354,4 +356,34 @@ def test_catalog_filled_after_lease_reuses_without_research(scripted_service, mo
     monkeypatch.setattr(state.service, "_select", lambda *_: next(selections))
     result = state.service.tool("op", "task", LookupContext())(request="JWT handling")
     assert "Assessment: conditional" in result
+    assert not state.research_calls
+
+
+@pytest.mark.parametrize("subject", ["http", "network", "filesystem"])
+def test_independent_confirmation_detects_guidance_vs_task_confusion(scripted_service, subject):
+    state = scripted_service
+    prompts = []
+
+    def runner(role, prompt, tools):
+        prompts.append((role, prompt))
+        confirmation = role == "technique_applicability_confirmation"
+        return json.dumps({
+            "generic_request": "Trust boundary hypothesis guidance",
+            "applicability": "conditional" if confirmation else "incompatible",
+            "unmet_prerequisites": ["Inspect implementation"] if confirmation else [],
+            "reason": "Future checks are useful" if confirmation else "Task requires terminal disposition",
+            "conflict": None if confirmation else {
+                "kind": "task_constraint", "requirement": "Future validation",
+                "context_reference": "Hypothesis only; no execution",
+            },
+        })
+
+    state.service.runner = runner
+    with pytest.raises(ValueError, match="assessment uncertainty"):
+        state.service.get("Hypothesis guidance", LookupContext(
+            purpose="Hypothesis generation", subjects=[{"kind": subject}],
+            constraints=["Hypothesis only; no execution"],
+        ))
+    assert len(prompts) == 2
+    assert "advisory guidance and final task requirements" in prompts[1][1]
     assert not state.research_calls

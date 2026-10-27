@@ -359,3 +359,17 @@ codex mcp call langfuse get_session_details --session_id "{operation_id}"
 - **Tool Failures**: Broken or missing tools are handled by the operation; do not flag them as forensic issues.
 - **Reporting Overhead**: Do not flag reporting or evaluation time as a budget issue.
 - **No-Finish Operations**: An operation may continue even if health suggests it won't finish, as coverage is prioritized. Recommend budget increases in the report instead of complaining.
+
+
+### Technique bundle investigations
+
+Correlate lifecycle events by operation, task, activity and `component_id`; inspect `research_round`
+for targeted follow-up and exhaustion (at most three batches per component). Bundle summaries are
+operation-local; published and produced documents contain individual validated techniques. Partial
+delivery does not establish complete request coverage.
+Inspect `technique_uses.use_context` JSON for `component_purpose`, `requirements`, and `components`
+when multiple purposes reuse a revision. Unresolved components have no receipts. Receipt keys remain
+operation/task/revision; legacy empty context is unknown. Compare individual source attribution to
+overall coverage. Check repair ownership: attribution to selection, missing support to research,
+procedure or omitted requested content to authorship. Applicability disagreement is assessment
+uncertainty. Judge contribution against the component purpose, not final task completion.

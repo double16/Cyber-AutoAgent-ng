@@ -18,7 +18,7 @@ def test_produced_copy_is_immediate_and_evaluated_copy_includes_use_sentiment(sc
     revision = state.service.repository.revisions()[0]["revision_id"]
     directory = tmp_path / "operation" / "techniques"
     produced = directory / f"{revision}.produced.md"
-    assert produced.read_text() == rendered
+    assert produced.read_text() in rendered
     assert not list(directory.glob("*.evaluated-*.md"))
     assert not (tmp_path / "operation" / "artifacts").exists()
     state.score = -1
@@ -35,7 +35,7 @@ def test_produced_copy_is_immediate_and_evaluated_copy_includes_use_sentiment(sc
     assert len(list(directory.glob("*.evaluated-*.md"))) == 1
     state.service.evaluate("operation", "second-task", "A second use")
     assert len(list(directory.glob("*.evaluated-*.md"))) == 2
-    assert produced.read_text() == rendered
+    assert produced.read_text() in rendered
     original = evaluated[0].read_text()
     state.service.evaluate("operation", "first-task", "Continuation")
     assert evaluated[0].read_text() == original

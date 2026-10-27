@@ -65,6 +65,12 @@ describe('technique lifecycle presentation', () => {
     expect(techniqueEventSeverity({type: 'technique_resolved'})).toBe('info');
   });
 
+  it('shows component and research round correlation in shared output', () => {
+    expect(formatTechniqueEvent({type: 'technique_build_progress', stage: 'source_selection',
+      status: 'completed', component_id: 'network', research_round: 2}))
+      .toContain('[component network] [research round 2]');
+  });
+
   it.each([
     ['python', () => new PythonExecutionService(), 'processOutputStream'],
     ['docker', () => new DirectDockerService(), 'parseEvents'],

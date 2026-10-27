@@ -207,3 +207,24 @@ def test_non_certificate_connection_failure_is_preserved():
 
     with pytest.raises(httpx.ConnectError, match="connection refused"):
         WebResearch(runner, search_tool, fetch)("JWT")
+
+
+def test_later_batches_do_not_refetch_known_sources():
+    fetched = []
+
+    async def search_tool(**kwargs):
+        return [{"url": "https://vendor.example/old"}, {"url": "https://vendor.example/new"}]
+
+    def runner(role, prompt, tools):
+        asyncio.run(tools[0](query="Explicit missing version support"))
+        with pytest.raises(ValueError, match="earlier research batch"):
+            tools[1](url="https://vendor.example/old")
+        tools[1](url="https://vendor.example/new")
+
+    def fetch(url):
+        fetched.append(url)
+        return {"url": url, "text": "New version support"}
+
+    docs = WebResearch(runner, search_tool, fetch).batch("Missing version", {"https://vendor.example/old"})
+    assert fetched == ["https://vendor.example/new"]
+    assert len(docs) == 1

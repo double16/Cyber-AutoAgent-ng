@@ -9,6 +9,8 @@ export type TechniqueEvent = {
   type: TechniqueEventType;
   task_uid?: string;
   activity_id?: string;
+  component_id?: string;
+  research_round?: number;
   revision_id?: string;
   operation_id?: string;
   title?: string;
@@ -78,6 +80,8 @@ export const formatTechniqueEvent = (input: { type?: unknown }): string | null =
     default:
       return null;
   }
+  if (event.component_id) message += ` [component ${text(event.component_id)}]`;
+  if (event.research_round != null) message += ` [research round ${event.research_round}]`;
   if (event.snapshot_path) message += ` [${text(event.snapshot_path)}]`;
   return event.task_uid ? `[${text(event.task_uid)}] ${message}` : message;
 };

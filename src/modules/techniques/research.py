@@ -83,6 +83,9 @@ class WebResearch:
         self.fetch = fetch
 
     def __call__(self, request: str) -> list[dict]:
+        return self.batch(request, set())
+
+    def batch(self, request: str, excluded: set[str]) -> list[dict]:
         documents: dict[str, dict] = {}
         permitted: dict[str, str] = {}
         counts = {"search": 0, "fetch": 0}
@@ -126,6 +129,8 @@ class WebResearch:
             """Read a document returned by search; fetch at most six candidates, aiming for three usable sources."""
             nonlocal trust_failure
             require_trust()
+            if url in excluded:
+                raise ValueError("Source URL was already fetched in an earlier research batch")
             if url not in permitted:
                 raise ValueError("Source URL must come from this research agent's search results")
             if url in documents:

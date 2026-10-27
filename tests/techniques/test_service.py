@@ -1,11 +1,104 @@
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
 from modules.techniques.documents import TechniqueDocument
+
+
+@pytest.mark.parametrize("first_fails", [False, True])
+def test_bound_lookup_serializes_calls_and_releases_after_failure(scripted_service, monkeypatch, first_fails):
+    first_entered, release_first, second_started, second_entered = (Event() for _ in range(4))
+    order = []
+
+    def resolve(request, *args, **kwargs):
+        order.append(request)
+        if request == "first":
+            first_entered.set()
+            assert release_first.wait(5)
+            if first_fails:
+                raise ValueError("Research unavailable")
+        else:
+            second_entered.set()
+        return SimpleNamespace(render=lambda: request)
+
+    monkeypatch.setattr(scripted_service.service, "resolve_bundle", resolve)
+    lookup = scripted_service.service.tool("operation", "task")
+
+    def second():
+        second_started.set()
+        return lookup(request="second")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_result = pool.submit(lookup, request="first")
+        try:
+            assert first_entered.wait(5)
+            second_result = pool.submit(second)
+            assert second_started.wait(5)
+            assert not second_entered.wait(0.1)
+        finally:
+            release_first.set()
+        if first_fails:
+            with pytest.raises(ValueError, match="Research unavailable"):
+                first_result.result(timeout=5)
+        else:
+            assert first_result.result(timeout=5) == "first"
+        assert second_result.result(timeout=5) == "second"
+    assert order == ["first", "second"]
+
+
+def test_distinct_task_bindings_can_resolve_concurrently(scripted_service, monkeypatch):
+    entered = Barrier(2)
+
+    def resolve(request, *args, **kwargs):
+        entered.wait(timeout=5)
+        return SimpleNamespace(render=lambda: request)
+
+    monkeypatch.setattr(scripted_service.service, "resolve_bundle", resolve)
+    first = scripted_service.service.tool("operation", "first-task")
+    second = scripted_service.service.tool("operation", "second-task")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(first, request="first"), pool.submit(second, request="second")]
+        assert [future.result(timeout=5) for future in futures] == ["first", "second"]
+
+
+def test_runtime_tool_streams_serialize_without_blocking_the_event_loop(scripted_service, monkeypatch):
+    first_entered, release_first, second_entered = (Event() for _ in range(3))
+
+    def resolve(request, *args, **kwargs):
+        if request == "first":
+            first_entered.set()
+            assert release_first.wait(5)
+        else:
+            second_entered.set()
+        return SimpleNamespace(render=lambda: request)
+
+    monkeypatch.setattr(scripted_service.service, "resolve_bundle", resolve)
+    lookup = scripted_service.service.tool("operation", "task")
+
+    async def invoke(request):
+        return [event async for event in lookup.stream({
+            "toolUseId": request, "name": "get_technique", "input": {"request": request},
+        }, {})]
+
+    async def run():
+        first = asyncio.create_task(invoke("first"))
+        try:
+            assert await asyncio.to_thread(first_entered.wait, 5)
+            second = asyncio.create_task(invoke("second"))
+            assert not await asyncio.to_thread(second_entered.wait, 0.1)
+        finally:
+            release_first.set()
+        return await asyncio.gather(first, second)
+
+    results = asyncio.run(run())
+    assert second_entered.is_set()
+    assert all(events[-1].tool_result["status"] == "success" for events in results)
 
 
 def test_active_match_reuses_complete_document_without_research(scripted_service):
@@ -58,7 +151,7 @@ def test_unknown_revision_and_source_selections_are_rejected(scripted_service):
 def test_insufficient_source_and_rejected_critique_do_not_publish(scripted_service):
     state = scripted_service
     state.authoritative = False
-    with pytest.raises(ValueError, match="authoritative"):
+    with pytest.raises(ValueError, match="coverage exhausted"):
         state.service.get("JWT")
     assert not state.service.repository.revisions()
     state.authoritative = True
@@ -87,9 +180,8 @@ def test_invalid_authored_document_and_sources_do_not_publish(scripted_service, 
         if role == "technique_author"
         else original(role, prompt, tools)
     )
-    with pytest.raises(ValueError, match="source metadata"):
-        state.service.get("JWT")
-    assert not state.service.repository.revisions()
+    revision, _ = state.service.get("JWT")
+    assert state.service.store.document(revision).metadata.sources[0].url == state.source_urls[0]
 
 
 def test_inactive_example_is_used_as_negative_context_and_rebuilt(scripted_service):
@@ -321,3 +413,144 @@ def test_mixed_failures_report_final_stage_and_redact_critic_reason(scripted_ser
     assert "Fix [operation-specific] controls" in attempts[2]
     assert not state.service.repository.revisions()
     assert len(list((tmp_path / "techniques" / "builds").glob("*/*.json"))) == 3
+
+
+@pytest.mark.parametrize("category,expected_authors,expected_research", [
+    ("authored_content", 2, 1),
+    ("request_coverage", 2, 1),
+    ("source_attribution", 1, 1),
+    ("research_coverage", 1, 2),
+])
+def test_critique_routes_repairs_to_owning_stage(scripted_service, category, expected_authors, expected_research):
+    state = scripted_service
+    original = state.service.runner
+    critiques = []
+    selections = []
+
+    def research(request):
+        state.research_calls.append(request)
+        return [{"url": state.source_urls[0], "title": "Advisory", "text": "Primary support"}]
+
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            critiques.append(prompt)
+            return json.dumps({"approved": len(critiques) > 1, "category": category, "reason": "Fix coverage"})
+        if role == "technique_judge" and "selected_urls" in prompt:
+            selections.append(prompt)
+        return original(role, prompt, tools)
+
+    state.service.research = research
+    state.service.runner = runner
+    revision, markdown = state.service.get("JWT handling")
+    assert revision and "Check assumptions" in markdown
+    assert len([row for row in state.calls if row[0] == "technique_author"]) == expected_authors
+    assert len(state.research_calls) == expected_research
+    assert len(critiques) == 2
+    if category == "source_attribution":
+        assert len(selections) == 2 and "Fix coverage" in selections[-1]
+    if category in {"source_attribution", "research_coverage"}:
+        assert critiques[0].split("Draft:\n")[1] == critiques[1].split("Draft:\n")[1]
+
+
+@pytest.mark.parametrize("category,message", [
+    ("source_attribution", "after one repair"),
+    ("research_coverage", "Research coverage exhausted"),
+])
+def test_owned_repair_exhaustion_is_explicit_without_reauthoring(scripted_service, category, message):
+    state = scripted_service
+    original = state.service.runner
+
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            return json.dumps({"approved": False, "category": category, "reason": "Unsupported requirement"})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    with pytest.raises(ValueError, match=message):
+        state.service.get("JWT handling")
+    assert [role for role, _, _ in state.calls].count("technique_author") == 1
+    assert not state.service.repository.revisions()
+
+
+def test_attribution_repair_cannot_claim_success_with_coverage_gaps(scripted_service):
+    state = scripted_service
+    original = state.service.runner
+    selection_count = []
+
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            return json.dumps({"approved": False, "category": "source_attribution", "reason": "Inaccurate support"})
+        result = original(role, prompt, tools)
+        if role == "technique_judge" and "selected_urls" in prompt:
+            selection_count.append(prompt)
+            if len(selection_count) > 1:
+                row = json.loads(result)
+                row["coverage"][0]["gaps"] = ["Unsupported version"]
+                return json.dumps(row)
+        return result
+
+    state.service.runner = runner
+    with pytest.raises(ValueError, match="Research coverage exhausted"):
+        state.service.get("JWT handling")
+    assert not state.service.repository.revisions()
+
+
+def test_repairs_on_third_author_attempt_still_receive_exact_final_critique(scripted_service):
+    state = scripted_service
+    original = state.service.runner
+    authors = []
+    critics = []
+
+    def runner(role, prompt, tools):
+        if role == "technique_author":
+            authors.append(prompt)
+            if len(authors) < 3:
+                return "invalid JSON"
+        if role == "technique_critic":
+            critics.append(prompt)
+            return json.dumps({"approved": len(critics) > 1, "category": "source_attribution", "reason": "Clarify"})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    _, markdown = state.service.get("JWT handling")
+    assert len(authors) == 3 and len(critics) == 2
+    assert "Check assumptions" in markdown
+
+
+def test_controller_ignores_author_provenance_and_critiques_assembled_metadata(scripted_service):
+    state = scripted_service
+    original = state.service.runner
+    critiques = []
+
+    def runner(role, prompt, tools):
+        result = original(role, prompt, tools)
+        if role == "technique_author":
+            payload = json.loads(result)
+            payload["metadata"]["sources"] = [{"url": "invalid author provenance"}]
+            payload["metadata"]["source_coverage"] = "Invented coverage"
+            return json.dumps(payload)
+        if role == "technique_critic":
+            critiques.append(prompt)
+        return result
+
+    state.service.runner = runner
+    _, markdown = state.service.get("JWT handling")
+    assert "invalid author provenance" not in markdown and "Invented coverage" not in markdown
+    assert "selection_reason: Primary applicable advisory" in markdown
+    assert "selection_reason: Primary applicable advisory" in critiques[0]
+
+
+def test_explicit_component_requirements_reach_initial_research_and_assembled_roles(scripted_service):
+    from modules.techniques.coverage import Requirement
+    from modules.techniques.roles import SYSTEM
+
+    state = scripted_service
+    _, markdown = state.service.get("Token review", requirements=[
+        Requirement(id="method", description="Preserve verification and requested CVE version analysis"),
+    ])
+    assert "requested CVE version analysis" in state.research_calls[0]
+    for role in ("technique_author", "technique_critic"):
+        assembled = SYSTEM + next(prompt for selected, prompt, _ in state.calls if selected == role)
+        assert "requested CVE version analysis" in assembled
+        assert "advisory" in assembled and "untrusted data" in assembled
+    assert "requested CVE version analysis" in markdown

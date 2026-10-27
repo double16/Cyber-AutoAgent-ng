@@ -65,6 +65,12 @@ def scripted_service(store, markdown):
 
     def runner(role, prompt, tools):
         state.calls.append((role, prompt, tools))
+        if role == "technique_plan_reviewer":
+            return json.dumps({"approved": True, "reason": "Request preserved"})
+        if role == "technique_planner":
+            return json.dumps({"components": [{"id": "method", "request": "JWT handling",
+                "purpose": "Review token validation", "requirements": [
+                    {"id": "method", "description": "JWT handling"}]}]})
         if role == "technique_judge":
             if "generic_request" in prompt:
                 return json.dumps({
@@ -76,6 +82,10 @@ def scripted_service(store, markdown):
                 return json.dumps(
                     {
                         "selected_urls": state.source_urls,
+                        "attributions": [{"url": url, "reason": "Primary applicable advisory"}
+                                         for url in state.source_urls],
+                        "coverage": [{"requirement_id": "method", "source_urls": state.source_urls,
+                                      "explanation": "Primary method support", "gaps": []}],
                         "reason": "Primary applicable advisory",
                         "authoritative_sufficient": state.authoritative,
                     }

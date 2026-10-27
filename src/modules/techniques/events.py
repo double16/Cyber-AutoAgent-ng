@@ -60,10 +60,24 @@ class TechniqueEvents:
         if attempt is not None:
             fields["attempt"] = attempt
         self.emit("technique_build_progress", status="started", **fields)
-        yield fields
-        self.emit(
-            "technique_build_progress", status="completed", elapsed_seconds=round(monotonic() - started, 3), **fields
-        )
+        with self.scope(stage=stage, **({"attempt": attempt} if attempt is not None else {})):
+            try:
+                yield fields
+            except BaseException as error:
+                self.emit(
+                    "technique_build_progress", status="failed", elapsed_seconds=round(monotonic() - started, 3),
+                    reason=str(error), **fields,
+                )
+                raise
+            else:
+                self.emit(
+                    "technique_build_progress", status="completed", elapsed_seconds=round(monotonic() - started, 3),
+                    **fields,
+                )
+
+    @staticmethod
+    def current_context():
+        return dict(_context.get() or {})
 
     @staticmethod
     def current_activity_id():

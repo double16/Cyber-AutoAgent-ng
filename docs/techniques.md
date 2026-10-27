@@ -4,12 +4,33 @@ Techniques are global, reusable Markdown guidance for reconnaissance, hypothesis
 verification, source analysis, and execution. They do not belong to a target or operation and cannot
 satisfy execution receipts, finding validation, or current-operation evidence requirements.
 
-An agent calls `get_technique(request)` with a generic natural-language description. Existing active
-guidance is judged for applicability before reuse. A miss invokes separate researcher, source judge,
-author, and critic agents. Research aims for three fetched documents; one authoritative document may
-suffice when the independent judge explains why. Source snippets are discovery leads, not documents.
-Up to three author attempts are allowed, with independent critique before publication. Source code
-informs reasoning; original examples use Python 3.13+ or browser JavaScript.
+An agent calls `get_technique(request)` with a generic natural-language description. A structured planner
+splits broad requests into a flat list of independently reusable components and explicit requirements;
+a separate review checks that mechanisms and deliverables were preserved without invented requirements.
+Narrow requests remain one component. Each component resolves independently. The operation-local Markdown
+bundle includes complete validated techniques, per-component applicability, and actionable unresolved gaps.
+Equivalent components are deduplicated, and repeated revisions appear in full once. Partial bundles are
+returned when any component succeeds; total failure returns diagnostics. Only individual validated
+techniques enter the global catalog. Direct callers retain `get()` and its `(revision, markdown)` tuple;
+operation tools and CLI use the typed `resolve_bundle()` API.
+
+Existing active guidance is judged for applicability before reuse. A miss invokes separate researcher, source judge,
+author, and critic agents. Research starts with a target of three relevant fetched documents, with no
+three-source selection cap. Sufficiency depends on requirement support, authority, contradictions and
+version relevance; one authoritative document may suffice, and three documents may remain inadequate.
+Each component has at most three research batches, each with three searches and six fetch attempts.
+Later batches target explicit coverage gaps and reject refetches of known documents. Sources are assessed
+separately with bounded coverage summaries rather than concatenating all fetched text. Coverage records
+contain requirement IDs, supporting URLs, explanations and unresolved gaps. Python validates references;
+the judge assesses meaning. Source snippets are discovery leads, not documents. Inputs exceeding the
+configured prompt limit fail explicitly, preserving exact-document critique instead of truncating it.
+Up to three author attempts are allowed, with independent critique before publication. Critique distinguishes
+authored-content, request-coverage, source-attribution and research-coverage defects. Procedure or omitted
+request content returns to the author; attribution returns to selection once per selection round; missing
+support returns to targeted research within the component's three-batch limit. Attribution and research
+repairs retain the authored draft. Exhaustion yields an explicit unresolved result. Python owns fetched
+URLs, titles, timestamps and individual attribution, separately from overall coverage. Similar attribution
+wording alone is not rejection grounds. Source code informs reasoning; original examples use Python 3.13+ or browser JavaScript.
 
 During operations, Python binds lookup to structured phase metadata, task purpose, subject descriptors,
 available capabilities, task constraints and bounded observations. Source files, symbols, hosts, services, configurations,
@@ -19,6 +40,9 @@ while preserving relevant platform, language, protocol, version and standard-pat
 Task applicability is assessed without catalog candidates. Candidate selection is separate: no matching
 guidance triggers research and generation, not task rejection. Incompatibility requires a conflicting
 requirement and an exact reference to a supplied constraint or subject-specific source observation.
+Before rejecting an incompatibility, an independent confirmation checks whether advisory guidance or
+future validation was confused with final task requirements or present execution. Disagreement returns
+assessment uncertainty, without claiming applicability or a task conflict.
 Malformed assessments receive one repair attempt; continued failure is reported as an assessment error.
 Existing guidance is filtered by declared phase compatibility when phase context is known, independent
 of its originating module. Legacy phases without contexts remain explicitly unknown and use task purpose.
@@ -26,7 +50,8 @@ of its originating module. Legacy phases without contexts remain explicitly unkn
 Operation responses append a local applicability assessment: supported or conditional. Conditional
 guidance names unmet prerequisites and asks the worker to establish them within scope; hypothesis phases
 describe future checks only. Contradicted prerequisites or permission conflicts reject the lookup. These
-notes are excluded from global documents, produced snapshots and standalone CLI output. Source-selection
+notes are excluded from global documents and produced snapshots. CLI lookups include them when
+`--phase` or `--constraint` supplies task context. Source-selection
 metadata is assembled before critique, so the critic reviews exactly the document that will be published.
 
 ```mermaid
@@ -34,27 +59,50 @@ flowchart LR
     O[Observed evidence + phase metadata] --> T[Detectors and semantic trigger matcher]
     T --> R[Lookup recommendation]
     R --> A[Worker chooses get_technique]
-    A --> Q[Global active technique search]
+    A --> P[Flat component plan + requirement review]
+    P --> Q[Per-component global active technique search]
     Q --> J[Applicability judge]
     J -->|miss| W[Researcher + source judge]
-    W --> C[Author + critic]
+    W --> G{Requirement coverage sufficient?}
+    G -->|gaps; batches remain| W
+    G -->|yes| C[Author + critic]
+    G -->|exhausted| X[Unresolved component]
     C --> S[Store approved Markdown]
     J -->|match| U[Return guidance]
     S --> U
-    U --> E[Independent use evaluator]
+    U --> B[Operation-local bundle with unresolved components]
+    X --> B
+    B --> E[Independent per-revision use evaluator]
     E --> F[Sentiment and active status]
 ```
 
 ## CLI
 
-```bash
-UV_CACHE_DIR="$PWD/.uv-cache" uv run caa-technique \
-  "JWT trust-boundary hypothesis generation" --module web --provider ollama
+The CLI prints the bundle and exits successfully for partial delivery, with an incompleteness notice.
+It exits unsuccessfully when no component resolves and creates no operation-use receipts.
 
-UV_CACHE_DIR="$PWD/.uv-cache" uv run caa-technique \
+```bash
+uv run caa-technique \
+  "JWT trust-boundary analysis" --module web --provider ollama \
+  --phase hypothesis_generation --constraint "No live execution"
+
+uv run caa-technique \
   "Validate the prerequisites and applicability of CVE-YYYY-NNNN" \
   --provider litellm --model your-configured-model --output-dir ./outputs
 ```
+
+`--phase` is optional and repeatable. Accepted values are `reconnaissance`, `hypothesis_generation`,
+`vulnerability_verification`, `execution`, and `analysis`. Explicit phases filter reusable candidates
+and require generated guidance to support at least one requested phase. `--module` selects module
+imports independently of phase.
+
+Use repeatable `--constraint` options for restrictions such as `"Read only"` or `"No live execution"`.
+Constraints inform the phase-aware applicability assessment; future validation guidance does not
+authorize present execution. Blank constraints and unknown phases are rejected before storage opens.
+With constraints but no phase, the phase remains explicitly unknown. With neither option, generic
+lookup retains its existing behavior without task-applicability notes. The request supplies task purpose;
+no target or operation identifier is required. Applicability notes remain local to CLI output and are
+excluded from published techniques.
 
 Replace the placeholder CVE and model with real values. The command imports the selected module and
 its inherited modules, then uses exactly the same lookup and generation service as operation agents.
@@ -62,6 +110,47 @@ It requires no assessment target and creates no assessment or use rating. Succes
 only the complete Markdown document; diagnostics go to stderr. Failures return exit status 1. A
 concurrent identical build returns a retryable busy error. Embedded Qdrant permits one owning process;
 use a Qdrant service for simultaneous CLI and operation access to the same store.
+
+### CLI progress and diagnostic logs
+
+Normal runs show concise progress on stderr: initialization, module synchronization, planning,
+research rounds and source counts, author/critic attempts, repairs, and reuse or generation.
+`--verbose` adds role/model/tool timing and correlation identifiers; `--quiet` shows only warnings
+and errors. These options are mutually exclusive. Stdout remains exclusively the Markdown bundle.
+
+Each invocation automatically creates a new private JSONL log under
+`<output-dir>/techniques/logs/<UTC-timestamp>_<UUID>.jsonl`. The path is announced on stderr unless
+quiet. Use `--log-file PATH` to choose another path; existing files are never overwritten.
+New log directories use mode `0700`, and files use `0600`. Help and argument errors create no log.
+
+```bash
+uv run caa-technique "Source-to-sink review" --module code_security --verbose > guidance.md
+uv run caa-technique "Network trust boundaries" --quiet --log-file ./diagnostics/network.jsonl
+# Read stage transitions and final outcomes from a saved run:
+jq 'select(.type == "technique_build_progress" or .type == "bundle_completed")' path/to/run.jsonl
+# Inspect each fitted model input and observed model response:
+jq 'select(.type == "model_input" or .type == "model_output")' path/to/run.jsonl
+```
+
+All verbosity modes save detailed records, including system instructions, fitted conversation messages,
+tool schemas, model responses, research-tool inputs/results, available usage counts, timings, and
+sanitized exceptions with stack traces. Records carry run, component, activity, role-invocation,
+model-attempt, and tool-call identifiers where available. Each attempted response is recorded; final
+role completion or failure is separate. Prompt inputs are recorded after budget fitting, before any
+provider-specific wire transformation. Missing usage data is not fabricated.
+
+Conversations are file-only. Secret-bearing fields, recognized credential text, registered runtime
+secrets, and known private values are redacted before writing or display; logging does not change
+agent inputs or published guidance. Binary content is omitted. Logs retain complete textual records
+after redaction, can become large, and remain local until manually removed. Redaction is conservative
+and cannot identify every arbitrary unlabeled secret. These diagnostics are separate from operation
+evidence and technique-use ratings; provider wire-level debug logging is not enabled.
+
+If automatic log creation fails, the CLI warns and continues with stderr progress. An invalid explicit
+`--log-file` fails before service initialization. A write failure warns once and disables file logging
+without aborting lookup. Configuration errors before an output directory can be resolved are reported
+on stderr. Partial bundles retain successful exit status and emit a warning with delivered/unresolved
+counts. Other lookup failures retain exit status 1. Logs flush as records are written and close on exit.
 
 ## Module documents
 
@@ -227,6 +316,11 @@ feedback or return inactive guidance. The existing author/critic revision limit 
 
 ## Lifecycle visibility
 
+Calls to the same bound `get_technique` tool run one at a time, including under concurrent executors.
+The guard covers bundle resolution and rendering and releases on failure. Other tools and separate
+task bindings can still run concurrently. Multiple calls in one model turn remain valid; serialization
+does not remove duplicate calls or guarantee a particular scheduling order.
+
 The TUI and headless console show technique library synchronization counts, new task
 recommendations, reuse or generation, and research, source selection, authoring, and critique
 milestones. Source selection includes fetched and selected document counts. Revision messages
@@ -260,3 +354,16 @@ guidance. The TUI and console show sanitized reasons and relative diagnostic pat
 contents. A diagnostic write failure does not interrupt generation. Produced and evaluated Markdown
 snapshots retain their existing locations. The CLI still prints only the resolved Markdown to stdout
 and reports failures on stderr.
+
+### Bundle correlation and contribution review
+
+Lifecycle events include `component_id`; research and selection events include `research_round`.
+Each delivered revision gets one idempotent receipt per task. Delivery-context JSON includes component
+purpose and requirements, with a `components` list when multiple components reuse a revision. Unresolved
+components create no receipts. The evaluator identifies observed contribution, non-use or misleading
+effect for each revision. Genericity, conditional prerequisites, incomplete execution and task failure
+alone do not justify zero. Unestablished contribution remains neutral; legacy delivery context is unknown.
+Historical ratings and documents are unchanged; no SQL migration is needed.
+
+Offline tests verify controller routing and contracts. A subsequent live continuation must confirm
+relevance, repair effectiveness, semantic source coverage and contribution judgments.

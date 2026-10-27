@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -6,21 +7,22 @@ import pytest
 from modules.techniques import cli, roles
 
 
-def test_cli_only_writes_markdown_to_stdout_and_creates_no_use_receipt(scripted_service, monkeypatch, capsys):
+def test_cli_only_writes_markdown_to_stdout_and_creates_no_use_receipt(scripted_service, monkeypatch, capsys, tmp_path):
     state = scripted_service
     revision = state.publish()
     state.selection = revision
 
-    def build(*args):
+    def build(*args, **kwargs):
         print("Diagnostic message")
         return state.service
 
     monkeypatch.setattr(cli, "build_service", build)
-    assert cli.main(["JWT handling", "--provider", "ollama", "--output-dir", "/unused"]) == 0
+    assert cli.main(["JWT handling", "--provider", "ollama", "--output-dir", str(tmp_path)]) == 0
     output = capsys.readouterr()
-    assert output.out.startswith("---\n")
+    assert output.out.startswith("# Technique bundle")
     assert "Diagnostic message" not in output.out
-    assert "Diagnostic message" in output.err
+    assert "Diagnostic message" not in output.err
+    assert "Diagnostic message" in next((tmp_path / "techniques" / "logs").glob("*.jsonl")).read_text()
     assert not state.service.repository.pending_uses("", "")
 
 
@@ -108,7 +110,12 @@ def test_cli_build_and_bootstrap_reuse_storage_without_fake_target(store, monkey
     monkeypatch.setattr(manager_module, "get_config_manager", lambda: manager)
     monkeypatch.setattr("modules.config.get_config_manager", lambda: manager)
     monkeypatch.setattr("modules.storage.qdrant.open_qdrant", lambda output: store.qdrant)
-    service = cli.build_service("ollama", None, str(tmp_path / "cli"), "web")
+    from modules.techniques.diagnostics import DiagnosticSession
+
+    diagnostics = DiagnosticSession(quiet=True)
+    service = cli.build_service("ollama", None, str(tmp_path / "cli"), "web", diagnostics=diagnostics)
+    assert service.events.callback == diagnostics.lifecycle
+    assert service.runner.diagnostics is diagnostics
     assert len(service.repository.revisions()) == 2
     monkeypatch.setattr(memory, "get_application_database_path", lambda: str(tmp_path / "operation.db"))
     client = SimpleNamespace(qdrant=store.qdrant, embeddings=store.embeddings, config={"embedding_dimensions": 3})
@@ -142,7 +149,7 @@ def test_cli_generated_document_and_generation_failure_keep_output_contract(
 ):
     state = scripted_service
     state.bad_document = invalid
-    monkeypatch.setattr(cli, "build_service", lambda *args: state.service)
+    monkeypatch.setattr(cli, "build_service", lambda *args, **kwargs: state.service)
     result = cli.main(["generic guidance", "--provider", "ollama"])
     output = capsys.readouterr()
     if invalid:
@@ -152,6 +159,121 @@ def test_cli_generated_document_and_generation_failure_keep_output_contract(
         assert "independent critique" not in output.err
     else:
         assert result == 0
-        assert output.out.startswith("---\n")
+        assert output.out.startswith("# Technique bundle")
         assert "# Guidance" in output.out
-        assert output.err == ""
+        assert "Initializing technique service" in output.err
+
+
+def test_role_runner_rejects_oversized_input_before_model_call(monkeypatch):
+    monkeypatch.setattr(roles, "require_prompt_token_limit", lambda *args: 100)
+    create = Mock()
+    monkeypatch.setattr(roles, "create_strands_model", create)
+    with pytest.raises(ValueError, match="configured prompt limit"):
+        roles.TechniqueRoleRunner("ollama", "test")("technique_critic", "exact document " * 2000, [])
+    create.assert_not_called()
+
+
+def test_partial_cli_bundle_succeeds_with_incompleteness_notice(scripted_service, monkeypatch, capsys):
+    from modules.techniques.bundles import Component, Delivered, TechniqueBundle, Unresolved
+
+    state = scripted_service
+    revision = state.publish()
+    component = Component(id="one", request="Source review", purpose="Trace data flow", requirements=[
+        {"id": "flow", "description": "Trace data flow"},
+    ])
+    bundle = TechniqueBundle(delivered=[Delivered(component=component, revision_id=revision,
+                                                 markdown=state.service.store.render(revision))],
+                             unresolved=[Unresolved(component=component, reason="Version research exhausted")])
+    monkeypatch.setattr(state.service, "resolve_bundle", lambda request, context=None: bundle)
+    monkeypatch.setattr(cli, "build_service", lambda *args, **kwargs: state.service)
+    assert cli.main(["Source review", "--provider", "ollama"]) == 0
+    output = capsys.readouterr()
+    assert "Incomplete guidance" in output.out and "Version research exhausted" in output.out
+
+
+@pytest.mark.parametrize("role,profile", [
+    ("technique_planner", "technique_judge"),
+    ("technique_plan_reviewer", "technique_critic"),
+    ("technique_applicability_confirmation", "technique_judge"),
+])
+def test_planning_and_confirmation_use_registered_profiles(monkeypatch, role, profile):
+    model = Mock()
+    monkeypatch.setattr(roles, "create_strands_model", model)
+    monkeypatch.setattr(roles, "require_prompt_token_limit", lambda *args: 48_000)
+    agent = Mock(return_value=SimpleNamespace(message={"content": [{"text": "{}"}]}))
+    monkeypatch.setattr(roles, "create_agent_with_stateful_retry", lambda *args: agent)
+    roles.TechniqueRoleRunner("ollama", "test")(role, "Assess assigned component", [])
+    model.assert_called_once_with("ollama", "test", profile)
+
+
+@pytest.mark.parametrize("options,phases,constraints", [
+    ([], None, None),
+    (["--phase", "analysis"], ["analysis"], []),
+    (["--constraint", "Read only"], [], ["Read only"]),
+    (["--phase", "analysis", "--phase", "hypothesis_generation", "--phase", "analysis",
+      "--constraint", " Read only ", "--constraint", "No live execution", "--constraint", "Read only"],
+     ["analysis", "hypothesis_generation"], ["Read only", "No live execution"]),
+])
+def test_cli_passes_optional_phase_and_constraints(monkeypatch, capsys, options, phases, constraints):
+    resolve = Mock(return_value=SimpleNamespace(render=lambda: "# Guidance\n", delivered=[object()], unresolved=[]))
+    service = SimpleNamespace(resolve_bundle=resolve, store=SimpleNamespace(qdrant=Mock()))
+    monkeypatch.setattr(cli, "build_service", lambda *args, **kwargs: service)
+    assert cli.main(["Trace input flow", "--provider", "ollama", *options]) == 0
+    assert capsys.readouterr().out == "# Guidance\n"
+    context = resolve.call_args.kwargs["context"]
+    if phases is None:
+        assert context is None
+    else:
+        assert context.phase_contexts == phases
+        assert context.constraints == constraints
+        assert context.purpose == "Trace input flow"
+        assert context.subjects == []
+    service.store.qdrant.close.assert_called_once()
+
+
+@pytest.mark.parametrize("options", [
+    ["--phase", "invented"], ["--phase"], ["--constraint"], ["--constraint", "  "],
+])
+def test_cli_rejects_invalid_context_options_before_storage(monkeypatch, capsys, options):
+    build = Mock()
+    monkeypatch.setattr(cli, "build_service", build)
+    with pytest.raises(SystemExit) as error:
+        cli.main(["Source review", *options])
+    assert error.value.code == 2
+    build.assert_not_called()
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("phases", [[], ["hypothesis_generation"]])
+def test_cli_context_reaches_applicability_author_and_critic(scripted_service, monkeypatch, capsys, phases):
+    state = scripted_service
+    monkeypatch.setattr(cli, "build_service", lambda *args, **kwargs: state.service)
+    assert cli.main([
+        "JWT handling", "--provider", "ollama", *[value for phase in phases for value in ("--phase", phase)],
+        "--constraint", "No live execution",
+    ]) == 0
+    rendered = capsys.readouterr().out
+    assert "Assessment: conditional" in rendered
+    from modules.techniques.roles import SYSTEM
+
+    applicability = next(prompt for role, prompt, _ in state.calls
+                         if role == "technique_judge" and "generic_request" in prompt)
+    assert "No live execution" in applicability
+    if not phases:
+        assert "Phase contexts: unknown" in applicability
+    assert "future validation guidance does not authorize present execution" in SYSTEM + applicability
+    for role in ("technique_author", "technique_critic"):
+        assembled = SYSTEM + next(prompt for selected, prompt, _ in state.calls if selected == role)
+        assert f"Required phase contexts: {json.dumps(phases)}" in assembled
+    assert not state.service.repository.pending_uses("", "")
+
+
+def test_cli_phase_filters_reuse_and_rejects_generated_wrong_phase(scripted_service, monkeypatch, capsys):
+    state = scripted_service
+    state.selection = state.publish()  # Advertises hypothesis_generation only.
+    monkeypatch.setattr(cli, "build_service", lambda *args, **kwargs: state.service)
+    assert cli.main(["JWT handling", "--provider", "ollama", "--phase", "analysis"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "must support a requested phase context" in output.err
+    assert state.research_calls
