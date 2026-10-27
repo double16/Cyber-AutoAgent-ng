@@ -35,7 +35,7 @@ operation's `techniques/` debug directory. Produced copies are saved immediately
 include their independent sentiment and reason. Lifecycle and use provenance are available read-only:
 
 ```sql
-SELECT u.operation_id, u.task_uid, u.revision_id, u.score, u.reason,
+SELECT u.operation_id, u.task_uid, u.revision_id, u.score, u.reason, u.use_context,
        r.lineage, r.origin, r.active, r.inactive_reason, r.score_count, r.score_total,
        r.pending_sync
 FROM technique_uses AS u
@@ -46,6 +46,8 @@ ORDER BY u.created_at;
 
 A NULL score is pending evaluation, not negative sentiment. An inactive current revision may advertise
 triggers for regeneration, but cannot be returned as guidance. Superseded revisions preserve history.
+`use_context` records the first delivery's generic purpose, phase contexts, applicability and observation
+provenance. Legacy receipts contain `{}`: their context is unknown, not reconstructed from task prose.
 
 ### "Find the operation log"
 

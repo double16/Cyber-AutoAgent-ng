@@ -382,3 +382,117 @@ def test_cache_identity_uses_only_the_sanitized_submitted_excerpt(scripted_servi
     second.observe("MASK" + "a" * 12_000 + "tail two", "source")
     assert first.state["semantic_calls"] == 1
     assert second.state["semantic_calls"] == 0
+
+
+def test_added_trigger_reuses_old_decisions_and_preserves_task_allowance(scripted_service, markdown, tmp_path):
+    from modules.techniques.documents import TechniqueDocument
+
+    state = scripted_service
+    state.publish()
+    path = tmp_path / "first.json"
+    first = RecommendationContext(state.service, ["hypothesis_generation"], [], path)
+    old = first.triggers[0]["trigger_id"]
+    calls = []
+
+    def runner(_role, prompt, _tools):
+        calls.append(prompt)
+        trigger = old if len(calls) == 1 else new
+        return json.dumps({"trigger_ids": [trigger], "reason": "Observed conditions"})
+
+    state.service.runner = runner
+    first.observe("Shared evidence", "source:first")
+    # A newly published technique changes the catalog without invalidating the old trigger.
+    state.service.store.publish(TechniqueDocument(markdown(title="New method")), "module:new", "module:source")
+    second = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "second.json")
+    new = next(row["trigger_id"] for row in second.triggers if row["trigger_id"] != old)
+    second.observe("Shared evidence", "source:second")
+    assert len(calls) == 2
+    assert old not in calls[1] and new in calls[1]
+    assert {row["trigger_id"] for row in second.state["recommendations"]} == {old, new}
+    assert all(row["source"] == "source:second" for row in second.state["recommendations"])
+    # Resuming the first task retains its allowance and recommendations across the catalog change.
+    first.state["semantic_calls"] = 6
+    first._save()
+    resumed = RecommendationContext(state.service, ["hypothesis_generation"], [], path)
+    assert resumed.state["semantic_calls"] == 6
+    assert resumed.state["recommendations"][0]["trigger_id"] == old
+    resumed.observe("Shared evidence", "source:resumed")
+    assert len(calls) == 2  # cached new-trigger decisions also remain usable after exhaustion
+    assert RecommendationContext._fingerprint(first.triggers[0]) == RecommendationContext._fingerprint({
+        **first.triggers[0], "active": False,
+    })
+
+
+def test_generated_tool_output_and_its_artifacts_do_not_trigger(scripted_service, tmp_path, monkeypatch):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "origin.json")
+    context.tool_origins["publish_analysis"] = "analysis"
+    hook = TechniqueObservationHook(context)
+    generated = {"status": "success", "content": [{"text": "artifact:generated.json"}]}
+    hook.after_tool(SimpleNamespace(
+        tool_use={"name": "publish_analysis", "toolUseId": "write", "input": {}}, result=generated,
+    ))
+    assert context.artifact_origins == {"artifact:generated.json": "analysis"}
+    resumed = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "resumed.json")
+    assert resumed.artifact_origins == context.artifact_origins
+    TechniqueObservationHook(resumed).after_tool(SimpleNamespace(
+        tool_use={"name": "future_reader", "toolUseId": "read-input", "input": {"path": "artifact:generated.json"}},
+        result={"status": "success", "content": [{"text": "Generated hypotheses without a reference header"}]},
+    ))
+    assert not resumed.lookup.observations
+    hook.after_tool(SimpleNamespace(
+        tool_use={"name": "future_reader", "toolUseId": "read", "input": {}}, result=generated,
+    ))
+    path = tmp_path / "source.json"
+    path.write_text("Generated hypothesis text")
+    monkeypatch.setattr("modules.tools.artifact.resolve_operation_artifact_path", lambda _: str(path))
+    context.inspect("artifact:generated.json")
+    assert not context.state["recommendations"]
+    assert not context.lookup.observations
+    assert not state.calls
+
+
+def test_procedure_source_seed_works_without_inventory_or_adapters(scripted_service, tmp_path, monkeypatch):
+    state = scripted_service
+    state.publish()
+    path = tmp_path / "source.txt"
+    path.write_text("Configuration declares a service dependency")
+    monkeypatch.setattr("modules.tools.artifact.resolve_operation_artifact_path", lambda _: str(path))
+    context = RecommendationContext(state.service, ["analysis"], [], tmp_path / "procedure.json")
+    task = SimpleNamespace(evidence=[], acceptance=SimpleNamespace(basis=SimpleNamespace(
+        source_refs=["target:service", "artifact:source.txt"], item_ids=[], snapshot_hash="",
+    )))
+    context.seed(task)
+    assert context.lookup.observations[0].origin == "source"
+    assert context.lookup.observations[0].scope == "subject"
+    assert not context.state["limitations"]
+
+
+def test_runtime_tool_declarations_are_read_from_actual_sdk_registry(scripted_service, tmp_path, monkeypatch):
+    from strands import tool
+    from strands.tools.registry import ToolRegistry
+
+    from tests.fixtures.outcome_agent import complete_tool_call, create_outcome_agent
+
+    @tool
+    def late_source() -> str:
+        """Read an assigned source file."""
+        return "Source data"
+
+    late_source._cyber_technique_observation_origin = "source"
+    state = scripted_service
+    context = RecommendationContext(state.service, ["analysis"], [], tmp_path / "late.json")
+    lookup = state.service.tool("op", "task", context.lookup)
+    lookup._cyber_technique_context = context
+    agent = create_outcome_agent(monkeypatch, "task_executor", [lookup])
+    agent.tool_registry = ToolRegistry()
+    agent.tool_registry.register_tool(lookup)
+    agent.tool_registry.register_tool(late_source)
+    complete_tool_call(agent, "late_source", {}, "Source code uses a bound parameter")
+    assert context.lookup.observations[-1].origin == "source"
+    assert "late_source" in context.lookup.capabilities
+    late_source._cyber_technique_observation_origin = "analysis"
+    before = list(context.lookup.observations)
+    complete_tool_call(agent, "late_source", {}, "Generated analysis")
+    assert context.lookup.observations == before

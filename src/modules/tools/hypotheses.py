@@ -294,6 +294,7 @@ def build_revise_hypothesis_tool(
         with mutation_lock:
             return apply_revision(hypothesis_id, replacement, reason)
 
+    revise_hypothesis._cyber_technique_observation_origin = "analysis"
     return revise_hypothesis
 
 
@@ -419,6 +420,7 @@ def build_record_hypotheses_tool(
         task.recovery_context["hypothesis_publications"] = publications
         return json.dumps(binding)
 
+    record_hypotheses._cyber_technique_observation_origin = "analysis"
     return record_hypotheses
 
 
@@ -451,6 +453,7 @@ def build_read_hypotheses_tool(
         return json.dumps({"item_id": item_id, "dispositions": dispositions, "hypotheses": page,
                            "next_offset": offset + len(page) if offset + len(page) < len(records) else None})
 
+    read_hypotheses._cyber_technique_observation_origin = "analysis"
     return read_hypotheses
 
 

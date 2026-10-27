@@ -13,6 +13,8 @@ const cases = [
   [{type: 'technique_build_progress', stage: 'source_selection', status: 'completed', fetched_count: 3,
     selected_count: 2}, '3 documents fetched, 2 selected'],
   [{type: 'technique_resolved', title: 'JWT validation', outcome: 'reused'}, 'Technique reused: JWT validation'],
+  [{type: 'technique_resolved', title: 'Source analysis', outcome: 'reused', applicability: 'conditional',
+    unmet_prerequisite_count: 2}, '(conditional), 2 unmet prerequisites'],
   [{type: 'technique_evaluated', score: 1, reason: 'Helpful controls'}, 'helpful (+1)'],
   [{type: 'technique_evaluated', score: 0}, 'neutral (0)'],
   [{type: 'technique_evaluated', score: -1}, 'unhelpful (-1)'],

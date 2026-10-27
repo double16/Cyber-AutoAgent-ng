@@ -1,5 +1,6 @@
 """Transactional global technique lifecycle and controller-owned use receipts."""
 
+import json
 import sqlite3
 import time
 from contextlib import closing, contextmanager
@@ -65,15 +66,15 @@ class TechniqueRepository:
                 (collection, revision),
             )
 
-    def use(self, operation: str, task: str, revision: str) -> None:
+    def use(self, operation: str, task: str, revision: str, use_context: dict | None = None) -> None:
         with self.transaction() as conn:
             row = conn.execute("SELECT active FROM technique_revisions WHERE revision_id = ?", (revision,)).fetchone()
             if row is None or not row[0]:
                 raise ValueError("Cannot use an inactive or unknown technique")
             conn.execute(
-                "INSERT OR IGNORE INTO technique_uses(operation_id, task_uid, revision_id, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (operation, task, revision, time.time()),
+                "INSERT OR IGNORE INTO technique_uses(operation_id, task_uid, revision_id, created_at, use_context) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (operation, task, revision, time.time(), json.dumps(use_context or {}, sort_keys=True)),
             )
 
     def pending_uses(self, operation: str, task: str) -> list[dict[str, Any]]:

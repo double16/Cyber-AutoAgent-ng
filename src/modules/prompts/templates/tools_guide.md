@@ -35,3 +35,7 @@ underlying signal yourself. Lookup remains your decision; both capabilities may 
 Keep target URLs, credentials, tokens, and personal data out of technique requests. Technique guidance
 and research sources never establish current-operation findings or execution proof. A version or CVE
 match requires verification.
+A catalog miss triggers technique research and generation; it is not task incompatibility.
+Operation lookups include task applicability notes. Treat conditional prerequisites as future checks,
+not established facts; hypothesis-generation phases design those checks without executing them.
+The same guidance contract supports source review, network services, system mapping and emulation.

@@ -26,6 +26,8 @@ export type TechniqueEvent = {
   snapshot_path?: string;
   diagnostic?: string;
   retry_pending?: boolean;
+  applicability?: 'supported' | 'conditional' | 'incompatible';
+  unmet_prerequisite_count?: number;
   [key: string]: unknown;
 };
 
@@ -53,6 +55,10 @@ export const formatTechniqueEvent = (input: { type?: unknown }): string | null =
       break;
     case 'technique_resolved':
       message = `Technique ${text(event.outcome)}: ${name}`;
+      if (event.applicability) message += ` (${text(event.applicability)})`;
+      if (typeof event.unmet_prerequisite_count === 'number' && event.unmet_prerequisite_count > 0) {
+        message += `, ${event.unmet_prerequisite_count} unmet prerequisites`;
+      }
       break;
     case 'technique_evaluated': {
       const label = event.score === 1 ? 'helpful (+1)' : event.score === -1 ? 'unhelpful (-1)' : 'neutral (0)';

@@ -66,6 +66,12 @@ def scripted_service(store, markdown):
     def runner(role, prompt, tools):
         state.calls.append((role, prompt, tools))
         if role == "technique_judge":
+            if "generic_request" in prompt:
+                return json.dumps({
+                    "generic_request": "JWT handling",
+                    "applicability": "conditional", "unmet_prerequisites": ["Establish token handling"],
+                    "reason": "Applicability decision",
+                })
             if "selected_urls" in prompt:
                 return json.dumps(
                     {

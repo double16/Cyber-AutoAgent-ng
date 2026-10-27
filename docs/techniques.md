@@ -11,6 +11,24 @@ suffice when the independent judge explains why. Source snippets are discovery l
 Up to three author attempts are allowed, with independent critique before publication. Source code
 informs reasoning; original examples use Python 3.13+ or browser JavaScript.
 
+During operations, Python binds lookup to structured phase metadata, task purpose, subject descriptors,
+available capabilities, task constraints and bounded observations. Source files, symbols, hosts, services, configurations,
+traces and module-defined subjects are supported; no HTTP traffic, inventory or live execution is required.
+The lookup judge abstracts incidental target identifiers before external research and global authoring,
+while preserving relevant platform, language, protocol, version and standard-path constraints.
+Task applicability is assessed without catalog candidates. Candidate selection is separate: no matching
+guidance triggers research and generation, not task rejection. Incompatibility requires a conflicting
+requirement and an exact reference to a supplied constraint or subject-specific source observation.
+Malformed assessments receive one repair attempt; continued failure is reported as an assessment error.
+Existing guidance is filtered by declared phase compatibility when phase context is known, independent
+of its originating module. Legacy phases without contexts remain explicitly unknown and use task purpose.
+
+Operation responses append a local applicability assessment: supported or conditional. Conditional
+guidance names unmet prerequisites and asks the worker to establish them within scope; hypothesis phases
+describe future checks only. Contradicted prerequisites or permission conflicts reject the lookup. These
+notes are excluded from global documents, produced snapshots and standalone CLI output. Source-selection
+metadata is assembled before critique, so the critic reviews exactly the document that will be published.
+
 ```mermaid
 flowchart LR
     O[Observed evidence + phase metadata] --> T[Detectors and semantic trigger matcher]
@@ -177,12 +195,29 @@ Certificate verification remains enabled. A certificate-verification failure sto
 fetches for that research attempt and returns a trust-configuration diagnostic through tool events.
 
 Semantic trigger decisions are cached within the operation for the same phase contexts, trigger
-catalog, candidate set, and sanitized excerpt. The cache stores only selected trigger IDs, never source
+fingerprint and sanitized excerpt. Each trigger has its own cached decision; adding guidance preserves
+decisions for unchanged triggers and never resets a task's six-call allowance. The cache stores only selected trigger IDs, never source
 excerpts or model reasons. Both positive and negative valid decisions can be reused across tasks and
 continuations; each task retains its own recommendation provenance. Failed decisions remain retryable.
 Only actual model calls consume the six-call per-task allowance. Seeded evidence and non-empty tool
 outputs receive semantic matching; tool inputs receive deterministic detection only. Deterministic
 signals continue to be checked after the semantic allowance is exhausted.
+
+Assigned subject observations precede shared artifact excerpts. Recommendations retain source/unknown
+origin and subject/shared scope. Trusted tool declarations use `_cyber_technique_observation_origin`
+with `source`, `analysis`, `guidance` or `unknown`; undeclared and runtime-added tools default to unknown.
+Generated analysis and guidance, including published hypotheses, cannot trigger their own prerequisites.
+Their artifact origins persist within the operation so later reads and continuations keep that distinction.
+Unknown observations may suggest conditional investigation but cannot establish applicability. Modules
+without signal adapters still use semantic recommendations and lookup without web imports.
+
+Use receipts retain the first delivery's `use_context` with generic intent, phase contexts, applicability,
+unmet prerequisites and source references/digests. Repeated deliveries do not overwrite that context or
+count as new uses. Legacy `{}` context remains unknown. Evaluation rates demonstrated contribution to
+the requested purpose, not coverage of every task requirement: excluding a source-to-sink path, resolving
+a system dependency or improving emulation telemetry may be helpful without live vulnerability testing.
+Applicability mismatch is distinct from document quality; negative feedback requires demonstrated harm
+or misleading guidance. Existing ratings and revisions are not rewritten automatically.
 
 Agents prefer techniques for reusable methodology and direct web research for target-specific public
 intelligence. Both tools remain available, and lookup remains the executor's decision.

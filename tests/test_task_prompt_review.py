@@ -541,3 +541,6 @@ def test_executor_research_guidance_survives_continuation_and_repair(review_case
         assert "Use web_search for\ntarget-specific public intelligence" in assembled
         assert "Lookup remains your decision" in assembled
         assert "Keep target URLs, credentials, tokens, and personal data out of technique requests" in assembled
+        assert "Treat conditional prerequisites as future checks" in assembled
+        assert "A catalog miss triggers technique research and generation" in assembled
+        assert "source review, network services, system mapping and emulation" in assembled

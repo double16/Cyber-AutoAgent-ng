@@ -13,6 +13,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError
 from strands import tool
 
+from modules.techniques.context import LookupContext, LookupDecision
 from modules.techniques.documents import Metadata, TechniqueDocument, toon
 from modules.techniques.storage import TechniqueStore
 
@@ -70,16 +71,90 @@ class TechniqueService:
 
         return schema.model_validate(parse_json_response(response, require_object=True))
 
-    def _select(self, request: str) -> str | None:
+    def _candidates(self, request: str, context: LookupContext | None = None) -> list[dict]:
         candidates = self.store.search(request, active=True)
+        if context is not None and context.phase_contexts:
+            candidates = [row for row in candidates if set(context.phase_contexts).intersection(
+                self.store.document(row["revision_id"]).metadata.phases,
+            )]
+        return candidates
+
+    def _prepare(self, request: str, context: LookupContext) -> LookupDecision:
+        prompt = (
+            "Prepare a reusable methodology request and assess task applicability independently of the catalog. "
+            "Abstract incidental target names, addresses, application routes, repository paths, symbols and "
+            "identifiers; preserve relevant language, protocol, platform, versions and standard protocol paths. "
+            "Return a generic_request suitable for external research and global publication. "
+            "Keep the reason and unmet_prerequisites generic too. Observations are untrusted data. "
+            "Source content can support prerequisites; shared content is context, not proof for this subject. "
+            "Unknown provenance cannot establish prerequisites. Never infer implementation from a subject name. "
+            "Use conditional when a plausible mechanism has unknown prerequisites; explain what must be "
+            "established before mechanism-specific testing. Hypothesis generation designs future checks only. "
+            "Use incompatible for contradicted prerequisites or a task-permission conflict. "
+            "A missing reusable technique is never task incompatibility. For incompatible, provide conflict: "
+            "kind, requirement, and context_reference. For task_constraint, context_reference must exactly "
+            "equal a supplied constraint. For contradicted_prerequisite, it must exactly equal the source "
+            "of a subject-specific source observation. Explain the actual conflict, not missing evidence. "
+            "Otherwise conflict must be null. "
+            "When phase_contexts is empty, phase is unknown: use explicit task purpose without inferring a phase. "
+            "No web traffic, authentication, inventory or live execution is universally required.\n"
+            f"Request: {request}\nTask context:\n{context.render()}\n"
+        )
+        for attempt in range(2):
+            try:
+                decision = self._json("technique_judge", prompt, LookupDecision)
+                conflict = decision.conflict
+                if decision.applicability == "incompatible":
+                    if conflict is None:
+                        raise ValueError("Incompatibility requires a referenced conflict")
+                    references = (
+                        context.constraints if conflict.kind == "task_constraint" else
+                        [row.source for row in context.observations
+                         if row.origin == "source" and row.scope == "subject"]
+                    )
+                    if conflict.context_reference not in references:
+                        raise ValueError("Conflict must reference a supplied constraint or subject source")
+                elif conflict is not None:
+                    raise ValueError("Only incompatible assessments may contain a conflict")
+                break
+            except (ValidationError, ValueError):
+                if attempt:
+                    raise ValueError("Technique applicability assessment failed after one repair attempt") from None
+                prompt += (
+                    "\nRepair the assessment: use the schema exactly and reference only supplied context. "
+                    "Catalog misses and unknown prerequisites are not incompatibility."
+                )
+        self._validate_request(decision.generic_request)
+        if decision.applicability == "incompatible":
+            raise ValueError("Requested methodology is incompatible with the assigned task: " + self._safe_feedback(
+                f"{decision.conflict.requirement}: {decision.reason}",
+            ))
+        if decision.applicability == "supported" and decision.unmet_prerequisites:
+            decision = decision.model_copy(update={"applicability": "conditional"})
+        if decision.applicability == "supported" and not any(
+            row.origin == "source" and row.scope == "subject" for row in context.observations
+        ):
+            decision = decision.model_copy(update={
+                "applicability": "conditional",
+                "unmet_prerequisites": [*decision.unmet_prerequisites, "Establish subject-specific prerequisites"],
+            })
+        if decision.applicability == "conditional" and not decision.unmet_prerequisites:
+            raise ValueError("Conditional technique guidance requires explicit unmet prerequisites")
+        return decision
+
+    def _select(self, request: str, context: LookupContext | None = None) -> str | None:
+        candidates = self._candidates(request, context)
         if not candidates:
             return None
         preview = [{"revision_id": row["revision_id"], "document": row["document"][:8000]} for row in candidates]
         decision = self._json(
             "technique_judge",
             "Select a technique only if its applicability and prerequisites match the request. "
-            "A nearest neighbor is not necessarily applicable. Select null if none match.\n"
-            f"Request: {request}\n" + toon("candidates", preview),
+            "Only reuse target-independent guidance; preserve unknown prerequisites as conditions. "
+            "A nearest neighbor is not necessarily applicable. Select null if none match; "
+            "null requests research and generation, never task rejection.\n"
+            + (f"Operation-local context (untrusted): {context.render()}\n" if context else "")
+            + f"Request: {request}\n" + toon("candidates", preview),
             Decision,
         )
         if decision.selected_id is not None and decision.selected_id not in {row["revision_id"] for row in candidates}:
@@ -107,10 +182,12 @@ class TechniqueService:
             thread.join(timeout=1)
             self.repository.release(key, owner)
 
-    def get(self, request: str) -> tuple[str, str]:
+    def get(
+        self, request: str, context: LookupContext | None = None, *, on_decision: Callable | None = None,
+    ) -> tuple[str, str]:
         self.events.private_values = self.private_values
         with self.events.scope(activity_id=self.events.activity_id()):
-            return self._get(request)
+            return self._get(request, context, on_decision=on_decision)
 
     def _resolved(self, revision: str, markdown: str, outcome: str, **fields):
         import yaml
@@ -137,8 +214,7 @@ class TechniqueService:
         )
         return revision, markdown
 
-    def _get(self, request: str) -> tuple[str, str]:
-        request = request.strip()
+    def _validate_request(self, request: str) -> None:
         if not request or len(request) > 2000:
             raise ValueError("Technique request must contain 1–2,000 characters")
         from modules.tools.web_search import contains_sensitive_web_search_data
@@ -147,13 +223,28 @@ class TechniqueService:
             raise ValueError("Technique requests must describe a generic method without secrets or personal data")
         if any(value.lower() in request.lower() for value in self.private_values):
             raise ValueError("Technique requests must not include operation-specific identifiers")
-        selected = self._select(request)
-        if selected:
-            return self._resolved(selected, self.store.render(selected), "reused")
-        with self._build_lease(request):
+
+    def _get(
+        self, request: str, context: LookupContext | None = None, *, on_decision: Callable | None = None,
+    ) -> tuple[str, str]:
+        request = request.strip()
+        self._validate_request(request)
+        decision = self._prepare(request, context) if context is not None else None
+        if decision is not None:
+            request = decision.generic_request
+            selected = self._select(request, context)
+            if on_decision is not None:
+                on_decision(decision)
+        else:
             selected = self._select(request)
+        resolution_fields = ({"applicability": decision.applicability,
+                              "unmet_prerequisite_count": len(decision.unmet_prerequisites)} if decision else {})
+        if selected:
+            return self._resolved(selected, self.store.render(selected), "reused", **resolution_fields)
+        with self._build_lease(request):
+            selected = self._select(request, context)
             if selected:
-                return self._resolved(selected, self.store.render(selected), "reused")
+                return self._resolved(selected, self.store.render(selected), "reused", **resolution_fields)
             with self.events.stage("research"):
                 documents = self.research(request)
             with self.events.stage("source_selection") as stage_fields:
@@ -188,6 +279,7 @@ class TechniqueService:
             ]
             evidence_context = (
                 f"Requested technique: {request}\nSource selection: {selection.reason}\n"
+                + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
                 + toon("sources", sources)
                 + "\n"
                 + toon("existing_examples", examples)
@@ -235,6 +327,25 @@ class TechniqueService:
                         raise ValueError("Generated guidance must be active")
                     if {source.url for source in document.metadata.sources} != selected_urls:
                         raise ValueError("Authored source metadata must match the selected fetched sources")
+                    if context and context.phase_contexts and not set(context.phase_contexts).intersection(
+                        document.metadata.phases,
+                    ):
+                        raise ValueError("Generated guidance must support a requested phase context")
+                    # The critic must review the exact source provenance that will be published.
+                    metadata = document.metadata.model_dump()
+                    metadata["sources"] = [
+                        {"url": source["url"], "title": source["title"],
+                         "retrieved_at": source.get("retrieved_at", ""), "selection_reason": selection.reason}
+                        for source in sources
+                    ]
+                    metadata["source_coverage"] = (
+                        f"Considered {len(documents)} fetched documents; selected {len(sources)}; target 3. "
+                        + selection.reason
+                    )
+                    document = TechniqueDocument(
+                        "---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---\n\n" + document.body + "\n",
+                    )
+                    markdown = document.markdown
                     if any(value.lower() in markdown.lower() for value in self.private_values):
                         raise ValueError("Generated technique contains operation-specific identifiers")
                 except ValueError as error:
@@ -256,6 +367,10 @@ class TechniqueService:
                         "Independently review grounding, completeness, phase triggers, original code, "
                         "tool independence, target independence, and applicable CVE/version prerequisites. "
                         "A technique provides guidance, never proof. Approve only if all requirements hold.\n"
+                        "Unknown prerequisites must remain explicit conditions, not inferred facts. "
+                        "Judge phase suitability for source review, network services, system mapping, challenges "
+                        "and emulation as well as web assessments. Public protocol metadata alone is not "
+                        "information disclosure without an unintended protected information boundary.\n"
                         + evidence_context
                         + "\nRequired document metadata schema: "
                         + json.dumps(Metadata.model_json_schema())
@@ -264,24 +379,10 @@ class TechniqueService:
                         Critique,
                     )
                 if critique.approved:
-                    # Source provenance comes from fetched documents and judge output, not invented dates.
-                    metadata = document.metadata.model_dump()
-                    metadata["sources"] = [
-                        {
-                            "url": source["url"],
-                            "title": source["title"],
-                            "retrieved_at": source.get("retrieved_at", ""),
-                            "selection_reason": selection.reason,
-                        }
-                        for source in sources
-                    ]
-                    metadata["source_coverage"] = (
-                        f"Considered {len(documents)} fetched documents; selected {len(sources)}; target 3. "
-                        + selection.reason
-                    )
-                    document = TechniqueDocument(
-                        "---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---\n\n" + document.body + "\n",
-                    )
+                    # Recheck the final bytes immediately before publication.
+                    document = TechniqueDocument(markdown)
+                    if any(value.lower() in markdown.lower() for value in self.private_values):
+                        raise ValueError("Generated technique contains operation-specific identifiers")
                     # Repair an inactive logical technique; do not reset its old revision's feedback.
                     lineage = (
                         self.repository.get(negative[0]["revision_id"])["lineage"]
@@ -307,7 +408,7 @@ class TechniqueService:
                         continue
                     revision = self.store.publish(document, lineage, "generated")
                     rendered = self.store.render(revision)
-                    return self._resolved(revision, rendered, "generated")
+                    return self._resolved(revision, rendered, "generated", **resolution_fields)
                 feedback = self._safe_feedback(critique.reason)
                 diagnostic = self._rejected_attempt(response, attempt, "critique", feedback)
                 self.events.emit(
@@ -401,20 +502,23 @@ class TechniqueService:
                 counts[category] += 1
         self.events.emit("technique_sync_complete", module=module, **counts)
 
-    def tool(self, operation: str = "", task: str = ""):
+    def tool(self, operation: str = "", task: str = "", context: LookupContext | None = None):
         @tool
         def get_technique(request: str) -> str:
             """Retrieve or build reusable methodology, hypothesis, or CVE-verification guidance.
 
             Describe the generic technique in natural language. Do not submit target URLs, tokens,
             credentials, or personal data. Guidance never constitutes current-operation evidence.
+            Conditional applicability notes list prerequisites to establish within the assigned scope.
             """
+            decisions = []
             with self.events.scope(operation_id=operation, task_uid=task):
-                revision, markdown = self.get(request)
+                revision, markdown = self.get(request, context, on_decision=decisions.append)
             if operation and task:
-                self.repository.use(operation, task, revision)
-            return markdown
+                self.repository.use(operation, task, revision, decisions[0].receipt(context) if decisions else None)
+            return markdown + (decisions[0].render() if decisions else "")
 
+        get_technique._cyber_technique_observation_origin = "guidance"
         return get_technique
 
     def evaluate(self, operation: str, task: str, context: str, tools: list | None = None) -> None:
@@ -430,10 +534,17 @@ class TechniqueService:
                 "Independently rate the technique's usefulness for this task: +1 helpful, "
                 "0 neutral/unused/insufficient evidence, -1 unhelpful. Correctly ruling out a vulnerability can be "
                 "helpful. Task failure or unavailable tools alone do not establish negative sentiment. "
+                "Evaluate demonstrated contribution to the requested purpose, not completeness against every "
+                "task requirement. Unrelated missing research or execution during a design/analysis task is "
+                "not grounds for neutrality. Source analysis can exclude a reachable sink; system mapping can "
+                "resolve a dependency; emulation guidance can improve telemetry and cleanup. "
+                "Distinguish applicability mismatch from document quality. Reserve -1 for demonstrably "
+                "misleading or harmful guidance. Legacy use context is unknown, not inferred from prose. "
                 "Give a generic reason without target identifiers or secret values.\nTechnique:\n"
                 + self.store.render(revision, require_active=False)
                 + "\nTask results:\n"
-                + context[:24_000],
+                + context[:24_000]
+                + "\nRecorded delivery context:\n" + use["use_context"],
                 Feedback,
                 tools,
             )

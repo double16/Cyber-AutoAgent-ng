@@ -35,8 +35,20 @@ def bind_task_techniques(runtime, plan, task, tools):
         Path(_operation_output_root()) / "techniques" / "recommendations" / f"{key}.json",
     )
     context.event_context = {"operation_id": runtime.operation_id, "task_uid": task.task_uid}
+    context.lookup.purpose = task.objective
+    context.lookup.capabilities = [get_tool_name(item) for item in tools]
+    context.lookup.constraints = list(getattr(plan, "constraints", []))
+    for item in tools:
+        origin = getattr(item, "_cyber_technique_observation_origin",
+                         context.tool_origins.get(get_tool_name(item), "unknown"))
+        if origin not in {"source", "analysis", "guidance", "unknown"}:
+            raise ValueError("Unknown technique observation origin")
+        context.tool_origins[get_tool_name(item)] = origin
+    context.lookup.subjects = [{"target_id": item.target_id, "kind": item.type, "value": item.value}
+                               for item in getattr(plan, "targets", [])
+                               if not getattr(task, "target_ids", []) or item.target_id in task.target_ids]
     context.seed(task)
-    selected = service.tool(runtime.operation_id, task.task_uid)
+    selected = service.tool(runtime.operation_id, task.task_uid, context.lookup)
     selected._cyber_technique_context = context
     return [item for item in tools if get_tool_name(item) != "get_technique"] + [selected]
 
