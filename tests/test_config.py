@@ -1394,6 +1394,7 @@ def test_server_model_override_handles_ollama_embedding_fallbacks(monkeypatch):
 
     manager = ConfigManager()
     monkeypatch.setattr(manager.env, "has_changed", lambda: False)
+    monkeypatch.setattr(manager, "get_max_tokens", lambda *_args: 1000)
     monkeypatch.setattr(manager, "get_ollama_host", lambda: "http://ollama")
     monkeypatch.setattr(manager_module.ollama, "Client", lambda **_kwargs: SimpleNamespace(
         list=lambda: {"models": [{"model": "llama"}]}
@@ -1435,3 +1436,78 @@ def test_safe_token_swarm_and_rate_limit_helpers_cover_default_paths(monkeypatch
 
     manager.get_rate_limit_config.cache_clear()
     assert manager.get_rate_limit_config("bedrock").max_concurrent == 0
+
+
+class TestLightweightConfiguration:
+    @pytest.mark.parametrize("provider", ["ollama", "bedrock", "litellm", "gemini"])
+    def test_settings_do_not_discover_unused_models(self, monkeypatch, tmp_path, provider):
+        monkeypatch.setenv("CYBER_AGENT_LLM_MODEL", "unused-model")
+        monkeypatch.setenv("CYBER_AGENT_SWARM_MODEL", "unused-swarm")
+        monkeypatch.setenv("CYBER_AGENT_EMBEDDING_MODEL", "text-embedding-3-small")
+        monkeypatch.setenv("CYBER_AGENT_OUTPUT_DIR", str(tmp_path))
+        manager = ConfigManager()
+        with patch.object(manager, "get_server_config", side_effect=AssertionError("full config")), \
+                patch.object(manager, "get_max_tokens", side_effect=AssertionError("model discovery")), \
+                patch("modules.config.manager.ollama.Client", side_effect=AssertionError("Ollama probe")), \
+                patch("modules.config.providers.litellm_config.litellm.get_max_tokens",
+                      side_effect=AssertionError("token lookup")):
+            assert manager.get_model_id(provider, "selected-model") == "selected-model"
+            assert manager.get_model_id(provider) == "unused-model"
+            assert manager.get_output_config(provider).base_dir == str(tmp_path)
+            assert manager.get_output_config(provider, output_dir=str(tmp_path / "other")).base_dir.endswith("other")
+            assert manager.get_sdk_config(provider, enable_hooks=False).enable_hooks is False
+            embedding = manager.get_embedding_config(provider, model_id="selected-model")
+            assert embedding.model_id == "text-embedding-3-small"
+            assert manager.get_qdrant_memory_config(provider)["embedding_model"] == embedding.model_id
+            assert manager.get_embedding_config(provider) is not embedding
+
+    def test_model_defaults_and_invalid_providers(self, monkeypatch):
+        monkeypatch.delenv("CYBER_AGENT_LLM_MODEL", raising=False)
+        manager = ConfigManager()
+        assert manager.get_model_id("ollama") == manager._default_configs["ollama"]["llm"].model_id
+        for getter in (manager.get_model_id, manager.get_output_config, manager.get_sdk_config,
+                       manager.get_embedding_config, manager.get_qdrant_memory_config):
+            with pytest.raises(ValueError, match="Unsupported provider"):
+                getter("unknown")
+
+    def test_explicit_model_precedes_limit_discovery(self, monkeypatch):
+        monkeypatch.setenv("CYBER_AGENT_LLM_MODEL", "unused-model")
+        monkeypatch.delenv("MAX_TOKENS", raising=False)
+        manager = ConfigManager()
+        with patch.object(manager, "get_max_tokens", return_value=1000) as limits:
+            with patch("modules.config.manager.ollama.Client"):
+                config = manager.get_server_config("ollama", model_id="selected-model")
+        assert config.llm.model_id == "selected-model"
+        assert limits.call_args.args[1] == "selected-model"
+        assert manager._default_configs["ollama"]["llm"].model_id != "selected-model"
+
+
+@pytest.mark.parametrize("provider", ["bedrock", "litellm", "gemini", "ollama"])
+def test_selected_model_configuration_preserves_discovery_failures(monkeypatch, provider):
+    monkeypatch.setenv("CYBER_AGENT_LLM_MODEL", "unused-model")
+    manager = ConfigManager()
+    monkeypatch.setattr(manager, "get_server_config", Mock(side_effect=AssertionError("full config")))
+    limits = Mock(side_effect=RuntimeError("selected model unavailable"))
+    monkeypatch.setattr(manager, "get_max_tokens", limits)
+    with pytest.raises(RuntimeError, match="selected model unavailable"):
+        if provider == "ollama":
+            manager.get_local_model_config("selected-model", provider)
+        else:
+            manager.get_standard_model_config("selected-model", "us-east-1", provider)
+    limits.assert_called_once_with(provider, "selected-model")
+
+
+def test_lightweight_sdk_and_embedding_refresh_environment(monkeypatch):
+    manager = ConfigManager()
+    monkeypatch.setenv("CYBER_SDK_ENABLE_STREAMING", "false")
+    monkeypatch.setenv("CYBER_CONVERSATION_WINDOW", "12")
+    monkeypatch.setenv("ENABLE_SDK_TELEMETRY", "false")
+    sdk = manager.get_sdk_config("ollama")
+    assert sdk.enable_streaming is False
+    assert sdk.enable_telemetry is False
+    assert sdk.conversation_window_size == 12
+    assert manager.get_sdk_config("ollama", enable_streaming=True).enable_streaming is True
+    monkeypatch.setenv("CYBER_AGENT_EMBEDDING_MODEL", "first-embedding")
+    assert manager.get_embedding_config("ollama").model_id == "first-embedding"
+    monkeypatch.setenv("CYBER_AGENT_EMBEDDING_MODEL", "second-embedding")
+    assert manager.get_embedding_config("ollama").model_id == "second-embedding"

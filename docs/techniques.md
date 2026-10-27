@@ -367,3 +367,8 @@ Historical ratings and documents are unchanged; no SQL migration is needed.
 
 Offline tests verify controller routing and contracts. A subsequent live continuation must confirm
 relevance, repair effectiveness, semantic source coverage and contribution judgments.
+
+The CLI selects its generation model from `--model`, then `CYBER_AGENT_LLM_MODEL`,
+then the provider default. Startup diagnostics report that effective model. Output, SDK,
+and embedding configuration reads do not probe unrelated generation models. Embeddings
+retain their independent configuration; `--model` does not replace the embedding model.

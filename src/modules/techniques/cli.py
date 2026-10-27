@@ -19,7 +19,7 @@ def build_service(provider: str, model: str | None, output_dir: str, module: str
 
     manager = get_config_manager()
     config = manager.get_qdrant_memory_config(provider)
-    model = model or manager.get_llm_config(provider).model_id
+    model = manager.get_model_id(provider, model)
     qdrant = open_qdrant(output_dir)
     try:
         repository = TechniqueRepository(str(Path(output_dir) / "cyber_autoagent.db"))
@@ -81,11 +81,12 @@ def main(argv: list[str] | None = None) -> int:
 
             manager = get_config_manager()
             provider = args.provider or manager.get_provider()
+            model = manager.get_model_id(provider, args.model)
             output_dir = args.output_dir or str(manager.get_output_config(provider).base_dir)
             diagnostics.open(output_dir, args.log_file)
             diagnostics.emit("startup", message="Initializing technique service", provider=provider,
-                             model_id=args.model, module=args.module, phase_contexts=args.phase)
-            service = build_service(provider, args.model, output_dir, args.module, diagnostics=diagnostics)
+                             model_id=model, module=args.module, phase_contexts=args.phase)
+            service = build_service(provider, model, output_dir, args.module, diagnostics=diagnostics)
             bundle = service.resolve_bundle(args.request, context=context)
             markdown = bundle.render()
             diagnostics.emit(

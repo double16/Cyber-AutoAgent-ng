@@ -106,6 +106,7 @@ def test_cli_build_and_bootstrap_reuse_storage_without_fake_target(store, monkey
             "embeddings": store.embeddings,
         },
         get_llm_config=lambda provider: SimpleNamespace(model_id="test"),
+        get_model_id=lambda provider, model=None: model or "test",
     )
     monkeypatch.setattr(manager_module, "get_config_manager", lambda: manager)
     monkeypatch.setattr("modules.config.get_config_manager", lambda: manager)
@@ -277,3 +278,52 @@ def test_cli_phase_filters_reuse_and_rejects_generated_wrong_phase(scripted_serv
     assert output.out == ""
     assert "must support a requested phase context" in output.err
     assert state.research_calls
+
+
+def test_cli_explicit_model_does_not_probe_environment_model(scripted_service, monkeypatch, capsys, tmp_path):
+    from modules.config.manager import ConfigManager
+    from modules.config.models import factory
+    from modules.config.models import ollama as ollama_module
+
+    monkeypatch.setenv("CYBER_AGENT_LLM_MODEL", "unused-model")
+    monkeypatch.setenv("CYBER_AGENT_SWARM_MODEL", "unused-swarm")
+    monkeypatch.setenv("CYBER_AGENT_EMBEDDING_MODEL", "mxbai-embed-large:latest")
+    manager = ConfigManager()
+    monkeypatch.setattr("modules.config.get_config_manager", lambda: manager)
+    monkeypatch.setattr(factory, "_get_config_manager", lambda: manager)
+    monkeypatch.setattr(manager, "get_server_config", Mock(side_effect=AssertionError("full config")))
+    probes = []
+
+    def get_limits(provider, model):
+        probes.append(model)
+        assert model == "selected-model"
+        return 8192
+
+    monkeypatch.setattr(manager, "get_max_tokens", get_limits)
+    monkeypatch.setattr("modules.config.models.get_capabilities", lambda *_args: SimpleNamespace(
+        pass_reasoning_effort=False, supports_reasoning=False, supports_temperature=True,
+    ))
+    monkeypatch.setattr(ollama_module, "OllamaModel", lambda **kwargs: SimpleNamespace(kwargs=kwargs))
+    monkeypatch.setattr(factory, "_get_parameters_by_role", lambda *args: SimpleNamespace(
+        llm_temp=0.2, llm_max=1000, top_k=None, top_p=None, reasoning_level=SimpleNamespace(value="none"),
+        role=SimpleNamespace(value="technique_author"), profile_max_tokens=1000, output_ceiling=None,
+    ))
+    state = scripted_service
+    state.selection = state.publish()
+
+    def build(provider, model, output_dir, module, **kwargs):
+        assert model == "selected-model"
+        assert manager.get_qdrant_memory_config(provider)["embedding_model"] == "mxbai-embed-large:latest"
+        created = factory.create_ollama_model(model, provider, "technique_author")
+        assert created.kwargs["model_id"] == model
+        return state.service
+
+    monkeypatch.setattr(cli, "build_service", build)
+    assert cli.main(["JWT handling", "--provider", "ollama", "--model", "selected-model",
+                     "--output-dir", str(tmp_path)]) == 0
+    assert probes == ["selected-model"]
+    output = capsys.readouterr()
+    assert output.out.startswith("# Technique bundle")
+    assert "unused-model" not in output.err
+    records = [json.loads(line) for line in next((tmp_path / "techniques/logs").glob("*.jsonl")).read_text().splitlines()]
+    assert next(record for record in records if record["type"] == "startup")["model_id"] == "selected-model"
