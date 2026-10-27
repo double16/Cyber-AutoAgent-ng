@@ -437,3 +437,21 @@ def test_quiet_retains_critical_python_diagnostics(tmp_path):
     session.close()
     assert "critical provider diagnostic" in stderr.getvalue()
     assert records(session)[-1]["level"] == "critical"
+
+
+def test_alignment_diagnostic_displays_adjustment_and_preserves_original(tmp_path):
+    import io
+    import json
+
+    from modules.techniques.diagnostics import DiagnosticSession
+
+    stderr = io.StringIO()
+    session = DiagnosticSession(stderr=stderr)
+    session.open(str(tmp_path))
+    session.emit("technique_build_progress", stage="request_alignment", status="completed",
+                 original_request="Validate applicability", adjusted_request="Develop applicability hypotheses",
+                 reason="Hypothesis guidance")
+    session.close()
+    assert "Aligned request: Develop applicability hypotheses" in stderr.getvalue()
+    record = json.loads(session.path.read_text().splitlines()[-1])
+    assert record["original_request"] == "Validate applicability"

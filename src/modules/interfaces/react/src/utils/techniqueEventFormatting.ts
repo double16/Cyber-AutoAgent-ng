@@ -28,7 +28,7 @@ export type TechniqueEvent = {
   snapshot_path?: string;
   diagnostic?: string;
   retry_pending?: boolean;
-  applicability?: 'supported' | 'conditional' | 'incompatible';
+  applicability?: 'supported' | 'conditional' | 'incompatible' | 'uncertain';
   unmet_prerequisite_count?: number;
   [key: string]: unknown;
 };
@@ -53,6 +53,10 @@ export const formatTechniqueEvent = (input: { type?: unknown }): string | null =
       if (event.fetched_count != null) message += `, ${event.fetched_count} documents fetched`;
       if (event.selected_count != null) message += `, ${event.selected_count} selected`;
       if (typeof event.elapsed_seconds === 'number') message += `, ${event.elapsed_seconds.toFixed(1)}s`;
+      if (event.stage === 'request_alignment' && event.original_request !== event.adjusted_request
+        && typeof event.adjusted_request === 'string') {
+        message += `, aligned request: ${text(event.adjusted_request)}`;
+      }
       if (event.reason) message += ` — ${text(event.reason)}`;
       break;
     case 'technique_resolved':

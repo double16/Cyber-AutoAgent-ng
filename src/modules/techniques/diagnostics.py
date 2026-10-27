@@ -168,6 +168,9 @@ class DiagnosticSession:
             if level == "debug":
                 label = f"{label} {event_type}"
             status = record.get("status", "")
+            if (record.get("stage") == "request_alignment" and record.get("adjusted_request")
+                    and record.get("original_request") != record["adjusted_request"]):
+                message = f"Aligned request: {record['adjusted_request']}. {message}"
             details = []
             for key in ("component_id", "research_round", "attempt", "fetched_count", "selected_count",
                         "delivered_count", "unresolved_count", "elapsed_seconds", "added", "updated", "unchanged",
@@ -233,6 +236,18 @@ class ConversationDiagnostics(HookProvider):
         self.attempt = 0
         self.started = 0.0
 
+    @staticmethod
+    def structured_fields(agent):
+        from modules.agents.native_structured import NativeFinalizer
+
+        model = getattr(agent, "model", None)
+        if not isinstance(model, NativeFinalizer):
+            return {}
+        return {"schema_id": model.schema_id, "schema_name": model.output_model.__name__,
+                "structured_mode": "native" if model.native else "tool",
+                **({"fallback_reason": "native_unsupported"} if not model.native
+                   and getattr(model.model, "_cyber_native_structured_output", False) else {})}
+
     def register_hooks(self, registry, **kwargs):
         registry.add_callback(BeforeModelCallEvent, self.before_model)
         registry.add_callback(AfterModelCallEvent, self.after_model)
@@ -248,18 +263,26 @@ class ConversationDiagnostics(HookProvider):
             tools=[item.tool_spec for item in event.agent.tool_registry.registry.values()],
             **({"input_tokens": event.projected_input_tokens} if event.projected_input_tokens is not None else {}),
             prompt_limit=event.agent._prompt_token_limit,
+            **self.structured_fields(event.agent),
         )
 
     def after_model(self, event):
         fields = {**self.fields, "model_attempt": self.attempt,
-                  "elapsed_seconds": round(monotonic() - self.started, 3)}
+                  "elapsed_seconds": round(monotonic() - self.started, 3),
+                  **self.structured_fields(getattr(event, "agent", None))}
         if event.exception is not None:
-            self.session.failure("model_failed", event.exception, level="debug", **fields)
+            self.session.failure(
+                "model_failed", event.exception, level="debug", **fields,
+                rejected_response=getattr(event.exception, "rejected_response", None),
+                validation_errors=getattr(event.exception, "validation_errors", None),
+            )
         else:
             response = event.stop_response
             self.session.emit("model_output", level="debug", **fields,
                               response=response.message if response else None,
-                              stop_reason=response.stop_reason if response else None)
+                              stop_reason=response.stop_reason if response else None,
+                              **({"validation_outcome": "validated" if fields["structured_mode"] == "native"
+                                 else "schema_tool_pending"} if "schema_id" in fields else {}))
 
     def before_tool(self, event):
         self.session.emit("tool_input", level="debug", **self.fields, model_attempt=self.attempt,

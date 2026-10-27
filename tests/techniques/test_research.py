@@ -93,8 +93,7 @@ def test_research_agent_must_fetch_discovered_sources_and_is_bounded():
 
 
 def test_research_rejects_empty_or_malformed_results():
-    with pytest.raises(ValueError, match="any usable"):
-        WebResearch(lambda *args: "No sources")("JWT")
+    assert WebResearch(lambda *args: "No sources")("JWT") == []
 
     async def search_tool(**kwargs):
         return {"results": "invalid"}

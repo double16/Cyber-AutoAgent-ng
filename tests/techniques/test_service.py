@@ -117,7 +117,7 @@ def test_missing_technique_runs_separate_research_selection_author_and_critic(sc
     revision, markdown = state.service.get("JWT handling")
     assert "revision_id:" in markdown
     assert state.service.repository.get(revision)["active"]
-    assert state.research_calls == ["JWT handling"]
+    assert len(state.research_calls) == 1 and state.research_calls[0].startswith("JWT handling\n")
     assert [role for role, _, _ in state.calls] == ["technique_judge", "technique_author", "technique_critic"]
     assert all(not tools for _, _, tools in state.calls)
     author_prompt = next(prompt for role, prompt, _ in state.calls if role == "technique_author")
@@ -429,6 +429,7 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
 
     def research(request):
         state.research_calls.append(request)
+        state.source_urls = [f"https://vendor.example/source-{len(state.research_calls)}"]
         return [{"url": state.source_urls[0], "title": "Advisory", "text": "Primary support"}]
 
     def runner(role, prompt, tools):
@@ -449,7 +450,7 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
     if category == "source_attribution":
         assert len(selections) == 2 and "Fix coverage" in selections[-1]
     if category in {"source_attribution", "research_coverage"}:
-        assert critiques[0].split("Draft:\n")[1] == critiques[1].split("Draft:\n")[1]
+        assert critiques[0].split("# Guidance")[1] == critiques[1].split("# Guidance")[1]
 
 
 @pytest.mark.parametrize("category,message", [

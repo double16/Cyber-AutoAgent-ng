@@ -1,0 +1,270 @@
+"""Phase objectives govern guidance, without claiming target execution or dropping intent."""
+
+import json
+
+import pytest
+
+from modules.techniques.alignment import PHASE_OBJECTIVES, align_request, phase_guidance
+from modules.techniques.context import LookupContext
+from modules.techniques.coverage import CoverageGap, Requirement, SourceSelection, review_coverage
+from modules.techniques.documents import CONTEXTS
+
+
+@pytest.mark.parametrize("phase", CONTEXTS)
+@pytest.mark.parametrize("subject", ["HTTP application", "TCP service", "source repository", "system configuration",
+                                    "challenge", "emulation telemetry"])
+def test_explicit_phase_alignment_is_shared_and_context_is_not_mutated(scripted_service, phase, subject):
+    state = scripted_service
+    original = state.service.runner
+    calls = []
+    request = f"Review {subject} prerequisites"
+    adjusted = f"Describe {phase} guidance for {subject} prerequisites"
+
+    def runner(role, prompt, tools):
+        if role == "technique_request_aligner":
+            calls.append(prompt)
+            return json.dumps({"adjusted_request": adjusted, "reason": "Preserve subject and clarify guidance"})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    context = LookupContext(phase_contexts=[phase], constraints=["Read only"])
+    alignment, aligned_context = align_request(state.service, request, context)
+    same, _ = align_request(state.service, adjusted, aligned_context)
+    assert same is alignment and len(calls) == 1
+    assert context._request_alignment is None and aligned_context is not context
+    assert alignment.original_request == request and alignment.adjusted_request == adjusted
+    assert alignment.objectives == {phase: PHASE_OBJECTIVES[phase]}
+    assert "Read only" in calls[0] and phase_guidance(context) in calls[0]
+    assert "Original request" in alignment.render()
+
+
+def test_unknown_phase_is_preserved_without_alignment_call(scripted_service):
+    alignment, context = align_request(scripted_service.service, "Validate applicability", None)
+    assert alignment.original_request == alignment.adjusted_request == "Validate applicability"
+    assert alignment.render() == "" and context is None
+    assert not scripted_service.calls
+    assert "Phase unknown" in phase_guidance(None)
+    with pytest.raises(ValueError, match="Unknown technique phase"):
+        phase_guidance(LookupContext(phase_contexts=["invented"]))
+
+
+def test_multiple_phase_objectives_are_deduplicated_without_ordering(scripted_service):
+    context = LookupContext(phase_contexts=["analysis", "hypothesis_generation", "analysis"])
+    alignment, _ = align_request(scripted_service.service, "Review source", context)
+    assert alignment.phase_contexts == ["analysis", "hypothesis_generation"]
+    assert set(alignment.objectives) == {"analysis", "hypothesis_generation"}
+    prompt = scripted_service.calls[0][1]
+    assert "no inferred ordering or automatic splitting" in prompt
+
+
+@pytest.mark.parametrize("bad", ["not JSON", json.dumps({"adjusted_request": "", "reason": "Invalid"})])
+def test_alignment_repairs_once_before_research(scripted_service, bad):
+    calls = []
+    scripted_service.service.runner = lambda *args: calls.append(args) or bad
+    with pytest.raises(ValueError, match="alignment failed after one correction"):
+        scripted_service.service.get("Review source", LookupContext(phase_contexts=["analysis"]))
+    assert len(calls) == 2 and "Validation failure" in calls[1][1]
+    assert not scripted_service.research_calls
+
+
+@pytest.mark.parametrize("reference,excerpt,valid", [
+    ("No execution", "Execute a probe", True),
+    ("hypothesis_generation", "Execute a probe", True),
+    ("invented restriction", "Execute a probe", False),
+    ("No execution", "Not requested", False),
+])
+def test_explicit_deliverable_conflicts_are_referenced_and_not_rewritten(scripted_service, reference, excerpt, valid):
+    calls = []
+    output = {"adjusted_request": "Describe a probe", "reason": "Conflict", "conflict": {
+        "requested_deliverable": "Execute a probe", "request_excerpt": excerpt,
+        "restriction_reference": reference, "explanation": "Requested execution conflicts with no execution",
+    }}
+    scripted_service.service.runner = lambda *args: calls.append(args) or json.dumps(output)
+    with pytest.raises(ValueError, match="alignment conflict" if valid else "alignment failed"):
+        scripted_service.service.resolve_bundle("Execute a probe", LookupContext(
+            phase_contexts=["hypothesis_generation"], constraints=["No execution"],
+        ))
+    assert len(calls) == (1 if valid else 2) and not scripted_service.research_calls
+
+
+def coverage(gaps=None):
+    return SourceSelection.model_validate({
+        "selected_urls": ["https://vendor.example/advisory"],
+        "attributions": [{"url": "https://vendor.example/advisory", "reason": "Mechanism and versions",
+                          "limitations": ["No exhaustive deployment matrix"]}],
+        "coverage": [{"requirement_id": "method", "source_urls": ["https://vendor.example/advisory"],
+                      "explanation": "Mechanism and affected versions support hypotheses", "gaps": gaps or []}],
+        "authoritative_sufficient": True, "reason": "Source-backed mechanism",
+    })
+
+
+@pytest.mark.parametrize("kind", ["missing_factual_support", "unresolved_contradiction"])
+def test_typed_gaps_and_legacy_boundary(kind):
+    typed = CoverageGap(kind=kind, description="Unresolved factual support")
+    assert coverage([typed.model_dump()]).coverage[0].gaps == [typed]
+    assert coverage(["Legacy gap"]).coverage[0].gaps[0].kind == "missing_factual_support"
+    with pytest.raises(ValueError):
+        CoverageGap(kind="target_not_tested", description="Not a factual gap")
+
+
+def test_independent_review_reclassifies_future_checks_and_preserves_sources(scripted_service):
+    selection = coverage(["Target version and exact payload not validated"])
+    corrected = coverage()
+    corrected.coverage[0].future_validation = ["Establish target version before testing"]
+    scripted_service.service.runner = lambda *_: corrected.model_dump_json()
+    result = review_coverage(scripted_service.service, "CVE hypothesis guidance",
+                             [Requirement(id="method", description="Applicability hypotheses")], selection,
+                             LookupContext(phase_contexts=["hypothesis_generation"]))
+    assert result.sufficient and result.coverage[0].future_validation
+    assert result.attributions == selection.attributions
+
+
+@pytest.mark.parametrize("bad", ["invalid JSON", "changed_attribution", "unknown_url"])
+def test_invalid_coverage_review_retains_valid_progress(scripted_service, bad):
+    selection = coverage(["Missing mechanism support"])
+    revised = coverage()
+    if bad == "changed_attribution":
+        revised.attributions[0].reason = "Invented replacement"
+    elif bad == "unknown_url":
+        revised.selected_urls = ["https://invented.example"]
+    calls = []
+    scripted_service.service.runner = lambda *args: calls.append(args) or (
+        bad if bad == "invalid JSON" else revised.model_dump_json())
+    assert review_coverage(scripted_service.service, "Method", [Requirement(id="method", description="Method")],
+                           selection) is selection
+    assert len(calls) == 2 and "Validation failure" in calls[1][1]
+
+
+@pytest.mark.parametrize("entrypoint", ["direct", "tool", "cli"])
+def test_alignment_reaches_full_workflow_and_stays_out_of_published_document(
+    scripted_service, entrypoint, monkeypatch, capsys, tmp_path,
+):
+    from modules.techniques import cli
+
+    state = scripted_service
+    original = state.service.runner
+    request = "Validate prerequisites and applicability of CVE-2026-109618"
+    adjusted = "Develop applicability hypotheses for CVE-2026-109618 with prerequisites and future checks"
+    alignments = []
+
+    def runner(role, prompt, tools):
+        if role == "technique_request_aligner":
+            alignments.append(prompt)
+            return json.dumps({"adjusted_request": adjusted, "reason": "Clarify hypothesis guidance"})
+        if role == "technique_planner":
+            return json.dumps({"components": [{"id": "method", "request": adjusted,
+                "purpose": "Applicability hypotheses", "request_excerpt": request,
+                "requirements": [{"id": "method", "description": "Applicability hypotheses and future checks"}]}]})
+        if role == "technique_judge" and "generic_request" in prompt:
+            state.calls.append((role, prompt, tools))
+            return json.dumps({"generic_request": adjusted, "applicability": "conditional",
+                               "unmet_prerequisites": ["Establish target version later"],
+                               "reason": "Guidance can help"})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    context = LookupContext(phase_contexts=["hypothesis_generation"], constraints=["No live execution"])
+    if entrypoint == "direct":
+        revision, result = state.service.get(request, context)
+    elif entrypoint == "tool":
+        result = state.service.tool("op", "task", context)(request=request)
+        receipt = json.loads(state.service.repository.pending_uses("op", "task")[0]["use_context"])
+        assert receipt["request_alignment"]["original_request"] == request
+        assert receipt["request_alignment"]["adjusted_request"] == adjusted
+        revision = state.service.repository.pending_uses("op", "task")[0]["revision_id"]
+    else:
+        monkeypatch.setattr(cli, "build_service", lambda *_a, **_k: state.service)
+        monkeypatch.setattr(state.service.store.qdrant, "close", lambda: None)
+        assert cli.main([request, "--provider", "ollama", "--phase", "hypothesis_generation",
+                         "--constraint", "No live execution", "--output-dir", str(tmp_path)]) == 0
+        result = capsys.readouterr().out
+        revision = state.service.repository.revisions()[0]["revision_id"]
+    assert len(alignments) == 1 and "Phase-aligned request: " + adjusted in result
+    assert "Request alignment (operation-local)" not in state.service.store.render(revision)
+    for role in ("technique_author", "technique_critic"):
+        prompt = next(prompt for selected, prompt, _ in state.calls if selected == role)
+        assert phase_guidance(context) in prompt
+        assert "Applicability hypotheses and future checks" in prompt if entrypoint != "direct" else adjusted in prompt
+    assert phase_guidance(context) in state.research_calls[0]
+    source_prompt = next(prompt for role, prompt, _ in state.calls
+                         if role == "technique_judge" and "selected_urls" in prompt)
+    assert "future_validation" in source_prompt and "exact requested checklist" in source_prompt
+
+
+def test_targeted_batches_report_repeated_queries_and_independent_review_can_finish(scripted_service):
+    from modules.techniques.research import ResearchDocuments
+
+    state = scripted_service
+    original = state.service.runner
+    requests = []
+    events = []
+    reviewed = []
+    state.service.events.callback = events.append
+
+    class Research:
+        def batch(self, request, excluded):
+            requests.append(request)
+            return ResearchDocuments([{"url": f"https://vendor.example/{len(requests)}", "title": "Advisory",
+                                       "text": "Mechanism and known versions"}], ["Broad CVE advisory"])
+
+    def runner(role, prompt, tools):
+        if role == "technique_judge" and "selected_urls" in prompt:
+            row = coverage(["No ready-made checklist and target version unknown"]).model_dump()
+            row["selected_urls"] = [f"https://vendor.example/{i}" for i in range(1, len(requests) + 1)]
+            row["attributions"] = [{"url": url, "reason": "Known mechanism"} for url in row["selected_urls"]]
+            row["coverage"][0]["source_urls"] = row["selected_urls"]
+            return json.dumps(row)
+        if role == "technique_coverage_reviewer":
+            reviewed.append(prompt)
+            row = json.loads(prompt.split("Retained assessment:\n", 1)[1].split("\nReturn only JSON", 1)[0])
+            row["coverage"][0]["gaps"] = []
+            row["coverage"][0]["future_validation"] = ["Establish target version before validation"]
+            return json.dumps(row)
+        return original(role, prompt, tools)
+
+    state.service.research = Research()
+    state.service.runner = runner
+    documents, selected, rounds = state.service._research_coverage(
+        "Develop CVE applicability hypotheses", [Requirement(id="method", description="Applicability hypotheses")],
+        context=LookupContext(phase_contexts=["hypothesis_generation"]),
+    )
+    assert rounds == len(documents) == 3 and selected.sufficient
+    assert len(reviewed) == 1 and "Do not invent support" in reviewed[0]
+    assert "Broad CVE advisory" in requests[1] and "Search specifically" in requests[1]
+    assert "ready-made" in requests[1]
+    assert len([event for event in events if event.get("repeated_queries")]) == 2
+
+
+def test_independent_review_does_not_clear_unresolved_contradictions(scripted_service):
+    state = scripted_service
+    selected = coverage([{"kind": "unresolved_contradiction", "description": "Sources disagree on fixed version"}])
+    state.service.runner = lambda *_: selected.model_dump_json()
+    result = review_coverage(state.service, "Verify versions", [Requirement(id="method", description="Versions")],
+                             selected, LookupContext(phase_contexts=["vulnerability_verification"]))
+    assert not result.sufficient and result.coverage[0].gaps[0].kind == "unresolved_contradiction"
+
+
+def test_alignment_correction_retains_original_and_validation_diagnostic(scripted_service):
+    calls = []
+    outputs = iter(["bad JSON", json.dumps({"adjusted_request": "Describe source analysis guidance",
+                                           "reason": "Clarify guidance"})])
+    scripted_service.service.runner = lambda *args: calls.append(args) or next(outputs)
+    aligned, _ = align_request(scripted_service.service, "Analyze source", LookupContext(phase_contexts=["analysis"]))
+    assert aligned.original_request == "Analyze source"
+    assert "Validation failure" in calls[1][1] and "bad JSON" in calls[1][1]
+    assert phase_guidance(LookupContext(phase_contexts=["analysis"])) in calls[1][1]
+
+
+def test_alignment_diagnostics_and_feedback_keep_delivery_purpose(scripted_service):
+    state = scripted_service
+    events = []
+    state.service.events.callback = events.append
+    state.service.resolve_bundle("JWT handling", LookupContext(phase_contexts=["hypothesis_generation"]),
+                                 operation="op", task="task")
+    aligned = next(event for event in events if event.get("original_request"))
+    assert aligned["operation_id"] == "op" and aligned["task_uid"] == "task" and aligned["activity_id"]
+    state.service.evaluate("op", "task", "Guidance helped form an applicability hypothesis; validation is pending")
+    feedback = next(prompt for role, prompt, _ in state.calls if role == "technique_evaluator")
+    assert "recorded original and phase-aligned request" in feedback
+    assert '"original_request": "JWT handling"' in feedback
+    assert "Form plausible source-backed hypotheses" in feedback

@@ -124,3 +124,102 @@ def test_contradictions_cannot_be_solved_by_three_documents(scripted_service):
         state.service.get("Version method")
     assert len(state.research_calls) == 3
     assert not any(role == "technique_author" for role, _, _ in state.calls)
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_malformed_coverage_retry_has_parser_location_and_retains_previous_support(scripted_service, recover):
+    """Reproduce the extra quote after gaps arrays in the 2026-10-27 CLI failure."""
+    state = scripted_service
+    urls = [f"https://vendor.example/{index}" for index in range(3)]
+    first = selection(urls[:1], ["Need configuration prerequisites"])
+    malformed = json.dumps(selection(urls[:2])).replace('"gaps": []}', '"gaps": []"}')
+    second_malformed = malformed.replace(": ", ":")
+    responses = iter([json.dumps(first), malformed,
+                      json.dumps(selection(urls[:2])) if recover else second_malformed,
+                      json.dumps(selection(urls))])
+    prompts = []
+
+    def run(role, prompt, tools):
+        prompts.append(prompt)
+        return next(responses)
+
+    state.service.runner = run
+    documents = [{"url": url, "text": "configuration prerequisites", "title": url} for url in urls]
+    if recover:
+        result = select_sources(state.service, "Prerequisite methodology",
+                                [Requirement(id="method", description="Prerequisites")], documents)
+        assert result.selected_urls == urls
+        assert len(prompts) == 4
+    else:
+        with pytest.raises(json.JSONDecodeError, match="Expecting ',' delimiter"):
+            select_sources(state.service, "Prerequisite methodology",
+                           [Requirement(id="method", description="Prerequisites")], documents)
+        assert len(prompts) == 3
+    assert malformed in prompts[2]
+    assert "Expecting ',' delimiter" in prompts[2] and "column" in prompts[2]
+    for prompt in prompts[1:3]:
+        assert "Need configuration prerequisites" in prompt
+        assert first["attributions"][0]["reason"] in prompt
+
+
+@pytest.mark.parametrize("empty_round", [1, 2, 3])
+def test_empty_batches_preserve_last_valid_assessment(scripted_service, empty_round):
+    from modules.techniques.coverage import Requirement
+
+    state = scripted_service
+    original = state.service.runner
+    batches = []
+    assessments = []
+
+    class Research:
+        def batch(self, request, excluded):
+            batches.append((request, excluded))
+            if len(batches) == empty_round:
+                return []
+            return [{"url": f"https://vendor.example/{len(batches)}", "title": "Source", "text": "Support"}]
+
+    def runner(role, prompt, tools):
+        if role == "technique_judge" and "selected_urls" in prompt:
+            assessments.append(prompt)
+            urls = [f"https://vendor.example/{i}" for i in range(1, len(batches) + 1) if i != empty_round]
+            return json.dumps(selection(urls, ["Missing configuration support"]))
+        return original(role, prompt, tools)
+
+    state.service.research = Research()
+    state.service.runner = runner
+    with pytest.raises(ValueError, match="three batches.*Authority sufficient",):
+        state.service._research_coverage("Method", [Requirement(id="method", description="Method")])
+    assert len(batches) == 3 and len(assessments) == 2
+    if empty_round != 1:
+        assert "Missing configuration support" in batches[-1][0]
+        assert "https://vendor.example/1" in batches[-1][1]
+
+
+def test_all_empty_batches_report_no_documents(scripted_service):
+    from modules.techniques.coverage import Requirement
+
+    state = scripted_service
+    calls = []
+    state.service.research = lambda request: calls.append(request) or []
+    with pytest.raises(ValueError, match="any usable source documents after three batches"):
+        state.service._research_coverage("Method", [Requirement(id="method", description="Method")])
+    assert len(calls) == 3
+    assert not state.calls
+
+
+def test_complementary_sources_can_have_limitations_without_requirement_gaps():
+    row = selection(["https://vendor.example/version", "https://vendor.example/config"])
+    row["attributions"][0]["limitations"] = ["Does not describe configuration"]
+    row["attributions"][1]["limitations"] = ["Does not enumerate versions"]
+    assessed = SourceSelection.model_validate(row)
+    assert assessed.sufficient
+    assert "requirement coverage sufficient: True" in assessed.summary()
+    assessed.coverage[0].gaps = ["Unresolved contradiction about supported configuration"]
+    assert not assessed.sufficient
+
+
+def test_empty_source_batch_does_not_rejudge_previous_selection(scripted_service):
+    previous = SourceSelection.model_validate(selection(["https://vendor.example/advisory"]))
+    result = select_sources(scripted_service.service, "Method", [Requirement(id="method", description="Method")],
+                            [], previous)
+    assert result is previous and not scripted_service.calls

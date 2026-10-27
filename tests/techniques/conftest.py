@@ -65,11 +65,16 @@ def scripted_service(store, markdown):
 
     def runner(role, prompt, tools):
         state.calls.append((role, prompt, tools))
+        if role == "technique_request_aligner":
+            request = prompt.split("Original request: ", 1)[1].split("\n", 1)[0]
+            return json.dumps({"adjusted_request": request, "reason": "Explicit guidance purpose preserved"})
+        if role == "technique_coverage_reviewer":
+            return prompt.split("Retained assessment:\n", 1)[1].split("\nReturn only JSON", 1)[0]
         if role == "technique_plan_reviewer":
             return json.dumps({"approved": True, "reason": "Request preserved"})
         if role == "technique_planner":
             return json.dumps({"components": [{"id": "method", "request": "JWT handling",
-                "purpose": "Review token validation", "requirements": [
+                "purpose": "Review token validation", "request_excerpt": prompt.split("Original request: ", 1)[1].split("\n", 1)[0], "requirements": [
                     {"id": "method", "description": "JWT handling"}]}]})
         if role == "technique_judge":
             if "generic_request" in prompt:

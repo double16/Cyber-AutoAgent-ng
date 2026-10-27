@@ -117,8 +117,11 @@ def test_invalid_applicability_stops_before_research(scripted_service, assessmen
         "generic_request": "Source analysis", "applicability": assessment,
         "unmet_prerequisites": [], "reason": reason,
     })
-    with pytest.raises(ValueError, match="assessment failed|explicit unmet prerequisites"):
-        state.service.get("Review source", LookupContext())
+    if assessment == "incompatible":
+        assert state.service._prepare("Review source", LookupContext()).applicability == "uncertain"
+    else:
+        with pytest.raises(ValueError, match="assessment failed|explicit unmet prerequisites"):
+            state.service.get("Review source", LookupContext())
     assert not state.research_calls
 
 
@@ -311,9 +314,9 @@ def test_invalid_conflict_reference_exhausts_one_repair(scripted_service, refere
         })
 
     state.service.runner = runner
-    with pytest.raises(ValueError, match="assessment failed after one repair"):
-        state.service.get("Source analysis", context)
-    assert len(calls) == 2 and "Repair the assessment" in calls[1]
+    decision = state.service._prepare("Source analysis", context)
+    assert decision.applicability == "uncertain"
+    assert len(calls) == 4 and "Repair the assessment" in calls[1]
     assert not state.research_calls
 
 
@@ -379,11 +382,70 @@ def test_independent_confirmation_detects_guidance_vs_task_confusion(scripted_se
         })
 
     state.service.runner = runner
-    with pytest.raises(ValueError, match="assessment uncertainty"):
-        state.service.get("Hypothesis guidance", LookupContext(
+    decision = state.service._prepare("Hypothesis guidance", LookupContext(
             purpose="Hypothesis generation", subjects=[{"kind": subject}],
             constraints=["Hypothesis only; no execution"],
         ))
+    assert decision.applicability == "uncertain"
+    assert len(decision.receipt(LookupContext())["assessment_provenance"]["assessments"]) == 2
     assert len(prompts) == 2
     assert "advisory guidance and final task requirements" in prompts[1][1]
     assert not state.research_calls
+
+
+def test_invalid_incompatibility_repair_reaches_confirmation_and_retains_diagnostics(scripted_service):
+    state = scripted_service
+    calls = []
+
+    def runner(role, prompt, tools):
+        calls.append((role, prompt))
+        if role == "technique_applicability_confirmation":
+            return json.dumps({"generic_request": "Source analysis", "applicability": "conditional",
+                               "unmet_prerequisites": ["Read advisory"], "reason": "Guidance can help"})
+        return json.dumps({"generic_request": "Source analysis", "applicability": "incompatible",
+                           "unmet_prerequisites": [], "reason": "Missing source material"})
+
+    state.service.runner = runner
+    decision = state.service._prepare("Source analysis", LookupContext())
+    assert decision.applicability == "uncertain" and decision.conflict is None
+    assert len(calls) == 3
+    assert "Rejected response" in calls[1][1] and "Missing source material" in calls[1][1]
+    provenance = decision.receipt(LookupContext())["assessment_provenance"]
+    assert len(provenance["assessments"]) == 3 and len(provenance["validation_errors"]) == 2
+    assert "assessment_provenance" not in decision.model_json_schema()["properties"]
+
+
+def test_malformed_confirmation_repairs_once_then_delivers_uncertainty(scripted_service):
+    state = scripted_service
+    calls = []
+
+    def runner(role, prompt, tools):
+        calls.append((role, prompt))
+        if role == "technique_applicability_confirmation":
+            return "malformed JSON"
+        return json.dumps({"generic_request": "Source analysis", "applicability": "incompatible",
+                           "unmet_prerequisites": [], "reason": "Requires writes",
+                           "conflict": {"kind": "task_constraint", "requirement": "Modify files",
+                                        "context_reference": "Read only"}})
+
+    state.service.runner = runner
+    decision = state.service._prepare("Source analysis", LookupContext(constraints=["Read only"]))
+    assert decision.applicability == "uncertain"
+    assert len(calls) == 3 and "Validation failure" in calls[-1][1]
+
+
+def test_uncertain_guidance_is_delivered_and_receipted(scripted_service):
+    state = scripted_service
+    original = state.service.runner
+
+    def runner(role, prompt, tools):
+        if role == "technique_applicability_confirmation" or (role == "technique_judge" and "generic_request" in prompt):
+            return json.dumps({"generic_request": "JWT handling", "applicability": "incompatible",
+                               "unmet_prerequisites": [], "reason": "Missing observations"})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    result = state.service.tool("op", "task", LookupContext())(request="JWT handling")
+    assert "Assessment: uncertain" in result and "does not authorize execution" in result
+    receipt = json.loads(state.service.repository.pending_uses("op", "task")[0]["use_context"])
+    assert receipt["applicability"] == "uncertain" and receipt["assessment_provenance"]["validation_errors"]

@@ -1,14 +1,17 @@
 """Operation-local applicability inputs, kept separate from global guidance."""
 
 import hashlib
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from modules.techniques.documents import toon
 
+if TYPE_CHECKING:
+    from modules.techniques.alignment import RequestAlignment
+
 ObservationOrigin = Literal["source", "analysis", "guidance", "unknown"]
-Applicability = Literal["supported", "conditional", "incompatible"]
+Applicability = Literal["supported", "conditional", "incompatible", "uncertain"]
 
 
 class Observation(BaseModel):
@@ -32,6 +35,7 @@ class LookupContext(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
+    _request_alignment: "RequestAlignment | None" = PrivateAttr(default=None)
 
     def observe(self, text: str, source: str, origin: ObservationOrigin, scope: str) -> None:
         if origin in {"analysis", "guidance"} or not text.strip():
@@ -51,8 +55,11 @@ class LookupContext(BaseModel):
         self.observations.sort(key=lambda row: row.scope != "subject")
         del self.observations[6:]
 
-    def render(self) -> str:
+    def render(self, *, include_phase_guidance: bool = True) -> str:
+        from modules.techniques.alignment import phase_guidance
+
         return (
+            (phase_guidance(self) if include_phase_guidance else "") +
             "Bounded excerpts and subject descriptors may be incomplete; missing details remain unknown.\n"
             f"Phase contexts: {self.phase_contexts or 'unknown'}\nPurpose: {self.purpose[:4000]}\n"
             f"Capabilities: {', '.join(self.capabilities)[:2000]}\n"
@@ -82,9 +89,12 @@ class LookupDecision(BaseModel):
     applicability: Applicability
     unmet_prerequisites: list[str] = Field(max_length=12)
     reason: str = Field(min_length=1, max_length=2000)
+    _assessment_provenance: dict = PrivateAttr(default_factory=dict)
 
     def receipt(self, context: LookupContext) -> dict:
         return {
+            "request_alignment": (context._request_alignment.model_dump() if context._request_alignment else {}),
+            "assessment_provenance": self._assessment_provenance,
             "generic_request": self.generic_request,
             "phase_contexts": context.phase_contexts,
             "applicability": self.applicability,

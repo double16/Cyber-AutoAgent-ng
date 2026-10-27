@@ -373,3 +373,17 @@ operation/task/revision; legacy empty context is unknown. Compare individual sou
 overall coverage. Check repair ownership: attribution to selection, missing support to research,
 procedure or omitted requested content to authorship. Applicability disagreement is assessment
 uncertainty. Judge contribution against the component purpose, not final task completion.
+
+
+### Technique structured-output failures
+
+In CLI JSONL logs, correlate `model_input`, `model_output`, `model_failed`, and `structured_output`
+by role invocation and model attempt. Inspect `schema_name`, `schema_id`, `structured_mode`, and
+`fallback_reason`. Native unavailability may produce a schema-tool fallback; invalid content or
+schema constraints must remain visible failures. `schema_tool_pending` is not validation success;
+`structured_output` marks successful role-level validation. For failed native content, inspect the
+redacted `rejected_response` and `validation_errors` when available. Compare correction input with
+the failed response and the last valid source assessment. Feedback corrections must retain SDK
+user-message tool results without reopening investigation. Research prose is not a structured
+result: fetched document records remain controller-owned. Valid schema output does not establish
+semantic coverage, applicability, or demonstrated contribution.

@@ -4,10 +4,12 @@ Techniques are global, reusable Markdown guidance for reconnaissance, hypothesis
 verification, source analysis, and execution. They do not belong to a target or operation and cannot
 satisfy execution receipts, finding validation, or current-operation evidence requirements.
 
-An agent calls `get_technique(request)` with a generic natural-language description. A structured planner
-splits broad requests into a flat list of independently reusable components and explicit requirements;
+An agent calls `get_technique(request)` with a generic natural-language description. The shared service
+first aligns ambiguous wording with explicitly supplied phase objectives, preserving original mechanisms
+and deliverables. With no phase, the request remains unchanged. A structured planner
+splits only distinct requested methodologies into a flat list with explicit requirements;
 a separate review checks that mechanisms and deliverables were preserved without invented requirements.
-Narrow requests remain one component. Each component resolves independently. The operation-local Markdown
+A single methodology remains one component, including its supporting steps. Each component resolves independently. The operation-local Markdown
 bundle includes complete validated techniques, per-component applicability, and actionable unresolved gaps.
 Equivalent components are deduplicated, and repeated revisions appear in full once. Partial bundles are
 returned when any component succeeds; total failure returns diagnostics. Only individual validated
@@ -42,8 +44,9 @@ guidance triggers research and generation, not task rejection. Incompatibility r
 requirement and an exact reference to a supplied constraint or subject-specific source observation.
 Before rejecting an incompatibility, an independent confirmation checks whether advisory guidance or
 future validation was confused with final task requirements or present execution. Disagreement returns
-assessment uncertainty, without claiming applicability or a task conflict.
-Malformed assessments receive one repair attempt; continued failure is reported as an assessment error.
+guidance marked `uncertain`, without claiming established applicability or a task conflict.
+Malformed assessments receive one repair attempt. Unsubstantiated incompatibility proceeds to independent
+confirmation; failure to obtain a usable methodology request is reported as an assessment error.
 Existing guidance is filtered by declared phase compatibility when phase context is known, independent
 of its originating module. Legacy phases without contexts remain explicitly unknown and use task purpose.
 
@@ -137,7 +140,11 @@ tool schemas, model responses, research-tool inputs/results, available usage cou
 sanitized exceptions with stack traces. Records carry run, component, activity, role-invocation,
 model-attempt, and tool-call identifiers where available. Each attempted response is recorded; final
 role completion or failure is separate. Prompt inputs are recorded after budget fitting, before any
-provider-specific wire transformation. Missing usage data is not fabricated.
+provider-specific wire transformation. Missing usage data is not fabricated. Structured calls also record
+schema identity, native or schema-tool mode, explicit native-unavailable fallback, and validation
+outcomes. Native output is validated before its SDK output-tool event is synthesized; schema-tool
+responses remain pending until the SDK validates their arguments. A `structured_output` record marks
+successful role-level validation. Invalid native content is recorded after redaction when available.
 
 Conversations are file-only. Secret-bearing fields, recognized credential text, registered runtime
 secrets, and known private values are redacted before writing or display; logging does not change
@@ -341,10 +348,26 @@ The standalone `caa-technique` command retains Markdown-only stdout.
 
 ### Generated document validation and diagnostics
 
-The author generates JSON containing technique metadata and a Markdown body. Python validates the
-response and renders YAML frontmatter; the independent critic reviews the resulting document.
-Generation allows three author attempts, with repair feedback identifying JSON, schema, document
-validation, or critique failures. Exhaustion reports the final failure stage.
+Planning, plan review, applicability and confirmation, reuse and source selection, authorship,
+critique, semantic trigger matching, and contribution feedback use typed structured output through the
+shared Strands invocation helper. Native schemas are preferred for Ollama, LiteLLM, and Gemini;
+providers without native support use schema tools. Explicit native transport unavailability may fall
+back to schema tools. Invalid output, unsupported schema constraints, authentication failures, and
+context errors do not silently fall back to free text. Injected legacy text runners remain supported.
+
+The researcher remains tool-driven: Python collects fetched documents rather than parsing its final
+prose. Feedback may inspect evidence with supplied tools, then closes investigation before structured
+finalization. Correction context retains tool results without repeating investigation.
+
+The author returns authored metadata and a Markdown body under a response schema. Source attribution,
+retrieval details, source coverage, schema version, and active state are controller-owned and excluded
+from that schema. Python assembles YAML frontmatter; the independent critic reviews the exact assembled
+document. Controller checks still reject unknown identifiers, unsupported references, and invalid
+documents; structured output alone does not establish semantic support or applicability.
+Validation corrections include bounded error details and rejected content when available; source-selection
+corrections preserve the last valid coverage assessment. Generation allows three author attempts,
+with repair feedback identifying JSON, schema, document validation, or critique failures.
+Exhaustion reports the final failure stage.
 
 During operations, rejected responses are saved immediately as private diagnostic JSON files under
 `techniques/builds/<activity-id>/attempt-<number>.json`, outside `artifacts/`. Each file includes
@@ -372,3 +395,69 @@ The CLI selects its generation model from `--model`, then `CYBER_AGENT_LLM_MODEL
 then the provider default. Startup diagnostics report that effective model. Output, SDK,
 and embedding configuration reads do not probe unrelated generation models. Embeddings
 retain their independent configuration; `--model` does not replace the embedding model.
+
+### Cohesive requests and research uncertainty
+
+The planner splits only distinct requested methodologies. Supporting steps such as extracting CVE
+metadata, identifying prerequisites, mapping criteria, and validating applicability remain one technique.
+Each component cites its original request excerpt; a rejected plan receives one correction and review.
+
+Missing observations indicate unknown prerequisites, not an incompatible method. Incompatibility
+requires independent confirmation of the same referenced conflict. Disputed assessments return
+`uncertain` applicability with assessment provenance in operation-local delivery context. This guidance
+does not establish task facts or authorize execution.
+
+Empty research batches preserve fetched documents and validated coverage while remaining batches
+target unresolved requirements. After three batches, diagnostics distinguish no usable documents from
+remaining coverage gaps. Individual source limitations do not block delivery when complementary
+sources support every requirement; unresolved contradictions and missing combined support do.
+
+### Phase-aligned guidance
+
+The CLI, bound `get_technique` tool, and direct `get()` calls share request alignment. Alignment runs
+once per resolution before component planning, with one correction for unusable structured output.
+It changes ambiguous framing, not explicit deliverables. A referenced conflict between an explicit
+requested action and a supplied restriction is reported before research. Request alignment, its
+rationale, original request, and adjusted request remain operation-local; published technique metadata
+and produced catalog copies contain reusable guidance only. Delivery-context JSON preserves alignment
+provenance for contribution feedback. Historical documents and receipts are not rewritten.
+
+| Phase context | Guidance objective |
+|---|---|
+| `reconnaissance` | Discover and characterize surfaces, components, versions, and trust boundaries |
+| `hypothesis_generation` | Form source-backed hypotheses, assumptions, known prerequisites, and future supporting or refuting checks |
+| `vulnerability_verification` | Describe controls, validation methods, evidence requirements, and confirmation or rejection criteria |
+| `execution` | Describe actionable procedures, prerequisites, observable outcomes, scope constraints, and applicable cleanup |
+| `analysis` | Interpret sources, code, configurations, or observations while preserving uncertainty |
+
+No context requires completed target execution or findings to publish guidance. Multiple contexts
+retain their individual objectives without implying an order or automatically splitting a method.
+Unknown phase follows the explicit request and purpose without guessing from module names or titles.
+Module declarations continue to supply contexts; this change does not add module phase mappings.
+
+For example:
+
+```bash
+UV_CACHE_DIR="$PWD/.uv-cache" uv run caa-technique \
+  "Validate the prerequisites and applicability of CVE-2026-109618" \
+  --phase hypothesis_generation --constraint "No live execution"
+```
+
+The service can frame this as applicability hypotheses with documented prerequisites, unknown target
+conditions, and future checks. Meaningful adjustments appear in returned guidance and diagnostics.
+If the request explicitly asks to execute a probe despite a no-execution restriction, it reports the
+conflict instead of silently replacing execution with a design task.
+
+Source selection receives the same guidance objectives as planning, applicability, authorship, and
+critique, including correction paths. Blocking requirement gaps use structured `kind` and `description`
+fields: `missing_factual_support` or `unresolved_contradiction`. Legacy string gaps normalize to missing
+factual support at the input boundary. Unknown target conditions belong in `future_validation`;
+individual source limitations remain separate. The author may synthesize original procedures from
+supported facts rather than find a ready-made checklist in a source.
+
+Before reporting research coverage exhaustion, an independent reviewer checks gap classification using
+bounded retained support. It cannot introduce new URLs or change attribution records. Invalid review
+output receives one correction; continued invalidity preserves the last validated assessment. Genuine
+missing support and unresolved contradictions still block publication. Research remains limited to
+three batches, three searches and six fetch attempts per batch. Follow-ups receive prior queries and
+specific gaps; repeated query diagnostics identify ineffective research without changing these limits.

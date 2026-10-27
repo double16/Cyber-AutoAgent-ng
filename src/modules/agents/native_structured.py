@@ -200,6 +200,10 @@ def retained_finalization_prompt(original_prompt: str, error: BaseException) -> 
         return None
     sections = [original_prompt, FINALIZATION_GUIDANCE, "\n## Retained structured investigation"]
     for message in messages:
-        if message.get("role") in {"assistant", "tool"}:
-            sections.append(f"\n{message['role']}: {json.dumps(message.get('content', []), ensure_ascii=False)}")
+        content = message.get("content", [])
+        if message.get("role") == "user":
+            # Strands represents tool results as user messages, not a separate tool role.
+            content = [block for block in content if "toolResult" in block]
+        if content and (message.get("role") in {"assistant", "tool", "user"}):
+            sections.append(f"\n{message['role']}: {json.dumps(content, ensure_ascii=False)}")
     return "\n".join(sections)

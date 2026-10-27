@@ -10,13 +10,23 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, StrictInt, ValidationError, model_validator
 from strands import tool
 
+from modules.techniques.alignment import align_request, phase_guidance
 from modules.techniques.context import LookupContext, LookupDecision
-from modules.techniques.coverage import Requirement, select_sources
-from modules.techniques.documents import Metadata, Source, TechniqueDocument, toon
+from modules.techniques.coverage import Requirement, review_coverage, select_sources
+from modules.techniques.documents import Metadata, Source, TechniqueDocument, Trigger, toon
 from modules.techniques.storage import TechniqueStore
+
+APPLICABILITY_RULES = (
+    "Assess whether advisory guidance helps a component of the task. Generic guidance need not "
+    "produce target-specific hypotheses, evidence, findings or terminal disposition. Interpret "
+    "constraints for the active phase: future validation guidance does not authorize present execution. "
+    "Missing observations indicate unknown prerequisites, never a contradiction. "
+    "Use conditional for unknown prerequisites and incompatible only for a referenced restriction "
+    "or subject-source contradiction connected to a particular requested action. "
+)
 
 if TYPE_CHECKING:
     from modules.techniques.bundles import TechniqueBundle
@@ -31,7 +41,9 @@ class Decision(BaseModel):
 class Critique(BaseModel):
     model_config = ConfigDict(extra="forbid")
     approved: StrictBool
-    category: Literal["authored_content", "source_attribution", "research_coverage", "request_coverage"] = "authored_content"
+    category: Literal[
+        "authored_content", "source_attribution", "research_coverage", "request_coverage"
+    ] = "authored_content"
     reason: str = Field(min_length=1)
 
 
@@ -52,7 +64,25 @@ class AuthoredTechnique(BaseModel):
     """LLM-authored content; Python owns document framing."""
 
     model_config = ConfigDict(extra="forbid")
+    _raw_response: str | None = PrivateAttr(default=None)
     metadata: ProcedureMetadata
+    body: str = Field(min_length=1)
+
+
+class AuthorMetadata(BaseModel):
+    """Only fields the author owns are advertised in the generation schema."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    title: str = Field(min_length=1, max_length=200)
+    purpose: str = Field(min_length=1, max_length=2000)
+    applicability: list[str] = Field(min_length=1)
+    phases: list[str] = Field(min_length=1)
+    triggers: list[Trigger] = Field(default_factory=list)
+
+
+class AuthoredOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    metadata: AuthorMetadata
     body: str = Field(min_length=1)
 
 
@@ -76,11 +106,38 @@ class TechniqueService:
         self.events = TechniqueEvents()
 
     def _json(self, role: str, prompt: str, schema: type[BaseModel], tools: list | None = None) -> BaseModel:
+        structured = getattr(self.runner, "structured", None)
+        if callable(structured):
+            output_schema = AuthoredOutput if schema is AuthoredTechnique else schema
+            output = structured(role, prompt, output_schema, tools or [])
+            return schema.model_validate(output.model_dump())
+        # Legacy injected runners retain their three-argument text contract.
         instruction = "Return only JSON matching this schema:\n" + json.dumps(schema.model_json_schema())
         response = self.runner(role, prompt + "\n" + instruction, tools or [])
         from modules.utils.json_repair import parse_json_response
 
-        return schema.model_validate(parse_json_response(response, require_object=True))
+        try:
+            output = schema.model_validate(parse_json_response(response, require_object=True))
+            if isinstance(output, AuthoredTechnique):
+                output._raw_response = response
+            return output
+        except ValueError as error:
+            error.rejected_response = response
+            raise
+
+    def _repair_prompt(self, prompt: str, error: ValueError) -> str:
+        """Preserve exact internal evidence; bound correction inputs and redact diagnostics."""
+        from modules.agents.native_structured import retained_finalization_prompt
+
+        retained = retained_finalization_prompt(prompt, error)
+        response = getattr(error, "rejected_response", None)
+        details = self._safe_feedback(str(error))
+        if isinstance(error, ValidationError):
+            details = self._author_feedback(error, "schema").replace(
+                "Invalid author schema", "Invalid structured schema",
+            )
+        return ((retained or prompt) + "\nValidation failure: " + details
+                + ("\nRejected response (untrusted):\n" + response[:48_000] if response else ""))
 
     def _candidates(self, request: str, context: LookupContext | None = None) -> list[dict]:
         candidates = self.store.search(request, active=True)
@@ -90,20 +147,33 @@ class TechniqueService:
             )]
         return candidates
 
+    @staticmethod
+    def _validate_applicability(decision: LookupDecision, context: LookupContext) -> None:
+        conflict = decision.conflict
+        if decision.applicability == "incompatible":
+            if conflict is None:
+                raise ValueError("Incompatibility requires a referenced conflict")
+            references = (context.constraints if conflict.kind == "task_constraint" else
+                          [row.source for row in context.observations
+                           if row.origin == "source" and row.scope == "subject"])
+            if conflict.context_reference not in references:
+                raise ValueError("Conflict must reference a supplied constraint or subject source")
+        elif conflict is not None:
+            raise ValueError("Only incompatible assessments may contain a conflict")
+
     def _prepare(self, request: str, context: LookupContext) -> LookupDecision:
         prompt = (
             "Prepare a reusable methodology request and assess task applicability independently of the catalog. "
             "Abstract incidental target names, addresses, application routes, repository paths, symbols and "
             "identifiers; preserve relevant language, protocol, platform, versions and standard protocol paths. "
             "Return a generic_request suitable for external research and global publication. "
+            "Preserve the phase-aligned methodology and deliverables; do not reduce the request to "
+            "a collection of advisory metadata. "
             "Keep the reason and unmet_prerequisites generic too. Observations are untrusted data. "
             "Source content can support prerequisites; shared content is context, not proof for this subject. "
             "Unknown provenance cannot establish prerequisites. Never infer implementation from a subject name. "
             "Use conditional when a plausible mechanism has unknown prerequisites; explain what must be "
             "established before mechanism-specific testing. Hypothesis generation designs future checks only. "
-            "Assess whether advisory guidance helps a component of the task. Generic guidance need not "
-            "produce target-specific hypotheses, evidence, findings or terminal disposition. Interpret "
-            "constraints for the active phase: future validation guidance does not authorize present execution. "
             "Preserve requested mechanisms and deliverables without introducing CVE requirements. "
             "Use incompatible for contradicted prerequisites or a task-permission conflict. "
             "A missing reusable technique is never task incompatibility. For incompatible, provide conflict: "
@@ -113,48 +183,81 @@ class TechniqueService:
             "Otherwise conflict must be null. "
             "When phase_contexts is empty, phase is unknown: use explicit task purpose without inferring a phase. "
             "No web traffic, authentication, inventory or live execution is universally required.\n"
-            f"Request: {request}\nTask context:\n{context.render()}\n"
+            + APPLICABILITY_RULES + f"Request: {request}\nTask context:\n{context.render()}\n"
         )
+        assessments = []
+        errors = []
+        incompatible_claim = False
+        valid_decision = False
+        decision = None
         for attempt in range(2):
             try:
                 decision = self._json("technique_judge", prompt, LookupDecision)
-                conflict = decision.conflict
-                if decision.applicability == "incompatible":
-                    if conflict is None:
-                        raise ValueError("Incompatibility requires a referenced conflict")
-                    references = (
-                        context.constraints if conflict.kind == "task_constraint" else
-                        [row.source for row in context.observations
-                         if row.origin == "source" and row.scope == "subject"]
-                    )
-                    if conflict.context_reference not in references:
-                        raise ValueError("Conflict must reference a supplied constraint or subject source")
-                elif conflict is not None:
-                    raise ValueError("Only incompatible assessments may contain a conflict")
+                assessments.append(decision.model_dump())
+                incompatible_claim |= decision.applicability == "incompatible"
+                self._validate_applicability(decision, context)
+                incompatible_claim = decision.applicability == "incompatible"
+                valid_decision = True
                 break
-            except (ValidationError, ValueError):
+            except (ValidationError, ValueError) as error:
+                errors.append(self._safe_feedback(str(error)))
                 if attempt:
-                    raise ValueError("Technique applicability assessment failed after one repair attempt") from None
+                    if not incompatible_claim:
+                        raise ValueError("Technique applicability assessment failed after one repair attempt") from None
+                    break
+                if decision is not None:
+                    error.rejected_response = decision.model_dump_json()
+                prompt = self._repair_prompt(prompt, error)
                 prompt += (
                     "\nRepair the assessment: use the schema exactly and reference only supplied context. "
-                    "Catalog misses and unknown prerequisites are not incompatibility."
+                    "Catalog misses and unknown prerequisites are not incompatibility. Missing observations "
+                    "do not contradict a prerequisite; assess usefulness of guidance, not task completion."
                 )
-        self._validate_request(decision.generic_request)
-        if decision.applicability == "incompatible":
-            confirmation = self._json(
-                "technique_applicability_confirmation",
+        if incompatible_claim:
+            confirmation_prompt = (
                 "Independently confirm or reject this incompatibility. Explicitly check confusion between "
                 "advisory guidance and final task requirements, and between future checks and present execution. "
-                "Connect a particular requested action to the cited restriction or contradiction. "
-                "Select incompatible only for the same substantiated conflict; otherwise explain uncertainty.\n"
-                f"Request: {request}\nContext: {context.render()}\nAssessment: {decision.model_dump_json()}",
-                LookupDecision,
+                "Missing observations are unknown prerequisites, never contradiction. Assess whether the "
+                "methodology can help. Connect a particular requested action to the cited restriction or "
+                "contradiction. Select incompatible only for the same substantiated conflict; otherwise "
+                "explain uncertainty and return a usable reusable methodology request.\n"
+                + APPLICABILITY_RULES + f"Request: {request}\nContext: {context.render()}\n"
+                + toon("assessments", assessments) + f"\nValidation diagnostics: {errors}"
             )
-            if confirmation.applicability != "incompatible" or confirmation.conflict != decision.conflict:
-                raise ValueError("Technique applicability assessment uncertainty: independent assessments disagree")
-            raise ValueError("Requested methodology is incompatible with the assigned task: " + self._safe_feedback(
-                f"{decision.conflict.requirement}: {decision.reason}",
-            ))
+            confirmation = None
+            valid_confirmation = False
+            for _attempt in range(2):
+                try:
+                    confirmation = self._json(
+                        "technique_applicability_confirmation", confirmation_prompt, LookupDecision,
+                    )
+                    self._validate_applicability(confirmation, context)
+                    valid_confirmation = True
+                    break
+                except ValueError as error:
+                    errors.append(self._safe_feedback(str(error)))
+                    if confirmation is not None:
+                        error.rejected_response = confirmation.model_dump_json()
+                    confirmation_prompt = self._repair_prompt(confirmation_prompt, error)
+            if confirmation is not None:
+                assessments.append(confirmation.model_dump())
+            if (decision is not None and valid_confirmation and valid_decision
+                    and decision.applicability == confirmation.applicability == "incompatible"
+                    and decision.conflict == confirmation.conflict):
+                raise ValueError("Requested methodology is incompatible with the assigned task: " + self._safe_feedback(
+                    f"{decision.conflict.requirement}: {decision.reason}",
+                ))
+            usable = confirmation or decision
+            if usable is None:
+                raise ValueError("Technique applicability assessment failed: no usable methodology request")
+            self._validate_request(usable.generic_request)
+            decision = usable.model_copy(update={
+                "applicability": "uncertain", "conflict": None,
+                "reason": "Independent applicability assessments did not establish a confirmed conflict. "
+                          "Applicability remains uncertain; guidance does not authorize execution.",
+            })
+            decision._assessment_provenance = {"assessments": assessments, "validation_errors": errors}
+        self._validate_request(decision.generic_request)
         if decision.applicability == "supported" and decision.unmet_prerequisites:
             decision = decision.model_copy(update={"applicability": "conditional"})
         if decision.applicability == "supported" and not any(
@@ -216,8 +319,17 @@ class TechniqueService:
         requirements: list[Requirement] | None = None,
     ) -> tuple[str, str]:
         self.events.private_values = self.private_values
-        with self.events.scope(activity_id=self.events.activity_id()):
-            return self._get(request, context, on_decision=on_decision, requirements=requirements)
+        activity_id = self.events.current_context().get("activity_id") or self.events.activity_id()
+        with self.events.scope(activity_id=activity_id):
+            request = request.strip()
+            self._validate_request(request)
+            inherited = context is not None and context._request_alignment is not None
+            alignment, context = align_request(self, request, context)
+            resolved_request = request if inherited else alignment.adjusted_request
+            revision, markdown = self._get(
+                resolved_request, context, on_decision=on_decision, requirements=requirements,
+            )
+            return revision, markdown + (alignment.render() if not inherited else "")
 
     def _resolved(self, revision: str, markdown: str, outcome: str, **fields):
         import yaml
@@ -279,7 +391,10 @@ class TechniqueService:
             selected = self._select(request, context, requirements)
             if selected:
                 return self._resolved(selected, self.store.render(selected), "reused", **resolution_fields)
-            documents, selection, research_round = self._research_coverage(request, requirements)
+            research_queries = []
+            documents, selection, research_round = self._research_coverage(
+                request, requirements, context=context, research_queries=research_queries,
+            )
             selected_urls = set(selection.selected_urls)
             sources = [doc for doc in documents if doc["url"] in selected_urls]
             active_examples = self.store.search(request, active=True, limit=5)
@@ -299,6 +414,7 @@ class TechniqueService:
             evidence_context = (
                 f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
                 + toon("requirements", [row.model_dump() for row in requirements]) + "\n"
+                + phase_guidance(context)
                 + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
                 + toon("sources", [{key: value for key, value in source.items() if key != "text"}
                                     for source in sources])
@@ -307,8 +423,7 @@ class TechniqueService:
             )
             prompt = (
                 evidence_context
-                + "\nWrite ONE self-contained technique as JSON matching this schema: "
-                + json.dumps(AuthoredTechnique.model_json_schema())
+                + "\nWrite ONE self-contained technique with metadata and a Markdown body."
                 + "\nUse prerequisites, original steps, controls, interpretation, limitations, optional tool choices, "
                 "and phase-aware triggers. Use Python 3.13+ or browser JavaScript for original examples. "
                 "Never copy source code verbatim. Never require a specific tool. Do not include operation or target "
@@ -325,23 +440,19 @@ class TechniqueService:
             attribution_repairs = 0
             retain_draft = False
             while attempt < 3 or retain_draft:
-                if not retain_draft:
-                    attempt += 1
-                    with self.events.stage("authoring", attempt):
-                        response = self.runner(
-                            "technique_author",
-                            prompt + "\nPrevious response:\n" + previous_draft + "\nRepair feedback: " + feedback,
-                            [],
-                        )
-                retain_draft = False
-                previous_draft = response[:48_000]
                 failure_stage = "author_json"
                 try:
-                    from modules.utils.json_repair import parse_json_response
-
-                    payload = parse_json_response(response, require_object=True)
-                    failure_stage = "author_schema"
-                    authored = AuthoredTechnique.model_validate(payload)
+                    if not retain_draft:
+                        attempt += 1
+                        with self.events.stage("authoring", attempt):
+                            authored = self._json(
+                                "technique_author",
+                                prompt + "\nPrevious response:\n" + previous_draft + "\nRepair feedback: " + feedback,
+                                AuthoredTechnique,
+                            )
+                        response = authored._raw_response or authored.model_dump_json()
+                    retain_draft = False
+                    previous_draft = response[:48_000]
                     failure_stage = "document_validation"
                     authored.metadata.sources = [Source(
                         url=source["url"], title=source["title"], retrieved_at=source.get("retrieved_at", ""),
@@ -370,6 +481,12 @@ class TechniqueService:
                     if any(value.lower() in markdown.lower() for value in self.private_values):
                         raise ValueError("Generated technique contains operation-specific identifiers")
                 except ValueError as error:
+                    retain_draft = False
+                    if failure_stage == "author_json":
+                        response = getattr(error, "rejected_response", None) or ""
+                        previous_draft = response[:48_000]
+                        if isinstance(error, ValidationError):
+                            failure_stage = "author_schema"
                     feedback = self._safe_feedback(self._author_feedback(error, failure_stage))
                     diagnostic = self._rejected_attempt(response, attempt, failure_stage, feedback)
                     self.events.emit(
@@ -443,19 +560,23 @@ class TechniqueService:
                         attribution_repairs += 1
                         with self.events.scope(research_round=research_round):
                             with self.events.stage("source_selection", attribution_repairs):
-                                selection = select_sources(self, request, requirements, sources, selection, feedback)
+                                selection = select_sources(
+                                    self, request, requirements, sources, selection, feedback, context=context,
+                                )
                         if not selection.sufficient:
                             if research_round >= 3:
                                 raise ValueError("Research coverage exhausted: " + selection.summary())
                             documents, selection, research_round = self._research_coverage(
-                                request, requirements, documents, selection, research_round, feedback,
+                                request, requirements, documents, selection, research_round, feedback, context=context,
+                                research_queries=research_queries,
                             )
                             attribution_repairs = 0
                     else:
                         if research_round >= 3:
                             raise ValueError("Research coverage exhausted: " + feedback)
                         documents, selection, research_round = self._research_coverage(
-                            request, requirements, documents, selection, research_round, feedback,
+                            request, requirements, documents, selection, research_round, feedback, context=context,
+                            research_queries=research_queries,
                         )
                         attribution_repairs = 0
                     selected_urls = set(selection.selected_urls)
@@ -464,6 +585,7 @@ class TechniqueService:
                     evidence_context = (
                         f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
                         + toon("requirements", [row.model_dump() for row in requirements]) + "\n"
+                        + phase_guidance(context)
                         + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
                         + toon("existing_examples", examples) + "\n"
                         + toon("sources", [{key: value for key, value in source.items() if key != "text"}
@@ -497,26 +619,42 @@ class TechniqueService:
     ) -> "TechniqueBundle":
         from modules.techniques.bundles import resolve_bundle
 
-        return resolve_bundle(self, request, context, operation, task)
+        self.events.private_values = self.private_values
+        with self.events.scope(operation_id=operation, task_uid=task, activity_id=self.events.activity_id()):
+            return resolve_bundle(self, request, context, operation, task)
 
-    def _research_coverage(self, request, requirements, documents=None, selection=None, research_round=0, gap=""):
+    def _research_coverage(self, request, requirements, documents=None, selection=None, research_round=0, gap="",
+                           *, context=None, research_queries=None):
         documents = list(documents or [])
+        prior_queries = research_queries if research_queries is not None else []
         while research_round < 3:
             research_round += 1
             with self.events.scope(research_round=research_round):
                 with self.events.stage("research"):
-                    research_request = request
+                    research_request = request + "\n" + phase_guidance(context)
                     if len(requirements) > 1 or requirements[0].description != request:
                         research_request += "\n" + toon("requirements", [row.model_dump() for row in requirements])
                     query = research_request if research_round == 1 else (
                         research_request + "\nTarget unresolved coverage: " + gap
                         + (selection.summary() if selection else "")
+                        + "\nSearch specifically for the listed missing factual support or contradictions. "
+                          "Do not repeat broad advisory searches. Prior source limitations and target "
+                          "validation needs are not factual research gaps."
+                        + "\nPrior searches (avoid repeating): " + json.dumps(prior_queries)
                         + "\nDo not refetch: " + ", ".join(doc["url"] for doc in documents)
                     )
                     if hasattr(self.research, "batch"):
                         fetched = self.research.batch(query, {doc["url"] for doc in documents})
                     else:
                         fetched = self.research(query)
+                queries = list(getattr(fetched, "queries", ()))
+                normalized = {" ".join(query.casefold().split()) for query in prior_queries}
+                repeats = [query for query in queries if " ".join(query.casefold().split()) in normalized]
+                if repeats:
+                    self.events.emit("technique_warning", stage="research",
+                                     diagnostic=f"Research batch {research_round} repeated prior search queries",
+                                     repeated_queries=repeats)
+                prior_queries.extend(queries)
                 known = {doc["url"] for doc in documents}
                 fresh = []
                 for document in fetched:
@@ -524,12 +662,23 @@ class TechniqueService:
                         fresh.append(document)
                         known.add(document["url"])
                 documents.extend(fresh)
+                if not fresh:
+                    self.events.emit("technique_build_progress", stage="research", status="no_new_documents",
+                                     fetched_count=len(documents), retained_selection=selection is not None)
+                    continue
                 with self.events.stage("source_selection") as fields:
-                    selection = select_sources(self, request, requirements, fresh, selection, gap)
+                    selection = select_sources(self, request, requirements, fresh, selection, gap, context=context)
                     fields.update(fetched_count=len(documents), selected_count=len(selection.selected_urls))
                 if selection.sufficient:
                     return documents, selection, research_round
-        raise ValueError("Research coverage exhausted after three batches: " + selection.summary())
+        if selection is None:
+            raise ValueError("Research did not fetch any usable source documents after three batches")
+        with self.events.scope(research_round=research_round):
+            selection = review_coverage(self, request, requirements, selection, context)
+        if selection.sufficient and not gap:
+            return documents, selection, research_round
+        raise ValueError("Research coverage exhausted after three batches: " + selection.summary()
+                         + ("\nRequested repair: " + gap if gap else ""))
 
     def _safe_feedback(self, text: str) -> str:
         from modules.utils.redaction import redact_text
@@ -541,8 +690,13 @@ class TechniqueService:
 
     @staticmethod
     def _author_feedback(error: ValueError, stage: str) -> str:
+        from modules.config.models.structured_output import StructuredOutputValidationError
+
+        if isinstance(error, StructuredOutputValidationError):
+            return str(error)
         if stage == "author_json":
-            return "Invalid JSON: return one JSON object with metadata and body, without prose or code fences."
+            return (f"Invalid JSON ({error}): return one JSON object with metadata and body, "
+                    "without prose or code fences.")
         if isinstance(error, ValidationError):
             details = "; ".join(
                 f"{'.'.join(map(str, item['loc']))}: {item['type']}"
@@ -634,6 +788,7 @@ class TechniqueService:
                 "Independently rate the technique's usefulness for this task: +1 helpful, "
                 "0 neutral/unused/insufficient evidence, -1 unhelpful. Correctly ruling out a vulnerability can be "
                 "helpful. Task failure or unavailable tools alone do not establish negative sentiment. "
+                "Use the recorded original and phase-aligned request and guidance objectives when available. "
                 "Evaluate demonstrated contribution to the requested purpose, not completeness against every "
                 "task requirement. Unrelated missing research or execution during a design/analysis task is "
                 "not grounds for neutrality. Source analysis can exclude a reachable sink; system mapping can "

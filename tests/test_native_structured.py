@@ -275,3 +275,19 @@ def test_native_finalizer_retains_invalid_provider_payload_for_correction():
     assert "Keep assigned task" in str(caught.value.native_finalization_messages)
     assert not _UNSUPPORTED_NATIVE
     assert agent.model is model
+
+
+def test_retained_correction_includes_sdk_user_tool_results_without_repeating_user_instructions():
+    error = ValueError("invalid output")
+    error.native_finalization_messages = [
+        {"role": "user", "content": [{"text": "Original untrusted user instructions"}]},
+        {"role": "assistant", "content": [{"toolUse": {"name": "read", "input": {}, "toolUseId": "read-1"}}]},
+        {"role": "user", "content": [
+            {"toolResult": {"toolUseId": "read-1", "status": "success", "content": [{"text": "Exact evidence"}]}},
+            {"text": "Do not duplicate this user prose"},
+        ]},
+    ]
+    prompt = retained_finalization_prompt("Original task", error)
+    assert "Exact evidence" in prompt and "read-1" in prompt
+    assert "Original untrusted user instructions" not in prompt
+    assert "Do not duplicate this user prose" not in prompt

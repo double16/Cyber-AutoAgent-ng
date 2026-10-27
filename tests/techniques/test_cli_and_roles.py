@@ -193,6 +193,8 @@ def test_partial_cli_bundle_succeeds_with_incompleteness_notice(scripted_service
 
 
 @pytest.mark.parametrize("role,profile", [
+    ("technique_request_aligner", "technique_judge"),
+    ("technique_coverage_reviewer", "technique_critic"),
     ("technique_planner", "technique_judge"),
     ("technique_plan_reviewer", "technique_critic"),
     ("technique_applicability_confirmation", "technique_judge"),

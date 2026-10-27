@@ -6,6 +6,9 @@ import {PythonExecutionService} from '../../../src/services/PythonExecutionServi
 import {DirectDockerService} from '../../../src/services/DirectDockerService.js';
 
 const cases = [
+  [{type: 'technique_build_progress', stage: 'request_alignment', status: 'completed',
+    original_request: 'Validate applicability', adjusted_request: 'Develop applicability hypotheses'},
+    'aligned request: Develop applicability hypotheses'],
   [{type: 'technique_sync_complete', added: 1, updated: 2, unchanged: 3}, '1 added, 2 updated, 3 unchanged'],
   [{type: 'technique_recommended', match_kind: 'semantic', title: 'Token validation'}, 'Token validation'],
   [{type: 'technique_build_progress', stage: 'critique', status: 'revision_requested', attempt: 2,
@@ -15,6 +18,8 @@ const cases = [
   [{type: 'technique_resolved', title: 'JWT validation', outcome: 'reused'}, 'Technique reused: JWT validation'],
   [{type: 'technique_resolved', title: 'Source analysis', outcome: 'reused', applicability: 'conditional',
     unmet_prerequisite_count: 2}, '(conditional), 2 unmet prerequisites'],
+  [{type: 'technique_resolved', title: 'Source analysis', outcome: 'generated', applicability: 'uncertain'},
+    '(uncertain)'],
   [{type: 'technique_evaluated', score: 1, reason: 'Helpful controls'}, 'helpful (+1)'],
   [{type: 'technique_evaluated', score: 0}, 'neutral (0)'],
   [{type: 'technique_evaluated', score: -1}, 'unhelpful (-1)'],

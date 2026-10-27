@@ -19,7 +19,7 @@ def plan_runner(state, components):
 
     def runner(role, prompt, tools):
         if role == "technique_planner":
-            return json.dumps({"components": components})
+            return json.dumps({"components": [{**item, "request_excerpt": prompt.split("Original request: ", 1)[1].split("\n", 1)[0]} for item in components]})
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -125,3 +125,51 @@ def test_bundle_types_reject_recursive_plan():
     with pytest.raises(ValidationError):
         Plan.model_validate({"components": [{**component(), "components": [component()]}]})
     assert Component.model_validate(component()).id == "one"
+
+
+@pytest.mark.parametrize("method_request", [
+    "Validate prerequisites and applicability of CVE-2026-109618",
+    "Trace file input, identify constraints, and validate reachability without executing source",
+    "Assess TCP service authentication prerequisites and applicability",
+])
+def test_cohesive_methodology_repairs_step_split(scripted_service, method_request, monkeypatch):
+    state = scripted_service
+    original = state.service.runner
+    planners = []
+    reviews = []
+
+    def runner(role, prompt, tools):
+        if role == "technique_planner":
+            planners.append(prompt)
+            items = [component("extract"), component("validate")] if len(planners) == 1 else [component()]
+            return json.dumps({"components": [{**item, "request_excerpt": method_request} for item in items]})
+        if role == "technique_plan_reviewer":
+            reviews.append(prompt)
+            return json.dumps({"approved": len(reviews) > 1, "reason": "One workflow split into steps"})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    monkeypatch.setattr(state.service, "get", lambda *_a, **_k: ("revision", "Validated procedure"))
+    bundle = state.service.resolve_bundle(method_request)
+    assert len(bundle.delivered) == 1
+    assert len(planners) == len(reviews) == 2
+    assert "One workflow split into steps" in planners[1]
+    assert "request_excerpt" in planners[0] and "not procedural steps" in reviews[0]
+    assert "Original request: " + method_request in reviews[1]
+
+
+def test_unreferenced_plan_exhausts_correction_before_research(scripted_service):
+    state = scripted_service
+    original = state.service.runner
+    prompts = []
+
+    def runner(role, prompt, tools):
+        if role == "technique_planner":
+            prompts.append(prompt)
+            return json.dumps({"components": [{**component(), "request_excerpt": "Invented method"}]})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    with pytest.raises(ValueError, match="exact original request excerpt"):
+        state.service.resolve_bundle("One method")
+    assert len(prompts) == 2 and not state.research_calls

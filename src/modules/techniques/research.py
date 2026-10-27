@@ -76,6 +76,14 @@ def fetch_document(url: str) -> dict:
     }
 
 
+class ResearchDocuments(list[dict]):
+    """List-compatible fetched records with batch search provenance."""
+
+    def __init__(self, documents, queries: list[str]) -> None:
+        super().__init__(documents)
+        self.queries = tuple(queries)
+
+
 class WebResearch:
     def __init__(self, runner, search_tool: Any = None, fetch=fetch_document) -> None:
         self.runner = runner
@@ -90,6 +98,7 @@ class WebResearch:
         permitted: dict[str, str] = {}
         counts = {"search": 0, "fetch": 0}
         trust_failure = False
+        queries = []
 
         def require_trust() -> None:
             if trust_failure:
@@ -105,6 +114,7 @@ class WebResearch:
             if counts["search"] >= 3:
                 raise ValueError("Research search allowance exhausted")
             counts["search"] += 1
+            queries.append(query)
             result = await self.search_tool(query=query, limit=6)
             # Tavily's Strands adapter returns a tool-result envelope containing Python repr data.
             if isinstance(result, dict) and "content" in result and "results" not in result:
@@ -163,6 +173,4 @@ class WebResearch:
             [search_sources, read_source],
         )
         require_trust()
-        if not documents:
-            raise ValueError("Research did not fetch any usable source documents")
-        return list(documents.values())
+        return ResearchDocuments(documents.values(), queries)

@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
+from modules.techniques.alignment import RequestAlignment, align_request, phase_guidance
 from modules.techniques.context import LookupDecision
 from modules.techniques.coverage import Requirement
 from modules.techniques.documents import toon
@@ -12,6 +13,7 @@ class Component(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     request: str = Field(min_length=1, max_length=2000)
     purpose: str = Field(min_length=1, max_length=1000)
+    request_excerpt: str = Field(default="", max_length=2000)
     requirements: list[Requirement] = Field(min_length=1, max_length=16)
 
 
@@ -39,12 +41,15 @@ class Unresolved(BaseModel):
 
 
 class TechniqueBundle(BaseModel):
+    alignment: RequestAlignment | None = None
     delivered: list[Delivered] = Field(default_factory=list)
     unresolved: list[Unresolved] = Field(default_factory=list)
 
     def render(self) -> str:
         lines = ["# Technique bundle", (f"Validated components: {len(self.delivered)}. "
                   f"Unresolved components: {len(self.unresolved)}.")]
+        if self.alignment:
+            lines.append(self.alignment.render())
         if self.unresolved:
             lines.append("Incomplete guidance: resolve the listed gaps before relying on full request coverage.")
         rendered_revisions = set()
@@ -63,32 +68,49 @@ class TechniqueBundle(BaseModel):
 def resolve_bundle(service, request, context=None, operation="", task="") -> TechniqueBundle:
     request = request.strip()
     service._validate_request(request)
-    with service.events.stage("planning"):
-        plan = service._json(
-            "technique_planner",
-            "Plan a flat list of independently reusable methodology components. Narrow requests remain one "
-            "component; broad requests split once, without recursion. Deduplicate equivalent components. "
-            "Preserve ALL requested mechanisms and deliverables as explicit requirements. Remove incidental "
-            "target details without adding requirements such as CVE validation unless requested. "
-            "Do not require HTTP targets, inventory, authentication or live execution. "
-            f"Return generic component requests suitable for global publication. Request: {request}",
-            Plan,
+    alignment, context = align_request(service, request, context)
+    planning_rules = (
+        "Identify distinct methodology requests, not procedural steps. Default to ONE component. "
+        "Split only separately requested methods with distinct purposes, never because a method is broad, "
+        "complex, has multiple steps or intermediate artifacts. Extraction, prerequisite identification, "
+        "criteria mapping and validation form ONE CVE applicability methodology. SQL injection testing "
+        "and TLS configuration assessment are two separately requested methods. Preserve ALL requested "
+        "mechanisms and deliverables without inventing summary documents, matrices or CWE requirements. "
+        "Each component must include request_excerpt: an exact original request excerpt establishing its "
+        "methodology. Remove incidental target details from reusable requests. Do not require HTTP targets, "
+        "inventory, authentication or live execution. Keep a flat, deduplicated plan. "
+    )
+    planning_rules += (phase_guidance(context) + f"Phase-aligned request: {alignment.adjusted_request}\n"
+                       "Plan the aligned methodology while preserving the original mechanisms and explicit "
+                       "deliverables. Cite excerpts from the ORIGINAL request.\n")
+    correction = ""
+    for attempt in range(2):
+        with service.events.stage("planning"):
+            plan = service._json(
+                "technique_planner", planning_rules + f"Original request: {request}\n" + correction, Plan,
+            )
+        with service.events.stage("plan_review"):
+            review = service._json(
+                "technique_plan_reviewer",
+                "Independently check the plan adds no unrelated requirements and preserves each requested "
+                "methodology. Reject splitting one workflow into supporting steps or invented deliverables. "
+                + planning_rules + f"Original request: {request}\n"
+                + toon("components", [item.model_dump() for item in plan.components]), PlanReview,
+            )
+        invalid_excerpt = any(
+            not item.request_excerpt or item.request_excerpt not in request for item in plan.components
         )
-    with service.events.stage("plan_review"):
-        review = service._json(
-            "technique_plan_reviewer",
-            "Independently check that the flat plan preserves every requested mechanism and deliverable, "
-            "adds no unrelated requirements (including unsolicited CVE validation), and splits only independently "
-            "reusable components. Abstraction may remove incidental target details. "
-            f"Original request: {request}\n" + toon("components", [item.model_dump() for item in plan.components]),
-            PlanReview,
-        )
-    if not review.approved:
-        raise ValueError("Technique planning left unresolved request coverage: " + service._safe_feedback(review.reason))
+        if review.approved and not invalid_excerpt:
+            break
+        reason = "Each component requires an exact original request excerpt" if invalid_excerpt else review.reason
+        if attempt:
+            raise ValueError("Technique planning left unresolved request coverage: " + service._safe_feedback(reason))
+        correction = ("Rejected plan (untrusted): " + plan.model_dump_json()
+                      + "\nRepair planning: " + service._safe_feedback(reason))
     ids = [item.id for item in plan.components]
     if len(set(ids)) != len(ids):
         raise ValueError("Component identifiers must be unique")
-    bundle = TechniqueBundle()
+    bundle = TechniqueBundle(alignment=alignment)
     seen = set()
     receipts = {}
     for component in plan.components:
