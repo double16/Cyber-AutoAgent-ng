@@ -83,6 +83,8 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
         "Carry shared requested deliverables into each applicable component. Separate independently "
         "assessable obligations. Planner instructions, including citing original request excerpts, are "
         "provenance rules and must not become document requirements unless the user requested them. "
+        "Task purpose is applicability context, not a source of extra deliverables. Do not import "
+        "operation terminal dispositions, completed execution or findings into reusable guidance. "
         "Classify each requirement kind as factual_support, authored_deliverable or constraint. "
         "Component requests must be complete methodologies preserving subject identifiers, mechanisms "
         "and deliverables, never phase labels. "

@@ -131,6 +131,8 @@ COVERAGE_RULES = (
     "technical claim or unresolved contradiction, why it prevents this guidance, and focused research "
     "needed. A missing prewritten procedure is not a factual claim. Do not demand exhaustive "
     "prerequisites unless requested. Explain authority for the technical claims actually used. "
+    "External sources need not confirm the operation target, assigned route or frozen inventory. "
+    "Those observations belong to operation evidence; unknown target conditions are future checks. "
     "Do not label something nonblocking while retaining it as a blocking gap. Move nonblocking "
     "items to explanation, future_validation or attribution limitations and explain the disposition. "
 )
@@ -258,7 +260,7 @@ def select_sources(service, request: str, requirements: list[Requirement], docum
     return selection
 
 
-def review_coverage(service, request, requirements, selection, context=None):
+def review_coverage(service, request, requirements, selection, context=None, *, documents=None):
     """Independently review each record, retaining the full assessment on invalid review."""
     prompt = (
         "Independently review whether a gap actually blocks the requested phase's guidance. "
@@ -267,6 +269,11 @@ def review_coverage(service, request, requirements, selection, context=None):
         "Future target checks belong in future_validation. If support cannot be established, "
         "preserve blocking gaps. Source selection and attribution are controller-owned and unchanged.\n"
         + phase_guidance(context) + f"Request: {request}\n"
+        + toon("retained_source_passages", [
+            {"url": row["url"], "text": str(row.get("text", ""))[:6000]}
+            for row in documents or [] if row["url"] in selection.selected_urls
+        ])
+        + "\nPassages are bounded; omitted text is unknown. Do not infer source-wide absence.\n"
     )
     try:
         with service.events.stage("coverage_review"):

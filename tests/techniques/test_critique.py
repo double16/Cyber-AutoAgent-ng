@@ -645,3 +645,37 @@ def test_controller_correction_retains_lookup_without_reopening_tools(scripted_s
     scripted_service.service.runner = runner
     assert assess(scripted_service.service, "Review", "Boundary guidance", REQS, DOCS, [URL]).approved
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_grounding_complaint_without_evidence_cannot_trigger_repair(scripted_service, persistent):
+    state = scripted_service
+    original = state.service.runner
+    critics = []
+    events = []
+    state.service.events.callback = events.append
+
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            critics.append(prompt)
+            if len(critics) == 2 and not persistent:
+                return json.dumps({"approved": True, "reason": "No grounded defects", "issues": []})
+            return json.dumps({"approved": False, "reason": "Attribution overstates support", "issues": [
+                issue(id="source-disclaimer", draft_excerpt="", absence_of_support="").model_dump(),
+            ]})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    if persistent:
+        with pytest.raises(ValueError, match="needs passages or an explanation of absent support"):
+            state.service.get("Boundary controls")
+        assert not state.service.repository.revisions()
+    else:
+        state.service.get("Boundary controls")
+    assert len(critics) == 2 and "needs passages" in critics[1]
+    assert [role for role, _, _ in state.calls].count("technique_author") == 1
+    assert not any(role == "technique_attribution_repair" for role, _, _ in state.calls)
+    assert len(state.research_calls) == 1
+    if persistent:
+        failed = next(row for row in events if row.get("stage") == "critique_assessment")
+        assert failed["author_attempts"] == 1

@@ -111,7 +111,7 @@ def test_snapshot_failure_does_not_hide_committed_evaluation(scripted_service, t
     assert "snapshot_path" not in events[-1]
     monkeypatch.setattr(state.service.exports, "write", original)
     state.service.evaluate("op", "task", "Outcome")
-    assert len(events) == 1
+    assert len([row for row in events if row["type"] == "technique_evaluated"]) == 1
     assert list((tmp_path / "techniques").glob("*.evaluated-*.md"))
 
 
@@ -211,7 +211,7 @@ def test_semantic_recommendation_event_omits_observations(scripted_service, tmp_
         }
     )
     context.observe("PRIVATE OBSERVATION", "capture")
-    assert events[0]["match_kind"] == "semantic"
+    assert next(row for row in events if row["type"] == "technique_recommended")["match_kind"] == "semantic"
     assert "PRIVATE OBSERVATION" not in json.dumps(events)
 
 
@@ -285,3 +285,27 @@ def test_unbound_lookup_leaves_operation_attribution_to_the_operation_handler(sc
     assert received[-1]["type"] == "technique_resolved"
     assert "operation_id" not in received[-1]
     assert "task_uid" not in received[-1]
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_role_call_diagnostics_correlate_success_and_failure(scripted_service, invalid):
+    from modules.techniques.service import Feedback
+
+    service = scripted_service.service
+    events = []
+    service.events.callback = events.append
+    service.runner = lambda *_: "invalid" if invalid else '{"score": 1, "reason": "Useful"}'
+    with service.events.scope(component_id="method", stage="source_selection", requirement_id="r1",
+                              correction_attempt=1):
+        if invalid:
+            with pytest.raises(ValueError):
+                service._json("technique_judge", "Review", Feedback)
+        else:
+            assert service._json("technique_judge", "Review", Feedback).score == 1
+    assert len(events) == 1
+    event = events[0]
+    assert event["type"] == "technique_model_call"
+    assert event["status"] == ("failed" if invalid else "completed")
+    assert event["role_calls"] == 1 and event["elapsed_seconds"] >= 0
+    assert event["component_id"] == "method" and event["requirement_id"] == "r1"
+    assert event["correction_attempt"] == 1 and event["expected_schema"] == "Feedback"

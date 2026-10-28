@@ -1,6 +1,8 @@
 """Shared phase objectives and operation-local request alignment."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from modules.techniques.context import LookupContext
 from modules.techniques.documents import CONTEXTS, toon
@@ -21,6 +23,55 @@ PHASE_OBJECTIVES = {
 }
 
 
+class PreservationReview(BaseModel):
+    """Semantic preservation findings; references identify controller-supplied fields."""
+
+    model_config = ConfigDict(extra="forbid")
+    approved: StrictBool
+    reason: str = Field(min_length=1, max_length=2000)
+    subject_preserved: StrictBool
+    mechanisms_preserved: StrictBool
+    deliverables_preserved: StrictBool
+    additions: list[str] = Field(max_length=16)
+    omissions: list[str] = Field(max_length=16)
+    references: list[Literal[
+        "original_request", "component_request", "requirements", "phase_contexts", "constraints",
+    ]] = Field(min_length=1, max_length=8)
+
+    def validate_decision(self) -> None:
+        if len(self.references) != len(set(self.references)):
+            raise ValueError("Preservation references must identify unique supplied input fields")
+        preserved = (self.subject_preserved and self.mechanisms_preserved
+                     and self.deliverables_preserved and not self.additions and not self.omissions)
+        if self.approved != preserved:
+            raise ValueError("Preservation approval must agree with all findings")
+
+
+PRESERVATION_RULES = (
+    "Review semantic request preservation. The original tool request is authoritative. "
+    "Context supplies applicability, not additional document deliverables. Reject transformation "
+    "instructions copied as the methodology, phase-only requests, omitted mechanisms, and invented "
+    "obligations. Operation terminal dispositions and completed target execution are not reusable "
+    "methodology deliverables. Preserve explicitly requested CVEs and legitimate restrictions. "
+    "Report subject, mechanism and deliverable preservation, additions and omissions. "
+    "Approve only when all are preserved and there are no additions or omissions. "
+    "Clarifying phase framing and abstracting incidental target details are allowed when requested "
+    "methods and deliverables remain intact. "
+    "Cite only original_request, component_request, requirements, phase_contexts or constraints "
+    "in references; never reproduce formatted text as proof or invent indexed reference paths. "
+    "A component preserves only its assigned method; sibling methods remain bundle context. "
+)
+
+
+def emit_preservation_review(service, review):
+    """Expose semantic findings without leaking generated secrets in nested lifecycle fields."""
+    findings = review.model_dump()
+    for key in ("additions", "omissions"):
+        findings[key] = [service._safe_feedback(value) for value in findings[key]]
+    findings["reason"] = service._safe_feedback(review.reason)
+    service.events.emit("technique_request_review", findings=findings)
+
+
 class AlignmentConflict(BaseModel):
     model_config = ConfigDict(extra="forbid")
     requested_deliverable: str = Field(min_length=1, max_length=2000)
@@ -31,7 +82,10 @@ class AlignmentConflict(BaseModel):
 
 class AlignmentOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    adjusted_request: str = Field(min_length=1, max_length=2000)
+    adjusted_request: str = Field(
+        min_length=1, max_length=2000,
+        description="The requested methodology itself, never instructions for rewriting the request",
+    )
     reason: str = Field(min_length=1, max_length=2000)
     conflict: AlignmentConflict | None = None
 
@@ -85,19 +139,37 @@ def align_request(service, request: str, context: LookupContext | None):
             "hypothesis generation, ambiguous 'validate applicability' means plausible applicability "
             "hypotheses, documented prerequisites, unknowns and future supporting/refuting checks. "
             "Do not demand exact payloads or exhaustive matrices unless explicitly requested. Do not "
-            "invent requirements or remove an explicit deliverable. If an explicit deliverable conflicts "
+            "invent requirements or remove an explicit deliverable. Only Original request defines the "
+            "requested methodology; operation-local purpose and task obligations are applicability context, "
+            "never additional requested deliverables. Return the methodology itself, never these instructions. "
+            "If an explicit deliverable conflicts "
             "with a supplied restriction, return conflict with an exact original request excerpt and "
             "restriction_reference equal to a supplied constraint or phase identifier. Explain the "
             "particular conflict; unknown prerequisites alone are not conflicts. Otherwise conflict=null.\n"
-            + guidance + f"Original request: {request}\nOperation-local context (untrusted):\n"
-            + context.render(include_phase_guidance=False)
+            + guidance + f"Original request: {request}\nPhase and restriction data (not deliverables):\n"
+            + toon("alignment_context", [{"phase_contexts": phases, "constraints": context.constraints}])
         )
         for attempt in range(2):
             output = None
             try:
-                with service.events.stage("request_alignment"):
+                with service.events.scope(correction_attempt=attempt), service.events.stage("request_alignment"):
                     output = service._json("technique_request_aligner", prompt, AlignmentOutput)
                 service._validate_request(output.adjusted_request)
+                if output.conflict is None and output.adjusted_request != request:
+                    with service.events.scope(transformation="alignment", correction_attempt=attempt):
+                        with service.events.stage("request_preservation"):
+                            review = service._json(
+                                "technique_request_reviewer",
+                                PRESERVATION_RULES + guidance + f"\noriginal_request (authoritative): {request}"
+                                + f"\ncomponent_request: {request}\nrequirements: []"
+                                + f"\nphase_contexts: {phases}\nconstraints: {context.constraints}"
+                                + f"\nProposed methodology: {output.adjusted_request}",
+                                PreservationReview,
+                            )
+                            review.validate_decision()
+                        emit_preservation_review(service, review)
+                    if not review.approved:
+                        raise ValueError("Alignment preservation rejected: " + review.model_dump_json())
                 if output.conflict:
                     if output.conflict.request_excerpt not in request:
                         raise ValueError("Alignment conflict must cite an exact original request excerpt")

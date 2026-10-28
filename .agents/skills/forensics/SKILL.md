@@ -489,3 +489,32 @@ validated sibling deliveries; partial delivery does not establish complete reque
 For split plans, verify each component's rendered lookup purpose matches its own request. Shared
 phase, constraints and observations remain available, but a bundle-wide purpose must not widen
 component research back to sibling methods. Alignment provenance remains attached to the bundle.
+
+### Request preservation and assessment latency
+
+Correlate `technique_request_review` by activity, component, `transformation` and
+`correction_attempt`. Findings record subject, mechanism and deliverable preservation, additions,
+omissions and references to supplied input fields. Approval must agree with all findings.
+References identify inputs; semantic preservation remains a model judgment. The original tool
+request is the intent anchor. Components cover their assigned methods; task purpose and
+observations supply applicability context. Transformation instructions and operation terminal
+dispositions must not replace methodology. Alignment review shares its single correction;
+abstraction retains its single correction. Persistent failure stops before research.
+
+`technique_model_call` records one completed or failed role invocation, its expected schema,
+call ID and elapsed seconds. Aggregate `role_calls` by activity, component, stage, role,
+requirement and correction attempt. These are role invocations, not provider HTTP request counts:
+inspect CLI JSONL `model_input`, `model_output` and `model_failed` for provider attempts. Stage
+elapsed times include nested calls; do not add stage duration to nested role duration.
+
+Coverage review receives bounded retained passages from selected sources. Omitted text is
+unknown, not evidence of source-wide absence. External research need not confirm assigned routes
+or frozen inventory. Distinguish missing technical support from unknown target conditions and
+missing prewritten procedures. Preserve valid assessments during contract failures. CLI requests
+and phases omit operation context; reproduce context-dependent failures using an isolated harness
+with captured context. Never alter an active operation to test a fix.
+
+Alignment and preservation review intentionally omit task purpose and observations. Applicability
+assessment retains them. When investigating imported task duties, check the actual role input:
+request intent, phase guidance and explicit restrictions should remain separate from task execution
+context. Component obligations still come from the independently reviewed methodology plan.

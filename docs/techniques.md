@@ -602,3 +602,30 @@ Independent plan review permits one correction before research. Diagnostics reco
 in `technique_plan_accepted` or the rejected plan and feedback in `technique_plan_rejected`.
 Each component retains its own research allowance; empty batches preserve the prior assessment.
 Supported components can be delivered while unsupported siblings remain explicitly unresolved.
+
+
+### Request preservation
+
+Task purpose and observations are supplied to applicability assessment, while alignment and
+preservation reviews receive only request intent, phase and explicit restrictions. This prevents
+task-only execution duties from becoming methodology requirements.
+
+The original tool request remains the intent anchor. Phase alignment and generic request
+abstraction receive independent preservation review when they change the request. Review findings
+cover the subject, mechanisms, deliverables, additions and omissions; approval must agree with
+all findings. A failed alignment review shares the alignment stage's single correction allowance.
+Persistent failure stops before research. Task purpose informs applicability and does not itself
+add document deliverables such as completed execution or a terminal disposition for a target.
+
+Coverage review receives bounded retained passages from selected sources. Omitted text remains
+unknown. External sources need not confirm the operation's assigned route; unknown target
+conditions become future checks. Existing research, author and attribution limits remain unchanged.
+
+
+Preservation findings reference controller-supplied input field IDs rather than reproducing
+formatted passages. Lifecycle `technique_request_review` records the findings, transformation,
+and correction number. `technique_model_call` records elapsed time and one `role_calls` unit per
+completed or failed role invocation, with component, stage and requirement correlation where
+available. Provider retries remain separate model-attempt diagnostics. Stage durations include
+nested calls and must not be added to their durations. Assessment order and research limits are
+unchanged; these diagnostics support a later latency investigation.

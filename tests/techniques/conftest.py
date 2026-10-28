@@ -95,7 +95,12 @@ def scripted_service(store, markdown):
             return json.dumps({"adjusted_request": request, "reason": "Explicit guidance purpose preserved"})
         if role == "technique_coverage_reviewer":
             return prompt.split("Retained assessment:\n", 1)[1].split("\nReturn only JSON", 1)[0]
-        if role in {"technique_plan_reviewer", "technique_request_reviewer"}:
+        if role == "technique_request_reviewer":
+            return json.dumps({"approved": True, "reason": "Request preserved",
+                               "references": ["original_request"], "subject_preserved": True,
+                               "mechanisms_preserved": True,
+                               "deliverables_preserved": True, "additions": [], "omissions": []})
+        if role == "technique_plan_reviewer":
             return json.dumps({"approved": True, "reason": "Request preserved"})
         if role == "technique_planner":
             return json.dumps({"components": [{"id": "method", "request": "JWT handling",

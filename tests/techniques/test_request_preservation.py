@@ -38,7 +38,11 @@ def test_applicability_rewrite_is_independently_checked(scripted_service, subjec
         prompts.append((role, prompt))
         if role == "technique_request_reviewer":
             return json.dumps({"approved": repair and "Proposed request: " + subject in prompt,
-                               "reason": "Preserve subject and remove invented static-only restriction"})
+                               "reason": "Preserve subject and remove invented static-only restriction",
+                               "references": ["original_request"],
+                               "subject_preserved": repair and "Proposed request: " + subject in prompt,
+                               "mechanisms_preserved": True, "deliverables_preserved": True,
+                               "additions": [], "omissions": []})
         return json.dumps({**decision.model_dump(), "generic_request": subject})
 
     service.runner = run
@@ -125,7 +129,9 @@ def test_bad_request_review_fails_actionably_after_one_correction(scripted_servi
     def run(role, prompt, tools):
         calls.append(role)
         if role == "technique_request_reviewer":
-            return "invalid JSON" if malformed else json.dumps({"approved": False, "reason": "Subject omitted"})
+            return "invalid JSON" if malformed else json.dumps({"approved": False, "reason": "Subject omitted",
+                               "references": ["original_request"], "subject_preserved": False,
+        "mechanisms_preserved": True, "deliverables_preserved": True, "additions": [], "omissions": []})
         return json.dumps({"generic_request": "Still omits subject", "applicability": "conditional",
                            "unmet_prerequisites": ["Check version"], "reason": "Can help"})
 
@@ -168,7 +174,9 @@ def test_empty_batches_do_not_repeat_independent_review(scripted_service):
 
 def test_invalid_preservation_correction_is_actionable(scripted_service):
     service = scripted_service.service
-    service.runner = lambda role, *_: json.dumps({"approved": False, "reason": "Lost subject"}) \
+    service.runner = lambda role, *_: json.dumps({"approved": False, "reason": "Lost subject",
+                               "references": ["original_request"], "subject_preserved": False,
+        "mechanisms_preserved": True, "deliverables_preserved": True, "additions": [], "omissions": []}) \
         if role == "technique_request_reviewer" else "invalid JSON"
     decision = LookupDecision(generic_request="Phase", applicability="conditional",
                               unmet_prerequisites=["Unknown version"], reason="Can help")

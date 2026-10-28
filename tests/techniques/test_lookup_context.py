@@ -113,7 +113,9 @@ def test_request_abstraction_precedes_research_and_phase_guides_author(scripted_
 ])
 def test_invalid_applicability_stops_before_research(scripted_service, assessment, reason):
     state = scripted_service
-    state.service.runner = lambda role, *_: json.dumps({"approved": True, "reason": "Preserved"}) \
+    state.service.runner = lambda role, *_: json.dumps({"approved": True, "reason": "Preserved",
+                               "references": ["original_request"], "subject_preserved": True,
+        "mechanisms_preserved": True, "deliverables_preserved": True, "additions": [], "omissions": []}) \
         if role == "technique_request_reviewer" else json.dumps({
         "generic_request": "Source analysis", "applicability": assessment,
         "unmet_prerequisites": [], "reason": reason,
@@ -370,7 +372,9 @@ def test_independent_confirmation_detects_guidance_vs_task_confusion(scripted_se
 
     def runner(role, prompt, tools):
         if role == "technique_request_reviewer":
-            return json.dumps({"approved": True, "reason": "Preserved"})
+            return json.dumps({"approved": True, "reason": "Preserved",
+                               "references": ["original_request"], "subject_preserved": True,
+        "mechanisms_preserved": True, "deliverables_preserved": True, "additions": [], "omissions": []})
         prompts.append((role, prompt))
         confirmation = role == "technique_applicability_confirmation"
         return json.dumps({

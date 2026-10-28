@@ -7,6 +7,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -99,6 +100,20 @@ class TechniqueService:
         self.events = TechniqueEvents()
 
     def _json(self, role: str, prompt: str, schema: type[BaseModel], tools: list | None = None) -> BaseModel:
+        call_id = str(uuid.uuid4())
+        started = monotonic()
+        status = "failed"
+        try:
+            output = self._json_output(role, prompt, schema, tools)
+            status = "completed"
+            return output
+        finally:
+            self.events.emit("technique_model_call", role=role, expected_schema=schema.__name__,
+                             call_id=call_id, status=status, role_calls=1,
+                             elapsed_seconds=round(monotonic() - started, 3))
+
+    def _json_output(self, role, prompt, schema, tools):
+        """Run one role invocation; provider-level model retries remain separately observable."""
         structured = getattr(self.runner, "structured", None)
         if callable(structured):
             output_schema = AuthoredOutput if schema is AuthoredTechnique else schema
@@ -159,7 +174,8 @@ class TechniqueService:
             "Prepare a reusable methodology request and assess task applicability independently of the catalog. "
             "Abstract incidental target names, addresses, application routes, repository paths, symbols and "
             "identifiers; preserve relevant language, protocol, platform, versions and standard protocol paths. "
-            "Return a generic_request suitable for external research and global publication. "
+            "Return the methodology itself in generic_request, never the instructions for preparing it. "
+            "It must be suitable for external research and global publication. "
             "Only abstract incidental target details; preserve explicitly requested subject identifiers "
             "including CVEs. Do not add deliverables or restrictions such as static-only or read-only. "
             "Preserve the phase-aligned methodology and deliverables; do not reduce the request to "
@@ -270,26 +286,36 @@ class TechniqueService:
         return decision
 
     def _preserve_request(self, request, decision, context, requirements):
-        from modules.techniques.bundles import PlanReview
+        from modules.techniques.alignment import PRESERVATION_RULES, PreservationReview, emit_preservation_review
 
         if decision.generic_request == request:
             return decision
         prompt = (
-            "Review request preservation, not task completion. Only incidental target details may be "
-            "abstracted. Preserve the requested subject (including explicit CVEs), mechanisms and "
-            "deliverables. Reject phase labels, omissions, invented obligations and restrictions. "
-            + (context.render() if context else phase_guidance(None))
-            + f"Original component request: {request}\n"
+            PRESERVATION_RULES + "Review request preservation, not task completion. "
+            + phase_guidance(context)
+            + f"Original component request: {request}\ncomponent_request: {request}\n"
+            + "original_request (authoritative): "
+            + (context._request_alignment.original_request if context and context._request_alignment else request)
+            + "\n"
             + toon("requirements", [row.model_dump() for row in requirements or []])
+            + f"\nphase_contexts: {context.phase_contexts if context else []}"
+            + f"\nconstraints: {context.constraints if context else []}\n"
         )
         for attempt in range(2):
             try:
-                review = self._json(
-                    "technique_request_reviewer",
-                    prompt + "\nProposed request: " + decision.generic_request, PlanReview,
-                )
+                with self.events.scope(transformation="abstraction", correction_attempt=attempt):
+                    with self.events.stage("request_preservation"):
+                        review = self._json(
+                            "technique_request_reviewer",
+                            prompt + "\nProposed request: " + decision.generic_request, PreservationReview,
+                        )
+                        review.validate_decision()
+                    emit_preservation_review(self, review)
             except ValueError as error:
-                review = PlanReview(approved=False, reason=self._safe_feedback(str(error)))
+                review = PreservationReview(approved=False, reason=self._safe_feedback(str(error)),
+                                            subject_preserved=False, mechanisms_preserved=False,
+                                            deliverables_preserved=False, additions=[], omissions=[],
+                                            references=["original_request"])
             if review.approved:
                 self.events.emit("technique_request_preserved", original_request=request,
                                  validated_request=decision.generic_request, reason=review.reason)
@@ -300,6 +326,7 @@ class TechniqueService:
                 correction = self._json(
                     "technique_judge", prompt + "\nRepair rejected request: " + decision.generic_request
                     + "\nPreservation error: " + self._safe_feedback(review.reason)
+                    + "\nPreservation findings (untrusted): " + review.model_dump_json()
                     + "\nReturn the complete LookupDecision without inventing an applicability conflict.",
                     LookupDecision,
                 )
@@ -724,7 +751,7 @@ class TechniqueService:
                     assessment_key = selection.model_dump_json()
                     if assessment_key not in reviewed_assessments:
                         reviewed_assessments[assessment_key] = review_coverage(
-                            self, request, requirements, selection, context,
+                            self, request, requirements, selection, context, documents=documents,
                         )
                     selection = reviewed_assessments[assessment_key]
                 if selection.sufficient:

@@ -576,3 +576,111 @@ def test_planning_and_source_contracts_fail_closed_when_prompt_cannot_fit(runner
     with pytest.raises(ValueError, match="input exceeds configured prompt limit"):
         runner.structured(role, "Preserve every method and evidence instruction", schema, [])
     assert not model.calls
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("subject", ["HTTP email API", "TCP mail service", "source/filesystem mail handler"])
+def test_preservation_findings_use_real_structured_transport(runner_factory, scripted_service, provider, subject):
+    from modules.techniques.alignment import AlignmentOutput, align_request
+    from modules.techniques.context import LookupContext
+
+    # An instruction-copy response must be rejected even though it satisfies the generation schema.
+    rewritten = "Align methodology with phase objectives"
+    payloads = [
+        {"adjusted_request": rewritten, "reason": "Rewrite"},
+        {"approved": False, "reason": "Instructions replaced the requested method",
+         "subject_preserved": False, "mechanisms_preserved": False, "deliverables_preserved": False,
+         "additions": ["Transformation instructions"], "omissions": [subject],
+         "references": ["original_request"]},
+        {"adjusted_request": subject, "reason": "Preserve explicit methodology"},
+    ]
+    runner, model = runner_factory(payloads, provider)
+    service = scripted_service.service
+    service.runner = runner
+    events = []
+    service.events.callback = events.append
+    context = LookupContext(phase_contexts=["hypothesis_generation"],
+                            purpose="Produce terminal disposition for assigned route only")
+    alignment, _ = align_request(service, subject, context)
+    assert alignment.original_request == alignment.adjusted_request == subject
+    assert len(model.calls) == 3
+    assert all(call[0] == ("tool" if provider == "bedrock" else "native") for call in model.calls)
+    assembled = str(model.calls)
+    assert "Produce terminal disposition for assigned route only" not in assembled
+    assert "original_request (authoritative)" in assembled
+    assert "Context supplies applicability" in assembled
+    assert "Validation failure" in assembled and "rejected" in assembled
+    findings = next(row for row in events if row["type"] == "technique_request_review")
+    assert findings["transformation"] == "alignment" and findings["correction_attempt"] == 0
+    assert not findings["findings"]["approved"]
+    assert AlignmentOutput.model_fields["adjusted_request"].annotation is str
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+def test_preservation_schema_fails_closed_before_model_when_input_does_not_fit(runner_factory, monkeypatch, provider):
+    from modules.techniques.alignment import PreservationReview
+
+    runner, model = runner_factory([], provider)
+    monkeypatch.setattr(roles, "require_prompt_token_limit", lambda *_: 1)
+    with pytest.raises(ValueError, match="input exceeds configured prompt limit"):
+        runner.structured("technique_request_reviewer", "Preserve original request", PreservationReview, [])
+    assert not model.calls
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("subject", ["HTTP email API", "TCP mail service", "source/filesystem mail handler"])
+def test_abstraction_review_keeps_root_and_component_intent(runner_factory, scripted_service, provider, subject):
+    from modules.techniques.alignment import RequestAlignment
+    from modules.techniques.context import LookupContext, LookupDecision
+
+    findings = {"approved": False, "reason": "Copied transformation instructions",
+                "subject_preserved": False, "mechanisms_preserved": False, "deliverables_preserved": False,
+                "additions": ["Rewrite instructions"], "omissions": [subject],
+                "references": ["original_request", "component_request"]}
+    decision = {"generic_request": subject, "applicability": "conditional",
+                "unmet_prerequisites": ["Implementation unknown"], "reason": "Guidance can help"}
+    approved = {**findings, "approved": True, "reason": "Assigned component preserved",
+                "subject_preserved": True, "mechanisms_preserved": True, "deliverables_preserved": True,
+                "additions": [], "omissions": []}
+    runner, model = runner_factory([findings, decision, approved], provider)
+    service = scripted_service.service
+    service.runner = runner
+    context = LookupContext(phase_contexts=["hypothesis_generation"],
+                            purpose="Produce terminal disposition for assigned route only")
+    context._request_alignment = RequestAlignment(original_request=subject + " and TLS review",
+                                                  adjusted_request=subject + " and TLS review")
+    original = LookupDecision(**{**decision, "generic_request": "Prepare a reusable methodology request"})
+    result = service._preserve_request(subject, original, context,
+                                      [Requirement(id="method", description=subject, kind="authored_deliverable")])
+    assert result.generic_request == subject and result.applicability == original.applicability
+    assert original.generic_request == "Prepare a reusable methodology request"
+    assert "TLS review" in str(model.calls) and "sibling methods remain bundle context" in str(model.calls)
+    assert "Produce terminal disposition for assigned route only" not in str(model.calls)
+    assert "Preservation findings (untrusted)" in str(model.calls)
+    assert len(model.calls) == 3
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("boundary", ["alignment", "abstraction"])
+def test_complete_preservation_inputs_fail_closed_when_they_do_not_fit(
+    runner_factory, scripted_service, monkeypatch, provider, boundary,
+):
+    from modules.techniques.alignment import align_request
+    from modules.techniques.context import LookupContext, LookupDecision
+
+    runner, model = runner_factory([], provider)
+    service = scripted_service.service
+    service.runner = runner
+    monkeypatch.setattr(roles, "require_prompt_token_limit", lambda *_: 100)
+    context = LookupContext(phase_contexts=["hypothesis_generation"],
+                            purpose="Task terminal disposition is context, not a document deliverable",
+                            constraints=["No present execution"])
+    if boundary == "alignment":
+        with pytest.raises(ValueError, match="alignment failed.*input exceeds configured prompt limit"):
+            align_request(service, "HTTP API boundary methodology", context)
+    else:
+        decision = LookupDecision(generic_request="Abstract API methodology", applicability="conditional",
+                                  reason="Unknown prerequisites", unmet_prerequisites=[])
+        with pytest.raises(ValueError, match="request preservation failed.*input exceeds configured prompt limit"):
+            service._preserve_request("HTTP API boundary methodology", decision, context, [])
+    assert not model.calls and not scripted_service.research_calls

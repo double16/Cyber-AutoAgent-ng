@@ -7,7 +7,7 @@ from conftest import assessment_output
 
 from modules.techniques.alignment import PHASE_OBJECTIVES, align_request, phase_guidance
 from modules.techniques.context import LookupContext
-from modules.techniques.coverage import CoverageGap, Requirement, SourceSelection, review_coverage
+from modules.techniques.coverage import Attribution, CoverageGap, Requirement, SourceSelection, Support, review_coverage
 from modules.techniques.documents import CONTEXTS
 
 
@@ -36,6 +36,7 @@ def test_explicit_phase_alignment_is_shared_and_context_is_not_mutated(scripted_
     assert alignment.original_request == request and alignment.adjusted_request == adjusted
     assert alignment.objectives == {phase: PHASE_OBJECTIVES[phase]}
     assert "Read only" in calls[0] and phase_guidance(context) in calls[0]
+    assert "operation-local purpose and task obligations are applicability context" in calls[0]
     assert "Original request" in alignment.render()
 
 
@@ -252,7 +253,10 @@ def test_independent_review_does_not_clear_unresolved_contradictions(scripted_se
 def test_alignment_correction_retains_original_and_validation_diagnostic(scripted_service):
     calls = []
     outputs = iter(["bad JSON", json.dumps({"adjusted_request": "Describe source analysis guidance",
-                                           "reason": "Clarify guidance"})])
+                                           "reason": "Clarify guidance"}), json.dumps({
+        "approved": True, "reason": "Preserved",
+                               "references": ["original_request"], "subject_preserved": True,
+        "mechanisms_preserved": True, "deliverables_preserved": True, "additions": [], "omissions": []})])
     scripted_service.service.runner = lambda *args: calls.append(args) or next(outputs)
     aligned, _ = align_request(scripted_service.service, "Analyze source", LookupContext(phase_contexts=["analysis"]))
     assert aligned.original_request == "Analyze source"
@@ -273,3 +277,113 @@ def test_alignment_diagnostics_and_feedback_keep_delivery_purpose(scripted_servi
     assert "recorded original and phase-aligned request" in feedback
     assert '"original_request": "JWT handling"' in feedback
     assert "Form plausible source-backed hypotheses" in feedback
+
+
+@pytest.mark.parametrize("approved,subject,additions", [(True, False, []), (True, True, ["Invented"]),
+                                                       (False, True, [])])
+def test_preservation_findings_require_consistent_decision(approved, subject, additions):
+    from modules.techniques.alignment import PreservationReview
+
+    review = PreservationReview(approved=approved, reason="Assessment", references=["original_request"],
+                                subject_preserved=subject,
+                                mechanisms_preserved=True, deliverables_preserved=True,
+                                additions=additions, omissions=[])
+    with pytest.raises(ValueError, match="agree with all findings"):
+        review.validate_decision()
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_alignment_instruction_leak_is_reviewed_before_planning(scripted_service, persistent):
+    service = scripted_service.service
+    original = service.runner
+    calls = []
+
+    def runner(role, prompt, tools):
+        calls.append((role, prompt))
+        if role == "technique_request_aligner":
+            request = "Align methodology with phase instructions" if persistent or len(calls) == 1 else "Analyze source"
+            return json.dumps({"adjusted_request": request, "reason": "Rewrite"})
+        if role == "technique_request_reviewer":
+            return json.dumps({"approved": False, "reason": "Instructions replaced methodology",
+                               "references": ["original_request"], "subject_preserved": False,
+                               "mechanisms_preserved": False,
+                               "deliverables_preserved": False, "additions": ["Instructions"], "omissions": []})
+        return original(role, prompt, tools)
+
+    service.runner = runner
+    if persistent:
+        with pytest.raises(ValueError, match="after one correction"):
+            align_request(service, "Analyze source", LookupContext(phase_contexts=["analysis"]))
+    else:
+        alignment, _ = align_request(service, "Analyze source", LookupContext(phase_contexts=["analysis"]))
+        assert alignment.adjusted_request == alignment.original_request == "Analyze source"
+    assert all(role != "technique_planner" for role, _ in calls)
+
+
+def test_coverage_review_receives_bounded_selected_evidence(scripted_service):
+    state = scripted_service
+    selection = SourceSelection(
+        selected_urls=["https://example.com/a"],
+        attributions=[Attribution(url="https://example.com/a", reason="Technical basis")],
+        authoritative_sufficient=True, reason="Review evidence",
+        coverage=[Support(requirement_id="method", source_urls=["https://example.com/a"],
+                          explanation="Technical facts support future checks", gaps=[])],
+    )
+    prompts = []
+    original = state.service.runner
+
+    def runner(role, prompt, tools):
+        prompts.append(prompt)
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    result = review_coverage(
+        state.service, "Method", [Requirement(id="method", description="Method")], selection, documents=[
+        {"url": "https://example.com/a", "text": "selected evidence" + "x" * 7000},
+        {"url": "https://example.com/b", "text": "unselected evidence"},
+    ])
+    assert result.sufficient and result is not selection
+    assert "selected evidence" in prompts[0]
+    assert "unselected evidence" not in prompts[0]
+    assert "x" * 6001 not in prompts[0]
+    assert "omitted text is unknown" in prompts[0]
+
+
+@pytest.mark.parametrize("references", [["original_request", "original_request"]])
+def test_preservation_rejects_invalid_input_references(references):
+    from modules.techniques.alignment import PreservationReview
+
+    review = PreservationReview(approved=True, reason="Preserved", subject_preserved=True,
+                                mechanisms_preserved=True, deliverables_preserved=True,
+                                additions=[], omissions=[], references=references)
+    with pytest.raises(ValueError, match="unique supplied input fields"):
+        review.validate_decision()
+
+
+def test_preservation_events_redact_nested_findings(scripted_service):
+    from modules.techniques.alignment import PreservationReview, emit_preservation_review
+
+    service = scripted_service.service
+    events = []
+    service.events.callback = events.append
+    service.private_values = ("private-name",)
+    review = PreservationReview(approved=False, reason="Lost private-name", subject_preserved=False,
+                                mechanisms_preserved=True, deliverables_preserved=True,
+                                additions=["private-name"], omissions=["private-name"],
+                                references=["original_request"])
+    emit_preservation_review(service, review)
+    assert "private-name" not in json.dumps(events)
+    assert events[0]["findings"]["approved"] is False
+
+
+def test_preservation_reference_enum_is_generation_constrained():
+    from modules.techniques.alignment import PreservationReview
+
+    schema = PreservationReview.model_json_schema()
+    assert schema["properties"]["references"]["items"]["enum"] == [
+        "original_request", "component_request", "requirements", "phase_contexts", "constraints",
+    ]
+    with pytest.raises(ValueError, match="Input should be"):
+        PreservationReview(approved=True, reason="Preserved", subject_preserved=True,
+                           mechanisms_preserved=True, deliverables_preserved=True,
+                           additions=[], omissions=[], references=["phase_objectives[1]"])
