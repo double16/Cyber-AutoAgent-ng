@@ -555,11 +555,7 @@ class TechniqueService:
                             "Judge phase suitability for source review, network services, system mapping, challenges "
                             "and emulation as well as web assessments. Public protocol metadata alone is not "
                             "information disclosure without an unintended protected information boundary.\n"
-                            + evidence_context
-                            + "\nRequired document metadata schema: "
-                            + json.dumps(Metadata.model_json_schema())
-                            + "\nDraft:\n"
-                            + markdown,
+                            + evidence_context,
                             markdown, requirements, documents, selection.selected_urls,
                         )
                 except ValueError as error:

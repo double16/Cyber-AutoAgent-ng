@@ -458,3 +458,15 @@ document review; author, research, and attribution counters do not advance for t
 Contract diagnostics identify `originating_role`, `expected_schema`, `failure_kind`, and
 `correction_number`. Distinguish absence from inspected passages from absence throughout
 retained text or the complete external article. Persistent failure prevents publication.
+
+### Decoded critic snapshots and source inspection
+
+Critics and assessors review decoded metadata and body references, not YAML syntax. Correlate
+`review_snapshot` and `issues_validated` events using `snapshot_id`. `draft_references` identify
+values in that exact snapshot; resolved excerpts are controller-owned. Edits invalidate old references.
+Inspect `source_inspection`, returned passage IDs, character counts, and continuation offsets.
+Literal search misses establish no semantic absence. `entire_retained_source` absence claims require
+complete inspected interval coverage for every affected URL; gaps invalidate the claim. Complete
+inspection establishes availability, while the independent assessor still judges support. Partial
+inspection cannot justify source-wide attribution or research rejection. Contract corrections retain
+existing evidence and do not reopen investigation tools or advance repair counters.

@@ -567,3 +567,17 @@ Critic and assessor share one correction per assembled-document review. Correcti
 no author, research, or attribution attempts. Persistent failure names the originating assessor
 and expected schema; no document is published. Support judgments concern retained material,
 not unseen portions of an external article.
+
+
+### Critic review references
+
+Python parses technique frontmatter. Critics and independent assessors receive decoded metadata
+values and referenced body lines, rather than raw YAML. References belong to the exact document
+snapshot; edits invalidate previous references. Missing-content issues identify requirements.
+Legacy exact excerpts remain accepted, but new critiques should use `draft_references`.
+
+Retained-source lookup supports literal search with `query`, bounded passages, passage IDs,
+character counts, and continuation offsets. Search misses do not prove missing support.
+A source-wide absence complaint must set `absence_scope` to `entire_retained_source` and inspect
+all retained characters first. Partial inspection supports statements about inspected passages only.
+The independent assessor judges semantic support; complete inspection alone proves no defect.

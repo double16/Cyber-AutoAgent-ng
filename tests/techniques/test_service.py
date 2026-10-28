@@ -453,7 +453,9 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
         assert any(role == "technique_attribution_repair" and "Fix coverage" in prompt
                    for role, prompt, _ in state.calls)
     if category in {"source_attribution", "research_coverage"}:
-        assert critiques[0].split("# Guidance")[1] == critiques[1].split("# Guidance")[1]
+        assert [line.split(",body.line[", 1)[1] for line in critiques[0].splitlines() if ",body.line[" in line] == [
+            line.split(",body.line[", 1)[1] for line in critiques[1].splitlines() if ",body.line[" in line
+        ]
 
 
 @pytest.mark.parametrize("category,message", [
@@ -540,7 +542,7 @@ def test_controller_ignores_author_provenance_and_critiques_assembled_metadata(s
     _, markdown = state.service.get("JWT handling")
     assert "invalid author provenance" not in markdown and "Invented coverage" not in markdown
     assert "selection_reason: Primary applicable advisory" in markdown
-    assert "selection_reason: Primary applicable advisory" in critiques[0]
+    assert "Primary applicable advisory" in critiques[0]
 
 
 def test_explicit_component_requirements_reach_initial_research_and_assembled_roles(scripted_service):

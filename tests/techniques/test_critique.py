@@ -319,7 +319,9 @@ def test_seven_requirements_three_drafts_and_incomplete_attribution_response_pre
     assert len(state.research_calls) == 1
     assert all(f"r{index}" in markdown for index in range(7))
     # The final assembled draft changes provenance only; authored Markdown remains byte-identical.
-    assert critics[-1].split("# Guidance", 1)[1] == critics[-2].split("# Guidance", 1)[1]
+    assert [line.split(",body.line[", 1)[1] for line in critics[-1].splitlines() if ",body.line[" in line] == [
+        line.split(",body.line[", 1)[1] for line in critics[-2].splitlines() if ",body.line[" in line
+    ]
     assert "Primary method support" not in markdown
 
 
@@ -475,7 +477,7 @@ def test_invalid_excerpt_correction_requests_literal_draft_text(scripted_service
         scripted_service.service, "Review\nBoundary guidance", "Boundary guidance", REQS, DOCS, [URL]
     ).approved
     assert len(calls) == 2
-    assert "short literal YAML/Markdown text" in calls[0]
+    assert "draft_references" in calls[0]
     assert "quote literal Draft text with escapes" in calls[1]
 
 
@@ -532,3 +534,114 @@ def test_critique_and_assessor_share_one_correction(scripted_service, first_fail
     assert len(calls) == 3
     assert critic_calls == (2 if first_failure == "critic_contract" else 1)
     assert not service.repository.revisions()
+
+
+def test_decoded_review_snapshot(markdown):
+    from modules.techniques.critique import ReviewSnapshot
+
+    snapshot = ReviewSnapshot(markdown().replace("title: JWT handling", "title: >\n  Multiple\n  lines"))
+    key = next(key for key in snapshot.values if snapshot.paths[key] == "metadata.title")
+    assert snapshot.values[key] == "Multiple lines"
+    assert "title: >" not in snapshot.render()
+    lookup = RetainedSources(DOCS)
+    candidate = Critique(approved=False, reason="Defect", issues=[issue(draft_references=[key])])
+    with pytest.raises(ValueError, match="stale"):
+        lookup.validate(candidate, "Different document", REQS, [URL])
+
+
+def test_source_absence_requires_complete_inspection():
+    lookup = RetainedSources(DOCS)
+    candidate = Critique(approved=False, reason="Defect", issues=[issue(
+        absence_scope="entire_retained_source", absence_of_support="Claim absent",
+    )])
+    lookup.lookup(URL, 0, 5)
+    with pytest.raises(ValueError, match="complete inspection"):
+        lookup.validate(candidate, "Boundary guidance", REQS, [URL])
+    lookup.lookup(URL, 5, 4000)
+    lookup.validate(candidate, "Boundary guidance", REQS, [URL])
+
+
+def test_reference_resolution_and_search():
+    from modules.techniques.critique import ReviewSnapshot
+
+    lookup = RetainedSources(DOCS)
+    tool = lookup.tool()
+    result = tool(url=URL, query="boundary", length=4000)
+    assert result["characters"] == len(DOCS[0]["text"])
+    assert result["next_start"] is None
+    assert tool(url=URL, query="not present")["matched"] is False
+    with pytest.raises(ValueError, match="Unknown"):
+        tool(url="unknown", query="boundary")
+    snapshot = ReviewSnapshot("Boundary guidance")
+    candidate = Critique(approved=False, reason="Defect", issues=[issue(
+        draft_references=list(snapshot.values), passage_ids=[result["passage_id"]],
+    )])
+    lookup.validate(candidate, "Boundary guidance", REQS, [URL])
+    assert candidate.issues[0].draft_excerpt == "Boundary guidance"
+    assert candidate.issues[0].passages[0].url == URL
+    candidate.issues[0].passage_ids = ["unknown"]
+    with pytest.raises(ValueError, match="Unknown source passage"):
+        lookup.validate(candidate, "Boundary guidance", REQS, [URL])
+
+
+@pytest.mark.parametrize("style,value", [
+    ('"Escaped \\"quote\\""', 'Escaped "quote"'),
+    ("|\n  First line\n  Second line", "First line\nSecond line"),
+    (">\n  First line\n  Second line", "First line Second line"),
+    ('"Unicode café"', "Unicode café"),
+])
+def test_snapshot_uses_existing_parser(markdown, style, value):
+    from modules.techniques.critique import ReviewSnapshot
+
+    document = markdown().replace("title: JWT handling", "title: " + style)
+    snapshot = ReviewSnapshot(document)
+    assert next(value for key, value in snapshot.values.items() if snapshot.paths[key] == "metadata.title") == value
+    assert "---" not in snapshot.render()
+    assert list(snapshot.values.values()).count("# Guidance") == 1
+
+
+def test_full_inspection_rejects_gaps_and_accepts_overlaps():
+    lookup = RetainedSources(DOCS)
+    candidate = Critique(approved=False, reason="Defect", issues=[issue(
+        absence_scope="entire_retained_source", absence_of_support="Disputed claim absent",
+    )])
+    lookup.lookup(URL, 0, 5)
+    lookup.lookup(URL, 6, 4000)
+    with pytest.raises(ValueError, match="complete inspection"):
+        lookup.validate(candidate, "Boundary guidance", REQS, [URL])
+    lookup.lookup(URL, 4, 4)
+    lookup.validate(candidate, "Boundary guidance", REQS, [URL])
+
+
+@pytest.mark.parametrize("start,length", [(-1, 10), (True, 10), (0, 0), (0, 4001)])
+def test_search_validates_bounds_even_on_miss(start, length):
+    with pytest.raises(ValueError, match="nonnegative"):
+        RetainedSources(DOCS).tool()(url=URL, start=start, length=length, query="absent")
+
+
+def test_entire_source_absence_requires_urls():
+    candidate = Critique(approved=False, reason="Defect", issues=[issue(
+        category="research_coverage", source_urls=[], absence_scope="entire_retained_source",
+    )])
+    with pytest.raises(ValueError, match="affected source URLs"):
+        RetainedSources(DOCS).validate(candidate, "Boundary guidance", REQS, [])
+
+
+def test_controller_correction_retains_lookup_without_reopening_tools(scripted_service):
+    calls = []
+
+    def runner(role, prompt, tools):
+        calls.append((prompt, tools))
+        if len(calls) == 1:
+            tools[0](url=URL, length=4000)
+            return Critique(approved=False, reason="Defect", issues=[issue(
+                draft_references=["unknown"],
+            )]).model_dump_json()
+        assert tools == []
+        assert DOCS[0]["text"] in prompt
+        assert "retained_lookup_passages" in prompt
+        return Critique(approved=True, reason="No demonstrated defect").model_dump_json()
+
+    scripted_service.service.runner = runner
+    assert assess(scripted_service.service, "Review", "Boundary guidance", REQS, DOCS, [URL]).approved
+    assert len(calls) == 2

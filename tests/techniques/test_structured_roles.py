@@ -461,3 +461,40 @@ def test_assessor_assembled_contract_and_native_correction(
         ]
         assert "Retained structured investigation" in str(model.calls[-1])
         assert "Rejected response" in str(model.calls[-1])
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("subject", ["HTTP controls", "TCP mapping", "filesystem review"])
+def test_decoded_snapshot_assembled_for_both_review_roles(
+    scripted_service, runner_factory, markdown, provider, subject,
+):
+    from modules.techniques.critique import ReviewSnapshot, assess
+
+    document = markdown().replace("title: JWT handling", "title: >\n  Decoded\n  title")
+    snapshot = ReviewSnapshot(document)
+    reference = next(key for key in snapshot.values if snapshot.paths[key] == "metadata.title")
+    critique = {"approved": False, "reason": "Missing scope", "issues": [{
+        "id": "scope", "category": "authored_content", "problem": "Title omits the requested scope",
+        "requested_correction": "Identify the scope in the title", "requirement_ids": ["method"],
+        "source_urls": [], "draft_references": [reference],
+    }]}
+    runner, model = runner_factory([critique, {"approved": True, "reason": "Concrete correction"}], provider)
+    scripted_service.service.runner = runner
+    result = assess(scripted_service.service, "Review " + subject, document,
+                    [Requirement(id="method", description=subject)], [], [])
+    assert result.issues[0].draft_excerpt == "Decoded title"
+    assembled = str(model.calls)
+    assert reference in assembled
+    assert "title: >" not in assembled
+    assert "source_inspection" in assembled
+
+
+def test_snapshot_does_not_fit_is_explicit_failure(runner_factory, monkeypatch, markdown, scripted_service):
+    from modules.techniques.critique import assess
+
+    runner, model = runner_factory([])
+    monkeypatch.setattr(roles, "require_prompt_token_limit", lambda *_: 1)
+    scripted_service.service.runner = runner
+    with pytest.raises(ValueError, match="input exceeds configured prompt limit"):
+        assess(scripted_service.service, "Review", markdown(), [], [], [])
+    assert model.calls == []

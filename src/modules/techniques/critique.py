@@ -1,14 +1,55 @@
 """Evidence references and stage-owned repairs for assembled technique reviews."""
 
+import hashlib
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 from strands import tool
 
 from modules.techniques.coverage import Attribution
-from modules.techniques.documents import toon
+from modules.techniques.documents import TechniqueDocument, toon
 
 Category = Literal["authored_content", "source_attribution", "research_coverage", "request_coverage"]
+
+
+class ReviewSnapshot:
+    """Controller references to decoded values, never YAML syntax."""
+
+    def __init__(self, markdown):
+        self.identifier = hashlib.sha256(markdown.encode()).hexdigest()
+        match = re.match(r"\A---\r?\n(.*?)\r?\n---\r?\n(.*)\Z", markdown, re.DOTALL)
+        self.values = {}
+        self.paths = {}
+        prefix = "d" + self.identifier[:12]
+        if match:
+            # Production reviews use the existing validated document parser.
+            metadata = TechniqueDocument(markdown).metadata.model_dump()
+            def register(path, value):
+                if isinstance(value, dict) and value:
+                    for key, child in value.items():
+                        register(f"{path}.{key}" if path else key, child)
+                elif isinstance(value, list) and value:
+                    for index, child in enumerate(value):
+                        register(f"{path}[{index}]", child)
+                else:
+                    reference = f"{prefix}:m{len(self.values) + 1}"
+                    self.values[reference] = value
+                    self.paths[reference] = f"metadata.{path}"
+
+            register("", metadata)
+            body = match[2]
+        else:
+            body = markdown
+        for index, line in enumerate(body.splitlines(), 1):
+            reference = f"{prefix}:b{index}"
+            self.values[reference] = line
+            self.paths[reference] = f"body.line[{index}]"
+
+    def render(self):
+        return toon("draft_references", [
+            {"reference": key, "path": self.paths[key], "value": value} for key, value in self.values.items()
+        ])
 
 
 class Passage(BaseModel):
@@ -26,7 +67,14 @@ class Issue(BaseModel):
     requested_correction: str = Field(min_length=1, max_length=2000, pattern=r"\S")
     requirement_ids: list[str] = Field(max_length=16)
     source_urls: list[str] = Field(max_length=18)
+    draft_references: list[str] = Field(
+        default_factory=list, max_length=32,
+        description="Copy complete IDs from the draft_references reference column, e.g. d0123456789ab:b3. "
+                    "A snapshot hash or field path alone is not a reference.",
+    )
+    absence_scope: Literal["inspected_passages", "entire_retained_source"] = "inspected_passages"
     draft_excerpt: str = Field(default="", max_length=4000)
+    passage_ids: list[str] = Field(default_factory=list, max_length=18)
     passages: list[Passage] = Field(default_factory=list, max_length=18)
     absence_of_support: str = Field(default="", max_length=2000)
 
@@ -56,6 +104,7 @@ class RetainedSources:
     def __init__(self, documents):
         self.texts = {row["url"]: row.get("text", "") for row in documents}
         self.references = set()
+        self.passage_ids = {}
 
     def lookup(self, url: str, start: int = 0, length: int = 2000) -> dict:
         if url not in self.texts:
@@ -67,13 +116,37 @@ class RetainedSources:
             raise ValueError("Offset is outside retained source text")
         end = min(start + length, len(text))
         self.references.add((url, start, end))
+        identifier = hashlib.sha256(f"{url}:{start}:{end}".encode()).hexdigest()
+        self.passage_ids[identifier] = Passage(url=url, start=start, end=end)
         return {"url": url, "start": start, "end": end, "text": text[start:end]}
+
+    def inspection(self):
+        return [
+            {"url": url, "characters": len(text),
+             "inspected_intervals": sorted((a, b) for u, a, b in self.references if u == url)}
+            for url, text in self.texts.items()
+        ]
 
     def tool(self):
         @tool
-        def retained_source_lookup(url: str, start: int = 0, length: int = 2000) -> dict:
-            """Read retained source text at character offsets; length must be 1 to 4000."""
-            return self.lookup(url, start, length)
+        def retained_source_lookup(url: str, start: int = 0, length: int = 2000, query: str = "") -> dict:
+            """Read retained text or locate a literal query; length must be 1 to 4000.
+
+            Search misses establish no semantic absence. Continue reading to inspect a whole source.
+            """
+            if type(start) is not int or start < 0 or type(length) is not int or not 1 <= length <= 4000:
+                raise ValueError("Use a nonnegative offset and length from 1 to 4000")
+            if query:
+                if url not in self.texts:
+                    raise ValueError("Unknown retained source URL")
+                found = self.texts[url].find(query, start)
+                if found < 0:
+                    return {"matched": False, "characters": len(self.texts[url])}
+                start = max(0, found - min(200, length // 4))
+            result = self.lookup(url, start, length)
+            identifier = hashlib.sha256(f"{url}:{start}:{result['end']}".encode()).hexdigest()
+            return {**result, "passage_id": identifier, "characters": len(self.texts[url]),
+                    "next_start": result["end"] if result["end"] < len(self.texts[url]) else None}
 
         return retained_source_lookup
 
@@ -90,7 +163,23 @@ class RetainedSources:
                 raise ValueError(f"Issue {issue.id} references unknown requirement IDs")
             if not set(issue.source_urls) <= self.texts.keys():
                 raise ValueError(f"Issue {issue.id} references unknown source URLs")
-            if issue.draft_excerpt:
+            snapshot = ReviewSnapshot(markdown)
+            if not set(issue.draft_references) <= snapshot.values.keys():
+                raise ValueError("Unknown or stale draft reference; copy a complete reference ID from the reference column")
+            if issue.absence_scope == "entire_retained_source":
+                if not issue.source_urls:
+                    raise ValueError("Entire-source absence must identify affected source URLs")
+                for url in issue.source_urls:
+                    cursor = 0
+                    for start, end in sorted((a, b) for u, a, b in self.references if u == url):
+                        if start > cursor:
+                            break
+                        cursor = max(cursor, end)
+                    if cursor < len(self.texts[url]):
+                        raise ValueError("Entire retained source absence requires complete inspection")
+            if issue.draft_references:
+                issue.draft_excerpt = "\n".join(str(snapshot.values[key]) for key in issue.draft_references)[:4000]
+            elif issue.draft_excerpt:
                 if issue.draft_excerpt not in markdown:
                     raise ValueError(f"Issue {issue.id} excerpt is not exact; quote literal Draft text with escapes")
             elif not issue.requirement_ids:
@@ -100,9 +189,15 @@ class RetainedSources:
             ):
                 raise ValueError(f"Attribution issue {issue.id} must identify affected selected URLs")
             if issue.category in {"source_attribution", "research_coverage"} and not (
-                issue.passages or issue.absence_of_support.strip()
+                issue.passages or issue.passage_ids or issue.absence_of_support.strip()
             ):
                 raise ValueError(f"Grounding issue {issue.id} needs passages or an explanation of absent support")
+            for identifier in issue.passage_ids:
+                if identifier not in self.passage_ids:
+                    raise ValueError("Unknown source passage ID")
+                passage = self.passage_ids[identifier]
+                if passage not in issue.passages:
+                    issue.passages.append(passage)
             for passage in issue.passages:
                 if (
                     passage.url not in issue.source_urls
@@ -113,23 +208,41 @@ class RetainedSources:
 
 def assess(service, prompt, markdown, requirements, documents, selected_urls):
     lookup = RetainedSources(documents)
+    snapshot = ReviewSnapshot(markdown)
+    prompt += "\n" + snapshot.render()
+    prompt += "\n" + toon("retained_sources", [
+        {"url": url, "characters": len(text)} for url, text in lookup.texts.items()
+    ])
     prompt += (
-        "\nReturn structured issues, each with a unique id, category, concrete problem, requested_correction, "
-        "requirement_ids, source_urls and draft_excerpt (short literal YAML/Markdown text). Missing content must "
+        "\nPython has already parsed and validated the metadata schema. Evaluate decoded values and "
+        "their meaning, not YAML syntax, escaping, indentation, or serialization.\nReturn structured issues, each with a unique id, category, concrete problem, requested_correction, "
+        "requirement_ids, source_urls and draft_references from the supplied snapshot. Do not copy YAML. "
+        "Missing content must "
         "reference requirements instead. Grounding and attribution complaints must identify the disputed "
         "claim and cite passages returned by retained_source_lookup, or explain absence_of_support in "
-        "retained material. Use offsets exactly as returned. Similar wording alone is not a defect. "
+        "retained material. Entire-source absence requires reading every character; partial inspection cannot "
+        "establish missing overall support. Set absence_scope explicitly. Cite passage_ids returned by lookup; "
+        "legacy offsets must be exact. Similar wording alone is not a defect. "
         "Judge whether evidence establishes the defect and whether the requested correction resolves it; "
         "do not return vague feedback. Approve with no issues; reject with at least one concrete issue. "
         "Unsupported procedure claims belong to authored_content; missing factual support belongs to "
         "research_coverage. source_attribution changes attribution only, never coverage or procedure."
     )
+    service.events.emit(
+        "technique_build_progress", stage="critique", status="review_snapshot",
+        snapshot_id=snapshot.identifier, draft_reference_count=len(snapshot.values),
+    )
     correction_used = False
     for _correction in range(2):
         candidate = None
         try:
-            candidate = service._json("technique_critic", prompt, Critique, [lookup.tool()])
+            candidate = service._json("technique_critic", prompt, Critique, [] if correction_used else [lookup.tool()])
             lookup.validate(candidate, markdown, requirements, selected_urls)
+            service.events.emit(
+                "technique_build_progress", stage="critique", status="issues_validated",
+                snapshot_id=snapshot.identifier, issues=[row.model_dump() for row in candidate.issues],
+                source_inspection=lookup.inspection(),
+            )
             if candidate.issues:
                 passages = [
                     {"url": url, "start": start, "end": end, "text": lookup.texts[url][start:end]}
@@ -140,7 +253,9 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls):
                     "Never use issue IDs as keys. Approval means ALL proposed issues are actionable and "
                     "evidence-backed, not that the technique is approved. Assess support within retained "
                     "material only; distinguish inspected passages, all retained text, and the full external "
-                    "article. Use supplied character bounds; do not infer absence beyond inspected material. "
+                    "article. Partial inspection alone cannot justify rejecting overall coverage or attribution. "
+                    "Reject source-wide absence claims disguised as inspected-passages claims. "
+                    "Use supplied character bounds; do not infer absence beyond inspected material. "
                     "Assess whether every proposed issue identifies a concrete defect and an actionable "
                     "correction. Check whether cited evidence supports each claimed defect; an explicit "
                     "absence-of-support explanation must identify the disputed factual claim and why "
@@ -158,8 +273,9 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls):
                     + toon("issues", [row.model_dump() for row in candidate.issues])
                     + "\n"
                     + toon("passages", passages)
-                    + "\nDraft:\n"
-                    + markdown
+                    + "\n" + toon("source_inspection", lookup.inspection())
+                    + "\n"
+                    + snapshot.render()
                 )
                 for assessor_attempt in range(2):
                     try:
@@ -192,6 +308,13 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls):
             correction_used = True
             if candidate is not None:
                 error.rejected_response = candidate.model_dump_json()
+            if not hasattr(error, "native_finalization_messages"):
+                prompt += "\n" + toon("retained_lookup_passages", [
+                    {"passage_id": identifier, **passage.model_dump(),
+                     "text": lookup.texts[passage.url][passage.start:passage.end]}
+                    for identifier, passage in lookup.passage_ids.items()
+                ])
+                prompt += "\n" + toon("source_inspection", lookup.inspection())
             prompt = service._repair_prompt(prompt, error)
     raise AssertionError("Unreachable")
 
