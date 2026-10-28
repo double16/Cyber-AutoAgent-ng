@@ -173,3 +173,107 @@ def test_unreferenced_plan_exhausts_correction_before_research(scripted_service)
     with pytest.raises(ValueError, match="exact original request excerpt"):
         state.service.resolve_bundle("One method")
     assert len(prompts) == 2 and not state.research_calls
+
+
+def test_planning_separates_methods_and_excludes_instruction_requirements(scripted_service):
+    state = scripted_service
+    plan_runner(state, [component()])
+    original = state.service.runner
+    captured = []
+
+    def runner(role, prompt, tools):
+        captured.append((role, prompt, tools))
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    state.service.resolve_bundle("JWT handling")
+    prompts = [prompt for role, prompt, *_ in captured if role == "technique_planner"]
+    assert prompts
+    assert "independently produce useful guidance" in prompts[0]
+    assert "must not become document requirements" in prompts[0]
+
+
+@pytest.mark.parametrize("defect", ["combined methods", "omitted SSRF", "invented excerpt deliverable"])
+@pytest.mark.parametrize("recover", [False, True])
+def test_method_review_correction_is_bounded_and_precedes_execution(scripted_service, monkeypatch, defect, recover):
+    state = scripted_service
+    original = state.service.runner
+    requests = []
+    reviews = []
+    executed = []
+    events = []
+    state.service.events.callback = events.append
+    request = ("Prompt injection and jailbreak, tool SSRF, JSON mass assignment, CVE validation. "
+               "Include preconditions, safe steps, positive results, negative results, required evidence.")
+    deliverables = ["preconditions", "safe steps", "positive results", "negative results", "required evidence"]
+    requirements = [{"id": f"d{i}", "description": item, "kind": "authored_deliverable"}
+                    for i, item in enumerate(deliverables)]
+    methods = ["Prompt injection and jailbreak", "tool SSRF", "JSON mass assignment", "CVE validation"]
+
+    def runner(role, prompt, tools):
+        if role == "technique_planner":
+            requests.append(prompt)
+            names = methods if recover and len(requests) == 2 else [request]
+            return json.dumps({"components": [{**component(str(i), method, requirements), "request_excerpt": method}
+                                               for i, method in enumerate(names)]})
+        if role == "technique_plan_reviewer":
+            reviews.append(prompt)
+            return json.dumps({"approved": recover and len(reviews) == 2,
+                               "reason": f"Correct {defect}: preserve four independent methods and user obligations"})
+        return original(role, prompt, tools)
+
+    def get(method, *args, **kwargs):
+        executed.append(method)
+        assert [row.description for row in kwargs["requirements"]] == deliverables
+        assert all(row.kind == "authored_deliverable" for row in kwargs["requirements"])
+        if method == "tool SSRF":
+            raise ValueError("Unsupported outbound mechanism")
+        return method, "Validated procedure"
+
+    state.service.runner = runner
+    monkeypatch.setattr(state.service, "get", get)
+    if recover:
+        bundle = state.service.resolve_bundle(request)
+        assert len(bundle.delivered) == 3 and len(bundle.unresolved) == 1
+        assert executed == methods
+        assert len([e for e in events if e["type"] == "technique_plan_accepted"]) == 1
+    else:
+        with pytest.raises(ValueError, match="unresolved request coverage"):
+            state.service.resolve_bundle(request)
+        assert not executed and not state.research_calls
+        assert not any(e["type"] == "technique_plan_accepted" for e in events)
+    assert len(requests) == len(reviews) == 2
+    assert defect in requests[1] and "Rejected plan" in requests[1]
+    assert "requirements derived from planner instructions" in reviews[1]
+    rejected = [e for e in events if e["type"] == "technique_plan_rejected"]
+    assert len(rejected) == (1 if recover else 2)
+    assert rejected[0]["correction_attempt"] == 0 and defect in rejected[0]["reason"]
+
+
+def test_split_component_context_keeps_shared_inputs_without_widening_purpose(scripted_service, monkeypatch):
+    state = scripted_service
+    request = "HTTP controls and TCP service mapping"
+    context = LookupContext(phase_contexts=["hypothesis_generation"], purpose=request,
+                            subjects=[{"id": "subject"}], capabilities=["source inspection"],
+                            constraints=["read only"])
+    context.observe("Shared source observation", "artifact:source", "source", "shared")
+    frozen = context.model_dump_json()
+    captured = []
+    plan_runner(state, [component("http", "HTTP controls"), component("tcp", "TCP service mapping")])
+
+    def get(method, supplied, **kwargs):
+        captured.append(supplied)
+        assert supplied.purpose == method
+        assert supplied.phase_contexts == context.phase_contexts
+        assert supplied.constraints == context.constraints
+        assert supplied.subjects == context.subjects and supplied.observations == context.observations
+        assert supplied.capabilities == context.capabilities
+        assert supplied._request_alignment.original_request == request
+        return method, "Validated method"
+
+    monkeypatch.setattr(state.service, "get", get)
+    bundle = state.service.resolve_bundle(request, context)
+    assert len(bundle.delivered) == 2 and captured[0] is not captured[1]
+    captured[0].constraints.append("component-local change")
+    assert captured[1].constraints == context.constraints
+    assert context.model_dump_json() == frozen and context._request_alignment is None

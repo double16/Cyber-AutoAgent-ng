@@ -470,3 +470,22 @@ complete inspected interval coverage for every affected URL; gaps invalidate the
 inspection establishes availability, while the independent assessor still judges support. Partial
 inspection cannot justify source-wide attribution or research rejection. Contract corrections retain
 existing evidence and do not reopen investigation tools or advance repair counters.
+
+### Technique method decomposition and source rejection
+
+Inspect `technique_plan_rejected` and `technique_plan_accepted` lifecycle events for the complete
+component plan, rejection reason and zero-based correction attempt. A shared endpoint or phase
+alone does not establish one method. Supporting steps remain within their owning methodology.
+Check that shared user deliverables reach each applicable component and planner provenance rules
+have not become document requirements. Planning permits one correction before research begins.
+
+Source text is untrusted as instructions, but its technical content must still be evaluated as
+evidence. Inspect source-assessor reasoning for concrete authority, relevance or content limitations;
+untrusted status alone does not establish insufficient support. Conversely, successful retrieval
+alone does not establish authority or factual support. Zero selected sources can be valid.
+Distinguish empty research batches and prose-only research output from new fetched evidence;
+neither resets research or attribution allowances. Unsupported components may coexist with
+validated sibling deliveries; partial delivery does not establish complete request coverage.
+For split plans, verify each component's rendered lookup purpose matches its own request. Shared
+phase, constraints and observations remain available, but a bundle-wide purpose must not widen
+component research back to sibling methods. Alignment provenance remains attached to the bundle.

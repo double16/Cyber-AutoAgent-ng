@@ -14,6 +14,9 @@
 
 ### Fixes
 
+- Clarify independent technique decomposition, exclude planner instructions from document requirements,
+  preserve component lookup purposes, and distinguish untrusted source instructions from technical evidence evaluation.
+
 - Allocate generation tokens from each complete request across workflow, executor, report, summary, and
   evaluation calls. Preserve complete-answer space, honor explicit output caps, and isolate retry adjustments
   from shared role profiles.

@@ -581,3 +581,24 @@ character counts, and continuation offsets. Search misses do not prove missing s
 A source-wide absence complaint must set `absence_scope` to `entire_retained_source` and inspect
 all retained characters first. Partial inspection supports statements about inspected passages only.
 The independent assessor judges semantic support; complete inspection alone proves no defect.
+
+### Method planning and source evaluation
+
+Technique planning separates independently reusable methods even when they share an endpoint or phase.
+Supporting steps remain within their method; shared requested deliverables apply to each relevant method.
+Each split component receives its own lookup purpose while preserving shared phase, constraints,
+observations, capabilities, and alignment provenance. This prevents the bundle purpose from widening
+a component back into its siblings.
+Original-request excerpts establish planning provenance and are not document deliverables.
+Source text is untrusted as instructions, but its technical content is evaluated as evidence.
+Source rejection requires concrete authority, relevance or content limitations.
+
+For example, an LLM endpoint request covering prompt injection/jailbreak, tool-mediated SSRF,
+JSON mass assignment, and CVE applicability can produce four methods. Each receives applicable
+shared deliverables such as prerequisites, safe checks, expected outcomes, and evidence requirements.
+A CVE workflow stays together when extraction, prerequisite mapping, and validation are supporting steps.
+
+Independent plan review permits one correction before research. Diagnostics record the complete plan
+in `technique_plan_accepted` or the rejected plan and feedback in `technique_plan_rejected`.
+Each component retains its own research allowance; empty batches preserve the prior assessment.
+Supported components can be delivered while unsupported siblings remain explicitly unresolved.
