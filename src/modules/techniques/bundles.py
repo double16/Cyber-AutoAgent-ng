@@ -76,6 +76,9 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
         "criteria mapping and validation form ONE CVE applicability methodology. SQL injection testing "
         "and TLS configuration assessment are two separately requested methods. Preserve ALL requested "
         "mechanisms and deliverables without inventing summary documents, matrices or CWE requirements. "
+        "Classify each requirement kind as factual_support, authored_deliverable or constraint. "
+        "Component requests must be complete methodologies preserving subject identifiers, mechanisms "
+        "and deliverables, never phase labels. "
         "Each component must include request_excerpt: an exact original request excerpt establishing its "
         "methodology. Remove incidental target details from reusable requests. Do not require HTTP targets, "
         "inventory, authentication or live execution. Keep a flat, deduplicated plan. "
@@ -89,11 +92,16 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
             plan = service._json(
                 "technique_planner", planning_rules + f"Original request: {request}\n" + correction, Plan,
             )
+        if len(plan.components) == 1:
+            plan.components[0].request = alignment.adjusted_request
         with service.events.stage("plan_review"):
             review = service._json(
                 "technique_plan_reviewer",
                 "Independently check the plan adds no unrelated requirements and preserves each requested "
-                "methodology. Reject splitting one workflow into supporting steps or invented deliverables. "
+                "methodology. Check each component request itself preserves its subject, mechanisms and explicit "
+                "deliverables, not only its purpose and requirements. Check requirement classifications: "
+                "facts need factual_support, procedures need authored_deliverable, restrictions need constraint. "
+                "Reject phase-only requests. Reject splitting one workflow into supporting steps or invented deliverables. "
                 + planning_rules + f"Original request: {request}\n"
                 + toon("components", [item.model_dump() for item in plan.components]), PlanReview,
             )

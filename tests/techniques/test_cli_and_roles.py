@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -117,7 +118,8 @@ def test_cli_build_and_bootstrap_reuse_storage_without_fake_target(store, monkey
     service = cli.build_service("ollama", None, str(tmp_path / "cli"), "web", diagnostics=diagnostics)
     assert service.events.callback == diagnostics.lifecycle
     assert service.runner.diagnostics is diagnostics
-    assert len(service.repository.revisions()) == 2
+    assert len(service.repository.revisions()) == len(list(
+        Path("src/modules/operation_plugins/web/techniques").glob("*.md")))
     monkeypatch.setattr(memory, "get_application_database_path", lambda: str(tmp_path / "operation.db"))
     client = SimpleNamespace(qdrant=store.qdrant, embeddings=store.embeddings, config={"embedding_dimensions": 3})
     config = SimpleNamespace(provider="ollama", model_id="model", module="ctf", target="https://assigned.invalid")
@@ -131,7 +133,10 @@ def test_cli_build_and_bootstrap_reuse_storage_without_fake_target(store, monkey
         operation_service.synchronize_module(get_module_loader(), config.module)
         assert events[-1]["type"] == "technique_sync_complete"
     assert operation_service.store.qdrant is store.qdrant
-    assert len(operation_service.repository.revisions()) == 3
+    assert len(operation_service.repository.revisions()) == sum(
+        len(list((Path("src/modules/operation_plugins") / module / "techniques").glob("*.md")))
+        for module in ("web", "ctf")
+    )
 
 
 def test_cli_build_closes_client_on_initialization_failure(store, monkeypatch, tmp_path):
@@ -194,6 +199,7 @@ def test_partial_cli_bundle_succeeds_with_incompleteness_notice(scripted_service
 
 @pytest.mark.parametrize("role,profile", [
     ("technique_request_aligner", "technique_judge"),
+    ("technique_request_reviewer", "technique_critic"),
     ("technique_coverage_reviewer", "technique_critic"),
     ("technique_planner", "technique_judge"),
     ("technique_plan_reviewer", "technique_critic"),
@@ -329,3 +335,36 @@ def test_cli_explicit_model_does_not_probe_environment_model(scripted_service, m
     assert "unused-model" not in output.err
     records = [json.loads(line) for line in next((tmp_path / "techniques/logs").glob("*.jsonl")).read_text().splitlines()]
     assert next(record for record in records if record["type"] == "startup")["model_id"] == "selected-model"
+
+
+@pytest.mark.parametrize("mode", ["success", "unknown", "export_failure"])
+def test_explicit_module_exports_and_reports_failures(
+    scripted_service, monkeypatch, capsys, tmp_path, mode,
+):
+    from modules.prompts import factory
+    from modules.techniques import module_export
+
+    revision = scripted_service.publish()
+    expected = scripted_service.service.store.document(revision).markdown
+    scripted_service.selection = revision
+    monkeypatch.setattr(cli, "build_service", lambda *args, **kwargs: scripted_service.service)
+    loader = SimpleNamespace(resolve_module_directory=lambda _: None if mode == "unknown" else tmp_path)
+    monkeypatch.setattr(factory, "get_module_loader", lambda: loader)
+    if mode == "export_failure":
+        monkeypatch.setattr(module_export, "export_bundle", Mock(side_effect=OSError("Destination read-only")))
+    status = cli.main(["JWT handling", "--provider", "ollama", "--module", "fixture",
+                       "--phase", "hypothesis_generation", "--output-dir", str(tmp_path)])
+    captured = capsys.readouterr()
+    assert status == (0 if mode == "success" else 1)
+    if mode == "unknown":
+        assert "Unknown module" in captured.err
+        assert captured.out == ""
+    else:
+        assert captured.out.startswith("# Technique bundle")
+    if mode == "success":
+        files = list((tmp_path / "techniques").glob("*.md"))
+        assert len(files) == 1
+        assert files[0].name.startswith("hypothesis-generation--")
+        assert files[0].read_text() == expected
+    elif mode == "export_failure":
+        assert "Destination read-only" in captured.err

@@ -113,7 +113,8 @@ def test_request_abstraction_precedes_research_and_phase_guides_author(scripted_
 ])
 def test_invalid_applicability_stops_before_research(scripted_service, assessment, reason):
     state = scripted_service
-    state.service.runner = lambda *_: json.dumps({
+    state.service.runner = lambda role, *_: json.dumps({"approved": True, "reason": "Preserved"}) \
+        if role == "technique_request_reviewer" else json.dumps({
         "generic_request": "Source analysis", "applicability": assessment,
         "unmet_prerequisites": [], "reason": reason,
     })
@@ -162,7 +163,7 @@ def test_final_source_provenance_is_validated_before_critic(scripted_service):
 
     def runner(role, prompt, tools):
         response = original(role, prompt, tools)
-        if role == "technique_judge" and "selected_urls" in prompt:
+        if role == "technique_source_assessor":
             data = json.loads(response)
             data["reason"] = "Contains private-target in source provenance"
             return json.dumps(data)
@@ -368,6 +369,8 @@ def test_independent_confirmation_detects_guidance_vs_task_confusion(scripted_se
     prompts = []
 
     def runner(role, prompt, tools):
+        if role == "technique_request_reviewer":
+            return json.dumps({"approved": True, "reason": "Preserved"})
         prompts.append((role, prompt))
         confirmation = role == "technique_applicability_confirmation"
         return json.dumps({

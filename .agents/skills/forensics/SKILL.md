@@ -370,7 +370,7 @@ delivery does not establish complete request coverage.
 Inspect `technique_uses.use_context` JSON for `component_purpose`, `requirements`, and `components`
 when multiple purposes reuse a revision. Unresolved components have no receipts. Receipt keys remain
 operation/task/revision; legacy empty context is unknown. Compare individual source attribution to
-overall coverage. Check repair ownership: attribution to selection, missing support to research,
+overall coverage. Check repair ownership: attribution to dedicated attribution-only repair, missing support to research,
 procedure or omitted requested content to authorship. Applicability disagreement is assessment
 uncertainty. Judge contribution against the component purpose, not final task completion.
 
@@ -387,3 +387,74 @@ the failed response and the last valid source assessment. Feedback corrections m
 user-message tool results without reopening investigation. Research prose is not a structured
 result: fetched document records remain controller-owned. Valid schema output does not establish
 semantic coverage, applicability, or demonstrated contribution.
+
+
+### Technique request preservation and coverage review
+
+Read CLI JSONL with physical newline-delimited iteration (`for line in stream: json.loads(line)`).
+Do not use Unicode-aware `str.splitlines()`: source text may contain Unicode line separators within
+valid JSON strings. Check parse failures against physical records before reporting log corruption.
+
+Inspect `technique_request_preserved` transitions and original/aligned requests for subject loss or
+invented deliverables. A single methodology keeps its aligned component request. Applicability may
+abstract incidental target details, but changes require independent preservation review.
+
+Requirement kinds distinguish `factual_support`, `authored_deliverable` and `constraint`; legacy
+requirements default to factual support. Required coverage `explanation` gives the factual basis and
+how it supports author-created procedures; `synthesis` is optional supplementary detail. Empty or
+missing synthesis must not be treated as missing research. Inspect field paths and requirement IDs
+in correction diagnostics. Persistent invalid output is a source-selection validation failure, not
+research insufficiency. Inspect schema, reference, attribution and coverage field errors within their
+owning assessment; contract failures must not be treated as missing research.
+Blocking gaps identify `claim`, `blocking_reason` and `research_question`. Compare independent review
+coverage to the preceding assessment before judging exhaustion. A missing ready-made checklist is not
+itself missing factual support. Unknown target conditions belong to `future_validation`. Factual
+contradictions still block publication. Empty research batches retain the reviewed assessment.
+
+### Technique critique and repair ownership
+
+Inspect structured issue IDs, categories, requirement references, exact draft excerpts, affected URLs
+and source passage offsets. `retained_source_lookup` reads retained documents only. Availability alone
+does not establish a defect: the critic and independent critique assessor judge evidence and actionability.
+Absence-of-support complaints identify the disputed claim. Critique assessment failure after one
+correction is distinct from author exhaustion and consumes no author attempt.
+
+Correlate lifecycle `issue_references`, `owning_stage`, `affected_urls`, `source_selection_round`,
+`author_attempts`, `research_batches` and `attribution_repairs`. Repair research coverage first,
+attribution second, authored/request content last. Every repair receives a new exact-document critique;
+new issues replace previous issues. Never apply stale issues to a changed document.
+
+Compare coverage, selected URLs, authority assessment, retrieval metadata, unaffected attribution and
+authored body before and after attribution repair: only affected attribution records may change.
+A one-row coverage response is a contract error, never a replacement validated assessment. Limits are
+three author calls, three research batches, and one attribution repair per source-selection round,
+including one contract correction. Only changed validated research assessments start new rounds;
+empty batches and attribution/schema corrections do not. Attribution repair and final critique may
+follow author call three. Publication requires exact final-document approval. No SQL migration or
+historical-record rewrite is involved.
+
+
+### Per-requirement source-selection diagnostics
+
+Source selection uses `technique_source_assessor` for URLs, attribution and authority, then
+`technique_requirement_assessor` for each assigned requirement. Independent review uses
+`technique_requirement_reviewer` and preserves source and authority decisions. Correlate
+`assessment_substage`, `requirement_id`, `source_url`, `correction_attempt` and
+`retained_assessment`. Each individual call permits one correction; sibling records are not retried.
+Python assembles coverage atomically after every requirement validates. A failed update never
+replaces the previous complete assessment, and an invalid independent review retains that assessment.
+A model-level structured-output success is schema validation, not complete controller validation or
+semantic sufficiency. Source removal and new contradictions require reassessment, not copying prior
+support. These calls do not consume author attempts, add research batches or reset attribution
+allowances. Public interfaces and SQL schemas remain unchanged.
+
+### Critique assessor correction routing
+
+The critique assessor returns one aggregate `IssueAssessment` with `approved` and `reason`.
+Approval means all proposed issues are actionable and evidence-backed. Issue IDs are data,
+never top-level decision fields. A malformed assessor result retries the assessor with its
+retained investigation, not the critic. Critic and assessor share one correction per assembled
+document review; author, research, and attribution counters do not advance for this correction.
+Contract diagnostics identify `originating_role`, `expected_schema`, `failure_kind`, and
+`correction_number`. Distinguish absence from inspected passages from absence throughout
+retained text or the complete external article. Persistent failure prevents publication.

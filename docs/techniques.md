@@ -28,7 +28,7 @@ the judge assesses meaning. Source snippets are discovery leads, not documents. 
 configured prompt limit fail explicitly, preserving exact-document critique instead of truncating it.
 Up to three author attempts are allowed, with independent critique before publication. Critique distinguishes
 authored-content, request-coverage, source-attribution and research-coverage defects. Procedure or omitted
-request content returns to the author; attribution returns to selection once per selection round; missing
+request content returns to the author; attribution receives a dedicated attribution-only repair once per source-selection round; missing
 support returns to targeted research within the component's three-batch limit. Attribution and research
 repairs retain the authored draft. Exhaustion yields an explicit unresolved result. Python owns fetched
 URLs, titles, timestamps and individual attribution, separately from overall coverage. Similar attribution
@@ -461,3 +461,109 @@ output receives one correction; continued invalidity preserves the last validate
 missing support and unresolved contradictions still block publication. Research remains limited to
 three batches, three searches and six fetch attempts per batch. Follow-ups receive prior queries and
 specific gaps; repeated query diagnostics identify ineffective research without changing these limits.
+
+### Request preservation and actionable coverage
+
+A single methodology keeps its phase-aligned request throughout planning. Applicability may abstract
+incidental target details but must preserve explicit subjects (including CVEs), mechanisms and
+deliverables. An independent reviewer checks changed requests before lookup or research. One correction
+is allowed; persistent loss of intent returns a request-preservation error.
+
+Requirements distinguish factual support, authored deliverables and constraints. Source-backed facts
+can support an original checklist, procedure, safeguards or acceptance criteria; sources need not contain
+the finished document. The required, nonblank coverage `explanation` describes the factual basis and
+how it supports constructing the procedure. `synthesis` is optional supplementary detail; missing or
+empty values do not block guidance. Blocking gaps identify an unsupported
+technical claim or contradiction, why it prevents guidance and the focused research question needed.
+Unknown target conditions remain future validation checks. Genuine factual gaps still block publication.
+
+Independent coverage review runs before further research when an assessment is insufficient. Empty
+batches retain the reviewed assessment. CLI diagnostics record validated request transitions and revised
+coverage, correlated with component and research round. The three-batch research limit is unchanged.
+
+When investigating CLI JSONL, iterate physical lines (`for line in stream: json.loads(line)`). Do not use
+`str.splitlines()`: retrieved source text can contain Unicode line separators inside valid JSON strings.
+These separators do not indicate broken JSONL. Historical records and ratings are not rewritten.
+
+Source-selection corrections identify the failed field and, for per-requirement controller checks,
+the requirement ID. JSON/schema, reference, attribution and coverage errors receive focused
+instructions while retaining the source, request, rejected response and relevant prior assessment.
+One correction is allowed per source assessment or individual requirement assessment. Persistent invalid output reports a source-selection validation failure;
+it does not establish research insufficiency. Semantic gaps still receive independent coverage review.
+
+### Evidence-backed critique and stage-owned repair
+
+The critic reviews the exact assembled document and returns structured issues with unique IDs,
+repair category, concrete problem, requested correction, requirement IDs, affected source URLs,
+and an exact draft excerpt where content exists. Missing-content issues reference requirements.
+A read-only `retained_source_lookup` tool returns at most 4,000 characters per call with
+controller-owned URL and character offsets. It cannot search or fetch new material. Grounding
+complaints cite returned passages or explicitly explain the absence of support for a disputed claim.
+Python validates references and excerpts; an independent semantic assessor judges whether issues
+are concrete, actionable and supported. Approval with issues and rejection without issues are invalid.
+Each assembled-document review allows one critique correction, consuming no author or research call.
+
+Repairs run one owning stage at a time: research coverage, then attribution, then authored or omitted
+request content. Every repair is followed by reassembly and independent critique; the new issues
+replace the previous issues. Stale issues never drive another repair against a changed document.
+
+Attribution repair assesses each affected selected source separately and returns exactly one replacement
+attribution for that URL. One contract correction is permitted. Python merges only those records;
+selected URLs, coverage, authority assessment, retrieval metadata, unaffected attribution and authored
+content remain unchanged. Unsupported procedure claims require authorship; missing factual support
+requires research. Attribution repair cannot initiate research or replace coverage.
+
+Counters are independent per component: three author calls, three research batches, and one attribution
+repair per source-selection round. Only a changed validated assessment produced by research starts a
+new source-selection round. Empty batches, schema corrections and attribution edits cannot reset that
+allowance. Research that changes only attribution also retains the current round.
+Attribution repair and final critique remain available after the third author call while
+retaining the draft. Further authorship reports exhaustion. Repeated attribution rejection reports an
+explicit unresolved result. Publication requires approval of the exact final assembled document.
+
+The final assembled source selection validates missing, unexpected and duplicate requirement IDs
+separately. Models return individual records; Python alone assembles complete coverage. Incomplete
+updates never replace a complete validated assessment. Lifecycle diagnostics include `issue_references`, `owning_stage`,
+`affected_urls`, `source_selection_round`, `author_attempts`, `research_batches` and
+`attribution_repairs`. No historical records or SQL schema are changed.
+
+### Per-requirement source assessment
+
+Source selection first validates selected URLs, attribution and source authority. Each requirement
+then receives its own structured support assessment and at most one correction. Python assembles
+coverage only after all records validate; incomplete updates never replace the prior complete
+assessment. Independent coverage review uses the same individual-record boundary. These calls do
+not consume author attempts or additional research batches. This reduces output complexity at the
+cost of additional model calls. Each new document is committed only after all requirements validate.
+Corrections preserve valid sibling records. Removing a selected source requires reassessing support;
+prior rows are never copied automatically. Independent review retains source selection, attribution
+and authority decisions exactly; an invalid review retains the preceding complete assessment.
+
+Diagnostics identify `assessment_substage`, `requirement_id`, `source_url`, `correction_attempt` and
+`retained_assessment`. A role-level structured-output success establishes schema validity only;
+controller validation establishes references and completeness, and model assessment judges support.
+These calls do not reset attribution allowances. Oversized prompts fail explicitly under the existing
+prompt limit rather than dropping requirements or source text silently.
+
+### CLI module files
+
+Explicit `--module` saves each delivered technique, including reused guidance, under the
+selected module's `techniques/` directory. Omitting it keeps the default web lookup context
+without writing module files. `--output-dir` still controls runtime storage and logs.
+Files contain authored metadata and Markdown only; runtime lineage, revision, and sentiment
+fields and bundle commentary are excluded.
+
+Names use `<title-slug>.md`, or `<phase>--<title-slug>.md` when `--phase` is supplied.
+For example, `--phase vulnerability_verification` prefixes `vulnerability-verification--`.
+Multiple phases use canonical order joined by `+`. Identical files are reused; differing
+files are preserved and new content receives a SHA-256 suffix. Partial bundles save delivered
+components only. Export errors return exit code 1 while retaining global revisions and any
+files already saved. Paths are reported through CLI diagnostics.
+
+Critique assessment uses an aggregate `{approved, reason}` decision: approval means every
+proposed issue is actionable and evidence-backed. Malformed assessor decisions are corrected
+at the assessor stage with the same critique and retained evidence; the critic is not restarted.
+Critic and assessor share one correction per assembled-document review. Corrections consume
+no author, research, or attribution attempts. Persistent failure names the originating assessor
+and expected schema; no document is published. Support judgments concern retained material,
+not unseen portions of an external article.

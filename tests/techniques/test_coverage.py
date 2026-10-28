@@ -4,6 +4,7 @@ import copy
 import json
 
 import pytest
+from conftest import assessment_output
 
 from modules.techniques.coverage import Requirement, SourceSelection, select_sources
 
@@ -26,9 +27,11 @@ def test_selection_supports_more_than_three_sources_and_retains_individual_attri
     seen = []
 
     def runner(role, prompt, tools):
-        if role == "technique_judge" and "selected_urls" in prompt:
-            seen.append(prompt)
-            return json.dumps(selection(urls[:len(seen)], ["Need other mechanisms"] if len(seen) < 4 else []))
+        if role in {"technique_source_assessor", "technique_requirement_assessor"}:
+            if role == "technique_source_assessor":
+                seen.append(prompt)
+            return assessment_output(role, prompt, selection(urls[:len(seen)],
+                                     ["Need other mechanisms"] if len(seen) < 4 else []))
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -68,14 +71,16 @@ def test_selection_repairs_invalid_references_once(scripted_service):
     prompts = []
 
     def runner(role, prompt, tools):
-        prompts.append(prompt)
-        return json.dumps(selection(["https://unknown.example" if len(prompts) == 1 else "https://vendor.example/doc"]))
+        if role == "technique_source_assessor":
+            prompts.append(prompt)
+        url = "https://unknown.example" if len(prompts) == 1 else "https://vendor.example/doc"
+        return assessment_output(role, prompt, selection([url]))
 
     state.service.runner = runner
     selected = select_sources(state.service, "Method", [Requirement(id="method", description="Method")],
                               [{"url": "https://vendor.example/doc", "text": "support"}])
     assert selected.sufficient
-    assert "Repair invalid selection" in prompts[-1]
+    assert "not fetched" in prompts[-1] and "current output schema" in prompts[-1]
     with pytest.raises(ValueError, match="any usable"):
         select_sources(state.service, "Method", [], [])
 
@@ -95,9 +100,11 @@ def test_targeted_research_follows_gaps_and_deduplicates_documents(scripted_serv
             return [document, copy.copy(document)]
 
     def runner(role, prompt, tools):
-        if role == "technique_judge" and "selected_urls" in prompt:
+        if role in {"technique_source_assessor", "technique_requirement_assessor"}:
             urls = [f"https://vendor.example/{n}" for n in range(1, len(requests) + 1)]
-            return json.dumps(selection(urls, ["Missing requested CVE version coverage"] if len(requests) == 1 else []))
+            return assessment_output(role, prompt, selection(
+                urls, ["Missing requested CVE version coverage"] if len(requests) == 1 else [],
+            ))
         return original(role, prompt, tools)
 
     state.service.research = Research()
@@ -115,8 +122,10 @@ def test_contradictions_cannot_be_solved_by_three_documents(scripted_service):
     original = state.service.runner
 
     def runner(role, prompt, tools):
-        if role == "technique_judge" and "selected_urls" in prompt:
-            return json.dumps(selection(state.source_urls, ["Version sources contradict requested behavior"]))
+        if role in {"technique_source_assessor", "technique_requirement_assessor"}:
+            return assessment_output(role, prompt, selection(
+                state.source_urls, ["Version sources contradict requested behavior"],
+            ))
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -132,34 +141,34 @@ def test_malformed_coverage_retry_has_parser_location_and_retains_previous_suppo
     state = scripted_service
     urls = [f"https://vendor.example/{index}" for index in range(3)]
     first = selection(urls[:1], ["Need configuration prerequisites"])
-    malformed = json.dumps(selection(urls[:2])).replace('"gaps": []}', '"gaps": []"}')
-    second_malformed = malformed.replace(": ", ":")
-    responses = iter([json.dumps(first), malformed,
-                      json.dumps(selection(urls[:2])) if recover else second_malformed,
-                      json.dumps(selection(urls))])
+    malformed = json.dumps(selection(urls[:2])["coverage"][0]).replace('"gaps": []}', '"gaps": []"}')
     prompts = []
+    sources = []
 
     def run(role, prompt, tools):
-        prompts.append(prompt)
-        return next(responses)
+        if role == "technique_source_assessor":
+            sources.append(prompt)
+            return assessment_output(role, prompt, selection(urls[:len(sources)]))
+        if len(sources) == 2:
+            prompts.append(prompt)
+            if len(prompts) == 1 or not recover:
+                return malformed
+        return assessment_output(role, prompt, first if len(sources) == 1 else selection(urls[:len(sources)]))
 
     state.service.runner = run
     documents = [{"url": url, "text": "configuration prerequisites", "title": url} for url in urls]
     if recover:
         result = select_sources(state.service, "Prerequisite methodology",
                                 [Requirement(id="method", description="Prerequisites")], documents)
-        assert result.selected_urls == urls
-        assert len(prompts) == 4
+        assert result.selected_urls == urls and len(sources) == 3
     else:
-        with pytest.raises(json.JSONDecodeError, match="Expecting ',' delimiter"):
+        with pytest.raises(ValueError, match="Source-selection validation failed.*Expecting ',' delimiter"):
             select_sources(state.service, "Prerequisite methodology",
                            [Requirement(id="method", description="Prerequisites")], documents)
-        assert len(prompts) == 3
-    assert malformed in prompts[2]
-    assert "Expecting ',' delimiter" in prompts[2] and "column" in prompts[2]
-    for prompt in prompts[1:3]:
-        assert "Need configuration prerequisites" in prompt
-        assert first["attributions"][0]["reason"] in prompt
+        assert len(sources) == 2
+    assert len(prompts) == 2 and malformed in prompts[1]
+    assert "Expecting ',' delimiter" in prompts[1] and "column" in prompts[1]
+    assert all("Need configuration prerequisites" in prompt for prompt in prompts)
 
 
 @pytest.mark.parametrize("empty_round", [1, 2, 3])
@@ -179,10 +188,11 @@ def test_empty_batches_preserve_last_valid_assessment(scripted_service, empty_ro
             return [{"url": f"https://vendor.example/{len(batches)}", "title": "Source", "text": "Support"}]
 
     def runner(role, prompt, tools):
-        if role == "technique_judge" and "selected_urls" in prompt:
-            assessments.append(prompt)
+        if role in {"technique_source_assessor", "technique_requirement_assessor"}:
+            if role == "technique_source_assessor":
+                assessments.append(prompt)
             urls = [f"https://vendor.example/{i}" for i in range(1, len(batches) + 1) if i != empty_round]
-            return json.dumps(selection(urls, ["Missing configuration support"]))
+            return assessment_output(role, prompt, selection(urls, ["Missing configuration support"]))
         return original(role, prompt, tools)
 
     state.service.research = Research()
@@ -223,3 +233,16 @@ def test_empty_source_batch_does_not_rejudge_previous_selection(scripted_service
     result = select_sources(scripted_service.service, "Method", [Requirement(id="method", description="Method")],
                             [], previous)
     assert result is previous and not scripted_service.calls
+
+
+def test_complete_selection_reports_missing_unexpected_and_duplicate_identifiers():
+    requirements = [Requirement(id=f"r{index}", description=f"Requirement {index}") for index in range(7)]
+    payload = selection(["https://vendor.example/advisory"])
+    payload["coverage"] = [dict(payload["coverage"][0], requirement_id=key) for key in ["r0", "r0", "unknown"]]
+    with pytest.raises(ValueError) as caught:
+        SourceSelection.model_validate(payload).validate_references(
+            [{"url": "https://vendor.example/advisory"}], requirements,
+        )
+    assert "Missing IDs: ['r1', 'r2', 'r3', 'r4', 'r5', 'r6']" in str(caught.value)
+    assert "unexpected IDs: ['unknown']" in str(caught.value)
+    assert "duplicate IDs: ['r0']" in str(caught.value)

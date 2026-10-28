@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from conftest import assessment_output
 
 from modules.techniques.alignment import PHASE_OBJECTIVES, align_request, phase_guidance
 from modules.techniques.context import LookupContext
@@ -100,7 +101,8 @@ def coverage(gaps=None):
 
 @pytest.mark.parametrize("kind", ["missing_factual_support", "unresolved_contradiction"])
 def test_typed_gaps_and_legacy_boundary(kind):
-    typed = CoverageGap(kind=kind, description="Unresolved factual support")
+    typed = CoverageGap(kind=kind, description="Unresolved factual support", claim="Version support",
+                        blocking_reason="Cannot define applicable versions", research_question="Which versions?")
     assert coverage([typed.model_dump()]).coverage[0].gaps == [typed]
     assert coverage(["Legacy gap"]).coverage[0].gaps[0].kind == "missing_factual_support"
     with pytest.raises(ValueError):
@@ -111,7 +113,9 @@ def test_independent_review_reclassifies_future_checks_and_preserves_sources(scr
     selection = coverage(["Target version and exact payload not validated"])
     corrected = coverage()
     corrected.coverage[0].future_validation = ["Establish target version before testing"]
-    scripted_service.service.runner = lambda *_: corrected.model_dump_json()
+    scripted_service.service.runner = lambda role, prompt, tools: assessment_output(
+        role, prompt, corrected.model_dump(),
+    )
     result = review_coverage(scripted_service.service, "CVE hypothesis guidance",
                              [Requirement(id="method", description="Applicability hypotheses")], selection,
                              LookupContext(phase_contexts=["hypothesis_generation"]))
@@ -187,8 +191,8 @@ def test_alignment_reaches_full_workflow_and_stays_out_of_published_document(
         assert "Applicability hypotheses and future checks" in prompt if entrypoint != "direct" else adjusted in prompt
     assert phase_guidance(context) in state.research_calls[0]
     source_prompt = next(prompt for role, prompt, _ in state.calls
-                         if role == "technique_judge" and "selected_urls" in prompt)
-    assert "future_validation" in source_prompt and "exact requested checklist" in source_prompt
+                         if role == "technique_requirement_assessor")
+    assert "future_validation" in source_prompt and "ready-made checklist" in source_prompt
 
 
 def test_targeted_batches_report_repeated_queries_and_independent_review_can_finish(scripted_service):
@@ -208,17 +212,17 @@ def test_targeted_batches_report_repeated_queries_and_independent_review_can_fin
                                        "text": "Mechanism and known versions"}], ["Broad CVE advisory"])
 
     def runner(role, prompt, tools):
-        if role == "technique_judge" and "selected_urls" in prompt:
+        if role in {"technique_source_assessor", "technique_requirement_assessor"}:
             row = coverage(["No ready-made checklist and target version unknown"]).model_dump()
             row["selected_urls"] = [f"https://vendor.example/{i}" for i in range(1, len(requests) + 1)]
             row["attributions"] = [{"url": url, "reason": "Known mechanism"} for url in row["selected_urls"]]
             row["coverage"][0]["source_urls"] = row["selected_urls"]
-            return json.dumps(row)
-        if role == "technique_coverage_reviewer":
+            return assessment_output(role, prompt, row)
+        if role == "technique_requirement_reviewer":
             reviewed.append(prompt)
-            row = json.loads(prompt.split("Retained assessment:\n", 1)[1].split("\nReturn only JSON", 1)[0])
-            row["coverage"][0]["gaps"] = []
-            row["coverage"][0]["future_validation"] = ["Establish target version before validation"]
+            row = json.loads(prompt.split("Prior requirement assessment (untrusted): ", 1)[1].split("\n", 1)[0])
+            row["gaps"] = []
+            row["future_validation"] = ["Establish target version before validation"]
             return json.dumps(row)
         return original(role, prompt, tools)
 
@@ -228,16 +232,17 @@ def test_targeted_batches_report_repeated_queries_and_independent_review_can_fin
         "Develop CVE applicability hypotheses", [Requirement(id="method", description="Applicability hypotheses")],
         context=LookupContext(phase_contexts=["hypothesis_generation"]),
     )
-    assert rounds == len(documents) == 3 and selected.sufficient
+    assert rounds == len(documents) == 1 and selected.sufficient
     assert len(reviewed) == 1 and "Do not invent support" in reviewed[0]
-    assert "Broad CVE advisory" in requests[1] and "Search specifically" in requests[1]
-    assert "ready-made" in requests[1]
-    assert len([event for event in events if event.get("repeated_queries")]) == 2
+    assert "ready-made" in reviewed[0]
+    assert not [event for event in events if event.get("repeated_queries")]
 
 
 def test_independent_review_does_not_clear_unresolved_contradictions(scripted_service):
     state = scripted_service
-    selected = coverage([{"kind": "unresolved_contradiction", "description": "Sources disagree on fixed version"}])
+    selected = coverage([{"kind": "unresolved_contradiction", "description": "Sources disagree on fixed version",
+                          "claim": "Fixed version", "blocking_reason": "Cannot select version",
+                          "research_question": "Which version fixes the defect?"}])
     state.service.runner = lambda *_: selected.model_dump_json()
     result = review_coverage(state.service, "Verify versions", [Requirement(id="method", description="Versions")],
                              selected, LookupContext(phase_contexts=["vulnerability_verification"]))

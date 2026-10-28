@@ -48,7 +48,7 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("request")
-    parser.add_argument("--module", default="web")
+    parser.add_argument("--module", help="Save delivered techniques into this module")
     parser.add_argument("--provider", choices=["bedrock", "ollama", "litellm", "gemini"])
     parser.add_argument("--model")
     parser.add_argument("--output-dir")
@@ -86,7 +86,14 @@ def main(argv: list[str] | None = None) -> int:
             diagnostics.open(output_dir, args.log_file)
             diagnostics.emit("startup", message="Initializing technique service", provider=provider,
                              model_id=model, module=args.module, phase_contexts=args.phase)
-            service = build_service(provider, model, output_dir, args.module, diagnostics=diagnostics)
+            module_dir = None
+            if args.module is not None:
+                from modules.prompts.factory import get_module_loader
+
+                module_dir = get_module_loader().resolve_module_directory(args.module)
+                if module_dir is None:
+                    raise ValueError(f"Unknown module: {args.module}")
+            service = build_service(provider, model, output_dir, args.module or "web", diagnostics=diagnostics)
             bundle = service.resolve_bundle(args.request, context=context)
             markdown = bundle.render()
             diagnostics.emit(
@@ -94,6 +101,15 @@ def main(argv: list[str] | None = None) -> int:
                 status="partial" if bundle.unresolved else "completed",
                 delivered_count=len(bundle.delivered), unresolved_count=len(bundle.unresolved),
             )
+        if module_dir is not None:
+            from modules.techniques.module_export import export_bundle
+
+            try:
+                for path in export_bundle(service.store, bundle, module_dir, args.phase):
+                    diagnostics.emit("module_document_saved", message=f"Technique file: {path}", path=str(path))
+            except Exception:
+                print(markdown, end="" if markdown.endswith("\n") else "\n")
+                raise
         print(markdown, end="" if markdown.endswith("\n") else "\n")
         return 0
     except Exception as error:

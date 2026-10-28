@@ -38,12 +38,14 @@ class TechniqueModel(Model):
             raise payload
         yield {"metadata": {"usage": {"inputTokens": 12, "outputTokens": 8, "totalTokens": 20},
                             "metrics": {"latencyMs": 1}}}
-        yield {"output": validate_structured_json(output_model, payload if isinstance(payload, str) else json.dumps(payload))}
+        yield {"output": validate_structured_json(
+            output_model, payload if isinstance(payload, str) else json.dumps(payload),
+        )}
 
     async def stream(self, messages, tool_specs=None, system_prompt=None, tool_choice=None, **kwargs):
         self.calls.append(("tool", deepcopy(tool_specs), deepcopy(messages), system_prompt))
         yield {"messageStart": {"role": "assistant"}}
-        if tool_specs and tool_specs[0]["name"] == "inspect_evidence":
+        if tool_specs and tool_specs[0]["name"] in {"inspect_evidence", "retained_source_lookup"}:
             if self.investigated:
                 yield {"contentBlockDelta": {"delta": {"text": "Read-only evidence shows contribution."},
                                              "contentBlockIndex": 0}}
@@ -51,7 +53,9 @@ class TechniqueModel(Model):
                 yield {"messageStop": {"stopReason": "end_turn"}}
                 return
             self.investigated = True
-            payload, name = {}, "inspect_evidence"
+            name = tool_specs[0]["name"]
+            payload = ({"url": "https://vendor.example/advisory", "start": 0, "length": 20}
+                       if name == "retained_source_lookup" else {})
         else:
             payload, name = next(self.payloads), tool_specs[0]["name"]
         yield {"contentBlockStart": {"start": {"toolUse": {"toolUseId": "result", "name": name}},
@@ -178,7 +182,8 @@ def test_missing_or_invalid_sdk_output_never_falls_back_to_text(monkeypatch, mis
     monkeypatch.setattr(roles, "create_strands_model", lambda *_: object())
     monkeypatch.setattr(roles, "model_uses_server_side_state", lambda _: False)
     monkeypatch.setattr(roles, "create_agent_with_stateful_retry", lambda *_: SimpleNamespace())
-    monkeypatch.setattr(roles, "invoke_structured", lambda *_args, **_kwargs: SimpleNamespace(structured_output=missing))
+    monkeypatch.setattr(roles, "invoke_structured",
+                        lambda *_args, **_kwargs: SimpleNamespace(structured_output=missing))
     with pytest.raises(ValueError):
         roles.TechniqueRoleRunner("ollama", "fixture").structured("technique_judge", "Select", Decision, [])
 
@@ -260,8 +265,12 @@ def test_native_source_selection_corrects_malformed_arrays_with_retained_coverag
                               "explanation": "Supported mechanism", "gaps": []}],
                 "reason": "Authoritative method support", "authoritative_sufficient": True}
 
-    malformed = json.dumps(payload(urls)).replace('"gaps": []}', '"gaps": []"}')
-    runner, model = runner_factory([payload(urls[:1]), malformed, payload(urls) if recover else malformed])
+    first, second = payload(urls[:1]), payload(urls)
+    first_source = {key: value for key, value in first.items() if key != "coverage"}
+    second_source = {key: value for key, value in second.items() if key != "coverage"}
+    malformed = json.dumps(second["coverage"][0]).replace('"gaps": []}', '"gaps": []"}')
+    runner, model = runner_factory([first_source, first["coverage"][0], second_source, malformed,
+                                   second["coverage"][0] if recover else malformed])
     service = scripted_service.service
     service.runner = runner
     documents = [{"url": url, "title": url, "text": "Method guidance"} for url in urls]
@@ -269,9 +278,9 @@ def test_native_source_selection_corrects_malformed_arrays_with_retained_coverag
     if recover:
         assert select_sources(service, "Review prerequisites", requirements, documents).selected_urls == urls
     else:
-        with pytest.raises(StructuredOutputValidationError):
+        with pytest.raises(ValueError, match="Source-selection validation failed after one correction"):
             select_sources(service, "Review prerequisites", requirements, documents)
-    assert len(model.calls) == 3 and all(row[0] == "native" for row in model.calls)
+    assert len(model.calls) == 5 and all(row[0] == "native" for row in model.calls)
     correction = str(model.calls[-1][2])
     assert "Validation failure" in correction and "json_invalid" in correction
     assert "Authoritative method support" in correction and urls[0] in correction
@@ -319,3 +328,136 @@ def test_phase_alignment_and_coverage_review_use_real_structured_transport(runne
                              []).adjusted_request == alignment["adjusted_request"]
     assert runner.structured("technique_coverage_reviewer", "Review factual support", SourceSelection, []).sufficient
     assert len(model.calls) == 2
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+def test_request_review_and_actionable_gap_use_canonical_transports(runner_factory, provider):
+    from modules.techniques.bundles import PlanReview
+    from modules.techniques.coverage import SourceSelection
+
+    gap = {"kind": "unresolved_contradiction", "description": "Sources disagree",
+           "claim": "Fixed version", "blocking_reason": "Cannot define version check",
+           "research_question": "Which release fixed this mechanism?"}
+    payload = {"selected_urls": [], "attributions": [], "coverage": [{"requirement_id": "method",
+               "source_urls": [], "explanation": "Contradiction remains", "gaps": [gap]}],
+               "authoritative_sufficient": False, "reason": "Requires factual research"}
+    runner, model = runner_factory([{"approved": False, "reason": "CVE subject omitted"}, payload], provider)
+    assert not runner.structured("technique_request_reviewer", "Preserve requested CVE", PlanReview, []).approved
+    result = runner.structured("technique_coverage_reviewer", "Review contradiction", SourceSelection, [])
+    assert not result.sufficient and result.coverage[0].gaps[0].claim == "Fixed version"
+    assert len(model.calls) == 2
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("synthesis", [None, "", "Additional procedure design detail"])
+def test_canonical_explanation_survives_native_and_schema_tool_transport(runner_factory, provider, synthesis):
+    from modules.techniques.coverage import COVERAGE_RULES, SourceSelection
+
+    url = "https://vendor.example/advisory"
+    payload = {"selected_urls": [url], "attributions": [{"url": url, "reason": "Primary mechanism source"}],
+               "coverage": [{"requirement_id": "method", "source_urls": [url],
+                    "explanation": "Affected versions and prerequisites support constructing applicability "
+                                   "checks and confirmation criteria without requiring completed validation.",
+                    "gaps": []}], "reason": "Sufficient factual basis", "authoritative_sufficient": True}
+    if synthesis is not None:
+        payload["coverage"][0]["synthesis"] = synthesis
+    runner, model = runner_factory([payload], provider)
+    result = runner.structured("technique_judge", COVERAGE_RULES, SourceSelection, [])
+    result.validate_references([{"url": url}], [
+        Requirement(id="method", description="Verification method", kind="authored_deliverable")])
+    assert result.sufficient and len(model.calls) == 1
+    assert result.coverage[0].synthesis == (synthesis or "")
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("subject", ["HTTP request controls", "network service mapping", "source/filesystem review"])
+def test_evidence_critique_and_attribution_repair_transports(runner_factory, provider, subject):
+    from modules.techniques.critique import AttributionReplacement, Critique, IssueAssessment, RetainedSources
+
+    url = "https://vendor.example/advisory"
+    payload = {"approved": False, "reason": "Scope overstated", "issues": [{
+        "id": "scope", "category": "source_attribution", "problem": "Attribution claims unconditional support",
+        "requested_correction": "Describe the prerequisite", "requirement_ids": ["method"],
+        "source_urls": [url], "draft_excerpt": "Unconditional support",
+        "passages": [{"url": url, "start": 0, "end": 20}],
+    }]}
+    replacement = {"attributions": [{"url": url, "reason": "Requires a protected boundary"}]}
+    runner, model = runner_factory([payload, {"approved": True, "reason": "Concrete source-backed defect"},
+                                    replacement], provider)
+    lookup = RetainedSources([{"url": url, "text": "A protected boundary is required."}])
+    result = runner.structured("technique_critic", "Review " + subject, Critique, [lookup.tool()])
+    lookup.validate(result, "Unconditional support", [Requirement(id="method", description=subject)], [url])
+    assert runner.structured("technique_critique_assessor", "Assess " + subject, IssueAssessment, []).approved
+    repaired = runner.structured("technique_attribution_repair", "Repair " + subject, AttributionReplacement, [])
+    assert repaired.attributions[0].url == url
+    assert lookup.references == {(url, 0, 20)}
+    assert subject in str(model.calls)
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"], ids=["native", "schema-tool"])
+@pytest.mark.parametrize("subject", [
+    "HTTP response comparison", "TCP service identification", "filesystem source review",
+])
+def test_per_requirement_transport_assembles_seven_rows_per_document(
+    scripted_service, runner_factory, provider, subject,
+):
+    from modules.techniques.coverage import SourceAssessment, Support, review_coverage
+
+    urls = [f"https://vendor.example/{i}" for i in range(3)]
+    requirements = [Requirement(id=f"r{i}", description=f"{subject} requirement {i}") for i in range(7)]
+    payloads = []
+    for index in range(3):
+        selected = urls[:index + 1]
+        payloads.append({"selected_urls": selected,
+                         "attributions": [{"url": url, "reason": "Primary source"} for url in selected],
+                         "reason": "Combined authority", "authoritative_sufficient": True})
+        payloads.extend({"requirement_id": row.id, "source_urls": selected,
+                         "explanation": f"Documented basis for {row.id}", "gaps": []} for row in requirements)
+    payloads.extend({"requirement_id": row.id, "source_urls": urls,
+                     "explanation": f"Reviewed basis for {row.id}", "gaps": []} for row in requirements)
+    runner, model = runner_factory(payloads, provider)
+    scripted_service.service.runner = runner
+    selected = select_sources(scripted_service.service, subject, requirements,
+                              [{"url": url, "text": "Documented mechanism and limitations"} for url in urls])
+    reviewed = review_coverage(scripted_service.service, subject, requirements, selected)
+    assert reviewed.sufficient and [row.requirement_id for row in reviewed.coverage] == [r.id for r in requirements]
+    assert reviewed.selected_urls == selected.selected_urls and reviewed.attributions == selected.attributions
+    assert len(model.calls) == 31
+    assert all(call[0] == ("native" if provider == "ollama" else "tool") for call in model.calls)
+    if provider == "ollama":
+        assert [call[1] for call in model.calls].count(SourceAssessment) == 3
+        assert [call[1] for call in model.calls].count(Support) == 28
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("subject", ["HTTP controls", "TCP service mapping", "filesystem review"])
+def test_assessor_assembled_contract_and_native_correction(
+    scripted_service, runner_factory, provider, subject,
+):
+    from modules.techniques.critique import assess
+
+    url = "https://vendor.example/advisory"
+    critique = {"approved": False, "reason": "Concrete defect", "issues": [{
+        "id": "auth-001", "category": "authored_content", "problem": "Missing negative control",
+        "requested_correction": "Add a negative control", "requirement_ids": ["method"],
+        "source_urls": [], "draft_excerpt": subject,
+    }]}
+    payloads = [critique]
+    if provider == "ollama":
+        payloads.append({"auth-001": {"approved": True}})
+    payloads.append({"approved": True, "reason": "Specific omission and actionable correction"})
+    runner, model = runner_factory(payloads, provider)
+    scripted_service.service.runner = runner
+    result = assess(scripted_service.service, "Review " + subject, subject,
+                    [Requirement(id="method", description=subject)],
+                    [{"url": url, "text": "A protected boundary is required."}], [url])
+    assert not result.approved
+    calls = str(model.calls)
+    assert "Never use issue IDs as keys" in calls
+    assert "all retained text" in calls
+    if provider == "ollama":
+        assert [row[1].__name__ for row in model.calls if row[0] == "native"] == [
+            "Critique", "IssueAssessment", "IssueAssessment",
+        ]
+        assert "Retained structured investigation" in str(model.calls[-1])
+        assert "Rejected response" in str(model.calls[-1])

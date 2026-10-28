@@ -74,6 +74,12 @@ class TechniqueRoleRunner:
             raise ValueError(f"Technique {role} input exceeds configured prompt limit; narrow the component")
         profile_role = {
             "technique_request_aligner": "technique_judge",
+            "technique_source_assessor": "technique_judge",
+            "technique_requirement_assessor": "technique_judge",
+            "technique_requirement_reviewer": "technique_critic",
+            "technique_attribution_repair": "technique_judge",
+            "technique_critique_assessor": "technique_critic",
+            "technique_request_reviewer": "technique_critic",
             "technique_coverage_reviewer": "technique_critic",
             "technique_planner": "technique_judge",
             "technique_plan_reviewer": "technique_critic",

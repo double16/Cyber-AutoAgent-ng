@@ -6,6 +6,7 @@ from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
+from conftest import critique_result
 from pydantic import ValidationError
 
 from modules.techniques.documents import TechniqueDocument
@@ -118,8 +119,8 @@ def test_missing_technique_runs_separate_research_selection_author_and_critic(sc
     assert "revision_id:" in markdown
     assert state.service.repository.get(revision)["active"]
     assert len(state.research_calls) == 1 and state.research_calls[0].startswith("JWT handling\n")
-    assert [role for role, _, _ in state.calls] == ["technique_judge", "technique_author", "technique_critic"]
-    assert all(not tools for _, _, tools in state.calls)
+    assert [role for role, _, _ in state.calls] == ["technique_source_assessor", "technique_requirement_assessor", "technique_author", "technique_critic"]
+    assert all(bool(tools) == (role == "technique_critic") for role, _, tools in state.calls)
     author_prompt = next(prompt for role, prompt, _ in state.calls if role == "technique_author")
     critic_prompt = next(prompt for role, prompt, _ in state.calls if role == "technique_critic")
     assert "Return only JSON" in author_prompt
@@ -402,7 +403,7 @@ def test_mixed_failures_report_final_stage_and_redact_critic_reason(scripted_ser
             attempts.append(prompt)
             return "bad JSON" if len(attempts) == 1 else runner(role, prompt, tools)
         if role == "technique_critic":
-            return json.dumps({"approved": False, "reason": "Fix internal-target.example controls"})
+            return critique_result(reason="Fix internal-target.example controls")
         return runner(role, prompt, tools)
 
     state.service.runner = run
@@ -435,8 +436,8 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
     def runner(role, prompt, tools):
         if role == "technique_critic":
             critiques.append(prompt)
-            return json.dumps({"approved": len(critiques) > 1, "category": category, "reason": "Fix coverage"})
-        if role == "technique_judge" and "selected_urls" in prompt:
+            return critique_result(len(critiques) > 1, category, "Fix coverage", state.source_urls)
+        if role == "technique_source_assessor":
             selections.append(prompt)
         return original(role, prompt, tools)
 
@@ -448,7 +449,9 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
     assert len(state.research_calls) == expected_research
     assert len(critiques) == 2
     if category == "source_attribution":
-        assert len(selections) == 2 and "Fix coverage" in selections[-1]
+        assert len(selections) == 1
+        assert any(role == "technique_attribution_repair" and "Fix coverage" in prompt
+                   for role, prompt, _ in state.calls)
     if category in {"source_attribution", "research_coverage"}:
         assert critiques[0].split("# Guidance")[1] == critiques[1].split("# Guidance")[1]
 
@@ -463,7 +466,7 @@ def test_owned_repair_exhaustion_is_explicit_without_reauthoring(scripted_servic
 
     def runner(role, prompt, tools):
         if role == "technique_critic":
-            return json.dumps({"approved": False, "category": category, "reason": "Unsupported requirement"})
+            return critique_result(False, category, "Unsupported requirement", state.source_urls)
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -473,26 +476,25 @@ def test_owned_repair_exhaustion_is_explicit_without_reauthoring(scripted_servic
     assert not state.service.repository.revisions()
 
 
-def test_attribution_repair_cannot_claim_success_with_coverage_gaps(scripted_service):
+def test_attribution_repair_cannot_replace_coverage(scripted_service):
     state = scripted_service
     original = state.service.runner
-    selection_count = []
+    repairs = []
 
     def runner(role, prompt, tools):
         if role == "technique_critic":
-            return json.dumps({"approved": False, "category": "source_attribution", "reason": "Inaccurate support"})
-        result = original(role, prompt, tools)
-        if role == "technique_judge" and "selected_urls" in prompt:
-            selection_count.append(prompt)
-            if len(selection_count) > 1:
-                row = json.loads(result)
-                row["coverage"][0]["gaps"] = ["Unsupported version"]
-                return json.dumps(row)
-        return result
+            return critique_result(False, "source_attribution", "Inaccurate support", state.source_urls)
+        if role == "technique_attribution_repair":
+            repairs.append(prompt)
+            return json.dumps({"attributions": [{"url": state.source_urls[0], "reason": "Fixed"}],
+                               "coverage": [{"requirement_id": "method"}]})
+        return original(role, prompt, tools)
 
     state.service.runner = runner
-    with pytest.raises(ValueError, match="Research coverage exhausted"):
+    with pytest.raises(ValueError, match="Attribution repair invalid after one correction"):
         state.service.get("JWT handling")
+    assert len(repairs) == 2
+    assert len(state.research_calls) == 1
     assert not state.service.repository.revisions()
 
 
@@ -509,7 +511,7 @@ def test_repairs_on_third_author_attempt_still_receive_exact_final_critique(scri
                 return "invalid JSON"
         if role == "technique_critic":
             critics.append(prompt)
-            return json.dumps({"approved": len(critics) > 1, "category": "source_attribution", "reason": "Clarify"})
+            return critique_result(len(critics) > 1, "source_attribution", "Clarify", state.source_urls)
         return original(role, prompt, tools)
 
     state.service.runner = runner
