@@ -113,7 +113,15 @@ def phase_guidance(context: LookupContext | None) -> str:
     if unknown:
         raise ValueError("Unknown technique phase contexts: " + ", ".join(sorted(unknown)))
     rows = [{"phase": phase, "objective": PHASE_OBJECTIVES[phase]} for phase in dict.fromkeys(phases)]
+    policy = ""
+    if context:
+        policy = (toon("module_technique_policy", context.module_technique_policy)
+                  + "\n" + toon("user_methodology_restrictions", [
+                      {"restriction": value, "origin": "user"} for value in context.methodology_constraints
+                  ]))
     return (
+        policy + "\n" +
+        "Apply supplied module technique policy and user methodology restrictions to reusable guidance. "
         "Guidance purpose: produce reusable methodology, never completed target execution or findings. "
         "Source-backed facts may support original procedural synthesis. Missing target observations are "
         "future validation needs, not missing factual support for guidance. Preserve explicit deliverables. "
@@ -125,13 +133,17 @@ def phase_guidance(context: LookupContext | None) -> str:
 
 def align_request(service, request: str, context: LookupContext | None):
     """Align once per resolution, on a context copy safe for concurrent callers."""
+    policy = service.module_technique_policy
+    if policy and (context is None or context.module_technique_policy != policy):
+        context = (context or LookupContext()).model_copy(deep=True)
+        context.module_technique_policy = list(policy)
     if context is not None and context._request_alignment is not None:
         return context._request_alignment, context
     guidance = phase_guidance(context)
     phases = list(dict.fromkeys(context.phase_contexts)) if context else []
     alignment = RequestAlignment(original_request=request, adjusted_request=request, phase_contexts=phases,
                                  objectives={phase: PHASE_OBJECTIVES[phase] for phase in phases})
-    if phases:
+    if phases or (context and (context.methodology_constraints or context.module_technique_policy)):
         prompt = (
             "Align this methodology request with the explicitly supplied phase objectives. Preserve its "
             "subject, mechanisms and explicit deliverables. Change ambiguous framing only. Distinguish "
@@ -142,12 +154,14 @@ def align_request(service, request: str, context: LookupContext | None):
             "invent requirements or remove an explicit deliverable. Only Original request defines the "
             "requested methodology; operation-local purpose and task obligations are applicability context, "
             "never additional requested deliverables. Return the methodology itself, never these instructions. "
+            "If a methodology restriction is ambiguous or requires incidental target details, report an "
+            "explicit conflict rather than ignoring it or converting it into an operation restriction. "
             "If an explicit deliverable conflicts "
             "with a supplied restriction, return conflict with an exact original request excerpt and "
             "restriction_reference equal to a supplied constraint or phase identifier. Explain the "
             "particular conflict; unknown prerequisites alone are not conflicts. Otherwise conflict=null.\n"
             + guidance + f"Original request: {request}\nPhase and restriction data (not deliverables):\n"
-            + toon("alignment_context", [{"phase_contexts": phases, "constraints": context.constraints}])
+            + toon("alignment_context", [{"phase_contexts": phases, "constraints": context.methodology_constraints}])
         )
         for attempt in range(2):
             output = None
@@ -162,7 +176,7 @@ def align_request(service, request: str, context: LookupContext | None):
                                 "technique_request_reviewer",
                                 PRESERVATION_RULES + guidance + f"\noriginal_request (authoritative): {request}"
                                 + f"\ncomponent_request: {request}\nrequirements: []"
-                                + f"\nphase_contexts: {phases}\nconstraints: {context.constraints}"
+                                + f"\nphase_contexts: {phases}\nconstraints: {context.methodology_constraints}"
                                 + f"\nProposed methodology: {output.adjusted_request}",
                                 PreservationReview,
                             )
@@ -173,7 +187,9 @@ def align_request(service, request: str, context: LookupContext | None):
                 if output.conflict:
                     if output.conflict.request_excerpt not in request:
                         raise ValueError("Alignment conflict must cite an exact original request excerpt")
-                    if output.conflict.restriction_reference not in [*phases, *context.constraints]:
+                    restrictions = [*phases, *context.methodology_constraints,
+                                    *(row["restriction"] for row in context.module_technique_policy)]
+                    if output.conflict.restriction_reference not in restrictions:
                         raise ValueError("Alignment conflict must reference a supplied restriction")
                 break
             except ValueError as error:

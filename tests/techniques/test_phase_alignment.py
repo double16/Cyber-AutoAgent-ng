@@ -28,7 +28,7 @@ def test_explicit_phase_alignment_is_shared_and_context_is_not_mutated(scripted_
         return original(role, prompt, tools)
 
     state.service.runner = runner
-    context = LookupContext(phase_contexts=[phase], constraints=["Read only"])
+    context = LookupContext(phase_contexts=[phase], methodology_constraints=["Read only"])
     alignment, aligned_context = align_request(state.service, request, context)
     same, _ = align_request(state.service, adjusted, aligned_context)
     assert same is alignment and len(calls) == 1
@@ -84,7 +84,7 @@ def test_explicit_deliverable_conflicts_are_referenced_and_not_rewritten(scripte
     scripted_service.service.runner = lambda *args: calls.append(args) or json.dumps(output)
     with pytest.raises(ValueError, match="alignment conflict" if valid else "alignment failed"):
         scripted_service.service.resolve_bundle("Execute a probe", LookupContext(
-            phase_contexts=["hypothesis_generation"], constraints=["No execution"],
+            phase_contexts=["hypothesis_generation"], methodology_constraints=["No execution"],
         ))
     assert len(calls) == (1 if valid else 2) and not scripted_service.research_calls
 
@@ -178,6 +178,7 @@ def test_alignment_reaches_full_workflow_and_stays_out_of_published_document(
         assert receipt["request_alignment"]["adjusted_request"] == adjusted
         revision = state.service.repository.pending_uses("op", "task")[0]["revision_id"]
     else:
+        context = context.model_copy(update={"constraints": [], "methodology_constraints": ["No live execution"]})
         monkeypatch.setattr(cli, "build_service", lambda *_a, **_k: state.service)
         monkeypatch.setattr(state.service.store.qdrant, "close", lambda: None)
         assert cli.main([request, "--provider", "ollama", "--phase", "hypothesis_generation",

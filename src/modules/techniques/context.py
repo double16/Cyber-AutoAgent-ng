@@ -34,6 +34,8 @@ class LookupContext(BaseModel):
     subjects: list[dict] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
+    methodology_constraints: list[str] = Field(default_factory=list)
+    module_technique_policy: list[dict[str, str]] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
     _request_alignment: "RequestAlignment | None" = PrivateAttr(default=None)
 
@@ -63,6 +65,7 @@ class LookupContext(BaseModel):
             "Bounded excerpts and subject descriptors may be incomplete; missing details remain unknown.\n"
             f"Phase contexts: {self.phase_contexts or 'unknown'}\nPurpose: {self.purpose[:4000]}\n"
             f"Capabilities: {', '.join(self.capabilities)[:2000]}\n"
+            f"Methodology restrictions: {self.methodology_constraints}\n"
             f"Task constraints: {'; '.join(self.constraints)[:4000]}\n"
             + toon("subjects", self.subjects[:20])[:6000]
             + "\n" + toon("observations", [row.model_dump() for row in self.observations])

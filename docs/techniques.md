@@ -87,7 +87,7 @@ It exits unsuccessfully when no component resolves and creates no operation-use 
 ```bash
 uv run caa-technique \
   "JWT trust-boundary analysis" --module web --provider ollama \
-  --phase hypothesis_generation --constraint "No live execution"
+  --phase hypothesis_generation --constraint "Describe non-destructive validation controls"
 
 uv run caa-technique \
   "Validate the prerequisites and applicability of CVE-YYYY-NNNN" \
@@ -99,9 +99,11 @@ uv run caa-technique \
 and require generated guidance to support at least one requested phase. `--module` selects module
 imports independently of phase.
 
-Use repeatable `--constraint` options for restrictions such as `"Read only"` or `"No live execution"`.
-Constraints inform the phase-aware applicability assessment; future validation guidance does not
-authorize present execution. Blank constraints and unknown phases are rejected before storage opens.
+Use repeatable `--constraint` options for methodology restrictions such as
+`"Describe non-destructive controls"`. These restrict the requested guidance, rather than authorizing
+or restricting a particular operation. Operation-plan constraints govern applicability and execution;
+they do not add technique document obligations. Future validation guidance does not authorize execution.
+Blank constraints and unknown phases are rejected before storage opens.
 With constraints but no phase, the phase remains explicitly unknown. With neither option, generic
 lookup retains its existing behavior without task-applicability notes. The request supplies task purpose;
 no target or operation identifier is required. Applicability notes remain local to CLI output and are
@@ -440,7 +442,7 @@ For example:
 ```bash
 UV_CACHE_DIR="$PWD/.uv-cache" uv run caa-technique \
   "Validate the prerequisites and applicability of CVE-2026-109618" \
-  --phase hypothesis_generation --constraint "No live execution"
+  --phase hypothesis_generation --constraint "Describe non-destructive validation controls"
 ```
 
 The service can frame this as applicability hypotheses with documented prerequisites, unknown target
@@ -629,3 +631,82 @@ completed or failed role invocation, with component, stage and requirement corre
 available. Provider retries remain separate model-attempt diagnostics. Stage durations include
 nested calls and must not be added to their durations. Assessment order and research limits are
 unchanged; these diagnostics support a later latency investigation.
+
+### Preferred research sources
+
+Modules may declare `technique_sources` in `module.yaml`:
+
+```yaml
+technique_sources:
+  mode: append
+  sites:
+    - https://portswigger.net/web-security
+```
+
+Recommendations inherit through `extend`. Parent branches merge in declared order, followed
+by the child; duplicate URLs are removed. Use `mode: replace` to replace inherited sites,
+or `mode: replace` with `sites: []` to clear them. Omitted settings inherit unchanged.
+URLs may include paths but cannot contain credentials, queries, or fragments.
+
+These are optional discovery recommendations, never restrictions or evidence of authority.
+CVE requests prioritize vendor advisories, CVE records, affected versions, and original research.
+No searches or citations are reserved for preferred sites; existing research limits remain unchanged.
+Preferences affect new research, not reuse of valid techniques. CLI uses its existing effective
+module (web by default). Diagnostics record the effective sites, module, and contributing modules.
+
+CLI `--constraint` arguments restrict the requested methodology. They are separate from
+operation-plan restrictions, which govern applicability and execution. Component preservation
+reviews compare the assigned method rather than demanding sibling methodologies.
+
+
+### Module technique policy
+
+Modules can explicitly designate reusable methodology policy separately from general execution rules:
+
+```yaml
+technique_policy:
+  mode: append
+  restrictions:
+    - Explain non-destructive controls and interpretation limits.
+```
+
+Parents merge in declared `extend` order, branch by branch. `append` is the default; `replace`
+replaces that branch's inherited policy, and `replace` with an empty list clears it. Missing policy
+adds no restrictions. Each restriction retains its defining module; duplicate records are removed.
+Module technique policy and CLI methodology restrictions apply throughout planning, research,
+authoring, critique and repair. Conflicts receive explicit assessment rather than silently dropping
+restrictions. An operation's no-write restriction may prevent applying a write-validation method
+without converting the reusable document into a read-only technique.
+
+Preservation checks each assigned component independently; bundle planning checks overall completeness.
+Published metadata, body and examples must omit incidental target identifiers while retaining CVEs,
+versions and standard protocol identifiers. The critic reviews decoded values, never YAML syntax.
+
+Usefulness feedback records methodological purpose, observed use, helpful contribution and harmful
+effects. Python derives +1 for demonstrated helpful contribution, -1 for demonstrated misleading or
+harmful guidance (including mixed effects), and 0 when contribution is unestablished. Missing target
+execution, proof or terminal disposition alone does not establish non-contribution. Legacy context
+remains unknown. Existing scores are not rewritten.
+
+Exact-text draft reviews, evidence passages, and critique repair inputs use JSON to preserve
+punctuation and whitespace. Compact summary tables may still use TOON.
+
+Source assessment retains earlier accepted sources across incremental research. Fetched counts
+are cumulative unique documents; retained source counts do not establish factual sufficiency.
+There is no minimum source count: one authoritative source may supply sufficient factual support.
+Each new source is accepted or rejected independently, with its URL and reason in progress events.
+An explicit reassessment of the same URL replaces that source's decision only after all outputs
+validate. A failed correction retains the previous build state; exceeding 18 retained sources fails
+explicitly rather than dropping evidence. This state is local to the current build and its repairs.
+
+Requirement assessment and independent review receive bounded exact source context (up to 6,000
+characters per source), or previously retained excerpts. Returned excerpts must match supplied text
+for a cited URL. Legacy outputs without excerpts use controller-retained context; this is source
+context, not a quotation inferred from the model's explanation. Neither matching text nor accepting
+a source proves semantic support. The model must assess complementary support and preserve unresolved
+contradictions. Text omitted from a bounded passage remains unknown.
+
+For example, an accepted mechanism advisory remains available when a later configuration guide
+adds prerequisites. Fetching an unrelated third page records a rejection and leaves both accepted
+sources retained. The shared terminal display reports cumulative unique documents fetched and
+sources retained, while each source decision explains why it was accepted or rejected.

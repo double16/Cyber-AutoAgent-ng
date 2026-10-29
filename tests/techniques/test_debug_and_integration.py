@@ -135,7 +135,10 @@ def test_private_identifiers_cannot_enter_requests_and_feedback_is_redacted(scri
         state.service.get("Inspect JWT on assigned.invalid")
     revision = state.publish()
     state.service.repository.use("op", "task", revision)
-    state.service.runner = lambda *args: json.dumps({"score": 0, "reason": "assigned.invalid was unavailable"})
+    state.service.runner = lambda *args: json.dumps({
+        "methodological_purpose": "Review", "observed_use": "", "helpful_contribution": False,
+        "contribution": "", "misleading_or_harmful": False, "harmful_effect": "",
+        "reason": "assigned.invalid was unavailable"})
     state.service.evaluate("op", "task", "Context")
     assert "assigned.invalid" not in state.service.store.render(revision)
 
@@ -143,8 +146,8 @@ def test_private_identifiers_cannot_enter_requests_and_feedback_is_redacted(scri
 def test_evaluator_can_read_only_task_evidence_and_continuation_replays_recommendations(
     scripted_service, tmp_path, monkeypatch
 ):
+    from modules.techniques.feedback import ContributionFeedback
     from modules.techniques.integration import recommendation_prompt
-    from modules.techniques.service import Feedback
 
     state = scripted_service
     revision = state.publish()
@@ -158,7 +161,7 @@ def test_evaluator_can_read_only_task_evidence_and_continuation_replays_recommen
     seen_tools = []
 
     def evaluate(role, prompt, schema, tools=None):
-        assert schema is Feedback
+        assert schema is ContributionFeedback
         assert "artifact:evidence.txt" in prompt
         seen_tools.extend(tools)
         return original(role, prompt, schema, tools)

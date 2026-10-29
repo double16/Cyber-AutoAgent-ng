@@ -227,3 +227,34 @@ def test_later_batches_do_not_refetch_known_sources():
     docs = WebResearch(runner, search_tool, fetch).batch("Missing version", {"https://vendor.example/old"})
     assert fetched == ["https://vendor.example/new"]
     assert len(docs) == 1
+
+
+@pytest.mark.parametrize("technique_request", [
+    "CVE-2021-44228 affected versions and validation methodology",
+    "HTTP authorization comparison methodology",
+    "TCP service authentication methodology",
+    "Source filesystem path traversal review methodology",
+])
+def test_preferences_are_advisory_in_initial_and_gap_research(technique_request):
+    prompts = []
+    queries = []
+
+    async def search_tool(**kwargs):
+        queries.append(kwargs["query"])
+        return [{"url": "https://vendor.example/advisory", "title": "Original evidence"}]
+
+    def runner(role, prompt, tools):
+        prompts.append(prompt)
+        assert technique_request in prompt
+        assert "preferred.example/methods" in prompt
+        assert "Request-specific evidence takes priority" in prompt
+        assert "Recommendations require no searches, fetches or citations" in prompt
+        assert "three searches and six fetches" in prompt
+        asyncio.run(tools[0](query="vendor original evidence"))
+        tools[1](url="https://vendor.example/advisory")
+
+    research = WebResearch(runner, search_tool, fetch=lambda url: {"url": url, "text": "Evidence"})
+    research.preferred_sites = ["https://preferred.example/methods"]
+    assert research(technique_request)[0]["url"] == "https://vendor.example/advisory"
+    assert research.batch(technique_request + "; evidence gap", set())[0]["text"] == "Evidence"
+    assert len(prompts) == len(queries) == 2

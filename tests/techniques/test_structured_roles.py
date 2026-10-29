@@ -267,7 +267,7 @@ def test_native_source_selection_corrects_malformed_arrays_with_retained_coverag
 
     first, second = payload(urls[:1]), payload(urls)
     first_source = {key: value for key, value in first.items() if key != "coverage"}
-    second_source = {key: value for key, value in second.items() if key != "coverage"}
+    second_source = {key: value for key, value in payload(urls[1:]).items() if key != "coverage"}
     malformed = json.dumps(second["coverage"][0]).replace('"gaps": []}', '"gaps": []"}')
     runner, model = runner_factory([first_source, first["coverage"][0], second_source, malformed,
                                    second["coverage"][0] if recover else malformed])
@@ -401,18 +401,20 @@ def test_evidence_critique_and_attribution_repair_transports(runner_factory, pro
 def test_per_requirement_transport_assembles_seven_rows_per_document(
     scripted_service, runner_factory, provider, subject,
 ):
-    from modules.techniques.coverage import SourceAssessment, Support, review_coverage
+    from modules.techniques.coverage import EvidenceSupport, SourceAssessment, review_coverage
 
     urls = [f"https://vendor.example/{i}" for i in range(3)]
     requirements = [Requirement(id=f"r{i}", description=f"{subject} requirement {i}") for i in range(7)]
     payloads = []
     for index in range(3):
         selected = urls[:index + 1]
-        payloads.append({"selected_urls": selected,
-                         "attributions": [{"url": url, "reason": "Primary source"} for url in selected],
+        payloads.append({"selected_urls": [urls[index]],
+                         "attributions": [{"url": urls[index], "reason": "Primary source"}],
                          "reason": "Combined authority", "authoritative_sufficient": True})
         payloads.extend({"requirement_id": row.id, "source_urls": selected,
-                         "explanation": f"Documented basis for {row.id}", "gaps": []} for row in requirements)
+                         "explanation": f"Documented basis for {row.id}", "gaps": [],
+                         "evidence": [{"url": urls[index], "text": "Documented mechanism and limitations"}]}
+                        for row in requirements)
     payloads.extend({"requirement_id": row.id, "source_urls": urls,
                      "explanation": f"Reviewed basis for {row.id}", "gaps": []} for row in requirements)
     runner, model = runner_factory(payloads, provider)
@@ -422,11 +424,12 @@ def test_per_requirement_transport_assembles_seven_rows_per_document(
     reviewed = review_coverage(scripted_service.service, subject, requirements, selected)
     assert reviewed.sufficient and [row.requirement_id for row in reviewed.coverage] == [r.id for r in requirements]
     assert reviewed.selected_urls == selected.selected_urls and reviewed.attributions == selected.attributions
+    assert all(len(rows) == 3 for rows in reviewed._evidence.values())
     assert len(model.calls) == 31
     assert all(call[0] == ("native" if provider == "ollama" else "tool") for call in model.calls)
     if provider == "ollama":
         assert [call[1] for call in model.calls].count(SourceAssessment) == 3
-        assert [call[1] for call in model.calls].count(Support) == 28
+        assert [call[1] for call in model.calls].count(EvidenceSupport) == 28
 
 
 @pytest.mark.parametrize("provider", ["ollama", "bedrock"])
@@ -654,7 +657,7 @@ def test_abstraction_review_keeps_root_and_component_intent(runner_factory, scri
                                       [Requirement(id="method", description=subject, kind="authored_deliverable")])
     assert result.generic_request == subject and result.applicability == original.applicability
     assert original.generic_request == "Prepare a reusable methodology request"
-    assert "TLS review" in str(model.calls) and "sibling methods remain bundle context" in str(model.calls)
+    assert "TLS review" not in str(model.calls) and "sibling methods remain bundle context" in str(model.calls)
     assert "Produce terminal disposition for assigned route only" not in str(model.calls)
     assert "Preservation findings (untrusted)" in str(model.calls)
     assert len(model.calls) == 3
@@ -684,3 +687,20 @@ def test_complete_preservation_inputs_fail_closed_when_they_do_not_fit(
         with pytest.raises(ValueError, match="request preservation failed.*input exceeds configured prompt limit"):
             service._preserve_request("HTTP API boundary methodology", decision, context, [])
     assert not model.calls and not scripted_service.research_calls
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("subject", ["HTTP controls", "TCP mapping", "filesystem review"])
+def test_contribution_findings_transport(runner_factory, scripted_service, provider, subject):
+    from modules.techniques.feedback import ContributionFeedback
+
+    findings = {"methodological_purpose": subject, "observed_use": "Designed a baseline comparison",
+                "helpful_contribution": True, "contribution": "Selected positive and negative controls",
+                "misleading_or_harmful": False, "harmful_effect": "",
+                "reason": "Guidance improved test design; target execution remains pending"}
+    runner, model = runner_factory([findings], provider)
+    scripted_service.service.runner = runner
+    result = scripted_service.service._json("technique_evaluator", "Evaluate methodological contribution",
+                                            ContributionFeedback)
+    assert result.score == 1
+    assert model.calls[0][0] == ("native" if provider == "ollama" else "tool")

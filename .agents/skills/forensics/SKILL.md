@@ -518,3 +518,17 @@ Alignment and preservation review intentionally omit task purpose and observatio
 assessment retains them. When investigating imported task duties, check the actual role input:
 request intent, phase guidance and explicit restrictions should remain separate from task execution
 context. Component obligations still come from the independently reviewed methodology plan.
+
+### Technique policy and contribution boundaries
+
+Inspect `technique_policy` events for effective restrictions and defining modules. CLI `--constraint`
+values restrict methodology; operation-plan constraints remain applicability and execution context.
+Component preservation uses the assigned request; bundle planning owns whole-request completeness.
+A sibling omission is not a component defect. Critic corrections retain passage IDs and inspection
+bounds, including native failures. Publication requires decoded metadata and body approval without
+incidental target details.
+
+Usefulness findings identify purpose, observed use, contribution and harmful effects. Python derives
+the existing score: +1 helpful, -1 misleading or harmful (including mixed effects), otherwise 0. Missing
+target proof or disposition alone does not establish non-contribution. Legacy context remains unknown
+and historical scores are unchanged.

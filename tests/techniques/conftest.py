@@ -142,7 +142,13 @@ def scripted_service(store, markdown):
             return json.dumps({"attributions": [{"url": state.source_urls[0],
                                                 "reason": "Accurate source scope"}]})
         if role == "technique_evaluator":
-            return json.dumps({"score": state.score, "reason": "Guidance helped discriminate behavior"})
+            return json.dumps({"methodological_purpose": "Discriminate behavior",
+                               "observed_use": "Controlled comparison",
+                               "helpful_contribution": state.score == 1,
+                               "contribution": "Clarified controls" if state.score == 1 else "",
+                               "misleading_or_harmful": state.score == -1,
+                               "harmful_effect": "Misleading control" if state.score == -1 else "",
+                               "reason": "Guidance helped discriminate behavior"})
         if role == "technique_trigger_matcher":
             return json.dumps({"trigger_ids": [], "reason": "No semantic match"})
         raise AssertionError(role)
@@ -173,6 +179,10 @@ def assessment_output(role, prompt, payload):
     """Project a semantic test fixture onto the requested internal output contract."""
     if role == "technique_source_assessor":
         payload = {key: value for key, value in payload.items() if key != "coverage"}
+        if len(set(payload["selected_urls"])) > 1 and "Current document URL: " in prompt:
+            current = json.loads(prompt.split("Current document URL: ", 1)[1].split("\n", 1)[0])["url"]
+            payload["selected_urls"] = [url for url in payload["selected_urls"] if url == current]
+            payload["attributions"] = [row for row in payload["attributions"] if row["url"] == current]
     elif role in {"technique_requirement_assessor", "technique_requirement_reviewer"}:
         assigned = json.loads(prompt.split("Assigned requirement: ", 1)[1].split("\n", 1)[0])
         payload = next(row for row in payload["coverage"] if row["requirement_id"] == assigned["id"])

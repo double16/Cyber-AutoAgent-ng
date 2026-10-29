@@ -173,6 +173,7 @@ class DiagnosticSession:
                 message = f"Aligned request: {record['adjusted_request']}. {message}"
             details = []
             for key in ("component_id", "research_round", "attempt", "fetched_count", "selected_count",
+                        "source_url", "source_decision",
                         "delivered_count", "unresolved_count", "elapsed_seconds", "added", "updated", "unchanged",
                         "outcome", "title", "revision_id"):
                 if key in record:

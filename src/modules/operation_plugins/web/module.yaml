@@ -80,3 +80,13 @@ planning:
         - unauthenticated_baseline
         - authenticated_credential_coverage
         - authorization_comparison
+
+technique_sources:
+  mode: append
+  sites:
+    - https://portswigger.net/web-security
+    - https://book.hacktricks.wiki/
+    - https://owasp.org/www-project-web-security-testing-guide/
+    - https://portswigger.net/research
+    - https://github.com/swisskyrepo/PayloadsAllTheThings
+    - https://cheatsheetseries.owasp.org/

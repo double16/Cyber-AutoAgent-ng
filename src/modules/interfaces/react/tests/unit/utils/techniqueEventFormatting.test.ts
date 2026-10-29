@@ -14,7 +14,7 @@ const cases = [
   [{type: 'technique_build_progress', stage: 'critique', status: 'revision_requested', attempt: 2,
     reason: 'Missing controls'}, 'critique: revision requested, attempt 2 of 3'],
   [{type: 'technique_build_progress', stage: 'source_selection', status: 'completed', fetched_count: 3,
-    selected_count: 2}, '3 documents fetched, 2 selected'],
+    selected_count: 2}, '3 unique documents fetched total, 2 sources retained'],
   [{type: 'technique_resolved', title: 'JWT validation', outcome: 'reused'}, 'Technique reused: JWT validation'],
   [{type: 'technique_resolved', title: 'Source analysis', outcome: 'reused', applicability: 'conditional',
     unmet_prerequisite_count: 2}, '(conditional), 2 unmet prerequisites'],
@@ -97,4 +97,13 @@ describe('technique lifecycle presentation', () => {
     expect(displayed.every(event => (event as any).task_uid === 'filesystem-task')).toBe(true);
     expect(displayed.every(event => (event as any).future_field === 'preserved')).toBe(true);
   });
+});
+
+it('shows individual source decisions while preserving older count-only events', () => {
+  expect(formatTechniqueEvent({type: 'technique_build_progress', stage: 'source_selection',
+    status: 'source_assessed', source_url: 'https://vendor.example/config', source_decision: 'rejected',
+    reason: 'Unrelated content'})).toContain('source rejected: https://vendor.example/config — Unrelated content');
+  expect(formatTechniqueEvent({type: 'technique_build_progress', stage: 'source_selection',
+    status: 'completed', fetched_count: 7, selected_count: 1}))
+    .toContain('7 unique documents fetched total, 1 source retained');
 });

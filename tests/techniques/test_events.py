@@ -92,7 +92,9 @@ def test_revision_and_research_failure_keep_existing_error_path(scripted_service
     with pytest.raises(ValueError, match="TLS trust"):
         state.service.get("JWT handling")
     assert [(row["stage"], row["status"]) for row in events if row["stage"] != "request_alignment"] == [
-        ("research", "started"), ("research", "failed")]
+        ("research", "started"),
+        ("research", "failed"),
+    ]
 
 
 def test_snapshot_failure_does_not_hide_committed_evaluation(scripted_service, tmp_path, monkeypatch):
@@ -133,13 +135,20 @@ def test_module_sync_counts_additions_updates_and_unchanged(scripted_service, ma
     directory.mkdir()
     path = directory / "example.md"
     path.write_text(markdown())
-    loader = SimpleNamespace(_inheritance_chain=lambda module: [module], _find_module_dir=lambda module: tmp_path)
+    loader = SimpleNamespace(
+        _get_extend_list=lambda root: [],
+        _read_module_yaml=lambda root: {},
+        _inheritance_chain=lambda module: [module],
+        _find_module_dir=lambda module: tmp_path,
+    )
     events = []
     service.events.callback = events.append
     service.synchronize_module(loader, "web")
     service.synchronize_module(loader, "web")
     path.write_text(markdown(title="Revised guidance"))
     service.synchronize_module(loader, "web")
+    events = [row for row in events if "added" in row]
+
     assert [row["added"] for row in events] == [1, 0, 0]
     assert [row["unchanged"] for row in events] == [0, 1, 0]
     assert [row["updated"] for row in events] == [0, 0, 1]
@@ -295,8 +304,9 @@ def test_role_call_diagnostics_correlate_success_and_failure(scripted_service, i
     events = []
     service.events.callback = events.append
     service.runner = lambda *_: "invalid" if invalid else '{"score": 1, "reason": "Useful"}'
-    with service.events.scope(component_id="method", stage="source_selection", requirement_id="r1",
-                              correction_attempt=1):
+    with service.events.scope(
+        component_id="method", stage="source_selection", requirement_id="r1", correction_attempt=1
+    ):
         if invalid:
             with pytest.raises(ValueError):
                 service._json("technique_judge", "Review", Feedback)

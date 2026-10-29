@@ -1,6 +1,7 @@
 """Self-contained technique document contract and stable source identities."""
 
 import hashlib
+import json
 import re
 import uuid
 from typing import Any
@@ -92,3 +93,8 @@ def toon(label: str, rows: list[dict[str, Any]]) -> str:
     for row in rows:
         lines.append("  " + ",".join(sanitize_toon_value(str(row.get(key, ""))) for key in fields))
     return "\n".join(lines)
+
+
+def json_payload(label: str, value: Any) -> str:
+    """Serialize exact-text model data without punctuation or whitespace normalization."""
+    return json.dumps({label: value}, ensure_ascii=False)

@@ -109,7 +109,7 @@ def test_error_specific_correction_retains_context_and_is_bounded(scripted_servi
     assert len(prompts) == 2
     repair = prompts[-1]
     assert "Prior validated synthesis" in repair and "Requested method" in repair
-    assert "Mechanism; fixed versions and prerequisites" in repair
+    assert "Mechanism, fixed versions and prerequisites" in repair
     assert previous.model_dump_json() == original
     assert "Return only the current output schema" in repair
     assert "Validation failure" in repair
@@ -137,3 +137,17 @@ def test_explanation_schema_and_whitespace_validation_agree():
     legacy = copy.deepcopy(supported())
     del legacy["coverage"][0]["synthesis"]
     assert SourceSelection.model_validate(legacy).coverage[0].synthesis == ""
+
+
+def test_later_source_cannot_remove_prior_source(scripted_service):
+    previous = SourceSelection.model_validate(supported())
+    new_url = "https://vendor.example/config"
+    payload = supported()
+    payload["selected_urls"] = [new_url]
+    payload["attributions"] = [{"url": new_url, "reason": "Configuration authority"}]
+    payload["coverage"][0]["source_urls"] = [URL, new_url]
+    scripted_service.service.runner = lambda role, prompt, tools: assessment_output(role, prompt, payload)
+    result = select_sources(scripted_service.service, "Method", REQUIREMENTS,
+                            [{"url": new_url, "text": "Configuration evidence"}], previous)
+    assert result.selected_urls == [URL, new_url]
+    assert previous.selected_urls == [URL]

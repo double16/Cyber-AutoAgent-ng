@@ -19,13 +19,16 @@ from modules.techniques.context import LookupContext, LookupDecision
 from modules.techniques.coverage import Requirement, review_coverage, select_sources
 from modules.techniques.critique import Critique as Critique
 from modules.techniques.critique import assess, repair_attribution
-from modules.techniques.documents import Metadata, Source, TechniqueDocument, Trigger, toon
+from modules.techniques.documents import Metadata, Source, TechniqueDocument, Trigger, json_payload, toon
+from modules.techniques.feedback import ContributionFeedback
 from modules.techniques.storage import TechniqueStore
 
 APPLICABILITY_RULES = (
     "Assess whether advisory guidance helps a component of the task. Generic guidance need not "
     "produce target-specific hypotheses, evidence, findings or terminal disposition. Interpret "
     "constraints for the active phase: future validation guidance does not authorize present execution. "
+    "Operation restrictions affect applicability only: never rewrite the methodology to satisfy them. "
+    "Only explicit methodology restrictions and module technique policy constrain the document. "
     "Missing observations indicate unknown prerequisites, never a contradiction. "
     "Use conditional for unknown prerequisites and incompatible only for a referenced restriction "
     "or subject-source contradiction connected to a particular requested action. "
@@ -93,6 +96,7 @@ class TechniqueService:
         self.runner = runner
         self.research = research
         self.private_values: tuple[str, ...] = ()
+        self.module_technique_policy: list[dict[str, str]] = []
         self.exports = None
         self._pending_produced_exports: set[str] = set()
         from modules.techniques.events import TechniqueEvents
@@ -294,12 +298,10 @@ class TechniqueService:
             PRESERVATION_RULES + "Review request preservation, not task completion. "
             + phase_guidance(context)
             + f"Original component request: {request}\ncomponent_request: {request}\n"
-            + "original_request (authoritative): "
-            + (context._request_alignment.original_request if context and context._request_alignment else request)
-            + "\n"
+            + f"original_request (authoritative assigned component): {request}\n"
             + toon("requirements", [row.model_dump() for row in requirements or []])
             + f"\nphase_contexts: {context.phase_contexts if context else []}"
-            + f"\nconstraints: {context.constraints if context else []}\n"
+            + f"\nconstraints: {context.methodology_constraints if context else []}\n"
         )
         for attempt in range(2):
             try:
@@ -485,7 +487,7 @@ class TechniqueService:
                 + toon("sources", [{key: value for key, value in source.items() if key != "text"}
                                     for source in sources])
                 + "\n"
-                + toon("existing_examples", examples)
+                + json_payload("existing_examples", examples)
             )
             prompt = (
                 evidence_context
@@ -526,7 +528,7 @@ class TechniqueService:
                         selection_reason=next(row.reason for row in selection.attributions if row.url == source["url"]),
                     ) for source in sources]
                     authored.metadata.source_coverage = (
-                        f"Considered {len(documents)} fetched documents; selected {len(sources)}; target 3. "
+                        f"Considered {len(documents)} fetched documents; selected {len(sources)}. "
                         + toon("requirements", [row.model_dump() for row in requirements]) + "\n"
                         + selection.summary()
                     )
@@ -631,7 +633,7 @@ class TechniqueService:
                     "research_coverage", "source_attribution", "authored_content", "request_coverage"
                 ) if any(issue.category == category for issue in critique.issues))
                 issues = [issue for issue in critique.issues if issue.category == owner]
-                feedback = toon("issues", [issue.model_dump() for issue in issues])
+                feedback = json_payload("issues", [issue.model_dump() for issue in issues])
                 diagnostic = (
                     self._rejected_attempt(response, attempt, "critique", self._safe_feedback(feedback))
                     if owner in {"authored_content", "request_coverage"} else {}
@@ -672,7 +674,7 @@ class TechniqueService:
                         + toon("requirements", [row.model_dump() for row in requirements]) + "\n"
                         + phase_guidance(context)
                         + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
-                        + toon("existing_examples", examples) + "\n"
+                        + json_payload("existing_examples", examples) + "\n"
                         + toon("sources", [{key: value for key, value in source.items() if key != "text"}
                                            for source in sources])
                     )
@@ -748,7 +750,10 @@ class TechniqueService:
                     selection = select_sources(self, request, requirements, fresh, selection, gap, context=context)
                     fields.update(fetched_count=len(documents), selected_count=len(selection.selected_urls))
                 if not selection.sufficient:
-                    assessment_key = selection.model_dump_json()
+                    assessment_key = (
+                        selection.model_dump_json(),
+                        tuple((doc["url"], str(doc.get("text", ""))) for doc in documents),
+                    )
                     if assessment_key not in reviewed_assessments:
                         reviewed_assessments[assessment_key] = review_coverage(
                             self, request, requirements, selection, context, documents=documents,
@@ -815,6 +820,19 @@ class TechniqueService:
         return decision.selected_id is not None
 
     def synchronize_module(self, loader: Any, module: str) -> None:
+        from modules.techniques.policy import resolve_policy
+        from modules.techniques.source_preferences import resolve_sources
+
+        self.module_technique_policy = resolve_policy(loader, module)
+        self.events.emit("technique_policy", module=module, restrictions=[
+            {"module": row["module"], "restriction": self._safe_feedback(row["restriction"])}
+            for row in self.module_technique_policy
+        ])
+        contributors: list[str] = []
+        sites = resolve_sources(loader, module, contributors=contributors)
+        if hasattr(self.research, "preferred_sites"):
+            self.research.preferred_sites = sites
+        self.events.emit("technique_source_preferences", module=module, sites=sites, contributing_modules=contributors)
         counts = {"added": 0, "updated": 0, "unchanged": 0}
         for name in loader._inheritance_chain(module):
             root = loader._find_module_dir(name)
@@ -868,7 +886,16 @@ class TechniqueService:
             revision = use["revision_id"]
             feedback = self._json(
                 "technique_evaluator",
-                "Independently rate the technique's usefulness for this task: +1 helpful, "
+                "Return structured contribution findings; Python derives the score. "
+                "Identify methodological_purpose using recorded component purposes and requirements. "
+                "For shared revisions assess contribution across delivered components. "
+                "Use observed_use to cite actual task behavior, not expected behavior. "
+                "Set helpful_contribution only with concrete contribution evidence; otherwise contribution is empty. "
+                "Set misleading_or_harmful only with concrete harmful_effect evidence; otherwise it is empty. "
+                "Mixed helpful and harmful effects count as harmful. Missing target proof or terminal disposition "
+                "is never itself evidence of non-contribution. Task-specific duties are not document duties. "
+                "Legacy context is unknown; do not reconstruct intent. "
+                "Evaluate usefulness for this task: +1 helpful, "
                 "0 neutral/unused/insufficient evidence, -1 unhelpful. Correctly ruling out a vulnerability can be "
                 "helpful. Task failure or unavailable tools alone do not establish negative sentiment. "
                 "Use the recorded original and phase-aligned request and guidance objectives when available. "
@@ -886,7 +913,7 @@ class TechniqueService:
                 + "\nTask results:\n"
                 + context[:24_000]
                 + "\nRecorded delivery context:\n" + use["use_context"],
-                Feedback,
+                ContributionFeedback,
                 tools,
             )
             from modules.utils.redaction import redact_text

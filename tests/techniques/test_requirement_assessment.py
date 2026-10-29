@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from modules.techniques.coverage import Requirement, SourceAssessment, Support, _assess_records
+from modules.techniques.coverage import EvidenceSupport, Requirement, SourceAssessment, Support, _assess_records
 from modules.techniques.events import TechniqueEvents
 
 
@@ -20,7 +20,7 @@ def test_atomic_requirement_correction(recover):
         if schema is SourceAssessment:
             return schema(selected_urls=[url], attributions=[{"url": url, "reason": "Primary"}],
                           reason="Primary", authoritative_sufficient=True)
-        assert schema is Support
+        assert schema is EvidenceSupport
         identifier = next(r.id for r in requirements if f'"id":"{r.id}"' in prompt)
         attempts[identifier] = attempts.get(identifier, 0) + 1
         if identifier == "r6" and (not recover or attempts[identifier] == 1):
@@ -123,7 +123,7 @@ def test_assessment_uses_only_assigned_prior_requirement_and_keeps_review_source
         assert f"Prior basis {'two' if identifier == 'one' else 'one'}" not in prompt
         if review:
             return prior.coverage[len(prompts) - 1].model_dump_json()
-        assert url in prompt.split("Removed source URLs: ", 1)[1]
+        assert prompt.split("Removed source URLs: ", 1)[1].startswith("['https://vendor.example/advisory']")
         return json.dumps({"requirement_id": identifier, "source_urls": [], "explanation": "Support removed",
                            "gaps": ["No remaining support"]})
 

@@ -21,6 +21,8 @@ export type TechniqueEvent = {
   elapsed_seconds?: number;
   fetched_count?: number;
   selected_count?: number;
+  source_url?: string;
+  source_decision?: 'retained' | 'rejected';
   score?: -1 | 0 | 1;
   reason?: string;
   sentiment_count?: number;
@@ -50,12 +52,17 @@ export const formatTechniqueEvent = (input: { type?: unknown }): string | null =
     case 'technique_build_progress':
       message = `Technique ${text(event.stage).replaceAll('_', ' ')}: ${text(event.status).replaceAll('_', ' ')}`;
       if (event.attempt != null) message += `, attempt ${event.attempt} of 3`;
-      if (event.fetched_count != null) message += `, ${event.fetched_count} documents fetched`;
-      if (event.selected_count != null) message += `, ${event.selected_count} selected`;
+      if (event.fetched_count != null) message += `, ${event.fetched_count} unique documents fetched total`;
+      if (event.selected_count != null) {
+        message += `, ${event.selected_count} ${event.selected_count === 1 ? 'source' : 'sources'} retained`;
+      }
       if (typeof event.elapsed_seconds === 'number') message += `, ${event.elapsed_seconds.toFixed(1)}s`;
       if (event.stage === 'request_alignment' && event.original_request !== event.adjusted_request
         && typeof event.adjusted_request === 'string') {
         message += `, aligned request: ${text(event.adjusted_request)}`;
+      }
+      if (event.source_decision && event.source_url) {
+        message += `, source ${text(event.source_decision)}: ${text(event.source_url)}`;
       }
       if (event.reason) message += ` — ${text(event.reason)}`;
       break;

@@ -116,6 +116,7 @@ def test_cli_build_and_bootstrap_reuse_storage_without_fake_target(store, monkey
 
     diagnostics = DiagnosticSession(quiet=True)
     service = cli.build_service("ollama", None, str(tmp_path / "cli"), "web", diagnostics=diagnostics)
+    assert "https://portswigger.net/web-security" in service.research.preferred_sites
     assert service.events.callback == diagnostics.lifecycle
     assert service.runner.diagnostics is diagnostics
     assert len(service.repository.revisions()) == len(list(
@@ -132,6 +133,7 @@ def test_cli_build_and_bootstrap_reuse_storage_without_fake_target(store, monkey
         operation_service.events.callback = events.append
         operation_service.synchronize_module(get_module_loader(), config.module)
         assert events[-1]["type"] == "technique_sync_complete"
+    assert operation_service.research.preferred_sites == service.research.preferred_sites
     assert operation_service.store.qdrant is store.qdrant
     assert len(operation_service.repository.revisions()) == sum(
         len(list((Path("src/modules/operation_plugins") / module / "techniques").glob("*.md")))
@@ -234,7 +236,8 @@ def test_cli_passes_optional_phase_and_constraints(monkeypatch, capsys, options,
         assert context is None
     else:
         assert context.phase_contexts == phases
-        assert context.constraints == constraints
+        assert context.methodology_constraints == constraints
+        assert context.constraints == []
         assert context.purpose == "Trace input flow"
         assert context.subjects == []
     service.store.qdrant.close.assert_called_once()

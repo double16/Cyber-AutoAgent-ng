@@ -235,6 +235,8 @@ def test_module_chain_imports_once_handles_missing_and_rejects_symlink_escape(sc
     directory.mkdir(parents=True)
     (directory / "one.md").write_text(markdown())
     loader = SimpleNamespace(
+        _get_extend_list=lambda root: [],
+        _read_module_yaml=lambda root: {},
         _inheritance_chain=lambda name: [name, "missing"],
         _find_module_dir=lambda name: root if name == "module" else None,
     )
@@ -427,6 +429,13 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
     original = state.service.runner
     critiques = []
     selections = []
+    retained = []
+    original_research = state.service._research_coverage
+
+    def coverage(*args, **kwargs):
+        result = original_research(*args, **kwargs)
+        retained.append(result[1])
+        return result
 
     def research(request):
         state.research_calls.append(request)
@@ -442,12 +451,17 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
         return original(role, prompt, tools)
 
     state.service.research = research
+    state.service._research_coverage = coverage
     state.service.runner = runner
     revision, markdown = state.service.get("JWT handling")
     assert revision and "Check assumptions" in markdown
     assert len([row for row in state.calls if row[0] == "technique_author"]) == expected_authors
     assert len(state.research_calls) == expected_research
     assert len(critiques) == 2
+    if category == "research_coverage":
+        assert len(retained[-1]._decisions) == len(retained[-1]._documents) == 2
+        assert set(retained[0].selected_urls).issubset(retained[-1].selected_urls)
+        assert retained[-1]._evidence["method"]
     if category == "source_attribution":
         assert len(selections) == 1
         assert any(role == "technique_attribution_repair" and "Fix coverage" in prompt

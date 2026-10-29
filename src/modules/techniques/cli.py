@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--constraint", action="append", default=[],
-        help="Task restriction such as read-only or no live execution; repeat for multiple restrictions",
+        help="Methodology restriction; repeat for multiple restrictions",
     )
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument("--verbose", action="store_true", help="Show model/tool timing and diagnostic identifiers")
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     if "" in constraints:
         parser.error("--constraint must contain non-whitespace text")
     context = LookupContext(
-        phase_contexts=list(dict.fromkeys(args.phase)), purpose=args.request, constraints=constraints,
+        phase_contexts=list(dict.fromkeys(args.phase)), purpose=args.request, methodology_constraints=constraints,
     ) if args.phase or constraints else None
     from modules.techniques.diagnostics import DiagnosticSession
 

@@ -627,13 +627,18 @@ def test_entire_source_absence_requires_urls():
         RetainedSources(DOCS).validate(candidate, "Boundary guidance", REQS, [])
 
 
-def test_controller_correction_retains_lookup_without_reopening_tools(scripted_service):
+@pytest.mark.parametrize("native_failure", [False, True])
+def test_controller_correction_retains_lookup_without_reopening_tools(scripted_service, native_failure):
     calls = []
 
     def runner(role, prompt, tools):
         calls.append((prompt, tools))
         if len(calls) == 1:
             tools[0](url=URL, length=4000)
+            if native_failure:
+                error = ValueError("Invalid structured grounding")
+                error.native_finalization_messages = []
+                raise error
             return Critique(approved=False, reason="Defect", issues=[issue(
                 draft_references=["unknown"],
             )]).model_dump_json()
@@ -679,3 +684,43 @@ def test_grounding_complaint_without_evidence_cannot_trigger_repair(scripted_ser
     if persistent:
         failed = next(row for row in events if row.get("stage") == "critique_assessment")
         assert failed["author_attempts"] == 1
+
+
+@pytest.mark.parametrize("location", ["metadata", "body", "example"])
+def test_target_detail_issue_repairs_authorship_without_research_loss(scripted_service, location):
+    state = scripted_service
+    original = state.service.runner
+    authors = []
+    critics = []
+    marker = "assigned.internal"
+
+    def runner(role, prompt, tools):
+        if role == "technique_author":
+            authors.append(prompt)
+            payload = json.loads(original(role, prompt, tools))
+            if len(authors) == 1:
+                if location == "metadata":
+                    payload["metadata"]["purpose"] += " on " + marker
+                else:
+                    payload["body"] += ("\nExample: fetch('https://" + marker + "')" if location == "example"
+                                        else "\nApply to " + marker)
+            return json.dumps(payload)
+        if role == "technique_critic":
+            critics.append(prompt)
+            assert "decoded values" in prompt and "incidental target identifiers" in prompt
+            if len(critics) == 1:
+                return Critique(approved=False, reason="Incidental target detail", issues=[issue(
+                    category="authored_content", source_urls=[], draft_excerpt=marker,
+                    problem="Incidental operation host appears in reusable guidance",
+                    requested_correction="Replace the incidental host with a generic subject",
+                )]).model_dump_json()
+            assert marker not in prompt
+            return Critique(approved=True, reason="Reusable guidance").model_dump_json()
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    revision, _ = state.service.get("JWT handling")
+    assert marker not in state.service.store.render(revision)
+    assert len(authors) == len(critics) == 2
+    assert len(state.research_calls) == 1
+    assert "https://vendor.example/advisory" in state.service.store.render(revision)

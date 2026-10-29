@@ -41,3 +41,38 @@ def test_toon_escapes_fields_and_empty_rows():
     output = toon("sources", [{"url": "a,b", "title": "a\nb"}, {"url": "c", "title": "d"}])
     assert output.startswith("sources[2]{url,title}:")
     assert len(output.splitlines()) == 3
+
+
+@pytest.mark.parametrize("text", [
+    ("def build_multipart(field_name, filename, content_bytes, boundary=None):\n"
+     "    return content_type, body\n"),
+    "def broken(a; b):\n\treturn a; b",
+    'quotes " and \\ and Unicode Ω\u2028,;\n\t',
+    "",
+])
+def test_exact_json_payload(text):
+    import json
+
+    from modules.techniques.critique import ReviewSnapshot
+    from modules.techniques.documents import json_payload
+
+    value = [{"text": text, "nested": {"items": [text, None, False]}}]
+    assert json.loads(json_payload("evidence", value)) == {"evidence": value}
+    snapshot = ReviewSnapshot(text or "empty")
+    rows = json.loads(snapshot.render())["draft_references"]
+    assert {row["reference"]: row["value"] for row in rows} == snapshot.values
+
+
+def test_python_survives_review_serialization():
+    import ast
+    import json
+
+    from modules.techniques.critique import ReviewSnapshot
+
+    original = "def build_multipart(field_name, filename, content_bytes, boundary=None):\n    return content_type, body"
+    rows = json.loads(ReviewSnapshot(original).render())["draft_references"]
+    decoded = "\n".join(row["value"] for row in rows)
+    assert decoded == original
+    ast.parse(decoded)
+    with pytest.raises(SyntaxError):
+        ast.parse(decoded.replace("field_name,", "field_name;"))
