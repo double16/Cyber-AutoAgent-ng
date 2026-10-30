@@ -83,7 +83,7 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
         "Carry shared requested deliverables into each applicable component. Separate independently "
         "assessable obligations. Planner instructions, including citing original request excerpts, are "
         "provenance rules and must not become document requirements unless the user requested them. "
-        "Task purpose is applicability context, not a source of extra deliverables. Do not import "
+        "Only the explicit methodology request defines deliverables. Do not import "
         "operation terminal dispositions, completed execution or findings into reusable guidance. "
         "Classify each requirement kind as factual_support, authored_deliverable or constraint. "
         "Component requests must be complete methodologies preserving subject identifiers, mechanisms "
@@ -163,7 +163,7 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
         seen.add(key)
         component_context = context
         if context is not None and len(plan.components) > 1:
-            component_context = context.model_copy(deep=True, update={"purpose": component.request})
+            component_context = context.model_copy(deep=True)
         decisions = []
         with service.events.scope(operation_id=operation, task_uid=task, component_id=component.id):
             try:

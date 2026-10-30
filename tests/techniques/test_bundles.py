@@ -263,17 +263,15 @@ def test_split_component_context_keeps_shared_inputs_without_widening_purpose(sc
 
     def get(method, supplied, **kwargs):
         captured.append(supplied)
-        assert supplied.purpose == method
+        assert not hasattr(supplied, "purpose")
         assert supplied.phase_contexts == context.phase_contexts
-        assert supplied.constraints == context.constraints
-        assert supplied.subjects == context.subjects and supplied.observations == context.observations
-        assert supplied.capabilities == context.capabilities
+        assert not any(hasattr(supplied, name) for name in ("constraints", "subjects", "observations", "capabilities"))
         assert supplied._request_alignment.original_request == request
         return method, "Validated method"
 
     monkeypatch.setattr(state.service, "get", get)
     bundle = state.service.resolve_bundle(request, context)
     assert len(bundle.delivered) == 2 and captured[0] is not captured[1]
-    captured[0].constraints.append("component-local change")
-    assert captured[1].constraints == context.constraints
+    captured[0].methodology_constraints.append("component-local change")
+    assert captured[1].methodology_constraints == []
     assert context.model_dump_json() == frozen and context._request_alignment is None

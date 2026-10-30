@@ -1,10 +1,10 @@
-"""Shared phase objectives and operation-local request alignment."""
+"""Shared phase objectives and methodology request alignment."""
 
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from modules.techniques.context import LookupContext
+from modules.techniques.context import MethodologyContext, methodology_context
 from modules.techniques.documents import CONTEXTS, toon
 
 PHASE_OBJECTIVES = {
@@ -49,7 +49,7 @@ class PreservationReview(BaseModel):
 
 PRESERVATION_RULES = (
     "Review semantic request preservation. The original tool request is authoritative. "
-    "Context supplies applicability, not additional document deliverables. Reject transformation "
+    "Phase and methodology restrictions do not invent additional deliverables. Reject transformation "
     "instructions copied as the methodology, phase-only requests, omitted mechanisms, and invented "
     "obligations. Operation terminal dispositions and completed target execution are not reusable "
     "methodology deliverables. Preserve explicitly requested CVEs and legitimate restrictions. "
@@ -107,7 +107,7 @@ class RequestAlignment(BaseModel):
                 f"Phase-aligned request: {self.adjusted_request}\nReason: {self.reason}\n")
 
 
-def phase_guidance(context: LookupContext | None) -> str:
+def phase_guidance(context: MethodologyContext | None) -> str:
     phases = context.phase_contexts if context else []
     unknown = set(phases) - set(CONTEXTS)
     if unknown:
@@ -127,15 +127,16 @@ def phase_guidance(context: LookupContext | None) -> str:
         "future validation needs, not missing factual support for guidance. Preserve explicit deliverables. "
         "Multiple contexts have separate objectives, no inferred ordering or automatic splitting.\n"
         + (toon("phase_objectives", rows) if rows else
-           "Phase unknown: follow the explicit request and task purpose without inferring a phase.") + "\n"
+           "Phase unknown: follow the explicit request without inferring a phase.") + "\n"
     )
 
 
-def align_request(service, request: str, context: LookupContext | None):
+def align_request(service, request: str, context: MethodologyContext | None):
     """Align once per resolution, on a context copy safe for concurrent callers."""
+    context = methodology_context(context)
     policy = service.module_technique_policy
     if policy and (context is None or context.module_technique_policy != policy):
-        context = (context or LookupContext()).model_copy(deep=True)
+        context = (context or MethodologyContext()).model_copy(deep=True)
         context.module_technique_policy = list(policy)
     if context is not None and context._request_alignment is not None:
         return context._request_alignment, context
@@ -152,8 +153,7 @@ def align_request(service, request: str, context: LookupContext | None):
             "hypotheses, documented prerequisites, unknowns and future supporting/refuting checks. "
             "Do not demand exact payloads or exhaustive matrices unless explicitly requested. Do not "
             "invent requirements or remove an explicit deliverable. Only Original request defines the "
-            "requested methodology; operation-local purpose and task obligations are applicability context, "
-            "never additional requested deliverables. Return the methodology itself, never these instructions. "
+            "requested methodology; task objectives and execution context are not supplied to this workflow. Return the methodology itself, never these instructions. "
             "If a methodology restriction is ambiguous or requires incidental target details, report an "
             "explicit conflict rather than ignoring it or converting it into an operation restriction. "
             "If an explicit deliverable conflicts "

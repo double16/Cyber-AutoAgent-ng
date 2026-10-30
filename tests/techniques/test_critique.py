@@ -454,7 +454,7 @@ def test_persistent_invalid_critique_retains_authored_draft_diagnostic(scripted_
     )
     with pytest.raises(ValueError, match="Critique assessment failed"):
         state.service.get("Boundary guidance")
-    event = next(row for row in events if row["stage"] == "critique_assessment")
+    event = next(row for row in events if row.get("stage") == "critique_assessment")
     assert event["author_attempts"] == 1
     snapshot = json.loads((tmp_path / event["snapshot_path"]).read_text())
     assert "Check assumptions and controls" in snapshot["response"]

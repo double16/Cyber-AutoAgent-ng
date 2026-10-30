@@ -273,3 +273,19 @@ def test_diagnostic_export_failure_does_not_block_repair(scripted_service, tmp_p
     assert len([event for event in events if event["type"] == "technique_warning"]) == 1
     assert events[-1]["type"] == "technique_resolved"
     assert not any("disk unavailable" in str(event) for event in events)
+
+
+def test_task_results_reach_only_post_task_usefulness_evaluation(scripted_service):
+    state = scripted_service
+    state.service.tool("operation", "task")(request="JWT handling")
+    assert all("PRIVATE_TASK_OBJECTIVE" not in prompt for _, prompt, _ in state.calls)
+    task = SimpleNamespace(
+        task_uid="task", evidence=[], objective="PRIVATE_TASK_OBJECTIVE", status="done",
+    )
+    runtime = SimpleNamespace(
+        technique_service=state.service, operation_id="operation", prompt_token_limit=8000,
+    )
+    evaluate_task_techniques(runtime, task, "Completed execution", [])
+    evaluated = [prompt for role, prompt, _ in state.calls if role == "technique_evaluator"]
+    assert len(evaluated) == 1 and "PRIVATE_TASK_OBJECTIVE" in evaluated[0]
+    assert not state.service.repository.pending_uses("operation", "task")

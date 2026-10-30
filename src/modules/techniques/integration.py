@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 
+from modules.techniques.context import methodology_context
 from modules.techniques.triggers import RecommendationContext, phase_contexts, signal_adapters
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def bind_task_techniques(runtime, plan, task, tools):
                                for item in getattr(plan, "targets", [])
                                if not getattr(task, "target_ids", []) or item.target_id in task.target_ids]
     context.seed(task)
-    selected = service.tool(runtime.operation_id, task.task_uid, context.lookup)
+    selected = service.tool(runtime.operation_id, task.task_uid, methodology_context(context.lookup))
     selected._cyber_technique_context = context
     return [item for item in tools if get_tool_name(item) != "get_technique"] + [selected]
 

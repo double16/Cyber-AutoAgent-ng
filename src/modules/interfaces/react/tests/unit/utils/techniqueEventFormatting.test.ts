@@ -33,6 +33,13 @@ describe('technique lifecycle presentation', () => {
     expect(formatTechniqueEvent(event)).toContain(expected);
   });
 
+  it.each(cases)('keeps task identifiers out of displayed messages for %o', (event) => {
+    const task_uid = 'ac86420e-fefd-4d78-a116-762ea43b32d9';
+    const correlated = {...event, task_uid};
+    expect(formatTechniqueEvent(correlated)).toBe(formatTechniqueEvent(event));
+    expect(correlated.task_uid).toBe(task_uid);
+  });
+
   it('shows validation failures and diagnostic paths without displaying drafts', () => {
     const event = {type: 'technique_build_progress', stage: 'author_schema', status: 'failed',
       attempt: 3, reason: 'metadata.title: missing', snapshot_path: 'techniques/builds/build/attempt-3.json',
@@ -53,7 +60,7 @@ describe('technique lifecycle presentation', () => {
     const event = {type: 'technique_resolved', outcome: 'generated', title: '\u001b[31m' + 'x'.repeat(3000),
       task_uid: 'network-task', snapshot_path: 'techniques/revision.produced.md', document: 'PRIVATE DOCUMENT'};
     const result = formatTechniqueEvent(event)!;
-    expect(result).toContain('[network-task]');
+    expect(result).not.toContain('network-task');
     expect(result).toContain('[techniques/revision.produced.md]');
     expect(result).not.toContain('\u001b');
     expect(result).not.toContain('PRIVATE DOCUMENT');

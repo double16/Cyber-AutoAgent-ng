@@ -91,7 +91,7 @@ def test_revision_and_research_failure_keep_existing_error_path(scripted_service
     state.service.research = lambda request: (_ for _ in ()).throw(ValueError("TLS trust unavailable"))
     with pytest.raises(ValueError, match="TLS trust"):
         state.service.get("JWT handling")
-    assert [(row["stage"], row["status"]) for row in events if row["stage"] != "request_alignment"] == [
+    assert [(row["stage"], row["status"]) for row in events if row.get("stage") not in {None, "request_alignment"}] == [
         ("research", "started"),
         ("research", "failed"),
     ]

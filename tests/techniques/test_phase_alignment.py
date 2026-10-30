@@ -31,12 +31,12 @@ def test_explicit_phase_alignment_is_shared_and_context_is_not_mutated(scripted_
     context = LookupContext(phase_contexts=[phase], methodology_constraints=["Read only"])
     alignment, aligned_context = align_request(state.service, request, context)
     same, _ = align_request(state.service, adjusted, aligned_context)
-    assert same is alignment and len(calls) == 1
+    assert same == alignment and len(calls) == 1
     assert context._request_alignment is None and aligned_context is not context
     assert alignment.original_request == request and alignment.adjusted_request == adjusted
     assert alignment.objectives == {phase: PHASE_OBJECTIVES[phase]}
     assert "Read only" in calls[0] and phase_guidance(context) in calls[0]
-    assert "operation-local purpose and task obligations are applicability context" in calls[0]
+    assert "task objectives and execution context are not supplied to this workflow" in calls[0]
     assert "Original request" in alignment.render()
 
 

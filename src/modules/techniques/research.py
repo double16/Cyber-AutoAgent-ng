@@ -2,6 +2,7 @@
 
 import ast
 import os
+import re
 import ssl
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -9,6 +10,7 @@ from typing import Any
 
 import httpx
 from strands import tool
+from trafilatura import extract
 
 from modules.techniques.documents import toon
 from modules.tools.web_search import SemanticWebSearchCache, create_web_search_tool
@@ -31,18 +33,32 @@ class DocumentText(HTMLParser):
         super().__init__()
         self.parts: list[str] = []
         self.hidden = 0
+        self.preformatted = False
+        self.rendered: list[str] = []
 
     def handle_starttag(self, tag, attrs):
-        if tag in {"script", "style"}:
+        if not self.hidden and tag in {"p", "div", "h1", "h2", "h3", "ul", "ol", "li", "tr", "pre", "br"}:
+            self.rendered.append("\n")
+        if tag == "pre":
+            self.preformatted = True
+        if tag in {"script", "style", "nav", "footer"}:
             self.hidden += 1
 
     def handle_endtag(self, tag):
-        if tag in {"script", "style"}:
+        if not self.hidden and tag in {"p", "div", "h1", "h2", "h3", "li", "tr", "pre"}:
+            self.rendered.append("\n")
+        if not self.hidden and tag in {"td", "th"}:
+            self.rendered.append("\t")
+        if tag == "pre":
+            self.preformatted = False
+        if tag in {"script", "style", "nav", "footer"}:
             self.hidden = max(0, self.hidden - 1)
 
     def handle_data(self, data):
+        if not self.hidden:
+            self.rendered.append(data if self.preformatted else re.sub(r"\s+", " ", data))
         if not self.hidden and data.strip():
-            self.parts.append(data.strip())
+            self.parts.append(data if self.preformatted else data.strip())
 
 
 def fetch_document(url: str) -> dict:
@@ -63,16 +79,24 @@ def fetch_document(url: str) -> dict:
                     raise ValueError("Source exceeds the two-megabyte fetch limit")
                 parts.append(chunk)
             text = b"".join(parts).decode(response.encoding or "utf-8", errors="replace")
+    extraction_method = "plain_text"
     if "html" in content_type:
         parser = DocumentText()
         parser.feed(text)
-        text = "\n".join(parser.parts)
+        try:
+            article = extract(text, output_format="markdown", include_tables=True, include_links=False)
+        except (ValueError, TypeError):
+            article = None
+        text = article if article and article.strip() else "".join(parser.rendered).strip()
+        extraction_method = "article" if article and article.strip() else "whole_page"
     if not text.strip():
         raise ValueError("Source contains no readable text")
     return {
         "url": url,
         "text": text[:16_000],
         "truncated": len(text) > 16_000,
+        "extraction_method": extraction_method,
+        "retained_characters": min(len(text), 16_000),
         "retrieved_at": datetime.now(UTC).isoformat(),
     }
 

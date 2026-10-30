@@ -94,7 +94,7 @@ export const formatTechniqueEvent = (input: { type?: unknown }): string | null =
   if (event.component_id) message += ` [component ${text(event.component_id)}]`;
   if (event.research_round != null) message += ` [research round ${event.research_round}]`;
   if (event.snapshot_path) message += ` [${text(event.snapshot_path)}]`;
-  return event.task_uid ? `[${text(event.task_uid)}] ${message}` : message;
+  return message;
 };
 
 export const techniqueEventSeverity = (event: {type?: unknown; status?: unknown}): 'info' | 'warning' =>

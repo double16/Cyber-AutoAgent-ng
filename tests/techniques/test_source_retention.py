@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from modules.techniques.coverage import (
+    EvidenceExcerpt,
     EvidenceSupport,
     Requirement,
     SourceAssessment,
@@ -26,7 +27,7 @@ def harness():
     events = TechniqueEvents()
     events.callback = state.events.append
 
-    def generate(role, prompt, schema):
+    def generate(role, prompt, schema, tools=None):
         state.calls.append((role, prompt))
         if schema is SourceAssessment:
             url = json.loads(prompt.split("Current document URL: ", 1)[1].split("\n", 1)[0])["url"]
@@ -144,7 +145,7 @@ def test_new_source_assessor_cannot_reselect_an_older_url():
     prior = select_sources(state.service, "Method", REQUIREMENTS, [document(1)])
     generate = state.service._json
 
-    def stale(role, prompt, schema):
+    def stale(role, prompt, schema, tools=None):
         if schema is SourceAssessment:
             return prior._decisions[document(1)["url"]]
         return generate(role, prompt, schema)
@@ -203,3 +204,51 @@ def test_complementary_source_can_close_a_prior_gap():
     result = select_sources(state.service, "Method", REQUIREMENTS, [document(2)], prior)
     assert result.sufficient and len(result.coverage[0].source_urls) == 2
     assert prior.coverage[0].gaps and not result.coverage[0].gaps
+
+
+def test_assessor_can_inspect_beyond_initial_excerpt():
+    state = harness()
+    original = state.service._json
+    text = "x" * 6500 + "Exact late technical evidence"
+    source = document(1, text)
+
+    def generate(role, prompt, schema, tools=None):
+        result = original(role, prompt, schema, tools)
+        if schema is EvidenceSupport:
+            assert tools
+            passage = tools[0](url=source["url"], start=6500, length=100)
+            result.evidence = [EvidenceExcerpt(url=source["url"], text=passage["text"])]
+        return result
+
+    state.service._json = generate
+    result = select_sources(state.service, "HTTP request controls", REQUIREMENTS, [source])
+    assert result._documents[source["url"]]["text"] == text
+    assert result._evidence["method"][0].text == "Exact late technical evidence"
+
+
+@pytest.mark.parametrize("subject", ["HTTP upload controls", "TCP protocol mapping", "filesystem source review"])
+def test_long_source_correction_retains_inspection_without_reopening_tools(subject):
+    state = harness()
+    original = state.service._json
+    source = document(1, "x" * 6500 + "Late mechanism evidence")
+    attempts = []
+
+    def generate(role, prompt, schema, tools=None):
+        result = original(role, prompt, schema, tools)
+        if schema is EvidenceSupport:
+            attempts.append(prompt)
+            if len(attempts) == 1:
+                passage = tools[0](url=source["url"], start=6500, length=100)
+                assert passage["text"] == "Late mechanism evidence"
+                result.requirement_id = "wrong"
+            else:
+                assert not tools
+                assert "Late mechanism evidence" in prompt
+                result.evidence = [EvidenceExcerpt(url=source["url"], text="Late mechanism evidence")]
+        return result
+
+    state.service._json = generate
+    result = select_sources(state.service, subject, REQUIREMENTS, [source])
+    assert len(attempts) == 2
+    assert result.sufficient
+    assert any(event.get("status") == "source_inspected" for event in state.events)

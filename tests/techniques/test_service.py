@@ -119,7 +119,7 @@ def test_missing_technique_runs_separate_research_selection_author_and_critic(sc
     assert "revision_id:" in markdown
     assert state.service.repository.get(revision)["active"]
     assert len(state.research_calls) == 1 and state.research_calls[0].startswith("JWT handling\n")
-    assert [role for role, _, _ in state.calls] == ["technique_source_assessor", "technique_requirement_assessor", "technique_author", "technique_critic"]
+    assert [role for role, _, _ in state.calls] == ["technique_judge", "technique_source_assessor", "technique_requirement_assessor", "technique_author", "technique_critic"]
     assert all(bool(tools) == (role == "technique_critic") for role, _, tools in state.calls)
     author_prompt = next(prompt for role, prompt, _ in state.calls if role == "technique_author")
     critic_prompt = next(prompt for role, prompt, _ in state.calls if role == "technique_critic")

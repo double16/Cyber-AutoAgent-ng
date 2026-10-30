@@ -237,9 +237,9 @@ def test_cli_passes_optional_phase_and_constraints(monkeypatch, capsys, options,
     else:
         assert context.phase_contexts == phases
         assert context.methodology_constraints == constraints
-        assert context.constraints == []
-        assert context.purpose == "Trace input flow"
-        assert context.subjects == []
+        assert not hasattr(context, "constraints")
+        assert not hasattr(context, "purpose")
+        assert not hasattr(context, "subjects")
     service.store.qdrant.close.assert_called_once()
 
 
@@ -273,7 +273,7 @@ def test_cli_context_reaches_applicability_author_and_critic(scripted_service, m
     assert "No live execution" in applicability
     if not phases:
         assert "Phase contexts: unknown" in applicability
-    assert "future validation guidance does not authorize present execution" in SYSTEM + applicability
+    assert "Task objectives, subjects, observations, tool capabilities and operation restrictions are not inputs." in SYSTEM + applicability
     for role in ("technique_author", "technique_critic"):
         assembled = SYSTEM + next(prompt for selected, prompt, _ in state.calls if selected == role)
         assert f"Required phase contexts: {json.dumps(phases)}" in assembled
@@ -371,3 +371,31 @@ def test_explicit_module_exports_and_reports_failures(
         assert files[0].read_text() == expected
     elif mode == "export_failure":
         assert "Destination read-only" in captured.err
+
+
+@pytest.mark.parametrize("phases", [[], ["hypothesis_generation"]])
+def test_cli_and_agent_assemble_equivalent_generation_inputs(
+    scripted_service, monkeypatch, capsys, tmp_path, phases,
+):
+    from modules.techniques.context import LookupContext
+
+    state = scripted_service
+    monkeypatch.setattr(state.service.store, "search", lambda *args, **kwargs: [])
+    context = LookupContext(
+        phase_contexts=phases, methodology_constraints=["Describe negative controls"],
+        purpose="PRIVATE_TASK_OBJECTIVE", subjects=[{"value": "PRIVATE_SUBJECT"}],
+        constraints=["PRIVATE_OPERATION_CONSTRAINT"], capabilities=["PRIVATE_TOOL"],
+    )
+    context.observe("PRIVATE_OBSERVATION", "artifact:PRIVATE_REFERENCE", "source", "subject")
+    state.service.tool("PRIVATE_OPERATION", "PRIVATE_TASK", context)("JWT handling")
+    expected = [(role, prompt) for role, prompt, _ in state.calls]
+    state.calls.clear()
+    monkeypatch.setattr(cli, "build_service", lambda *args, **kwargs: state.service)
+    assert cli.main([
+        "JWT handling", "--provider", "ollama", "--output-dir", str(tmp_path),
+        *[value for phase in phases for value in ("--phase", phase)],
+        "--constraint", "Describe negative controls",
+    ]) == 0
+    actual = [(role, prompt) for role, prompt, _ in state.calls]
+    assert expected == actual and "PRIVATE_" not in str(actual)
+    assert "Request compatibility" in capsys.readouterr().out

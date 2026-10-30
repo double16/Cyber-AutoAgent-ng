@@ -15,7 +15,7 @@ def test_atomic_requirement_correction(recover):
     requirements = [Requirement(id=f"r{i}", description=f"Requirement {i}") for i in range(7)]
     attempts = {}
 
-    def generate(role, prompt, schema):
+    def generate(role, prompt, schema, tools=None):
         calls.append((role, prompt))
         if schema is SourceAssessment:
             return schema(selected_urls=[url], attributions=[{"url": url, "reason": "Primary"}],

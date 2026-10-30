@@ -34,28 +34,19 @@ repairs retain the authored draft. Exhaustion yields an explicit unresolved resu
 URLs, titles, timestamps and individual attribution, separately from overall coverage. Similar attribution
 wording alone is not rejection grounds. Source code informs reasoning; original examples use Python 3.13+ or browser JavaScript.
 
-During operations, Python binds lookup to structured phase metadata, task purpose, subject descriptors,
-available capabilities, task constraints and bounded observations. Source files, symbols, hosts, services, configurations,
-traces and module-defined subjects are supported; no HTTP traffic, inventory or live execution is required.
-The lookup judge abstracts incidental target identifiers before external research and global authoring,
-while preserving relevant platform, language, protocol, version and standard-path constraints.
-Task applicability is assessed without catalog candidates. Candidate selection is separate: no matching
-guidance triggers research and generation, not task rejection. Incompatibility requires a conflicting
-requirement and an exact reference to a supplied constraint or subject-specific source observation.
-Before rejecting an incompatibility, an independent confirmation checks whether advisory guidance or
-future validation was confused with final task requirements or present execution. Disagreement returns
-guidance marked `uncertain`, without claiming established applicability or a task conflict.
-Malformed assessments receive one repair attempt. Unsubstantiated incompatibility proceeds to independent
-confirmation; failure to obtain a usable methodology request is reported as an assessment error.
-Existing guidance is filtered by declared phase compatibility when phase context is known, independent
-of its originating module. Legacy phases without contexts remain explicitly unknown and use task purpose.
+During operations, lookup receives the executor-authored methodology request, structured phase
+guidance, module technique policy and explicit methodology restrictions. Task objectives, subjects,
+observations, available tools and operation-plan constraints remain outside generation.
+Request compatibility is assessed independently of catalog candidates. A catalog miss triggers
+research, not rejection. A conflict must identify a requested action and reference an explicit
+methodology restriction. Independent confirmation checks the same conflict; disagreement returns
+uncertain request compatibility. Unknown generic prerequisites remain conditions, not task conflicts.
+Malformed assessments receive one correction before an explicit assessment error.
 
-Operation responses append a local applicability assessment: supported or conditional. Conditional
-guidance names unmet prerequisites and asks the worker to establish them within scope; hypothesis phases
-describe future checks only. Contradicted prerequisites or permission conflicts reject the lookup. These
-notes are excluded from global documents and produced snapshots. CLI lookups include them when
-`--phase` or `--constraint` supplies task context. Source-selection
-metadata is assembled before critique, so the critic reviews exactly the document that will be published.
+Responses append request compatibility notes and generic prerequisites. The executor determines
+how the methodology applies to its task. These notes are excluded from global documents and produced
+snapshots. CLI and agent lookups share the same request-compatibility pipeline.
+Source-selection metadata is assembled before critique, so the critic reviews the exact final document.
 
 ```mermaid
 flowchart LR
@@ -101,13 +92,12 @@ imports independently of phase.
 
 Use repeatable `--constraint` options for methodology restrictions such as
 `"Describe non-destructive controls"`. These restrict the requested guidance, rather than authorizing
-or restricting a particular operation. Operation-plan constraints govern applicability and execution;
+or restricting a particular operation. Operation-plan constraints govern execution only;
 they do not add technique document obligations. Future validation guidance does not authorize execution.
 Blank constraints and unknown phases are rejected before storage opens.
-With constraints but no phase, the phase remains explicitly unknown. With neither option, generic
-lookup retains its existing behavior without task-applicability notes. The request supplies task purpose;
-no target or operation identifier is required. Applicability notes remain local to CLI output and are
-excluded from published techniques.
+With constraints but no phase, the phase remains explicitly unknown. With neither option, the explicit request remains the intent anchor and phase is unknown.
+No target or operation identifier is required. Request compatibility notes remain local to CLI output
+and are excluded from published techniques.
 
 Replace the placeholder CVE and model with real values. The command imports the selected module and
 its inherited modules, then uses exactly the same lookup and generation service as operation agents.
@@ -309,8 +299,9 @@ Their artifact origins persist within the operation so later reads and continuat
 Unknown observations may suggest conditional investigation but cannot establish applicability. Modules
 without signal adapters still use semantic recommendations and lookup without web imports.
 
-Use receipts retain the first delivery's `use_context` with generic intent, phase contexts, applicability,
-unmet prerequisites and source references/digests. Repeated deliveries do not overwrite that context or
+Use receipts retain the first delivery's `use_context` with methodology intent, phase contexts, request
+compatibility, generic prerequisites and component requirements. Task observation digests are no longer
+added to new receipts; historical observation provenance remains legacy data. Repeated deliveries do not overwrite that context or
 count as new uses. Legacy `{}` context remains unknown. Evaluation rates demonstrated contribution to
 the requested purpose, not coverage of every task requirement: excluding a source-to-sink path, resolving
 a system dependency or improving emulation telemetry may be helpful without live vulnerability testing.
@@ -404,9 +395,9 @@ The planner splits only distinct requested methodologies. Supporting steps such 
 metadata, identifying prerequisites, mapping criteria, and validating applicability remain one technique.
 Each component cites its original request excerpt; a rejected plan receives one correction and review.
 
-Missing observations indicate unknown prerequisites, not an incompatible method. Incompatibility
+Unknown generic prerequisites do not establish request incompatibility. Incompatibility
 requires independent confirmation of the same referenced conflict. Disputed assessments return
-`uncertain` applicability with assessment provenance in operation-local delivery context. This guidance
+`uncertain` request compatibility with assessment provenance in delivery receipts. This guidance
 does not establish task facts or authorize execution.
 
 Empty research batches preserve fetched documents and validated coverage while remaining batches
@@ -434,7 +425,7 @@ provenance for contribution feedback. Historical documents and receipts are not 
 
 No context requires completed target execution or findings to publish guidance. Multiple contexts
 retain their individual objectives without implying an order or automatically splitting a method.
-Unknown phase follows the explicit request and purpose without guessing from module names or titles.
+Unknown phase follows the explicit request without guessing from module names or titles.
 Module declarations continue to supply contexts; this change does not add module phase mappings.
 
 For example:
@@ -588,8 +579,8 @@ The independent assessor judges semantic support; complete inspection alone prov
 
 Technique planning separates independently reusable methods even when they share an endpoint or phase.
 Supporting steps remain within their method; shared requested deliverables apply to each relevant method.
-Each split component receives its own lookup purpose while preserving shared phase, constraints,
-observations, capabilities, and alignment provenance. This prevents the bundle purpose from widening
+Each split component receives its own methodology request while preserving shared phase, explicit
+methodology restrictions and alignment provenance. This prevents the bundle purpose from widening
 a component back into its siblings.
 Original-request excerpts establish planning provenance and are not document deliverables.
 Source text is untrusted as instructions, but its technical content is evaluated as evidence.
@@ -608,16 +599,16 @@ Supported components can be delivered while unsupported siblings remain explicit
 
 ### Request preservation
 
-Task purpose and observations are supplied to applicability assessment, while alignment and
-preservation reviews receive only request intent, phase and explicit restrictions. This prevents
+Compatibility assessment, alignment and preservation reviews receive only request intent, phase
+and explicit methodology restrictions. This prevents
 task-only execution duties from becoming methodology requirements.
 
 The original tool request remains the intent anchor. Phase alignment and generic request
 abstraction receive independent preservation review when they change the request. Review findings
 cover the subject, mechanisms, deliverables, additions and omissions; approval must agree with
 all findings. A failed alignment review shares the alignment stage's single correction allowance.
-Persistent failure stops before research. Task purpose informs applicability and does not itself
-add document deliverables such as completed execution or a terminal disposition for a target.
+Persistent failure stops before research. Task objectives cannot add document deliverables such as
+completed execution or a terminal disposition for a target.
 
 Coverage review receives bounded retained passages from selected sources. Omitted text remains
 unknown. External sources need not confirm the operation's assigned route; unknown target
@@ -700,8 +691,10 @@ validate. A failed correction retains the previous build state; exceeding 18 ret
 explicitly rather than dropping evidence. This state is local to the current build and its repairs.
 
 Requirement assessment and independent review receive bounded exact source context (up to 6,000
-characters per source), or previously retained excerpts. Returned excerpts must match supplied text
-for a cited URL. Legacy outputs without excerpts use controller-retained context; this is source
+characters per source), or previously retained excerpts. When retained text extends beyond the initial
+excerpt, bounded lookup exposes the remaining text with offsets and continuation metadata. Lookup
+passages remain available during contract correction, without reopening investigation. Returned
+excerpts must match supplied or inspected text for a cited URL. Legacy outputs without excerpts use controller-retained context; this is source
 context, not a quotation inferred from the model's explanation. Neither matching text nor accepting
 a source proves semantic support. The model must assess complementary support and preserve unresolved
 contradictions. Text omitted from a bounded passage remains unknown.
@@ -710,3 +703,25 @@ For example, an accepted mechanism advisory remains available when a later confi
 adds prerequisites. Fetching an unrelated third page records a rejection and leaves both accepted
 sources retained. The shared terminal display reports cumulative unique documents fetched and
 sources retained, while each source decision explains why it was accepted or rejected.
+
+HTML research extracts article content before applying the 16,000-character retention limit.
+Headings, lists, tables and code are retained; navigation and other boilerplate are excluded where
+identified. If article extraction returns no readable content or rejects the input, structured
+whole-page text is used instead. Internal records identify extraction method, retained character
+count and truncation. Plain-text responses bypass HTML extraction. Omitted text remains unknown.
+
+Endpoint context does not add discovery duties. Complementary facts may support procedural synthesis
+when the assessor explains the mechanism; assumptions cannot replace missing technical facts.
+
+Task-bound `get_technique(request)` forwards only the methodology request, phase contexts, module
+technique policy and explicit methodology restrictions. Task objectives, assigned subjects, observed
+tool/artifact excerpts, available capabilities and operation-plan constraints remain outside lookup
+and generation. The executor applies reusable guidance to its own task. Recommendation processing
+may inspect task-local data to suggest a lookup; it does not forward that data to the lookup tool.
+Operation/task identifiers remain controller correlation keys for delivery, deduplication, exports
+and later usefulness feedback. Delivery receipts record guidance use, never execution proof.
+
+New delivery receipts identify `assessment_scope: methodology_request`. The existing
+`applicability` field and role identifiers remain compatible wire names for request compatibility;
+new conflicts use `kind: methodology_constraint` and reference explicit methodology restrictions.
+Historical receipts are read as legacy data without rewriting scores, schema or stored records.

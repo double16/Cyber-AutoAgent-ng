@@ -78,8 +78,8 @@ def test_alignment_separates_operation_and_methodology_constraints(scripted_serv
     assert "assigned.internal" not in prompts[0]
     assert "Explain cleanup" in prompts[0] and "Describe negative controls" in prompts[0]
     assert context.module_technique_policy == []
-    assert aligned.constraints == context.constraints
-    assert "assigned.internal" in aligned.render()
+    assert not hasattr(aligned, "constraints")
+    assert "assigned.internal" not in aligned.render()
     _, bare = align_request(service, subject, None)
     assert bare.module_technique_policy == service.module_technique_policy
 

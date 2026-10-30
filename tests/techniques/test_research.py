@@ -258,3 +258,79 @@ def test_preferences_are_advisory_in_initial_and_gap_research(technique_request)
     assert research(technique_request)[0]["url"] == "https://vendor.example/advisory"
     assert research.batch(technique_request + "; evidence gap", set())[0]["text"] == "Evidence"
     assert len(prompts) == len(queries) == 2
+
+
+def test_fallback_preserves_code_and_excludes_navigation():
+    parser = DocumentText()
+    parser.feed("<nav>menu</nav><pre>def f(a, b):\n    return a, b</pre><footer>footer</footer>")
+    assert parser.parts == ["def f(a, b):\n    return a, b"]
+
+
+@pytest.mark.parametrize("article", [None, "Extracted technical guidance"])
+def test_fetch_extraction_metadata_and_fallback(monkeypatch, article):
+    actual_client = httpx.Client
+    monkeypatch.setattr("modules.techniques.research.extract", lambda *args, **kwargs: article)
+    monkeypatch.setattr(
+        "modules.techniques.research.httpx.Client",
+        lambda **kwargs: actual_client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(
+                200, text="<nav>menu</nav><p>Fallback &amp; guidance</p>",
+                headers={"content-type": "text/html"},
+            )), **kwargs,
+        ),
+    )
+    result = fetch_document("https://example.org/article")
+    assert result["text"] == (article or "Fallback & guidance")
+    assert result["retained_characters"] == len(result["text"])
+    assert result["extraction_method"] == ("article" if article else "whole_page")
+    assert not result["truncated"]
+
+
+def test_article_extractor_preserves_technical_structure():
+    from trafilatura import extract
+
+    html = (
+        "<html><body><nav>Navigation noise</nav><article><h1>Technical guide</h1><p>"
+        + "Technical evidence and methodology. " * 30
+        + "</p><pre>def f(a, b):\n    return a, b</pre>"
+        + "<ul><li>Compare controls</li></ul>"
+        + "<table><tr><th>Input</th><th>Result</th></tr><tr><td>A</td><td>B</td></tr></table>"
+        + "</article></body></html>"
+    )
+    text = extract(html, output_format="markdown", include_tables=True, include_links=False)
+    assert "Navigation noise" not in text
+    assert "# Technical guide" in text
+    assert "def f(a, b):\n    return a, b" in text
+    assert "Compare controls" in text
+    assert "Input" in text and "Result" in text
+
+
+def test_fallback_preserves_inline_text_and_nested_code():
+    parser = DocumentText()
+    parser.feed("<p>Read <b>this</b> carefully.</p><pre>def f(a, b):\n"
+                "<code>    return a, b</code>\n</pre>"
+                "<table><tr><td>A</td><td>B</td></tr></table>")
+    text = "".join(parser.rendered)
+    assert "Read this carefully." in text
+    assert "def f(a, b):\n    return a, b\n" in text
+    assert "A\tB\t" in text
+
+
+def test_fetch_falls_back_when_article_extractor_rejects_input(monkeypatch):
+    actual_client = httpx.Client
+
+    def reject(*args, **kwargs):
+        raise ValueError("Malformed article")
+
+    monkeypatch.setattr("modules.techniques.research.extract", reject)
+    monkeypatch.setattr(
+        "modules.techniques.research.httpx.Client",
+        lambda **kwargs: actual_client(
+            transport=httpx.MockTransport(lambda request: httpx.Response(
+                200, text="<p>Readable fallback</p>", headers={"content-type": "text/html"},
+            )), **kwargs,
+        ),
+    )
+    result = fetch_document("https://example.org/article")
+    assert result["text"] == "Readable fallback"
+    assert result["extraction_method"] == "whole_page"

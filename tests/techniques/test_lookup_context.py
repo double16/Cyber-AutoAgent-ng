@@ -57,8 +57,8 @@ def test_real_module_guidance_reuses_with_local_context_and_durable_feedback(
     delivered = json.loads(receipt["use_context"])
     assert delivered["generic_request"] == document.metadata.title
     assert delivered["phase_contexts"] == [phase]
-    assert "excerpt" not in delivered["observations"][0]
-    assert delivered["observations"][0]["source"] == "artifact:captured.txt"
+    assert delivered["observations"] == []
+    assert all(observation not in prompt for _, prompt, _ in state.calls)
     # Cross-module reuse and a second delivery must not overwrite the first receipt or count twice.
     context.purpose = "A different contribution"
     selected(request="Equivalent methodology")
@@ -140,8 +140,8 @@ def test_unknown_provenance_is_conditional_and_unknown_phase_remains_usable(scri
     context = LookupContext(purpose="Review captured observations")
     context.observe("Potential token handling", "tool:runtime-added", "unknown", "subject")
     result = state.service.tool("op", "task", context)(request="Review token handling")
-    assert "Assessment: conditional" in result
-    assert "Establish subject-specific prerequisites" in result
+    assert "Assessment: supported" in result
+    assert "Establish subject-specific prerequisites" not in result
     assert json.loads(state.service.repository.pending_uses("op", "task")[0]["use_context"])["phase_contexts"] == []
 
 
@@ -278,12 +278,12 @@ def test_catalog_miss_researches_independently_of_applicability(scripted_service
     assert len(state.research_calls) == 1 and state.research_calls[0].startswith(method_request)
 
 
-@pytest.mark.parametrize("kind", ["task_constraint", "contradicted_prerequisite"])
+@pytest.mark.parametrize("kind", ["methodology_constraint"])
 def test_referenced_conflict_stops_before_candidate_search(scripted_service, kind, monkeypatch):
     state = scripted_service
-    context = LookupContext(constraints=["Read only"])
+    context = LookupContext(methodology_constraints=["Read only"])
     context.observe("Input cannot reach sink", "artifact:source", "source", "subject")
-    reference = "Read only" if kind == "task_constraint" else "artifact:source"
+    reference = "Read only"
     state.service.runner = lambda *_: json.dumps({
         "generic_request": "Source analysis", "applicability": "incompatible",
         "unmet_prerequisites": [], "reason": "Requested action contradicts supplied context",
@@ -291,8 +291,8 @@ def test_referenced_conflict_stops_before_candidate_search(scripted_service, kin
                      "context_reference": reference},
     })
     monkeypatch.setattr(state.service.store, "search", lambda *_a, **_k: pytest.fail("Must not search"))
-    with pytest.raises(ValueError, match="incompatible.*Requires modifying"):
-        state.service.get("Source analysis", context)
+    with pytest.raises(ValueError, match="restriction.*Requires modifying"):
+        state.service._prepare("Source analysis", context)
     assert not state.research_calls
 
 
@@ -312,7 +312,7 @@ def test_invalid_conflict_reference_exhausts_one_repair(scripted_service, refere
         return json.dumps({
             "generic_request": "Source analysis", "applicability": "incompatible",
             "unmet_prerequisites": [], "reason": "No reusable candidate",
-            "conflict": {"kind": "contradicted_prerequisite", "requirement": "Requires input",
+            "conflict": {"kind": "methodology_constraint", "requirement": "Requires input",
                          "context_reference": reference},
         })
 
@@ -349,10 +349,10 @@ def test_non_incompatible_assessment_rejects_conflict(scripted_service):
     state.service.runner = lambda *_: json.dumps({
         "generic_request": "Source analysis", "applicability": "supported",
         "unmet_prerequisites": [], "reason": "Useful",
-        "conflict": {"kind": "task_constraint", "requirement": "Write", "context_reference": "Read only"},
+        "conflict": {"kind": "methodology_constraint", "requirement": "Write", "context_reference": "Read only"},
     })
     with pytest.raises(ValueError, match="assessment failed"):
-        state.service.get("Source analysis", LookupContext(constraints=["Read only"]))
+        state.service._prepare("Source analysis", LookupContext(methodology_constraints=["Read only"]))
 
 
 def test_catalog_filled_after_lease_reuses_without_research(scripted_service, monkeypatch):
@@ -383,7 +383,7 @@ def test_independent_confirmation_detects_guidance_vs_task_confusion(scripted_se
             "unmet_prerequisites": ["Inspect implementation"] if confirmation else [],
             "reason": "Future checks are useful" if confirmation else "Task requires terminal disposition",
             "conflict": None if confirmation else {
-                "kind": "task_constraint", "requirement": "Future validation",
+                "kind": "methodology_constraint", "requirement": "Future validation",
                 "context_reference": "Hypothesis only; no execution",
             },
         })
@@ -391,12 +391,12 @@ def test_independent_confirmation_detects_guidance_vs_task_confusion(scripted_se
     state.service.runner = runner
     decision = state.service._prepare("Hypothesis guidance", LookupContext(
             purpose="Hypothesis generation", subjects=[{"kind": subject}],
-            constraints=["Hypothesis only; no execution"],
+            methodology_constraints=["Hypothesis only; no execution"],
         ))
     assert decision.applicability == "uncertain"
     assert len(decision.receipt(LookupContext())["assessment_provenance"]["assessments"]) == 2
     assert len(prompts) == 2
-    assert "advisory guidance and final task requirements" in prompts[1][1]
+    assert "explicit methodology" in prompts[1][1]
     assert not state.research_calls
 
 
@@ -432,11 +432,11 @@ def test_malformed_confirmation_repairs_once_then_delivers_uncertainty(scripted_
             return "malformed JSON"
         return json.dumps({"generic_request": "Source analysis", "applicability": "incompatible",
                            "unmet_prerequisites": [], "reason": "Requires writes",
-                           "conflict": {"kind": "task_constraint", "requirement": "Modify files",
+                           "conflict": {"kind": "methodology_constraint", "requirement": "Modify files",
                                         "context_reference": "Read only"}})
 
     state.service.runner = runner
-    decision = state.service._prepare("Source analysis", LookupContext(constraints=["Read only"]))
+    decision = state.service._prepare("Source analysis", LookupContext(methodology_constraints=["Read only"]))
     assert decision.applicability == "uncertain"
     assert len(calls) == 3 and "Validation failure" in calls[-1][1]
 
@@ -456,3 +456,91 @@ def test_uncertain_guidance_is_delivered_and_receipted(scripted_service):
     assert "Assessment: uncertain" in result and "does not authorize execution" in result
     receipt = json.loads(state.service.repository.pending_uses("op", "task")[0]["use_context"])
     assert receipt["applicability"] == "uncertain" and receipt["assessment_provenance"]["validation_errors"]
+
+
+@pytest.mark.parametrize("subject", ["HTTP endpoint", "TCP service", "filesystem symbol"])
+def test_tool_forwards_only_methodology_context_and_keeps_ids_for_bookkeeping(
+    scripted_service, monkeypatch, subject,
+):
+    state = scripted_service
+    context = LookupContext(
+        phase_contexts=["hypothesis_generation"], purpose="private task objective",
+        subjects=[{"kind": subject, "value": "private assigned subject"}],
+        capabilities=["private_runtime_tool"], constraints=["private operation constraint"],
+        methodology_constraints=["Explain non-destructive controls"],
+        module_technique_policy=[{"restriction": "Keep guidance reusable", "origin": "web"}],
+    )
+    context.observe("private observed result", "artifact:private", "source", "subject")
+    forwarded = []
+
+    def resolve(request, supplied, *, operation, task):
+        forwarded.append((request, supplied, operation, task))
+        return SimpleNamespace(render=lambda: "Reusable guidance")
+
+    monkeypatch.setattr(state.service, "resolve_bundle", resolve)
+    selected = state.service.tool("operation-correlation", "task-correlation", context)
+    for request in ["Explain mechanism prerequisites", "Describe future validation"]:
+        assert selected(request=request) == "Reusable guidance"
+        supplied = forwarded[-1][1]
+        assert not hasattr(supplied, "purpose")
+        assert supplied.phase_contexts == context.phase_contexts
+        assert supplied.methodology_constraints == context.methodology_constraints
+        assert supplied.module_technique_policy == context.module_technique_policy
+        assert not any(hasattr(supplied, name) for name in ("subjects", "capabilities", "constraints", "observations"))
+        assert forwarded[-1][2:] == ("operation-correlation", "task-correlation")
+        supplied.module_technique_policy[0]["restriction"] = "Changed copy"
+        assert context.module_technique_policy[0]["restriction"] == "Keep guidance reusable"
+    assert context.purpose == "private task objective"
+    assert len(context.observations) == 1
+
+
+@pytest.mark.parametrize("subject", ["HTTP endpoint", "TCP service", "filesystem symbol"])
+@pytest.mark.parametrize("entrypoint", ["tool", "bundle", "get"])
+@pytest.mark.parametrize("repair", [False, True])
+def test_generation_inputs_ignore_task_context_across_all_entrypoints(
+    scripted_service, monkeypatch, subject, entrypoint, repair,
+):
+    from modules.techniques.context import MethodologyContext
+
+    state = scripted_service
+    monkeypatch.setattr(state.service, "_candidates", lambda *_: [])
+    monkeypatch.setattr(state.service.store, "search", lambda *args, **kwargs: [])
+    state.approve = not repair
+    dirty = LookupContext(
+        phase_contexts=["hypothesis_generation"],
+        methodology_constraints=["Describe negative controls"],
+        purpose="PRIVATE_OBJECTIVE",
+        subjects=[{"kind": subject, "value": "PRIVATE_SUBJECT"}],
+        capabilities=["PRIVATE_CAPABILITY"], constraints=["PRIVATE_PLAN_CONSTRAINT"],
+    )
+    dirty.observe("PRIVATE_OBSERVATION", "artifact:PRIVATE_ARTIFACT", "source", "subject")
+    clean = MethodologyContext(
+        phase_contexts=["hypothesis_generation"],
+        methodology_constraints=["Describe negative controls"],
+    )
+    assembled = []
+    for context in [dirty, clean]:
+        state.calls.clear()
+
+        def run():
+            if entrypoint == "tool":
+                return state.service.tool("PRIVATE_OPERATION", "PRIVATE_TASK", context)("JWT handling")
+            if entrypoint == "bundle":
+                return state.service.resolve_bundle(
+                    "JWT handling", context, operation="PRIVATE_OPERATION", task="PRIVATE_TASK",
+                )
+            return state.service.get("JWT handling", context)
+
+        if repair:
+            with pytest.raises(ValueError):
+                run()
+        else:
+            run()
+        inputs = [(role, prompt, [item.tool_spec["name"] for item in tools])
+                  for role, prompt, tools in state.calls]
+        assert "PRIVATE_" not in str(inputs)
+        assembled.append(inputs)
+    assert assembled[0] == assembled[1]
+    assert any(role == "technique_author" for role, _, _ in assembled[0])
+    if repair:
+        assert sum(role == "technique_author" for role, _, _ in assembled[0]) == 3

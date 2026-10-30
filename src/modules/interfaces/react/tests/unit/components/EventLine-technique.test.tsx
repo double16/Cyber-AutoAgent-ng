@@ -17,6 +17,7 @@ describe('technique event rendering', () => {
     const {render} = await import('ink-testing-library');
     const view = render(React.createElement(EventLine, {event: event as any, animationsEnabled: false}));
     expect(view.lastFrame()).toContain(formatTechniqueEvent(event));
+    expect(view.lastFrame()).not.toContain('task-1');
     view.unmount();
   });
 });

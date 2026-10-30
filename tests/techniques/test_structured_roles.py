@@ -611,7 +611,7 @@ def test_preservation_findings_use_real_structured_transport(runner_factory, scr
     assembled = str(model.calls)
     assert "Produce terminal disposition for assigned route only" not in assembled
     assert "original_request (authoritative)" in assembled
-    assert "Context supplies applicability" in assembled
+    assert "Phase and methodology restrictions do not invent" in assembled
     assert "Validation failure" in assembled and "rejected" in assembled
     findings = next(row for row in events if row["type"] == "technique_request_review")
     assert findings["transformation"] == "alignment" and findings["correction_attempt"] == 0
@@ -704,3 +704,69 @@ def test_contribution_findings_transport(runner_factory, scripted_service, provi
                                             ContributionFeedback)
     assert result.score == 1
     assert model.calls[0][0] == ("native" if provider == "ollama" else "tool")
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+def test_long_source_assessment_exposes_lookup_through_real_transport(scripted_service, runner_factory, provider):
+    from modules.techniques.coverage import review_coverage
+
+    url = "https://vendor.example/advisory"
+    payloads = [
+        {"selected_urls": [url], "attributions": [{"url": url, "reason": "Mechanism authority"}],
+         "reason": "Authority for contributing claims", "authoritative_sufficient": True},
+        {"requirement_id": "method", "source_urls": [url],
+         "explanation": "Facts support original synthesis", "gaps": []},
+        {"requirement_id": "method", "source_urls": [url],
+         "explanation": "Independent review supports synthesis", "gaps": []},
+    ]
+    runner, model = runner_factory(payloads, provider)
+    scripted_service.service.runner = runner
+    selected = select_sources(
+        scripted_service.service, "Review a supplied resource",
+        [Requirement(id="method", description="Explain the mechanism", kind="authored_deliverable")],
+        [{"url": url, "text": "Mechanism evidence. " * 500}],
+    )
+    reviewed = review_coverage(
+        scripted_service.service, "Review a supplied resource",
+        [Requirement(id="method", description="Explain the mechanism", kind="authored_deliverable")],
+        selected,
+    )
+    assert reviewed.sufficient
+    assembled = str(model.calls)
+    assert "retained_source_lookup" in assembled
+    assert "Context about a supplied resource does not add discovery duties" in assembled
+    assert "Assumptions cannot replace missing technical facts" in assembled
+    assert reviewed._documents[url]["text"] == "Mechanism evidence. " * 500
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("conflict", [False, True])
+def test_request_compatibility_schema_and_confirmation_use_only_methodology_inputs(
+    scripted_service, runner_factory, provider, conflict,
+):
+    from modules.techniques.context import LookupContext
+
+    payload = {
+        "generic_request": "JWT handling", "applicability": "incompatible" if conflict else "supported",
+        "unmet_prerequisites": [], "reason": "Explicit methodology compatibility",
+        "conflict": {"kind": "methodology_constraint", "requirement": "JWT handling",
+                     "context_reference": "Exclude token validation"} if conflict else None,
+    }
+    runner, model = runner_factory([payload, payload] if conflict else [payload], provider)
+    scripted_service.service.runner = runner
+    context = LookupContext(
+        purpose="PRIVATE_OBJECTIVE", subjects=[{"value": "PRIVATE_SUBJECT"}],
+        constraints=["PRIVATE_OPERATION_CONSTRAINT"], capabilities=["PRIVATE_TOOL"],
+        methodology_constraints=["Exclude token validation"] if conflict else [],
+    )
+    context.observe("PRIVATE_OBSERVATION", "artifact:PRIVATE", "source", "subject")
+    if conflict:
+        with pytest.raises(ValueError, match="explicit methodology restriction"):
+            scripted_service.service._prepare("JWT handling", context)
+    else:
+        decision = scripted_service.service._prepare("JWT handling", context)
+        assert decision.applicability == "supported" and not decision.unmet_prerequisites
+    assembled = str(model.calls)
+    assert "PRIVATE_" not in assembled
+    assert "request compatibility independently of the catalog" in assembled
+    assert all(call[0] == ("native" if provider == "ollama" else "tool") for call in model.calls)

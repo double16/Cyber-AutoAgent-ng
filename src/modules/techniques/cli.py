@@ -43,7 +43,7 @@ def build_service(provider: str, model: str | None, output_dir: str, module: str
 
 
 def main(argv: list[str] | None = None) -> int:
-    from modules.techniques.context import LookupContext
+    from modules.techniques.context import MethodologyContext
     from modules.techniques.documents import CONTEXTS
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -68,8 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     constraints = list(dict.fromkeys(value.strip() for value in args.constraint))
     if "" in constraints:
         parser.error("--constraint must contain non-whitespace text")
-    context = LookupContext(
-        phase_contexts=list(dict.fromkeys(args.phase)), purpose=args.request, methodology_constraints=constraints,
+    context = MethodologyContext(
+        phase_contexts=list(dict.fromkeys(args.phase)), methodology_constraints=constraints,
     ) if args.phase or constraints else None
     from modules.techniques.diagnostics import DiagnosticSession
 
