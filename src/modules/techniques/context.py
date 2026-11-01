@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from modules.techniques.documents import toon
+from modules.techniques.documents import json_payload, optional_records_payload
 
 if TYPE_CHECKING:
     from modules.techniques.alignment import RequestAlignment
@@ -37,9 +37,10 @@ class MethodologyContext(BaseModel):
     def render(self, *, include_phase_guidance: bool = True) -> str:
         from modules.techniques.alignment import phase_guidance
 
-        return ((phase_guidance(self) if include_phase_guidance else "")
-                + f"Phase contexts: {self.phase_contexts or 'unknown'}\n"
-                + f"Methodology restrictions: {self.methodology_constraints}\n")
+        phases = (json_payload("phase_contexts", self.phase_contexts)
+                  if self.phase_contexts else "Phase contexts: unknown")
+        return ((phase_guidance(self) if include_phase_guidance else "") + phases + "\n"
+                + json_payload("methodology_restrictions", self.methodology_constraints) + "\n")
 
 
 def methodology_context(context: MethodologyContext | None) -> MethodologyContext | None:
@@ -88,14 +89,15 @@ class LookupContext(MethodologyContext):
         from modules.techniques.alignment import phase_guidance
 
         return (
-            (phase_guidance(self) if include_phase_guidance else "") +
-            "Bounded excerpts and subject descriptors may be incomplete; missing details remain unknown.\n"
-            f"Phase contexts: {self.phase_contexts or 'unknown'}\nPurpose: {self.purpose[:4000]}\n"
-            f"Capabilities: {', '.join(self.capabilities)[:2000]}\n"
-            f"Methodology restrictions: {self.methodology_constraints}\n"
-            f"Task constraints: {'; '.join(self.constraints)[:4000]}\n"
-            + toon("subjects", self.subjects[:20])[:6000]
-            + "\n" + toon("observations", [row.model_dump() for row in self.observations])
+            (phase_guidance(self) if include_phase_guidance else "")
+            + "Bounded excerpts and subject descriptors may be incomplete; missing details remain unknown.\n"
+            + json_payload("recommendation_context", {
+                "phase_contexts": self.phase_contexts, "purpose": self.purpose[:4000],
+                "capabilities": self.capabilities, "methodology_restrictions": self.methodology_constraints,
+                "task_constraints": self.constraints,
+            }) + "\n"
+            + optional_records_payload("subjects", self.subjects[:20], 6000)
+            + "\n" + json_payload("observations", [row.model_dump() for row in self.observations])
         )
 
 

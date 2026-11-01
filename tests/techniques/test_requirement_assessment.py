@@ -123,7 +123,8 @@ def test_assessment_uses_only_assigned_prior_requirement_and_keeps_review_source
         assert f"Prior basis {'two' if identifier == 'one' else 'one'}" not in prompt
         if review:
             return prior.coverage[len(prompts) - 1].model_dump_json()
-        assert prompt.split("Removed source URLs: ", 1)[1].startswith("['https://vendor.example/advisory']")
+        removed = json.loads(prompt.split("Removed source URLs: ", 1)[1].split("\n", 1)[0])
+        assert removed == {"removed_source_urls": ["https://vendor.example/advisory"]}
         return json.dumps({"requirement_id": identifier, "source_urls": [], "explanation": "Support removed",
                            "gaps": ["No remaining support"]})
 
@@ -165,3 +166,69 @@ def test_invalid_late_review_preserves_every_prior_record(scripted_service):
     assert review_coverage(service, "Method", requirements, prior) is prior
     assert prior.model_dump_json() == frozen
     assert calls == [r.id for r in requirements] + ["r6"]
+
+
+@pytest.mark.parametrize("method", ["HTTP controls", "TCP service review", "filesystem analysis"])
+@pytest.mark.parametrize("supported", [True, False])
+def test_research_uses_typed_scope_and_preserves_authored_obligations(scripted_service, method, supported):
+    import json
+
+    service = scripted_service.service
+    url = scripted_service.source_urls[0]
+    requirements = [
+        Requirement(id="authored", description="Write illustrative examples and a complete checklist",
+                    kind="authored_deliverable"),
+        Requirement(id="constraint", description="Keep unknown conditions as future checks", kind="constraint"),
+        Requirement(id="facts", description="Establish mechanism prerequisites", kind="factual_support"),
+    ]
+    frozen = [r.model_dump_json() for r in requirements]
+    assigned = []
+
+    def run(role, prompt, tools):
+        if role == "technique_source_assessor":
+            return json.dumps({"selected_urls": [url], "attributions": [{"url": url, "reason": "Primary facts"}],
+                               "reason": "Primary factual contribution", "authoritative_sufficient": True})
+        row = json.loads(prompt.split("Assigned requirement: ", 1)[1].split("\n", 1)[0])
+        assigned.append(row)
+        assert row["kind"] == "factual_support"
+        if row["id"] == "authored":
+            assert "technical foundation" in row["description"]
+            assert requirements[0].description not in prompt
+        else:
+            assert row["description"] == requirements[2].description
+        return json.dumps({"requirement_id": row["id"], "source_urls": [url] if supported else [],
+                           "explanation": "Mechanism facts support construction" if supported else "Missing mechanism",
+                           "gaps": [] if supported else ["Underlying mechanism is unsupported"]})
+
+    service.runner = run
+    result = _assess_records(service, f"Request: {method}", requirements, [{"url": url, "text": "Mechanism facts"}])
+    assert [r["id"] for r in assigned] == ["authored", "facts"]
+    assert [r.model_dump_json() for r in requirements] == frozen
+    assert result.sufficient is supported
+    constraint = result.coverage[1]
+    assert constraint.source_urls == constraint.gaps == []
+    assert "draft critique checks compliance" in constraint.explanation
+    if not supported:
+        assert result.coverage[0].gaps and result.coverage[2].gaps
+
+
+def test_authoring_passages_preserve_exact_evidence_and_bound_only_fallback_text():
+    from modules.techniques.coverage import EvidenceExcerpt, SourceSelection
+
+    url = "https://vendor.example/source"
+    extra = "https://vendor.example/supplement"
+    text = 'Unicode λ\n{"nested": ["code", {"punctuation": "a:b,c!"}]}\nprint("exact")'
+    selected = SourceSelection(selected_urls=[url, extra], attributions=[], coverage=[],
+                               reason="Selected", authoritative_sufficient=True)
+    excerpt = EvidenceExcerpt(url=url, text=text)
+    selected._evidence = {
+        "r1": [excerpt, EvidenceExcerpt(url="https://rejected.example", text="Unselected")],
+        "r2": [excerpt],
+    }
+    frozen = {key: [row.model_dump() for row in rows] for key, rows in selected._evidence.items()}
+    documents = [{"url": url, "text": "Do not replace the exact evidence with the beginning"},
+                 {"url": extra, "text": "x" * 7000}, {"url": extra, "text": ""},
+                 {"url": "https://rejected.example", "text": "Excluded"}]
+    passages = selected.authoring_passages(documents)
+    assert passages == [{"url": url, "text": text}, {"url": extra, "text": "x" * 6000}]
+    assert frozen == {key: [row.model_dump() for row in rows] for key, rows in selected._evidence.items()}

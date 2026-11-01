@@ -12,6 +12,25 @@ from modules.techniques.events import TechniqueEvents
 from modules.techniques.triggers import RecommendationContext
 
 
+def test_nested_assessment_events_redact_secrets_without_mutating_model_evidence():
+    events = TechniqueEvents()
+    received = []
+    events.callback = received.append
+    events.private_values = ("private.example",)
+    assessment = {"reason": "Observed PRIVATE.EXAMPLE behavior", "score": 1,
+                  "findings": [{"api_key": "short-secret", "problem": "x" * 2001}],
+                  "references": ("private.example", None, 42), "input_tokens": 123}
+    events.emit("technique_build_progress", assessment=assessment)
+    exported = received[0]["assessment"]
+    assert "private.example" not in json.dumps(exported).lower()
+    assert "short-secret" not in json.dumps(exported)
+    assert exported["score"] == 1 and exported["input_tokens"] == 123
+    assert exported["references"] == ["[operation-specific]", None, 42]
+    assert len(exported["findings"][0]["problem"]) == 2001
+    assert assessment["findings"][0]["api_key"] == "short-secret"
+    assert assessment["reason"] == "Observed PRIVATE.EXAMPLE behavior"
+
+
 def test_event_scope_is_thread_local_redacted_bounded_and_best_effort():
     events = TechniqueEvents()
     events.emit("ignored")

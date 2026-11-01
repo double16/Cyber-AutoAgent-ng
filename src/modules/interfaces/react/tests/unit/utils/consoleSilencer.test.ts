@@ -51,3 +51,26 @@ describe('consoleSilencer', () => {
         expect(console.log).toBe(originals.log);
     });
 });
+
+it('silences all output channels idempotently and restores their original functions', () => {
+  const originals = [console.log, console.info, console.debug, console.warn];
+  const error = console.error;
+  disableConsoleSilence();
+  try {
+    enableConsoleSilence();
+    enableConsoleSilence();
+    console.log('ignored'); console.info('ignored'); console.debug('ignored'); console.warn('ignored');
+    expect(console.error).toBe(error);
+    expect(console.log).not.toBe(originals[0]);
+  } finally {disableConsoleSilence();}
+  expect([console.log, console.info, console.debug, console.warn]).toEqual(originals);
+});
+it('restores missing original channels without assigning an invalid function', () => {
+  const originals = [console.log, console.info, console.debug, console.warn];
+  try {
+    [console.log, console.info, console.debug, console.warn] = [undefined, undefined, undefined, undefined] as any;
+    enableConsoleSilence();
+    disableConsoleSilence();
+    expect(typeof console.log).toBe('function');
+  } finally {[console.log, console.info, console.debug, console.warn] = originals;}
+});

@@ -140,3 +140,244 @@ def test_policy_diagnostics_redact_private_values_without_changing_internal_poli
     event = next(row for row in events if row["type"] == "technique_policy")
     assert "private-identifier" not in str(event)
     assert service.module_technique_policy[0]["restriction"] == "Avoid private-identifier"
+
+
+@pytest.mark.parametrize("subject", ["HTTP comparison", "network exclusion", "filesystem hypothesis"])
+@pytest.mark.parametrize("score", [-1, 0, 1])
+def test_every_feedback_score_has_independent_evidence_review(scripted_service, subject, score):
+    state = scripted_service
+    state.score = score
+    state.service.tool("op", "task")(request="Generic methodology")
+    state.service.evaluate("op", "task", subject + "; execution remains incomplete")
+    reviews = [p for r, p, _ in state.calls if r == "technique_feedback_reviewer"]
+    assert len(reviews) == 1
+    assert subject in reviews[0] and "resolved_evidence" in reviews[0]
+    assert not state.service.repository.pending_uses("op", "task")
+
+
+@pytest.mark.parametrize("defect", ["reference", "neutral", "disagreement", "review_contract"])
+@pytest.mark.parametrize("recover", [False, True])
+def test_feedback_shared_correction_and_pending_on_exhaustion(scripted_service, defect, recover):
+    state = scripted_service
+    state.service.tool("op", "task")(request="Generic methodology")
+    original = state.service.runner
+    counts = {"evaluate": 0, "review": 0}
+
+    def runner(role, prompt, tools):
+        if role == "technique_evaluator":
+            counts["evaluate"] += 1
+            if defect == "reference" and counts["evaluate"] == 2:
+                assert "result:invented:1" in prompt
+                assert "Copy exact result:" in prompt
+                assert "do not use artifact paths or tool-call IDs" in prompt
+            data = json.loads(original(role, prompt, tools))
+            if not recover or counts["evaluate"] == 1:
+                if defect == "reference":
+                    data["evidence_mappings"][0]["result_references"] = ["result:invented:1"]
+                if defect == "neutral":
+                    data.update(helpful_contribution=False, contribution="", neutral_basis=None)
+            return json.dumps(data)
+        if role == "technique_feedback_reviewer":
+            counts["review"] += 1
+            if not recover or counts["review"] == 1:
+                if defect == "review_contract":
+                    return "{}"
+                if defect == "disagreement":
+                    return json.dumps({"approved": False, "reason": "Citation alone",
+                                       "findings": ["Concrete application is unestablished"]})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    if recover:
+        state.service.evaluate("op", "task", "Observed application")
+        assert not state.service.repository.pending_uses("op", "task")
+    else:
+        with pytest.raises(ValueError, match="feedback remains pending"):
+            state.service.evaluate("op", "task", "Observed application")
+        assert state.service.repository.pending_uses("op", "task")
+    assert counts["evaluate"] == (1 if defect == "review_contract" else 2)
+
+
+def test_feedback_review_uses_shared_rubric_without_evaluator_output_instructions(scripted_service):
+    from modules.techniques.feedback import USEFULNESS_RUBRIC
+
+    state = scripted_service
+    state.service.tool("op", "task")(request="Generic methodology")
+    state.service.evaluate("op", "task", "Concrete next step; execution incomplete")
+    evaluator = next(p for r, p, _ in state.calls if r == "technique_evaluator")
+    reviewer = next(p for r, p, _ in state.calls if r == "technique_feedback_reviewer")
+    assert USEFULNESS_RUBRIC in evaluator and USEFULNESS_RUBRIC in reviewer
+    assert "Return ContributionFeedback findings" in evaluator
+    assert "Return ContributionFeedback findings" not in reviewer
+    assert "Concrete next step; execution incomplete" in reviewer
+
+
+def test_feedback_uses_frozen_delivery_after_lifecycle_changes(scripted_service, monkeypatch):
+    state = scripted_service
+    state.service.tool("op", "task")(request="Generic methodology")
+    receipt = state.service.repository.pending_uses("op", "task")[0]
+    frozen = json.loads(receipt["use_context"])["delivered_documents"]
+    assert frozen
+    monkeypatch.setattr(state.service.store, "render", lambda *a, **kw: "Later lifecycle state")
+    state.service.evaluate("op", "task", "Observed controlled application")
+    evaluator = next(p for r, p, _ in state.calls if r == "technique_evaluator")
+    assert frozen[0] in evaluator
+    assert "Later lifecycle state" not in evaluator
+    assert "Delivery snapshot: recorded" in evaluator
+
+
+@pytest.mark.parametrize("snapshots", [[], "wrong", [1], [""]])
+def test_corrupt_controller_snapshot_leaves_feedback_pending(scripted_service, snapshots):
+    state = scripted_service
+    revision = state.publish()
+    state.service.repository.use("op", "task", revision, {"delivered_documents": snapshots})
+    with pytest.raises(ValueError, match="feedback remains pending"):
+        state.service.evaluate("op", "task", "Results")
+    assert state.service.repository.pending_uses("op", "task")
+
+
+def test_legacy_feedback_context_explicitly_unknown(scripted_service):
+    state = scripted_service
+    state.service.repository.use("op", "task", state.publish())
+    state.service.evaluate("op", "task", "Results")
+    evaluator = next(p for r, p, _ in state.calls if r == "technique_evaluator")
+    assert "Delivery snapshot: unknown (legacy context)" in evaluator
+
+
+@pytest.mark.parametrize("subject", ["HTTP control", "network exclusion", "filesystem source comparison"])
+def test_feedback_retains_read_evidence_for_reviewer_and_correction_without_rereading(scripted_service, subject):
+    from strands import tool
+
+    from modules.techniques.evidence import current_tool_evidence_hook
+
+    @tool
+    def inspect_evidence() -> str:
+        """Read the task artifact."""
+        return subject
+
+    state = scripted_service
+    state.service.tool("op", "task")(request="Generic methodology")
+    original = state.service.runner
+    calls, reads, reference = [], [], []
+
+    def runner(role, prompt, tools):
+        calls.append((role, prompt, tools))
+        if role == "technique_evaluator":
+            if not reference:
+                assert tools == [inspect_evidence]
+                observed = SimpleNamespace(tool_use={"name": "inspect_evidence", "toolUseId": "read-1"},
+                                           result={"status": "success", "content": [{"text": inspect_evidence()}]})
+                hook = current_tool_evidence_hook(tools)
+                hook.after_tool(observed)
+                reference.extend(hook.capture.origins)
+                reads.append(observed)
+            else:
+                assert tools == []
+                assert subject in prompt and reference[0] in prompt
+            data = json.loads(original(role, prompt, tools))
+            data["evidence_mappings"][0]["result_references"] = [reference[0]]
+            return json.dumps(data)
+        if role == "technique_feedback_reviewer":
+            assert subject in prompt and reference[0] in prompt
+            assert "retained_tool_evidence" in prompt
+            count = sum(selected == role for selected, _, _ in calls)
+            assert tools == ([inspect_evidence] if count == 1 else [])
+            return json.dumps({"approved": count > 1, "reason": "Check the control application", "findings": []
+                               if count > 1 else ["Explain observed control contribution more precisely"]})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    state.service.evaluate("op", "task", "Artifact available; execution incomplete", [inspect_evidence])
+    assert len(reads) == 1
+    assert not state.service.repository.pending_uses("op", "task")
+    assert len(calls) == 4
+
+
+@pytest.mark.parametrize("contract_first", [False, True])
+def test_feedback_reviewer_contract_and_disagreement_share_one_allowance(scripted_service, contract_first):
+    state = scripted_service
+    state.service.tool("op", "task")(request="Generic methodology")
+    original = state.service.runner
+    calls = []
+
+    def runner(role, prompt, tools):
+        calls.append((role, prompt))
+        if role == "technique_feedback_reviewer":
+            count = sum(selected == role for selected, _ in calls)
+            if (count == 1) == contract_first:
+                return "{}"
+            return json.dumps({"approved": False, "reason": "Contribution disputed",
+                               "findings": ["Guidance-to-behavior correspondence remains unestablished"]})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    with pytest.raises(ValueError, match="remains pending"):
+        state.service.evaluate("op", "task", "Observed results")
+    assert sum(role == "technique_feedback_reviewer" for role, _ in calls) == 2
+    assert sum(role == "technique_evaluator" for role, _ in calls) == (1 if contract_first else 2)
+    assert state.service.repository.pending_uses("op", "task")
+    if contract_first:
+        repair = [prompt for role, prompt in calls if role == "technique_feedback_reviewer"][1]
+        assert "Validation failure" in repair and "Independently check purpose" in repair
+        assert "Return ContributionFeedback findings" not in repair
+
+
+def test_reviewer_consistency_repair_preserves_rejected_review_in_its_own_role(scripted_service):
+    state = scripted_service
+    state.service.tool("op", "task")(request="Generic methodology")
+    original = state.service.runner
+    reviews = []
+
+    def runner(role, prompt, tools):
+        if role == "technique_feedback_reviewer":
+            reviews.append(prompt)
+            if len(reviews) == 1:
+                return json.dumps({"approved": True, "reason": "Contradictory judgment",
+                                   "findings": ["Specific disputed correspondence"]})
+            assert "Rejected response" in prompt and "Specific disputed correspondence" in prompt
+            assert "Return ContributionFeedback findings" not in prompt
+            return json.dumps({"approved": True, "reason": "Consistency corrected", "findings": []})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    state.service.evaluate("op", "task", "Observed application")
+    assert len(reviews) == 2
+    assert not state.service.repository.pending_uses("op", "task")
+
+
+def test_feedback_schema_explains_empty_effect_fields_for_absent_contributions():
+    fields = ContributionFeedback.model_json_schema()["properties"]
+    for name in ("helpful_contribution", "contribution", "misleading_or_harmful", "harmful_effect"):
+        assert "empty string" in fields[name]["description"]
+    assert "explain neutrality in reason" in fields["contribution"]["description"]
+    mapping = ContributionFeedback.model_json_schema()["$defs"]["EvidenceMapping"]["properties"]
+    assert "Copy exact guidance:" in mapping["guidance_references"]["description"]
+    assert "Artifact paths" in mapping["result_references"]["description"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("supported", [False, True])
+def test_internal_review_decisions_name_the_subject_and_normalize_legacy_approval(legacy, supported):
+    from modules.techniques.critique import IssueAssessment
+    from modules.techniques.feedback import FeedbackReview
+
+    for schema, field in ((IssueAssessment, "critic_supported"), (FeedbackReview, "feedback_supported")):
+        decision = schema.model_validate({"approved" if legacy else field: supported, "reason": "Evidence review"})
+        assert decision.approved == supported
+        assert decision.model_dump()[field] == supported
+        assert "approved" not in decision.model_dump()
+        assert field in schema.model_json_schema()["properties"]
+        assert "approved" not in schema.model_json_schema()["properties"]
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_internal_review_decision_rejects_unknown_or_conflicting_fields(conflict):
+    from modules.techniques.critique import IssueAssessment
+    from modules.techniques.feedback import FeedbackReview
+
+    for schema, field in ((IssueAssessment, "critic_supported"), (FeedbackReview, "feedback_supported")):
+        data = {"reason": "Review", field: True, "approved": False} if conflict else {
+            "reason": "Review", "supported": True,
+        }
+        with pytest.raises(ValueError):
+            schema.model_validate(data)

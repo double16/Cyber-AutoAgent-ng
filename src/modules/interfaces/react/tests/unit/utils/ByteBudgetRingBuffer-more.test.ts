@@ -62,3 +62,11 @@ describe('ByteBudgetRingBuffer additional behavior', () => {
         expect(buffer.toArray()).toEqual([]);
     });
 });
+
+it('estimates absent, structured and unreadable content without failing', () => {
+  const buffer = new ByteBudgetRingBuffer<any>(1024, {});
+  buffer.push(null); buffer.push({content: {nested: true}}); buffer.push({content: []});
+  const unreadable = Object.defineProperty({}, 'content', {get() {throw new Error('unreadable');}});
+  buffer.push(unreadable);
+  expect(buffer.size()).toBe(4); expect(buffer.bytes()).toBe(384);
+});

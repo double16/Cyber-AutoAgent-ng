@@ -119,8 +119,11 @@ def test_missing_technique_runs_separate_research_selection_author_and_critic(sc
     assert "revision_id:" in markdown
     assert state.service.repository.get(revision)["active"]
     assert len(state.research_calls) == 1 and state.research_calls[0].startswith("JWT handling\n")
-    assert [role for role, _, _ in state.calls] == ["technique_judge", "technique_source_assessor", "technique_requirement_assessor", "technique_author", "technique_critic"]
-    assert all(bool(tools) == (role == "technique_critic") for role, _, tools in state.calls)
+    assert [role for role, _, _ in state.calls] == [
+        "technique_judge", "technique_source_assessor", "technique_requirement_assessor",
+        "technique_author", "technique_critic", "technique_critique_assessor",
+    ]
+    assert all(bool(tools) == (role in {"technique_critic", "technique_critique_assessor"}) for role, _, tools in state.calls)
     author_prompt = next(prompt for role, prompt, _ in state.calls if role == "technique_author")
     critic_prompt = next(prompt for role, prompt, _ in state.calls if role == "technique_critic")
     assert "Return only JSON" in author_prompt
@@ -433,6 +436,7 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
     original_research = state.service._research_coverage
 
     def coverage(*args, **kwargs):
+        assert kwargs.get("require_complete_support", False) is bool(retained)
         result = original_research(*args, **kwargs)
         retained.append(result[1])
         return result
@@ -467,6 +471,8 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
         assert any(role == "technique_attribution_repair" and "Fix coverage" in prompt
                    for role, prompt, _ in state.calls)
     if category in {"source_attribution", "research_coverage"}:
+        assert all('"source_passages"' in prompt for prompt in critiques)
+        assert "Primary support" in critiques[-1]
         assert [line.split(",body.line[", 1)[1] for line in critiques[0].splitlines() if ",body.line[" in line] == [
             line.split(",body.line[", 1)[1] for line in critiques[1].splitlines() if ",body.line[" in line
         ]
@@ -573,3 +579,21 @@ def test_explicit_component_requirements_reach_initial_research_and_assembled_ro
         assert "requested CVE version analysis" in assembled
         assert "advisory" in assembled and "untrusted data" in assembled
     assert "requested CVE version analysis" in markdown
+
+
+@pytest.mark.parametrize("kind", ["authored_deliverable", "constraint"])
+def test_research_readiness_does_not_approve_unfulfilled_draft_obligations(scripted_service, kind):
+    from modules.techniques.context import MethodologyContext
+    from modules.techniques.coverage import Requirement
+
+    state = scripted_service
+    state.approve = False
+    description = "Include a complete checklist with positive and negative controls"
+    with pytest.raises(ValueError, match="3 attempts at critique"):
+        state.service.get("HTTP controls", MethodologyContext(phase_contexts=["hypothesis_generation"]),
+                          requirements=[Requirement(id="method", description=description, kind=kind)])
+    for role in ("technique_author", "technique_critic"):
+        prompts = [prompt for selected, prompt, _ in state.calls if selected == role]
+        assert len(prompts) == 3
+        assert all(description in prompt and kind in prompt for prompt in prompts)
+    assert not state.service.repository.revisions()

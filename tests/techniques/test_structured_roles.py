@@ -1,3 +1,5 @@
+from conftest import plan_payload
+
 """Technique schemas use the native bridge while retaining controller-owned decisions."""
 
 import io
@@ -45,6 +47,12 @@ class TechniqueModel(Model):
     async def stream(self, messages, tool_specs=None, system_prompt=None, tool_choice=None, **kwargs):
         self.calls.append(("tool", deepcopy(tool_specs), deepcopy(messages), system_prompt))
         yield {"messageStart": {"role": "assistant"}}
+        if not tool_specs:
+            yield {"contentBlockDelta": {"delta": {"text": "Independent subject observations retained."},
+                                         "contentBlockIndex": 0}}
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+            yield {"messageStop": {"stopReason": "end_turn"}}
+            return
         if tool_specs and tool_specs[0]["name"] in {"inspect_evidence", "retained_source_lookup"}:
             if self.investigated:
                 yield {"contentBlockDelta": {"delta": {"text": "Read-only evidence shows contribution."},
@@ -165,13 +173,14 @@ def test_structured_prompt_limit_includes_schema(monkeypatch):
     seen = []
 
     def estimate(*args, **kwargs):
-        seen.extend(kwargs["tool_specs"])
+        seen.append(kwargs)
         return 2
 
     monkeypatch.setattr(roles, "estimate_prompt_tokens", estimate)
     with pytest.raises(ValueError, match="configured prompt limit"):
         roles.TechniqueRoleRunner("ollama", "fixture").structured("technique_judge", "Select", Decision, [])
-    assert seen == [{"output_schema": Decision.model_json_schema()}]
+    assert seen[0]["tool_specs"] == []
+    assert json.loads(seen[0]["system_prompt"].splitlines()[-1]) == Decision.model_json_schema()
 
 
 @pytest.mark.parametrize("missing", [None, {"unknown": "value"}])
@@ -440,7 +449,8 @@ def test_assessor_assembled_contract_and_native_correction(
     from modules.techniques.critique import assess
 
     url = "https://vendor.example/advisory"
-    critique = {"approved": False, "reason": "Concrete defect", "issues": [{
+    critique = {"no_security_checks_reason": "No separately enumerated checks in scripted draft",
+                "approved": False, "reason": "Concrete defect", "issues": [{
         "id": "auth-001", "category": "authored_content", "problem": "Missing negative control",
         "requested_correction": "Add a negative control", "requirement_ids": ["method"],
         "source_urls": [], "draft_excerpt": subject,
@@ -476,7 +486,8 @@ def test_decoded_snapshot_assembled_for_both_review_roles(
     document = markdown().replace("title: JWT handling", "title: >\n  Decoded\n  title")
     snapshot = ReviewSnapshot(document)
     reference = next(key for key in snapshot.values if snapshot.paths[key] == "metadata.title")
-    critique = {"approved": False, "reason": "Missing scope", "issues": [{
+    critique = {"no_security_checks_reason": "No separately enumerated checks in scripted draft",
+                "approved": False, "reason": "Missing scope", "issues": [{
         "id": "scope", "category": "authored_content", "problem": "Title omits the requested scope",
         "requested_correction": "Identify the scope in the title", "requirement_ids": ["method"],
         "source_urls": [], "draft_references": [reference],
@@ -510,10 +521,12 @@ def test_source_evidence_contract_survives_transport(runner_factory, scripted_se
     url = "https://vendor.example/technical-guide"
     source = {"selected_urls": [url] if supported else [],
               "attributions": [{"url": url, "reason": "Primary technical description"}] if supported else [],
-              "reason": "Relevant primary technical content" if supported else "No relevant technical mechanism described",
+              "reason": ("Relevant primary technical content"
+                         if supported else "No relevant technical mechanism described"),
               "authoritative_sufficient": supported}
     record = {"requirement_id": "method", "source_urls": [url] if supported else [],
-              "explanation": "Documented boundary supports constructing checks" if supported else "Missing boundary facts",
+              "explanation": ("Documented boundary supports constructing checks"
+                              if supported else "Missing boundary facts"),
               "gaps": [] if supported else [{"kind": "missing_factual_support", "description": "Missing boundary",
                         "claim": "Boundary exists", "blocking_reason": "No mechanism described",
                         "research_question": "Find primary mechanism documentation"}]}
@@ -534,24 +547,29 @@ def test_source_evidence_contract_survives_transport(runner_factory, scripted_se
 
 @pytest.mark.parametrize("provider", ["ollama", "bedrock"])
 @pytest.mark.parametrize("subject", ["HTTP controls", "TCP service mapping", "filesystem review"])
-def test_planning_review_correction_assembled_transport(runner_factory, scripted_service, monkeypatch, provider, subject):
-    from modules.techniques.bundles import Plan, PlanReview
+def test_planning_review_correction_assembled_transport(
+    runner_factory, scripted_service, monkeypatch, provider, subject,
+):
+    from modules.techniques.bundles import PlannerOutput, PlanReview
 
     state = scripted_service
     legacy = state.service.runner
     request = f"{subject} baseline and {subject} boundary checks"
     shared = {"purpose": "Reusable boundary method", "request_excerpt": request,
               "requirements": [{"id": "method", "description": "Explain prerequisites and evidence",
-                                "kind": "authored_deliverable"}]}
+                                "kind": "authored_deliverable",
+                                "origins": [{"source": "original_request", "excerpt": request}]}]}
     bad = {"components": [{"id": "all", "request": request, **shared}]}
     fixed = {"components": [{"id": str(i), "request": f"{subject} {part}", **shared}
                             for i, part in enumerate(["baseline", "boundary checks"])]}
-    runner, model = runner_factory([bad, {"approved": False, "reason": "Separate independently reusable methods"},
-                                    fixed, {"approved": True, "reason": "All requested methods preserved"}], provider)
+    runner, model = runner_factory([
+        plan_payload(bad), {"approved": False, "reason": "Separate independently reusable methods"},
+        plan_payload(fixed), {"approved": True, "reason": "All requested methods preserved"},
+    ], provider)
 
     class TypedRunner:
         def structured(self, role, prompt, schema, tools):
-            if schema in (Plan, PlanReview):
+            if schema in (PlannerOutput, PlanReview):
                 return runner.structured(role, prompt, schema, tools)
             return schema.model_validate_json(legacy(role, prompt, tools))
 
@@ -565,16 +583,23 @@ def test_planning_review_correction_assembled_transport(runner_factory, scripted
     assert "Separate independently reusable methods" in str(model.calls[2])
     assert "Rejected plan" in str(model.calls[2])
     assert "Reject under-splitting" in str(model.calls[1])
+    assert "planner_output" in str(model.calls[1])
+    assert "controller-derived persisted metadata" in str(model.calls[1])
+    assert "not its source category alone" in str(model.calls[1])
+    assert "phase requirements and applicable procedural details" in str(model.calls[1])
+    assert "do not require input_references in that derived section" in str(model.calls[1])
 
 
-@pytest.mark.parametrize("role", ["technique_planner", "technique_plan_reviewer", "technique_source_assessor"])
+@pytest.mark.parametrize("role", ["technique_planner", "technique_plan_reviewer",
+                                  "technique_feedback_reviewer", "technique_source_assessor"])
 def test_planning_and_source_contracts_fail_closed_when_prompt_cannot_fit(runner_factory, monkeypatch, role):
-    from modules.techniques.bundles import Plan, PlanReview
+    from modules.techniques.bundles import PlannerOutput, PlanReview
     from modules.techniques.coverage import SourceAssessment
 
     runner, model = runner_factory([])
     monkeypatch.setattr(roles, "require_prompt_token_limit", lambda *_: 1)
-    schema = {"technique_planner": Plan, "technique_plan_reviewer": PlanReview,
+    schema = {"technique_planner": PlannerOutput, "technique_plan_reviewer": PlanReview,
+              "technique_feedback_reviewer": PlanReview,
               "technique_source_assessor": SourceAssessment}[role]
     with pytest.raises(ValueError, match="input exceeds configured prompt limit"):
         runner.structured(role, "Preserve every method and evidence instruction", schema, [])
@@ -611,7 +636,7 @@ def test_preservation_findings_use_real_structured_transport(runner_factory, scr
     assembled = str(model.calls)
     assert "Produce terminal disposition for assigned route only" not in assembled
     assert "original_request (authoritative)" in assembled
-    assert "Phase and methodology restrictions do not invent" in assembled
+    assert "Applicable procedural detail, examples and checklists are normal guidance" in assembled
     assert "Validation failure" in assembled and "rejected" in assembled
     findings = next(row for row in events if row["type"] == "technique_request_review")
     assert findings["transformation"] == "alignment" and findings["correction_attempt"] == 0
@@ -770,3 +795,94 @@ def test_request_compatibility_schema_and_confirmation_use_only_methodology_inpu
     assert "PRIVATE_" not in assembled
     assert "request compatibility independently of the catalog" in assembled
     assert all(call[0] == ("native" if provider == "ollama" else "tool") for call in model.calls)
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+def test_runtime_tool_results_receive_controller_refs_without_capturing_schema_outputs(runner_factory, provider):
+    from modules.techniques.evidence import ToolEvidenceCapture
+
+    @tool
+    def inspect_evidence() -> str:
+        """Read observed task behavior."""
+        return 'Compared allowed and denied cases for "λ"\nExecution remains incomplete'
+
+    runner, model = runner_factory([{"score": 1, "reason": "Observed control contribution"}], provider)
+    capture = ToolEvidenceCapture({})
+    with capture.scope():
+        result = runner.structured("technique_evaluator", "Read task evidence", Feedback, [inspect_evidence])
+    assert result.score == 1
+    assert capture.calls == 1
+    assert len(capture.references) == 2
+    assert all(call["tool"] == "inspect_evidence" for call in capture.tool_calls.values())
+    assembled = str(model.calls)
+    assert all(reference in assembled for reference in capture.references)
+    assert "Controller evidence references" in assembled
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+def test_final_output_contract_is_visible_in_native_and_tool_transport(runner_factory, provider):
+    from modules.techniques.critique import IssueAssessment
+
+    payload = {"approved": True, "reason": "Agree with the critic's rejection", "findings": []}
+    runner, model = runner_factory([payload], provider)
+    result = runner.structured("technique_critique_assessor", "Review a justified rejection", IssueAssessment, [])
+    assert result.approved
+    system = model.calls[-1][-1]
+    assert "without a decision, result, or schema-name wrapper" in system
+    assert "as that tool's arguments" in system
+    declared = json.loads(system.splitlines()[-1])
+    assert declared == IssueAssessment.model_json_schema()
+    assert "not approval of the document" in declared["properties"]["critic_supported"]["description"]
+    assert "critic_supported is true" in declared["properties"]["findings"]["description"]
+
+
+def test_structured_contract_is_included_in_initial_prompt_fitting(monkeypatch, runner_factory):
+    from modules.techniques.critique import Critique
+
+    runner, model = runner_factory([])
+    measured = []
+
+    def estimate(*args, **kwargs):
+        measured.append(kwargs)
+        return 40_001
+
+    monkeypatch.setattr(roles, "estimate_prompt_tokens", estimate)
+    with pytest.raises(ValueError, match="input exceeds configured prompt limit"):
+        runner.structured("technique_critic", "Review", Critique, [])
+    assert not model.calls
+    system = measured[0]["system_prompt"]
+    assert json.loads(system.splitlines()[-1]) == Critique.model_json_schema()
+    assert measured[0]["tool_specs"] == []
+    assert roles.structured_system_prompt(None) == roles.SYSTEM
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"], ids=["native", "tool"])
+def test_deferred_review_hides_critic_until_independent_notes(runner_factory, provider):
+    from modules.techniques.critique import IssueAssessment
+
+    runner, model = runner_factory([{"approved": True, "reason": "Compared independent notes",
+                                    "interpretation_reviews": [], "findings": []}], provider)
+    prompt = roles.DeferredReviewPrompt("EXACT_DRAFT_SUBJECT", "WITHHELD_CRITIC_DECISION")
+    assert "EXACT_DRAFT_SUBJECT" in str(prompt) and "WITHHELD_CRITIC_DECISION" in str(prompt)
+    assert runner.structured("technique_critique_assessor", prompt, IssueAssessment, []).approved
+    assert len(model.calls) == 2
+    assert "EXACT_DRAFT_SUBJECT" in str(model.calls[0])
+    assert "WITHHELD_CRITIC_DECISION" not in str(model.calls[0])
+    assert "critic_supported" not in model.calls[0][-1]
+    assert "Final decision contract" not in model.calls[0][-1]
+    assert "WITHHELD_CRITIC_DECISION" in str(model.calls[-1])
+    assert "critic_supported" in model.calls[-1][-1]
+    assert "Independent subject observations retained" in str(model.calls[-1])
+
+
+def test_deferred_review_budget_counts_the_complete_comparison(runner_factory, monkeypatch):
+    from modules.techniques.critique import IssueAssessment
+
+    runner, model = runner_factory([])
+    monkeypatch.setattr(roles, "require_prompt_token_limit", lambda *_: 10)
+    monkeypatch.setattr(roles, "estimate_prompt_tokens", lambda *args, **kwargs:
+                        100 if "WITHHELD_CRITIC_DECISION" in kwargs["extra_content"] else 1)
+    with pytest.raises(ValueError, match="input exceeds"):
+        runner.structured("technique_critique_assessor", roles.DeferredReviewPrompt(
+            "Small subject", "WITHHELD_CRITIC_DECISION"), IssueAssessment, [])
+    assert model.calls == []

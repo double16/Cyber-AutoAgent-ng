@@ -347,6 +347,9 @@ shared Strands invocation helper. Native schemas are preferred for Ollama, LiteL
 providers without native support use schema tools. Explicit native transport unavailability may fall
 back to schema tools. Invalid output, unsupported schema constraints, authentication failures, and
 context errors do not silently fall back to free text. Injected legacy text runners remain supported.
+The complete final JSON schema and field descriptions also appear in the model's system instructions,
+with the same contract for native transport, schema tools, continuation and correction. Prompt fitting
+counts these instructions. Native provider schema enforcement alone is not a model-facing explanation.
 
 The researcher remains tool-driven: Python collects fetched documents rather than parsing its final
 prose. Feedback may inspect evidence with supplied tools, then closes investigation before structured
@@ -457,7 +460,9 @@ specific gaps; repeated query diagnostics identify ineffective research without 
 
 ### Request preservation and actionable coverage
 
-A single methodology keeps its phase-aligned request throughout planning. Applicability may abstract
+A single methodology remains one component, and its actual planned request is reviewed against the
+original request and permitted phase framing. Python does not overwrite it with aligned text.
+Applicability may abstract
 incidental target details but must preserve explicit subjects (including CVEs), mechanisms and
 deliverables. An independent reviewer checks changed requests before lookup or research. One correction
 is allowed; persistent loss of intent returns a request-preservation error.
@@ -468,7 +473,33 @@ the finished document. The required, nonblank coverage `explanation` describes t
 how it supports constructing the procedure. `synthesis` is optional supplementary detail; missing or
 empty values do not block guidance. Blocking gaps identify an unsupported
 technical claim or contradiction, why it prevents guidance and the focused research question needed.
+
+Research readiness is separate from fulfillment of an unwritten document. Python routes requirements
+using their explicit `kind`; it does not infer kinds from wording or filenames. Original requirements
+and identifiers remain unchanged for authoring, critique and persisted metadata.
+
+| Kind | Research assessment | Actual draft review |
+| --- | --- | --- |
+| `factual_support` | Assess the specified technical claims and contradictions. | Check accurate use of supported facts. |
+| `authored_deliverable` | Assess the technical foundation of the requested method. | Check the requested procedure, examples, checklist and other deliverables. |
+| `constraint` | Retain the supplied procedural instruction; external support is inapplicable. | Check compliance with the instruction. |
+
+A research-ready record never proves that a requested deliverable exists or that the draft complies
+with an instruction. Publication still requires independent critique of the original obligations.
+Drafting requires authoritative sources and a cited technical basis for each authored requirement.
+Its recorded concerns remain visible to authors and critics; they are not resolved by permission to
+draft. Missing support for explicit factual requirements and unresolved contradictions block drafting.
+If critique identifies unsupported claims in the actual draft, research repair requires complete
+support, including resolution of authored-requirement gaps, within the existing three-batch limit.
+
 Unknown target conditions remain future validation checks. Genuine factual gaps still block publication.
+Each future check should distinguish legitimate behavior from the suspected security-boundary
+violation and specify comparison controls and evidence to collect. Illustrative placeholders and
+reserved example domains are permitted; incidental identifiers from real operations are excluded.
+Initial authoring and repair prompts include exact retained source passages as JSON, deduplicated
+across requirements and excluding rejected sources. Legacy assessments without excerpts use bounded
+source text. These passages establish availability; summaries and quotations do not independently
+prove factual support. Required inputs remain complete or fail the prompt-size contract explicitly.
 
 Independent coverage review runs before further research when an assessment is insufficient. Empty
 batches retain the reviewed assessment. CLI diagnostics record validated request transitions and revised
@@ -489,11 +520,41 @@ it does not establish research insufficiency. Semantic gaps still receive indepe
 The critic reviews the exact assembled document and returns structured issues with unique IDs,
 repair category, concrete problem, requested correction, requirement IDs, affected source URLs,
 and an exact draft excerpt where content exists. Missing-content issues reference requirements.
+The critic also returns structured `interpretations` for security-relevant checks. An empty table
+requires `no_security_checks_reason`; that justification is independently reviewed against the draft.
+A document section titled Interpretation does not substitute for this internal assessment.
 A read-only `retained_source_lookup` tool returns at most 4,000 characters per call with
 controller-owned URL and character offsets. It cannot search or fetch new material. Grounding
 complaints cite returned passages or explicitly explain the absence of support for a disputed claim.
-Python validates references and excerpts; an independent semantic assessor judges whether issues
-are concrete, actionable and supported. Approval with issues and rejection without issues are invalid.
+Python validates references and excerpts. An independent semantic assessor reviews every decision,
+including approvals with no issues, for interpretation, omitted deliverables and unsupported defects.
+For every interpretation, the assessor constructs a concrete permitted counterexample to the suspicious
+observation and identifies the actual draft control excluding it. Missing controls must be reported
+as missing; reviewer guidance cannot silently supply them. Python requires exactly one indexed review
+per interpretation, validates its draft references, and rejects agreement with a critic judged incorrect.
+The claimed discriminator must be a verbatim procedure-body excerpt, or empty when missing. Python
+resolves all matching body-line references and records their origins; the model need not duplicate
+those IDs. Unknown supplied references and invented or metadata-only control quotes still fail.
+This proves text availability, not semantic correspondence or sufficiency of the control.
+Per-check judgments state whether the permitted scenario satisfies the actual prerequisites and
+suspicious observation, and whether a procedural control excludes it. Checks precede the final
+verdict. Python rejects agreement with an approving critic when those judgments identify a matching
+permitted scenario without an excluding control. Authorized access does not refute a check explicitly
+requiring missing entitlements; an expected outcome cannot silently become a prerequisite.
+When no permitted scenario satisfies the actual conditions, both investigation and comparison
+explicitly allow that conclusion. Reviewers must not replace missing entitlements with missing
+ownership to manufacture a counterexample; shared access can be authorized without ownership.
+During investigation the assessor receives the procedure, authored metadata, requirements and source
+lookup access. The critic decision and controller-owned archived research receipt (`source_coverage`)
+are withheld. Finalization supplies both, completing the exact decoded draft, for comparison with the
+assessor's independent notes. Repairs preserve this separation and the complete evidence.
+The first pass receives subject-investigation instructions and the base system prompt only; the
+comparison instructions and decision schema arrive at finalization, so absence of a critic cannot
+be mistaken for agreement.
+Legacy injected text runners receive the combined prompt; production native and schema-tool transports
+enforce the staged handoff. Prompt fitting counts both parts before investigation starts.
+Disagreement includes referenced findings and requested corrections. Approval with issues and rejection
+without issues are invalid.
 Each assembled-document review allows one critique correction, consuming no author or research call.
 
 Repairs run one owning stage at a time: research coverage, then attribution, then authored or omitted
@@ -553,8 +614,9 @@ files are preserved and new content receives a SHA-256 suffix. Partial bundles s
 components only. Export errors return exit code 1 while retaining global revisions and any
 files already saved. Paths are reported through CLI diagnostics.
 
-Critique assessment uses an aggregate `{approved, reason}` decision: approval means every
-proposed issue is actionable and evidence-backed. Malformed assessor decisions are corrected
+Critique assessment uses `{critic_supported, reason, interpretation_reviews, findings}`. True means
+agreement with the complete critic decision, including interpretation coverage, requested
+deliverables and issue actionability. Referenced findings explain disagreement. Malformed assessor decisions are corrected
 at the assessor stage with the same critique and retained evidence; the critic is not restarted.
 Critic and assessor share one correction per assembled-document review. Corrections consume
 no author, research, or attribution attempts. Persistent failure names the originating assessor
@@ -673,27 +735,53 @@ Preservation checks each assigned component independently; bundle planning check
 Published metadata, body and examples must omit incidental target identifiers while retaining CVEs,
 versions and standard protocol identifiers. The critic reviews decoded values, never YAML syntax.
 
-Usefulness feedback records methodological purpose, observed use, helpful contribution and harmful
-effects. Python derives +1 for demonstrated helpful contribution, -1 for demonstrated misleading or
+Usefulness feedback records methodological purpose, observed use, helpful contribution, harmful
+effects and guidance/result evidence mappings. Python resolves controller reference IDs to exact
+excerpts; an independent reviewer judges semantic correspondence for every proposed score. Task-tool
+results receive controller references automatically. Their exact text and call inputs are retained
+for independent review and correction; schema-output tools and nested helper roles cannot supply
+task evidence. Corrections reuse retained results without repeating artifact reads. Evidence
+mappings copy exact `guidance:` and `result:` IDs; artifact paths and tool-call IDs do not
+substitute for controller result references. Invalid-reference diagnostics identify the rejected IDs.
+Partial reads support only claims about inspected excerpts, not non-use throughout unread artifacts.
+Neutral findings identify `not_used` or `contribution_unestablished`. New use receipts freeze exact delivered
+documents in the existing `use_context` JSON; later lifecycle changes cannot replace that evidence.
+Legacy receipts explicitly lack a known delivery snapshot. Contract errors and disagreement share
+one correction allowance. Reviewers return `feedback_supported`, which means agreement with the proposed
+feedback and derived score, including a justified neutral or harmful score. Legacy internal `approved`
+inputs normalize to the canonical subject-specific verdict fields; unknown or conflicting fields fail.
+Invalid reviewer contracts are corrected by the reviewer; semantic
+disagreement corrects evaluator findings and then re-reviews them. Exhaustion leaves feedback pending. Python derives +1 for demonstrated helpful contribution, -1 for demonstrated misleading or
 harmful guidance (including mixed effects), and 0 when contribution is unestablished. Missing target
 execution, proof or terminal disposition alone does not establish non-contribution. Legacy context
-remains unknown. Existing scores are not rewritten.
+remains unknown. Existing scores are not rewritten. Evaluator and independent feedback-review inputs
+preserve complete observed results as JSON data, including long or multiline results. Required
+results that cannot fit the configured prompt limit fail explicitly; they are not silently truncated.
 
-Exact-text draft reviews, evidence passages, and critique repair inputs use JSON to preserve
-punctuation and whitespace. Compact summary tables may still use TOON.
+All technique-owned role inputs use JSON for structured data, preserving nested values, punctuation,
+Unicode, code and multiline text. Markdown documents and prose instructions remain Markdown and prose.
+Optional source passages and example records are bounded before serialization. Required requests,
+restrictions, rejected outputs and correction findings are preserved; an input that cannot fit the
+configured prompt limit fails explicitly rather than cutting JSON or compressing authoritative data.
 
 Source assessment retains earlier accepted sources across incremental research. Fetched counts
 are cumulative unique documents; retained source counts do not establish factual sufficiency.
 There is no minimum source count: one authoritative source may supply sufficient factual support.
 Each new source is accepted or rejected independently, with its URL and reason in progress events.
 An explicit reassessment of the same URL replaces that source's decision only after all outputs
-validate. A failed correction retains the previous build state; exceeding 18 retained sources fails
+validate. Accepted sources have one matching attribution each. Rejected sources have neither a
+selected URL nor an attribution; their rejection explanation and limitations remain in the decision
+reason. Attribution corrections identify expected counts and supplied URLs. A failed correction retains the previous build state; exceeding 18 retained sources fails
 explicitly rather than dropping evidence. This state is local to the current build and its repairs.
 
 Requirement assessment and independent review receive bounded exact source context (up to 6,000
 characters per source), or previously retained excerpts. When retained text extends beyond the initial
 excerpt, bounded lookup exposes the remaining text with offsets and continuation metadata. Lookup
-passages remain available during contract correction, without reopening investigation. Returned
+passages remain available during contract correction, without reopening investigation. If a literal
+query misses, lookup may return bounded case-insensitive individual-term passages in `term_matches`,
+with `match_kind: individual_terms`. The exact-query `matched` flag stays false. These passages locate
+text only; they do not establish support or absence. Total passage text stays within the requested
+length, and returned offsets and passage IDs remain controller-owned. Returned
 excerpts must match supplied or inspected text for a cited URL. Legacy outputs without excerpts use controller-retained context; this is source
 context, not a quotation inferred from the model's explanation. Neither matching text nor accepting
 a source proves semantic support. The model must assess complementary support and preserve unresolved
@@ -725,3 +813,49 @@ New delivery receipts identify `assessment_scope: methodology_request`. The exis
 `applicability` field and role identifiers remain compatible wire names for request compatibility;
 new conflicts use `kind: methodology_constraint` and reference explicit methodology restrictions.
 Historical receipts are read as legacy data without rewriting scores, schema or stored records.
+
+Technique assessments retain multiple exact excerpts per source and deduplicate identical excerpts.
+Procedural constraints are retained from supplied instructions and checked against the actual draft,
+not external repetition of those instructions. Applying generic guidance to a concrete subject is expected; asserted usefulness purpose
+mismatches receive independent review, with disputed feedback left pending.
+
+New internal planner outputs contain component requests, requirements and `input_references` only.
+Python supplies stable invocation-local record IDs such as `original_request:1`, `phase_guidance:1`
+and `methodology_restriction:1`. It assigns component and requirement IDs, derives component purposes
+from the actual planned requests, and resolves input references into persisted `origins` containing
+`source` and exact `excerpt` pairs. Legacy persisted records remain readable without origins.
+Unknown references and duplicate methods fail validation. The single planning correction receives
+every deterministic finding, independent reviewer findings and the complete rejected output.
+Planning must succeed before research starts; unsupported obligations are never silently discarded.
+
+References establish provenance only. Independent review checks method decomposition, relevance and
+request completeness. Multiple requirements within one method, such as prerequisites, controls and
+evidence criteria, do not create independent methods. Single-component requests receive the same
+review and are not overwritten with phase-aligned text.
+
+Authors should include applicable checklists, representative payloads or commands, prerequisites,
+controls, expected outcomes and evidence requirements without needing an explicit request. During
+hypothesis generation, concrete validation steps and illustrative payloads describe future work;
+they must be clearly distinguished from observed results. Supported technical facts can justify
+original procedures and examples even when no source publishes an identical checklist or payload.
+A source may contribute one relevant technical fact while other sources cover the remaining mechanisms.
+Relevance follows the explained factual connection, rather than exact request-word matching. Requests
+to identify unknown prerequisites ask how to establish them; unknown implementation conditions remain
+future checks.
+Preservation review rejects invented prohibitions as well as omitted deliverables. Explicit user
+and module restrictions remain authoritative; irrelevant padding and unsupported claims remain defects.
+
+
+Independent decision review covers every critique decision and usefulness score, including approvals
+and neutral judgments. Critique assesses decoded draft references, policy assumptions, legitimate
+outcomes, distinguishing controls and requested deliverables. A distant caveat or future-hypothesis label cannot repair an
+unconditional violation claim. Establish unknown policy through documentation, configuration or
+independently known authorized and denied baselines; a note that policy is unknown is insufficient.
+A repeated successful use of a valid reusable credential is legitimate unless a specific revocation,
+expiry or freshness contract is violated. Feedback compares delivered guidance with observed behavior through
+controller references; citation alone is insufficient. Neutral feedback identifies non-use or
+unestablished contribution. Helpful methodological effects can occur before execution completes;
+demonstrated harm overrides benefit. Contract errors and disagreement share one correction per
+decision. Unresolved critique blocks publication; unresolved feedback remains pending. Inspect
+`critique_assessment` and `feedback_assessment` progress diagnostics for snapshot references,
+proposed decisions, independent findings and correction numbers. Historical scores are unchanged.

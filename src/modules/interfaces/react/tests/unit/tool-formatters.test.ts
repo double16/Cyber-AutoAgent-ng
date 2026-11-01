@@ -6,7 +6,7 @@ import { describe, it, expect } from '@jest/globals';
 let toolFormatters;
 
 beforeAll(async () => {
-  const mod = await import('../../dist/utils/toolFormatters.js');
+  const mod = await import('../../src/utils/toolFormatters.js');
   toolFormatters = mod.toolFormatters;
 });
 

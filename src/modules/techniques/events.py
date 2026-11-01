@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from time import monotonic
 
-from modules.utils.redaction import redact_text
+from modules.utils.redaction import redact
 
 logger = logging.getLogger(__name__)
 _context = ContextVar("technique_event_context", default=None)
@@ -28,18 +28,26 @@ class TechniqueEvents:
         finally:
             _context.reset(token)
 
+    def _private_fields(self, value):
+        if isinstance(value, str):
+            for private in self.private_values:
+                value = re.sub(re.escape(private), "[operation-specific]", value, flags=re.IGNORECASE)
+            return value
+        if isinstance(value, dict):
+            return {key: self._private_fields(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._private_fields(item) for item in value]
+        return value
+
     def emit(self, event_type, **fields):
         if self.callback is None:
             return
-        event = {"type": event_type, **(_context.get() or {}), **fields}
+        event = self._private_fields(redact({"type": event_type, **(_context.get() or {}), **fields}))
         for key in ("operation_id", "task_uid"):
             if not event.get(key):
                 event.pop(key, None)
         for key, value in event.items():
             if isinstance(value, str):
-                value = redact_text(value)
-                for private in self.private_values:
-                    value = re.sub(re.escape(private), "[operation-specific]", value, flags=re.IGNORECASE)
                 event[key] = value[:1000]
         if event_type == "technique_warning":
             key = tuple(

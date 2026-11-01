@@ -92,7 +92,7 @@ def test_explicit_reassessment_replaces_same_url_and_authority():
     assert not result._evidence["method"]
 
 
-@pytest.mark.parametrize("defect", ["text", "url", "duplicate", "requirement"])
+@pytest.mark.parametrize("defect", ["text", "url", "requirement"])
 def test_failed_correction_rolls_back_all_private_state(defect):
     state = harness()
     prior = select_sources(state.service, "Method", REQUIREMENTS, [document(1)])
@@ -100,8 +100,6 @@ def test_failed_correction_rolls_back_all_private_state(defect):
     state.evidence = [{"url": document(2)["url"], "text": "Fabricated, quote"}]
     if defect == "url":
         state.evidence[0] = {"url": "https://unknown.example", "text": "Evidence 2"}
-    elif defect == "duplicate":
-        state.evidence = [{"url": document(2)["url"], "text": "Evidence 2"}] * 2
     elif defect == "requirement":
         state.evidence = []
         state.invalid = True
@@ -252,3 +250,56 @@ def test_long_source_correction_retains_inspection_without_reopening_tools(subje
     assert len(attempts) == 2
     assert result.sufficient
     assert any(event.get("status") == "source_inspected" for event in state.events)
+
+
+@pytest.mark.parametrize("duplicate", [True, False])
+def test_multiple_exact_passages_from_one_source(duplicate):
+    state = harness()
+    source = document(1, "First fact. Second fact.")
+    first = {"url": source["url"], "text": "First fact."}
+    second = first if duplicate else {"url": source["url"], "text": "Second fact."}
+    state.evidence = [first, second]
+    result = select_sources(state.service, "Method", REQUIREMENTS, [source])
+    assert [row.text for row in result._evidence["method"]] == (
+        ["First fact."] if duplicate else ["First fact.", "Second fact."]
+    )
+    reviewed = review_coverage(state.service, "Method", REQUIREMENTS, result)
+    assert reviewed._evidence == result._evidence
+
+
+def test_rejected_source_correction_explains_empty_attribution_contract(scripted_service):
+    import json
+
+    from modules.techniques.coverage import Requirement, select_sources
+
+    service = scripted_service.service
+    url = "https://example.com/rejected"
+    prompts = []
+    original = service.runner
+
+    def run(role, prompt, tools):
+        if role == "technique_source_assessor":
+            prompts.append(prompt)
+            return json.dumps({
+                "selected_urls": [], "attributions": [{"url": url, "reason": "Unrelated mechanism"}]
+                if len(prompts) == 1 else [],
+                "reason": "Unrelated mechanism", "authoritative_sufficient": False,
+            })
+        if role == "technique_requirement_assessor":
+            return json.dumps({"requirement_id": "method", "source_urls": [],
+                               "explanation": "Restriction preserved without factual source claims", "gaps": []})
+        return original(role, prompt, tools)
+
+    service.runner = run
+    result = select_sources(service, "HTTP controls", [
+        Requirement(id="method", description="Preserve restrictions", kind="constraint"),
+    ], [{"url": url, "text": "Unrelated mechanism"}])
+    assert result.selected_urls == result.attributions == []
+    assert len(prompts) == 2
+    assert "selected_urls=[] and attributions=[]" in prompts[0]
+    assert "contributes at least one relevant" in prompts[0]
+    assert "not exact request-word matching" in prompts[0]
+    assert "A source can contribute one relevant technical fact" in prompts[0]
+    assert "Expected exactly 0 attribution records" in prompts[1]
+    assert "Rejected sources must have no attribution records" in prompts[1]
+    assert url in prompts[1]

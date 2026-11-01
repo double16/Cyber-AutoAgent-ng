@@ -203,3 +203,19 @@ describe('text input components', () => {
     expect(unsubscribe).toHaveBeenCalled();
   });
 });
+
+it('handles unfocused and cursorless paste inputs, control shortcuts and external truncation', async () => {
+  const {PasteAwareTextInput} = await load(); const onChange = jest.fn();
+  let view!: ReactTestRenderer;
+  act(() => {view = TestRenderer.create(<PasteAwareTextInput value="abc" onChange={onChange}/>);});
+  const oldHandler = keypressHandler!;
+  for (const name of ['c', 'l', 's']) act(() => oldHandler({name, ctrl: true, sequence: name}));
+  act(() => view.update(<PasteAwareTextInput value="" onChange={onChange} showCursor={false}/>));
+  for (const name of ['left', 'right', 'return', 'backspace', 'delete']) act(() => keypressHandler!({name, sequence: '', ctrl: false, meta: false}));
+  expect(onChange).not.toHaveBeenCalled();
+  act(() => view.update(<PasteAwareTextInput value="" onChange={onChange} focus={false} placeholder="type"/>));
+  act(() => view.update(<PasteAwareTextInput value="long" onChange={onChange} mask="*"/>));
+  act(() => view.update(<PasteAwareTextInput value="x" onChange={onChange}/>));
+  expect(textFromTree(view.toJSON())).toContain('x');
+  act(() => view.unmount());
+});

@@ -291,3 +291,52 @@ def test_retained_correction_includes_sdk_user_tool_results_without_repeating_us
     assert "Exact evidence" in prompt and "read-1" in prompt
     assert "Original untrusted user instructions" not in prompt
     assert "Do not duplicate this user prose" not in prompt
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"], ids=["native", "tool"])
+def test_comparison_context_is_withheld_until_finalization(provider):
+    model = Provider(provider)
+    agent = Agent(model=model, callback_handler=None)
+    result = invoke_structured(agent, "Exact subject for independent notes", Answer, investigate=True,
+                               finalization_context="WITHHELD_CRITIC_DECISION")
+    assert result.structured_output.values == ([3] if provider == "bedrock" else [1, 2])
+    assert "WITHHELD_CRITIC_DECISION" not in str(model.calls[0])
+    assert "WITHHELD_CRITIC_DECISION" in str(model.calls[-1][1])
+    assert "Exact subject for independent notes" in str(model.calls[-1][1])
+    assert "boundary remains conditional" in str(model.calls[-1][1])
+
+
+def test_non_sdk_compatibility_receives_complete_deferred_context():
+    calls = []
+    agent = SimpleNamespace(model=object())
+
+    class ExternalAgent:
+        model = agent.model
+
+        def __call__(self, prompt, **kwargs):
+            calls.append(prompt)
+            return "external"
+
+    assert invoke_structured(ExternalAgent(), "Subject", Answer, finalization_context="Comparison") == "external"
+    assert calls == ["Subject\nComparison"]
+
+
+def test_finalization_context_without_investigation_is_not_lost():
+    model = Provider()
+    result = invoke_structured(Agent(model=model, callback_handler=None), "Subject", Answer,
+                               finalization_context="Comparison")
+    assert result.structured_output.values == [1, 2]
+    assert len(model.calls) == 1
+    assert model.calls[0][1][0]["content"][0]["text"] == "Subject\nComparison"
+
+
+def test_failed_finalization_retains_deferred_context_for_bounded_correction():
+    model = Provider(failures=[ValueError("invalid structured content")])
+    agent = Agent(model=model, callback_handler=None)
+    with pytest.raises(ValueError) as caught:
+        invoke_structured(agent, "Independent subject", Answer, investigate=True,
+                          finalization_context="Exact critic decision and referenced findings")
+    repaired = retained_finalization_prompt("Independent subject", caught.value)
+    assert "Exact critic decision and referenced findings" in repaired
+    assert "boundary remains conditional" in repaired
+    assert "Exact critic decision" not in str(model.calls[0])

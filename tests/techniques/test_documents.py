@@ -3,7 +3,7 @@ import hashlib
 import pytest
 import yaml
 
-from modules.techniques.documents import Metadata, Source, TechniqueDocument, revision_id, toon
+from modules.techniques.documents import Metadata, Source, TechniqueDocument, json_payload, revision_id
 
 
 def test_document_is_self_contained_with_separate_source_identity(markdown):
@@ -36,11 +36,13 @@ def test_metadata_reject_unknown_fields_versions_and_bad_urls(markdown):
         Source(url="file:///etc/passwd", title="Bad")
 
 
-def test_toon_escapes_fields_and_empty_rows():
-    assert toon("sources", []) == "sources[0]:"
-    output = toon("sources", [{"url": "a,b", "title": "a\nb"}, {"url": "c", "title": "d"}])
-    assert output.startswith("sources[2]{url,title}:")
-    assert len(output.splitlines()) == 3
+def test_json_preserves_native_values_and_exact_text():
+    import json
+
+    rows = [{"nested": {"array": [True, None, 42, {"text": "a,b; λ\n`x`"}]},
+             "code": "print(\"a,b\")\n  # 日本語"}]
+    assert json.loads(json_payload("sources", rows)) == {"sources": rows}
+    assert json.loads(json_payload("sources", [])) == {"sources": []}
 
 
 @pytest.mark.parametrize("text", [
@@ -76,3 +78,19 @@ def test_python_survives_review_serialization():
     ast.parse(decoded)
     with pytest.raises(SyntaxError):
         ast.parse(decoded.replace("field_name,", "field_name;"))
+
+
+def test_optional_prompt_fitting_drops_records_without_cutting_nested_json():
+    import json
+
+    from modules.techniques.documents import optional_records_payload
+
+    first = {"nested": [True, None, {"code": 'print("λ,;")\n  next()'}]}
+    rows = [first, {"text": "large\n" * 1000}]
+    original = json.dumps(rows, ensure_ascii=False)
+    rendered = optional_records_payload("examples", rows, len(json_payload("examples", [first])))
+    assert json.loads(rendered) == {"examples": [first]}
+    assert json.dumps(rows, ensure_ascii=False) == original
+    assert json.loads(optional_records_payload("examples", rows, 16)) == {"examples": []}
+    with pytest.raises(ValueError, match="cannot fit"):
+        optional_records_payload("examples", rows, 1)

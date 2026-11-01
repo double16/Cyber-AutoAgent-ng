@@ -1,3 +1,5 @@
+from conftest import plan_payload
+
 """Phase objectives govern guidance, without claiming target execution or dropping intent."""
 
 import json
@@ -157,9 +159,9 @@ def test_alignment_reaches_full_workflow_and_stays_out_of_published_document(
             alignments.append(prompt)
             return json.dumps({"adjusted_request": adjusted, "reason": "Clarify hypothesis guidance"})
         if role == "technique_planner":
-            return json.dumps({"components": [{"id": "method", "request": adjusted,
+            return json.dumps(plan_payload({"components": [{"id": "method", "request": adjusted,
                 "purpose": "Applicability hypotheses", "request_excerpt": request,
-                "requirements": [{"id": "method", "description": "Applicability hypotheses and future checks"}]}]})
+                "requirements": [{"id": "method", "description": "Applicability hypotheses and future checks"}]}]}))
         if role == "technique_judge" and "generic_request" in prompt:
             state.calls.append((role, prompt, tools))
             return json.dumps({"generic_request": adjusted, "applicability": "conditional",

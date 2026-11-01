@@ -40,3 +40,28 @@ describe('installAutoRunInterruptFallback', () => {
     expect(input.setRawMode).not.toHaveBeenCalled();
   });
 });
+
+it('preserves an already raw and flowing terminal, and accepts string input', () => {
+  const input = new FakeInput();
+  input.isRaw = true;
+  input.readableFlowing = true;
+  const interrupt = jest.fn();
+  const cleanup = installAutoRunInterruptFallback(interrupt, input);
+  input.emit('data', 'hello');
+  expect(interrupt).not.toHaveBeenCalled();
+  input.emit('data', '\x03');
+  expect(interrupt).toHaveBeenCalledTimes(1);
+  cleanup();
+  expect(input.setRawMode).toHaveBeenCalledTimes(1);
+  expect(input.pause).not.toHaveBeenCalled();
+});
+
+it('supports TTY input without optional flow controls', () => {
+  const input = new FakeInput();
+  (input as any).resume = undefined;
+  (input as any).pause = undefined;
+  const cleanup = installAutoRunInterruptFallback(jest.fn(), input);
+  (input as any).setRawMode = undefined;
+  expect(cleanup).not.toThrow();
+  expect(installAutoRunInterruptFallback(jest.fn(), input)).not.toThrow();
+});

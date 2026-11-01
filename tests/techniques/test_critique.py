@@ -90,7 +90,15 @@ def test_invalid_issue_references(updates, message):
     lookup = RetainedSources(DOCS)
     with pytest.raises(ValueError, match=message):
         lookup.validate(
-            Critique(approved=False, reason="Defect", issues=[issue(**updates)]), "Boundary guidance", REQS, [URL]
+            Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=False,
+                reason="Defect",
+                issues=[issue(**updates)],
+            ),
+            "Boundary guidance",
+            REQS,
+            [URL],
         )
 
 
@@ -98,13 +106,26 @@ def test_invalid_issue_references(updates, message):
 def test_approval_and_issue_consistency(approved, issues):
     with pytest.raises(ValueError, match="Approval requires"):
         RetainedSources(DOCS).validate(
-            Critique(approved=approved, reason="Review", issues=issues), "Boundary guidance", REQS, [URL]
+            Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=approved,
+                reason="Review",
+                issues=issues,
+            ),
+            "Boundary guidance",
+            REQS,
+            [URL],
         )
 
 
 def test_duplicate_issue_ids_and_unselected_attribution():
     lookup = RetainedSources(DOCS)
-    critique = Critique(approved=False, reason="Defect", issues=[issue(), issue()])
+    critique = Critique(
+        no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+        approved=False,
+        reason="Defect",
+        issues=[issue(), issue()],
+    )
     with pytest.raises(ValueError, match="unique"):
         lookup.validate(critique, "Boundary guidance", REQS, [URL])
     with pytest.raises(ValueError, match="affected selected"):
@@ -115,7 +136,7 @@ def test_exact_returned_passage_and_missing_content_are_valid():
     lookup = RetainedSources(DOCS)
     passage = lookup.lookup(URL, 0, 4000)
     passage.pop("text")
-    critique = Critique(
+    critique = Critique(no_security_checks_reason="No separately enumerated security checks in this scripted draft",
         approved=False,
         reason="Defect",
         issues=[
@@ -127,7 +148,16 @@ def test_exact_returned_passage_and_missing_content_are_valid():
         ],
     )
     lookup.validate(critique, "Boundary guidance", REQS, [URL])
-    lookup.validate(Critique(approved=True, reason="Complete"), "Boundary guidance", REQS, [URL])
+    lookup.validate(
+        Critique(
+            no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+            approved=True,
+            reason="Complete",
+        ),
+        "Boundary guidance",
+        REQS,
+        [URL],
+    )
 
 
 @pytest.mark.parametrize("valid_second", [True, False])
@@ -138,10 +168,21 @@ def test_semantically_vague_or_unsupported_critique_has_one_correction(scripted_
     def runner(role, prompt, tools):
         calls.append((role, prompt))
         if role == "technique_critic":
-            return json.dumps(Critique(approved=False, reason="Review", issues=[issue()]).model_dump())
+            return json.dumps(
+                Critique(
+                    no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                    approved=False,
+                    reason="Review",
+                    issues=[issue()],
+                ).model_dump()
+            )
         assert role == "technique_critique_assessor"
         return json.dumps(
-            {"approved": valid_second and len(calls) == 4, "reason": "Correction does not identify a concrete defect"}
+            {"approved": valid_second and len(calls) == 4,
+             "reason": "Correction does not identify a concrete defect",
+             "findings": [] if valid_second and len(calls) == 4 else [{
+                 "problem": "Unsupported defect", "requested_correction": "Withdraw or substantiate",
+                 "issue_ids": ["boundary"]}]}
         )
 
     service.runner = runner
@@ -151,7 +192,7 @@ def test_semantically_vague_or_unsupported_critique_has_one_correction(scripted_
         with pytest.raises(ValueError, match="Critique assessment failed after one correction"):
             assess(service, "Review", "Boundary guidance", REQS, DOCS, [URL])
     assert len(calls) == 4
-    assert "Critique is not actionable" in calls[2][1]
+    assert "Critique disagreement" in calls[2][1]
     assert not service.repository.revisions()
 
 
@@ -163,7 +204,8 @@ def test_invalid_critique_correction_consumes_no_author_attempt(scripted_service
     def runner(role, prompt, tools):
         if role == "technique_critic":
             critics.append(prompt)
-            return json.dumps({"approved": len(critics) > 1, "reason": "No issues"})
+            return json.dumps({"approved": len(critics) > 1, "reason": "No issues",
+                               "no_security_checks_reason": "No separately enumerated checks in scripted draft"})
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -251,7 +293,12 @@ def test_mixed_issues_replace_stale_author_and_attribution_requests(scripted_ser
                 issue(category=category, id=category, source_urls=state.source_urls, draft_excerpt="")
                 for category in ["authored_content", "source_attribution", "research_coverage"]
             ]
-            return Critique(approved=False, reason="Review", issues=issues).model_dump_json()
+            return Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=False,
+                reason="Review",
+                issues=issues,
+            ).model_dump_json()
         return original(role, prompt, tools)
 
     state.service.research = research
@@ -295,6 +342,7 @@ def test_seven_requirements_three_drafts_and_incomplete_attribution_response_pre
                 return critique_result(True)
             category = "source_attribution" if len(critics) == 3 else "authored_content"
             return Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
                 approved=False,
                 reason="Boundary control",
                 issues=[
@@ -359,7 +407,10 @@ def test_research_only_resets_attribution_allowance_on_changed_validated_assessm
                 return critique_result(True)
             category = "research_coverage" if count == 2 else "source_attribution"
             return Critique(
-                approved=False, reason="Review", issues=[issue(category=category, draft_excerpt="")]
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=False,
+                reason="Review",
+                issues=[issue(category=category, draft_excerpt="")],
             ).model_dump_json()
         if role == "technique_attribution_repair":
             repairs.append(prompt)
@@ -420,6 +471,7 @@ def test_complete_validated_author_feedback_reaches_repair_without_diagnostic_tr
             if len(critics) > 1:
                 return critique_result(True)
             return Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
                 approved=False,
                 reason="Review",
                 issues=[
@@ -465,8 +517,10 @@ def test_invalid_excerpt_correction_requests_literal_draft_text(scripted_service
     calls = []
 
     def runner(role, prompt, tools):
+        if role == "technique_critique_assessor":
+            return json.dumps({"approved": True, "reason": "Complete"})
         calls.append(prompt)
-        return Critique(
+        return Critique(no_security_checks_reason="No separately enumerated security checks in this scripted draft",
             approved=len(calls) > 1,
             reason="Review",
             issues=[] if len(calls) > 1 else [issue(draft_excerpt="    Boundary guidance")],
@@ -489,7 +543,12 @@ def test_assessor_contract_correction_stays_with_assessor(scripted_service, reco
     def runner(role, prompt, tools):
         calls.append((role, prompt, tools))
         if role == "technique_critic":
-            return Critique(approved=False, reason="Review", issues=[issue()]).model_dump_json()
+            return Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=False,
+                reason="Review",
+                issues=[issue()],
+            ).model_dump_json()
         if len(calls) == 2 or not recover:
             return json.dumps({"auth-001": {"approved": True}})
         return json.dumps({"approved": True, "reason": "Concrete supported defect"})
@@ -522,7 +581,12 @@ def test_critique_and_assessor_share_one_correction(scripted_service, first_fail
             critic_calls += 1
             if first_failure == "critic_contract" and critic_calls == 1:
                 return json.dumps({"decision": "reject"})
-            return Critique(approved=False, reason="Review", issues=[issue()]).model_dump_json()
+            return Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=False,
+                reason="Review",
+                issues=[issue()],
+            ).model_dump_json()
         assessor_calls += 1
         if first_failure == "critic_contract" or assessor_calls == 1:
             return json.dumps({"auth-001": {"approved": True}})
@@ -544,16 +608,29 @@ def test_decoded_review_snapshot(markdown):
     assert snapshot.values[key] == "Multiple lines"
     assert "title: >" not in snapshot.render()
     lookup = RetainedSources(DOCS)
-    candidate = Critique(approved=False, reason="Defect", issues=[issue(draft_references=[key])])
+    candidate = Critique(
+        no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+        approved=False,
+        reason="Defect",
+        issues=[issue(draft_references=[key])],
+    )
     with pytest.raises(ValueError, match="stale"):
         lookup.validate(candidate, "Different document", REQS, [URL])
 
 
 def test_source_absence_requires_complete_inspection():
     lookup = RetainedSources(DOCS)
-    candidate = Critique(approved=False, reason="Defect", issues=[issue(
-        absence_scope="entire_retained_source", absence_of_support="Claim absent",
-    )])
+    candidate = Critique(
+        no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+        approved=False,
+        reason="Defect",
+        issues=[
+            issue(
+                absence_scope="entire_retained_source",
+                absence_of_support="Claim absent",
+            )
+        ],
+    )
     lookup.lookup(URL, 0, 5)
     with pytest.raises(ValueError, match="complete inspection"):
         lookup.validate(candidate, "Boundary guidance", REQS, [URL])
@@ -573,9 +650,17 @@ def test_reference_resolution_and_search():
     with pytest.raises(ValueError, match="Unknown"):
         tool(url="unknown", query="boundary")
     snapshot = ReviewSnapshot("Boundary guidance")
-    candidate = Critique(approved=False, reason="Defect", issues=[issue(
-        draft_references=list(snapshot.values), passage_ids=[result["passage_id"]],
-    )])
+    candidate = Critique(
+        no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+        approved=False,
+        reason="Defect",
+        issues=[
+            issue(
+                draft_references=list(snapshot.values),
+                passage_ids=[result["passage_id"]],
+            )
+        ],
+    )
     lookup.validate(candidate, "Boundary guidance", REQS, [URL])
     assert candidate.issues[0].draft_excerpt == "Boundary guidance"
     assert candidate.issues[0].passages[0].url == URL
@@ -602,9 +687,17 @@ def test_snapshot_uses_existing_parser(markdown, style, value):
 
 def test_full_inspection_rejects_gaps_and_accepts_overlaps():
     lookup = RetainedSources(DOCS)
-    candidate = Critique(approved=False, reason="Defect", issues=[issue(
-        absence_scope="entire_retained_source", absence_of_support="Disputed claim absent",
-    )])
+    candidate = Critique(
+        no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+        approved=False,
+        reason="Defect",
+        issues=[
+            issue(
+                absence_scope="entire_retained_source",
+                absence_of_support="Disputed claim absent",
+            )
+        ],
+    )
     lookup.lookup(URL, 0, 5)
     lookup.lookup(URL, 6, 4000)
     with pytest.raises(ValueError, match="complete inspection"):
@@ -620,9 +713,18 @@ def test_search_validates_bounds_even_on_miss(start, length):
 
 
 def test_entire_source_absence_requires_urls():
-    candidate = Critique(approved=False, reason="Defect", issues=[issue(
-        category="research_coverage", source_urls=[], absence_scope="entire_retained_source",
-    )])
+    candidate = Critique(
+        no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+        approved=False,
+        reason="Defect",
+        issues=[
+            issue(
+                category="research_coverage",
+                source_urls=[],
+                absence_scope="entire_retained_source",
+            )
+        ],
+    )
     with pytest.raises(ValueError, match="affected source URLs"):
         RetainedSources(DOCS).validate(candidate, "Boundary guidance", REQS, [])
 
@@ -632,6 +734,8 @@ def test_controller_correction_retains_lookup_without_reopening_tools(scripted_s
     calls = []
 
     def runner(role, prompt, tools):
+        if role == "technique_critique_assessor":
+            return json.dumps({"approved": True, "reason": "Complete"})
         calls.append((prompt, tools))
         if len(calls) == 1:
             tools[0](url=URL, length=4000)
@@ -639,13 +743,24 @@ def test_controller_correction_retains_lookup_without_reopening_tools(scripted_s
                 error = ValueError("Invalid structured grounding")
                 error.native_finalization_messages = []
                 raise error
-            return Critique(approved=False, reason="Defect", issues=[issue(
-                draft_references=["unknown"],
-            )]).model_dump_json()
+            return Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=False,
+                reason="Defect",
+                issues=[
+                    issue(
+                        draft_references=["unknown"],
+                    )
+                ],
+            ).model_dump_json()
         assert tools == []
         assert DOCS[0]["text"] in prompt
         assert "retained_lookup_passages" in prompt
-        return Critique(approved=True, reason="No demonstrated defect").model_dump_json()
+        return Critique(
+            no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+            approved=True,
+            reason="No demonstrated defect",
+        ).model_dump_json()
 
     scripted_service.service.runner = runner
     assert assess(scripted_service.service, "Review", "Boundary guidance", REQS, DOCS, [URL]).approved
@@ -664,7 +779,8 @@ def test_grounding_complaint_without_evidence_cannot_trigger_repair(scripted_ser
         if role == "technique_critic":
             critics.append(prompt)
             if len(critics) == 2 and not persistent:
-                return json.dumps({"approved": True, "reason": "No grounded defects", "issues": []})
+                return json.dumps({"approved": True, "reason": "No grounded defects", "issues": [],
+                                   "no_security_checks_reason": "No security checks in scripted draft"})
             return json.dumps({"approved": False, "reason": "Attribution overstates support", "issues": [
                 issue(id="source-disclaimer", draft_excerpt="", absence_of_support="").model_dump(),
             ]})
@@ -708,14 +824,29 @@ def test_target_detail_issue_repairs_authorship_without_research_loss(scripted_s
         if role == "technique_critic":
             critics.append(prompt)
             assert "decoded values" in prompt and "incidental target identifiers" in prompt
+            assert "reserved example domains" in prompt
+            assert "expected legitimate behavior" in prompt
             if len(critics) == 1:
-                return Critique(approved=False, reason="Incidental target detail", issues=[issue(
-                    category="authored_content", source_urls=[], draft_excerpt=marker,
-                    problem="Incidental operation host appears in reusable guidance",
-                    requested_correction="Replace the incidental host with a generic subject",
-                )]).model_dump_json()
+                return Critique(
+                    no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                    approved=False,
+                    reason="Incidental target detail",
+                    issues=[
+                        issue(
+                            category="authored_content",
+                            source_urls=[],
+                            draft_excerpt=marker,
+                            problem="Incidental operation host appears in reusable guidance",
+                            requested_correction="Replace the incidental host with a generic subject",
+                        )
+                    ],
+                ).model_dump_json()
             assert marker not in prompt
-            return Critique(approved=True, reason="Reusable guidance").model_dump_json()
+            return Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=True,
+                reason="Reusable guidance",
+            ).model_dump_json()
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -724,3 +855,576 @@ def test_target_detail_issue_repairs_authorship_without_research_loss(scripted_s
     assert len(authors) == len(critics) == 2
     assert len(state.research_calls) == 1
     assert "https://vendor.example/advisory" in state.service.store.render(revision)
+
+
+@pytest.mark.parametrize("text,query,terms", [
+    ("A session token may use proprietary HTTP headers.", "header Authorization token", ["header", "token"]),
+    ("A TCP service returns a challenge.", "tls TCP nonce", ["TCP"]),
+    ('def read(path):\n    return "λ,;"\n', "PATH filename source", ["PATH"]),
+    ("axb comes before literal a.b", "A.B missing", ["A.B"]),
+])
+def test_lookup_term_fallback_preserves_exact_passages_and_controller_references(text, query, terms):
+    lookup = RetainedSources([{"url": URL, "text": text}])
+    tool = lookup.tool()
+    result = tool(url=URL, query=query, length=100)
+    assert result["matched"] is False  # The literal phrase was absent.
+    assert result["match_kind"] == "individual_terms"
+    assert [row["term"] for row in result["term_matches"]] == terms
+    assert sum(row["end"] - row["start"] for row in result["term_matches"]) <= 100
+    for row in result["term_matches"]:
+        assert row["text"] == text[row["start"]:row["end"]]
+        assert (URL, row["start"], row["end"]) in lookup.references
+        assert row["passage_id"] in lookup.passage_ids
+    assert "never establish semantic support or absence" in tool.tool_spec["description"]
+
+
+@pytest.mark.parametrize("length", [1, 4, 40])
+def test_lookup_term_fallback_bounds_number_and_total_length(length):
+    text = "one two three four five six seven eight nine"
+    lookup = RetainedSources([{"url": URL, "text": text}])
+    result = lookup.tool()(url=URL, query="ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE", length=length)
+    assert len(result["term_matches"]) == min(4, length)
+    assert sum(len(row["text"]) for row in result["term_matches"]) <= length
+
+
+def test_lookup_miss_and_offset_search_do_not_invent_passages():
+    lookup = RetainedSources([{"url": URL, "text": "token then other text"}])
+    for query, start in [("absent missing", 0), ("TOKEN missing", 6),
+                         ("absent1 absent2 absent3 absent4 absent5 absent6 absent7 absent8 token", 0)]:
+        assert lookup.tool()(url=URL, query=query, start=start) == {"matched": False, "characters": 21}
+    assert not lookup.references
+    exact = lookup.tool()(url=URL, query="token", length=5)
+    assert exact["text"] == "token" and "term_matches" not in exact
+
+
+@pytest.mark.parametrize("text", [
+    "Changing the object header and receiving the selected object proves IDOR.",
+    "JavaScript reading browser storage proves an authentication vulnerability.",
+    "Reusing a currently valid token must be rejected.",
+    "Deliverable checklist is missing.",
+])
+@pytest.mark.parametrize("persistent", [False, True])
+def test_approval_independently_challenged_and_exact_correction_reviewed(scripted_service, text, persistent):
+    from modules.techniques.critique import ReviewSnapshot
+
+    reference = next(iter(ReviewSnapshot(text).values))
+    calls = []
+
+    def runner(role, prompt, tools):
+        calls.append((role, prompt))
+        if role == "technique_critic":
+            if len(calls) == 1 or persistent:
+                return Critique(
+                    no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                    approved=True,
+                    reason="No defects",
+                ).model_dump_json()
+            assert "Clarify policy and controls" in prompt
+            return Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=False,
+                reason="Unconditional claim",
+                issues=[
+                    issue(
+                        category="authored_content",
+                        draft_excerpt="",
+                        draft_references=[reference],
+                        requested_correction="Clarify policy and controls",
+                    )
+                ],
+            ).model_dump_json()
+        agreed = len(calls) == 4 and not persistent
+        assert text in prompt and "critic_assessment" in prompt
+        return json.dumps({"approved": agreed, "reason": "Independent semantic review", "findings": [] if agreed else [{
+            "problem": "Unconditional interpretation or missing requested deliverable",
+            "requested_correction": "Clarify policy and controls", "draft_references": [reference],
+        }]})
+
+    scripted_service.service.runner = runner
+    if persistent:
+        with pytest.raises(ValueError, match="after one correction"):
+            assess(scripted_service.service, "Review", text, REQS, DOCS, [URL])
+    else:
+        assert not assess(scripted_service.service, "Review", text, REQS, DOCS, [URL]).approved
+    assert len(calls) == 4
+
+
+def test_interpretation_rejects_stale_references():
+    from modules.techniques.critique import Interpretation
+
+    candidate = Critique(approved=True, reason="Conditional policy", interpretations=[Interpretation(
+        draft_references=["stale"], prerequisite_or_policy="Determine intended authorization",
+        legitimate_outcome="Authorized object returned", suspected_violation="Unauthorized object returned",
+        distinguishing_control="Compare authorized and unauthorized identities",
+    )])
+    with pytest.raises(ValueError, match="interpretation draft reference"):
+        RetainedSources(DOCS).validate(candidate, "Conditional method", REQS, [URL])
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_assessment_invalid_references_or_consistency_blocks_approval(scripted_service, stale):
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            return Critique(
+                no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                approved=True,
+                reason="No defects",
+            ).model_dump_json()
+        return json.dumps({"approved": False, "reason": "Disagreed", "findings": [{
+            "problem": "Missing control", "requested_correction": "Add control",
+            "draft_references": ["stale"] if stale else [],
+        }] if stale else []})
+
+    scripted_service.service.runner = runner
+    with pytest.raises(ValueError, match="after one correction"):
+        assess(scripted_service.service, "Review", "Conditional method", REQS, DOCS, [URL])
+
+
+def test_unsupported_defect_withdrawn_is_independently_reviewed(scripted_service):
+    original = scripted_service.service.runner
+    critics = []
+    reviews = []
+
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            critics.append(prompt)
+            return (
+                Critique(
+                    no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                    approved=False,
+                    reason="Unsupported",
+                    issues=[issue()],
+                )
+                if len(critics) == 1
+                else Critique(
+                    no_security_checks_reason="No separately enumerated security checks in this scripted draft",
+                    approved=True,
+                    reason="Withdrawn",
+                )
+            ).model_dump_json()
+        if role == "technique_critique_assessor":
+            reviews.append(prompt)
+            return json.dumps({"approved": len(reviews) > 1, "reason": "Assess support", "findings": []
+                               if len(reviews) > 1 else [{"problem": "Claim lacks evidence",
+                                  "requested_correction": "Withdraw defect", "issue_ids": ["boundary"]}]})
+        return original(role, prompt, tools)
+
+    scripted_service.service.runner = runner
+    assert assess(scripted_service.service, "Review", "Boundary guidance", REQS, DOCS, [URL]).approved
+    assert len(critics) == len(reviews) == 2
+
+
+@pytest.mark.parametrize("method,legitimate,violation", [
+    ("header object selection", "An entitled identity receives its selected public object",
+     "An identity receives an object the established ownership policy denies"),
+    ("browser storage access", "Application JavaScript reads its own origin's storage",
+     "An independently demonstrated injected script reads a protected token across the intended script boundary"),
+    ("token reuse", "A reusable, unexpired bearer token succeeds again",
+     "A token succeeds after established revocation or contrary to a documented single-use policy"),
+])
+@pytest.mark.parametrize("case", ["legitimate", "violation", "conditional", "distant_caveat"])
+def test_interpretation_policy_and_controls_survive_independent_review(
+    scripted_service, method, legitimate, violation, case,
+):
+    from modules.techniques.critique import Interpretation, ReviewSnapshot
+
+    policy = "Establish the applicable authorization, origin or token lifecycle policy before interpreting results"
+    text = f"Method: {method}. Legitimate: {legitimate}. Violation: {violation}. Policy: {policy}."
+    if case == "conditional":
+        text += " If policy is unknown, compare authorized controls and establish it before deciding."
+    if case == "distant_caveat":
+        text += " Procedure: legitimate behavior always proves violation. Later caveat: policy may vary."
+    reference = next(iter(ReviewSnapshot(text).values))
+    calls = []
+
+    def runner(role, prompt, tools):
+        calls.append(role)
+        assert text in prompt
+        interpretation = Interpretation(
+            draft_references=[reference], prerequisite_or_policy=policy,
+            legitimate_outcome=legitimate, suspected_violation=violation,
+            distinguishing_control="Compare an entitled positive baseline with an otherwise equivalent denied case",
+        )
+        if role == "technique_critic":
+            issues = [issue(category="authored_content", draft_excerpt="", draft_references=[reference],
+                            problem="Procedure unconditionally labels legitimate behavior a violation",
+                            requested_correction="Make interpretation conditional on the established policy")]
+            return Critique(approved=case != "distant_caveat" or len(calls) == 1, reason="Interpret policy",
+                            interpretations=[interpretation],
+                            issues=issues if case == "distant_caveat" and len(calls) > 1 else []).model_dump_json()
+        agreed = case != "distant_caveat" or len(calls) > 2
+        return json.dumps({"approved": agreed, "reason": "Compare procedure and stated policy",
+                           "interpretation_reviews": [{"interpretation_index": 0,
+                               "draft_references": [reference], "permitted_counterexample": legitimate,
+                               "actual_discriminator": text,
+                               "counterexample_matches_check": case == "distant_caveat",
+                               "control_excludes_counterexample": case != "distant_caveat",
+                               "critic_correct": agreed}],
+                           "findings": [] if agreed else [{"problem": "Distant caveat cannot fix the procedure",
+                           "requested_correction": "Correct the unconditional procedure claim",
+                           "draft_references": [reference]}]})
+
+    scripted_service.service.runner = runner
+    result = assess(scripted_service.service, "Review", text, REQS, DOCS, [URL])
+    assert result.approved == (case != "distant_caveat")
+    assert len(calls) == (4 if case == "distant_caveat" else 2)
+    assert result.interpretations[0].legitimate_outcome == legitimate
+    if result.issues:
+        assert result.issues[0].category == "authored_content"
+
+
+def test_assembled_assessor_requires_independent_outcome_derivation(scripted_service):
+    original = scripted_service.service.runner
+    prompts = []
+
+    def runner(role, prompt, tools):
+        if role == "technique_critique_assessor":
+            prompts.append(prompt)
+        return original(role, prompt, tools)
+
+    scripted_service.service.runner = runner
+    assess(scripted_service.service, "Review", "An unexpired reusable credential succeeds again", REQS, DOCS, [URL])
+    assert len(prompts) == 1
+    assert "First derive legitimate and prohibited outcomes" in prompts[0]
+    assert "Calling a check a future hypothesis does not excuse misclassifying legitimate behavior" in prompts[0]
+    assert "specify how to establish policy through documentation" in prompts[0]
+    assert "a valid reusable credential can legitimately succeed repeatedly" in prompts[0]
+    assert "reuse inside its valid window" in prompts[0]
+    assert "freshness-limit event to have occurred" in prompts[0]
+
+
+@pytest.mark.parametrize("recover", [False, True])
+def test_missing_interpretation_assessment_requires_shared_correction(scripted_service, recover):
+    from modules.techniques.critique import Interpretation, ReviewSnapshot
+
+    text = "An unexpired reusable credential succeeds again"
+    reference = next(iter(ReviewSnapshot(text).values))
+    calls = []
+
+    def runner(role, prompt, tools):
+        calls.append(role)
+        if role == "technique_critic":
+            interpretation = Interpretation(
+                draft_references=[reference], prerequisite_or_policy="A valid reusable credential",
+                legitimate_outcome="Repeated success", suspected_violation="No violation established",
+                distinguishing_control="Test established expiry or revocation separately",
+            )
+            return Critique(approved=True, reason="Legitimate behavior", interpretations=[interpretation]
+                            if recover and len(calls) > 1 else []).model_dump_json()
+        return json.dumps({"approved": True, "reason": "Interpretation matches policy", "findings": [],
+                           "interpretation_reviews": [{"interpretation_index": 0,
+                               "draft_references": [reference],
+                               "permitted_counterexample": "Unexpired reusable credential succeeds again",
+                               "actual_discriminator": "",
+                               "counterexample_matches_check": False, "control_excludes_counterexample": False,
+                               "critic_correct": True}]})
+
+    scripted_service.service.runner = runner
+    if recover:
+        assert assess(scripted_service.service, "Review", text, REQS, DOCS, [URL]).approved
+        assert calls == ["technique_critic", "technique_critic", "technique_critique_assessor"]
+    else:
+        with pytest.raises(ValueError, match="after one correction"):
+            assess(scripted_service.service, "Review", text, REQS, DOCS, [URL])
+        assert calls == ["technique_critic", "technique_critic"]
+
+
+def test_interpretation_scope_cannot_contradict_populated_checks(scripted_service):
+    from modules.techniques.critique import Interpretation, ReviewSnapshot
+
+    reference = next(iter(ReviewSnapshot("Check").values))
+    candidate = Critique(approved=True, reason="Scope", no_security_checks_reason="No checks", interpretations=[
+        Interpretation(draft_references=[reference], prerequisite_or_policy="Policy", legitimate_outcome="Allowed",
+                       suspected_violation="Denied", distinguishing_control="Compare")])
+    scripted_service.service.runner = lambda *args: candidate.model_dump_json()
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        assess(scripted_service.service, "Review", "Check", REQS, DOCS, [URL])
+
+
+def test_native_critique_schema_requires_interpretation_assessment():
+    schema = Critique.model_json_schema()
+    assert {"approved", "reason", "interpretations", "no_security_checks_reason"} <= set(schema["required"])
+    assert "interpretations" in schema["properties"]
+    assert "no_security_checks_reason" in schema["properties"]
+
+
+def test_assessor_contract_repair_retains_its_own_passages_and_rejected_assessment(scripted_service):
+    original = scripted_service.service.runner
+    assessor_calls = []
+    staged_calls = []
+    original_json = scripted_service.service._json
+
+    def capture_stage(role, prompt, schema, tools=None):
+        if role == "technique_critique_assessor":
+            staged_calls.append(prompt)
+        return original_json(role, prompt, schema, tools)
+
+    scripted_service.service._json = capture_stage
+
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            return Critique(approved=True, reason="No disputed claims",
+                            no_security_checks_reason="No separately enumerated checks in scripted draft").model_dump_json()
+        if role == "technique_critique_assessor":
+            assessor_calls.append(prompt)
+            if len(assessor_calls) == 1:
+                returned = tools[0](url=URL, start=0, length=20)
+                assert returned["text"] == DOCS[0]["text"][:20]
+                return json.dumps({"approved": False, "reason": "Bad reference", "findings": [{
+                    "problem": "Unresolved policy", "requested_correction": "Clarify it",
+                    "draft_references": ["stale-reference"],
+                }]})
+            assert tools == []
+            assert DOCS[0]["text"][:20] in prompt
+            assert "retained_lookup_passages" in prompt and "stale-reference" in prompt
+            assert "Rejected response" in prompt
+            return json.dumps({"approved": True, "reason": "Reference repaired; no defect", "findings": []})
+        return original(role, prompt, tools)
+
+    scripted_service.service.runner = runner
+    assert assess(scripted_service.service, "Review", "Boundary guidance", REQS, DOCS, [URL]).approved
+    assert len(assessor_calls) == 2
+    from modules.techniques.roles import DeferredReviewPrompt
+
+    assert len(staged_calls) == 2
+    assert all(isinstance(prompt, DeferredReviewPrompt) for prompt in staged_calls)
+    assert all("No disputed claims" not in prompt.investigation for prompt in staged_calls)
+    assert all("critic_supported" not in prompt.investigation for prompt in staged_calls)
+    assert all("interpretation_reviews" not in prompt.investigation for prompt in staged_calls)
+    assert all("Then compare your findings" not in prompt.investigation for prompt in staged_calls)
+    assert all("No disputed claims" in prompt.comparison for prompt in staged_calls)
+    assert all("critic_supported" in prompt.comparison for prompt in staged_calls)
+    assert "stale-reference" not in staged_calls[1].investigation
+    assert "stale-reference" in staged_calls[1].comparison
+
+
+@pytest.mark.parametrize("defect", [
+    "missing", "duplicate", "stale", "invented", "repaired", "contradiction", "counterexample_conflict",
+    "empty_control", "excluded_counterexample", "valid",
+])
+def test_independent_counterexample_review_validates_coverage_references_and_agreement(scripted_service, defect):
+    from modules.techniques.critique import Interpretation, ReviewSnapshot
+
+    text = "A valid reusable token succeeds again. Compare separately with established revocation."
+    reference = next(iter(ReviewSnapshot(text).values))
+    assessor_calls = []
+
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            return Critique(approved=True, reason="Normal reuse distinguished", interpretations=[Interpretation(
+                draft_references=[reference], prerequisite_or_policy="Unexpired reusable bearer credential",
+                legitimate_outcome="Repeated success", suspected_violation="Success after established revocation",
+                distinguishing_control="Compare established revocation with valid-token baseline",
+            )]).model_dump_json()
+        assessor_calls.append(prompt)
+        row = {"interpretation_index": 0, "draft_references": ["stale" if defect == "stale" else reference],
+               "permitted_counterexample": "Valid reusable credential succeeds again",
+               "actual_discriminator": "" if defect == "empty_control" else "Invented policy-establishment step"
+               if defect == "invented" or (defect == "repaired" and len(assessor_calls) == 1) else text,
+               "counterexample_matches_check": defect in {"counterexample_conflict", "excluded_counterexample"},
+               "control_excludes_counterexample": defect != "counterexample_conflict",
+               "critic_correct": defect != "contradiction"}
+        return json.dumps({"approved": True, "reason": "Reviewed actual procedure", "findings": [],
+                           "interpretation_reviews": [] if defect == "missing" else
+                           [row, row] if defect == "duplicate" else [row]})
+
+    scripted_service.service.runner = runner
+    if defect in {"valid", "repaired", "excluded_counterexample"}:
+        assert assess(scripted_service.service, "Review", text, REQS, DOCS, [URL]).approved
+        assert len(assessor_calls) == (2 if defect == "repaired" else 1)
+        if defect == "repaired":
+            assert "verbatim excerpt" in assessor_calls[1]
+            assert "Invented policy-establishment step" in assessor_calls[1]
+    else:
+        with pytest.raises(ValueError, match="after one correction"):
+            assess(scripted_service.service, "Review", text, REQS, DOCS, [URL])
+        assert len(assessor_calls) == 2
+        assert "Rejected response" in assessor_calls[1]
+    assert "Construct a concrete permitted counterexample" in assessor_calls[0]
+    assert "If no permitted scenario can satisfy both, say so" in assessor_calls[0]
+    assert "counterexample_matches_check=false" in assessor_calls[0]
+    assert "mere lack of ownership" in assessor_calls[0]
+
+
+def test_native_assessor_schema_requires_counterexample_reviews():
+    from modules.techniques.critique import IssueAssessment
+
+    assert {"critic_supported", "reason", "interpretation_reviews", "findings"} <= set(
+        IssueAssessment.model_json_schema()["required"]
+    )
+    schema = IssueAssessment.model_json_schema()
+    assert next(iter(schema["properties"])) == "interpretation_reviews"
+    assert {"counterexample_matches_check", "control_excludes_counterexample"} <= set(
+        schema["$defs"]["InterpretationReview"]["required"]
+    )
+
+
+@pytest.mark.parametrize("literal", ["Check assumptions and controls.", "True"])
+def test_control_excerpts_resolve_only_text_from_mixed_decoded_metadata(scripted_service, markdown, literal):
+    from modules.techniques.critique import Interpretation, ReviewSnapshot
+
+    text = markdown()
+    snapshot = ReviewSnapshot(text)
+    references = [ref for ref, value in snapshot.values.items()
+                  if isinstance(value, (bool, int)) or value == "Check assumptions and controls."]
+
+    def runner(role, prompt, tools):
+        if role == "technique_critic":
+            return Critique(approved=True, reason="Check policy", interpretations=[Interpretation(
+                draft_references=references, prerequisite_or_policy="Establish policy",
+                legitimate_outcome="Allowed outcome", suspected_violation="Denied outcome",
+                distinguishing_control="Check assumptions and controls.",
+            )]).model_dump_json()
+        return json.dumps({"approved": True, "reason": "Actual control", "findings": [],
+                           "interpretation_reviews": [{"interpretation_index": 0,
+                               "draft_references": references, "permitted_counterexample": "Allowed outcome",
+                               "actual_discriminator": literal, "critic_correct": True,
+                               "counterexample_matches_check": False,
+                               "control_excludes_counterexample": True}]})
+
+    scripted_service.service.runner = runner
+    if literal == "True":
+        with pytest.raises(ValueError, match="verbatim excerpt"):
+            assess(scripted_service.service, "Review", text, REQS, DOCS, [URL])
+    else:
+        assert assess(scripted_service.service, "Review", text, REQS, DOCS, [URL]).approved
+
+
+def test_research_receipt_is_deferred_without_losing_decoded_draft_references(markdown):
+    import yaml
+
+    from modules.techniques.critique import ReviewSnapshot
+
+    text = markdown()
+    metadata, body = text.split("---", 2)[1:]
+    fields = yaml.safe_load(metadata)
+    fields["source_coverage"] = "ARCHIVED_RESEARCH_READY is permission to draft, not procedural approval"
+    snapshot = ReviewSnapshot("---\n" + yaml.safe_dump(fields) + "---" + body)
+    subject = json.loads(snapshot.render(research_notes=False))["draft_references"]
+    receipt = json.loads(snapshot.render(research_notes=True))["draft_references"]
+    full = json.loads(snapshot.render())["draft_references"]
+    assert len(receipt) == 1
+    assert receipt[0]["path"] == "metadata.source_coverage"
+    assert "ARCHIVED_RESEARCH_READY" not in json.dumps(subject)
+    assert "Check assumptions and controls." in json.dumps(subject)
+    assert {row["reference"]: row for row in subject + receipt} == {row["reference"]: row for row in full}
+
+
+def test_retained_lookup_runtime_schema_advertises_the_enforced_page_bounds():
+    lookup = RetainedSources([{**DOCS[0], "text": "x" * 5000}]).tool()
+    properties = lookup.tool_spec["inputSchema"]["json"]["properties"]
+    assert properties["start"]["minimum"] == 0
+    assert properties["length"]["minimum"] == 1
+    assert properties["length"]["maximum"] == 4000
+    assert len(lookup(url=URL, length=4000)["text"]) == 4000
+    with pytest.raises(ValueError, match="1 to 4000"):
+        lookup(url=URL, length=4001)
+    with pytest.raises(ValueError, match="nonnegative"):
+        lookup(url=URL, start=-1)
+
+
+@pytest.mark.parametrize("excerpt,indices", [
+    ("  - Compare baseline.", [2, 5]),
+    ("  - Compare baseline.\n  - Compare denied.", [5, 6]),
+    ("Compare baseline.\n\nSecond check", [2, 3, 4]),
+    ("Compare baseline.\nSecond check", []),
+    ("not in the document", []), ("", []), (" \n ", []),
+])
+def test_control_quotes_resolve_exact_body_spans_and_repeated_origins(excerpt, indices):
+    from modules.techniques.critique import ReviewSnapshot
+
+    snapshot = ReviewSnapshot(
+        "First check\n  - Compare baseline.\n\nSecond check\n  - Compare baseline.\n  - Compare denied."
+    )
+    prefix = "d" + snapshot.identifier[:12]
+    assert snapshot.control_references(excerpt) == [f"{prefix}:b{index}" for index in indices]
+
+
+def test_control_quote_resolution_handles_overlaps_unicode_and_empty_body(markdown):
+    import yaml
+
+    from modules.techniques.critique import ReviewSnapshot
+
+    overlapping = ReviewSnapshot("a\na\na")
+    assert overlapping.control_references("a\na") == overlapping.body_references
+    unicode_snapshot = ReviewSnapshot("π\nαβ\nγ")
+    assert unicode_snapshot.control_references("β\nγ") == unicode_snapshot.body_references[1:]
+    assert ReviewSnapshot("").control_references("absent") == []
+    metadata, body = markdown().split("---", 2)[1:]
+    fields = yaml.safe_load(metadata)
+    fields["purpose"] = "METADATA_ONLY_CONTROL"
+    snapshot = ReviewSnapshot("---\n" + yaml.safe_dump(fields) + "---" + body)
+    assert snapshot.control_references("METADATA_ONLY_CONTROL") == []
+
+
+def test_controller_resolves_real_control_without_requiring_duplicate_model_ids(scripted_service):
+    from modules.techniques.critique import Interpretation, ReviewSnapshot
+
+    text = "Observe selection.\nControl: compare known authorized and denied objects."
+    snapshot = ReviewSnapshot(text)
+    observation, control = snapshot.body_references
+    events, calls = [], []
+    scripted_service.service.events.callback = events.append
+
+    def runner(role, prompt, tools):
+        calls.append(role)
+        if role == "technique_critic":
+            return Critique(approved=True, reason="Conditional comparison", interpretations=[Interpretation(
+                draft_references=[observation], prerequisite_or_policy="Known allowed and denied objects",
+                legitimate_outcome="Allowed object selected", suspected_violation="Denied object data returned",
+                distinguishing_control="Compare authorized and denied cases",
+            )]).model_dump_json()
+        return json.dumps({"critic_supported": True, "reason": "Actual excluding control", "findings": [],
+                           "interpretation_reviews": [{"interpretation_index": 0,
+                               "draft_references": [observation], "permitted_counterexample": "Allowed selection",
+                               "actual_discriminator": snapshot.values[control], "critic_correct": True,
+                               "counterexample_matches_check": True, "control_excludes_counterexample": True}]})
+
+    scripted_service.service.runner = runner
+    assert assess(scripted_service.service, "Review", text, REQS, DOCS, [URL]).approved
+    assert calls == ["technique_critic", "technique_critique_assessor"]
+    resolved = next(event for event in events if event.get("status") == "control_references_resolved")
+    assert resolved["provided_references"] == [observation]
+    assert resolved["resolved_references"] == [control]
+    final = next(event for event in events if event.get("status") == "assessed")
+    assert final["assessment"]["interpretation_reviews"][0]["draft_references"] == [observation, control]
+
+
+def test_quote_resolution_preserves_the_shared_allowance_for_semantic_critic_correction(scripted_service):
+    from modules.techniques.critique import Interpretation, ReviewSnapshot
+
+    text = "Select an object.\nSuspected violation: selected object changes.\nControl: repeat the allowed selection."
+    snapshot = ReviewSnapshot(text)
+    heading, observation, control = snapshot.body_references
+    calls, counts = [], {"critic": 0, "assessor": 0}
+
+    def runner(role, prompt, tools):
+        calls.append(role)
+        if role == "technique_critic":
+            counts["critic"] += 1
+            corrected = counts["critic"] > 1
+            if corrected:
+                assert "Critique disagreement" in prompt
+                assert "verbatim excerpt" not in prompt
+            return Critique(approved=not corrected, reason="Interpret selection", interpretations=[Interpretation(
+                draft_references=[heading, observation], prerequisite_or_policy="Allowed selector",
+                legitimate_outcome="Allowed selection changes", suspected_violation="Selection changes",
+                distinguishing_control="Repeats allowed access only",
+            )], issues=[issue(category="authored_content", source_urls=[], requirement_ids=[], draft_excerpt="",
+                              draft_references=[observation], problem="Normal selection is labeled a violation",
+                              requested_correction="Require an established denial and compare denied object access")]
+                            if corrected else []).model_dump_json()
+        counts["assessor"] += 1
+        corrected = counts["assessor"] > 1
+        return json.dumps({"critic_supported": corrected, "reason": "Check the actual authorization distinction",
+            "interpretation_reviews": [{"interpretation_index": 0, "draft_references": [observation],
+                "permitted_counterexample": "An entitled caller changes its selected object",
+                "counterexample_matches_check": True, "control_excludes_counterexample": False,
+                "actual_discriminator": snapshot.values[control], "critic_correct": corrected}],
+            "findings": [] if corrected else [{"problem": "Allowed selection satisfies the violation label",
+                "requested_correction": "Require known unauthorized access, beyond selector influence",
+                "draft_references": [observation]}]})
+
+    scripted_service.service.runner = runner
+    assert not assess(scripted_service.service, "Review", text, REQS, DOCS, [URL]).approved
+    assert calls == ["technique_critic", "technique_critique_assessor"] * 2

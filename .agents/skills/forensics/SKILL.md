@@ -47,7 +47,9 @@ ORDER BY u.created_at;
 A NULL score is pending evaluation, not negative sentiment. An inactive current revision may advertise
 triggers for regeneration, but cannot be returned as guidance. Superseded revisions preserve history.
 `use_context` records the first delivery's generic purpose, phase contexts, applicability and observation
-provenance. Legacy receipts contain `{}`: their context is unknown, not reconstructed from task prose.
+provenance. New receipts also freeze exact `delivered_documents` in this JSON. Missing snapshots
+mean legacy delivery is unknown; later lifecycle rendering must not replace recorded delivery.
+Legacy receipts contain `{}`: their context is unknown, not reconstructed from task prose.
 
 ### "Find the operation log"
 
@@ -450,9 +452,32 @@ allowances. Public interfaces and SQL schemas remain unchanged.
 
 ### Critique assessor correction routing
 
-The critique assessor returns one aggregate `IssueAssessment` with `approved` and `reason`.
-Approval means all proposed issues are actionable and evidence-backed. Issue IDs are data,
-never top-level decision fields. A malformed assessor result retries the assessor with its
+The critique assessor returns one aggregate `IssueAssessment` with `critic_supported`, `reason`,
+`interpretation_reviews` and referenced disagreement `findings`. It reviews every decision,
+including approvals with zero issues, for interpretation and requested deliverables as well as issue
+actionability. `critic_supported=true` means agreement
+with the complete critic decision; it does not independently approve publication.
+Each indexed interpretation review constructs a permitted counterexample and identifies the actual
+draft discriminator. Check that it has not invented a missing control or policy-discovery step.
+`actual_discriminator` is an exact procedure-body excerpt, or empty if missing. Python resolves its
+body-line origins and logs `control_references_resolved` when adding omitted quote IDs. Unknown
+supplied IDs, invented text and metadata-only control quotes remain invalid. Resolution establishes
+availability only; the model still judges correspondence and exclusion.
+Inspect `counterexample_matches_check` and `control_excludes_counterexample`: the permitted scenario
+must satisfy the actual prerequisites and labeled observation. A matching permitted scenario with
+no excluding control contradicts support for an approving critic. Python validates this consistency
+and requires a quoted step when a control is claimed; the model judges matching and exclusion.
+In production, inspect investigation and finalization inputs separately: the critic's decision is
+withheld until the assessor has recorded independent subject notes. The controller-owned archived
+`source_coverage` research receipt is also deferred; its readiness claims cannot supply procedure
+controls. The final call must include the complete decoded draft, critic decision and retained
+investigation. Repairs keep critic/correction material out of the initial
+subject review. Legacy injected text runners receive the complete combined prompt.
+The subject pass must also exclude comparison instructions and the final verdict schema. It must
+record actual procedure observations, not default to agreement because no critic is yet available.
+Python validates review coverage, references and agreement consistency; semantic adequacy remains
+the assessor's responsibility. Issue IDs are data, never top-level decision fields.
+A malformed assessor result retries the assessor with its
 retained investigation, not the critic. Critic and assessor share one correction per assembled
 document review; author, research, and attribution counters do not advance for this correction.
 Contract diagnostics identify `originating_role`, `expected_schema`, `failure_kind`, and
@@ -464,6 +489,9 @@ retained text or the complete external article. Persistent failure prevents publ
 Critics and assessors review decoded metadata and body references, not YAML syntax. Correlate
 `review_snapshot` and `issues_validated` events using `snapshot_id`. `draft_references` identify
 values in that exact snapshot; resolved excerpts are controller-owned. Edits invalidate old references.
+Inspect the critic's structured `interpretations` table as well as the draft. Empty tables require
+`no_security_checks_reason`; the independent assessor judges whether that scope claim is credible.
+A document heading alone does not supply the internal assessment.
 Inspect `source_inspection`, returned passage IDs, character counts, and continuation offsets.
 Literal search misses establish no semantic absence. `entire_retained_source` absence claims require
 complete inspected interval coverage for every affected URL; gaps invalidate the claim. Complete
@@ -532,3 +560,29 @@ Usefulness findings identify purpose, observed use, contribution and harmful eff
 the existing score: +1 helpful, -1 misleading or harmful (including mixed effects), otherwise 0. Missing
 target proof or disposition alone does not establish non-contribution. Legacy context remains unknown
 and historical scores are unchanged.
+
+Independent technique review covers every critique decision and usefulness score. Inspect
+`critic_supported` and `feedback_supported` as agreement with the proposed decision, not document
+approval or helpfulness. A justified rejection, neutral score or harmful score can be supported.
+Legacy internal `approved` inputs normalize to these canonical fields; historical traces and scores
+are not rewritten. A false verdict with a reason endorsing the proposed score remains unresolved.
+Inspect `critique_assessment` and `feedback_assessment` diagnostics for snapshot references, proposed
+decisions, findings and correction numbers. Contract errors and semantic disagreement share one
+correction per decision. Unresolved critique blocks publication; unresolved feedback stays pending.
+Feedback compares delivered guidance and observed behavior; citation alone establishes no benefit.
+Neutrality requires non-use or unestablished contribution. Historical scores remain unchanged.
+
+
+### Usefulness evidence and correction ownership
+
+Task-tool reads receive controller-generated `result:` references in their model-facing output.
+Inspect `retained_tool_evidence.calls` for frozen tool inputs and status, and `references` for exact
+text and call provenance. Availability does not establish contribution. Schema-output tools and
+nested helper roles do not supply task evidence. Retained text preserves line endings and Unicode.
+Reviewer inputs and corrections retain this evidence without reopening artifact reads.
+
+Feedback contract failures are corrected in the originating role. A reviewer contract error retries
+the reviewer with its rejected assessment; semantic disagreement corrects evaluator findings and
+then re-reviews them. Both consume the same single allowance. Exhaustion leaves feedback pending;
+no disputed score is committed. Nested diagnostic fields are redacted without altering internal
+model-facing evidence. A failed live replay is not a validated draft or accepted score.

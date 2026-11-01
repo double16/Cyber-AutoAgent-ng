@@ -91,6 +91,9 @@ def test_role_runner_uses_fresh_restricted_agents_with_assembled_instructions(mo
         assert "untrusted data" in kwargs["system_prompt"]
         assert ("conversation_manager" in kwargs) is not stateful
     if not stateful:
+        from strands.agent.conversation_manager import NullConversationManager
+
+        assert isinstance(calls[0]["conversation_manager"], NullConversationManager)
         assert calls[0]["conversation_manager"] is not calls[1]["conversation_manager"]
 
 
@@ -273,7 +276,10 @@ def test_cli_context_reaches_applicability_author_and_critic(scripted_service, m
     assert "No live execution" in applicability
     if not phases:
         assert "Phase contexts: unknown" in applicability
-    assert "Task objectives, subjects, observations, tool capabilities and operation restrictions are not inputs." in SYSTEM + applicability
+    assert (
+        "Task objectives, subjects, observations, tool capabilities and operation restrictions are not inputs."
+        in SYSTEM + applicability
+    )
     for role in ("technique_author", "technique_critic"):
         assembled = SYSTEM + next(prompt for selected, prompt, _ in state.calls if selected == role)
         assert f"Required phase contexts: {json.dumps(phases)}" in assembled
@@ -336,7 +342,10 @@ def test_cli_explicit_model_does_not_probe_environment_model(scripted_service, m
     output = capsys.readouterr()
     assert output.out.startswith("# Technique bundle")
     assert "unused-model" not in output.err
-    records = [json.loads(line) for line in next((tmp_path / "techniques/logs").glob("*.jsonl")).read_text().splitlines()]
+    records = [
+        json.loads(line)
+        for line in next((tmp_path / "techniques/logs").glob("*.jsonl")).read_text().splitlines()
+    ]
     assert next(record for record in records if record["type"] == "startup")["model_id"] == "selected-model"
 
 
@@ -399,3 +408,40 @@ def test_cli_and_agent_assemble_equivalent_generation_inputs(
     actual = [(role, prompt) for role, prompt, _ in state.calls]
     assert expected == actual and "PRIVATE_" not in str(actual)
     assert "Request compatibility" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("tokens,valid", [(5, True), (11, False), (None, False)])
+def test_prompt_budget_preserves_required_json_on_continuation(monkeypatch, tokens, valid):
+    from modules.techniques.documents import json_payload
+
+    payload = {"nested": [True, None, {"code": "a,b; λ\n  run()"}]}
+    agent = SimpleNamespace(model=SimpleNamespace(), _prompt_token_limit=10, messages=[
+        {"role": "user", "content": [{"text": json_payload("inputs", payload)}]},
+    ])
+    frozen = json.dumps(agent.messages, ensure_ascii=False)
+    monkeypatch.setattr(roles, "safe_estimate_tokens", lambda _: tokens)
+    if valid:
+        roles.preserve_prompt_budget(agent)
+    else:
+        with pytest.raises(ValueError, match="cannot fit required inputs"):
+            roles.preserve_prompt_budget(agent)
+    assert json.dumps(agent.messages, ensure_ascii=False) == frozen
+    assert json.loads(agent.messages[0]["content"][0]["text"])["inputs"] == payload
+
+
+
+def test_prompt_budget_allocates_generation_without_rewriting_inputs(monkeypatch):
+    from modules.config.models import generation_budget
+
+    agent = SimpleNamespace(model=SimpleNamespace(_cyber_preferred_output_tokens=20), _prompt_token_limit=100)
+    monkeypatch.setattr(roles, "safe_estimate_tokens", lambda _: 40)
+    request = Mock(return_value="request")
+    allocate = Mock(return_value=SimpleNamespace(generation_tokens=20))
+    set_tokens = Mock()
+    monkeypatch.setattr(generation_budget, "model_generation_request", request)
+    monkeypatch.setattr(generation_budget, "allocate_generation", allocate)
+    monkeypatch.setattr(generation_budget, "set_generation_tokens", set_tokens)
+    roles.preserve_prompt_budget(agent)
+    request.assert_called_once_with(agent.model, 40)
+    allocate.assert_called_once_with("request")
+    set_tokens.assert_called_once_with(agent.model, 20)

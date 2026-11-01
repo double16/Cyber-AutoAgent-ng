@@ -1,0 +1,44 @@
+import {beforeEach, expect, it, jest} from '@jest/globals';
+let catalog: any[] | null;
+const peekAllModels = jest.fn<any>(() => catalog);
+const loadAllModels = jest.fn<any>(async () => catalog);
+const getContextLimitSync = jest.fn<any>(() => null);
+const getContextLimit = jest.fn<any>(async () => null);
+jest.unstable_mockModule('../../../src/services/ModelsCatalog.js', () => ({peekAllModels, loadAllModels, getContextLimitSync, getContextLimit}));
+const {OperationManager} = await import('../../../src/services/OperationManager.js');
+beforeEach(() => {jest.clearAllMocks(); catalog = [{provider: 'vendor', model: {id: 'one', name: 'One', cost: {input: 2}, limit: {context: 32000}}}, {provider: 'vendor', model: {id: 'vendor/two'}}, {provider: 'vendor', model: {id: 'three', name: 'Three'}}]; peekAllModels.mockImplementation(() => catalog); getContextLimitSync.mockReturnValue(null);});
+it.each(['bedrock', 'ollama'])('merges catalog and pricing-only %s models including missing metadata', provider => {
+  const manager = new OperationManager({modelProvider: provider, modelPricing: {one: {inputCostPer1k: 4}, 'custom:latest': {inputCostPer1k: 1, outputCostPer1k: 2}, 'openai/custom': {inputCostPer1k: 3, outputCostPer1k: 4}, 'region.three': {inputCostPer1k: 5}, 'prefix/One': {}, 'custom': {}}} as any);
+  const models = manager.getAvailableModels();
+  expect(models).toHaveLength(8);
+  expect(manager.getModelInfo('one')?.inputCostPer1k).toBe(provider === 'ollama' ? 0 : 4);
+  expect(manager.getModelInfo('one')?.outputCostPer1k).toBe(provider === 'ollama' ? 0 : 2);
+  expect(models.find(m => m.id === 'region.three')?.name).toBe('Three');
+  expect(models.find(m => m.id === 'prefix/One')?.name).toBe('One');
+  expect(models.find(m => m.id === 'custom:latest')?.provider).toBe('ollama');
+  manager.destroy();
+});
+it('handles missing, throwing and rejected catalog lookups with conservative defaults', async () => {
+  catalog = null; loadAllModels.mockRejectedValue(new Error('offline')); getContextLimit.mockRejectedValue(new Error('offline'));
+  const manager = new OperationManager({modelPricing: {one: {}}} as any);
+  expect(manager.getAvailableModels()[0]).toMatchObject({name: 'one', contextLimit: 8000});
+  peekAllModels.mockImplementation(() => {throw new Error('catalog unavailable');});
+  getContextLimitSync.mockImplementation(() => {throw new Error('catalog unavailable');});
+  expect(manager.getAvailableModels()[0].contextLimit).toBe(8000);
+  await Promise.resolve();
+  expect(new OperationManager({} as any).getAvailableModels()).toEqual([]);
+});
+it('prefers cached context limits and handles empty aliases and operation merges', () => {
+  getContextLimitSync.mockReturnValue(16000);
+  const manager = new OperationManager({modelPricing: {'prefix/two': {}, 'region.Three': {}, 'unknown': {}}} as any);
+  expect(manager.getAvailableModels().find(m => m.id === 'prefix/two')).toMatchObject({name: 'vendor/two', contextLimit: 16000});
+  const a = manager.startOperation('web', 'target', 'objective', 'one');
+  manager.updateOperation(a.id, {description: 'changed'}); expect(a.description).toBe('changed');
+  manager.addLog(a.id, 'info', null as any); expect(a.logs.at(-1)?.message).toBe('');
+  expect(manager.renameOperationId(a.id, a.id)).toBe(a);
+  expect(manager.renameOperationId('unknown', 'unknown')).toBeNull();
+  const b = manager.startOperation('', '', '', 'one'); b.description = ''; b.progressPercentage = 0;
+  manager.renameOperationId(b.id, a.id); expect(manager.getAllOperations()).toHaveLength(1);
+  expect(manager.getOperationDuration(a.id)).toBe('0s');
+  a.startTime = new Date(Date.now() - 65000); expect(manager.getOperationDuration(a.id)).toBe('1m 5s');
+});

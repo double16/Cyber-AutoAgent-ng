@@ -95,3 +95,18 @@ describe('LoggingService', () => {
         expect(console.log).not.toBe(originalConsole.log);
     });
 });
+
+it.each(['DEBUG', 'INFO', 'ERROR', 'NONE', 'unknown'])('supports %s environment log levels and bounded buffers', async level => {
+  const previous = process.env.LOG_LEVEL;
+  try {
+    jest.resetModules(); process.env.LOG_LEVEL = level;
+    const {loggingService, LogLevel} = await load();
+    loggingService.setLogLevel(LogLevel.NONE);
+    loggingService.debug(); loggingService.info(); loggingService.warn(); loggingService.error();
+    for (let i = 0; i < 1005; i++) loggingService.info(`entry ${i}`);
+    expect(loggingService.getRecentLogs(2000)).toHaveLength(1000);
+    const child = loggingService.createLogger('child');
+    child.debug('debug'); child.info('info'); child.warn('warn'); child.error('error');
+    expect(loggingService.getRecentLogs(4).map(log => log.message)).toEqual(['[child] debug', '[child] info', '[child] warn', '[child] error']);
+  } finally {if (previous === undefined) delete process.env.LOG_LEVEL; else process.env.LOG_LEVEL = previous;}
+});

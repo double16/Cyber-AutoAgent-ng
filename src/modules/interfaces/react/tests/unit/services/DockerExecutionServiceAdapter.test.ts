@@ -240,3 +240,20 @@ describe('DockerExecutionServiceAdapter', () => {
         expect(adapter.listenerCount('stop')).toBe(0);
     });
 });
+
+it('reports stack restart warnings and forwards setup progress and execution failures', async () => {
+  const {adapter, containerManager, dockerService} = await loadAdapter(ExecutionMode.DOCKER_STACK);
+  process.env.DEV = 'true';
+  const result = await adapter.validate({...baseConfig, modelProvider: 'bedrock', awsBearerToken: 'fixture'} as any);
+  expect(result.warnings).toContain('2 containers need to be created for full-stack mode');
+  expect(result.warnings).toContain('1 containers need to be restarted');
+  const progress = jest.fn(); containerManager.switchToMode.mockImplementationOnce(async () => {containerManager.emit('progress', 'setup');});
+  await adapter.setup(baseConfig, progress); expect(progress).toHaveBeenCalledWith('setup');
+  await adapter.setup(baseConfig); await adapter.stop();
+  dockerService.executeAssessment.mockRejectedValueOnce(new Error('execution failed'));
+  adapter.on('error', () => {});
+  const handle = await adapter.execute({} as any, baseConfig);
+  dockerService.emit('error', new Error('execution failed'));
+  await expect(handle.result).resolves.toMatchObject({success: false, error: 'execution failed'});
+  adapter.cleanup(); delete process.env.DEV;
+});

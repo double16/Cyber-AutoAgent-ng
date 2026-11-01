@@ -15,6 +15,7 @@ def critique_result(approved=False, category="authored_content", reason="Check c
                     urls=None):
     return json.dumps({
         "approved": approved, "category": category, "reason": reason,
+        "no_security_checks_reason": "No separately enumerated checks in the scripted draft",
         "issues": [] if approved else [{
             "id": "controls", "category": category, "problem": reason,
             "requested_correction": "Describe the missing control and its interpretation",
@@ -103,10 +104,10 @@ def scripted_service(store, markdown):
         if role == "technique_plan_reviewer":
             return json.dumps({"approved": True, "reason": "Request preserved"})
         if role == "technique_planner":
-            return json.dumps({"components": [{"id": "method", "request": "JWT handling",
+            return json.dumps(plan_payload({"components": [{"id": "method", "request": "JWT handling",
                 "purpose": "Review token validation",
                 "request_excerpt": prompt.split("Original request: ", 1)[1].split("\n", 1)[0], "requirements": [
-                    {"id": "method", "description": "JWT handling"}]}]})
+                    {"id": "method", "description": "JWT handling"}]}]}))
         if role == "technique_judge":
             if "generic_request" in prompt:
                 return json.dumps({
@@ -135,14 +136,29 @@ def scripted_service(store, markdown):
                 else json.dumps({"metadata": document.metadata.model_dump(), "body": document.body})
             )
         if role == "technique_critic":
-            return critique_result(state.approve)
+            result = json.loads(critique_result(state.approve))
+            if '"id": "requirement-1"' in prompt:
+                for issue in result["issues"]:
+                    issue["requirement_ids"] = ["requirement-1"]
+            return json.dumps(result)
         if role == "technique_critique_assessor":
             return json.dumps({"approved": True, "reason": "Concrete correction supported by retained material"})
         if role == "technique_attribution_repair":
             return json.dumps({"attributions": [{"url": state.source_urls[0],
                                                 "reason": "Accurate source scope"}]})
+        if role == "technique_feedback_reviewer":
+            return json.dumps({"approved": True, "reason": "Evidence supports findings", "findings": []})
         if role == "technique_evaluator":
-            return json.dumps({"methodological_purpose": "Discriminate behavior",
+            import re
+
+            guidance_ref = re.search(r'guidance:[a-f0-9]+:[0-9]+', prompt)
+            result_ref = re.search(r'result:[a-f0-9]+:[0-9]+', prompt)
+            mappings = ([{"guidance_references": [guidance_ref[0]],
+                          "result_references": [result_ref[0]], "explanation": "Controlled application"}]
+                        if guidance_ref and result_ref else [])
+            return json.dumps({"neutral_basis": "contribution_unestablished" if state.score == 0 else None,
+                               "evidence_mappings": mappings,
+                               "methodological_purpose": "Discriminate behavior",
                                "observed_use": "Controlled comparison",
                                "helpful_contribution": state.score == 1,
                                "contribution": "Clarified controls" if state.score == 1 else "",
@@ -187,3 +203,14 @@ def assessment_output(role, prompt, payload):
         assigned = json.loads(prompt.split("Assigned requirement: ", 1)[1].split("\n", 1)[0])
         payload = next(row for row in payload["coverage"] if row["requirement_id"] == assigned["id"])
     return json.dumps(payload)
+
+
+def plan_payload(payload):
+    """Project legacy fixtures onto the semantic planner-only contract."""
+    return {"components": [
+        {"request": component["request"], "input_references": ["original_request:1"],
+         "requirements": [
+             {"description": row["description"], "kind": row.get("kind", "factual_support"),
+              "input_references": ["original_request:1"]}
+             for row in component["requirements"]]}
+        for component in payload["components"]]}

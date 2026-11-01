@@ -1,3 +1,5 @@
+from conftest import plan_payload
+
 """Source selection recovers contract errors without rejecting authored synthesis."""
 
 import copy
@@ -44,11 +46,14 @@ def test_latest_failure_reaches_authoring_after_one_batch(scripted_service, monk
 
     def run(role, prompt, tools):
         if role == "technique_planner":
-            return json.dumps({"components": [{"id": "method", "request": subject, "purpose": subject,
-                "request_excerpt": subject, "requirements": [row.model_dump() for row in REQUIREMENTS]}]})
+            return json.dumps(plan_payload({"components": [{"id": "method", "request": subject, "purpose": subject,
+                "request_excerpt": subject, "requirements": [row.model_dump() for row in REQUIREMENTS]}]}))
         if role in {"technique_source_assessor", "technique_requirement_assessor"}:
             state.calls.append((role, prompt, tools))
-            return assessment_output(role, prompt, supported())
+            payload = supported()
+            if entrypoint == "cli":
+                payload["coverage"][0]["requirement_id"] = "requirement-1"
+            return assessment_output(role, prompt, payload)
         return original(role, prompt, tools)
 
     state.service.runner = run

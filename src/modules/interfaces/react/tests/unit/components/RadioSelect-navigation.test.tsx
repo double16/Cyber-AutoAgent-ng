@@ -1,0 +1,27 @@
+import React from 'react';
+import {expect, it, jest} from '@jest/globals';
+import TestRenderer, {act} from '../test-renderer.js';
+import {RadioSelect} from '../../../src/components/shared/RadioSelect.js';
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+const send = (input: string, key = {}) => act(() => (globalThis as any).__inkInputHandler(input, key));
+it('skips disabled choices in both directions, wraps, highlights and selects', () => {
+  const onSelect = jest.fn(); const onHighlight = jest.fn();
+  const items = [{value: 'a', label: 'A', badge: 'active'}, {value: 'b', label: 'B', disabled: true, badge: 'disabled'}, {value: 'c', label: 'C'}];
+  let view!: ReturnType<typeof TestRenderer.create>;
+  act(() => {view = TestRenderer.create(<RadioSelect items={items} onSelect={onSelect} onHighlight={onHighlight}/>);});
+  send('j'); send('', {return: true}); expect(onSelect).toHaveBeenLastCalledWith('c');
+  send('k'); send('', {return: true}); expect(onSelect).toHaveBeenLastCalledWith('a');
+  send('k'); expect(onHighlight).toHaveBeenLastCalledWith('c');
+  send('j'); expect(onHighlight).toHaveBeenLastCalledWith('a');
+  send('2'); send('9'); expect(onSelect).toHaveBeenCalledTimes(2);
+  send('3'); expect(onSelect).toHaveBeenLastCalledWith('c');
+  act(() => view.update(<RadioSelect items={items} initialIndex={1} onSelect={onSelect}/>));
+  act(() => view.update(<RadioSelect items={items.slice(0, 2)} onSelect={onSelect} initialIndex={1}/>));
+  send('', {return: true}); expect(onSelect).toHaveBeenLastCalledWith('a');
+  act(() => view.update(<RadioSelect items={[]} initialIndex={4} onSelect={onSelect}/>));
+  send('1');
+  act(() => view.update(<RadioSelect items={[{label: 'no', value: 'no', disabled: true}]} onSelect={onSelect}/>));
+  send('j'); send('k'); send('', {return: true});
+  expect(onSelect).not.toHaveBeenCalledWith('no');
+  act(() => view.unmount());
+});

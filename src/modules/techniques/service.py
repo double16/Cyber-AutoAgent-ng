@@ -19,8 +19,14 @@ from modules.techniques.context import LookupDecision, MethodologyContext, metho
 from modules.techniques.coverage import Requirement, review_coverage, select_sources
 from modules.techniques.critique import Critique as Critique
 from modules.techniques.critique import assess, repair_attribution
-from modules.techniques.documents import Metadata, Source, TechniqueDocument, Trigger, json_payload, toon
-from modules.techniques.feedback import ContributionFeedback
+from modules.techniques.documents import (
+    Metadata,
+    Source,
+    TechniqueDocument,
+    Trigger,
+    json_payload,
+    optional_records_payload,
+)
 from modules.techniques.storage import TechniqueStore
 
 APPLICABILITY_RULES = (
@@ -136,18 +142,18 @@ class TechniqueService:
             raise
 
     def _repair_prompt(self, prompt: str, error: ValueError) -> str:
-        """Preserve exact internal evidence; bound correction inputs and redact diagnostics."""
+        """Preserve complete authoritative inputs, rejected output and model-facing diagnostics."""
         from modules.agents.native_structured import retained_finalization_prompt
 
         retained = retained_finalization_prompt(prompt, error)
         response = getattr(error, "rejected_response", None)
-        details = self._safe_feedback(str(error))
+        details = str(error)
         if isinstance(error, ValidationError):
             details = self._author_feedback(error, "schema").replace(
                 "Invalid author schema", "Invalid structured schema",
             )
         return ((retained or prompt) + "\nValidation failure: " + details
-                + ("\nRejected response (untrusted):\n" + response[:48_000] if response else ""))
+                + ("\nRejected response (untrusted):\n" + response if response else ""))
 
     def _candidates(self, request: str, context: MethodologyContext | None = None) -> list[dict]:
         candidates = self.store.search(request, active=True)
@@ -181,7 +187,7 @@ class TechniqueService:
             "requested action, and context_reference exactly matching an explicit methodology restriction. "
             "Otherwise conflict=null. Use conditional for unknown generic prerequisites and name them. "
             "Unknown phase means follow the explicit request without inferring a phase.\n"
-            + toon("requirements", [row.model_dump() for row in requirements or []])
+            + json_payload("requirements", [row.model_dump() for row in requirements or []])
             + APPLICABILITY_RULES + f"Request: {request}\nMethodology context:\n{context.render()}\n"
         )
         assessments = []
@@ -199,10 +205,12 @@ class TechniqueService:
                 valid_decision = True
                 break
             except (ValidationError, ValueError) as error:
-                errors.append(self._safe_feedback(str(error)))
+                errors.append(str(error))
                 if attempt:
                     if not incompatible_claim:
-                        raise ValueError("Technique request compatibility assessment failed after one repair attempt") from None
+                        raise ValueError(
+                            "Technique request compatibility assessment failed after one repair attempt",
+                        ) from None
                     break
                 if decision is not None:
                     error.rejected_response = decision.model_dump_json()
@@ -218,9 +226,9 @@ class TechniqueService:
                 "are not conflicts. Connect a particular requested action to an explicit methodology "
                 "restriction. Select incompatible only for the same substantiated conflict; otherwise "
                 "explain uncertainty and return a usable reusable methodology request.\n"
-                + toon("requirements", [row.model_dump() for row in requirements or []])
+                + json_payload("requirements", [row.model_dump() for row in requirements or []])
                 + APPLICABILITY_RULES + f"Request: {request}\nContext: {context.render()}\n"
-                + toon("assessments", assessments) + f"\nValidation diagnostics: {errors}"
+                + json_payload("assessments", assessments) + "\n" + json_payload("validation_diagnostics", errors)
             )
             confirmation = None
             valid_confirmation = False
@@ -233,7 +241,7 @@ class TechniqueService:
                     valid_confirmation = True
                     break
                 except ValueError as error:
-                    errors.append(self._safe_feedback(str(error)))
+                    errors.append(str(error))
                     if confirmation is not None:
                         error.rejected_response = confirmation.model_dump_json()
                     confirmation_prompt = self._repair_prompt(confirmation_prompt, error)
@@ -242,9 +250,10 @@ class TechniqueService:
             if (decision is not None and valid_confirmation and valid_decision
                     and decision.applicability == confirmation.applicability == "incompatible"
                     and decision.conflict == confirmation.conflict):
-                raise ValueError("Requested methodology conflicts with an explicit methodology restriction: " + self._safe_feedback(
-                    f"{decision.conflict.requirement}: {decision.reason}",
-                ))
+                raise ValueError(
+                    "Requested methodology conflicts with an explicit methodology restriction: "
+                    + self._safe_feedback(f"{decision.conflict.requirement}: {decision.reason}"),
+                )
             usable = confirmation or decision
             if usable is None:
                 raise ValueError("Technique request compatibility assessment failed: no usable methodology request")
@@ -273,9 +282,9 @@ class TechniqueService:
             + phase_guidance(context)
             + f"Original component request: {request}\ncomponent_request: {request}\n"
             + f"original_request (authoritative assigned component): {request}\n"
-            + toon("requirements", [row.model_dump() for row in requirements or []])
-            + f"\nphase_contexts: {context.phase_contexts if context else []}"
-            + f"\nconstraints: {context.methodology_constraints if context else []}\n"
+            + json_payload("requirements", [row.model_dump() for row in requirements or []])
+            + "\n" + json_payload("phase_contexts", context.phase_contexts if context else [])
+            + "\n" + json_payload("constraints", context.methodology_constraints if context else []) + "\n"
         )
         for attempt in range(2):
             try:
@@ -301,7 +310,7 @@ class TechniqueService:
             try:
                 correction = self._json(
                     "technique_judge", prompt + "\nRepair rejected request: " + decision.generic_request
-                    + "\nPreservation error: " + self._safe_feedback(review.reason)
+                    + "\nPreservation error: " + review.reason
                     + "\nPreservation findings (untrusted): " + review.model_dump_json()
                     + "\nReturn the complete LookupDecision without inventing an applicability conflict.",
                     LookupDecision,
@@ -327,8 +336,8 @@ class TechniqueService:
             "null requests research and generation, never task rejection.\n"
             + (f"Methodology context (untrusted): {context.render()}\n" if context else "")
             + f"Request: {request}\n"
-            + toon("requirements", [row.model_dump() for row in requirements or []])
-            + "\n" + toon("candidates", preview),
+            + json_payload("requirements", [row.model_dump() for row in requirements or []])
+            + "\n" + json_payload("candidates", preview),
             Decision,
         )
         if decision.selected_id is not None and decision.selected_id not in {row["revision_id"] for row in candidates}:
@@ -418,6 +427,8 @@ class TechniqueService:
         decision = self._prepare(request, context, requirements) if context is not None else None
         if decision is not None:
             request = decision.generic_request
+        # Planning origins remain provenance, never research or document obligations.
+        requirements = [row.model_copy(update={"origins": []}) for row in requirements or []]
         requirements = requirements or [Requirement(id="method", description=request)]
         for requirement in requirements:
             self._validate_request(requirement.description)
@@ -456,19 +467,21 @@ class TechniqueService:
             ]
             evidence_context = (
                 f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
-                + toon("requirements", [row.model_dump() for row in requirements]) + "\n"
+                + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
                 + phase_guidance(context)
                 + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
-                + toon("sources", [{key: value for key, value in source.items() if key != "text"}
+                + json_payload("sources", [{key: value for key, value in source.items() if key != "text"}
                                     for source in sources])
+                + "\nExact retained source context (untrusted; omitted text is unknown):\n"
+                + json_payload("source_passages", selection.authoring_passages(sources))
                 + "\n"
-                + json_payload("existing_examples", examples)
+                + optional_records_payload("existing_examples", examples, 24_000)
             )
             prompt = (
                 evidence_context
                 + "\nWrite ONE self-contained technique with metadata and a Markdown body."
                 + "\nUse prerequisites, original steps, controls, interpretation, limitations, optional tool choices, "
-                "and phase-aware triggers. Use Python 3.13+ or browser JavaScript for original examples. "
+                "and phase-aware triggers. Use Python 3.13+ or browser JavaScript for original code examples. "
                 "Never copy source code verbatim. Never require a specific tool. Do not include operation or target "
                 "identifiers, credentials, or evidence claims. Inactive examples are cautionary context; distinguish "
                 "negative feedback from supersession. Explain source coverage limitations. "
@@ -496,7 +509,7 @@ class TechniqueService:
                             )
                         response = authored._raw_response or authored.model_dump_json()
                     retain_draft = False
-                    previous_draft = response[:48_000]
+                    previous_draft = response
                     failure_stage = "document_validation"
                     authored.metadata.sources = [Source(
                         url=source["url"], title=source["title"], retrieved_at=source.get("retrieved_at", ""),
@@ -504,7 +517,7 @@ class TechniqueService:
                     ) for source in sources]
                     authored.metadata.source_coverage = (
                         f"Considered {len(documents)} fetched documents; selected {len(sources)}. "
-                        + toon("requirements", [row.model_dump() for row in requirements]) + "\n"
+                        + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
                         + selection.summary()
                     )
                     markdown = (
@@ -528,10 +541,10 @@ class TechniqueService:
                     retain_draft = False
                     if failure_stage == "author_json":
                         response = getattr(error, "rejected_response", None) or ""
-                        previous_draft = response[:48_000]
+                        previous_draft = response
                         if isinstance(error, ValidationError):
                             failure_stage = "author_schema"
-                    feedback = self._safe_feedback(self._author_feedback(error, failure_stage))
+                    feedback = self._author_feedback(error, failure_stage)
                     diagnostic = self._rejected_attempt(response, attempt, failure_stage, feedback)
                     self.events.emit(
                         "technique_build_progress",
@@ -636,7 +649,7 @@ class TechniqueService:
                         previous_selection = selection.model_dump_json(exclude={"attributions"})
                         documents, selection, research_round = self._research_coverage(
                             request, requirements, documents, selection, research_round, feedback, context=context,
-                            research_queries=research_queries,
+                            research_queries=research_queries, require_complete_support=True,
                         )
                         if selection.model_dump_json(exclude={"attributions"}) != previous_selection:
                             source_selection_round += 1
@@ -646,12 +659,14 @@ class TechniqueService:
                     old_evidence = evidence_context
                     evidence_context = (
                         f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
-                        + toon("requirements", [row.model_dump() for row in requirements]) + "\n"
+                        + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
                         + phase_guidance(context)
                         + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
-                        + json_payload("existing_examples", examples) + "\n"
-                        + toon("sources", [{key: value for key, value in source.items() if key != "text"}
+                        + optional_records_payload("existing_examples", examples, 24_000) + "\n"
+                        + json_payload("sources", [{key: value for key, value in source.items() if key != "text"}
                                            for source in sources])
+                        + "\nExact retained source context (untrusted; omitted text is unknown):\n"
+                        + json_payload("source_passages", selection.authoring_passages(sources))
                     )
                     prompt = prompt.replace(old_evidence, evidence_context, 1)
                     retain_draft = True
@@ -679,8 +694,14 @@ class TechniqueService:
             return resolve_bundle(self, request, context, operation, task)
 
     def _research_coverage(self, request, requirements, documents=None, selection=None, research_round=0, gap="",
-                           *, context=None, research_queries=None):
+                           *, context=None, research_queries=None, require_complete_support=False):
         documents = list(documents or [])
+
+        def ready(value):
+            return value.sufficient if require_complete_support else value.research_ready
+
+        if selection is not None and not gap and ready(selection):
+            return documents, selection, research_round
         prior_queries = research_queries if research_queries is not None else []
         reviewed_assessments = {}
         while research_round < 3:
@@ -689,7 +710,9 @@ class TechniqueService:
                 with self.events.stage("research"):
                     research_request = request + "\n" + phase_guidance(context)
                     if len(requirements) > 1 or requirements[0].description != request:
-                        research_request += "\n" + toon("requirements", [row.model_dump() for row in requirements])
+                        research_request += "\n" + json_payload(
+                            "requirements", [row.model_dump() for row in requirements],
+                        )
                     query = research_request if research_round == 1 else (
                         research_request + "\nTarget unresolved coverage: " + gap
                         + (selection.summary() if selection else "")
@@ -735,11 +758,11 @@ class TechniqueService:
                             self, request, requirements, selection, context, documents=documents,
                         )
                     selection = reviewed_assessments[assessment_key]
-                if selection.sufficient:
+                if ready(selection):
                     return documents, selection, research_round
         if selection is None:
             raise ValueError("Research did not fetch any usable source documents after three batches")
-        if selection.sufficient and not gap:
+        if ready(selection) and not gap:
             return documents, selection, research_round
         raise ValueError("Research coverage exhausted after three batches: " + selection.summary()
                          + ("\nRequested repair: " + gap if gap else ""))
@@ -766,7 +789,7 @@ class TechniqueService:
                 f"{'.'.join(map(str, item['loc']))}: {item['type']}"
                 for item in error.errors(include_input=False, include_url=False)
             )
-            return f"Invalid author schema: {details}"[:2000]
+            return f"Invalid author schema: {details}"
         return str(error)
 
     def _rejected_attempt(self, response: str, attempt: int, stage: str, reason: str) -> dict:
@@ -787,7 +810,7 @@ class TechniqueService:
         decision = self._json(
             "technique_judge",
             f"Does this inactive technique address the requested method? Request: {request}\n"
-            + toon("candidates", [candidate])
+            + json_payload("candidates", [candidate])
             + "\nSelect its revision ID if yes, otherwise null.",
             Decision,
         )
@@ -862,38 +885,10 @@ class TechniqueService:
     def _evaluate(self, operation: str, task: str, context: str, tools: list | None = None) -> None:
         for use in self.repository.pending_uses(operation, task):
             revision = use["revision_id"]
-            feedback = self._json(
-                "technique_evaluator",
-                "Return structured contribution findings; Python derives the score. "
-                "Identify methodological_purpose using recorded component purposes and requirements. "
-                "For shared revisions assess contribution across delivered components. "
-                "Use observed_use to cite actual task behavior, not expected behavior. "
-                "Set helpful_contribution only with concrete contribution evidence; otherwise contribution is empty. "
-                "Set misleading_or_harmful only with concrete harmful_effect evidence; otherwise it is empty. "
-                "Mixed helpful and harmful effects count as harmful. Missing target proof or terminal disposition "
-                "is never itself evidence of non-contribution. Task-specific duties are not document duties. "
-                "Legacy context is unknown; do not reconstruct intent. "
-                "Evaluate usefulness for this task: +1 helpful, "
-                "0 neutral/unused/insufficient evidence, -1 unhelpful. Correctly ruling out a vulnerability can be "
-                "helpful. Task failure or unavailable tools alone do not establish negative sentiment. "
-                "Use the recorded original and phase-aligned request and guidance objectives when available. "
-                "Evaluate demonstrated contribution to the requested purpose, not completeness against every "
-                "task requirement. Unrelated missing research or execution during a design/analysis task is "
-                "not grounds for neutrality. Source analysis can exclude a reachable sink; system mapping can "
-                "resolve a dependency; emulation guidance can improve telemetry and cleanup. "
-                "Distinguish applicability mismatch from document quality. Reserve -1 for demonstrably "
-                "misleading or harmful guidance. Legacy use context is unknown, not inferred from prose. "
-                "Identify observed contribution, non-use or misleading effect in the reason. Genericity, "
-                "conditional prerequisites and incomplete execution do not independently justify zero. "
-                "Preserve neutral when contribution is unestablished. "
-                "Give a generic reason without target identifiers or secret values.\nTechnique:\n"
-                + self.store.render(revision, require_active=False)
-                + "\nTask results:\n"
-                + context[:24_000]
-                + "\nRecorded delivery context:\n" + use["use_context"],
-                ContributionFeedback,
-                tools,
-            )
+            from modules.techniques.feedback import evaluate_feedback
+
+            feedback = evaluate_feedback(self, use, context, tools)
+
             from modules.utils.redaction import redact_text
 
             reason = redact_text(feedback.reason)

@@ -1,3 +1,5 @@
+from conftest import plan_payload
+
 """Preserve methodology subjects and research only missing technical facts."""
 
 import json
@@ -9,20 +11,21 @@ from modules.techniques.context import LookupContext, LookupDecision
 from modules.techniques.coverage import Requirement, SourceSelection
 
 
-def test_single_component_request_is_controller_owned(scripted_service):
+def test_single_component_request_is_not_overwritten(scripted_service):
     state = scripted_service
     original = state.service.runner
 
     def run(role, prompt, tools):
         if role == "technique_planner":
-            return json.dumps({"components": [{"id": "method", "request": "vulnerability_verification",
+            return json.dumps(plan_payload({"components": [{
+                "id": "method", "request": "CVE-2099-1234 future validation procedure",
                 "purpose": "Verification methodology", "request_excerpt": "CVE-2099-1234 methodology",
-                "requirements": [{"id": "method", "description": "CVE-2099-1234 methodology"}]}]})
+                "requirements": [{"id": "method", "description": "CVE-2099-1234 methodology"}]}]}))
         return original(role, prompt, tools)
 
     state.service.runner = run
     bundle = state.service.resolve_bundle("CVE-2099-1234 methodology")
-    assert bundle.delivered[0].component.request == "CVE-2099-1234 methodology"
+    assert bundle.delivered[0].component.request == "CVE-2099-1234 future validation procedure"
     assert any("CVE-2099-1234 methodology" in query for query in state.research_calls)
 
 
@@ -193,3 +196,108 @@ def test_constraints_need_compliance_explanation_without_external_fact_support()
         Requirement(id="method", description="No live execution", kind="constraint")])
     assert result.sufficient
     assert "_requirement_kind" not in result.model_dump_json()
+
+
+def test_alignment_rejects_optional_examples_becoming_prohibitions(scripted_service):
+    from modules.techniques.alignment import align_request
+    from modules.techniques.context import MethodologyContext
+
+    state = scripted_service
+    original = state.service.runner
+    prompts = []
+
+    def run(role, prompt, tools):
+        prompts.append((role, prompt))
+        if role == "technique_request_aligner":
+            return json.dumps({"adjusted_request": "HTTP hypotheses; prohibit payloads and checklists",
+                               "reason": "Examples were not explicitly requested"})
+        if role == "technique_request_reviewer":
+            assert "converting optional content into forbidden content" in prompt
+            assert "representative payloads or commands" in prompt
+            return json.dumps({"approved": False, "reason": "Invented prohibition",
+                               "subject_preserved": True, "mechanisms_preserved": True,
+                               "deliverables_preserved": True, "additions": ["Prohibits useful examples"],
+                               "omissions": [], "references": ["original_request", "component_request"]})
+        return original(role, prompt, tools)
+
+    state.service.runner = run
+    with pytest.raises(ValueError, match="after one correction"):
+        align_request(state.service, "HTTP hypotheses", MethodologyContext(phase_contexts=["hypothesis_generation"]))
+    assert sum(role == "technique_request_aligner" for role, _ in prompts) == 2
+    assert "Invented prohibition" in prompts[-2][1]
+
+
+def test_contract_correction_keeps_long_rejected_json_and_all_schema_findings(scripted_service):
+    service = scripted_service.service
+    response = json.dumps({"nested": ["a,b; λ\n" * 9000], "flags": [True, None]})
+    error = ValueError("first defect; " + "independent defect; " * 300)
+    error.rejected_response = response
+    prompt = service._repair_prompt("Authoritative original inputs", error)
+    assert str(error) in prompt
+    assert prompt.startswith("Authoritative original inputs")
+    retained = prompt.split("Rejected response (untrusted):\n", 1)[1]
+    assert json.loads(retained) == json.loads(response)
+
+
+@pytest.mark.parametrize("kind", ["authored_deliverable", "factual_support", "constraint"])
+@pytest.mark.parametrize("gap_kind", ["missing_factual_support", "unresolved_contradiction"])
+def test_draft_readiness_preserves_concerns_and_requires_factual_basis(kind, gap_kind):
+    data = assessment()
+    data["coverage"][0]["gaps"] = [{
+        "kind": gap_kind, "description": "Unresolved mechanism concern", "claim": "Mechanism applies",
+        "blocking_reason": "Needs assessment on the actual draft", "research_question": "Which facts apply?",
+    }]
+    selection = SourceSelection.model_validate(data)
+    documents = [{"url": selection.selected_urls[0]}]
+    requirement = Requirement(id="method", description="Required method", kind=kind)
+    selection.validate_references(documents, [requirement])
+    frozen = selection.model_dump_json()
+    assert not selection.sufficient
+    assert selection.research_ready is (
+        kind in {"constraint", "authored_deliverable"} and gap_kind == "missing_factual_support")
+    assert selection.model_dump_json() == frozen
+    if kind != "constraint":
+        selection.coverage[0].source_urls = []
+        assert not selection.research_ready
+    selection.authoritative_sufficient = False
+    assert not selection.research_ready
+
+
+def test_draft_research_repair_requires_complete_support(scripted_service):
+    service = scripted_service.service
+    data = assessment()
+    data["coverage"][0]["gaps"] = ["Missing underlying mechanism"]
+    selection = SourceSelection.model_validate(data)
+    requirement = Requirement(id="method", description="Construct method", kind="authored_deliverable")
+    documents = [{"url": selection.selected_urls[0]}]
+    selection.validate_references(documents, [requirement])
+    assert selection.research_ready and not selection.sufficient
+    assert service._research_coverage("Method", [requirement], documents, selection, 3)[1] is selection
+    with pytest.raises(ValueError, match="exhausted after three batches"):
+        service._research_coverage("Method", [requirement], documents, selection, 3,
+                                   require_complete_support=True)
+
+
+def test_drafting_keeps_research_concerns_for_author_and_independent_critic(scripted_service):
+    state = scripted_service
+    original = state.service.runner
+
+    def run(role, prompt, tools):
+        if role in {"technique_source_assessor", "technique_requirement_assessor",
+                    "technique_requirement_reviewer"}:
+            data = assessment()
+            data["coverage"][0]["gaps"] = ["Specific concern about an unwritten illustrative payload"]
+            return assessment_output(role, prompt, data)
+        return original(role, prompt, tools)
+
+    state.service.runner = run
+    state.service.get("JWT handling", requirements=[
+        Requirement(id="method", description="Write examples and checklist", kind="authored_deliverable")])
+    assert len(state.research_calls) == 1
+    for role in ("technique_author", "technique_critic"):
+        prompt = next(prompt for assigned, prompt, _ in state.calls if assigned == role)
+        assert "Specific concern about an unwritten illustrative payload" in prompt
+        assert "Write examples and checklist" in prompt
+        assert "not fulfillment or factual proof" in prompt
+        assert "expected legitimate behavior" in prompt
+        assert "reserved example domains" in prompt

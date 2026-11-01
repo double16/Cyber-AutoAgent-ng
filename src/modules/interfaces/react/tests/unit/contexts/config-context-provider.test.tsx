@@ -173,3 +173,24 @@ describe('ConfigProvider', () => {
         ctx.updateConfig({modelProvider: 'ollama'});
     });
 });
+
+it('loads full-stack explicit defaults, normalizes fresh memory and persists changed confirmation settings', async () => {
+  const env = {...process.env}; delete process.env.CYBER_CONFIG_DIR;
+  readFile.mockResolvedValue(JSON.stringify({deploymentMode: 'full-stack', isConfigured: true, memoryMode: 'fresh', observability: true, autoEvaluation: true, awsBearerToken: '', awsAccessKeyId: '', awsSecretAccessKey: ''}));
+  detectDeployments.mockResolvedValue({availableDeployments: [{mode: 'full-stack', isHealthy: true}]} as any);
+  const {ConfigProvider, useConfig, useOptionalConfig} = await load(); let context: any;
+  const Consumer = () => {context = useConfig(); expect(useOptionalConfig()).toBe(context); return null;};
+  let view!: ReactTestRenderer;
+  try {
+    await act(async () => {view = TestRenderer.create(<ConfigProvider><Consumer/></ConfigProvider>);});
+    expect(context.config.memoryMode).toBe('operation');
+    await act(async () => context.loadConfig());
+    expect(context.config.observability).toBe(true); expect(context.config.awsBearerToken).toBe('');
+    act(() => context.updateConfig({confirmations: !context.config.confirmations}));
+    await act(async () => {await Promise.resolve();});
+    await context.saveConfig();
+    expect(writeFile).toHaveBeenCalled();
+    writeFile.mockRejectedValueOnce(new Error('readonly'));
+    await expect(context.saveConfig()).rejects.toThrow('readonly');
+  } finally {act(() => view.unmount()); process.env = env;}
+});

@@ -141,3 +141,15 @@ plan_phases[4]{id,title,status,criteria}:
         expect(formatToolInput('unknown_tool', {target: 'example.com'})).toBe('target: example.com');
     });
 });
+
+it('handles sparse memory results and malformed plans without inventing preview data', () => {
+  expect(toolFormatters.memory_get({})).toBe('get');
+  expect(toolFormatters.memory_get({content: '{bad}'})).toContain('{bad}');
+  expect(toolFormatters.memory_get({content: '{"results":[{}]}'})).toContain('results');
+  expect(toolFormatters.memory_get({content: 3})).toContain('3');
+  expect(getToonPlanPreview('plan_overview\nplan_phases')).toBeNull();
+  expect(getToonPlanPreview('plan_overview\n,invalid,invalid\nplan_phases\nbad\n2,,active,testing\nplan_tasks')).toBe('Operation plan');
+  expect(formatDuration(1234, true)).toBe('1s');
+  expect(formatGenericToolInput({nested: {a: 1}})).toBe('nested: {a}');
+  expect(formatGenericToolInput({a: [1], b: {one: 1}})).toBe('a: [1 items] | b: {one}');
+});

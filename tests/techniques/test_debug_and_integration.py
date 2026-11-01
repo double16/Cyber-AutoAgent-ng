@@ -135,10 +135,12 @@ def test_private_identifiers_cannot_enter_requests_and_feedback_is_redacted(scri
         state.service.get("Inspect JWT on assigned.invalid")
     revision = state.publish()
     state.service.repository.use("op", "task", revision)
-    state.service.runner = lambda *args: json.dumps({
+    original = state.service.runner
+    state.service.runner = lambda role, prompt, tools: json.dumps({
+        "neutral_basis": "contribution_unestablished",
         "methodological_purpose": "Review", "observed_use": "", "helpful_contribution": False,
         "contribution": "", "misleading_or_harmful": False, "harmful_effect": "",
-        "reason": "assigned.invalid was unavailable"})
+        "reason": "assigned.invalid was unavailable"}) if role == "technique_evaluator" else original(role, prompt, tools)
     state.service.evaluate("op", "task", "Context")
     assert "assigned.invalid" not in state.service.store.render(revision)
 
@@ -289,3 +291,69 @@ def test_task_results_reach_only_post_task_usefulness_evaluation(scripted_servic
     evaluated = [prompt for role, prompt, _ in state.calls if role == "technique_evaluator"]
     assert len(evaluated) == 1 and "PRIVATE_TASK_OBJECTIVE" in evaluated[0]
     assert not state.service.repository.pending_uses("operation", "task")
+
+
+@pytest.mark.parametrize("approved", [True, False])
+@pytest.mark.parametrize("subject", ["HTTP controls", "TCP mapping", "filesystem review"])
+def test_purpose_mismatch_receives_independent_review(scripted_service, approved, subject):
+    import json
+
+    state = scripted_service
+    state.service.tool("op", "task")(request="JWT handling")
+    original = state.service.runner
+    calls = []
+
+    def run(role, prompt, tools):
+        calls.append((role, prompt))
+        if role == "technique_evaluator":
+            data = json.loads(original(role, prompt, tools))
+            data["purpose_mismatch"] = True
+            return json.dumps(data)
+        if role == "technique_feedback_reviewer":
+            return json.dumps({"approved": approved, "reason": "Compared observed method with purpose",
+                               "findings": [] if approved else ["Unrelated purpose not established"]})
+        return original(role, prompt, tools)
+
+    state.service.runner = run
+    if approved:
+        state.service.evaluate("op", "task", subject)
+        assert not state.service.repository.pending_uses("op", "task")
+    else:
+        with pytest.raises(ValueError, match="remains pending"):
+            state.service.evaluate("op", "task", subject)
+        assert state.service.repository.pending_uses("op", "task")
+    reviews = [prompt for role, prompt in calls if role == "technique_feedback_reviewer"]
+    assert len(reviews) == (1 if approved else 2)
+    assert subject in reviews[0] and "Applying generic guidance to a concrete" in reviews[0]
+
+
+def test_feedback_and_independent_review_preserve_complete_serialized_results(scripted_service):
+    import json
+
+    state = scripted_service
+    state.service.tool("op", "task")(request="JWT handling")
+    original = state.service.runner
+    calls = []
+    value = {"nested": [{"code": 'print("λ,;")\n  next()', "flags": [True, None]}],
+             "padding": "x" * 25_000, "tail": "Final decisive observation λ,;"}
+    context = json.dumps(value, ensure_ascii=False)
+
+    def run(role, prompt, tools):
+        calls.append((role, prompt))
+        if role == "technique_evaluator":
+            result = json.loads(original(role, prompt, tools))
+            result["purpose_mismatch"] = True
+            return json.dumps(result)
+        if role == "technique_feedback_reviewer":
+            return json.dumps({"approved": True, "reason": "Checked complete observed results"})
+        return original(role, prompt, tools)
+
+    state.service.runner = run
+    state.service.evaluate("op", "task", context)
+    for role, delimiter in [("technique_evaluator", "Task results:\n"),
+                            ("technique_feedback_reviewer", "Observed results: ")]:
+        prompt = next(prompt for selected, prompt in calls if selected == role)
+        payload = json.loads(prompt.split(delimiter, 1)[1].split("\n", 1)[0])
+        assert payload == {"observed_results": context}
+        assert json.loads(payload["observed_results"]) == value
+    assert not state.service.repository.pending_uses("op", "task")

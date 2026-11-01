@@ -5,15 +5,57 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from modules.techniques.context import MethodologyContext, methodology_context
-from modules.techniques.documents import CONTEXTS, toon
+from modules.techniques.documents import CONTEXTS, json_payload
+
+AUTHORING_GUIDANCE = (
+    "Include applicable checklists, representative payloads or commands, prerequisites, controls, "
+    "expected outcomes and evidence requirements without waiting for an explicit request. "
+    "For hypothesis generation, give concrete future validation steps and useful illustrative payloads, "
+    "clearly distinguished from observed results. Synthesize original procedures from supported "
+    "technical facts; identical examples or ready-made checklists need not appear in sources. "
+    "A source can contribute one relevant technical fact without covering every mechanism, prerequisite "
+    "or example in the request. Combine complementary contributions to construct the requested guidance. "
+    "A request to identify unknown prerequisites asks how to establish them, not whether they already "
+    "hold. Keep unknown implementation conditions as future checks rather than asserted facts. "
+    "Research evaluates technical foundations; draft critique evaluates actual authored deliverables "
+    "and compliance with procedural instructions. Preserve explicit user and module restrictions. "
+    "Avoid irrelevant padding and unsupported claims. "
+    "For each future check, identify the expected legitimate behavior, the suspected security-boundary "
+    "violation, comparison controls and evidence to collect. Ordinary intended behavior alone does not "
+    "support a vulnerability hypothesis. Use explicit assumptions for unknown enforcement policies. "
+    "Distinguish establishing prerequisites, legitimate behavior and demonstrated boundary violations. "
+    "Header-based object selection, JavaScript reading browser storage and token reuse alone do not "
+    "establish violations. Explain how unknown policy is established. A distant limitation cannot excuse "
+    "an unconditional violation claim or rejection expectation in a procedure. Such inconsistencies are "
+    "authored_content defects; clarification of conditional checks does not require research. "
+    "Evaluate interpretation at the procedure step that labels an outcome. Calling a check a future "
+    "hypothesis does not excuse misclassifying legitimate behavior. A policy caveat alone is insufficient: "
+    "specify how to establish policy through documentation, configuration or independently known "
+    "authorized and denied baselines. Rejection of credential reuse requires an established revocation, "
+    "expiry or freshness contract; a valid reusable credential can legitimately succeed repeatedly. "
+    "The existence of a time-bound contract alone does not prohibit reuse inside its valid window. "
+    "Require the relevant expiry, revocation, nonce-consumption or freshness-limit event to have "
+    "occurred, and compare the observed acceptance with that actual restriction before labeling a breach. "
+    "Storage reading requires a separate demonstrated untrusted-script or confidentiality boundary, "
+    "and object selection requires an established entitlement restriction before either is a violation. "
+    "A control that merely repeats legitimate access does not distinguish a violation. "
+    "A permitted counterexample must satisfy the procedure's actual prerequisites and the exact "
+    "observation labeled suspicious; changing either does not refute the check. An expected outcome "
+    "does not itself establish a prerequisite or policy. An outcome label is not a procedural control. "
+    "Successful use of currently valid credentials or access through an intended trusted interface "
+    "is not itself a security-boundary violation. Base rejection expectations on a stated policy, "
+    "not assumed single-use properties or client behavior. "
+    "Generic placeholders and reserved example domains are appropriate illustrative inputs, not "
+    "incidental identifiers from a real operation. "
+)
 
 PHASE_OBJECTIVES = {
     "reconnaissance": "Discover and characterize relevant surfaces, components, versions and trust boundaries; "
                       "preserve unknowns rather than require confirmed vulnerabilities.",
     "hypothesis_generation": "Form plausible source-backed hypotheses with known prerequisites, explicit "
-                             "assumptions and future supporting or refuting checks. Target evidence, exact "
-                             "payloads, exhaustive product matrices and ready-made checklists are not "
-                             "automatically required. Unknown target conditions become future checks.",
+                             "assumptions and concrete future supporting or refuting checks. Include applicable "
+                             "illustrative payloads and checklists, distinguished from observed results. "
+                             "Unknown target conditions become future checks.",
     "vulnerability_verification": "Describe validation methods, controls, evidence requirements and criteria "
                                   "to confirm or reject a hypothesis; do not require completed target validation.",
     "execution": "Describe actionable procedures with prerequisites, observable outcomes, scope constraints "
@@ -49,9 +91,12 @@ class PreservationReview(BaseModel):
 
 PRESERVATION_RULES = (
     "Review semantic request preservation. The original tool request is authoritative. "
-    "Phase and methodology restrictions do not invent additional deliverables. Reject transformation "
+    "Phase objectives frame the method and explicit methodology restrictions remain authoritative. "
+    "Applicable procedural detail, examples and checklists are normal guidance, not invented obligations. "
+    "Reject unrelated mandatory deliverables. Reject transformation "
     "instructions copied as the methodology, phase-only requests, omitted mechanisms, and invented "
-    "obligations. Operation terminal dispositions and completed target execution are not reusable "
+    "obligations or prohibitions, including converting optional content into forbidden content. "
+    "Operation terminal dispositions and completed target execution are not reusable "
     "methodology deliverables. Preserve explicitly requested CVEs and legitimate restrictions. "
     "Report subject, mechanism and deliverable preservation, additions and omissions. "
     "Approve only when all are preserved and there are no additions or omissions. "
@@ -115,18 +160,18 @@ def phase_guidance(context: MethodologyContext | None) -> str:
     rows = [{"phase": phase, "objective": PHASE_OBJECTIVES[phase]} for phase in dict.fromkeys(phases)]
     policy = ""
     if context:
-        policy = (toon("module_technique_policy", context.module_technique_policy)
-                  + "\n" + toon("user_methodology_restrictions", [
+        policy = (json_payload("module_technique_policy", context.module_technique_policy)
+                  + "\n" + json_payload("user_methodology_restrictions", [
                       {"restriction": value, "origin": "user"} for value in context.methodology_constraints
                   ]))
     return (
-        policy + "\n" +
+        policy + "\n" + AUTHORING_GUIDANCE + "\n" +
         "Apply supplied module technique policy and user methodology restrictions to reusable guidance. "
         "Guidance purpose: produce reusable methodology, never completed target execution or findings. "
         "Source-backed facts may support original procedural synthesis. Missing target observations are "
         "future validation needs, not missing factual support for guidance. Preserve explicit deliverables. "
         "Multiple contexts have separate objectives, no inferred ordering or automatic splitting.\n"
-        + (toon("phase_objectives", rows) if rows else
+        + (json_payload("phase_objectives", rows) if rows else
            "Phase unknown: follow the explicit request without inferring a phase.") + "\n"
     )
 
@@ -151,9 +196,10 @@ def align_request(service, request: str, context: MethodologyContext | None):
             "validation guidance from performing validation: techniques always provide guidance. For "
             "hypothesis generation, ambiguous 'validate applicability' means plausible applicability "
             "hypotheses, documented prerequisites, unknowns and future supporting/refuting checks. "
-            "Do not demand exact payloads or exhaustive matrices unless explicitly requested. Do not "
+            "Encourage applicable examples and checklists without inventing restrictions. Do not "
             "invent requirements or remove an explicit deliverable. Only Original request defines the "
-            "requested methodology; task objectives and execution context are not supplied to this workflow. Return the methodology itself, never these instructions. "
+            "requested methodology; task objectives and execution context are not supplied to this workflow. "
+            "Return the methodology itself, never these instructions. "
             "If a methodology restriction is ambiguous or requires incidental target details, report an "
             "explicit conflict rather than ignoring it or converting it into an operation restriction. "
             "If an explicit deliverable conflicts "
@@ -161,7 +207,9 @@ def align_request(service, request: str, context: MethodologyContext | None):
             "restriction_reference equal to a supplied constraint or phase identifier. Explain the "
             "particular conflict; unknown prerequisites alone are not conflicts. Otherwise conflict=null.\n"
             + guidance + f"Original request: {request}\nPhase and restriction data (not deliverables):\n"
-            + toon("alignment_context", [{"phase_contexts": phases, "constraints": context.methodology_constraints}])
+            + json_payload("alignment_context", [
+                {"phase_contexts": phases, "constraints": context.methodology_constraints},
+            ])
         )
         for attempt in range(2):
             output = None
@@ -176,7 +224,8 @@ def align_request(service, request: str, context: MethodologyContext | None):
                                 "technique_request_reviewer",
                                 PRESERVATION_RULES + guidance + f"\noriginal_request (authoritative): {request}"
                                 + f"\ncomponent_request: {request}\nrequirements: []"
-                                + f"\nphase_contexts: {phases}\nconstraints: {context.methodology_constraints}"
+                                + "\n" + json_payload("phase_contexts", phases)
+                                + "\n" + json_payload("constraints", context.methodology_constraints)
                                 + f"\nProposed methodology: {output.adjusted_request}",
                                 PreservationReview,
                             )

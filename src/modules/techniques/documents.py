@@ -82,19 +82,18 @@ def revision_id(lineage: str, digest: str) -> str:
     return str(uuid.uuid5(NAMESPACE, f"{lineage}:{digest}"))
 
 
-def toon(label: str, rows: list[dict[str, Any]]) -> str:
-    """Use the repository's escaped TOON dialect for homogeneous model inputs."""
-    from modules.handlers.utils import sanitize_toon_value
-
-    if not rows:
-        return f"{label}[0]:"
-    fields = list(rows[0])
-    lines = [f"{label}[{len(rows)}]{{{','.join(fields)}}}:"]
-    for row in rows:
-        lines.append("  " + ",".join(sanitize_toon_value(str(row.get(key, ""))) for key in fields))
-    return "\n".join(lines)
-
-
 def json_payload(label: str, value: Any) -> str:
     """Serialize exact-text model data without punctuation or whitespace normalization."""
     return json.dumps({label: value}, ensure_ascii=False)
+
+
+def optional_records_payload(label: str, rows: list[dict[str, Any]], max_chars: int) -> str:
+    """Fit optional context by dropping whole records, preserving every retained native value."""
+    retained = list(rows)
+    while True:
+        serialized = json_payload(label, retained)
+        if len(serialized) <= max_chars:
+            return serialized
+        if not retained:
+            raise ValueError("Technique input contract cannot fit the optional-record envelope")
+        retained.pop()
