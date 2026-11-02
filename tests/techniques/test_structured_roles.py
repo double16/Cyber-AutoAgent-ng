@@ -886,3 +886,29 @@ def test_deferred_review_budget_counts_the_complete_comparison(runner_factory, m
         runner.structured("technique_critique_assessor", roles.DeferredReviewPrompt(
             "Small subject", "WITHHELD_CRITIC_DECISION"), IssueAssessment, [])
     assert model.calls == []
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+@pytest.mark.parametrize("score", [1, 2, 3, 4, 5])
+def test_experimental_ratings_use_real_sdk_transport(runner_factory, provider, score):
+    from modules.techniques.critique import Critique
+    from modules.techniques.critique_trials import rated_schema
+
+    schema = rated_schema(Critique)
+    payload = {"score": score, "reason": "Reviewed conditions", "issues": [],
+               "interpretations": [], "no_security_checks_reason": "No checks in this schema fixture"}
+    runner, model = runner_factory([payload], provider)
+    result = runner.structured("technique_critic", "Review exact conditions", schema, [])
+    assert result.score == score
+    assert model.calls[0][0] == ("tool" if provider == "bedrock" else "native")
+
+
+@pytest.mark.parametrize("score", [True, 0, 6, "4", 4.5])
+def test_experimental_native_ratings_reject_invalid_values(runner_factory, score):
+    from modules.techniques.critique import Critique
+    from modules.techniques.critique_trials import rated_schema
+
+    payload = {"score": score, "reason": "Reviewed", "interpretations": [], "no_security_checks_reason": "None"}
+    runner, _ = runner_factory([payload])
+    with pytest.raises((StructuredOutputValidationError, ValueError)):
+        runner.structured("technique_critic", "Review exact conditions", rated_schema(Critique), [])

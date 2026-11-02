@@ -859,3 +859,61 @@ demonstrated harm overrides benefit. Contract errors and disagreement share one 
 decision. Unresolved critique blocks publication; unresolved feedback remains pending. Inspect
 `critique_assessment` and `feedback_assessment` progress diagnostics for snapshot references,
 proposed decisions, independent findings and correction numbers. Historical scores are unchanged.
+
+### Graded critique experiment
+
+`modules.techniques.critique_experiment` defines isolated experimental rating contracts.
+It does not enable a production replacement. The four comparison arms separate boolean versus
+1–5 verdicts from current versus focused review organization. Ratings 4 and 5 qualify only
+when references are valid and no blocking findings remain. Rating 3 represents unresolved
+uncertainty and must not force an invented defect.
+
+Screen every arm before selection. Human-adjudicated false approvals take priority over false
+rejections, reasoning errors, contract failures and exhausted corrections, in that order.
+Ties prefer the earliest arm (A, B, C, D), preserving existing behavior when evidence is equal.
+These contracts alone do not establish live acceptance or authorize rollout.
+
+The opt-in runner is available through:
+
+```bash
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python -m modules.techniques.critique_trial_cli \
+  tests/techniques/fixtures/critique_screen.json --dry-run
+```
+
+Omit `--dry-run` to execute fresh production-role calls against the frozen corpus. All trial
+storage is newly created in the system temporary directory; no technique repository or active
+operation is opened. The default comparison includes four arms and one repetition, in an order
+randomized with seed 20261101. `--variants` and `--repetitions` select held-out comparisons.
+A scheduling seed controls order only; it is not an inference seed. Record the provider model
+digest and sampling configuration alongside the run before interpreting repeated results.
+Output-token exhaustion records an unresolved trial with the exception type, preserves its
+evidence and continues the schedule without retrying or raising its generation budget.
+Unexpected exceptions record an interrupted outcome and still abort the run; they do not
+become approvals or disappear from the results.
+
+Focused arms first inventory procedure/context references, review each procedure separately,
+then supply those notes to full-document critique and independent assessment. Valid references
+prove availability only. The full-document pass must check omissions and contradictions.
+The rated schema replaces only the terminal verdict; evidence predicates retain their meaning.
+Rating 3 raises an unresolved judgment through the existing shared correction allowance.
+
+The screening expectations live separately from model inputs. They are provisional review labels,
+not an automatic semantic oracle. Every outcome remains `human_adjudication: pending` until its
+findings and requested corrections are inspected. Outcome matching alone cannot select a winner.
+Exact model inputs and evidence are sensitive internal artifacts and must not be exported as reports.
+
+Experimental cases must explicitly declare each requirement's `kind` (`factual_support`,
+`authored_deliverable` or `constraint`). The loader rejects missing kinds; it does not infer
+intent from the description or inherit the legacy default. The screening method requests
+are authored deliverables. Compare only runs with matching frozen requirement metadata.
+Focused roles receive the retained URL catalog separately from inline draft-reference values:
+source lookup cannot retrieve draft IDs, and absent research text does not make the draft unreadable.
+
+For the held-out stage, `select_candidate(..., challenger_only=True)` selects the strongest
+nonbaseline arm to compare with A. This prevents a tied screening baseline from being compared
+with itself. Default ranking still includes A and preserves existing behavior on a tie. Selecting
+a challenger for further study does not authorize adoption or establish superiority.
+
+The [November 2026 live evaluation](critique-verdict-evaluation.md) did not establish a
+benefit from graded verdicts. Both arms failed strict acceptance; retain production behavior.
+The report distinguishes unresolved decisions, semantic review errors and output exhaustion.

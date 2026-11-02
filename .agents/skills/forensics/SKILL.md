@@ -586,3 +586,28 @@ the reviewer with its rejected assessment; semantic disagreement corrects evalua
 then re-reviews them. Both consume the same single allowance. Exhaustion leaves feedback pending;
 no disputed score is committed. Nested diagnostic fields are redacted without altering internal
 model-facing evidence. A failed live replay is not a validated draft or accepted score.
+
+### Isolated critique comparisons
+
+The opt-in `modules.techniques.critique_trial_cli` runner writes to a new system temporary
+`critique-comparison-*` directory. It does not open operation SQLite or publish techniques.
+`corpus.json` freezes model-facing subjects; `configuration.json` records trial order settings.
+Each `trial-*` directory contains an outcome and sensitive internal model evidence. Role diagnostic
+logs record model inputs/outputs; current runner invocations also forward controller lifecycle events.
+Interpret `human_adjudication: pending` literally: neither a completed call nor a matching proposed
+verdict establishes semantic correctness. Inspect omitted defects, unsupported objections and exact
+prerequisites before assigning trial metrics. Do not treat these experimental artifacts as current
+operation evidence or rewrite historical scores from their outcomes.
+
+For critique comparisons, inspect the frozen requirement kinds as well as the draft hash.
+Missing `Requirement.kind` historically defaults to `factual_support`; that is not equivalent
+to `authored_deliverable`. The experimental loader now requires an explicit kind. Do not pool
+partial runs with misclassified requirements into a corrected authored-deliverable comparison.
+
+Output-token exhaustion in an isolated critique trial is unresolved, not neutral or approved.
+The experiment records `error_type: MaxTokensReachedException`, preserves its evidence and
+continues the remaining schedule without retrying or increasing the generation budget. Unexpected
+exceptions record an interrupted outcome and still abort. Distinguish output exhaustion from
+input-context overflow; a small input does not establish sufficient answer-generation capacity.
+If recovering an older aborted run, preserve the original outcome and traceback, identify the
+bookkeeping-only code change, and continue only unattempted jobs in the frozen schedule.
