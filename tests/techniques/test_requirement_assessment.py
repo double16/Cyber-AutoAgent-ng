@@ -31,11 +31,11 @@ def test_atomic_requirement_correction(recover):
                               _safe_feedback=str,
                               _repair_prompt=lambda prompt, error: prompt + "\nCorrection: " + str(error))
     if recover:
-        result = _assess_records(service, "Source text", requirements, [{"url": url}])
+        result = _assess_records(service, "Source text", requirements, [{"url": url, "text": "Source text"}])
         assert [row.requirement_id for row in result.coverage] == [r.id for r in requirements]
     else:
         with pytest.raises(ValueError, match="after one correction"):
-            _assess_records(service, "Source text", requirements, [{"url": url}])
+            _assess_records(service, "Source text", requirements, [{"url": url, "text": "Source text"}])
     assert attempts == {**dict.fromkeys([f"r{i}" for i in range(6)], 1), "r6": 2}
 
 
@@ -130,7 +130,7 @@ def test_assessment_uses_only_assigned_prior_requirement_and_keeps_review_source
 
     scripted_service.service.runner = generate
     result = _assess_records(scripted_service.service, "Source text", requirements,
-                             [{"url": url}], prior, review=review)
+                             [{"url": url, "text": "Source text"}], prior, review=review)
     assert prior.model_dump_json() == frozen and len(prompts) == 2
     if review:
         assert result.selected_urls == prior.selected_urls and result.attributions == prior.attributions
@@ -152,6 +152,7 @@ def test_invalid_late_review_preserves_every_prior_record(scripted_service):
                             reason="Primary authority", authoritative_sufficient=True,
                             coverage=[Support(requirement_id=r.id, source_urls=[url],
                                               explanation="Prior basis", gaps=["Missing facts"]) for r in requirements])
+    prior._documents = {url: {"url": url, "text": "Source text"}}
     frozen = prior.model_dump_json()
     calls = []
 

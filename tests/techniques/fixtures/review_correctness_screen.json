@@ -1,0 +1,208 @@
+[
+  {
+    "id": "header_prerequisite_1",
+    "draft": "Review the API contract and configuration to determine whether a header selects objects. Compare requests with the selector present, changed and absent. A changed object establishes selector influence only. Record the contract, identity, requested and returned object IDs. This step establishes prerequisites; it makes no violation claim.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "header_prerequisite_2",
+    "draft": "Compare requests with a header present, changed and absent. Suspected violation: changing the header changes the returned object. Record request and returned object IDs.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "storage_behavior_1",
+    "draft": "Read first-party own-origin storage to inventory authentication material and its lifetime. This is permitted browser behavior. Record storage type, access context and lifecycle. Any future confidentiality hypothesis separately requires demonstrated untrusted-script access and exfiltration across an established boundary.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "storage_behavior_2",
+    "draft": "Read own-origin storage using first-party JavaScript. Suspected violation: JavaScript can read an authentication token. Record the storage key and token use.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "replay_event_1",
+    "draft": "Establish expiry/revocation requirements from configuration or authoritative documentation. Confirm the applicable expiry or revocation event. Compare the captured credential after that event with a current valid-credential baseline under the same identity and resource. Reuse within the valid window is permitted. Suspect a breach only if the restricted credential still authorizes protected access. Record policy, event timing, identities and responses.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "replay_event_2",
+    "draft": "Capture a valid reusable session credential and repeat the same request during its validity window. Suspected violation: both requests succeed. Record the requests and responses.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "network_policy_1",
+    "draft": "Read effective firewall configuration and declared service-access rules to establish allowed and denied source/service pairs. Compare connectivity from authorized test peers in each class to the same service. Allowed connectivity is legitimate; suspect a breach only when a peer independently established as denied reaches the protected service. Record rules, peer identities and connection results.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "network_policy_2",
+    "draft": "Connect to a service from another host. Suspected violation: a connection succeeds. Record the addresses and connection result.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "filesystem_rights_1",
+    "draft": "Read effective ACLs, group membership and sharing configuration to establish allowed and denied principal/file pairs. Compare reads for known allowed and denied files using the same principal. Other-owner files may legitimately be shared. Suspect a breach only when a file independently established as denied is read. Record effective policy, identity, file identity and results.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "filesystem_rights_2",
+    "draft": "Read a file owned by another user. Suspected violation: the read succeeds. Record owner, reader and contents.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "combined_checks_1",
+    "draft": "Inventory first-party storage without labeling readability a violation; require untrusted-script access and exfiltration for a confidentiality hypothesis. Establish endpoint protection from configuration and compare missing/invalid credentials with a valid baseline; exclude public endpoints. Establish credential expiry/revocation requirements and confirm the limiting event before comparing old and current credentials. Record each policy, identity, input and result; all checks are future procedures.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "combined_checks_2",
+    "draft": "Inventory browser storage: readable tokens are a suspected violation. Remove a credential from a request: any successful response is a suspected violation. Repeat a valid credential: repeated success is a suspected violation. Record each input and result.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "source_synthesis_1",
+    "draft": "Using the supplied object-ID and authorization facts, illustrate a future test with GET /objects and X-Object-ID: <test-id>. The command is original and illustrative, not observed. Establish allowed and denied identity/object pairs from configured entitlements; compare both under the same identity. Suspect a breach only when the independently denied object is returned. Record policy, inputs and object identities.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": [
+      {
+        "url": "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/",
+        "text": "Object identifiers can appear in request headers.\nThe checks should validate that the logged-in user has permissions to perform the requested action on the requested object.",
+        "truncated": true,
+        "extraction_method": "Test paraphrase and short excerpt from previously retained OWASP text; not a new fetch"
+      }
+    ]
+  },
+  {
+    "id": "source_synthesis_2",
+    "draft": "The supplied source proves every GET endpoint accepts X-Object-ID and bypasses authorization when its value is changed. Illustration: GET /objects with X-Object-ID: <test-id>. No entitlement check is needed before declaring a violation.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested."
+      }
+    ],
+    "sources": [
+      {
+        "url": "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/",
+        "text": "Object identifiers can appear in request headers.\nThe checks should validate that the logged-in user has permissions to perform the requested action on the requested object.",
+        "truncated": true,
+        "extraction_method": "Test paraphrase and short excerpt from previously retained OWASP text; not a new fetch"
+      }
+    ]
+  },
+  {
+    "id": "deliverable_coverage_1",
+    "draft": "Establish documented allowed and denied resource pairs under the same identity. Compare them; only access to an independently denied resource supports a violation. Illustrative command: GET /objects with X-Object-ID: <test-id>. Checklist: establish policy; confirm identity; run allowed/denied comparisons; record input, returned identity and expected/actual outcome. No execution is claimed.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested. Include an original illustrative command and an explicit checklist."
+      }
+    ],
+    "sources": []
+  },
+  {
+    "id": "deliverable_coverage_2",
+    "draft": "Establish documented allowed and denied resource pairs under the same identity. Compare them; only access to an independently denied resource supports a violation. No execution is claimed.",
+    "requirements": [
+      {
+        "id": "method",
+        "kind": "authored_deliverable",
+        "description": "Provide a reusable procedure with prerequisites, controls, legitimate outcomes and evidence requirements. Target execution is not requested. Include an original illustrative command and an explicit checklist."
+      }
+    ],
+    "sources": []
+  }
+]

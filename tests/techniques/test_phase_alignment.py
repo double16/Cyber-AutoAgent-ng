@@ -114,6 +114,8 @@ def test_typed_gaps_and_legacy_boundary(kind):
 
 def test_independent_review_reclassifies_future_checks_and_preserves_sources(scripted_service):
     selection = coverage(["Target version and exact payload not validated"])
+    url = selection.selected_urls[0]
+    selection._documents = {url: {"url": url, "text": "Supported mechanism"}}
     corrected = coverage()
     corrected.coverage[0].future_validation = ["Establish target version before testing"]
     scripted_service.service.runner = lambda role, prompt, tools: assessment_output(

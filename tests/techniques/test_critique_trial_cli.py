@@ -136,3 +136,116 @@ def test_invalid_case_shapes_use_normal_validation(data):
 
     with pytest.raises(ValidationError):
         cli.FrozenCase.model_validate(data)
+
+
+def test_correctness_cli_rejects_other_verdict_variants(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["trial", str(tmp_path / "unused"), "--correctness",
+                                    "--variants", Variant.B.value])
+    with pytest.raises(SystemExit):
+        cli.main()
+
+
+def test_correctness_trial_uses_production_assessment_without_repository(tmp_path):
+    from modules.techniques.correctness_trials import CorrectnessAssessment, CorrectnessCritique
+
+    calls = []
+
+    def structured(role, prompt, schema, tools):
+        calls.append((role, schema, prompt))
+        if schema is CorrectnessCritique:
+            return schema(approved=True, reason="No procedure", interpretations=[],
+                          no_security_checks_reason="This document has no security checks",
+                          correction_dispositions=[])
+        assert schema is CorrectnessAssessment
+        return schema(critic_supported=True, reason="Independently confirmed no procedures",
+                      interpretation_reviews=[], findings=[], issue_reviews=[], requirement_reviews=[], disposition_reviews=[])
+
+    outcome = cli.run_trial(case(), Variant.A, SimpleNamespace(structured=structured),
+                            tmp_path / "trial", correctness=True)
+    assert outcome["status"] == "completed"
+    assert outcome["review"]["approved"]
+    assert len(calls) == 2
+    assert calls[1][2].investigation.count("Classify what each draft check") == 1
+    assert calls[1][2].comparison.count("Classify what each draft check") == 1
+    assert "For EACH procedure" not in calls[1][2].investigation
+    assert "critic_assessment" not in calls[1][2].investigation
+    assert "complete_critic" in calls[1][2].comparison
+    evidence = json.loads((tmp_path / "trial" / "model-evidence.json").read_text())
+    assert evidence[1]["output"]["correction_dispositions"] == []
+
+
+def test_comparison_interleaves_both_contracts(tmp_path, monkeypatch):
+    corpus = tmp_path / "cases.json"
+    corpus.write_text(json.dumps([case().model_dump()]))
+    monkeypatch.setattr("sys.argv", ["trial", str(corpus), "--variants", Variant.A.value,
+                                    "--compare-correctness"])
+    monkeypatch.setattr(cli.tempfile, "mkdtemp", lambda **kw: str(tmp_path))
+    monkeypatch.setattr(cli, "DiagnosticSession", lambda **kw: SimpleNamespace(
+        open=lambda path: None, close=lambda: None, lifecycle=lambda *a, **kw: None))
+    monkeypatch.setattr(cli, "TechniqueRoleRunner", lambda *a, **kw: SimpleNamespace())
+    seen = []
+
+    def run(*args, correctness=False):
+        seen.append(correctness)
+        directory = args[3]
+        directory.mkdir()
+        return {"status": "completed", "review_contract": "correctness" if correctness else "baseline"}
+
+    monkeypatch.setattr(cli, "run_trial", run)
+    cli.main()
+    assert sorted(seen) == [False, True]
+    assert json.loads((tmp_path / "trial-001" / "outcome.json").read_text())["status"] == "completed"
+
+
+def test_new_screen_is_eight_explicit_paired_families():
+    path = Path(__file__).parent / "fixtures" / "review_correctness_screen.json"
+    rows = [cli.FrozenCase.model_validate(row) for row in json.loads(path.read_text())]
+    assert len(rows) == 16
+    assert len({row.id.rsplit("_", 1)[0] for row in rows}) == 8
+    assert all(q.kind == "authored_deliverable" for row in rows for q in row.requirements)
+
+
+@pytest.mark.parametrize("bad_quote", ["never", "once", "always"])
+def test_correctness_quote_correction_uses_single_shared_allowance(tmp_path, bad_quote):
+    from modules.techniques.correctness_trials import CorrectnessCritique
+    from modules.techniques.critique import ReviewSnapshot
+
+    frozen = case().model_copy(update={"draft": "Compare known allowed and denied access under one identity."})
+    reference = next(iter(ReviewSnapshot(frozen.draft).values))
+    attempts = []
+
+    def structured(role, prompt, schema, tools):
+        if schema is CorrectnessCritique:
+            return schema(approved=True, reason="Conditional boundary test", correction_dispositions=[],
+                interpretations=[dict(check_purpose="boundary_violation", draft_references=[reference],
+                    prerequisite_or_policy="Established denied access", legitimate_outcome="Denied access fails",
+                    suspected_violation="Known denied access succeeds",
+                    distinguishing_control="Allowed/denied comparison under a fixed identity")])
+        attempts.append(prompt)
+        wrong = bad_quote == "always" or (bad_quote == "once" and len(attempts) == 1)
+        return schema(critic_supported=True, reason="Control distinguishes denied access", findings=[],
+            issue_reviews=[], requirement_reviews=[], disposition_reviews=[], interpretation_reviews=[dict(
+                interpretation_index=0, check_purpose="boundary_violation", draft_references=[reference],
+                permitted_counterexample="None satisfies independently established denial and access",
+                counterexample_matches_check=False, control_excludes_counterexample=True,
+                actual_discriminator="Invented replacement control" if wrong else frozen.draft,
+                critic_correct=True)])
+
+    outcome = cli.run_trial(frozen, Variant.A, SimpleNamespace(structured=structured),
+                            tmp_path / "trial", correctness=True)
+    assert len(attempts) == (1 if bad_quote == "never" else 2)
+    if bad_quote == "always":
+        assert outcome["status"] == "unresolved"
+        assert "review" not in outcome
+    else:
+        assert outcome["status"] == "completed"
+        assert outcome["review"]["approved"]
+    if bad_quote != "never":
+        assert "Invented replacement control" in str(attempts[-1])
+
+
+def test_correctness_cannot_be_mislabeled_as_rated_variant(tmp_path):
+    directory = tmp_path / "trial"
+    with pytest.raises(ValueError, match="boolean_current only"):
+        cli.run_trial(case(), Variant.B, SimpleNamespace(), directory, correctness=True)
+    assert not directory.exists()

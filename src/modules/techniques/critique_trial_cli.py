@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from strands.types.exceptions import MaxTokensReachedException
 
 from modules.techniques.alignment import AUTHORING_GUIDANCE
+from modules.techniques.correctness_trials import CorrectnessRunner
 from modules.techniques.coverage import Requirement
 from modules.techniques.critique import assess
 from modules.techniques.critique_experiment import Variant
@@ -50,18 +51,23 @@ def schedule(cases, variants, repetitions, seed):
     return jobs
 
 
-def run_trial(case, variant, runner, directory, events_callback=None):
+def run_trial(case, variant, runner, directory, events_callback=None, *, correctness=False):
+    if correctness and variant != Variant.A:
+        raise ValueError("Correctness profile uses boolean_current only")
     directory.mkdir()
-    adapter = ExperimentRunner(runner, variant, case.draft, case.sources)
+    adapter = (CorrectnessRunner(runner, case.requirements, case.draft) if correctness
+               else ExperimentRunner(runner, variant, case.draft, case.sources))
     service = TechniqueService(SimpleNamespace(repository=None), adapter, None)
     service.events.callback = events_callback
     outcome = {"case": case.id, "variant": variant.value,
                "draft_sha256": hashlib.sha256(case.draft.encode()).hexdigest(),
-               "human_adjudication": "pending"}
+               "human_adjudication": "pending",
+               "review_contract": "correctness" if correctness else "baseline"}
     try:
         result = assess(service, AUTHORING_GUIDANCE + "\n"
             + json.dumps({"requirements": [r.model_dump() for r in case.requirements]}),
-            case.draft, case.requirements, case.sources, [s["url"] for s in case.sources])
+            case.draft, case.requirements, case.sources, [s["url"] for s in case.sources],
+            **({"correctness": True} if correctness else {}))
         outcome.update(status="completed", review=result.model_dump())
     except (ValueError, RuntimeError, MaxTokensReachedException) as error:
         outcome.update(status="unresolved", error=str(error), error_type=type(error).__name__)
@@ -84,12 +90,23 @@ def main():
     parser.add_argument("--repetitions", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20261101)
     parser.add_argument("--dry-run", action="store_true")
+    contracts = parser.add_mutually_exclusive_group()
+    contracts.add_argument("--correctness", action="store_true", help="Opt-in boolean correctness contracts")
+    contracts.add_argument("--compare-correctness", action="store_true",
+                           help="Interleave baseline and correctness contracts in one frozen run")
     args = parser.parse_args()
+    if (args.correctness or args.compare_correctness) and args.variants != [Variant.A.value]:
+        parser.error("--correctness requires --variants boolean_current")
     raw = args.corpus.read_bytes()
     cases = [FrozenCase.model_validate(row) for row in json.loads(raw)]
     if len({case.id for case in cases}) != len(cases):
         parser.error("Case IDs must be unique")
-    jobs = schedule(cases, [Variant(v) for v in args.variants], args.repetitions, args.seed)
+    jobs = [(case, variant, repeat, args.correctness) for case, variant, repeat in
+            schedule(cases, [Variant(v) for v in args.variants], args.repetitions, args.seed)]
+    if args.compare_correctness:
+        jobs = [(case, variant, repeat, enabled) for case, variant, repeat, _ in jobs
+                for enabled in (False, True)]
+        random.Random(args.seed).shuffle(jobs)
     if args.dry_run:
         print(json.dumps({"trials": len(jobs), "corpus_sha256": hashlib.sha256(raw).hexdigest()}))
         return
@@ -97,13 +114,13 @@ def main():
     (root / "corpus.json").write_bytes(raw)
     (root / "configuration.json").write_text(json.dumps(vars(args), default=str, indent=2))
     print(root, flush=True)
-    for index, (case, variant, repeat) in enumerate(jobs):
+    for index, (case, variant, repeat, correctness) in enumerate(jobs):
         directory = root / f"trial-{index:03d}"
         diagnostics = DiagnosticSession(verbose=True)
         diagnostics.open(str(root / f"diagnostics-{index:03d}"))
         try:
             runner = TechniqueRoleRunner(args.provider, args.model, diagnostics=diagnostics)
-            outcome = run_trial(case, variant, runner, directory, diagnostics.lifecycle)
+            outcome = run_trial(case, variant, runner, directory, diagnostics.lifecycle, correctness=correctness)
             outcome["repeat"] = repeat
             (directory / "outcome.json").write_text(json.dumps(outcome, indent=2))
             print(index, case.id, variant.value, outcome["status"], flush=True)

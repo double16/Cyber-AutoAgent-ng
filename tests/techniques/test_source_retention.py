@@ -92,7 +92,7 @@ def test_explicit_reassessment_replaces_same_url_and_authority():
     assert not result._evidence["method"]
 
 
-@pytest.mark.parametrize("defect", ["text", "url", "requirement"])
+@pytest.mark.parametrize("defect", ["url", "requirement"])
 def test_failed_correction_rolls_back_all_private_state(defect):
     state = harness()
     prior = select_sources(state.service, "Method", REQUIREMENTS, [document(1)])
@@ -115,10 +115,10 @@ def test_exact_excerpts_and_legacy_context_are_retained():
     text = 'Header\n  return a, b  # λ\\n\nFooter'
     state.evidence = [{"url": document(1)["url"], "text": '  return a, b  # λ\\n'}]
     result = select_sources(state.service, "Method", REQUIREMENTS, [document(1, text)])
-    assert result._evidence["method"][0].text == state.evidence[0]["text"]
+    assert result._evidence["method"][0].text == text
     state.evidence = None
     result = select_sources(state.service, "Method", REQUIREMENTS, [document(2)], result)
-    assert result._evidence["method"][0].text == '  return a, b  # λ\\n'
+    assert result._evidence["method"][0].text == text
     assert result._evidence["method"][1].text == "Evidence 2"
 
 
@@ -131,11 +131,13 @@ def test_source_limit_fails_without_discarding_prior_state():
     assert len(result.selected_urls) == len(result._decisions) == 18
 
 
-def test_review_invalid_evidence_preserves_state():
+def test_review_paraphrased_evidence_uses_controller_text():
     state = harness()
     prior = select_sources(state.service, "Method", REQUIREMENTS, [document(1)])
     state.evidence = [{"url": document(1)["url"], "text": "Fabricated"}]
-    assert review_coverage(state.service, "Method", REQUIREMENTS, prior) is prior
+    reviewed = review_coverage(state.service, "Method", REQUIREMENTS, prior)
+    assert reviewed._evidence == prior._evidence
+    assert all(row.text != "Fabricated" for row in reviewed._evidence["method"])
 
 
 def test_new_source_assessor_cannot_reselect_an_older_url():
@@ -221,7 +223,7 @@ def test_assessor_can_inspect_beyond_initial_excerpt():
     state.service._json = generate
     result = select_sources(state.service, "HTTP request controls", REQUIREMENTS, [source])
     assert result._documents[source["url"]]["text"] == text
-    assert result._evidence["method"][0].text == "Exact late technical evidence"
+    assert any(row.text == "Exact late technical evidence" for row in result._evidence["method"])
 
 
 @pytest.mark.parametrize("subject", ["HTTP upload controls", "TCP protocol mapping", "filesystem source review"])
@@ -260,9 +262,7 @@ def test_multiple_exact_passages_from_one_source(duplicate):
     second = first if duplicate else {"url": source["url"], "text": "Second fact."}
     state.evidence = [first, second]
     result = select_sources(state.service, "Method", REQUIREMENTS, [source])
-    assert [row.text for row in result._evidence["method"]] == (
-        ["First fact."] if duplicate else ["First fact.", "Second fact."]
-    )
+    assert [row.text for row in result._evidence["method"]] == [source["text"]]
     reviewed = review_coverage(state.service, "Method", REQUIREMENTS, result)
     assert reviewed._evidence == result._evidence
 
@@ -303,3 +303,21 @@ def test_rejected_source_correction_explains_empty_attribution_contract(scripted
     assert "Expected exactly 0 attribution records" in prompts[1]
     assert "Rejected sources must have no attribution records" in prompts[1]
     assert url in prompts[1]
+
+
+@pytest.mark.parametrize("legacy_text", ["A paraphrase of the mechanism", "Fabricated exact quotation", None])
+def test_model_excerpt_wording_never_replaces_controller_source(legacy_text):
+    state = harness()
+    source = document(1, "Actual retained mechanism.\nExact whitespace preserved.")
+    state.evidence = ([{"url": source["url"], "text": legacy_text}] if legacy_text else None)
+    result = select_sources(state.service, "Method", REQUIREMENTS, [source])
+    assert result.sufficient
+    assert [row.text for row in result._evidence["method"]] == [source["text"]]
+    assert result.authoring_passages([source]) == [source]
+
+
+def test_cited_source_without_supplied_context_exhausts_correction():
+    state = harness()
+    source = {"url": document(1)["url"], "text": ""}
+    with pytest.raises(ValueError, match="Cited URL needs supplied source context"):
+        select_sources(state.service, "Method", REQUIREMENTS, [source])

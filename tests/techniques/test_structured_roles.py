@@ -912,3 +912,31 @@ def test_experimental_native_ratings_reject_invalid_values(runner_factory, score
     runner, _ = runner_factory([payload])
     with pytest.raises((StructuredOutputValidationError, ValueError)):
         runner.structured("technique_critic", "Review exact conditions", rated_schema(Critique), [])
+
+
+@pytest.mark.parametrize("provider", ["ollama", "bedrock"])
+def test_correctness_contracts_use_real_native_and_tool_transport(runner_factory, provider):
+    from modules.techniques.correctness_trials import CorrectnessRunner
+    from modules.techniques.critique import Critique, IssueAssessment
+
+    critic = dict(approved=True, reason="Prerequisite only", no_security_checks_reason="", issues=[],
+        correction_dispositions=[], interpretations=[dict(check_purpose="prerequisite",
+            draft_references=["draft:b1"], prerequisite_or_policy="Read effective policy",
+            legitimate_outcome="Policy established", suspected_violation="Not applicable",
+            distinguishing_control="Inspect configuration")])
+    assessor = dict(critic_supported=True, reason="Prerequisite correctly interpreted", findings=[],
+        issue_reviews=[], requirement_reviews=[], disposition_reviews=[], interpretation_reviews=[dict(
+            interpretation_index=0, draft_references=["draft:b1"], check_purpose="prerequisite",
+            permitted_counterexample="Not applicable to prerequisite establishment",
+            counterexample_matches_check=None, control_excludes_counterexample=None,
+            actual_discriminator="", critic_correct=True)])
+    runner, model = runner_factory([critic, assessor], provider)
+    adapter = CorrectnessRunner(runner, [])
+    assert adapter.structured("technique_critic", "Establish policy", Critique, []).approved
+    from modules.techniques.roles import DeferredReviewPrompt
+
+    result = adapter.structured("technique_critique_assessor", DeferredReviewPrompt("Inspect draft", "Compare"),
+                                IssueAssessment, [])
+    assert result.critic_supported
+    assert adapter.records[-1]["output"]["interpretation_reviews"][0]["counterexample_matches_check"] is None
+    assert "CheckPurpose" in str(model.calls)

@@ -562,8 +562,10 @@ target proof or disposition alone does not establish non-contribution. Legacy co
 and historical scores are unchanged.
 
 Independent technique review covers every critique decision and usefulness score. Inspect
-`critic_supported` and `feedback_supported` as agreement with the proposed decision, not document
-approval or helpfulness. A justified rejection, neutral score or harmful score can be supported.
+`critic_supported` as agreement with the proposed critique decision. Historical `feedback_supported`
+records also mean agreement, not document approval or helpfulness. New feedback reviews instead
+return independent contribution findings and material errors; Python derives agreement. A justified
+rejection, neutral score or harmful score can be supported.
 Legacy internal `approved` inputs normalize to these canonical fields; historical traces and scores
 are not rewritten. A false verdict with a reason endorsing the proposed score remains unresolved.
 Inspect `critique_assessment` and `feedback_assessment` diagnostics for snapshot references, proposed
@@ -611,3 +613,28 @@ exceptions record an interrupted outcome and still abort. Distinguish output exh
 input-context overflow; a small input does not establish sufficient answer-generation capacity.
 If recovering an older aborted run, preserve the original outcome and traceback, identify the
 bookkeeping-only code change, and continue only unattempted jobs in the frozen schedule.
+
+For opt-in correctness comparisons, outcome `review_contract` identifies baseline versus
+correctness. Raw model-evidence records preserve `check_purpose`, null non-boundary fields,
+correction dispositions and per-issue/requirement/disposition assessments. Legacy normalized
+booleans do not encode applicability; use raw records rather than treating null-to-false
+adaptation as a semantic conclusion. Prior-issue references are controller-owned within the
+trial. Check every disposition and independently assessed withdrawal before inferring that a
+repair resolved the original findings. Archived baseline purpose remains unknown. The new
+screen and gate are documented in `docs/techniques.md`; historical study results remain intact.
+
+
+### Independent feedback and controller source context
+
+New feedback reviews return `assessment` (independent contribution findings) and `material_errors`,
+not an agreement boolean. Compare `proposed_decision` and `independent_decision`; Python accepts
+matching scores only when no material errors remain. Inspect referenced evaluator fields, resolved
+error excerpts and independent evidence. Invalid review contracts retry the reviewer; semantic
+score differences or material errors correct the evaluator. Both share one correction allowance.
+Historical boolean verdicts retain their original meaning and historical scores are unchanged.
+
+Requirement-source assessments retain actual controller-supplied and lookup passages for cited
+selected URLs. Legacy model excerpt wording is advisory and cannot replace source text. Inexact
+quotations no longer cause rejection. Unknown URLs or citations without supplied source context
+remain contract failures. Passage availability does not establish semantic support. Distinguish
+unsupported technical mechanisms from author-created procedures and unknown target conditions.

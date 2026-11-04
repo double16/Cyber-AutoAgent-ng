@@ -737,8 +737,16 @@ versions and standard protocol identifiers. The critic reviews decoded values, n
 
 Usefulness feedback records methodological purpose, observed use, helpful contribution, harmful
 effects and guidance/result evidence mappings. Python resolves controller reference IDs to exact
-excerpts; an independent reviewer judges semantic correspondence for every proposed score. Task-tool
-results receive controller references automatically. Their exact text and call inputs are retained
+excerpts; an independent reviewer judges semantic correspondence for every proposed score. The
+evaluation compares the security method with its observed application, rather than requiring the
+task to author another reusable document. Scope follows substantive methods and explicit restrictions;
+illustrative route names are not restrictions. For example, authentication enforcement guidance can
+help form a role comparison for a product endpoint. An authentication hypothesis alone does not
+demonstrate contribution from injection guidance. Target specificity neither proves nor disproves
+usefulness; evidence must establish the guidance's contribution.
+The shared role system prompt restricts target independence to authored reusable guidance;
+usefulness evaluations may discuss concrete task evidence.
+Task-tool results receive controller references automatically. Their exact text and call inputs are retained
 for independent review and correction; schema-output tools and nested helper roles cannot supply
 task evidence. Corrections reuse retained results without repeating artifact reads. Evidence
 mappings copy exact `guidance:` and `result:` IDs; artifact paths and tool-call IDs do not
@@ -747,9 +755,10 @@ Partial reads support only claims about inspected excerpts, not non-use througho
 Neutral findings identify `not_used` or `contribution_unestablished`. New use receipts freeze exact delivered
 documents in the existing `use_context` JSON; later lifecycle changes cannot replace that evidence.
 Legacy receipts explicitly lack a known delivery snapshot. Contract errors and disagreement share
-one correction allowance. Reviewers return `feedback_supported`, which means agreement with the proposed
-feedback and derived score, including a justified neutral or harmful score. Legacy internal `approved`
-inputs normalize to the canonical subject-specific verdict fields; unknown or conflicting fields fail.
+one correction allowance. New reviewers return an independent contribution assessment and referenced
+material errors in evaluator fields. Python accepts matching derived scores only when no material
+errors remain. Historical `feedback_supported` and `approved` verdicts retain their historical meaning;
+new invocations do not ask the reviewer for an agreement boolean.
 Invalid reviewer contracts are corrected by the reviewer; semantic
 disagreement corrects evaluator findings and then re-reviews them. Exhaustion leaves feedback pending. Python derives +1 for demonstrated helpful contribution, -1 for demonstrated misleading or
 harmful guidance (including mixed effects), and 0 when contribution is unestablished. Missing target
@@ -781,9 +790,10 @@ passages remain available during contract correction, without reopening investig
 query misses, lookup may return bounded case-insensitive individual-term passages in `term_matches`,
 with `match_kind: individual_terms`. The exact-query `matched` flag stays false. These passages locate
 text only; they do not establish support or absence. Total passage text stays within the requested
-length, and returned offsets and passage IDs remain controller-owned. Returned
-excerpts must match supplied or inspected text for a cited URL. Legacy outputs without excerpts use controller-retained context; this is source
-context, not a quotation inferred from the model's explanation. Neither matching text nor accepting
+length, and returned offsets and passage IDs remain controller-owned. Models explain support in
+their own words and cite selected URLs. Python retains the supplied and inspected passages for those
+URLs. Optional legacy excerpt wording is ignored for provenance; a cited URL must have supplied context.
+This is source context, not a quotation inferred from the model's explanation. Neither text availability nor accepting
 a source proves semantic support. The model must assess complementary support and preserve unresolved
 contradictions. Text omitted from a bounded passage remains unknown.
 
@@ -814,7 +824,8 @@ New delivery receipts identify `assessment_scope: methodology_request`. The exis
 new conflicts use `kind: methodology_constraint` and reference explicit methodology restrictions.
 Historical receipts are read as legacy data without rewriting scores, schema or stored records.
 
-Technique assessments retain multiple exact excerpts per source and deduplicate identical excerpts.
+Technique assessments retain controller-supplied passages per cited source; model paraphrases never
+replace those passages.
 Procedural constraints are retained from supplied instructions and checked against the actual draft,
 not external repetition of those instructions. Applying generic guidance to a concrete subject is expected; asserted usefulness purpose
 mismatches receive independent review, with disputed feedback left pending.
@@ -861,6 +872,44 @@ decision. Unresolved critique blocks publication; unresolved feedback remains pe
 proposed decisions, independent findings and correction numbers. Historical scores are unchanged.
 
 ### Graded critique experiment
+
+The opt-in correctness profile distinguishes prerequisite establishment, legitimate behavior and
+boundary claims. Critic and assessor classify purpose independently. Non-boundary counterexample
+fields are null; boundary claims retain boolean judgments and exact discriminator evidence.
+Misleading violation labels must receive findings, not be silently classified as legitimate behavior.
+
+Corrections account for every prior issue as retained, revised or withdrawn. The assessor reviews
+each issue, requirement and disposition; Python validates coverage and references, while the model
+judges whether the correction is justified. Raw purpose-aware evidence is retained before adapting
+to legacy internal result types. Null applicability fields become false only for legacy guard
+compatibility; inspect raw evidence when interpreting their meaning. Archived baseline outputs
+have unknown purpose, not an inferred classification.
+
+Run the isolated two-arm screen with:
+
+```bash
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python -m modules.techniques.critique_trial_cli \
+  tests/techniques/fixtures/review_correctness_screen.json --variants boolean_current \
+  --compare-correctness --dry-run
+```
+
+This schedules 32 interleaved trials across 16 cases in eight families. Omit `--dry-run` only
+after human adjudication of [the screening packet](review-correctness-screen.md). Use
+`--correctness` for the experimental arm alone; both flags require `--variants boolean_current`.
+Outcome `review_contract` identifies `baseline` or `correctness`; verdicts stay boolean. No extra
+preflight role, model role name, generation capacity or correction allowance is introduced.
+
+The live gate requires no unresolved decisions, unsupported blocking findings, missed material
+defects or incorrect decisions in the adjudicated corpus. Repeated temperature-zero calls are
+consistency checks, not independent samples. After the screen, compare the same two contracts
+on the four frozen full documents with three repetitions. Record model/code/source manifests,
+exact evidence and failures; do not replace failures with reruns. Production integration remains
+disabled pending acceptance. No exhausted author or research budget is reset.
+
+The [completed correctness-profile evaluation](review-correctness-evaluation.md) failed this
+gate. Neither arm approved any human-acceptable screening case, and the proposal left more
+held-out decisions unresolved. Retain the opt-in profile for investigation only; do not enable
+it in production or claim improved useful-document yield.
 
 `modules.techniques.critique_experiment` defines isolated experimental rating contracts.
 It does not enable a production replacement. The four comparison arms separate boolean versus

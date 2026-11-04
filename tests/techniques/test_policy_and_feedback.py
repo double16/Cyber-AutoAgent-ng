@@ -12,6 +12,17 @@ from modules.techniques.feedback import ContributionFeedback
 from modules.techniques.policy import resolve_policy
 
 
+def independent_review(original, prompt, tools, error=None):
+    data = json.loads(original("technique_feedback_reviewer", prompt, tools))
+    if error:
+        import re
+
+        reference = re.search(r"result:[a-f0-9]+:[^\s\"]+", prompt)[0]
+        data["material_errors"] = [{"evaluator_field": "contribution", "references": [reference],
+                                   "explanation": error}]
+    return json.dumps(data)
+
+
 def loader(rows):
     return SimpleNamespace(_find_module_dir=lambda n: n if n in rows else None,
                            _get_extend_list=lambda n: rows[n].get("extend", []),
@@ -183,8 +194,7 @@ def test_feedback_shared_correction_and_pending_on_exhaustion(scripted_service, 
                 if defect == "review_contract":
                     return "{}"
                 if defect == "disagreement":
-                    return json.dumps({"approved": False, "reason": "Citation alone",
-                                       "findings": ["Concrete application is unestablished"]})
+                    return independent_review(original, prompt, tools, "Concrete application is unestablished")
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -282,8 +292,8 @@ def test_feedback_retains_read_evidence_for_reviewer_and_correction_without_rere
             assert "retained_tool_evidence" in prompt
             count = sum(selected == role for selected, _, _ in calls)
             assert tools == ([inspect_evidence] if count == 1 else [])
-            return json.dumps({"approved": count > 1, "reason": "Check the control application", "findings": []
-                               if count > 1 else ["Explain observed control contribution more precisely"]})
+            return independent_review(original, prompt, tools,
+                                      "Explain observed control contribution more precisely" if count == 1 else None)
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -306,8 +316,7 @@ def test_feedback_reviewer_contract_and_disagreement_share_one_allowance(scripte
             count = sum(selected == role for selected, _ in calls)
             if (count == 1) == contract_first:
                 return "{}"
-            return json.dumps({"approved": False, "reason": "Contribution disputed",
-                               "findings": ["Guidance-to-behavior correspondence remains unestablished"]})
+            return independent_review(original, prompt, tools, "Correspondence remains unestablished")
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -332,11 +341,12 @@ def test_reviewer_consistency_repair_preserves_rejected_review_in_its_own_role(s
         if role == "technique_feedback_reviewer":
             reviews.append(prompt)
             if len(reviews) == 1:
-                return json.dumps({"approved": True, "reason": "Contradictory judgment",
-                                   "findings": ["Specific disputed correspondence"]})
+                data = json.loads(independent_review(original, prompt, tools, "Specific disputed correspondence"))
+                data["material_errors"][0]["evaluator_field"] = "invented"
+                return json.dumps(data)
             assert "Rejected response" in prompt and "Specific disputed correspondence" in prompt
             assert "Return ContributionFeedback findings" not in prompt
-            return json.dumps({"approved": True, "reason": "Consistency corrected", "findings": []})
+            return independent_review(original, prompt, tools)
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -347,12 +357,63 @@ def test_reviewer_consistency_repair_preserves_rejected_review_in_its_own_role(s
 
 def test_feedback_schema_explains_empty_effect_fields_for_absent_contributions():
     fields = ContributionFeedback.model_json_schema()["properties"]
+    assert "output specificity alone" in fields["purpose_mismatch"]["description"]
+    assert "not a requirement" in fields["methodological_purpose"]["description"]
     for name in ("helpful_contribution", "contribution", "misleading_or_harmful", "harmful_effect"):
         assert "empty string" in fields[name]["description"]
     assert "explain neutrality in reason" in fields["contribution"]["description"]
     mapping = ContributionFeedback.model_json_schema()["$defs"]["EvidenceMapping"]["properties"]
     assert "Copy exact guidance:" in mapping["guidance_references"]["description"]
     assert "Artifact paths" in mapping["result_references"]["description"]
+
+
+@pytest.mark.parametrize("subject,score", [
+    ("HTTP: authentication role comparison applied to a product route", 1),
+    ("Network: reachability control excluded an unavailable service", 1),
+    ("Filesystem: ownership comparison supplied a next step for one file", 1),
+    ("HTTP: authentication hypothesis only; injection contribution unestablished", 0),
+    ("Network: document cited without demonstrated use", 0),
+    ("Filesystem: observed misleading permission interpretation despite useful controls", -1),
+])
+def test_application_scope_rules_survive_feedback_disagreement(scripted_service, subject, score):
+    """Exercise assembled initial/correction/review inputs, without simulating semantic judgment."""
+    from modules.techniques.feedback import USEFULNESS_RUBRIC
+
+    state = scripted_service
+    state.score = score
+    state.service.tool("op", "task")(request="Produce reusable generic methodology")
+    original = state.service.runner
+    seen = []
+
+    def runner(role, prompt, tools):
+        if role in {"technique_evaluator", "technique_feedback_reviewer"}:
+            seen.append((role, prompt))
+            assert USEFULNESS_RUBRIC in prompt
+            assert subject in prompt
+            assert "does not require the consuming task to repeat" in prompt
+            assert "not limited to login or token-issuance routes" in prompt
+            assert "does not by itself demonstrate use of injection guidance" in prompt
+        if role == "technique_feedback_reviewer" and len(seen) == 2:
+            return independent_review(original, prompt, tools, "Identify the observed methodological correspondence")
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    state.service.evaluate("op", "task", subject)
+    assert [role for role, _ in seen] == ["technique_evaluator", "technique_feedback_reviewer"] * 2
+    assert "Identify the observed methodological correspondence" in seen[2][1]
+    assert not state.service.repository.pending_uses("op", "task")
+
+
+def test_feedback_system_contract_scopes_target_independence_to_authored_guidance():
+    from modules.techniques.feedback import IndependentFeedbackReview
+    from modules.techniques.roles import structured_system_prompt
+
+    for schema in (ContributionFeedback, IndependentFeedbackReview):
+        prompt = structured_system_prompt(schema)
+        assert "Reusable guidance you author" in prompt
+        assert "evaluation may be target-specific" in prompt
+        assert "All guidance must be independent" not in prompt
+        assert schema.__name__ in prompt
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -381,3 +442,47 @@ def test_internal_review_decision_rejects_unknown_or_conflicting_fields(conflict
         }
         with pytest.raises(ValueError):
             schema.model_validate(data)
+
+
+@pytest.mark.parametrize("defect", ["score", "neutral", "mapping", "reference", "field", "error_reference"])
+def test_independent_assessment_errors_never_persist_disputed_feedback(scripted_service, defect):
+    state = scripted_service
+    state.service.tool("op", "task")(request="Generic methodology")
+    original = state.service.runner
+
+    def runner(role, prompt, tools):
+        data = json.loads(original(role, prompt, tools))
+        if role == "technique_feedback_reviewer":
+            if defect in {"score", "neutral"}:
+                data["assessment"].update(helpful_contribution=False, contribution="",
+                                          neutral_basis="contribution_unestablished" if defect == "score" else None)
+            elif defect == "mapping":
+                data["assessment"]["evidence_mappings"] = []
+            elif defect == "reference":
+                data["assessment"]["evidence_mappings"][0]["guidance_references"] = ["guidance:missing:1"]
+            else:
+                data = json.loads(independent_review(original, prompt, tools, "Unsupported contribution"))
+                if defect == "field":
+                    data["material_errors"][0]["evaluator_field"] = "unknown"
+                else:
+                    data["material_errors"][0]["references"] = ["result:missing:1"]
+        return json.dumps(data)
+
+    state.service.runner = runner
+    with pytest.raises(ValueError, match="remains pending"):
+        state.service.evaluate("op", "task", "Observed application")
+    assert state.service.repository.pending_uses("op", "task")
+    assert not state.service.repository.scored_uses("op", "task")
+
+
+def test_new_review_schema_exposes_independent_findings_without_agreement_verdict():
+    from modules.techniques.feedback import IndependentFeedbackReview
+    from modules.techniques.roles import structured_system_prompt
+
+    schema = IndependentFeedbackReview.model_json_schema()
+    assert schema["required"] == ["assessment"]
+    assert set(schema["properties"]) == {"assessment", "material_errors"}
+    prompt = structured_system_prompt(IndependentFeedbackReview)
+    assert '"ContributionFeedback"' in prompt
+    assert '"MaterialFeedbackError"' in prompt
+    assert '"feedback_supported"' not in prompt and '"approved"' not in prompt

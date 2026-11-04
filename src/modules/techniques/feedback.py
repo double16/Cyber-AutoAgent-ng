@@ -10,9 +10,17 @@ class ContributionFeedback(BaseModel):
 
     neutral_basis: Literal["not_used", "contribution_unestablished"] | None = None
     evidence_mappings: list["EvidenceMapping"] = Field(default_factory=list)
-    purpose_mismatch: StrictBool = False
+    purpose_mismatch: StrictBool = Field(
+        default=False,
+        description="Whether the applied method is outside the delivered guidance's methodological scope. "
+        "Different target names, route names or output specificity alone are not a purpose mismatch.",
+    )
 
-    methodological_purpose: str = Field(min_length=1, max_length=2000)
+    methodological_purpose: str = Field(
+        min_length=1, max_length=2000,
+        description="The security method the delivered guidance helps the task apply, not a requirement "
+        "for the task to author another reusable document. Distinguish examples from scope restrictions.",
+    )
     observed_use: str = Field(
         max_length=4000,
         description="Actual task behavior supported by result references, not requested or hypothetical behavior.",
@@ -59,9 +67,22 @@ class ContributionFeedback(BaseModel):
 
 
 USEFULNESS_RUBRIC = (
-    "Use the recorded original and phase-aligned request and guidance objectives. "
-    "Evaluate demonstrated contribution to the requested purpose. Unrelated missing research is not "
-    "grounds for neutrality. Applying generic guidance to a concrete subject is expected. "
+    "Evaluate demonstrated contribution of delivered guidance to observed task behavior. "
+    "Applying generic guidance to a concrete subject is expected. First identify the "
+    "security method taught by the delivered document, then compare its actual application in task "
+    "results. The recorded original and phase-aligned request explains why the guidance was authored; "
+    "it does not require the consuming task to repeat that authoring deliverable. A request to produce "
+    "generic methodology is not a requirement that downstream results remain generic. "
+    "Determine scope from substantive method and explicit applicability restrictions, not matching "
+    "endpoint names, document titles or illustrative examples. Authentication enforcement can be "
+    "tested on a data endpoint; it is not limited to login or token-issuance routes. Conversely, an "
+    "authentication hypothesis does not by itself demonstrate use of injection guidance. Identify "
+    "the actual methodological correspondence or missing contribution using evidence. "
+    "For example, an HTTP role comparison applied to one route, a network reachability control "
+    "applied to one service, or a filesystem ownership comparison applied to one file can each be "
+    "helpful when observed results show that the guidance supplied that control or next step. "
+    "Merely citing those documents, or independently producing a similar result, does not establish "
+    "their contribution. Unrelated missing research is not grounds for neutrality. "
     "Helpful means observed concrete methodological contribution: a hypothesis, control, comparison, "
     "exclusion, evidence requirement or next step. Neutral means not_used or contribution_unestablished. "
     "Harmful means observed misleading guidance or harmful effects; mixed effects remain negative. "
@@ -109,6 +130,46 @@ class FeedbackReview(BaseModel):
         return self.feedback_supported
 
 
+class MaterialFeedbackError(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    evaluator_field: str
+    references: list[str] = Field(min_length=1)
+    explanation: str = Field(min_length=1)
+
+
+class IndependentFeedbackReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    assessment: ContributionFeedback
+    material_errors: list[MaterialFeedbackError] = Field(default_factory=list)
+
+    def agrees_with(self, feedback: ContributionFeedback) -> bool:
+        """Compare structured conclusions without interpreting model prose."""
+        return self.assessment.score == feedback.score and not self.material_errors
+
+
+def resolve_feedback(feedback: ContributionFeedback, references: dict[str, str]) -> list[dict]:
+    """Resolve available evidence identically for the evaluator and independent reviewer."""
+    if feedback.score == 0 and feedback.neutral_basis is None:
+        raise ValueError("Neutral feedback requires a structured neutral_basis")
+    if feedback.score != 0 and not feedback.evidence_mappings:
+        raise ValueError("Demonstrated effects require guidance/result evidence mappings")
+    resolved = []
+    for mapping in feedback.evidence_mappings:
+        for prefix, keys in (("guidance:", mapping.guidance_references),
+                             ("result:", mapping.result_references)):
+            invalid = [key for key in keys if key not in references or not key.startswith(prefix)]
+            if invalid:
+                raise ValueError(
+                    f"Unknown or invalid feedback evidence reference: {invalid}. Copy exact {prefix} "
+                    "IDs from controller evidence_references or retained_tool_evidence; "
+                    "do not use artifact paths or tool-call IDs"
+                )
+        resolved.append({**mapping.model_dump(), "excerpts": {
+            key: references[key] for key in mapping.guidance_references + mapping.result_references
+        }})
+    return resolved
+
+
 def evaluate_feedback(service, use, context, tools):
     """Review every proposed score with one shared contract/semantic correction allowance."""
     import hashlib
@@ -150,30 +211,13 @@ def evaluate_feedback(service, use, context, tools):
                 feedback = service._json(
                     "technique_evaluator", prompt, ContributionFeedback, [] if correction_used else tools,
                 )
-            if feedback.score == 0 and feedback.neutral_basis is None:
-                raise ValueError("Neutral feedback requires a structured neutral_basis")
-            if feedback.score != 0 and not feedback.evidence_mappings:
-                raise ValueError("Demonstrated effects require guidance/result evidence mappings")
-            resolved = []
-            for mapping in feedback.evidence_mappings:
-                for prefix, keys in (("guidance:", mapping.guidance_references),
-                                     ("result:", mapping.result_references)):
-                    invalid = [key for key in keys if key not in references or not key.startswith(prefix)]
-                    if invalid:
-                        raise ValueError(
-                            f"Unknown or invalid feedback evidence reference: {invalid}. Copy exact {prefix} "
-                            "IDs from controller evidence_references or retained_tool_evidence; "
-                            "do not use artifact paths or tool-call IDs"
-                        )
-                resolved.append({**mapping.model_dump(), "excerpts": {
-                    key: references[key] for key in mapping.guidance_references + mapping.result_references
-                }})
+            resolved = resolve_feedback(feedback, references)
             review_prompt = (
                 USEFULNESS_RUBRIC
                 + " Independently check purpose, mappings, claimed effects and score justification for every "
-                "score. Return feedback_supported, reason and disagreement findings. "
-                "A justified neutral or harmful evaluation requires feedback_supported=true; "
-                "false requires a concrete error in the evaluator's findings or proposed score.\n"
+                "score. Return an independent assessment using ContributionFeedback and material_errors. "
+                "Each material error identifies an evaluator field and supplied evidence references. "
+                "Different wording is not a material error. Python compares the derived scores.\n"
                 + evidence + "\n" + capture.render() + "\nObserved results: "
                 + json_payload("observed_results", context) + "\n" + feedback.model_dump_json()
                 + "\n" + json_payload("resolved_evidence", resolved)
@@ -183,16 +227,20 @@ def evaluate_feedback(service, use, context, tools):
                 try:
                     with capture.scope():
                         review = service._json(
-                            "technique_feedback_reviewer", review_prompt, FeedbackReview,
+                            "technique_feedback_reviewer", review_prompt, IndependentFeedbackReview,
                             [] if correction_used else tools,
                         )
-                    if review.approved == bool(review.findings):
-                        raise ValueError("Agreement forbids findings; disagreement needs concrete findings")
+                    independent_evidence = resolve_feedback(review.assessment, references)
+                    for finding in review.material_errors:
+                        if finding.evaluator_field not in ContributionFeedback.model_fields:
+                            raise ValueError("Unknown evaluator field")
+                        if any(key not in references for key in finding.references):
+                            raise ValueError("Unknown material error reference")
                     break
                 except ValueError as error:
                     service.events.emit(
                         "technique_build_progress", stage="feedback_assessment", status="contract_failed",
-                        originating_role="technique_feedback_reviewer", expected_schema="FeedbackReview",
+                        originating_role="technique_feedback_reviewer", expected_schema="IndependentFeedbackReview",
                         correction_number=int(correction_used), revision_id=use["revision_id"],
                     )
                     if correction_used:
@@ -206,9 +254,14 @@ def evaluate_feedback(service, use, context, tools):
                 revision_id=use["revision_id"], proposed_decision=feedback.score,
                 snapshot_references=list(references), assessment=review.model_dump(),
                 correction_number=int(correction_used),
-                final_disposition="accepted" if review.approved else "disputed",
+                independent_decision=review.assessment.score,
+                independent_evidence=independent_evidence,
+                resolved_errors=[{**finding.model_dump(), "excerpts": {
+                    key: references[key] for key in finding.references
+                }} for finding in review.material_errors],
+                final_disposition="accepted" if review.agrees_with(feedback) else "disputed",
             )
-            if not review.approved:
+            if not review.agrees_with(feedback):
                 raise ValueError("Feedback disagreement: " + review.model_dump_json())
             return feedback
         except ValueError as error:

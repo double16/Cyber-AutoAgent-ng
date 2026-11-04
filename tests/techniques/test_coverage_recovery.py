@@ -146,6 +146,7 @@ def test_explanation_schema_and_whitespace_validation_agree():
 
 def test_later_source_cannot_remove_prior_source(scripted_service):
     previous = SourceSelection.model_validate(supported())
+    previous._documents = {URL: {"url": URL, "text": "Previous factual basis"}}
     new_url = "https://vendor.example/config"
     payload = supported()
     payload["selected_urls"] = [new_url]

@@ -310,8 +310,13 @@ def test_purpose_mismatch_receives_independent_review(scripted_service, approved
             data["purpose_mismatch"] = True
             return json.dumps(data)
         if role == "technique_feedback_reviewer":
-            return json.dumps({"approved": approved, "reason": "Compared observed method with purpose",
-                               "findings": [] if approved else ["Unrelated purpose not established"]})
+            data = json.loads(original(role, prompt, tools))
+            if not approved:
+                reference = next(iter(data["assessment"]["evidence_mappings"][0]["result_references"]))
+                data["material_errors"] = [{"evaluator_field": "purpose_mismatch",
+                                            "references": [reference],
+                                            "explanation": "Unrelated purpose not established"}]
+            return json.dumps(data)
         return original(role, prompt, tools)
 
     state.service.runner = run
@@ -345,7 +350,7 @@ def test_feedback_and_independent_review_preserve_complete_serialized_results(sc
             result["purpose_mismatch"] = True
             return json.dumps(result)
         if role == "technique_feedback_reviewer":
-            return json.dumps({"approved": True, "reason": "Checked complete observed results"})
+            return original(role, prompt, tools)
         return original(role, prompt, tools)
 
     state.service.runner = run

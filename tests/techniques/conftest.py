@@ -147,7 +147,9 @@ def scripted_service(store, markdown):
             return json.dumps({"attributions": [{"url": state.source_urls[0],
                                                 "reason": "Accurate source scope"}]})
         if role == "technique_feedback_reviewer":
-            return json.dumps({"approved": True, "reason": "Evidence supports findings", "findings": []})
+            assessment = next(json.loads(line) for line in prompt.splitlines()
+                              if line.startswith('{"neutral_basis":'))
+            return json.dumps({"assessment": assessment, "material_errors": []})
         if role == "technique_evaluator":
             import re
 

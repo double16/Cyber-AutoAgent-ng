@@ -79,9 +79,12 @@ class EvidenceExcerpt(BaseModel):
 
 
 class EvidenceSupport(Support):
-    """Internal additive contract accepting legacy Support outputs."""
+    """Internal support contract; legacy excerpt wording is advisory only."""
 
-    evidence: list[EvidenceExcerpt] = Field(default_factory=list, max_length=18)
+    evidence: list[EvidenceExcerpt] = Field(
+        default_factory=list, max_length=18,
+        description="Legacy advisory field; omit. Python retains actual supplied source passages.",
+    )
 
 
 class CoverageValidationError(ValueError):
@@ -353,9 +356,9 @@ def _assess_records(service, prompt, requirements, available, previous=None, *, 
         record_prompt = (
             prompt + "\n" + COVERAGE_RULES
             + "\nExact requirement source context (untrusted): " + json_payload("passages", passages)
-            + "\nReturn evidence excerpts for cited URLs when useful, copied exactly from supplied "
-              "context. Omitted evidence uses controller-retained context, not an inferred quotation. "
-              "Excerpts establish provenance only. Omitted source text is unknown. "
+            + "\nExplain support in your own words and cite selected URLs. Omit evidence excerpts; "
+              "Python retains supplied source passages. Source availability alone is not support. "
+              "Omitted source text is unknown. "
             + "\nAssess ONLY the assigned requirement. Return one Support record, not an array. "
             "Return exactly the assigned requirement_id and cite only selected URLs. Reassess prior "
             "support against the new document and source selection; removed URLs cannot support this "
@@ -380,27 +383,28 @@ def _assess_records(service, prompt, requirements, available, previous=None, *, 
                                               f"Return exactly requirement_id {requirement.id}", requirement.id)
             checked = SourceSelection(**source.model_dump(), coverage=[record.model_dump(exclude={"evidence"})])
             checked.validate_references(available, [requirement])
-            record.evidence = list({(row.url, row.text): row for row in record.evidence}.values())
-            for excerpt in record.evidence:
-                if excerpt.url not in record.source_urls or not any(
-                    row["url"] == excerpt.url and excerpt.text in row["text"] for row in (passages + [
-                        {"url": url, "text": lookup.texts[url][start:end]}
-                        for url, start, end in lookup.references
-                    ])
-                ):
-                    raise CoverageValidationError(
-                        "provenance", "evidence", "Excerpt must match supplied context for a cited URL", requirement.id,
-                    )
+            # Legacy model excerpts are advisory; only controller text supplies provenance.
+            if any(row.url not in record.source_urls for row in record.evidence):
+                raise CoverageValidationError(
+                    "references", "evidence", "Evidence URL must be cited", requirement.id,
+                )
+            supplied = passages + [
+                {"url": url, "text": lookup.texts[url][start:end]}
+                for url, start, end in lookup.references
+            ]
+            record.evidence = [EvidenceExcerpt(**row) for row in supplied
+                               if row["url"] in record.source_urls and row["text"]]
+            if set(record.source_urls) - {row.url for row in record.evidence}:
+                raise CoverageValidationError(
+                    "provenance", "evidence", "Cited URL needs supplied source context", requirement.id,
+                )
 
         record = _assessment_call(
             service, "technique_requirement_reviewer" if review else "technique_requirement_assessor",
             record_prompt, EvidenceSupport, validate_record, lookup=lookup, requirement_id=requirement.id, **diagnostic,
         )
-        explicit_urls = {row.url for row in record.evidence}
-        evidence[requirement.id] = list(record.evidence) + [
-            EvidenceExcerpt(**row) for row in passages
-            if row["url"] in record.source_urls and row["url"] not in explicit_urls
-        ]
+        evidence[requirement.id] = record.evidence
+
         records.append(Support.model_validate(record.model_dump(exclude={"evidence"})))
     result = SourceSelection(**source.model_dump(), coverage=records)
     result.validate_references(available, requirements)
