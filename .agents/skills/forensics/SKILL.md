@@ -638,3 +638,41 @@ selected URLs. Legacy model excerpt wording is advisory and cannot replace sourc
 quotations no longer cause rejection. Unknown URLs or citations without supplied source context
 remain contract failures. Passage availability does not establish semantic support. Distinguish
 unsupported technical mechanisms from author-created procedures and unknown target conditions.
+
+
+### Prose reference recovery
+
+When evaluator effect findings omit mappings, inspect `recovered_inventory` for complete known
+IDs, originating prose fields and resolved excerpts. Python collects an unpaired inventory; it
+does not infer correspondence. Acceptance requires reviewer mappings drawn from that inventory,
+matching scores and no material errors. Inspect `raw_evaluator_findings` and `mapping_origin`;
+`reviewer_confirmed_prose` means reviewer mappings were copied into normalized findings only
+after acceptance. Unknown, shortened or stale references require correction. Explicit invalid
+mappings are never replaced by recovery, and reviewer omissions consume the shared correction
+allowance rather than being recovered. Recovery itself adds no role calls or correction use.
+
+
+### Activity-specific feedback
+
+Inspect `feedback_activity` profile/provenance and the complete `feedback_task_context` in model
+inputs. Frozen hypothesis_set evidence requirements identify producers even when task.kind is
+standard; finding_validation/objective_validation identify verification. These task-level signals
+precede phase activity fallback. Conflicting or missing metadata selects unknown, without implying
+neutrality. Classification must not depend on titles, objectives or filenames.
+
+Both evaluator and reviewer receive the shared rubric plus the same supplement through corrections.
+Hypothesis artifacts are observed task behavior; executing their proposed tests is separate.
+Execution, verification and reconnaissance/analysis evaluate their own methodological contributions.
+Correct exclusions and refutations can be helpful. Check each task's own phase on continuation,
+not the currently active phase. Historical scores and continuation scheduling are unchanged.
+
+
+### Feedback schema-order investigations
+
+The accepted feedback schema places evidence_mappings after reason for evaluator and reviewer.
+When comparing ordering experiments, inspect the assembled schema property sequence, not only a
+schema fingerprint: canonical hashes may ignore object-key order. Normalized tool-output order does
+not independently prove raw provider token order. Check mapping content, resolved references,
+independent scores, correction counts and pending decisions as well as schema validation. The bounded
+seven-control muse-glimmer trial passed without corrections; large contexts and other models remain
+unverified. Existing reference and semantic review guards remain required.

@@ -966,3 +966,36 @@ a challenger for further study does not authorize adoption or establish superior
 The [November 2026 live evaluation](critique-verdict-evaluation.md) did not establish a
 benefit from graded verdicts. Both arms failed strict acceptance; retain production behavior.
 The report distinguishes unresolved decisions, semantic review errors and output exhaustion.
+
+When evaluator effect findings omit mappings, Python can recover complete known guidance/result
+IDs from its prose. This inventory records field origins and excerpts without pairing references.
+Independent review must produce valid mappings using inventory IDs and support the proposed score
+without material errors. Python then copies those confirmed mappings into the normalized findings.
+Unknown or shortened IDs and invalid explicit mappings require correction. Reviewer omissions are
+not recovered. Recovery does not consume the existing shared correction allowance.
+
+A follow-up experiment with more explicit mapping corrections did not improve the remaining
+omissions and regressed earlier passing controls. The prior prompt and prose recovery remain in
+place; see [acceptance results](technique-prose-recovery-acceptance.md).
+
+
+Feedback combines one shared usefulness rubric with a controller-selected activity supplement.
+Frozen `hypothesis_set` deliverables identify hypothesis producers, including standard-kind tasks
+and repairs. Explicit finding/objective validation kinds identify verification. These task-level
+signals precede broader phase metadata; execution, vulnerability verification, reconnaissance and
+analysis activities supply fallbacks. Conflicting or missing metadata uses an explicit unknown
+profile, which does not itself imply neutrality. Titles and objectives never select the profile.
+
+Hypothesis feedback assesses recorded hypotheses, prerequisites, controls, exclusions, evidence
+requirements and future validation plans. Producing these is observed work even when no target
+request is performed. Execution assesses performed actions and evidence collection. Verification
+credits confirmation, refutation and narrowing; analysis credits inventory, relationships, source
+interpretation and justified exclusions. Every profile retains shared evidence and independent
+review requirements. Supplements add no new task deliverables. Context and selection provenance
+are preserved through corrections and continuation; historical scores and scheduling are unchanged.
+
+The feedback schema places `evidence_mappings` after the contribution explanation for both roles.
+An isolated schema-order trial passed all seven frozen activity controls without correction; the
+prior order completed three. Fields, defaults, constraints, reference validation and scoring remain
+unchanged. This bounded result does not establish reliability for all models or large contexts.
+See [schema-order acceptance](technique-feedback-order-acceptance.md).

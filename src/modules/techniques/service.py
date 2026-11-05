@@ -877,17 +877,21 @@ class TechniqueService:
         get_technique._cyber_technique_observation_origin = "guidance"
         return get_technique
 
-    def evaluate(self, operation: str, task: str, context: str, tools: list | None = None) -> None:
+    def evaluate(
+        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None,
+    ) -> None:
         self.events.private_values = self.private_values
         with self.events.scope(operation_id=operation, task_uid=task):
-            self._evaluate(operation, task, context, tools)
+            self._evaluate(operation, task, context, tools, task_context=task_context)
 
-    def _evaluate(self, operation: str, task: str, context: str, tools: list | None = None) -> None:
+    def _evaluate(
+        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None,
+    ) -> None:
         for use in self.repository.pending_uses(operation, task):
             revision = use["revision_id"]
             from modules.techniques.feedback import evaluate_feedback
 
-            feedback = evaluate_feedback(self, use, context, tools)
+            feedback = evaluate_feedback(self, use, context, tools, task_context=task_context)
 
             from modules.utils.redaction import redact_text
 

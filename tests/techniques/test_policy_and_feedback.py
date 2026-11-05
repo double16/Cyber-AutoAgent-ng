@@ -486,3 +486,79 @@ def test_new_review_schema_exposes_independent_findings_without_agreement_verdic
     assert '"ContributionFeedback"' in prompt
     assert '"MaterialFeedbackError"' in prompt
     assert '"feedback_supported"' not in prompt and '"approved"' not in prompt
+
+
+@pytest.mark.parametrize("text,valid", [
+    ("guidance:a:1 maps to result:b:1.", True),
+    ("guidance:a:1 and guidance:a:1 with result:b:1", True),
+    ("guidance:a:10 and result:b:1", False),
+    ("guidance:a:1-extra and result:b:1", False),
+    ("a:1 and result:b:1", False),
+    ("guidance:a:1 and result:unknown:1", False),
+    ("guidance:a:1 alone", False),
+])
+def test_prose_recovery_uses_complete_known_ids_without_pairing(scripted_service, text, valid):
+    from modules.techniques.feedback import recover_prose_references
+
+    data = json.loads(scripted_service.service.runner("technique_evaluator", "", []))
+    data.update(reason=text, evidence_mappings=[])
+    feedback = ContributionFeedback.model_validate(data)
+    references = {"guidance:a:1": "Method", "result:b:1": "Behavior"}
+    if valid:
+        inventory = recover_prose_references(feedback, references)
+        assert {row["reference"] for row in inventory} == set(references)
+        assert all(row["field"] == "reason" and row["prose"] == text for row in inventory)
+        assert feedback.evidence_mappings == []
+    else:
+        with pytest.raises(ValueError):
+            recover_prose_references(feedback, references)
+
+
+@pytest.mark.parametrize("review_valid", [True, False, "outside"])
+def test_prose_inventory_requires_structured_independent_confirmation(scripted_service, review_valid):
+    state = scripted_service
+    state.service.tool("op", "task")(request="Generic methodology")
+    original = state.service.runner
+    calls = []
+
+    def runner(role, prompt, tools):
+        calls.append(role)
+        if role == "technique_evaluator":
+            data = json.loads(original(role, prompt, tools))
+            mapping = data["evidence_mappings"][0]
+            data["reason"] += " " + " ".join(mapping["guidance_references"] + mapping["result_references"])
+            data["evidence_mappings"] = []
+            return json.dumps(data)
+        if role == "technique_feedback_reviewer":
+            assert "unpaired_prose_references" in prompt
+            data = json.loads(original("technique_evaluator", prompt, tools))
+            if review_valid is False:
+                data["evidence_mappings"] = []
+            elif review_valid == "outside":
+                mapping = data["evidence_mappings"][0]
+                reference = mapping["result_references"][0]
+                mapping["result_references"] = [reference.rsplit(":", 1)[0] + ":2"]
+            return json.dumps({"assessment": data, "material_errors": []})
+        return original(role, prompt, tools)
+
+    state.service.runner = runner
+    if review_valid is True:
+        state.service.evaluate("op", "task", "Observed control contribution\nUnrelated observation")
+        assert not state.service.repository.pending_uses("op", "task")
+        assert calls == ["technique_evaluator", "technique_feedback_reviewer"]
+    else:
+        with pytest.raises(ValueError, match="remains pending"):
+            state.service.evaluate("op", "task", "Observed control contribution\nUnrelated observation")
+        assert state.service.repository.pending_uses("op", "task")
+
+
+def test_evidence_mapping_schema_follows_contribution_explanation():
+    from modules.techniques.feedback import IndependentFeedbackReview
+
+    fields = list(ContributionFeedback.model_json_schema()["properties"])
+    assert fields[-1] == "evidence_mappings"
+    assert fields.index("reason") < fields.index("evidence_mappings")
+    nested = IndependentFeedbackReview.model_json_schema()["$defs"]["ContributionFeedback"]
+    assert list(nested["properties"])[-1] == "evidence_mappings"
+    assert nested["properties"]["evidence_mappings"]["type"] == "array"
+    assert "anyOf" not in nested

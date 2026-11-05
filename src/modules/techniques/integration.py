@@ -54,7 +54,7 @@ def bind_task_techniques(runtime, plan, task, tools):
     return [item for item in tools if get_tool_name(item) != "get_technique"] + [selected]
 
 
-def evaluate_task_techniques(runtime, task, reason, outcomes) -> None:
+def evaluate_task_techniques(runtime, task, reason, outcomes, *, plan=None) -> None:
     service = getattr(runtime, "technique_service", None)
     if service is None:
         return
@@ -100,7 +100,11 @@ def evaluate_task_techniques(runtime, task, reason, outcomes) -> None:
                 ],
             }
         )
-        service.evaluate(runtime.operation_id, task.task_uid, context, tools)
+        from modules.techniques.feedback_activity import select_feedback_activity
+
+        phase = next((p for p in plan.phases if p.id == task.phase), None) if plan is not None else None
+        service.evaluate(runtime.operation_id, task.task_uid, context, tools,
+                         task_context=select_feedback_activity(task, phase))
     except Exception:
         # Preserve pending receipts for continuation; never fabricate neutral feedback on a model failure.
         service.events.emit(
@@ -114,13 +118,13 @@ def evaluate_task_techniques(runtime, task, reason, outcomes) -> None:
         logger.warning("Technique feedback or debug export remains pending for task %s", task.task_uid)
 
 
-def reconcile_task_techniques(runtime, tasks) -> None:
+def reconcile_task_techniques(runtime, tasks, *, plan=None) -> None:
     """Retry unevaluated receipts on continuation without counting duplicate uses."""
     if getattr(runtime, "technique_service", None) is None:
         return
     for task in tasks:
         if task.status in {"done", "partial_failure", "blocked", "superseded"}:
-            evaluate_task_techniques(runtime, task, task.status_reason or "Task closed", [])
+            evaluate_task_techniques(runtime, task, task.status_reason or "Task closed", [], plan=plan)
 
 
 def recommendation_prompt(prompt: str, tools: list) -> str:

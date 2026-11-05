@@ -2292,7 +2292,7 @@ class MultiAgentWorkflowController:
     def run(self) -> None:
         from modules.techniques.integration import reconcile_task_techniques
 
-        reconcile_task_techniques(self.runtime, self.state.list_tasks())
+        reconcile_task_techniques(self.runtime, self.state.list_tasks(), plan=self.state.get_plan())
         self._log_workflow(
             "start max_iterations=%s json_retries=%s plan_refinement_iterations=%s "
             "task_prompt_refinement_iterations=%s task_execution_cycles=%s",
@@ -2706,7 +2706,7 @@ class MultiAgentWorkflowController:
             return
         from modules.techniques.integration import reconcile_task_techniques
 
-        reconcile_task_techniques(self.runtime, self.state.list_tasks())
+        reconcile_task_techniques(self.runtime, self.state.list_tasks(), plan=plan)
         self._annotate_verified_findings(plan)
         self._enrich_final_attack_mappings(plan)
         phase_count = len(plan.phases)
@@ -7967,7 +7967,7 @@ class MultiAgentWorkflowController:
         updated_task = self.state.mark_task(current_task, decision.status, decision.reason)
         from modules.techniques.integration import evaluate_task_techniques
 
-        evaluate_task_techniques(self.runtime, updated_task, decision.reason, tool_outcomes)
+        evaluate_task_techniques(self.runtime, updated_task, decision.reason, tool_outcomes, plan=plan)
         self._emit_task_done(updated_task, finding_resolution=resolution)
         if updated_task.status in {"done", "superseded"}:
             if updated_task.replacement_of:
