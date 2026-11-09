@@ -184,3 +184,28 @@ describe('SetupWizard', () => {
         expect(onComplete).toHaveBeenCalledWith('Agent Container setup completed successfully');
     });
 });
+
+it('falls back to setup when detection fails, auto-completes, and reports save errors', async () => {
+  jest.useFakeTimers();
+  const {SetupWizard} = await load(); const onComplete = jest.fn(); let view!: ReactTestRenderer;
+  try {
+    wizardState = {currentStep: 'welcome', selectedMode: null};
+    act(() => {view = TestRenderer.create(<SetupWizard onComplete={onComplete}/>);});
+    wizardState = {...wizardState, currentStep: 'deployment'};
+    act(() => view.update(<SetupWizard onComplete={onComplete} terminalWidth={81}/>));
+    detectDeployments.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => {view.root.findAllByType('button')[0].props.onClick(); await jest.advanceTimersByTimeAsync(400);});
+    expect(wizardActions.startSetup).toHaveBeenCalledWith('local-cli');
+    wizardState = {currentStep: 'progress', selectedMode: 'full-stack', isComplete: true};
+    await act(async () => {view.update(<SetupWizard onComplete={onComplete} terminalWidth={82}/>);});
+    await act(async () => {await jest.advanceTimersByTimeAsync(1500);});
+    expect(onComplete).toHaveBeenCalledWith('Full Stack setup completed successfully');
+    saveConfig.mockRejectedValueOnce(new Error('readonly'));
+    await act(async () => {view.root.findAllByType('button')[0].props.onClick(); await Promise.resolve();});
+    expect(wizardActions.setError).toHaveBeenCalledWith('Failed to save configuration');
+    wizardState = {currentStep: 'progress', selectedMode: null}; act(() => view.update(<SetupWizard onComplete={onComplete} terminalWidth={83}/>));
+    await act(async () => view.root.findAllByType('button')[0].props.onClick());
+    expect(onComplete).toHaveBeenCalledWith();
+    wizardState = {currentStep: 'unexpected'}; act(() => view.update(<SetupWizard onComplete={onComplete} terminalWidth={84}/>));
+  } finally {act(() => view.unmount()); jest.useRealTimers();}
+});

@@ -57,12 +57,11 @@ def test_metadata_only_reason_routes_to_repair_without_rewriting_semantics(empty
 
     task, data = empty_review
     data["subject_reviews"][0]["no_hypothesis_basis"] = {"kind": "metadata_only", "inspection_refs": []}
-    with pytest.raises(ValueError, match="publication repair"):
+    with pytest.raises(ValueError, match="prerequisite gap"):
         validate_review(data, task, "OP_TEST")
-    normalized = normalize_review(data)
-    assert normalized["status"] == "partial_failure" and normalized["repair"]["kind"] == "acceptance"
-    assert semantic_review(normalized) == semantic_review(data)
-    validate_review(normalized, task, "OP_TEST")
+    with pytest.raises(ValueError, match="prerequisite_gaps"):
+        normalize_review(data)
+    assert semantic_review(data)["subject_reviews"][0]["no_hypothesis_basis"]["kind"] == "metadata_only"
 
 
 @pytest.mark.parametrize("content", ["HTTP response body", "SSH banner", "Filesystem configuration"])
@@ -959,8 +958,9 @@ def test_invalid_prerequisite_judgment_is_not_frozen(empty_review, fault):
     assert correction.accepted == {}
     data["subject_reviews"][0].update(reason="Corrected to publication repair", decision="revise",
                                      no_hypothesis_basis={"kind": "metadata_only", "inspection_refs": []})
-    data["prerequisite_gaps"] = []
-    assert correction.prepare(data, task)["repair"]["kind"] == "acceptance"
+    data["prerequisite_gaps"] = [{"criterion_id": "hypotheses", "missing_input": "Inspect the source",
+                                  "item_ids": ["subject"], "source_refs": ["artifact:inventory.json"]}]
+    assert correction.prepare(data, task)["repair"]["kind"] == "execution"
 
 
 def test_valid_subject_prerequisite_cannot_disappear_during_envelope_correction(reviewed):
@@ -1044,3 +1044,57 @@ def test_bound_runtime_instructions_are_nullable_and_canonical(reviewed, value):
     assert set(schema["properties"]["instructions"]["type"]) == {"string", "null"}
     result = bound.canonicalize({**data, "instructions": value}, task)
     assert result["instructions"] == ("" if value is None else value)
+
+
+@pytest.mark.parametrize("status", ["partial_failure", "blocked"])
+def test_metadata_only_review_routes_explicit_missing_content_to_inspection(empty_review, status):
+    from modules.agents.hypothesis_review import normalize_review
+
+    task, data = empty_review
+    data.update(status=status, reason="Linked source content has not been inspected",
+                prerequisite_gaps=[{"criterion_id": "hypotheses", "missing_input": "Linked source content",
+                                    "item_ids": ["subject"], "source_refs": ["artifact:inventory.json"]}])
+    data["subject_reviews"][0]["no_hypothesis_basis"] = {"kind": "metadata_only", "inspection_refs": []}
+    normalized = normalize_review(data)
+    assert normalized["repair"]["kind"] == ("none" if status == "blocked" else "execution")
+    validate_review(normalized, task, "OP_TEST")
+    if status == "partial_failure":
+        normalized["repair"]["kind"] = "acceptance"
+        with pytest.raises(ValueError, match="prerequisite recovery"):
+            validate_review(normalized, task, "OP_TEST")
+
+
+def test_metadata_only_gap_correction_does_not_freeze_an_invalid_subject(empty_review, tmp_path):
+    from modules.agents.hypothesis_context import hypothesis_inspection_journal
+    from modules.agents.hypothesis_review import BoundHypothesisReview, HypothesisReviewCorrection
+
+    task, data = empty_review
+    data["subject_reviews"][0]["no_hypothesis_basis"] = {"kind": "metadata_only", "inspection_refs": []}
+    correction = HypothesisReviewCorrection(BoundHypothesisReview.capture(task, "OP_TEST"), "OP_TEST")
+    with pytest.raises(ValueError, match="prerequisite gap"):
+        correction.prepare(data, task)
+    assert correction.accepted == {}
+    journal = hypothesis_inspection_journal(task, "OP_TEST", str(tmp_path))
+    ref = journal.record_inspection("read_artifact", "content", {}, '{"content":"Static presentation rules"}', ())
+    data["subject_reviews"][0]["no_hypothesis_basis"] = {
+        "kind": "inspected_evidence", "inspection_refs": [ref],
+        "no_relevant_behavior_reason": "Inspected static rules expose no interaction or protected behavior",
+    }
+    assert correction.prepare(data, task)["status"] == "done"
+
+@pytest.mark.parametrize("fixture_name", ["empty_review", "candidate_review"])
+def test_conditional_arrays_declare_items_for_native_grammar(request, fixture_name):
+    from modules.agents.hypothesis_review import BoundHypothesisReview
+
+    task = request.getfixturevalue(fixture_name)[0]
+    schema = BoundHypothesisReview.capture(task, "OP_TEST").output_model.model_json_schema()
+    branches = [definition["oneOf"][0] for definition in schema["$defs"].values()
+                if "oneOf" in definition]
+    assert branches
+    for branch in branches:
+        for field in branch["properties"].values():
+            if field.get("minItems", 0):
+                assert field["type"] == "array"
+                assert field["items"]
+                if "$ref" in field["items"]:
+                    assert field["items"]["$ref"].split("/")[-1] in schema["$defs"]

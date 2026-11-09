@@ -1,0 +1,267 @@
+{
+  "status": "completed_matches_human_label",
+  "protocol": "candidate-http-reference-catalog-protocol.json",
+  "subject_sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+  "candidate_code_identity": "598761fad61761b3d61bbadbc3bcc0bd93c83525c4bfa6502d4ac5346567c4ad",
+  "human_label": "needs_correction",
+  "outcome": {
+    "status": "completed",
+    "review": {
+      "approved": false,
+      "decision_origin": "controller_findings",
+      "issue_dispositions": [],
+      "category": "authored_content",
+      "reason": "The draft misclassifies header-based object selection as an authorization violation without establishing entitlement policy and prerequisites, and it asserts an unconditional violation claim that is not supported by the retained source.",
+      "issues": [
+        {
+          "id": "hdr-sel-violation-misclassification",
+          "category": "authored_content",
+          "criterion_id": "core:interpretation",
+          "material_impact": "The procedure labels any change in returned object on header mutation as an IDOR, removing the required entitlement check. This makes the advertised method produce false positives and misrepresents when an authorization boundary is crossed, defeating the requirement to correctly explain when the comparison establishes an authorization violation.",
+          "problem": "Draft states 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability. It is unnecessary to establish whether the same identity is entitled to both objects' (df57d88e905f7:b17-b19). The draft also treats missing-selector rejection as optional evidence (df57d88e905f7:b19-b20).",
+          "requested_correction": "Require explicit establishment of the authorization policy and entitlement baseline before labeling a violation, and define the comparison as a controlled variation against that baseline with distinguishing controls and evidence requirements.",
+          "requirement_ids": [
+            "method"
+          ],
+          "source_urls": [
+            "https://portswigger.net/web-security/access-control/idor"
+          ],
+          "draft_references": [
+            "df57d88e905f7:b17",
+            "df57d88e905f7:b18",
+            "df57d88e905f7:b19",
+            "df57d88e905f7:b20"
+          ],
+          "absence_scope": "inspected_passages",
+          "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed\nselection is sufficient evidence of an authorization failure. Rejecting a missing selector supports\nthe finding but is not required for confirmation.",
+          "passage_ids": [
+            "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+          ],
+          "passages": [
+            {
+              "url": "https://portswigger.net/web-security/access-control/idor",
+              "start": 0,
+              "end": 123
+            }
+          ],
+          "absence_of_support": ""
+        }
+      ],
+      "suggestions": [],
+      "interpretations": [
+        {
+          "draft_references": [
+            "df57d88e905f7:b10",
+            "df57d88e905f7:b12",
+            "df57d88e905f7:b13",
+            "df57d88e905f7:b17",
+            "df57d88e905f7:b18"
+          ],
+          "prerequisite_or_policy": "The draft assumes a declared API contract identifies a request header as an object selector and that a declared test identity and two non-sensitive test objects are available (df57d88e905f7:b5-b6). It does not specify how to establish the authorization policy that defines which objects the test identity is entitled to access, nor how to establish an authorized baseline and a prohibited baseline.",
+          "legitimate_outcome": "Under a properly scoped policy, changing the selector header while retaining the same identity may legitimately return a different object if the identity is entitled to both objects, or may legitimately be rejected if the selector is required. The draft does not distinguish these legitimate cases.",
+          "suspected_violation": "The draft labels a change in returned object on header mutation as an authorization failure, claiming entitlement need not be established.",
+          "distinguishing_control": "The draft controls for selector mutation only: request first object using its selector value, then change only the selector to second object identifier retaining same identity, endpoint and operation, and record status and returned object identity (df57d88e905f7:b10-b13). It adds a negative control removing the selector and repeating the initial request (df57d88e905f7:b14). No control establishes entitlement or policy."
+        }
+      ],
+      "no_security_checks_reason": ""
+    },
+    "counts": {
+      "limit": 6,
+      "requests": 5,
+      "roles": 2
+    }
+  },
+  "assessments": [
+    {
+      "timestamp": "2026-11-05T22:43:23.683290+00:00",
+      "stage": "critique",
+      "status": "review_snapshot",
+      "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+      "draft_reference_count": 39
+    },
+    {
+      "timestamp": "2026-11-05T22:47:42.325115+00:00",
+      "stage": "critique",
+      "status": "issues_validated",
+      "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+      "issues": [
+        {
+          "id": "hdr-sel-violation-misclassification",
+          "category": "authored_content",
+          "criterion_id": "core:interpretation",
+          "material_impact": "The procedure labels any change in returned object on header mutation as an IDOR, removing the required entitlement check. This makes the advertised method produce false positives and misrepresents when an authorization boundary is crossed, defeating the requirement to correctly explain when the comparison establishes an authorization violation.",
+          "problem": "Draft states 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability. It is unnecessary to establish whether the same identity is entitled to both objects' (df57d88e905f7:b17-b19). The draft also treats missing-selector rejection as optional evidence (df57d88e905f7:b19-b20).",
+          "requested_correction": "Require explicit establishment of the authorization policy and entitlement baseline before labeling a violation, and define the comparison as a controlled variation against that baseline with distinguishing controls and evidence requirements.",
+          "requirement_ids": [
+            "method"
+          ],
+          "source_urls": [
+            "https://portswigger.net/web-security/access-control/idor"
+          ],
+          "draft_references": [
+            "df57d88e905f7:b17",
+            "df57d88e905f7:b18",
+            "df57d88e905f7:b19",
+            "df57d88e905f7:b20"
+          ],
+          "absence_scope": "inspected_passages",
+          "draft_excerpt": "If changing the header changes the returned object, that alone confirms an IDOR vulnerability.\nIt is unnecessary to establish whether the same identity is entitled to both objects: the changed\nselection is sufficient evidence of an authorization failure. Rejecting a missing selector supports\nthe finding but is not required for confirmation.",
+          "passage_ids": [
+            "d1d15aec23f3d9f9bc4e85bd8596a5ff6d1e53458817ebfd57af6f30a35b636a"
+          ],
+          "passages": [
+            {
+              "url": "https://portswigger.net/web-security/access-control/idor",
+              "start": 0,
+              "end": 123
+            }
+          ],
+          "absence_of_support": ""
+        }
+      ],
+      "source_inspection": [
+        {
+          "url": "https://portswigger.net/web-security/access-control/idor",
+          "characters": 123,
+          "inspected_intervals": [
+            [
+              0,
+              123
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "timestamp": "2026-11-05T22:51:34.034865+00:00",
+      "stage": "critique_assessment",
+      "status": "assessed",
+      "snapshot_id": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+      "proposed_decision": false,
+      "assessment": {
+        "interpretation_reviews": [
+          {
+            "interpretation_index": 0,
+            "draft_references": [
+              "df57d88e905f7:b10",
+              "df57d88e905f7:b12",
+              "df57d88e905f7:b13",
+              "df57d88e905f7:b17",
+              "df57d88e905f7:b18"
+            ],
+            "permitted_counterexample": "Test identity is legitimately entitled to both object identifiers under the declared policy, and the request header is an object selector used for routing within entitlement. Changing only the selector to the second object identifier while retaining the same identity, endpoint and operation returns a different object that the identity is authorized to access.",
+            "counterexample_matches_check": true,
+            "control_excludes_counterexample": false,
+            "actual_discriminator": "",
+            "critic_correct": true
+          }
+        ],
+        "critic_supported": true,
+        "reason": "The critic correctly identifies the unconditional violation label and the missing entitlement/policy establishment. The draft states 'If changing the header changes the returned object, that alone confirms an IDOR vulnerability.' and 'It is unnecessary to establish whether the same identity is entitled to both objects' (df57d88e905f7:b17-b19). The procedure controls only selector mutation and a missing-selector negative control (df57d88e905f7:b10-b14) with no actual control that establishes authorization policy or an entitlement baseline, so a policy-compliant scenario with the same observation is not excluded. Agreement with the critic's rejection and its core interpretation is warranted.",
+        "findings": []
+      },
+      "correction_number": 0,
+      "final_disposition": "accepted"
+    }
+  ],
+  "model_inputs": [
+    {
+      "role": "technique_critic",
+      "input_tokens": 6376,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 6217,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critic",
+      "input_tokens": 7314,
+      "prompt_limit": 40000,
+      "structured_mode": "native"
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 4351,
+      "prompt_limit": 40000
+    },
+    {
+      "role": "technique_critique_assessor",
+      "input_tokens": 7526,
+      "prompt_limit": 40000,
+      "structured_mode": "native"
+    }
+  ],
+  "request_provenance": [
+    {
+      "path": "outputs/technique_review_trials/candidate-http-reference-catalog-20261105-1/live/provider-request-01.json",
+      "sha256": "a5282bff531adff1d575441e156b57b5da8784b96a30dd8c347848a750e31e01",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/candidate-http-reference-catalog-20261105-1/live/provider-request-02.json",
+      "sha256": "294bde60a19fea72bc9b20c96f26eea6db8d989874501d75dd02b8944218d0b4",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/candidate-http-reference-catalog-20261105-1/live/provider-request-03.json",
+      "sha256": "f937a5f520973db0e092c5fe25fdec217441ca99b75957247b3805c849c01544",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/candidate-http-reference-catalog-20261105-1/live/provider-request-04.json",
+      "sha256": "773140c04180de1fab06fcd729c98daed53ecd78caba2eefd9388848fa65f071",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/candidate-http-reference-catalog-20261105-1/live/provider-request-05.json",
+      "sha256": "1dea0e2a8ca77e6872f7f05d8c07844d936887d03573b2f38ca7da4bc5960ba0",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    }
+  ],
+  "offline_preflight": {
+    "native": "offline_contract_passed",
+    "tool": "offline_contract_passed"
+  },
+  "correction_count": 0,
+  "cumulative_live_requests": 44,
+  "candidate_http_allowance_used": 9,
+  "candidate_http_allowance_cap": 10,
+  "limitations": [
+    "One live HTTP fixture after the catalog revision; does not establish reliability across documents.",
+    "Earlier network/filesystem live results used the prior candidate revision.",
+    "Original failed trial and failed candidate HTTP review remain preserved.",
+    "No corrected draft authoring/re-review or generation-yield measurement."
+  ]
+}

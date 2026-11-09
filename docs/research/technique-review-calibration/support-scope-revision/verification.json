@@ -1,0 +1,31 @@
+{
+  "status": "unit_verified_live_untested",
+  "candidate_code_identity": "cc1882179374a99b92c44ceec1579d272432d19bb638902ad5b2eb3e22c0f098",
+  "tests_passed": 2213,
+  "skipped": 18,
+  "coverage": {
+    "src/modules/techniques/review_contract.py": {
+      "covered_lines": 23,
+      "num_statements": 23,
+      "percent_covered": 100.0,
+      "percent_covered_display": "100",
+      "missing_lines": 0,
+      "excluded_lines": 0,
+      "percent_statements_covered": 100.0,
+      "percent_statements_covered_display": "100",
+      "num_branches": 2,
+      "num_partial_branches": 0,
+      "covered_branches": 2,
+      "missing_branches": 0,
+      "percent_branches_covered": 100.0,
+      "percent_branches_covered_display": "100"
+    }
+  },
+  "ruff": "passed",
+  "new_live_calls": 0,
+  "cumulative_live_calls": 79,
+  "limitations": [
+    "No live replay or new transport preflight for this revision yet.",
+    "Semantics remain model judgments; tests establish shared contract assembly and bookkeeping, not model compliance."
+  ]
+}

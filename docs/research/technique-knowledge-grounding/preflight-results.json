@@ -1,0 +1,237 @@
+{
+  "runtime_identity": "a17349c14faced6e8c9e18789028880e61a2bd01bd073eaa64a524d485c1737a",
+  "provider_requests": 0,
+  "semantic_judgment": "not_performed",
+  "results": [
+    {
+      "case": "human-network",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 1
+      }
+    },
+    {
+      "case": "human-filesystem",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 2
+      }
+    },
+    {
+      "case": "http-selector",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 3
+      }
+    },
+    {
+      "case": "generate-filesystem",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 4
+      }
+    },
+    {
+      "case": "http-selector-corrected",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 5
+      }
+    },
+    {
+      "case": "human-network",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 1
+      }
+    },
+    {
+      "case": "human-filesystem",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 2
+      }
+    },
+    {
+      "case": "http-selector",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 3
+      }
+    },
+    {
+      "case": "generate-filesystem",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 4
+      }
+    },
+    {
+      "case": "http-selector-corrected",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "review": {
+        "approved": true,
+        "decision_origin": "legacy",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "Offline transport/schema test only; no semantic judgment",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [],
+        "no_security_checks_reason": ""
+      },
+      "scripted_model_dispatches": 2,
+      "semantic_judgment": "not_performed",
+      "counts": {
+        "limit": 30,
+        "requests": 0,
+        "roles": 5
+      }
+    }
+  ]
+}

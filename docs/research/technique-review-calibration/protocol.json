@@ -1,0 +1,24 @@
+{
+  "provider": "ollama",
+  "model": "muse-glimmer:30b",
+  "provider_request_cap": 30,
+  "role_invocation_cap": 30,
+  "execution": "sequential",
+  "cases": [
+    "http",
+    "network",
+    "filesystem"
+  ],
+  "arms": [
+    "new-policy baseline",
+    "final candidate"
+  ],
+  "adjudication_required": true,
+  "expected_labels": [
+    "acceptable",
+    "acceptable",
+    "needs_correction"
+  ],
+  "historical_scores_rewritten": false,
+  "live_calls_made": 0
+}

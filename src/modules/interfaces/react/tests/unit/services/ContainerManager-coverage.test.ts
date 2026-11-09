@@ -202,3 +202,54 @@ describe('ContainerManager coverage', () => {
         manager.cleanup();
     });
 });
+
+it('covers mode transitions, restart failures, container counters and compose stop fallbacks', async () => {
+  process.env.CYBER_PROJECT_ROOT = '/project'; existingPaths = new Set(['/project/docker/docker-compose.yml']);
+  commandResponses = [{match: 'docker info', stdout: 'ok'}, {match: /^docker ps --format/, stdout: 'cyber-autoagent\tUp 1 minute\ncyber-langfuse\tUp 1 minute'}, {match: /^docker ps -a --format/, stdout: 'cyber-langfuse-worker\tExited'}];
+  const {ContainerManager} = await load(); const manager = ContainerManager.getInstance() as any;
+  await manager.getCurrentMode();
+  const snapshot = jest.spyOn(manager, 'checkContainerStatus').mockResolvedValue({dockerAvailable: true, runningContainers: [{name: 'cyber-langfuse'}], requiredContainers: {'single-container': {services: ['cyber-autoagent'], missing: [], needsRestart: ['cyber-autoagent']}}});
+  await manager.switchToMode('single-container');
+  expect(await manager.getCurrentMode()).toBe('single-container');
+  snapshot.mockResolvedValue({dockerAvailable: true, runningContainers: [], requiredContainers: {'single-container': {services: ['cyber-autoagent'], missing: [], needsRestart: []}}});
+  await manager.switchToMode('single-container');
+  expect(await manager.getRunningCountForServices(['cyber-autoagent', 'redis'])).toEqual({running: 1, total: 2});
+  await manager.stopContainers(manager.getDeploymentConfig('single-container'));
+  existingPaths.clear(); await manager.stopContainers(manager.getDeploymentConfig('single-container'));
+  await manager.stopContainers(manager.getDeploymentConfig('local-cli')); await manager.startContainers(manager.getDeploymentConfig('local-cli'));
+  snapshot.mockResolvedValue({dockerAvailable: false}); await expect(manager.switchToMode('full-stack')).rejects.toThrow('Docker is not running');
+  snapshot.mockRestore(); manager.dispose(); delete process.env.CYBER_PROJECT_ROOT;
+});
+it('handles command errors, missing compose, readiness timeout and network failure', async () => {
+  process.env.CYBER_PROJECT_ROOT = '/project'; existingPaths = new Set();
+  commandResponses = [{match: /^docker ps --format/, error: new Error('Cannot connect to docker daemon')}];
+  const {ContainerManager} = await load(); const manager = ContainerManager.getInstance() as any;
+  expect(await manager.getRunningContainers()).toEqual([]);
+  commandResponses = [{match: /^docker ps --format/, error: new Error('unexpected failure')}];
+  expect(await manager.getRunningContainers()).toEqual([]);
+  await expect(manager.waitForContainers(['cyber-autoagent'], 0)).rejects.toThrow('Timeout waiting');
+  commandResponses = [{match: /^docker network ls/, error: new Error('permission denied')}];
+  await expect(manager.ensureNetworksExist()).rejects.toThrow('permissions');
+  delete process.env.CYBER_PROJECT_ROOT;
+  expect(manager.getComposePath('missing.yml')).toContain('docker/missing.yml');
+  manager.dispose();
+});
+it('builds the agent, pulls external images and waits for full-stack readiness', async () => {
+  process.env.CYBER_PROJECT_ROOT = '/project'; existingPaths = new Set(['/project/docker/docker-compose.yml']);
+  commandResponses = [{match: 'docker info', stdout: 'ok'}, {match: /^docker network ls/, stdout: 'cyber-autoagent_default'}, {match: /^docker images/, stdout: ''}];
+  const {ContainerManager} = await load(); const manager = ContainerManager.getInstance() as any;
+  const ready = jest.spyOn(manager, 'getRunningContainers').mockResolvedValue([{name: 'cyber-autoagent', status: 'Up'}, {name: 'cyber-langfuse', status: 'Up'}, {name: 'cyber-langfuse-postgres', status: 'Up'}]);
+  await manager.startContainers(manager.getDeploymentConfig('full-stack'));
+  expect(spawn).toHaveBeenCalledWith('docker', expect.arrayContaining(['build', 'cyber-autoagent']), expect.any(Object));
+  expect(spawn).toHaveBeenCalledWith('docker', expect.arrayContaining(['pull', 'postgres']), expect.any(Object));
+  ready.mockRestore(); manager.dispose(); delete process.env.CYBER_PROJECT_ROOT;
+});
+
+it('accepts missing service lists and reports missing compose files without launching commands', async () => {
+  existingPaths = new Set(); commandResponses = [];
+  process.env.CYBER_PROJECT_ROOT = '/project';
+  const {ContainerManager} = await load(); const manager = ContainerManager.getInstance() as any;
+  expect(await manager.getRunningCountForServices(undefined)).toEqual({running: 0, total: 0});
+  await expect(manager.startContainers(manager.getDeploymentConfig('single-container'))).rejects.toThrow('compose file not found');
+  manager.dispose(); delete process.env.CYBER_PROJECT_ROOT;
+});

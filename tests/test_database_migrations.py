@@ -49,6 +49,8 @@ def test_packaged_migrations_create_schema_once(tmp_path):
         (11, "0011_authentication_flow_records.sql"),
         (12, "0012_task_credential_authorizations.sql"),
         (13, "0013_authentication_worker_authorizations.sql"),
+        (14, "0014_techniques.sql"),
+        (15, "0015_technique_use_context.sql"),
     ]
     assert {
         "operations", "plans", "tasks", "operation_model_metrics", "finding_evidence_receipts",
@@ -89,7 +91,31 @@ def test_concurrent_startup_applies_each_migration_once(tmp_path):
 
     assert results == [None, None]
     with closing(sqlite3.connect(db_path)) as conn, conn:
-        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 13
+        assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 15
+
+
+def test_technique_use_context_migration_preserves_existing_feedback(tmp_path, monkeypatch):
+    path = str(tmp_path / "technique-legacy.db")
+    migrations = SQLiteMigrationRunner._load_migrations()
+    monkeypatch.setattr(SQLiteMigrationRunner, "_load_migrations", staticmethod(
+        lambda: [migration for migration in migrations if migration[0] < 15],
+    ))
+    SQLiteMigrationRunner(path).migrate()
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(
+            "INSERT INTO technique_revisions "
+            "(revision_id,lineage,source_sha256,origin,active,document_collection,created_at,score_count,score_total) "
+            "VALUES ('revision','lineage','digest','generated',1,'documents',0,1,1)"
+        )
+        connection.execute(
+            "INSERT INTO technique_uses(operation_id,task_uid,revision_id,score,reason,created_at) "
+            "VALUES ('op','task','revision',1,'Useful',0)"
+        )
+    monkeypatch.setattr(SQLiteMigrationRunner, "_load_migrations", staticmethod(lambda: migrations))
+    SQLiteMigrationRunner(path).migrate()
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT score,reason,use_context FROM technique_uses").fetchone() == (1, "Useful", "{}")
+        assert connection.execute("SELECT score_count,score_total FROM technique_revisions").fetchone() == (1, 1)
 
 
 def test_migrations_are_applied_in_version_order(tmp_path, monkeypatch):

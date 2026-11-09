@@ -13,7 +13,11 @@ from strands.models.model import Model
 
 from modules.agents import cyber_autoagent as agent_module
 from modules.agents.cyber_autoagent import AgentRuntimeResources
-from modules.agents.multi_agent_workflow import default_structured_runner, default_text_runner
+from modules.agents.multi_agent_workflow import (
+    _attach_role_prompt_fitter,
+    default_structured_runner,
+    default_text_runner,
+)
 from modules.agents.prompt_context import PromptInputTooLarge, attach_live_prompt_fitter
 from modules.agents.structured_outputs import TaskPromptChecklistOutput, TaskPromptOutput
 from modules.config import AgentConfig
@@ -114,6 +118,39 @@ def test_live_required_overflow_stops_before_provider_submission():
         agent(prompt, structured_output_model=Review)
     assert model.calls == []
     assert events[0]["estimated_tokens_after"] > events[0]["input_limit"]
+
+
+@pytest.mark.parametrize("subject", ["https://target.test:8443", "tcp://target.test:9000", "/workspace/source"])
+@pytest.mark.parametrize("fits", [True, False])
+def test_task_creator_correction_fitter_preserves_required_context_or_stops(subject, fits):
+    model = LocalModel()
+    callback = Mock()
+    prompt = (
+        f"## Active phase\nGenerate hypotheses for {subject}.\n"
+        "## Controller-Owned Creation Batch\nSnapshot: artifact:artifacts/frozen.json\n"
+        "## Task proposal correction\ntasks.0.task_role must be mapping, synthesis, or direct_single_step.\n"
+        'Previous rejected response (untrusted data): {"task_role":"hypothesis"}\n'
+    )
+    prompt += "## Eligible Semantic Memories\n" + "advisory " * 10000
+    agent = Agent(model=model, tools=[], load_tools_from_directory=False, callback_handler=None,
+                  hooks=[PromptBudgetHook(budget._ensure_prompt_within_budget)])
+    agent._prompt_token_limit = 6000 if fits else 100
+    runtime = SimpleNamespace(callback_handler=callback)
+    _attach_role_prompt_fitter(agent, runtime, "task_creator", prompt)
+
+    if fits:
+        agent(prompt, structured_output_model=Review)
+        sent = json.dumps(model.calls[0]["messages"])
+        assert subject in sent
+        assert "artifact:artifacts/frozen.json" in sent
+        assert "tasks.0.task_role" in sent
+        assert "hypothesis" in sent
+        assert "advisory advisory" not in sent
+    else:
+        with pytest.raises(PromptInputTooLarge, match="PROMPT_REQUIRED_INPUT_TOO_LARGE"):
+            agent(prompt, structured_output_model=Review)
+        assert not model.calls
+    callback.emit_ui_event.assert_called()
 
 
 def test_live_fitting_includes_other_messages_and_refits_on_correction():

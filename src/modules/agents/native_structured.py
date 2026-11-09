@@ -16,6 +16,7 @@ from strands.tools.registry import ToolRegistry
 
 from modules.agents.structured_outputs import StructuredOutputUnavailableError
 from modules.config.models.generation_budget import is_summary_generation
+from modules.config.models.structured_output import StructuredOutputValidationError
 
 logger = logging.getLogger(__name__)
 _UNSUPPORTED_NATIVE: set[tuple[str, str, str]] = set()
@@ -109,7 +110,12 @@ class NativeFinalizer(Model):
                     self.output_model, messages, system_prompt=system_prompt,
                 ):
                     if "output" in event:
-                        output = self.output_model.model_validate(event["output"])
+                        try:
+                            output = self.output_model.model_validate(event["output"])
+                        except ValidationError as error:
+                            raise StructuredOutputValidationError(
+                                error, json.dumps(event["output"], ensure_ascii=False),
+                            ) from None
                     elif "metadata" in event:
                         metadata.append(event)
                 if output is None:
@@ -147,16 +153,20 @@ def invoke_structured(
     agent: Any, prompt: str, output_model: type[BaseModel], *, investigate: bool = False,
     invocation_kwargs: dict[str, Any] | None = None,
     before_finalize: Callable[[], None] | None = None,
+    finalization_context: str = "",
+    investigation_system_prompt: str | None = None,
 ) -> Any:
     """Retain SDK lifecycle while selecting native output for the final decision only."""
     kwargs = dict(invocation_kwargs or {})
+    complete_prompt = prompt + ("\n" + finalization_context if finalization_context else "")
     model = getattr(agent, "model", None)
     if not isinstance(model, Model):
         # Compatibility for injected runners and SDK-compatible external agents.
-        return agent(prompt, structured_output_model=output_model, **kwargs)
+        return agent(complete_prompt, structured_output_model=output_model, **kwargs)
     if investigate:
         original_system = agent.system_prompt
-        agent.system_prompt = str(original_system or "") + INVESTIGATION_GUIDANCE
+        investigation_system = original_system if investigation_system_prompt is None else investigation_system_prompt
+        agent.system_prompt = str(investigation_system or "") + INVESTIGATION_GUIDANCE
         try:
             result = agent(prompt, **kwargs)
         finally:
@@ -167,7 +177,7 @@ def invoke_structured(
             raise RuntimeError("Investigation stopped before structured finalization")
     if before_finalize is not None:
         before_finalize()
-    final_prompt = FINALIZATION_GUIDANCE if investigate else prompt
+    final_prompt = (finalization_context + FINALIZATION_GUIDANCE) if investigate else complete_prompt
     adapter = NativeFinalizer(model, output_model)
     registry = agent.tool_registry
     agent.tool_registry = ToolRegistry()
@@ -180,6 +190,7 @@ def invoke_structured(
         # Let the existing caller own correction counts. Carry evidence forward so its
         # next bounded attempt can close investigation instead of replaying tool calls.
         error.native_finalization_messages = deepcopy(agent.messages)
+        error.native_finalization_context = finalization_context
         raise
     finally:
         model._cyber_native_schema = previous_native
@@ -193,7 +204,14 @@ def retained_finalization_prompt(original_prompt: str, error: BaseException) -> 
     if messages is None:
         return None
     sections = [original_prompt, FINALIZATION_GUIDANCE, "\n## Retained structured investigation"]
+    deferred_context = getattr(error, "native_finalization_context", "")
+    if deferred_context:
+        sections.append("\n## Retained finalization context\n" + deferred_context)
     for message in messages:
-        if message.get("role") in {"assistant", "tool"}:
-            sections.append(f"\n{message['role']}: {json.dumps(message.get('content', []), ensure_ascii=False)}")
+        content = message.get("content", [])
+        if message.get("role") == "user":
+            # Strands represents tool results as user messages, not a separate tool role.
+            content = [block for block in content if "toolResult" in block]
+        if content and (message.get("role") in {"assistant", "tool", "user"}):
+            sections.append(f"\n{message['role']}: {json.dumps(content, ensure_ascii=False)}")
     return "\n".join(sections)

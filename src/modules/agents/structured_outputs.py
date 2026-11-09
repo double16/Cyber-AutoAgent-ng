@@ -72,6 +72,7 @@ class PlanPhaseOutput(StrictStructuredOutput):
     ] = "standard"
     controller_owned_phase_kind: str = ""
     provided_workstreams: list[str] = Field(default_factory=list)
+    technique_contexts: list[str] = Field(default_factory=list)
 
 
 class PlanOutput(StrictStructuredOutput):

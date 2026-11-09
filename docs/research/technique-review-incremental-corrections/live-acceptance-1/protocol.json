@@ -1,0 +1,32 @@
+{
+  "status": "authorized",
+  "scope": "incremental correction live acceptance",
+  "candidate_code_identity": "471e84ddff8538acd3498e6517e9eae47073ebb8c14d81e85f7a89288d65fd74",
+  "provider": "ollama",
+  "model": "muse-glimmer:30b",
+  "provider_request_cap": 21,
+  "role_invocation_cap": 21,
+  "execution": "sequential",
+  "subjects": [
+    {
+      "id": "human-network",
+      "sha256": "8541967e20efda3e79b9abf985164de66a9294eb1ef3ef033052bc7a376795d8",
+      "label": "acceptable"
+    },
+    {
+      "id": "human-filesystem",
+      "sha256": "87312dcd1019a59718315f74c02aa4bdaea7f2e85a22438471e7497d9ae66365",
+      "label": "needs_correction"
+    },
+    {
+      "id": "http-selector",
+      "sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+      "label": "needs_correction"
+    }
+  ],
+  "prior_live_requests": 180,
+  "new_live_requests": 0,
+  "filesystem_input_changed": "User file-access clarification added as an authored obligation; document bytes unchanged. This is a new input context, not a replacement result.",
+  "acceptance": "Correct decisions and actionable reasons aligned to the supplied brief; labels alone are insufficient.",
+  "authorization": "User: go ahead; 21 sequential requests approved"
+}

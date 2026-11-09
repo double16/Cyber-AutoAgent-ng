@@ -36,6 +36,12 @@ class LLMRoleType(StrEnum):
     TAXONOMY_ANNOTATOR = "taxonomy_annotator"
     ATTACK_ENRICHER = "attack_enricher"
     SWARM_AGENT = "swarm_agent"
+    TECHNIQUE_RESEARCHER = "technique_researcher"
+    TECHNIQUE_JUDGE = "technique_judge"
+    TECHNIQUE_AUTHOR = "technique_author"
+    TECHNIQUE_CRITIC = "technique_critic"
+    TECHNIQUE_EVALUATOR = "technique_evaluator"
+    TECHNIQUE_TRIGGER_MATCHER = "technique_trigger_matcher"
     UNKNOWN = "unknown"
 
 
@@ -214,6 +220,24 @@ DEFAULT_AGENT_PROFILES: dict[LLMRoleType, AgentModelSettings] = {
         temperature=0.6,
         reasoning_level=ReasoningLevel.MEDIUM,
         max_tokens=8192,
+    ),
+    LLMRoleType.TECHNIQUE_RESEARCHER: AgentModelSettings(
+        temperature=0.0, reasoning_level=ReasoningLevel.LOW, max_tokens=4096,
+    ),
+    LLMRoleType.TECHNIQUE_JUDGE: AgentModelSettings(
+        temperature=0.0, reasoning_level=ReasoningLevel.LOW, max_tokens=4096,
+    ),
+    LLMRoleType.TECHNIQUE_AUTHOR: AgentModelSettings(
+        temperature=0.2, reasoning_level=ReasoningLevel.LOW, max_tokens=12288,
+    ),
+    LLMRoleType.TECHNIQUE_CRITIC: AgentModelSettings(
+        temperature=0.0, reasoning_level=ReasoningLevel.LOW, max_tokens=4096,
+    ),
+    LLMRoleType.TECHNIQUE_EVALUATOR: AgentModelSettings(
+        temperature=0.0, reasoning_level=ReasoningLevel.LOW, max_tokens=4096,
+    ),
+    LLMRoleType.TECHNIQUE_TRIGGER_MATCHER: AgentModelSettings(
+        temperature=0.0, reasoning_level=ReasoningLevel.LOW, max_tokens=4096,
     ),
     LLMRoleType.UNKNOWN: AgentModelSettings(
         temperature=0.5,

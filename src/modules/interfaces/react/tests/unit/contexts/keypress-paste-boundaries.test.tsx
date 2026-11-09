@@ -1,0 +1,40 @@
+import React, {useEffect} from 'react';
+import {PassThrough} from 'node:stream';
+import {afterEach, expect, it, jest} from '@jest/globals';
+import TestRenderer, {act} from '../test-renderer.js';
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+const stdin = new PassThrough() as any; stdin.isRaw = true;
+const setRawMode = jest.fn(); let decoder: any;
+jest.unstable_mockModule('ink', () => ({useStdin: () => ({stdin, setRawMode})}));
+jest.unstable_mockModule('node:readline', () => ({default: {createInterface: ({input}: any) => {decoder = input; return {close: jest.fn()};}, emitKeypressEvents: jest.fn()}}));
+const {KeypressProvider, useKeypressContext} = await import('../../../src/contexts/KeypressContext.js');
+afterEach(() => {jest.useRealTimers(); stdin.removeAllListeners();});
+it('combines rapid input, flushes before navigation and on unmount, and preserves raw mode', () => {
+  jest.useFakeTimers(); const events = jest.fn();
+  const Consumer = () => {const context = useKeypressContext(); useEffect(() => {context.subscribe(events); return () => context.unsubscribe(events);}, [context]); return null;};
+  let view!: ReturnType<typeof TestRenderer.create>;
+  act(() => {view = TestRenderer.create(<KeypressProvider><Consumer/></KeypressProvider>);});
+  const key = (sequence: string, name = '', extra = {}) => decoder.emit('keypress', undefined, {sequence, name, ctrl: false, meta: false, shift: false, ...extra});
+  act(() => {key('hello'); key(' world'); jest.advanceTimersByTime(100);});
+  expect(events).toHaveBeenCalledWith(expect.objectContaining({paste: true, sequence: 'hello world'}));
+  act(() => {key('pending'); key('\r', 'return');});
+  expect(events).toHaveBeenCalledWith(expect.objectContaining({paste: true, sequence: 'pending'}));
+  expect(events).toHaveBeenLastCalledWith(expect.objectContaining({paste: false, name: 'return'}));
+  act(() => {stdin.emit('data', Buffer.from('text\x1b[200~')); key('pasted'); stdin.emit('data', Buffer.from('\x1b[201~after'));});
+  expect(events).toHaveBeenCalledWith(expect.objectContaining({paste: true, sequence: 'pasted'}));
+  act(() => {key('unfinished'); view.unmount();});
+  expect(setRawMode).not.toHaveBeenCalled();
+});
+it('flushes an unterminated bracketed paste while releasing listeners', () => {
+  const events = jest.fn();
+  const Consumer = () => {const context = useKeypressContext(); useEffect(() => {context.subscribe(events);}, []); return null;};
+  let view!: ReturnType<typeof TestRenderer.create>;
+  act(() => {view = TestRenderer.create(<KeypressProvider><Consumer/></KeypressProvider>);});
+  act(() => {
+    stdin.emit('data', Buffer.from('\x1b[200~'));
+    decoder.emit('keypress', undefined, {sequence: 'unfinished', name: '', ctrl: false, meta: false});
+    view.unmount();
+  });
+  expect(events).toHaveBeenCalledWith(expect.objectContaining({paste: true, sequence: 'unfinished'}));
+  expect(stdin.listenerCount('data')).toBe(0);
+});

@@ -318,3 +318,34 @@ When configured, interface connects to Langfuse:
 **Component Customization**: Replace UI components while maintaining event contract
 
 This architecture enables clean separation between agent execution and user interface while maintaining real-time operation visibility and minimal coupling between layers.
+
+### Technique lifecycle events
+
+Technique messages share one formatter between the interactive TUI and headless console.
+They pass through the existing `__CYBER_EVENT__` envelope and do not change task completion,
+operation progress, evidence counts, or tool execution metrics.
+
+| Event | Purpose |
+|---|---|
+| `technique_sync_complete` | Module import counts: added, updated, unchanged |
+| `technique_recommended` | New task recommendation, phase contexts, trigger and match kind |
+| `technique_build_progress` | Research, source selection, authoring, critique and revision milestones |
+| `technique_resolved` | Successfully returned revision, title, origin and reused/generated outcome |
+| `technique_evaluated` | Committed independent sentiment, reason, cumulative count and mean |
+| `technique_deactivated` | Active-to-inactive transition caused by negative feedback |
+| `technique_warning` | Recoverable issue, affected stage and whether retry remains pending |
+
+Events carry operation/task identifiers when applicable; build milestones and lookup results
+share an activity identifier. Completed stages include elapsed seconds; source selection includes
+fetched/selected counts. Snapshot paths are relative to the operation directory and appear only
+after successful export. Repeated feedback and replayed recommendations do not create new transition events. Lookup errors continue through
+the existing tool-error path. Detailed Markdown remains in the operation `techniques/` directory.
+
+Example output:
+
+```text
+[task-1] Technique reused: JWT trust boundaries
+[task-2] Technique source selection: completed, 3 documents fetched, 2 selected
+[task-2] Technique critique: revision requested, attempt 1 of 3 — Missing controls
+[task-2] Technique evaluated: <revision>, helpful (+1) — Controls clarified the test
+```

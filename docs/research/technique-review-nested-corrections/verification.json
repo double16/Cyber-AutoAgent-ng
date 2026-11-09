@@ -1,0 +1,106 @@
+{
+  "status": "offline_verified_live_unverified",
+  "repository_entry_point": "UV_CACHE_DIR=\"$PWD/.uv-cache\" uv run ./.github/scripts/run-python-coverage.sh",
+  "repository_tests": {
+    "passed": 7807,
+    "skipped": 46,
+    "deselected": 86,
+    "warnings": 29,
+    "duration_seconds": 656.54
+  },
+  "focused_tests": {
+    "merge_and_sdk": 32,
+    "reasoning_contract": 6,
+    "final_sdk_diagnostics": 4
+  },
+  "ruff": "passed",
+  "diff_check": "passed",
+  "coverage_floor": {
+    "line_minimum": 80,
+    "branch_minimum": 80,
+    "result": "passed",
+    "files": {
+      "src/modules/techniques/critique.py": {
+        "covered_lines": 484,
+        "num_statements": 489,
+        "percent_covered": 98.2532751091703,
+        "percent_covered_display": "98",
+        "missing_lines": 5,
+        "excluded_lines": 0,
+        "percent_statements_covered": 98.97750511247443,
+        "percent_statements_covered_display": "99",
+        "num_branches": 198,
+        "num_partial_branches": 7,
+        "covered_branches": 191,
+        "missing_branches": 7,
+        "percent_branches_covered": 96.46464646464646,
+        "percent_branches_covered_display": "96"
+      },
+      "src/modules/techniques/review_corrections.py": {
+        "covered_lines": 90,
+        "num_statements": 91,
+        "percent_covered": 98.49624060150376,
+        "percent_covered_display": "98",
+        "missing_lines": 1,
+        "excluded_lines": 0,
+        "percent_statements_covered": 98.9010989010989,
+        "percent_statements_covered_display": "99",
+        "num_branches": 42,
+        "num_partial_branches": 1,
+        "covered_branches": 41,
+        "missing_branches": 1,
+        "percent_branches_covered": 97.61904761904762,
+        "percent_branches_covered_display": "98"
+      },
+      "src/modules/prompts/security_interpretation.py": {
+        "covered_lines": 1,
+        "num_statements": 1,
+        "percent_covered": 100.0,
+        "percent_covered_display": "100",
+        "missing_lines": 0,
+        "excluded_lines": 0,
+        "percent_statements_covered": 100.0,
+        "percent_statements_covered_display": "100",
+        "num_branches": 0,
+        "num_partial_branches": 0,
+        "covered_branches": 0,
+        "missing_branches": 0,
+        "percent_branches_covered": 100.0,
+        "percent_branches_covered_display": "100"
+      },
+      "src/modules/techniques/support_scope.py": {
+        "covered_lines": 1,
+        "num_statements": 1,
+        "percent_covered": 100.0,
+        "percent_covered_display": "100",
+        "missing_lines": 0,
+        "excluded_lines": 0,
+        "percent_statements_covered": 100.0,
+        "percent_statements_covered_display": "100",
+        "num_branches": 0,
+        "num_partial_branches": 0,
+        "covered_branches": 0,
+        "missing_branches": 0,
+        "percent_branches_covered": 100.0,
+        "percent_branches_covered_display": "100"
+      }
+    }
+  },
+  "full_coverage_report_sha256": "40dd2508a478bc8bebd82111f1157f2ea28ed713e0175a6b6c4a5159aa5a74f5",
+  "preflight": {
+    "cases": 3,
+    "wire_modes": [
+      "native",
+      "tool"
+    ],
+    "checks_passed": 6,
+    "provider_requests": 0
+  },
+  "live_requests": 0,
+  "cumulative_prior_live_requests": 196,
+  "limitations": [
+    "Scripted SDK and controller tests do not establish live semantic correctness.",
+    "The earlier filesystem response remains invalid and its live trial remains failed.",
+    "No new live allowance is authorized; the prepared protocol rejects live dispatch."
+  ]
+}

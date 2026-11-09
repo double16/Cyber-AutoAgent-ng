@@ -1,0 +1,31 @@
+{
+  "status": "running",
+  "trial": "outputs/technique_review_trials/live-matched-review-20261105-1",
+  "counts_at_checkpoint": {
+    "limit": 30,
+    "requests": 12,
+    "roles": 5
+  },
+  "completed": [
+    {
+      "case": "network-policy",
+      "arm": "baseline",
+      "status": "completed",
+      "approved": true,
+      "counts_at_completion": {
+        "limit": 30,
+        "requests": 7,
+        "roles": 3
+      }
+    }
+  ],
+  "current": "Candidate network assessor structured comparison in flight",
+  "observations": [
+    "Candidate network critic returned no blockers.",
+    "Baseline network assessor corrected its discriminator excerpt and agreed with approval."
+  ],
+  "limitations": [
+    "No overall acceptance or improvement claim.",
+    "Continue the existing run; do not reset counters or start replacement cases."
+  ]
+}

@@ -350,3 +350,30 @@ describe('App', () => {
         }
     });
 });
+
+it('ignores control sequences, debounces standalone ESC and drives the test workflow once', async () => {
+  jest.useFakeTimers(); const originalStdin = process.stdin; const originalExit = process.exit;
+  const exit = jest.fn(); let onData: any;
+  const stdin = {isTTY: false, on: (_event: string, cb: any) => {onData = cb;}, off: jest.fn()};
+  Object.defineProperty(process, 'stdin', {value: stdin, configurable: true});
+  Object.defineProperty(process, 'exit', {value: exit, configurable: true});
+  process.env.CYBER_TEST_MODE = 'true'; process.env.CYBER_TEST_EXECUTION = 'mock';
+  appState.isConfigLoaded = true; appState.activeOperation = null; modalManager.activeModal = ModalType.NONE;
+  let view!: ReactTestRenderer;
+  try {
+    const {App} = await load();
+    await act(async () => {view = TestRenderer.create(<App/>);});
+    act(() => {onData(Buffer.alloc(0)); onData(Buffer.from('\x1b[A')); onData(Buffer.from('\x1b')); onData(Buffer.from('[200~')); jest.advanceTimersByTime(200);});
+    expect(exit).not.toHaveBeenCalled();
+    expect(handleUnifiedInput).toHaveBeenCalledWith('execute');
+    const keyboard = useKeyboardHandlers.mock.calls.at(-1)![0];
+    await act(async () => keyboard.onAssessmentCancel());
+    act(() => {(globalThis as any).__inkInputHandler('', {escape: true}); onData(Buffer.from('\x1b')); jest.advanceTimersByTime(31);});
+    expect(exit).not.toHaveBeenCalled();
+    act(() => {jest.advanceTimersByTime(1600); (globalThis as any).__inkInputHandler('\x1b', {}); (globalThis as any).__inkInputHandler('', {escape: true}); jest.advanceTimersByTime(300);});
+    expect(exit).toHaveBeenCalledTimes(1);
+  } finally {
+    act(() => view.unmount()); Object.defineProperty(process, 'stdin', {value: originalStdin, configurable: true}); Object.defineProperty(process, 'exit', {value: originalExit, configurable: true});
+    delete process.env.CYBER_TEST_MODE; delete process.env.CYBER_TEST_EXECUTION; jest.useRealTimers();
+  }
+});

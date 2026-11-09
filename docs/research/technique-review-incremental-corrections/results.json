@@ -1,0 +1,63 @@
+{
+  "status": "offline_verified_live_unverified",
+  "live_requests": 0,
+  "cumulative_prior_live_requests": 180,
+  "model": "none; scripted SDK responses only",
+  "hashes": {
+    "src/modules/techniques/critique.py": "7c88a7512996052c8ec88b3af9be8f35a946ec5a1f12168b9ce365c2df00b7d6",
+    "src/modules/techniques/review_corrections.py": "ae64d9eeee53f68f9faacfd0046d494e1a3d4f8f8ee2d71423906e36e7fdd818",
+    "tests/techniques/test_review_corrections.py": "b13098628478899f292c4734488c7a79162be188c6d54f6334ac2a243e557d96",
+    "tests/techniques/test_structured_roles.py": "74eeb76cd558013230e04d7055804343becf6598f55a7634a1c6a54788731362"
+  },
+  "preimage_critique_sha256": "6c7e81e5b460de69cd4e7ba793c68152654b42e5e28138d0a9acc9b520942999",
+  "coverage": {
+    "src/modules/techniques/critique.py": {
+      "covered_lines": 482,
+      "num_statements": 487,
+      "percent_covered": 98.24817518248175,
+      "percent_covered_display": "98",
+      "missing_lines": 5,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.97330595482546,
+      "percent_statements_covered_display": "99",
+      "num_branches": 198,
+      "num_partial_branches": 7,
+      "covered_branches": 191,
+      "missing_branches": 7,
+      "percent_branches_covered": 96.46464646464646,
+      "percent_branches_covered_display": "96"
+    },
+    "src/modules/techniques/review_corrections.py": {
+      "covered_lines": 70,
+      "num_statements": 71,
+      "percent_covered": 98.01980198019803,
+      "percent_covered_display": "98",
+      "missing_lines": 1,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.59154929577464,
+      "percent_statements_covered_display": "99",
+      "num_branches": 30,
+      "num_partial_branches": 1,
+      "covered_branches": 29,
+      "missing_branches": 1,
+      "percent_branches_covered": 96.66666666666667,
+      "percent_branches_covered_display": "97"
+    }
+  },
+  "regression_result": {
+    "passed": 2289,
+    "skipped": 18
+  },
+  "sdk_round_trip": {
+    "passed": 2,
+    "modes": [
+      "native",
+      "tool"
+    ]
+  },
+  "limitations": [
+    "No new semantic acceptance result.",
+    "One shared correction remains; an assessor contract repair can exhaust it before a critic semantic repair.",
+    "Legacy and experimental correctness paths are unchanged."
+  ]
+}

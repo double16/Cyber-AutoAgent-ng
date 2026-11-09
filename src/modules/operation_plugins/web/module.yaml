@@ -30,10 +30,15 @@ module_interface:
   finding_categories: ["web-vulnerabilities", "authentication-flaws", "business-logic", "injection-vulnerabilities", "xss-bypasses", "idor-discoveries", "auth-bypasses", "injection-points", "file-traversal", "ssrf"]
 planning:
   phase_metadata_contracts:
+    - phase_id: 1
+      task_creation_mode: standard
+      technique_contexts: [reconnaissance]
     - phase_id: 2
       task_creation_mode: snapshot_dependent
+      technique_contexts: [execution]
     - phase_id: 3
       task_creation_mode: snapshot_dependent
+      technique_contexts: [vulnerability_verification]
   phase_task_contracts:
     - phase_id: 1
       mode: fanout_with_synthesis
@@ -75,3 +80,13 @@ planning:
         - unauthenticated_baseline
         - authenticated_credential_coverage
         - authorization_comparison
+
+technique_sources:
+  mode: append
+  sites:
+    - https://portswigger.net/web-security
+    - https://book.hacktricks.wiki/
+    - https://owasp.org/www-project-web-security-testing-guide/
+    - https://portswigger.net/research
+    - https://github.com/swisskyrepo/PayloadsAllTheThings
+    - https://cheatsheetseries.owasp.org/

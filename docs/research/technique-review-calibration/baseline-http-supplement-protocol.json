@@ -1,0 +1,13 @@
+{
+  "status": "prepared",
+  "scope": "baseline HTTP only",
+  "authorization": "User allowed more budget to run baseline HTTP review",
+  "additional_provider_request_cap": 10,
+  "additional_role_invocation_cap": 10,
+  "execution": "sequential",
+  "baseline_code_identity": "6bb093ec50ff6a9b0188f72322dc3fe9172917829414a9c9d78c1726b16dc6f7",
+  "subject_sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+  "original_trial_status": "30 requests exhausted; preserved",
+  "prompt_changes": false,
+  "replacement_of_failed_trial": false
+}

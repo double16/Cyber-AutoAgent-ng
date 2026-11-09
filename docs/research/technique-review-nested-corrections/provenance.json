@@ -1,0 +1,25 @@
+{
+  "baseline_runtime_identity": "471e84ddff8538acd3498e6517e9eae47073ebb8c14d81e85f7a89288d65fd74",
+  "baseline_reconstruction_verified": true,
+  "candidate_runtime_identity": "13223f87e76f1e83761277f3ee26d0936546378df227a8c9385af4a2811a6f46",
+  "source_hashes": {
+    "src/modules/techniques/critique.py": {
+      "before": "7c88a7512996052c8ec88b3af9be8f35a946ec5a1f12168b9ce365c2df00b7d6",
+      "after": "a4a83373f187b197967721f251ceb1e54df86359b5b83ca322856cedce17f82b"
+    },
+    "src/modules/techniques/review_corrections.py": {
+      "before": "ae64d9eeee53f68f9faacfd0046d494e1a3d4f8f8ee2d71423906e36e7fdd818",
+      "after": "f2e1ca8d8e380342d8e08a84abbfbd61a37e536cceaa11f7da0721cbb3c3019d"
+    },
+    "src/modules/prompts/security_interpretation.py": {
+      "before": "95832ea103e15c0ad396c9bd274c7b90a1301919738c449966a927c851d4c43a",
+      "after": "3c343aba36aeefed7826dc24323461df52598f46dbe06d61dec1c8b2e8107d6d"
+    },
+    "src/modules/techniques/support_scope.py": {
+      "before": "393092e7721c429cfcaf01c827852137a177bda1598ffb0e76cabd758a582f58",
+      "after": "efa13ec07eb6e3f3db9d16cbda576c33cb19800f301dc2c7b2805a26bb6c3c8c"
+    }
+  },
+  "live_requests": 0,
+  "prior_live_requests": 196
+}

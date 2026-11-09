@@ -221,6 +221,7 @@ class AgentRuntimeResources:
     structured_output_fallbacks: dict[str, str] = field(default_factory=dict)
     termination_policy: str = ""
     provider_capture_directory: Path | None = None
+    technique_service: Any = None
 
 
 def _tool_names(tools: list[Any]) -> set[str]:
@@ -618,7 +619,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
 
     web_search_instructions = """
 **Purpose**
-  - external intel, OSINT, NVD/CVE, Exploit‑DB, vendor advisories, Shodan/Censys, VirusTotal; save query and result artifacts and cite them as research context for hypothesis and test design or as evidence when applicable.
+  - target-specific public intel and OSINT; save query and result artifacts and cite them as research context.
+  - use get_technique for reusable methodology, CVE verification, and tool guidance when available.
   - NOT for: Do not run published proof-of-concepts; use them only to understand conditions and design an authorized test.
 """
     selected_web_search = (
@@ -628,6 +630,10 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     )
     tool_append_description(selected_web_search, web_search_instructions)
     builtin_tools_list.append(selected_web_search)
+
+    from modules.techniques.bootstrap import operation_techniques
+
+    technique_service = operation_techniques(memory_client, config, selected_web_search, synchronize=False)
 
 
     logger.info(f"Built-in tools available for allow listing by module: {[get_tool_name(tool) for tool in builtin_tools_list]}")
@@ -642,6 +648,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         load_tool,
         store_observation,
         store_knowledge,
+        technique_service.tool(),
         store_finding,
         record_finding_validation,
         store_objective_candidate,
@@ -867,6 +874,10 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         },
     )
     set_memory_event_emitter(callback_handler.emit_ui_event)
+    technique_service.events.callback = callback_handler.emit_ui_event
+    technique_service.events.private_values = technique_service.private_values
+    with technique_service.events.scope(operation_id=operation_id):
+        technique_service.synchronize_module(prompts.get_module_loader(), config.module)
 
     sdk_context_manager = (config_manager.getenv("CYBER_SDK_CONTEXT_MANAGER", "false") or "false").strip().lower()
     if sdk_context_manager in {"", "0", "false", "none", "off", "disabled"}:
@@ -1079,6 +1090,8 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
         base_trace_attributes = trace_attributes,
     )
     init_agent_factory(agent_factory_config)
+    technique_service.runner.callback_factory = create_subagent_callback_handler
+    technique_service.runner.hooks = subagent_hooks
 
     # Register these in case something gets missed, strands will default to our config
     os.environ["STRANDS_PROVIDER"] = config.provider
@@ -1089,6 +1102,7 @@ For all tools that make HTTP requests, include these bug bounty traffic HTTP hea
     os.environ["STRANDS_HTTP_ALLOW_INSECURE_SSL"] = "true"
 
     return AgentRuntimeResources(
+        technique_service=technique_service,
         config=config,
         operation_id=operation_id,
         server_config=server_config,
@@ -1252,6 +1266,12 @@ def create_agent(
         "load_tools_from_directory": tools is None,
         "trace_attributes": trace_attributes,
     }
+    from modules.techniques.triggers import TechniqueObservationHook
+
+    for selected_tool in agent_kwargs["tools"]:
+        technique_context = getattr(selected_tool, "_cyber_technique_context", None)
+        if technique_context is not None:
+            agent_kwargs["hooks"] = [*(agent_kwargs["hooks"] or []), TechniqueObservationHook(technique_context)]
     if model_uses_server_side_state(model):
         agent_logger.info(
             "Skipping local conversation manager for stateful model '%s'; "

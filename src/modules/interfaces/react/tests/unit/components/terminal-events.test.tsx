@@ -164,7 +164,7 @@ describe('Terminal event processing', () => {
 
         act(() => {
             cleanupRef.current?.();
-            service.emit('complete');
+            act(() => service.emit('complete'));
             service.emit('stopped');
             view.update(
                 <Terminal
@@ -985,4 +985,152 @@ describe('Terminal event processing', () => {
             view.unmount();
         });
     });
+});
+
+it('handles mixed tool contracts, repeated output, streamed corrections and evaluation termination', async () => {
+  jest.useFakeTimers(); process.env.CYBER_TEST_MODE = 'true';
+  const {Terminal} = await load(); const service = new MockExecutionService(); const onEvent = jest.fn();
+  let view!: ReactTestRenderer;
+  await act(async () => {view = TestRenderer.create(<Terminal executionService={service as any} sessionId="edge" onEvent={onEvent} animationsEnabled={false}/>);});
+  const emit = async (event: any, delay = 350) => {
+    await act(async () => {service.emit('event', event); await jest.advanceTimersByTimeAsync(delay);});
+  };
+  try {
+    await emit({type: 'output', content: 'startup'});
+    await emit({type: 'operation_init', operation_id: 'OP_EDGE', target: 'target'});
+    await emit({type: 'progress_update', step: 1, health: {score: 0.5}});
+    await emit({type: 'thinking', context: 'waiting'});
+    await emit({type: 'thinking_end'});
+    await emit({type: 'delayed_thinking_start', delay: 1});
+    await emit({type: 'model_invocation_start'});
+    await emit({type: 'reasoning', content: 'reasoning'});
+    await emit({type: 'reasoning', content: 'reasoning'});
+    await emit({type: 'reasoning', content: ' '});
+    await emit({type: 'tool_start', tool_name: 'shell', tool_id: 'shell-1', tool_input: {command: 'pwd'}});
+    await emit({type: 'tool_input_update', tool_id: 'shell-1', tool_input: {command: 'ls'}});
+    await emit({type: 'tool_input_corrected', tool_id: 'shell-1', tool_input: {command: 'whoami'}});
+    await emit({type: 'tool_invocation_start', toolName: 'shell'});
+    await emit({type: 'shell_command', command: 'ls'});
+    await emit({type: 'command', content: 'pwd'});
+    await emit({type: 'output', content: 'output\nactual data', metadata: {fromToolBuffer: true}});
+    await emit({type: 'output', content: 'actual data'}, 5);
+    await emit({type: 'output', content: 'actual data and more'}, 5);
+    await emit({type: 'output', content: 'actual data and more'}, 5);
+    await emit({type: 'output', content: 'output'});
+    await emit({type: 'output', content: '', metadata: {tool: 'shell'}});
+    await emit({type: 'output', content: 'synthetic', metadata: {syntheticToolStart: true}});
+    await emit({type: 'tool_end', toolId: 'shell-1', toolName: 'shell', success: false});
+    await emit({type: 'tool_invocation_end', success: false});
+    await emit({type: 'metrics_update', metrics: {tokens: 20, cost: 0.1, cacheReadTokens: 1, cacheWriteTokens: 2}});
+    await emit({type: 'prompt_change', overlay: '{}'});
+    await emit({type: 'rate_limit', retry_after: 1});
+    await emit({type: 'progress_update', operation_stage: 'ragas_evaluation'});
+    await emit({type: 'evaluation_step_complete', status: 'failed', message: 'failed metric'});
+    await emit({type: 'evaluation_complete', success: false});
+    await emit({type: 'operation_terminated', termination_reason: 'budget_limit'});
+    await emit({type: 'operation_finalized', report_status: 'completed'});
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({type: 'operation_finalized'}));
+    expect(service.listenerCount('event')).toBe(1);
+  } finally {act(() => view.unmount()); delete process.env.CYBER_TEST_MODE; jest.useRealTimers();}
+});
+
+it('bounds circular, deep, wide and unserializable event payloads', async () => {
+  const {estimateDisplayEventBytes, trimDisplayEventForMemory, buildTrimmedReportContent} = await load();
+  expect(estimateDisplayEventBytes(null)).toBe(0);
+  const cycle: any = {text: 'x'.repeat(9000)}; cycle.self = cycle;
+  let deep: any = {value: 'x'.repeat(9000)}; for (let i = 0; i < 8; i++) deep = {nested: deep};
+  const unreadable = Object.defineProperty({}, 'value', {enumerable: true, get() {throw new Error('unreadable');}});
+  for (const value of [null, false, 3, () => {}, cycle, deep, unreadable, Array.from({length: 250}, () => 'x'.repeat(1000))]) {
+    const event = {type: 'output', content: value, output: value, metadata: value, input: value} as any;
+    expect(estimateDisplayEventBytes(event)).toBeGreaterThan(0);
+    expect(trimDisplayEventForMemory(event)).toBeDefined();
+  }
+  expect(trimDisplayEventForMemory({type: 'report_content', content: 'short'} as any)).toMatchObject({content: 'short'});
+  expect(buildTrimmedReportContent(null as any)).toBe('');
+});
+it('aggregates large tool fragments and coalesces metrics with trailing updates', async () => {
+  jest.useFakeTimers(); const {Terminal} = await load(); const service = new MockExecutionService(); const metrics = jest.fn();
+  let view!: ReactTestRenderer;
+  await act(async () => {view = TestRenderer.create(<Terminal executionService={service as any} sessionId="buffer" onMetricsUpdate={metrics}/>);});
+  const emit = (event: any) => act(() => service.emit('event', event));
+  try {
+    emit({type: 'metrics_update', metrics: {tokens: 1, duration: '1s'}});
+    await act(async () => jest.advanceTimersByTimeAsync(110));
+    emit({type: 'metrics_update', metrics: {tokens: 2, memoryOps: 1, evidence: 2, progressPercent: 3}});
+    emit({type: 'metrics_update', metrics: {tokens: 3}});
+    await act(async () => jest.advanceTimersByTimeAsync(400));
+    expect(metrics).toHaveBeenCalledWith(expect.objectContaining({tokens: 2}));
+    emit({type: 'progress_update', step: 1});
+    emit({type: 'tool_start', tool_name: 'shell', toolId: 'large'});
+    for (const content of ['x'.repeat(6000), 'small', 'y'.repeat(8000), 'tail']) {
+      emit({type: 'output', content, metadata: {fromToolBuffer: true}});
+      await act(async () => jest.advanceTimersByTimeAsync(5));
+    }
+    emit({type: 'progress_update', step: 2});
+    for (let i = 0; i < 25; i++) emit({type: 'reasoning', content: `reason-${i}`});
+    emit({type: 'reasoning', content: 'x'.repeat(130000)});
+    emit({type: 'tool_start', tool_name: 'shell', tool_id: 'second'});
+    emit({type: 'tool_start', tool_name: 'shell', tool_id: 'second'});
+    emit({type: 'tool_end', tool_id: 'second', success: true});
+    emit({type: 'operation_complete', metrics: {tokens: 5}});
+    await act(async () => jest.advanceTimersByTimeAsync(1000));
+    service.emit('complete');
+    expect(service.listenerCount('event')).toBe(1);
+  } finally {act(() => view.unmount()); jest.useRealTimers();}
+});
+
+it('prunes under heap pressure and preserves bounded final-report buffers across sessions', async () => {
+  jest.useFakeTimers(); const env = {...process.env}; const originalGc = global.gc;
+  process.env.CYBER_HEAP_SOFT_LIMIT_MB = '1'; process.env.CYBER_MAX_GLOBAL_OUTPUT_FINGERPRINTS = '2';
+  process.env.CYBER_MAX_TOOL_OUTPUT_FINGERPRINTS = '2'; process.env.CYBER_MAX_TOOL_DEDUPE_SESSIONS = '2';
+  process.env.CYBER_MAX_OPERATION_SUMMARY_EVENTS = '2'; process.env.CYBER_MAX_FINAL_REPORT_EVENT_BYTES = '1000';
+  const memory = jest.spyOn(process, 'memoryUsage').mockReturnValue({heapUsed: 10 * 1024 * 1024} as any);
+  const gc = jest.fn(); global.gc = gc;
+  const {Terminal} = await load(); const service = new MockExecutionService(); const cleanupRef = {current: null as any}; let view!: ReactTestRenderer;
+  await act(async () => {view = TestRenderer.create(<Terminal executionService={service as any} sessionId="pressure" cleanupRef={cleanupRef}/>);});
+  const emit = async (event: any) => {await act(async () => {service.emit('event', event); await jest.advanceTimersByTimeAsync(100);});};
+  try {
+    for (let i = 0; i < 5; i++) await emit({type: 'output', content: `unique global ${i}`});
+    for (let i = 0; i < 4; i++) {
+      await emit({type: 'tool_start', tool_name: 'shell', toolId: `tool-${i}`});
+      for (let j = 0; j < 4; j++) await emit({type: 'output', content: `tool-${i} chunk-${j}`});
+    }
+    await emit({type: 'progress_update', step: 3});
+    for (let i = 0; i < 4; i++) await emit({type: 'output', content: `Report saved to: /tmp/${i}`});
+    await emit({type: 'progress_update', step: 'FINAL REPORT'});
+    await emit({type: 'report_content', content: {summary: 'summary'}});
+    const cycle: any = {}; cycle.self = cycle;
+    await emit({type: 'report_content', content: cycle});
+    await emit({type: 'assessment_complete'});
+    await act(async () => jest.advanceTimersByTimeAsync(9000));
+    expect(memory).toHaveBeenCalled(); expect(gc).toHaveBeenCalled();
+    act(() => cleanupRef.current());
+    act(() => view.update(<Terminal executionService={service as any} sessionId="next" collapsed/>));
+    expect(service.listenerCount('event')).toBe(1);
+  } finally {act(() => view.unmount()); process.env = env; global.gc = originalGc; jest.restoreAllMocks(); jest.useRealTimers();}
+});
+
+it('handles stop notifications, flushes pending tool output and accepts sparse lifecycle metadata', async () => {
+  jest.useFakeTimers(); const {Terminal, trimDisplayEventForMemory, estimateDisplayEventBytes} = await load();
+  const service = new MockExecutionService(); const observed = jest.fn(); let view!: ReactTestRenderer;
+  await act(async () => {view = TestRenderer.create(<Terminal executionService={service as any} sessionId="stop" onEvent={observed}/>);});
+  const emit = async (event: any) => {await act(async () => {service.emit('event', event); await jest.advanceTimersByTimeAsync(100);});};
+  try {
+    await emit({type: 'operation_init'});
+    await emit({type: 'workflow_activity', action: 'prepare', task_title: 'Task', status: 'running'});
+    await emit({type: 'workflow_activity', action: 'prepare', task_title: 'Task', status: 'completed'});
+    await emit({type: 'workflow_activity'});
+    await emit({type: 'tool_start', tool_name: 'shell', toolId: 'flush'});
+    await emit({type: 'output', content: 'unflushed tool stdout', metadata: {fromToolBuffer: true}});
+    act(() => service.emit('complete'));
+    await emit({type: 'output', content: 'after completion'});
+    act(() => service.emit('stopped'));
+    for (const content of ['ESC Kill Switch activated', 'OPERATION TERMINATED BY USER', '──────────────────', 'unrelated message']) await emit({type: 'output', content});
+    expect(observed).toHaveBeenCalledWith(expect.objectContaining({content: 'unrelated message'}));
+    const wide = {content: 'x'.repeat(9000), values: [null, 1, false, () => {}, 1n]};
+    expect(estimateDisplayEventBytes({type: 'output', content: wide} as any)).toBeGreaterThan(9000);
+    expect((trimDisplayEventForMemory({type: 'output', content: wide} as any) as any).content.preview).toContain('Unserializable');
+    const deep = {content: 'x'.repeat(9000), nested: {a: {b: {c: {d: {}}}}}};
+    expect((trimDisplayEventForMemory({type: 'output', content: deep} as any) as any).content.preview).toContain('[Object]');
+  } finally {act(() => view.unmount()); jest.useRealTimers();}
 });

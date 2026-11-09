@@ -1,0 +1,1890 @@
+{
+  "status": "budget_exhausted_no_pipeline_completions",
+  "frozen_identity": {
+    "runtime": "18645fefbabc51036161a43982c13f5cd072c0c021a22e4b891dcc7f1826adff",
+    "cases": [
+      {
+        "id": "generate-network",
+        "input_sha256": "aa3a6fda4e09235fb8a0e9f03aa082b4f7a151bab08c52c030e8f45f96937aff"
+      },
+      {
+        "id": "generate-filesystem",
+        "input_sha256": "dcff606774882fd7fa35cef07ca1f7ea53f85a8fa641ca80503d5d8b15716fd3"
+      },
+      {
+        "id": "generate-http",
+        "input_sha256": "b06fe67be9930b71c37b307fd4e26fa843217a46463619d2fb7bc4c6910e38fc"
+      }
+    ],
+    "provider": "ollama",
+    "model": "muse-glimmer:30b"
+  },
+  "results": {
+    "counts": {
+      "limit": 30,
+      "requests": 30,
+      "roles": 20
+    },
+    "outcomes": [
+      {
+        "case": "generate-network",
+        "status": "unresolved",
+        "error_type": "ValueError",
+        "error": "Critique assessment failed after one correction: Critique disagreement: {\"interpretation_reviews\":[{\"interpretation_index\":0,\"draft_references\":[\"da0191fe62909:b49\",\"da0191fe62909:b50\",\"da0191fe62909:b51\",\"da0191fe62909:b8\",\"da0191fe62909:b9\",\"da0191fe62909:b36\",\"da0191fe62909:b37\",\"da0191fe62909:b38\",\"da0191fe62909:b39\"],\"permitted_counterexample\":\"A policy-compliant scenario where the bound identity is authorized for the service and the first packet is passed, creating state, and subsequent packets are handled by the stateful engine without re-evaluation against the ordered rule set, producing the same observation of state creation and subsequent packet acceptance as the draft labels legitimate. The observation of subsequent packets following state is also produced when the implementation re-evaluates each packet against policy and still permits it because the policy permits it, i.e., the same observable acceptance occurs while the policy is enforced.\",\"counterexample_matches_check\":true,\"control_excludes_counterexample\":false,\"control_references\":[\"da0191fe62909:b49\",\"da0191fe62909:b50\",\"da0191fe62909:b51\",\"da0191fe62909:b8\",\"da0191fe62909:b9\",\"da0191fe62909:b36\",\"da0191fe62909:b37\",\"da0191fe62909:b38\",\"da0191fe62909:b39\"],\"actual_discriminator\":\"Statefulness control: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy. b38\",\"critic_correct\":false}],\"critic_supported\":false,\"reason\":\"Critic correctly identifies unsupported subsequent-packet handling claim and source attribution overclaim, but its interpretation retains the unsupported legitimate outcome that subsequent packets follow established state without re-evaluation and treats that as a distinguishing control. The interpretation therefore does not distinguish legitimate behavior from boundary violations on supported facts, and the critic fails to flag material operational defects present in the draft: the Execute Comparison step allows identity binding B for variation while prerequisites require ",
+        "input_sha256": "aa3a6fda4e09235fb8a0e9f03aa082b4f7a151bab08c52c030e8f45f96937aff",
+        "counts": {
+          "limit": 30,
+          "requests": 13,
+          "roles": 9
+        },
+        "human_adjudication": "pending"
+      },
+      {
+        "case": "generate-filesystem",
+        "status": "unresolved",
+        "error_type": "CalibrationBudgetExhausted",
+        "error": "Cumulative calibration allowance exhausted",
+        "input_sha256": "dcff606774882fd7fa35cef07ca1f7ea53f85a8fa641ca80503d5d8b15716fd3",
+        "counts": {
+          "limit": 30,
+          "requests": 30,
+          "roles": 20
+        },
+        "human_adjudication": "pending"
+      },
+      {
+        "case": "generate-http",
+        "status": "unattempted_budget_exhausted"
+      }
+    ]
+  },
+  "events": [
+    {
+      "case_index": "00",
+      "events": [
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "request_alignment",
+          "status": "completed",
+          "original_request": "Describe a reusable policy-based connectivity comparison with identity binding, controls and evidence requirements. No target execution or particular command syntax is requested.",
+          "adjusted_request": "Describe a reusable policy-based connectivity comparison with identity binding, controls and evidence requirements. No target execution or particular command syntax is requested.",
+          "phase_contexts": [],
+          "objectives": {},
+          "reason": "Phase unknown; preserve the explicit request without inferring a phase."
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "role": "technique_judge",
+          "expected_schema": "LookupDecision",
+          "call_id": "f41919b2-2ba8-4452-a579-65fd5adcd394",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 30.574
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "status": "started",
+          "stage": "research"
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "research",
+          "status": "completed",
+          "elapsed_seconds": 0.0
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "status": "started",
+          "stage": "source_selection"
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "source_selection",
+          "correction_attempt": 0,
+          "retained_assessment": false,
+          "source_url": "https://man.openbsd.org/pf.conf",
+          "role": "technique_source_assessor",
+          "expected_schema": "SourceAssessment",
+          "call_id": "0f2cb18f-7d54-43a2-8c8e-b08f81eb88c4",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 48.396
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "source_selection",
+          "correction_attempt": 0,
+          "retained_assessment": false,
+          "source_url": "https://man.openbsd.org/pf.conf",
+          "assessment_substage": "technique_source_assessor",
+          "status": "validated"
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "source_selection",
+          "correction_attempt": 0,
+          "requirement_id": "method",
+          "retained_assessment": false,
+          "source_url": "https://man.openbsd.org/pf.conf",
+          "role": "technique_requirement_assessor",
+          "expected_schema": "AssessedSupport",
+          "call_id": "feebe35e-1547-4b71-a6e4-b974c6d8534e",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 74.106
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "source_selection",
+          "correction_attempt": 0,
+          "requirement_id": "method",
+          "retained_assessment": false,
+          "source_url": "https://man.openbsd.org/pf.conf",
+          "assessment_substage": "technique_requirement_assessor",
+          "status": "validated"
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "source_selection",
+          "status": "source_assessed",
+          "source_url": "https://man.openbsd.org/pf.conf",
+          "source_decision": "retained",
+          "reason": "The current document is an authoritative primary source for OpenBSD pf configuration semantics. The retained excerpts provide at least one relevant supported technical fact about policy evaluation order and state creation that can support original procedural synthesis for a reusable policy-based connectivity comparison. Identity binding, specific controls and evidence requirements are not covered in the retained excerpts and remain limitations. Authority for the document's own relevant contributions is sufficient; coverage of the full request is assessed separately."
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "source_selection",
+          "status": "completed",
+          "elapsed_seconds": 122.506,
+          "fetched_count": 1,
+          "selected_count": 1
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "status": "started",
+          "stage": "coverage_review"
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "coverage_review",
+          "correction_attempt": 0,
+          "requirement_id": "method",
+          "retained_assessment": true,
+          "role": "technique_requirement_reviewer",
+          "expected_schema": "AssessedSupport",
+          "call_id": "46ac6e9f-1aad-4adc-8a75-2a4eea8c2aed",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 101.963
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "source_selection",
+          "correction_attempt": 0,
+          "requirement_id": "method",
+          "retained_assessment": true,
+          "assessment_substage": "technique_requirement_reviewer",
+          "status": "validated"
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "coverage_review",
+          "status": "completed",
+          "elapsed_seconds": 101.964
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "research_round": 1,
+          "stage": "coverage_review",
+          "status": "completed",
+          "sufficient": true,
+          "reason": "Retained 1 sources. Latest source assessment: The current document is an authoritative primary source for OpenBSD pf configuration semantics. The retained excerpts provide at least one relevant supported technical fact about policy evaluation order and state creation that can support original procedural synthesis for a reusable policy-based connectivity comparison. Identity binding, specific controls and evidence requirements are not covered in the retained excerpts and remain limitations. Authority for the document's own relevant contributions is sufficient; coverage of the full request is assessed separately.",
+          "coverage": [
+            {
+              "requirement_id": "method",
+              "source_urls": [
+                "https://man.openbsd.org/pf.conf"
+              ],
+              "explanation": "The retained pf.conf excerpts provide authoritative support for policy evaluation precedence and stateful tracking that can anchor a reusable comparison methodology. The last-matching-rule semantics supports policy-based decision ordering for baseline vs variation tests, and first-packet state creation supports evidence requirements around stateful observation. Identity binding, specific controls and detailed evidence collection can be described generically as procedural prerequisites and future validation steps without asserting unsupported pf mechanisms, so the supported facts are sufficient to author the requested reusable guidance.",
+              "authority_sufficient": true,
+              "claim_support": [
+                {
+                  "claim": "pf evaluates rules in order and the last matching rule decides the action taken, enabling policy-based connectivity decisions.",
+                  "source_urls": [
+                    "https://man.openbsd.org/pf.conf"
+                  ],
+                  "authority_basis": "OpenBSD pf.conf manual is the authoritative primary source for pf rule evaluation semantics."
+                },
+                {
+                  "claim": "The first time a packet matches a pass rule a state entry is created, providing a stateful tracking basis for baseline and variation observations.",
+                  "source_urls": [
+                    "https://man.openbsd.org/pf.conf"
+                  ],
+                  "authority_basis": "OpenBSD pf.conf manual describes state creation behavior for pass rules."
+                }
+              ],
+              "authoring_obligations": [],
+              "synthesis": "",
+              "gaps": [],
+              "future_validation": [
+                "Establish intended policy and baseline connectivity for the specific identity context during future application.",
+                "Confirm rule precedence and state creation behavior in the target pf version and configuration.",
+                "Collect baseline and controlled variation observations with state table evidence to distinguish legitimate vs prohibited outcomes."
+              ]
+            }
+          ]
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "status": "started",
+          "stage": "authoring",
+          "attempt": 1
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "authoring",
+          "attempt": 1,
+          "role": "technique_author",
+          "expected_schema": "AuthoredTechnique",
+          "call_id": "0a37d785-d059-45de-8002-0dd699c9b165",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 106.796
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "authoring",
+          "attempt": 1,
+          "status": "completed",
+          "elapsed_seconds": 106.796
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "status": "started",
+          "stage": "critique",
+          "attempt": 1
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "status": "review_snapshot",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "draft_reference_count": 78
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "role": "technique_critic",
+          "expected_schema": "Critique",
+          "call_id": "660a6777-72e7-4bda-abe3-9d06061428cc",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 304.668
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "status": "issues_validated",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "issues": [],
+          "source_inspection": [
+            {
+              "url": "https://man.openbsd.org/pf.conf",
+              "characters": 146,
+              "inspected_intervals": []
+            }
+          ]
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "role": "technique_critique_assessor",
+          "expected_schema": "IssueAssessment",
+          "call_id": "4814eda9-93cc-4aac-992d-13a15dbd9b68",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 408.908
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique_assessment",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "status": "control_references_resolved",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "interpretation_index": 0,
+          "provided_references": [
+            "da0191fe62909:b49",
+            "da0191fe62909:b50",
+            "da0191fe62909:b51",
+            "da0191fe62909:b8",
+            "da0191fe62909:b9",
+            "da0191fe62909:b36",
+            "da0191fe62909:b37",
+            "da0191fe62909:b38",
+            "da0191fe62909:b39"
+          ],
+          "resolved_references": [
+            "da0191fe62909:b49",
+            "da0191fe62909:b50",
+            "da0191fe62909:b51",
+            "da0191fe62909:b8",
+            "da0191fe62909:b9",
+            "da0191fe62909:b36",
+            "da0191fe62909:b37",
+            "da0191fe62909:b38",
+            "da0191fe62909:b39"
+          ],
+          "resolved_records": [
+            {
+              "reference": "da0191fe62909:b49",
+              "path": "body.line[49]",
+              "value": "- Legitimate behavior: outcome matches documented policy for the bound identity and state creation follows first-packet pass semantics."
+            },
+            {
+              "reference": "da0191fe62909:b50",
+              "path": "body.line[50]",
+              "value": "- Boundary violation hypothesis: outcome differs from policy for the bound identity, or state is created/maintained contrary to policy, or identity binding is bypassed."
+            },
+            {
+              "reference": "da0191fe62909:b51",
+              "path": "body.line[51]",
+              "value": "Interpretation must be conditioned on established policy and binding; do not infer violation from outcome alone."
+            },
+            {
+              "reference": "da0191fe62909:b8",
+              "path": "body.line[8]",
+              "value": "1. **Policy definition**: Documented intended allow/deny decisions per identity attribute, service, and direction. Policy must be expressed as ordered rules where evaluation precedence is defined."
+            },
+            {
+              "reference": "da0191fe62909:b9",
+              "path": "body.line[9]",
+              "value": "2. **Identity binding model**: Explicit mapping of identity attributes to enforcement points, e.g., source identifier, user context, device tag. The binding mechanism and its trust assumptions must be stated."
+            },
+            {
+              "reference": "da0191fe62909:b36",
+              "path": "body.line[36]",
+              "value": "- **Identity isolation control**: Repeat test with a different identity that should map to a different policy outcome to verify binding is effective."
+            },
+            {
+              "reference": "da0191fe62909:b37",
+              "path": "body.line[37]",
+              "value": "- **Order sensitivity control**: If policy allows, test with a non-matching rule preceding a matching rule to confirm last-matching-rule precedence."
+            },
+            {
+              "reference": "da0191fe62909:b38",
+              "path": "body.line[38]",
+              "value": "- **Statefulness control**: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy."
+            },
+            {
+              "reference": "da0191fe62909:b39",
+              "path": "body.line[39]",
+              "value": "- **Negative control**: Test a known denied identity-service pair to confirm denial is observable."
+            }
+          ],
+          "correction_number": 0
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique_assessment",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "status": "assessed",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "proposed_decision": true,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "interpretation_index": 0,
+                "draft_references": [
+                  "da0191fe62909:b49",
+                  "da0191fe62909:b50",
+                  "da0191fe62909:b51",
+                  "da0191fe62909:b8",
+                  "da0191fe62909:b9",
+                  "da0191fe62909:b36",
+                  "da0191fe62909:b37",
+                  "da0191fe62909:b38",
+                  "da0191fe62909:b39"
+                ],
+                "permitted_counterexample": "Policy is established and binding is enforced, but the observed outcome differs from the documented policy because the policy artifact version used for the comparison is stale relative to the enforcement point. The same observation 'outcome differs from documented policy for the bound identity' occurs, yet the difference is due to an undocumented policy change, not a boundary violation.",
+                "counterexample_matches_check": true,
+                "control_excludes_counterexample": false,
+                "control_references": [
+                  "da0191fe62909:b49",
+                  "da0191fe62909:b50",
+                  "da0191fe62909:b51",
+                  "da0191fe62909:b8",
+                  "da0191fe62909:b9",
+                  "da0191fe62909:b36",
+                  "da0191fe62909:b37",
+                  "da0191fe62909:b38",
+                  "da0191fe62909:b39"
+                ],
+                "actual_discriminator": "Interpretation must be conditioned on established policy and binding; do not infer violation from outcome alone. Legitimate behavior: outcome matches documented policy for the bound identity and state creation follows first-packet pass semantics. Boundary violation hypothesis: outcome differs from policy for the bound identity, or state is created/maintained contrary to policy, or identity binding is bypassed.",
+                "critic_correct": false
+              }
+            ],
+            "critic_supported": false,
+            "reason": "Critic approves the document as fully satisfying acceptance criteria. Independent inspection finds an unsupported asserted factual mechanism about subsequent-packet handling and statefulness, over-claimed source support in metadata, and incomplete attribution. The critic therefore misses material technical-support and attribution defects and incorrectly judges interpretation support.",
+            "findings": [
+              {
+                "criterion_id": "core:technical_support",
+                "material_impact": "Procedure relies on an asserted mechanism that subsequent packets follow established state and are not re-evaluated against policy. Without retained support the advertised comparison cannot be reliably followed, undermining the reusable methodology.",
+                "problem": "Draft asserts subsequent packet handling follows state without re-evaluation and requires statefulness control verifying subsequent packets follow state, not re-evaluate policy. Retained pf.conf excerpts support only 'the first time a packet matches a pass rule, a state entry is created' and 'the last matching rule decides what action is taken'. No retained support for subsequent-packet behavior.",
+                "requested_correction": "Remove or qualify the unsupported claim about subsequent packets not being re-evaluated; limit statefulness control to observable first-packet state creation supported by retained sources, and note subsequent handling as implementation-specific future validation.",
+                "draft_references": [
+                  "da0191fe62909:b38",
+                  "da0191fe62909:b32",
+                  "da0191fe62909:b50"
+                ],
+                "requirement_ids": [
+                  "method"
+                ],
+                "issue_ids": []
+              },
+              {
+                "criterion_id": "core:technical_support",
+                "material_impact": "Metadata selection_reason attributes support for baseline vs variation observations and stateful tracking evidence requirements to retained excerpts, overstating source coverage and misleading readers about factual support.",
+                "problem": "metadata.sources[0].selection_reason claims the excerpts support evidence requirements around stateful tracking and baseline vs variation observations. Retained text provides only rule precedence and first-packet state creation.",
+                "requested_correction": "Revise selection_reason to accurately reflect retained support limited to rule evaluation order and first-packet state creation, and state that identity binding, specific controls and detailed evidence collection remain generic limitations.",
+                "draft_references": [
+                  "da0191fe62909:m17"
+                ],
+                "requirement_ids": [],
+                "issue_ids": []
+              },
+              {
+                "criterion_id": "core:attribution",
+                "material_impact": "Attribution of retained source is incomplete, reducing transparency about source limitations.",
+                "problem": "metadata.sources[0].retrieved_at is empty, so attribution does not accurately describe retained source.",
+                "requested_correction": "Populate retrieved_at with the retrieval timestamp or explicitly note unavailable, ensuring attribution accurately describes retained sources.",
+                "draft_references": [
+                  "da0191fe62909:m16"
+                ],
+                "requirement_ids": [],
+                "issue_ids": []
+              }
+            ]
+          },
+          "correction_number": 0,
+          "final_disposition": "disputed"
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "role": "technique_critic",
+          "expected_schema": "Critique",
+          "call_id": "890980c5-a123-426a-948d-c7a3714ba615",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 142.296
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "status": "issues_validated",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "issues": [
+            {
+              "id": "tech-support-subsequent-packet",
+              "category": "authored_content",
+              "criterion_id": "core:technical_support",
+              "material_impact": "Procedure relies on an asserted mechanism that subsequent packets follow established state and are not re-evaluated against policy. Without retained support the advertised comparison cannot be reliably followed, undermining the reusable methodology.",
+              "problem": "Draft asserts subsequent packet handling follows state without re-evaluation and requires statefulness control verifying subsequent packets follow state, not re-evaluate policy. Retained pf.conf excerpts support only 'the first time a packet matches a pass rule, a state entry is created' and 'the last matching rule decides what action is taken'. No retained support for subsequent-packet behavior.",
+              "requested_correction": "Remove or qualify the unsupported claim about subsequent packets not being re-evaluated; limit statefulness control to observable first-packet state creation supported by retained sources, and note subsequent handling as implementation-specific future validation.",
+              "requirement_ids": [
+                "method"
+              ],
+              "source_urls": [
+                "https://man.openbsd.org/pf.conf"
+              ],
+              "draft_references": [
+                "da0191fe62909:b38",
+                "da0191fe62909:b32",
+                "da0191fe62909:b50"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "- **Statefulness control**: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy.\n- Subsequent packet handling within the established state\n- Boundary violation hypothesis: outcome differs from policy for the bound identity, or state is created/maintained contrary to policy, or identity binding is bypassed.",
+              "passage_ids": [
+                "bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1"
+              ],
+              "passages": [
+                {
+                  "url": "https://man.openbsd.org/pf.conf",
+                  "start": 0,
+                  "end": 146
+                }
+              ],
+              "absence_of_support": "Retained excerpts do not describe subsequent packet handling or that packets are not re-evaluated against policy."
+            },
+            {
+              "id": "source-attribution-selection-reason-overclaim",
+              "category": "source_attribution",
+              "criterion_id": "core:technical_support",
+              "material_impact": "Metadata selection_reason attributes support for baseline vs variation observations and stateful tracking evidence requirements to retained excerpts, overstating source coverage and misleading readers about factual support.",
+              "problem": "metadata.sources[0].selection_reason claims the excerpts support evidence requirements around stateful tracking and baseline vs variation observations. Retained text provides only rule precedence and first-packet state creation.",
+              "requested_correction": "Revise selection_reason to accurately reflect retained support limited to rule evaluation order and first-packet state creation, and state that identity binding, specific controls and detailed evidence collection remain generic limitations.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://man.openbsd.org/pf.conf"
+              ],
+              "draft_references": [
+                "da0191fe62909:m17"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "OpenBSD pf.conf manual provides authoritative description of pf rule evaluation order and state creation, supporting policy-based connectivity comparison methodology. The excerpt 'the last matching rule decides what action is taken' establishes rule precedence for policy decisions, and 'the first time a packet matches a pass rule, a state entry is created' supports evidence requirements around stateful tracking and baseline vs variation observations.",
+              "passage_ids": [
+                "bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1"
+              ],
+              "passages": [
+                {
+                  "url": "https://man.openbsd.org/pf.conf",
+                  "start": 0,
+                  "end": 146
+                }
+              ],
+              "absence_of_support": ""
+            },
+            {
+              "id": "attribution-retrieved-at-missing",
+              "category": "source_attribution",
+              "criterion_id": "core:attribution",
+              "material_impact": "Attribution of retained source is incomplete, reducing transparency about source limitations.",
+              "problem": "metadata.sources[0].retrieved_at is empty, so attribution does not accurately describe retained source.",
+              "requested_correction": "Populate retrieved_at with the retrieval timestamp or explicitly note unavailable, ensuring attribution accurately describes retained sources.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://man.openbsd.org/pf.conf"
+              ],
+              "draft_references": [
+                "da0191fe62909:m16"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "",
+              "passage_ids": [
+                "bebc0239c72c87fd30b739ed0ac19e28b0c2077e70aa6c0d2f1e298eccd92bb1"
+              ],
+              "passages": [
+                {
+                  "url": "https://man.openbsd.org/pf.conf",
+                  "start": 0,
+                  "end": 146
+                }
+              ],
+              "absence_of_support": ""
+            }
+          ],
+          "source_inspection": [
+            {
+              "url": "https://man.openbsd.org/pf.conf",
+              "characters": 146,
+              "inspected_intervals": [
+                [
+                  0,
+                  146
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "role": "technique_critique_assessor",
+          "expected_schema": "IssueAssessment",
+          "call_id": "df8aea79-125f-45f8-ac92-7282333e82d5",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 312.996
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique_assessment",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "status": "control_references_resolved",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "interpretation_index": 0,
+          "provided_references": [
+            "da0191fe62909:b49",
+            "da0191fe62909:b50",
+            "da0191fe62909:b51",
+            "da0191fe62909:b8",
+            "da0191fe62909:b9",
+            "da0191fe62909:b36",
+            "da0191fe62909:b37",
+            "da0191fe62909:b38",
+            "da0191fe62909:b39"
+          ],
+          "resolved_references": [
+            "da0191fe62909:b49",
+            "da0191fe62909:b50",
+            "da0191fe62909:b51",
+            "da0191fe62909:b8",
+            "da0191fe62909:b9",
+            "da0191fe62909:b36",
+            "da0191fe62909:b37",
+            "da0191fe62909:b38",
+            "da0191fe62909:b39"
+          ],
+          "resolved_records": [
+            {
+              "reference": "da0191fe62909:b49",
+              "path": "body.line[49]",
+              "value": "- Legitimate behavior: outcome matches documented policy for the bound identity and state creation follows first-packet pass semantics."
+            },
+            {
+              "reference": "da0191fe62909:b50",
+              "path": "body.line[50]",
+              "value": "- Boundary violation hypothesis: outcome differs from policy for the bound identity, or state is created/maintained contrary to policy, or identity binding is bypassed."
+            },
+            {
+              "reference": "da0191fe62909:b51",
+              "path": "body.line[51]",
+              "value": "Interpretation must be conditioned on established policy and binding; do not infer violation from outcome alone."
+            },
+            {
+              "reference": "da0191fe62909:b8",
+              "path": "body.line[8]",
+              "value": "1. **Policy definition**: Documented intended allow/deny decisions per identity attribute, service, and direction. Policy must be expressed as ordered rules where evaluation precedence is defined."
+            },
+            {
+              "reference": "da0191fe62909:b9",
+              "path": "body.line[9]",
+              "value": "2. **Identity binding model**: Explicit mapping of identity attributes to enforcement points, e.g., source identifier, user context, device tag. The binding mechanism and its trust assumptions must be stated."
+            },
+            {
+              "reference": "da0191fe62909:b36",
+              "path": "body.line[36]",
+              "value": "- **Identity isolation control**: Repeat test with a different identity that should map to a different policy outcome to verify binding is effective."
+            },
+            {
+              "reference": "da0191fe62909:b37",
+              "path": "body.line[37]",
+              "value": "- **Order sensitivity control**: If policy allows, test with a non-matching rule preceding a matching rule to confirm last-matching-rule precedence."
+            },
+            {
+              "reference": "da0191fe62909:b38",
+              "path": "body.line[38]",
+              "value": "- **Statefulness control**: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy."
+            },
+            {
+              "reference": "da0191fe62909:b39",
+              "path": "body.line[39]",
+              "value": "- **Negative control**: Test a known denied identity-service pair to confirm denial is observable."
+            }
+          ],
+          "correction_number": 1
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique_assessment",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+          "status": "assessed",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "proposed_decision": false,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "interpretation_index": 0,
+                "draft_references": [
+                  "da0191fe62909:b49",
+                  "da0191fe62909:b50",
+                  "da0191fe62909:b51",
+                  "da0191fe62909:b8",
+                  "da0191fe62909:b9",
+                  "da0191fe62909:b36",
+                  "da0191fe62909:b37",
+                  "da0191fe62909:b38",
+                  "da0191fe62909:b39"
+                ],
+                "permitted_counterexample": "A policy-compliant scenario where the bound identity is authorized for the service and the first packet is passed, creating state, and subsequent packets are handled by the stateful engine without re-evaluation against the ordered rule set, producing the same observation of state creation and subsequent packet acceptance as the draft labels legitimate. The observation of subsequent packets following state is also produced when the implementation re-evaluates each packet against policy and still permits it because the policy permits it, i.e., the same observable acceptance occurs while the policy is enforced.",
+                "counterexample_matches_check": true,
+                "control_excludes_counterexample": false,
+                "control_references": [
+                  "da0191fe62909:b49",
+                  "da0191fe62909:b50",
+                  "da0191fe62909:b51",
+                  "da0191fe62909:b8",
+                  "da0191fe62909:b9",
+                  "da0191fe62909:b36",
+                  "da0191fe62909:b37",
+                  "da0191fe62909:b38",
+                  "da0191fe62909:b39"
+                ],
+                "actual_discriminator": "Statefulness control: Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy. b38",
+                "critic_correct": false
+              }
+            ],
+            "critic_supported": false,
+            "reason": "Critic correctly identifies unsupported subsequent-packet handling claim and source attribution overclaim, but its interpretation retains the unsupported legitimate outcome that subsequent packets follow established state without re-evaluation and treats that as a distinguishing control. The interpretation therefore does not distinguish legitimate behavior from boundary violations on supported facts, and the critic fails to flag material operational defects present in the draft: the Execute Comparison step allows identity binding B for variation while prerequisites require identity held constant within each comparison set, and interpretation is presented without a prerequisite establishment control for documented policy and binding enforcement before labeling a violation. These omissions mean the critic decision is incomplete.",
+            "findings": [
+              {
+                "criterion_id": "core:operational_sufficiency",
+                "material_impact": "The reusable comparison method cannot be followed reliably because the variation step permits changing identity binding while prerequisites require identity held constant within each comparison set, breaking baseline vs variation isolation.",
+                "problem": "Prerequisite 3 requires ability to generate controlled probe traffic with identity held constant within each comparison set b10. Procedure step 3.2 performs variation observation with identity binding B or modified rule condition b27, allowing identity change within the comparison set.",
+                "requested_correction": "Revise step 3.2 to require identity held constant for baseline and variation within the same comparison set; separate identity-change tests into the identity isolation control b36.",
+                "draft_references": [
+                  "da0191fe62909:b10",
+                  "da0191fe62909:b26",
+                  "da0191fe62909:b27"
+                ],
+                "requirement_ids": [
+                  "method"
+                ],
+                "issue_ids": []
+              },
+              {
+                "criterion_id": "core:interpretation",
+                "material_impact": "Violation labeling can occur without established policy and binding, allowing false boundary violation conclusions from outcome alone.",
+                "problem": "Interpretation step defines legitimate and boundary violation hypotheses b49-b51 but does not require prior establishment of documented policy and binding enforcement as a prerequisite before labeling a violation; outcome alone is treated as sufficient.",
+                "requested_correction": "Add explicit prerequisite establishment controls for documented policy artifact and identity binding verification before interpretation, and condition violation labeling on demonstrated deviation from established policy and binding.",
+                "draft_references": [
+                  "da0191fe62909:b49",
+                  "da0191fe62909:b50",
+                  "da0191fe62909:b51",
+                  "da0191fe62909:b8",
+                  "da0191fe62909:b9"
+                ],
+                "requirement_ids": [
+                  "method"
+                ],
+                "issue_ids": []
+              },
+              {
+                "criterion_id": "core:technical_support",
+                "material_impact": "Identity binding model and enforcement trust assumptions are asserted as prerequisites without retained source support, undermining technical support for the reusable methodology.",
+                "problem": "Prerequisite 2 requires explicit mapping of identity attributes to enforcement points with stated trust assumptions b9, and controls rely on identity isolation b36. Retained sources cover only rule evaluation order and first-packet state creation.",
+                "requested_correction": "Qualify identity binding as generic procedural prerequisite with future validation, and remove unsupported factual claims about binding enforcement mechanisms.",
+                "draft_references": [
+                  "da0191fe62909:b9",
+                  "da0191fe62909:b36"
+                ],
+                "requirement_ids": [
+                  "method"
+                ],
+                "issue_ids": []
+              }
+            ]
+          },
+          "correction_number": 1,
+          "final_disposition": "disputed"
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique",
+          "attempt": 1,
+          "status": "failed",
+          "elapsed_seconds": 1168.912,
+          "reason": "Critique assessment failed after one correction: Critique disagreement: {\"interpretation_reviews\":[{\"interpretation_index\":0,\"draft_references\":[\"da0191fe62909:b49\",\"da0191fe62909:b50\",\"da0191fe62909:b51\",\"da0191fe62909:b8\",\"da0191fe62909:b9\",\"da0191fe62909:b36\",\"da0191fe62909:b37\",\"da0191fe62909:b38\",\"da0191fe62909:b39\"],\"permitted_counterexample\":\"A policy-compliant scenario where the bound identity is authorized for the service and the first packet is passed, creating state, and subsequent packets are handled by the stateful engine without re-evaluation against the ordered rule set, producing the same observation of state creation and subsequent packet acceptance as the draft labels legitimate. The observation of subsequent packets following state is also produced when the implementation re-evaluates each packet against policy and still permits it because the policy permits it, i.e., the same observable acceptance occurs while the policy is enforced.\",\"counterexample_matches_check\":"
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "3df79390-6250-4f7b-b30e-47a6f59feecb",
+          "stage": "critique_assessment",
+          "status": "failed",
+          "attempt": 1,
+          "author_attempts": 1,
+          "research_batches": 1,
+          "attribution_repairs": 0,
+          "source_selection_round": 1,
+          "reason": "Critique assessment failed after one correction: Critique disagreement: {\"interpretation_reviews\":[{\"interpretation_index\":0,\"draft_references\":[\"da0191fe62909:b49\",\"da0191fe62909:b50\",\"da0191fe62909:b51\",\"da0191fe62909:b8\",\"da0191fe62909:b9\",\"da0191fe62909:b36\",\"da0191fe62909:b37\",\"da0191fe62909:b38\",\"da0191fe62909:b39\"],\"permitted_counterexample\":\"A policy-compliant scenario where the bound identity is authorized for the service and the first packet is passed, creating state, and subsequent packets are handled by the stateful engine without re-evaluation against the ordered rule set, producing the same observation of state creation and subsequent packet acceptance as the draft labels legitimate. The observation of subsequent packets following state is also produced when the implementation re-evaluates each packet against policy and still permits it because the policy permits it, i.e., the same observable acceptance occurs while the policy is enforced.\",\"counterexample_matches_check\":",
+          "snapshot_path": "techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/attempt-1.json"
+        }
+      ]
+    },
+    {
+      "case_index": "01",
+      "events": [
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "request_alignment",
+          "status": "completed",
+          "original_request": "Describe a reusable read-access comparison using an established policy, the actual process identity, allowed and denied controls, and evidence requirements. No target execution or particular tool is requested.",
+          "adjusted_request": "Describe a reusable read-access comparison using an established policy, the actual process identity, allowed and denied controls, and evidence requirements. No target execution or particular tool is requested.",
+          "phase_contexts": [],
+          "objectives": {},
+          "reason": "Phase unknown; preserve the explicit request without inferring a phase."
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "role": "technique_judge",
+          "expected_schema": "LookupDecision",
+          "call_id": "69cefa04-7ef4-4b23-a5bd-66b5761fa61f",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 23.957
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "transformation": "abstraction",
+          "correction_attempt": 0,
+          "status": "started",
+          "stage": "request_preservation"
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "transformation": "abstraction",
+          "correction_attempt": 0,
+          "stage": "request_preservation",
+          "role": "technique_request_reviewer",
+          "expected_schema": "PreservationReview",
+          "call_id": "67a721e2-391f-461e-bc92-be1d0d79d2e8",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 31.462
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "transformation": "abstraction",
+          "correction_attempt": 0,
+          "stage": "request_preservation",
+          "status": "completed",
+          "elapsed_seconds": 31.464
+        },
+        {
+          "type": "technique_request_review",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "transformation": "abstraction",
+          "correction_attempt": 0,
+          "findings": {
+            "approved": true,
+            "reason": "The proposed request preserves the subject, mechanisms and deliverable of the authoritative original component request. It describes a reusable read-access comparison using an established policy, the actual process identity, allowed and denied controls, and evidence requirements, with no target execution or particular tool requested. No additions, omissions, or invented obligations are introduced.",
+            "subject_preserved": true,
+            "mechanisms_preserved": true,
+            "deliverables_preserved": true,
+            "additions": [],
+            "omissions": [],
+            "references": [
+              "original_request",
+              "component_request",
+              "requirements"
+            ]
+          }
+        },
+        {
+          "type": "technique_request_preserved",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "original_request": "Describe a reusable read-access comparison using an established policy, the actual process identity, allowed and denied controls, and evidence requirements. No target execution or particular tool is requested.",
+          "validated_request": "Describe a reusable read-access comparison methodology using an established policy, the actual process identity, allowed and denied controls, and evidence requirements. No target execution or particular tool is requested.",
+          "reason": "The proposed request preserves the subject, mechanisms and deliverable of the authoritative original component request. It describes a reusable read-access comparison using an established policy, the actual process identity, allowed and denied controls, and evidence requirements, with no target execution or particular tool requested. No additions, omissions, or invented obligations are introduced."
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "research_round": 1,
+          "status": "started",
+          "stage": "research"
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "research_round": 1,
+          "stage": "research",
+          "status": "completed",
+          "elapsed_seconds": 0.0
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "research_round": 1,
+          "status": "started",
+          "stage": "source_selection"
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "research_round": 1,
+          "stage": "source_selection",
+          "correction_attempt": 0,
+          "retained_assessment": false,
+          "source_url": "https://man7.org/linux/man-pages/man2/open.2.html",
+          "role": "technique_source_assessor",
+          "expected_schema": "SourceAssessment",
+          "call_id": "ece514b0-e3cb-4cd6-9f0e-ce9cddbeea6c",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 39.401
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "research_round": 1,
+          "stage": "source_selection",
+          "correction_attempt": 0,
+          "retained_assessment": false,
+          "source_url": "https://man7.org/linux/man-pages/man2/open.2.html",
+          "assessment_substage": "technique_source_assessor",
+          "status": "validated"
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "research_round": 1,
+          "stage": "source_selection",
+          "correction_attempt": 0,
+          "requirement_id": "method",
+          "retained_assessment": false,
+          "source_url": "https://man7.org/linux/man-pages/man2/open.2.html",
+          "role": "technique_requirement_assessor",
+          "expected_schema": "AssessedSupport",
+          "call_id": "7430f9f9-6332-44e5-8295-71c4a1ce76c9",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 73.265
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "research_round": 1,
+          "stage": "source_selection",
+          "correction_attempt": 0,
+          "requirement_id": "method",
+          "retained_assessment": false,
+          "source_url": "https://man7.org/linux/man-pages/man2/open.2.html",
+          "assessment_substage": "technique_requirement_assessor",
+          "status": "validated"
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "research_round": 1,
+          "stage": "source_selection",
+          "status": "source_assessed",
+          "source_url": "https://man7.org/linux/man-pages/man2/open.2.html",
+          "source_decision": "retained",
+          "reason": "The current document is an authoritative Linux man page source for the open(2) system call. The retained excerpts provide at least one relevant supported technical fact about read permission requirements and denial semantics that can be used to ground policy establishment and outcome classification in a reusable read-access comparison methodology. Limitations are noted for missing mechanisms and unknown omitted text."
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "research_round": 1,
+          "stage": "source_selection",
+          "status": "completed",
+          "elapsed_seconds": 112.669,
+          "fetched_count": 1,
+          "selected_count": 1
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "status": "started",
+          "stage": "authoring",
+          "attempt": 1
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "authoring",
+          "attempt": 1,
+          "role": "technique_author",
+          "expected_schema": "AuthoredTechnique",
+          "call_id": "f71e511b-55d4-4b6c-80af-17fc2943e969",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 112.877
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "authoring",
+          "attempt": 1,
+          "status": "completed",
+          "elapsed_seconds": 112.877
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "status": "started",
+          "stage": "critique",
+          "attempt": 1
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-e3386084fa3f967b61384fbd66a4ee0f9295714dc9eab11456edcbce13e31e18.json",
+          "status": "review_snapshot",
+          "snapshot_id": "93bea11e4632fb77113ac83df3133119eddd2d60caea062fa0815ebb41b7b3cc",
+          "draft_reference_count": 97
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-e3386084fa3f967b61384fbd66a4ee0f9295714dc9eab11456edcbce13e31e18.json",
+          "role": "technique_critic",
+          "expected_schema": "Critique",
+          "call_id": "b09899a1-2abe-4e03-91ab-a1def38ebf0b",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 347.873
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-e3386084fa3f967b61384fbd66a4ee0f9295714dc9eab11456edcbce13e31e18.json",
+          "status": "issues_validated",
+          "snapshot_id": "93bea11e4632fb77113ac83df3133119eddd2d60caea062fa0815ebb41b7b3cc",
+          "issues": [
+            {
+              "id": "exec_vs_no_exec_prereq",
+              "category": "authored_content",
+              "criterion_id": "core:operational_sufficiency",
+              "material_impact": "The advertised method cannot be followed as written because prerequisite 4 states allowed and denied controls can be applied without target execution while steps 3.2, 4.2 and the baseline procedure direct performing read-access attempts. This contradiction undermines operational sufficiency and violates the request restriction that no target execution be requested.",
+              "problem": "Prerequisite 4 requires baseline environment where allowed and denied controls can be applied without target execution, but Procedure 3.1-3.2 and 4.1-4.2 instruct to perform read-access attempts under controlled conditions. The request explicitly states no target execution or particular tool is requested.",
+              "requested_correction": "Reframe the baseline and variation steps as a description of how a comparison would be performed and what evidence would be collected, removing imperative execution instructions. Keep prerequisites and controls as design elements and make any attempt hypothetical/illustrative, preserving the no-execution restriction.",
+              "requirement_ids": [
+                "method"
+              ],
+              "source_urls": [
+                "https://man7.org/linux/man-pages/man2/open.2.html"
+              ],
+              "draft_references": [
+                "d93bea11e4632:b11",
+                "d93bea11e4632:b31",
+                "d93bea11e4632:b41"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "4. Baseline environment where allowed and denied controls can be applied without target execution.\n3.2 Perform read-access attempt under controlled conditions.\n4.2 Perform read-access attempt under same conditions as step 3.",
+              "passage_ids": [],
+              "passages": [],
+              "absence_of_support": ""
+            }
+          ],
+          "source_inspection": [
+            {
+              "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+              "characters": 132,
+              "inspected_intervals": []
+            }
+          ]
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-e3386084fa3f967b61384fbd66a4ee0f9295714dc9eab11456edcbce13e31e18.json",
+          "role": "technique_critique_assessor",
+          "expected_schema": "IssueAssessment",
+          "call_id": "7688f3b1-2981-4ccc-8477-941c4475331b",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 385.514
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique_assessment",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-e3386084fa3f967b61384fbd66a4ee0f9295714dc9eab11456edcbce13e31e18.json",
+          "status": "control_references_resolved",
+          "snapshot_id": "93bea11e4632fb77113ac83df3133119eddd2d60caea062fa0815ebb41b7b3cc",
+          "interpretation_index": 0,
+          "provided_references": [
+            "d93bea11e4632:b37",
+            "d93bea11e4632:b43"
+          ],
+          "resolved_references": [
+            "d93bea11e4632:b37",
+            "d93bea11e4632:b43"
+          ],
+          "resolved_records": [
+            {
+              "reference": "d93bea11e4632:b37",
+              "path": "body.line[37]",
+              "value": "3.4 Expected legitimate behavior: access succeeds if policy permits and caller has read permission on the object. Source support: Linux open(2) requires caller have read permission on the object for read access."
+            },
+            {
+              "reference": "d93bea11e4632:b43",
+              "path": "body.line[43]",
+              "value": "4.4 Expected legitimate behavior: access is denied. Source support: Linux open(2) documents that the requested access to the file is not allowed when permission is lacking."
+            }
+          ],
+          "correction_number": 0
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique_assessment",
+          "attempt": 1,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-e3386084fa3f967b61384fbd66a4ee0f9295714dc9eab11456edcbce13e31e18.json",
+          "status": "assessed",
+          "snapshot_id": "93bea11e4632fb77113ac83df3133119eddd2d60caea062fa0815ebb41b7b3cc",
+          "proposed_decision": false,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "interpretation_index": 0,
+                "draft_references": [
+                  "d93bea11e4632:b37",
+                  "d93bea11e4632:b43"
+                ],
+                "permitted_counterexample": "Policy is established that process identity A is authorized to read object X. The observed process identity is A, the allowed control is in place, and the kernel returns success with read permission present. The outcome matches policy for the observed identity and control, so access is legitimate.",
+                "counterexample_matches_check": false,
+                "control_excludes_counterexample": false,
+                "control_references": [
+                  "d93bea11e4632:b37",
+                  "d93bea11e4632:b43"
+                ],
+                "actual_discriminator": "Allowed control where policy states read is permitted for the test process identity versus denied control where policy states read is prohibited, with identity variation while keeping object and policy constant, and evidence collection of process identity attributes, requested access mode, kernel return code/error message, timestamp and object identifier. Steps: d93bea11e4632:b14, d93bea11e4632:b15, d93bea11e4632:b16, d93bea11e4632:b46, d93bea11e4632:b47, d93bea11e4632:b48, d93bea11e4632:b49, d93bea11e4632:b33, d93bea11e4632:b34, d93bea11e4632:b35, d93bea11e4632:b36.",
+                "critic_correct": true
+              }
+            ],
+            "critic_supported": true,
+            "reason": "The critic correctly identifies a material operational sufficiency inconsistency between prerequisite 4 stating allowed and denied controls can be applied without target execution and procedure steps 3.2 and 4.2 directing performance of read-access attempts, which conflicts with the request restriction against target execution. The interpretation review shows the draft\u2019s policy-based distinction and distinguishing controls are accurately described by the critic, and no additional interpretation defects are present.",
+            "findings": []
+          },
+          "correction_number": 0,
+          "final_disposition": "accepted"
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 1,
+          "status": "completed",
+          "elapsed_seconds": 733.411
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "status": "revision_requested",
+          "snapshot_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/attempt-1.json",
+          "reason": "{\"issues\": [{\"id\": \"exec_vs_no_exec_prereq\", \"category\": \"authored_content\", \"criterion_id\": \"core:operational_sufficiency\", \"material_impact\": \"The advertised method cannot be followed as written because prerequisite 4 states allowed and denied controls can be applied without target execution while steps 3.2, 4.2 and the baseline procedure direct performing read-access attempts. This contradiction undermines operational sufficiency and violates the request restriction that no target execution be requested.\", \"problem\": \"Prerequisite 4 requires baseline environment where allowed and denied controls can be applied without target execution, but Procedure 3.1-3.2 and 4.1-4.2 instruct to perform read-access attempts under controlled conditions. The request explicitly states no target execution or particular tool is requested.\", \"requested_correction\": \"Reframe the baseline and variation steps as a description of how a comparison would be performed and what evidence would be collected, remo",
+          "attempt": 1,
+          "owning_stage": "authored_content",
+          "issue_references": [
+            "exec_vs_no_exec_prereq"
+          ],
+          "affected_urls": [
+            "https://man7.org/linux/man-pages/man2/open.2.html"
+          ],
+          "source_selection_round": 1,
+          "author_attempts": 1,
+          "research_batches": 1,
+          "attribution_repairs": 0
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "status": "started",
+          "stage": "authoring",
+          "attempt": 2
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "authoring",
+          "attempt": 2,
+          "role": "technique_author",
+          "expected_schema": "AuthoredTechnique",
+          "call_id": "6d510225-980b-4d2c-b39a-91b9d4c0a8e8",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 117.593
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "authoring",
+          "attempt": 2,
+          "status": "completed",
+          "elapsed_seconds": 117.594
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "status": "started",
+          "stage": "critique",
+          "attempt": 2
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 2,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+          "status": "review_snapshot",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "draft_reference_count": 97
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 2,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+          "role": "technique_critic",
+          "expected_schema": "Critique",
+          "call_id": "7d059617-739f-4096-97cf-95f36d56a1e8",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 325.242
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 2,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+          "status": "issues_validated",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "issues": [],
+          "source_inspection": [
+            {
+              "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+              "characters": 132,
+              "inspected_intervals": []
+            }
+          ]
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 2,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+          "role": "technique_critique_assessor",
+          "expected_schema": "IssueAssessment",
+          "call_id": "568c75ca-1924-46cb-8507-4444fa361d01",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 360.541
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique_assessment",
+          "attempt": 2,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+          "status": "assessed",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "proposed_decision": true,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "interpretation_index": 0,
+                "draft_references": [
+                  "d64288cb04697:b8",
+                  "d64288cb04697:b21",
+                  "d64288cb04697:b22",
+                  "d64288cb04697:b26",
+                  "d64288cb04697:b30",
+                  "d64288cb04697:b40",
+                  "d64288cb04697:b65",
+                  "d64288cb04697:b66"
+                ],
+                "permitted_counterexample": "A read-access attempt where the observed process identity and object are the same as the suspicious observation, but the established policy source is not yet identified and documented, so the outcome cannot be classified as contradicting an established policy. The observation of success/denial is identical, but the prerequisite of an established policy is absent.",
+                "counterexample_matches_check": false,
+                "control_excludes_counterexample": false,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": false
+              }
+            ],
+            "critic_supported": false,
+            "reason": "The critic approves the document as having adequate technical support and correct interpretation. Independent review finds unsupported factual mechanisms in metadata and body that assert kernel error return and a permission-lacking condition not present in the retained excerpt. The critic therefore misses material technical-support defects and incorrectly judges the interpretation as fully supported.",
+            "findings": [
+              {
+                "criterion_id": "core:technical_support",
+                "material_impact": "The methodology claims source-backed support for kernel error return on denied access and for a permission-lacking condition. The retained excerpt only contains \"requires that the caller have read permission on the object\" and \"The requested access to the file is not allowed\". The unsupported claims undermine the asserted factual basis for policy establishment and outcome classification.",
+                "problem": "Metadata selection reason d64288cb04697:m18 asserts the source provides that the kernel returns an error when requested access is not allowed. Body line d64288cb04697:b43 asserts source support that access is denied when permission is lacking. The retained passage does not contain error return wording nor the permission-lacking condition.",
+                "requested_correction": "Remove or qualify the error-return claim and the permission-lacking conditional linkage to match the retained excerpts, or obtain retained support for those specific factual mechanisms. Update metadata selection reason and body source support statements to reflect only what is retained.",
+                "draft_references": [
+                  "d64288cb04697:m18",
+                  "d64288cb04697:b43"
+                ],
+                "requirement_ids": [],
+                "issue_ids": []
+              },
+              {
+                "criterion_id": "core:technical_support",
+                "material_impact": "Selection reason overstates source coverage, creating a false impression of authority for denial semantics.",
+                "problem": "Metadata selection reason d64288cb04697:m18 claims source provides source-backed technical facts that read access requires caller have read permission and that the kernel returns an error when requested access is not allowed. The retained excerpt does not support the error-return fact.",
+                "requested_correction": "Revise metadata selection reason to accurately describe retained excerpts and their limitations, removing the unsupported error-return assertion.",
+                "draft_references": [
+                  "d64288cb04697:m18"
+                ],
+                "requirement_ids": [],
+                "issue_ids": []
+              }
+            ]
+          },
+          "correction_number": 0,
+          "final_disposition": "disputed"
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 2,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+          "role": "technique_critic",
+          "expected_schema": "Critique",
+          "call_id": "8997c009-ccb1-49f1-8f29-4acfe687c7da",
+          "status": "completed",
+          "role_calls": 1,
+          "elapsed_seconds": 138.043
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 2,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+          "status": "issues_validated",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "issues": [
+            {
+              "id": "src-err-return-overclaim",
+              "category": "source_attribution",
+              "criterion_id": "core:technical_support",
+              "material_impact": "The methodology claims source-backed support for kernel error return on denied access and for a permission-lacking condition. The retained excerpt does not contain those mechanisms, undermining the asserted factual basis for policy establishment and outcome classification.",
+              "problem": "Metadata selection reason d64288cb04697:m18 asserts the source provides that the kernel returns an error when requested access is not allowed. Body line d64288cb04697:b43 asserts source support that access is denied when permission is lacking. The retained passage does not contain error return wording nor the permission-lacking condition.",
+              "requested_correction": "Remove or qualify the error-return claim and the permission-lacking conditional linkage to match the retained excerpts, or obtain retained support for those specific factual mechanisms. Update metadata selection reason and body source support statements to reflect only what is retained.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://man7.org/linux/man-pages/man2/open.2.html"
+              ],
+              "draft_references": [
+                "d64288cb04697:m18",
+                "d64288cb04697:b43"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "Provides source-backed technical facts that read access to a file requires the caller have read permission on the object and that the kernel returns an error when requested access is not allowed, which supports establishing policy/prerequisite checks and defining legitimate vs denied outcomes for a read-access comparison methodology.\n4.4 Expected legitimate behavior: access is denied. Source support: Linux open(2) documents that the requested access to the file is not allowed when permission is lacking.",
+              "passage_ids": [
+                "bb55f0eccbfb99f93b64b2799da4fece2f6ddba9afdc6f665fa022087d83d93f"
+              ],
+              "passages": [
+                {
+                  "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+                  "start": 0,
+                  "end": 132
+                }
+              ],
+              "absence_of_support": "The retained excerpt contains \"requires that the caller have read permission on the object\" and \"The requested access to the file is not allowed\". It does not state that the kernel returns an error, nor that denial occurs specifically when permission is lacking."
+            },
+            {
+              "id": "src-selection-overstatement",
+              "category": "source_attribution",
+              "criterion_id": "core:technical_support",
+              "material_impact": "Selection reason overstates source coverage, creating a false impression of authority for denial semantics and error return.",
+              "problem": "Metadata selection reason d64288cb04697:m18 claims source provides source-backed technical facts that read access requires caller have read permission and that the kernel returns an error when requested access is not allowed. The retained excerpt does not support the error-return fact.",
+              "requested_correction": "Revise metadata selection reason to accurately describe retained excerpts and their limitations, removing the unsupported error-return assertion.",
+              "requirement_ids": [],
+              "source_urls": [
+                "https://man7.org/linux/man-pages/man2/open.2.html"
+              ],
+              "draft_references": [
+                "d64288cb04697:m18"
+              ],
+              "absence_scope": "inspected_passages",
+              "draft_excerpt": "Provides source-backed technical facts that read access to a file requires the caller have read permission on the object and that the kernel returns an error when requested access is not allowed, which supports establishing policy/prerequisite checks and defining legitimate vs denied outcomes for a read-access comparison methodology.",
+              "passage_ids": [
+                "bb55f0eccbfb99f93b64b2799da4fece2f6ddba9afdc6f665fa022087d83d93f"
+              ],
+              "passages": [
+                {
+                  "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+                  "start": 0,
+                  "end": 132
+                }
+              ],
+              "absence_of_support": "Retained excerpts do not contain wording about kernel error return."
+            }
+          ],
+          "source_inspection": [
+            {
+              "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+              "characters": 132,
+              "inspected_intervals": [
+                [
+                  0,
+                  132
+                ]
+              ]
+            }
+          ]
+        },
+        {
+          "type": "technique_model_call",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 2,
+          "review_subject_path": "techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+          "role": "technique_critique_assessor",
+          "expected_schema": "IssueAssessment",
+          "call_id": "51447e4c-0320-45c0-93af-32bf02c6847d",
+          "status": "failed",
+          "role_calls": 1,
+          "elapsed_seconds": 0.0
+        },
+        {
+          "type": "technique_build_progress",
+          "activity_id": "822a28dc-9d9f-4bfc-b350-af088d42a69c",
+          "stage": "critique",
+          "attempt": 2,
+          "status": "failed",
+          "elapsed_seconds": 823.858,
+          "reason": "Cumulative calibration allowance exhausted"
+        }
+      ]
+    }
+  ],
+  "request_provenance": [
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-01.json",
+      "sha256": "cd3e0ab01f1058ac5845d82f704fcd5227c79dde036e4280bd6296bbfc66cdfd",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-02.json",
+      "sha256": "9b3bbeac6728cce8a4bc39605bd0af73bb4d5576be5aee3830e46cc54cb9c8ea",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-03.json",
+      "sha256": "caa4cfed3aab7a3ca33fee3d69efe5f70da7d781b3ddad1ad68a2646fb3fbe86",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-04.json",
+      "sha256": "531a7de794bcd1a8bae3ae3c3b02bfc46b41ec5d0a86eb64264b650a50d612f7",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-05.json",
+      "sha256": "8f14ed06ebbe71b57997b2c7ba642cd754f2ed8e3a696dd34ba360654fb46cdc",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 12288,
+        "temperature": 0.2
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-06.json",
+      "sha256": "ac644e8ba3ce9d70e01e1a58f1a55d4354dab0f282cd6ae68ec38e784f9e6646",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-07.json",
+      "sha256": "d9794495bf0f9d8d2f601e3c993142fa5df1653a699388b076704c4b2981a553",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-08.json",
+      "sha256": "0a4ddbd51f97e4a488714855466aea24b01c94a9feef79de6af1a1cb48b159da",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-09.json",
+      "sha256": "47bc7e1b1053a215129c75423d8b9cf1312b549878950d07c635fccc17108718",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-10.json",
+      "sha256": "3f4e7157702a984a9b7cf0a9ddb475bc1fa953459b746c97e70f9f448eac5ae8",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-11.json",
+      "sha256": "2fb1c06631f55591ff5ab47ed3aae91d286cb276b85ec53ff923b8d0c9de6858",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-12.json",
+      "sha256": "833eb68d134639c9b24cdbc60f37a7800226255b085809f34308c7311b1dd4b8",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/provider-request-13.json",
+      "sha256": "7458656d44e7498ae157417747831e50113298a18417e8f4b406925ea7c10eae",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-14.json",
+      "sha256": "0358e856dd34b1c6aa706ed9adb7f0da391fecd695b2f623f3b60059ff3e76d6",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-15.json",
+      "sha256": "5f811d192d8a70304088fcc81ee5b667e7223f2abae27ab89362fac80de7d231",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-16.json",
+      "sha256": "5e46fe9a1d20aaeb84764f815268451e5fe04f934b37b1a6b546b14b1fcdee7f",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-17.json",
+      "sha256": "1b0117badb764b2699a1821501e347bd0d7244193fbb90cc8f0682bd971908db",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-18.json",
+      "sha256": "e43904d98b5257a1d8a987a78edb993cf20a3c0747284b5cd73fcc9b8909b08a",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 12288,
+        "temperature": 0.2
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-19.json",
+      "sha256": "c8f6af031e058d03449256b63ff95810294a8d0dd931747a1e22a6008199a157",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-20.json",
+      "sha256": "569699387b267d700913a553ee4bffaa29107534b071bc828c1509a151b1f09b",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-21.json",
+      "sha256": "477c030d864068fd92d69b8f0184f46ed3e6d80204221aabdddef89b393185e4",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-22.json",
+      "sha256": "6e4d8f3114b76e2a05f38df31f87efa48fbc38a4597d64228b29df65d2dda107",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-23.json",
+      "sha256": "ff929f6e190a94f4f84de69abe3e231ecd330bc882189e2d5ac1ef761c73e564",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-24.json",
+      "sha256": "fea4e95ae07983a5c2393f8d749daf76b9f49016ecc2d59c54e9ae13f3165af3",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 12288,
+        "temperature": 0.2
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-25.json",
+      "sha256": "2f9d922baf11e418bb1b86c99e39f48a76703fcc2f4d8afd0f95c6ed555eef93",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-26.json",
+      "sha256": "bcc82a734a1c6890989a857ebf815321f4a252d4ed8f532e48a63cc15189bc25",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-27.json",
+      "sha256": "b50007eba6cba474d277cec85e9c81b6ff7d8c45fbb1176aea4d9f4b7019dee0",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-28.json",
+      "sha256": "c0f4f70b6e73cb421db9b62a6d471c8c9497026ee437bb6e47f4aa5488189720",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-29.json",
+      "sha256": "d22cefa7ee60f66fffb9ed0416962305eafae674db13831a357813c57d513d65",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/provider-request-30.json",
+      "sha256": "7d65f715364859061bf269fddd792932f4e594b0788c5de279719686ed2b2f97",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    }
+  ],
+  "drafts": [
+    {
+      "family": "network",
+      "case": "generate-network",
+      "author_attempt": 1,
+      "path": "network-draft-1.md",
+      "document_sha256": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+      "status": "unpublished_draft_human_quality_pending",
+      "source_snapshot": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+      "human_label": "acceptable_and_useful",
+      "human_reason": "User judged network-draft-1.md acceptable and useful."
+    },
+    {
+      "family": "filesystem",
+      "case": "generate-filesystem",
+      "author_attempt": 1,
+      "path": "filesystem-draft-1.md",
+      "document_sha256": "93bea11e4632fb77113ac83df3133119eddd2d60caea062fa0815ebb41b7b3cc",
+      "status": "unpublished_draft_human_quality_pending",
+      "source_snapshot": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-e3386084fa3f967b61384fbd66a4ee0f9295714dc9eab11456edcbce13e31e18.json"
+    },
+    {
+      "family": "filesystem",
+      "case": "generate-filesystem",
+      "author_attempt": 2,
+      "path": "filesystem-draft-2.md",
+      "document_sha256": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+      "status": "unpublished_draft_human_quality_pending",
+      "source_snapshot": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+      "human_label": "needs_correction",
+      "human_reason": "User preferred the previous version. The draft rarely identifies file-access testing, making the reader search to determine what is being read."
+    }
+  ],
+  "fixed_request_denominator": 3,
+  "pipeline_completed_documents": 0,
+  "human_usable_draft_yield": {
+    "accepted": 1,
+    "fixed_requests": 3,
+    "rate": 0.3333333333333333
+  },
+  "prior_experiment_live_calls": 117,
+  "cumulative_live_calls": 147,
+  "remaining_allowance": 0,
+  "limitations": [
+    "Two requests reached authoring but no document completed review.",
+    "Human judgment of complete unpublished drafts remains pending; pipeline failure does not prove a draft is useless.",
+    "HTTP was unattempted; source-scope behavior there remains untested.",
+    "No matched randomized generation comparison or isolated causal effect.",
+    "Human accepted network despite review failure; filesystem latest draft requires correction for loss of explicit file-access purpose. Earlier filesystem draft is not substituted for the declared last-version outcome."
+  ],
+  "human_adjudication": "complete_for_last_authored_versions"
+}

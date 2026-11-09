@@ -26,7 +26,7 @@ The controller creates agents for specific jobs:
 - **plan_creator**: creates or revises an initial high-level plan and infers operation-wide constraints
 - **plan_critic**: reviews an initial plan and either approves it or returns actionable revision feedback
 - **task_creator**: creates concrete current-phase tasks with finite acceptance contracts from a deterministic
-  controller prompt, except for modes such as `hypothesis_dependent` that construct tasks directly in Python
+  controller prompt, except for hypothesis-producing and `hypothesis_dependent` phases that construct tasks in Python
 - **task_prompt_builder**: reviews core, optional-tool, and installed shell-command catalogs, then selects applicable
   memory, optional tools, and likely commands for one task
 - **task_prompt_critic**: approves a proposed task execution prompt or returns actionable revision feedback
@@ -237,8 +237,15 @@ the same configuration contract independently and is not imported by application
 
 Task creation similarly has a deterministic structured-output boundary. After an initial rejected proposal, the
 controller may request up to `CYBER_TASK_CREATOR_MAX_CORRECTIONS` corrected payloads (six by default). The initial
-prompt contains stable phase context and corrections contain only the prior validation error. Agents submit a flat
-`TaskProposal` whose `limits` object is always required. Python discards it and `output_kind` for snapshot work,
+prompt and every correction retain stable phase context, frozen batch references, prior correction feedback,
+and the latest rejected response as untrusted data. Native validation preserves field-level diagnostics internally;
+UI and log summaries are bounded and redacted. Duplicate rejection stops require both the same actual response
+and the same validation failure; missing response content does not establish repetition. The existing prompt fitter
+preserves required context and fails explicitly if it cannot fit. Task-creation events distinguish repeated rejected
+submissions from exhausted attempts. The schema advertises planning roles `mapping`, `synthesis`, and
+`direct_single_step`; activity names such as `hypothesis` are not planning roles. Agents submit a flat
+`TaskProposal` whose optional `limits` object defaults to bounded procedure limits. Python discards it and
+`output_kind` for snapshot work,
 infers the basis, supplies procedure invariants, derives source references and target scope, and compiles the proposal
 before storage. Inventory-wide moving collections are rejected as procedures and must use frozen snapshot references.
 Exact frozen-contract duplicates are skipped deterministically within the active phase; completed coverage from one
@@ -257,6 +264,16 @@ accepted outputs. When a following phase consumes multiple completed inventory m
 provenance-preserving snapshot for fan-out. A manifest is not valid proof for a task frozen to a single inventory
 subject; that rejection occurs before ledger persistence. Prompt-memory selectors are advisory: stale IDs or indices
 are logged and dropped while valid selected context remains available to the executor.
+
+Hypothesis-producing phases (`produces_hypotheses=true`) create assignments directly in Python from validated
+frozen inventories. A single `hypothesis_generation` workstream expands into one task per target and normalized
+route group, including that route's parameter entries. Every task requires a hypothesis publication covering its
+assigned subjects, including reasoned no-test dispositions. The controller validates all batches before storing
+assignments; missing inventory fails explicitly. Continuations reuse existing assignments and create only uncovered
+groups. No task-creator model call or correction loop is needed; executor agents still research and reason about
+the assigned subjects. Creation events identify `creation_kind=hypothesis_generation` and report task and batch
+counts, with zero model attempts. Generic proposal repairs may remove identical duplicates during batch-wide repair;
+different intents with the same workstream remain invalid.
 
 A testing phase that depends on hypotheses creates tasks only for inventory groups with completed, validated
 hypothesis deliverables. Each `record_hypotheses` call may publish a non-empty subset of assigned subjects. A

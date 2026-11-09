@@ -1,0 +1,14 @@
+{
+  "status": "authorized",
+  "scope": "original defective HTTP negative control only",
+  "authorization": "User approved up to six remaining requests",
+  "candidate_code_identity": "cc1882179374a99b92c44ceec1579d272432d19bb638902ad5b2eb3e22c0f098",
+  "subject_sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+  "provider_request_cap": 6,
+  "role_invocation_cap": 6,
+  "prior_positive_requests": 15,
+  "combined_allowance_cap": 21,
+  "prior_cumulative_live_requests": 94,
+  "execution": "sequential",
+  "human_label": "needs_correction"
+}

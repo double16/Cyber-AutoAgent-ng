@@ -396,3 +396,53 @@ describe('useOperationManager', () => {
     hook.unmount();
   });
 });
+
+it.each(['single-container', 'full-stack', 'unknown'])('selects configured %s execution and handles sparse events and stop', async deploymentMode => {
+  jest.useFakeTimers(); process.env.CYBER_TEST_MODE = 'true';
+  executionService.removeAllListeners();
+  config = {deploymentMode, modelProvider: 'ollama', modelId: ''};
+  selectService.mockResolvedValue({isPreferred: true, mode: 'docker-stack', service: executionService, validation: {warnings: []}});
+  const {useOperationManager} = await loadHook(); const actions = createActions();
+  const appState = {activeOperation: operation, userHandoffActive: false, operationMetrics: {}} as any;
+  const hook = renderHook(() => useOperationManager({appState, actions, applicationConfig: {}, activeModal: 'none'}));
+  try {
+    let start!: Promise<void>; act(() => {start = hook.current.startAssessmentExecution({module: 'web', target: 'target', objective: '', continueOperation: 'OP_OLD', reportOnly: true} as any);});
+    await act(async () => {await jest.advanceTimersByTimeAsync(100); await start;});
+    act(() => {
+      for (const event of [
+        {type: 'operation_init'}, {type: 'progress_update'}, {type: 'metrics_update', metrics: {}},
+        {type: 'metrics_update', metrics: {tokens: 20}}, {type: 'tool_start'}, {type: 'output', content: 'output'},
+        {type: 'reasoning', content: 'reasoning'}, {type: 'error', message: 'failed'}, {type: 'warning', content: 'warning'},
+      ]) executionService.emit('event', event);
+    });
+    await act(async () => {await jest.advanceTimersByTimeAsync(5100);});
+    expect(actions.updateMetrics).toHaveBeenCalled();
+    act(() => executionService.emit('stopped'));
+    expect(operationManager.updateOperation).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({status: 'cancelled'}));
+  } finally {hook.unmount(); delete process.env.CYBER_TEST_MODE; jest.useRealTimers();}
+});
+it.each(['diagnostics', 'generic', 'fallback', 'execute-error'])('surfaces %s execution failures', async failure => {
+  jest.useFakeTimers(); executionService.removeAllListeners();
+  const {useOperationManager} = await loadHook(); const actions = createActions();
+  if (failure === 'diagnostics') selectService.mockRejectedValueOnce(new MockSelectionError('selection failed', ['diagnostic']));
+  if (failure === 'generic') selectService.mockRejectedValueOnce('unavailable');
+  if (failure === 'fallback') selectService.mockResolvedValueOnce({isPreferred: false, mode: 'python-cli', service: executionService, validation: {warnings: []}});
+  if (failure === 'execute-error') {
+    selectService.mockResolvedValueOnce({isPreferred: true, mode: 'python-cli', service: executionService, validation: {warnings: []}});
+    executionService.execute.mockRejectedValueOnce(new Error('execute failed'));
+  }
+  const hook = renderHook(() => useOperationManager({appState: {activeOperation: null} as any, actions, applicationConfig: {}}));
+  try {
+    let start!: Promise<void>; act(() => {start = hook.current.startAssessmentExecution();});
+    await act(async () => {await jest.advanceTimersByTimeAsync(100); await start;});
+    expect(operationManager.updateOperation).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({status: 'error'}));
+  } finally {hook.unmount(); jest.useRealTimers();}
+});
+it('ignores actions after unmount and handles pausing without an active service', async () => {
+  const {useOperationManager} = await loadHook(); const actions = createActions();
+  const appState = {activeOperation: null, executionService: null} as any;
+  const hook = renderHook(() => useOperationManager({appState, actions, applicationConfig: {}}));
+  await act(async () => {await hook.current.handleAssessmentPause(); await hook.current.handleAssessmentCancel();});
+  const add = hook.current.addOperationHistoryEntry;
+  hook.unmount(); expect(() => {add('error', 'late'); add('info', 'late');}).not.toThrow();
+});

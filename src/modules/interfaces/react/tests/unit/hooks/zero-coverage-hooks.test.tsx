@@ -419,3 +419,10 @@ describe('zero-coverage hooks', () => {
         hook.unmount();
     });
 });
+
+it('uses terminal ESC fallback without a callback and ignores unrelated input', async () => {
+  const {useKeyboardHandlers} = await import('../../../src/hooks/useKeyboardHandlers.js');
+  const hook = renderHook(() => useKeyboardHandlers({activeOperation: null, isTerminalInteractive: true, onAssessmentPause: jest.fn(), onAssessmentCancel: jest.fn(), onScreenClear: jest.fn()}));
+  act(() => {inputHandlers.at(-2)!.handler('unrelated', {}); inputHandlers.at(-2)!.handler('', {escape: true});});
+  expect(exit).toHaveBeenCalled(); hook.unmount();
+});

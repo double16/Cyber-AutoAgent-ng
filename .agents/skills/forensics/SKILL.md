@@ -28,6 +28,29 @@ and reasons for termination.
 
 ## Playbooks
 
+### Inspect technique use and feedback
+
+Techniques are global guidance, not operation evidence. Inspect source documents in Qdrant and the
+operation's `techniques/` debug directory. Produced copies are saved immediately; evaluated-use copies
+include their independent sentiment and reason. Lifecycle and use provenance are available read-only:
+
+```sql
+SELECT u.operation_id, u.task_uid, u.revision_id, u.score, u.reason, u.use_context,
+       r.lineage, r.origin, r.active, r.inactive_reason, r.score_count, r.score_total,
+       r.pending_sync
+FROM technique_uses AS u
+JOIN technique_revisions AS r ON r.revision_id = u.revision_id
+WHERE u.operation_id = :operation_id
+ORDER BY u.created_at;
+```
+
+A NULL score is pending evaluation, not negative sentiment. An inactive current revision may advertise
+triggers for regeneration, but cannot be returned as guidance. Superseded revisions preserve history.
+`use_context` records the first delivery's generic purpose, phase contexts, applicability and observation
+provenance. New receipts also freeze exact `delivered_documents` in this JSON. Missing snapshots
+mean delivery is unknown; later lifecycle rendering must not replace a recorded snapshot or be used
+to reconstruct a missing one from task prose.
+
 ### "Find the operation log"
 
 Use these commands to locate the `cyber_operations.log` file.
@@ -338,3 +361,36 @@ codex mcp call langfuse get_session_details --session_id "{operation_id}"
 - **Tool Failures**: Broken or missing tools are handled by the operation; do not flag them as forensic issues.
 - **Reporting Overhead**: Do not flag reporting or evaluation time as a budget issue.
 - **No-Finish Operations**: An operation may continue even if health suggests it won't finish, as coverage is prioritized. Recommend budget increases in the report instead of complaining.
+
+### Technique investigations
+
+Techniques are reusable guidance, not operation evidence. A recommendation is only a lookup lead;
+retrieval does not prove applicability, and citation does not prove contribution. Judge applicability
+against the assigned task and phase, then judge usefulness against the delivered guidance and
+observed task behavior. A neutral score means contribution was not established; it does not by itself
+mean the guidance was harmful. A justified exclusion or refutation can still be useful.
+
+Keep evidence availability separate from semantic support. Readable artifacts, successful tool calls,
+HTTP status codes and satisfied acceptance receipts establish availability or execution only. They
+do not establish a finding, correctness, semantic approval or technique contribution. Missing target
+prerequisites belong in future validation; unsupported methodology claims require an identified
+missing premise, contradiction or unjustified generalization. Do not infer absence from a partial
+search or incomplete source inspection.
+
+For generated technique bundles, judge each component against its assigned methodology and request.
+Partial delivery does not establish complete request coverage; a sibling component's omission is not
+automatically a defect in this component. Distinguish source support, user-requested content and
+authored procedure quality. Treat a review or tool contract failure as unresolved pipeline status, not
+as a semantic rejection. Inspect the current task's phase and provenance when reviewing continuation
+feedback; proposed future tests are not evidence that those tests were executed.
+
+### Technique research references
+
+Use the linked research records for detailed event fields, correction schemas, controller lifecycle
+and calibration evidence. They document specific revisions and experiments; scripted checks and
+model-call completion do not establish semantic acceptance.
+
+- [Technique forensics reference](../../../docs/research/technique/forensics-reference.md) summarizes
+  current event fields and points to the detailed contracts and study records.
+- [Earlier technique acceptance reports](../../../docs/research/README.md) retain study
+  protocols and outcomes. Do not treat them as current operation evidence.
