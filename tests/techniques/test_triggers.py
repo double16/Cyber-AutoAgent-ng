@@ -1,5 +1,6 @@
 import base64
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
 
@@ -496,3 +497,83 @@ def test_runtime_tool_declarations_are_read_from_actual_sdk_registry(scripted_se
     before = list(context.lookup.observations)
     complete_tool_call(agent, "late_source", {}, "Generated analysis")
     assert context.lookup.observations == before
+
+
+@pytest.mark.parametrize(("signal", "positive", "negative"), [
+    ("http.oauth", "/authorize?response_type=code&client_id=test", "response_type is documented"),
+    ("http.oidc", '{"id_token": "opaque"}', '{"id_token_hint": "opaque"}'),
+    ("http.saml", "/sso?SAMLResponse=encoded", "SAMLResponse is documented"),
+    ("http.graphql", '{"query": "query Read { viewer { id } }"}', '{"query": "ordinary search"}'),
+    ("http.websocket", "Upgrade: websocket\r\n", "Upgrade: h2c\r\n"),
+    ("http.xml", "Content-Type: application/soap+xml; charset=utf-8", "Content-Type: application/json"),
+    ("http.multipart", "Content-Type: multipart/form-data; boundary=test", "Content-Type: multipart/form-data"),
+    ("http.cors", "Access-Control-Allow-Origin: https://client.invalid", "Origin: https://client.invalid"),
+])
+def test_protocol_signals_identify_syntax_without_claiming_vulnerability(signal, positive, negative):
+    assert detect(positive) == [signal]
+    assert detect(negative) == []
+    assert detect(quote(positive, safe="")) == [signal]
+
+
+def test_protocol_signals_accumulate_once_in_stable_order():
+    text = f'{token()}\nUpgrade: websocket\nAccess-Control-Allow-Origin: *\nUpgrade: websocket'
+    assert detect(text) == ["http.jwt", "http.websocket", "http.cors"]
+    assert token() not in sanitize(text)
+
+
+@pytest.mark.parametrize("text", [
+    "https://issuer.invalid/.well-known/openid-configuration",
+    "urn:oasis:names:tc:SAML:2.0:protocol",
+    '{"query": "{ viewer { id } }"}',
+    "Sec-WebSocket-Key: test",
+    "Content-Type: text/xml",
+])
+def test_alternate_protocol_forms(text):
+    assert len(detect(text)) == 1
+
+
+def test_invalid_compact_candidates_do_not_suppress_protocol_clues():
+    def header(value):
+        return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+
+    for candidate in (f'{header({"alg": "dir"})}..a.b.c', f'{header({"alg": 1})}.e30.'):
+        assert detect(candidate + "\nUpgrade: websocket") == ["http.websocket"]
+
+
+@pytest.mark.parametrize(("filename", "observation"), [
+    ("jwt-verification.md", token()),
+    ("oauth-oidc.md", "/authorize?response_type=code"),
+    ("oauth-oidc.md", '{"id_token": "synthetic"}'),
+    ("saml.md", "/sso?SAMLResponse=synthetic"),
+    ("graphql.md", '{"query": "{ viewer { id } }"}'),
+    ("websockets.md", "Upgrade: websocket"),
+    ("xxe.md", "Content-Type: application/xml"),
+    ("file-upload-processing.md", "Content-Type: multipart/form-data; boundary=synthetic"),
+    ("cors.md", "Access-Control-Allow-Origin: https://client.invalid"),
+])
+def test_library_documents_assemble_phase_specific_signal_recommendations(
+    scripted_service, tmp_path, filename, observation,
+):
+    from modules.operation_plugins.web import technique_signals
+    from modules.techniques.documents import TechniqueDocument
+
+    root = Path(__file__).resolve().parents[2] / "src/modules/operation_plugins/web/techniques"
+    path = root / filename
+    doc = TechniqueDocument(path.read_bytes().decode("utf-8"))
+    state = scripted_service
+    state.service.store.publish(doc, f"module:web:techniques/{path.name}", "module:web")
+    for phase in ("hypothesis_generation", "vulnerability_verification"):
+        assert phase in doc.metadata.phases
+        context = RecommendationContext(state.service, [phase], [technique_signals], tmp_path / f"{phase}.json")
+        context.observe(observation, "artifact:synthetic-capture", semantic=False)
+        recommendations = context.state["recommendations"]
+        assert recommendations
+        assert all(row["phase_contexts"] == [phase] for row in recommendations)
+        requests = {trigger.request for trigger in doc.metadata.triggers if phase in trigger.phases}
+        assert {row["request"] for row in recommendations} <= requests
+        assert all(row["source_sha256"] for row in recommendations)
+        unrelated = RecommendationContext(
+            state.service, [phase], [technique_signals], tmp_path / f"{phase}-negative.json"
+        )
+        assert unrelated.observe("A plain unrelated response", "artifact:negative", semantic=False) == ""
+    assert not state.research_calls

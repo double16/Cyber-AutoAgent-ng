@@ -1,0 +1,926 @@
+{
+  "status": "passed_three_positive_fixtures",
+  "protocol": "protocol.json",
+  "candidate_code_identity": "cc1882179374a99b92c44ceec1579d272432d19bb638902ad5b2eb3e22c0f098",
+  "counts": {
+    "limit": 21,
+    "requests": 15,
+    "roles": 6
+  },
+  "results": [
+    {
+      "case": "network-policy",
+      "status": "completed",
+      "review": {
+        "approved": true,
+        "decision_origin": "controller_findings",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "The draft describes a reusable policy-based connectivity comparison with identity binding, controls and evidence requirements without target execution or command syntax. The asserted factual mechanisms about rule evaluation and connection state are supported by the retained pf.conf excerpts, and the procedure provides explicit prerequisites, baseline and repeat controls, and evidence requirements. Interpretation distinguishes legitimate allowed connectivity from a suspected enforcement failure only when identity mapping and path are verified under an established policy. No blocking defects are identified.",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [
+          {
+            "draft_references": [
+              "d93354ab1ca02:b28",
+              "d93354ab1ca02:b29",
+              "d93354ab1ca02:b30",
+              "d93354ab1ca02:b31",
+              "d93354ab1ca02:b32"
+            ],
+            "prerequisite_or_policy": "A declared policy defining allowed and denied source/service pairs, an effective rule-set revision, and a known enforcement point with verified identity mapping and path are established before interpretation. If intended policy, loaded configuration or enforcement point is unknown, it must be established before interpreting a connection as a violation.",
+            "legitimate_outcome": "Allowed connectivity from an independently verified allowed peer to the intended service through the enforcement point is legitimate. A denied peer failing to connect supports the expected outcome only when the control confirms the intended service was reachable.",
+            "suspected_violation": "Enforcement failure is suspected only when the independently established denied identity reaches the protected service under the stated policy with identity mapping and path verified. Mere response differences or successful connectivity from an unspecified peer establish no violation.",
+            "distinguishing_control": "Record service identity, destination address/port, protocol, enforcement interface and rule-set revision; verify source identity visible at enforcement point including NAT/proxy mapping; establish allowed-peer baseline with fresh connection; attempt same operation from independently verified denied peer holding service/protocol/operation constant; repeat allowed control to confirm service availability; record which rule and state decision applied when available."
+          }
+        ],
+        "no_security_checks_reason": ""
+      },
+      "counts": {
+        "limit": 21,
+        "requests": 5,
+        "roles": 2
+      }
+    },
+    {
+      "case": "filesystem-policy",
+      "status": "completed",
+      "review": {
+        "approved": true,
+        "decision_origin": "controller_findings",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "The draft describes a reusable read-access comparison that establishes policy independently, binds tests to a verified process identity and object metadata, uses allowed and denied controls under unchanged context, and requires evidence preservation. The retained open(2) excerpt provides factual support for the read-permission basis, and the procedure distinguishes legitimate access from a boundary violation with explicit prerequisites and controls. No material defects were found against the acceptance criteria.",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [
+          {
+            "draft_references": [
+              "de839ba9c2b56:b5",
+              "de839ba9c2b56:b6",
+              "de839ba9c2b56:b7",
+              "de839ba9c2b56:b8",
+              "de839ba9c2b56:b9",
+              "de839ba9c2b56:b12",
+              "de839ba9c2b56:b13",
+              "de839ba9c2b56:b15",
+              "de839ba9c2b56:b16",
+              "de839ba9c2b56:b18",
+              "de839ba9c2b56:b19",
+              "de839ba9c2b56:b25",
+              "de839ba9c2b56:b26",
+              "de839ba9c2b56:b27"
+            ],
+            "prerequisite_or_policy": "The intended read policy is established independently from approved configuration or an authoritative policy owner. An allowed file and a denied file are selected for the same declared test principal, with applicable sharing, ACL, identity, privilege and isolation conditions established before any security conclusion. Effective identity, groups, privilege context and filesystem namespace are recorded and object binding uses stable file metadata and resolved path, excluding symlink resolution, identity changes or replacement objects.",
+            "legitimate_outcome": "Reading the allowed file succeeds under the verified process context and unchanged policy. A denied read is expected to be denied or unavailable for the denied control when the established policy prohibits read access for the principal.",
+            "suspected_violation": "A boundary violation is suspected only if marker content from a file independently established as denied is returned under the verified principal with unchanged policy, i.e., the process reads data from an object the established policy prohibits it from reading.",
+            "distinguishing_control": "Record effective identity and privilege context and bind each test to the intended object via stable metadata and resolved path. Confirm from the established effective policy that the principal should read the allowed control and should not read the denied control. Under the same verified process context perform a read-only open and a small bounded read of non-sensitive marker content on the allowed file then the same operation on the denied file without changing identity or privilege. Record both open and read outcomes, distinguish missing path/unavailable filesystem from access denial, and repeat the allowed control to detect changes in availability or context."
+          }
+        ],
+        "no_security_checks_reason": ""
+      },
+      "counts": {
+        "limit": 21,
+        "requests": 10,
+        "roles": 4
+      }
+    },
+    {
+      "case": "http-selector-corrected",
+      "status": "completed",
+      "review": {
+        "approved": true,
+        "decision_origin": "controller_findings",
+        "issue_dispositions": [],
+        "category": "authored_content",
+        "reason": "The draft describes a reusable header-selector comparison with explicit prerequisites for establishing entitlement policy, a baseline allowed-object request, a controlled selector variation, a request-shape negative control and repeat verification, and it limits the authorization-violation conclusion to the case where an unchanged identity obtains object B despite an independently established denial policy with stable bindings. The procedure is presented as future guidance without target execution, and the interpretation distinguishes legitimate selection from an IDOR boundary violation. No blocking defects were identified against the acceptance criteria.",
+        "issues": [],
+        "suggestions": [],
+        "interpretations": [
+          {
+            "draft_references": [
+              "d289e33021071:b9",
+              "d289e33021071:b10",
+              "d289e33021071:b11",
+              "d289e33021071:b12",
+              "d289e33021071:b13",
+              "d289e33021071:b17",
+              "d289e33021071:b18",
+              "d289e33021071:b20",
+              "d289e33021071:b23",
+              "d289e33021071:b24",
+              "d289e33021071:b27",
+              "d289e33021071:b33",
+              "d289e33021071:b34",
+              "d289e33021071:b35",
+              "d289e33021071:b36"
+            ],
+            "prerequisite_or_policy": "Establish the intended entitlement policy independently from approved documentation, configuration or an authoritative policy owner. Record why the declared test identity should access object A and should not access object B for the same operation, accounting for ownership, sharing, roles and other applicable access grants. Verify that the request identity is the declared principal and that no other request context changes its effective entitlement, and re-establish policy and bindings if they change.",
+            "legitimate_outcome": "Returning a different object after a selector change can be legitimate selection. An allowed-object request succeeds for A, a denial of B supports expected enforcement for this comparison, and both objects being allowed makes selection between them legitimate. A request-shape negative control that rejects a missing selector only establishes that the selector is required, not that authorization is enforced.",
+            "suspected_violation": "Suspect an IDOR only if the unchanged identity obtains the controlled object B despite the independently established policy denying that identity the same operation on B, with identity, object binding and policy stability verified. The comparison must show disclosure of B, not merely a different status code, response size or unrelated error.",
+            "distinguishing_control": "Baseline: request allowed object A with the declared identity and record status, returned object identity and a non-sensitive marker, confirming the response is for the intended object and operation. Controlled variation: change only the selector header to object B while retaining the same identity information, endpoint, operation and other request context, and verify returned object identity and marker. Negative control: remove the selector as a request-shape check. Repeat the allowed-object request to verify identity, policy and object bindings remained stable before interpreting the comparison."
+          }
+        ],
+        "no_security_checks_reason": ""
+      },
+      "counts": {
+        "limit": 21,
+        "requests": 15,
+        "roles": 6
+      }
+    }
+  ],
+  "assessments": [
+    {
+      "case": "00-network-policy",
+      "timestamp": "2026-11-06T09:55:49.027373+00:00",
+      "stage": "critique",
+      "status": "review_snapshot",
+      "snapshot_id": "93354ab1ca026034f7ddd761eb1cae9a51d947d14a16ff4b5451c7225e77e74a",
+      "draft_reference_count": 52
+    },
+    {
+      "case": "00-network-policy",
+      "timestamp": "2026-11-06T09:59:48.594997+00:00",
+      "stage": "critique",
+      "status": "issues_validated",
+      "snapshot_id": "93354ab1ca026034f7ddd761eb1cae9a51d947d14a16ff4b5451c7225e77e74a",
+      "issues": [],
+      "source_inspection": [
+        {
+          "url": "https://man.openbsd.org/pf.conf",
+          "characters": 146,
+          "inspected_intervals": [
+            [
+              0,
+              146
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "case": "00-network-policy",
+      "timestamp": "2026-11-06T10:03:55.742101+00:00",
+      "stage": "critique_assessment",
+      "status": "control_references_resolved",
+      "snapshot_id": "93354ab1ca026034f7ddd761eb1cae9a51d947d14a16ff4b5451c7225e77e74a",
+      "interpretation_index": 0,
+      "provided_references": [
+        "d93354ab1ca02:b28",
+        "d93354ab1ca02:b29",
+        "d93354ab1ca02:b30",
+        "d93354ab1ca02:b31",
+        "d93354ab1ca02:b32"
+      ],
+      "resolved_references": [
+        "d93354ab1ca02:b28",
+        "d93354ab1ca02:b29",
+        "d93354ab1ca02:b30",
+        "d93354ab1ca02:b31",
+        "d93354ab1ca02:b32"
+      ],
+      "resolved_records": [
+        {
+          "reference": "d93354ab1ca02:b28",
+          "path": "body.line[28]",
+          "value": "Allowed connectivity is legitimate. A denied peer failing to connect supports the expected outcome"
+        },
+        {
+          "reference": "d93354ab1ca02:b29",
+          "path": "body.line[29]",
+          "value": "only when the control confirms that the intended service was reachable. Suspect an enforcement"
+        },
+        {
+          "reference": "d93354ab1ca02:b30",
+          "path": "body.line[30]",
+          "value": "failure only when the independently established denied identity reaches that protected service"
+        },
+        {
+          "reference": "d93354ab1ca02:b31",
+          "path": "body.line[31]",
+          "value": "under the stated policy, with the identity mapping and path verified. Mere response differences"
+        },
+        {
+          "reference": "d93354ab1ca02:b32",
+          "path": "body.line[32]",
+          "value": "or successful connectivity from an unspecified peer establish no violation."
+        }
+      ],
+      "correction_number": 0
+    },
+    {
+      "case": "00-network-policy",
+      "timestamp": "2026-11-06T10:03:55.744118+00:00",
+      "stage": "critique_assessment",
+      "status": "assessed",
+      "snapshot_id": "93354ab1ca026034f7ddd761eb1cae9a51d947d14a16ff4b5451c7225e77e74a",
+      "proposed_decision": true,
+      "assessment": {
+        "interpretation_reviews": [
+          {
+            "interpretation_index": 0,
+            "draft_references": [
+              "d93354ab1ca02:b28",
+              "d93354ab1ca02:b29",
+              "d93354ab1ca02:b30",
+              "d93354ab1ca02:b31",
+              "d93354ab1ca02:b32"
+            ],
+            "permitted_counterexample": "A scenario where the independently established denied identity reaches the protected service while the declared policy actually permits that source/service pair, i.e., the peer is not truly denied under the established policy. This would require the prerequisite that the policy defines the peer as denied to be false.",
+            "counterexample_matches_check": false,
+            "control_excludes_counterexample": false,
+            "control_references": [
+              "d93354ab1ca02:b28",
+              "d93354ab1ca02:b29",
+              "d93354ab1ca02:b30",
+              "d93354ab1ca02:b31",
+              "d93354ab1ca02:b32"
+            ],
+            "actual_discriminator": "Record service identity, destination address and port, protocol, enforcement interface and effective rule-set revision; select one policy-allowed and one policy-denied peer for that service; verify source identity actually visible at enforcement point including NAT or proxy mapping; verify test reaches intended service through enforcement point; establish allowed-peer baseline using fresh connection; attempt same operation from independently verified denied peer holding service, protocol and operation constant; account for pre-existing connection state; record which rule and state decision applied when available; repeat allowed control to check service remained available.",
+            "critic_correct": true
+          }
+        ],
+        "critic_supported": true,
+        "reason": "The draft provides explicit prerequisites for policy establishment, identity binding and path verification, and conditions suspected enforcement failure only when the independently established denied identity reaches the protected service under the stated policy with mapping and path verified. The interpretation distinguishes legitimate allowed connectivity from a suspected violation, and the asserted factual mechanisms about rule evaluation order and state creation are supported by retained pf.conf excerpts. No material blocker is present and the critic's approval is correct.",
+        "findings": []
+      },
+      "correction_number": 0,
+      "final_disposition": "accepted"
+    },
+    {
+      "case": "01-filesystem-policy",
+      "timestamp": "2026-11-06T10:03:59.922329+00:00",
+      "stage": "critique",
+      "status": "review_snapshot",
+      "snapshot_id": "e839ba9c2b56ba4c140b663f4e075414939f9800fe7e8a1deadd4f3af6b489d9",
+      "draft_reference_count": 49
+    },
+    {
+      "case": "01-filesystem-policy",
+      "timestamp": "2026-11-06T10:08:44.341525+00:00",
+      "stage": "critique",
+      "status": "issues_validated",
+      "snapshot_id": "e839ba9c2b56ba4c140b663f4e075414939f9800fe7e8a1deadd4f3af6b489d9",
+      "issues": [],
+      "source_inspection": [
+        {
+          "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+          "characters": 132,
+          "inspected_intervals": [
+            [
+              0,
+              132
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "case": "01-filesystem-policy",
+      "timestamp": "2026-11-06T10:13:41.912816+00:00",
+      "stage": "critique_assessment",
+      "status": "control_references_resolved",
+      "snapshot_id": "e839ba9c2b56ba4c140b663f4e075414939f9800fe7e8a1deadd4f3af6b489d9",
+      "interpretation_index": 0,
+      "provided_references": [
+        "de839ba9c2b56:b5",
+        "de839ba9c2b56:b6",
+        "de839ba9c2b56:b7",
+        "de839ba9c2b56:b8",
+        "de839ba9c2b56:b9",
+        "de839ba9c2b56:b12",
+        "de839ba9c2b56:b13",
+        "de839ba9c2b56:b15",
+        "de839ba9c2b56:b16",
+        "de839ba9c2b56:b18",
+        "de839ba9c2b56:b19",
+        "de839ba9c2b56:b25",
+        "de839ba9c2b56:b26",
+        "de839ba9c2b56:b27"
+      ],
+      "resolved_references": [
+        "de839ba9c2b56:b5",
+        "de839ba9c2b56:b6",
+        "de839ba9c2b56:b7",
+        "de839ba9c2b56:b8",
+        "de839ba9c2b56:b9",
+        "de839ba9c2b56:b12",
+        "de839ba9c2b56:b13",
+        "de839ba9c2b56:b15",
+        "de839ba9c2b56:b16",
+        "de839ba9c2b56:b18",
+        "de839ba9c2b56:b19",
+        "de839ba9c2b56:b25",
+        "de839ba9c2b56:b26",
+        "de839ba9c2b56:b27"
+      ],
+      "resolved_records": [
+        {
+          "reference": "de839ba9c2b56:b5",
+          "path": "body.line[5]",
+          "value": "Describe future read-only checks on explicitly selected test files. Establish the intended read"
+        },
+        {
+          "reference": "de839ba9c2b56:b6",
+          "path": "body.line[6]",
+          "value": "policy independently from approved configuration or an authoritative policy owner. Select an"
+        },
+        {
+          "reference": "de839ba9c2b56:b7",
+          "path": "body.line[7]",
+          "value": "allowed file and a denied file for the same declared test principal. Do not infer a denial from"
+        },
+        {
+          "reference": "de839ba9c2b56:b8",
+          "path": "body.line[8]",
+          "value": "ownership alone: establish applicable sharing, ACL, identity, privilege and isolation conditions."
+        },
+        {
+          "reference": "de839ba9c2b56:b9",
+          "path": "body.line[9]",
+          "value": "When those conditions are unknown, inspect or establish them before making a security conclusion."
+        },
+        {
+          "reference": "de839ba9c2b56:b12",
+          "path": "body.line[12]",
+          "value": "1. Record the process's effective identity and applicable groups, privilege context and filesystem"
+        },
+        {
+          "reference": "de839ba9c2b56:b13",
+          "path": "body.line[13]",
+          "value": "   namespace. Bind each test to the intended object using stable file metadata and resolved path"
+        },
+        {
+          "reference": "de839ba9c2b56:b15",
+          "path": "body.line[15]",
+          "value": "2. Confirm from the established effective policy that the same principal should read the allowed"
+        },
+        {
+          "reference": "de839ba9c2b56:b16",
+          "path": "body.line[16]",
+          "value": "   control and should not read the denied control. If the policy cannot decide either case, record"
+        },
+        {
+          "reference": "de839ba9c2b56:b18",
+          "path": "body.line[18]",
+          "value": "3. Under that same verified process context, attempt a read-only open and a small bounded read of"
+        },
+        {
+          "reference": "de839ba9c2b56:b19",
+          "path": "body.line[19]",
+          "value": "   non-sensitive marker content in the allowed test file. Then perform the same operation on the"
+        },
+        {
+          "reference": "de839ba9c2b56:b25",
+          "path": "body.line[25]",
+          "value": "Reading the allowed file is expected. A denied read supports enforcement only with a working"
+        },
+        {
+          "reference": "de839ba9c2b56:b26",
+          "path": "body.line[26]",
+          "value": "allowed control and verified file/identity binding. Suspect a boundary violation only if marker"
+        },
+        {
+          "reference": "de839ba9c2b56:b27",
+          "path": "body.line[27]",
+          "value": "content from the file independently established as denied is returned under the verified principal"
+        }
+      ],
+      "correction_number": 0
+    },
+    {
+      "case": "01-filesystem-policy",
+      "timestamp": "2026-11-06T10:13:41.916617+00:00",
+      "stage": "critique_assessment",
+      "status": "assessed",
+      "snapshot_id": "e839ba9c2b56ba4c140b663f4e075414939f9800fe7e8a1deadd4f3af6b489d9",
+      "proposed_decision": true,
+      "assessment": {
+        "interpretation_reviews": [
+          {
+            "interpretation_index": 0,
+            "draft_references": [
+              "de839ba9c2b56:b5",
+              "de839ba9c2b56:b6",
+              "de839ba9c2b56:b7",
+              "de839ba9c2b56:b8",
+              "de839ba9c2b56:b9",
+              "de839ba9c2b56:b12",
+              "de839ba9c2b56:b13",
+              "de839ba9c2b56:b15",
+              "de839ba9c2b56:b16",
+              "de839ba9c2b56:b18",
+              "de839ba9c2b56:b19",
+              "de839ba9c2b56:b25",
+              "de839ba9c2b56:b26",
+              "de839ba9c2b56:b27"
+            ],
+            "permitted_counterexample": "A policy-compliant scenario that produces the exact observation 'marker content from a file independently established as denied is returned under the verified principal with unchanged policy' would require the file to be both independently established as denied and readable by the principal under the same unchanged policy. No policy-compliant scenario can satisfy both the explicit prerequisite that the file is independently established as denied and the observation that its marker content is returned to the verified principal, because the established denial prohibits that read. Changing the file's entitlement or the policy would change the observation's prerequisites.",
+            "counterexample_matches_check": false,
+            "control_excludes_counterexample": false,
+            "control_references": [
+              "de839ba9c2b56:b5",
+              "de839ba9c2b56:b6",
+              "de839ba9c2b56:b7",
+              "de839ba9c2b56:b8",
+              "de839ba9c2b56:b9",
+              "de839ba9c2b56:b12",
+              "de839ba9c2b56:b13",
+              "de839ba9c2b56:b15",
+              "de839ba9c2b56:b16",
+              "de839ba9c2b56:b18",
+              "de839ba9c2b56:b19",
+              "de839ba9c2b56:b25",
+              "de839ba9c2b56:b26",
+              "de839ba9c2b56:b27"
+            ],
+            "actual_discriminator": "Record effective identity and privilege context and bind each test to the intended object via stable metadata and resolved path, excluding symlink resolution, identity changes or replacement objects. Confirm from the established effective policy that the principal should read the allowed control and should not read the denied control, recording a missing prerequisite rather than assuming denial. Under the same verified process context perform a read-only open and a small bounded read of non-sensitive marker content on the allowed file then the same operation on the denied file without changing identity or privilege. Record both open and read outcomes, distinguish missing path/unavailable filesystem from access denial, and repeat the allowed control to detect changes in availability or context. Suspect a boundary violation only if marker content from a file independently established as denied is returned under the verified principal and unchanged policy.",
+            "critic_correct": true
+          }
+        ],
+        "critic_supported": true,
+        "reason": "The draft establishes policy independently, binds tests to verified process identity and object metadata, uses allowed and denied controls under unchanged context, and requires evidence preservation. The retained open(2) excerpt supports the read-permission basis. The single security-relevant check distinguishes legitimate access from a boundary violation with explicit prerequisites and controls, and no permitted counterexample can satisfy the explicit denied-file prerequisite together with the suspicious observation. The critic's approval and empty issue set are consistent with the acceptance criteria.",
+        "findings": []
+      },
+      "correction_number": 0,
+      "final_disposition": "accepted"
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "timestamp": "2026-11-06T10:13:46.114101+00:00",
+      "stage": "critique",
+      "status": "review_snapshot",
+      "snapshot_id": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+      "draft_reference_count": 60
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "timestamp": "2026-11-06T10:18:43.828004+00:00",
+      "stage": "critique",
+      "status": "issues_validated",
+      "snapshot_id": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+      "issues": [],
+      "source_inspection": [
+        {
+          "url": "https://portswigger.net/web-security/access-control/idor",
+          "characters": 123,
+          "inspected_intervals": [
+            [
+              0,
+              123
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "timestamp": "2026-11-06T10:23:02.360252+00:00",
+      "stage": "critique_assessment",
+      "status": "control_references_resolved",
+      "snapshot_id": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+      "interpretation_index": 0,
+      "provided_references": [
+        "d289e33021071:b9",
+        "d289e33021071:b10",
+        "d289e33021071:b11",
+        "d289e33021071:b12",
+        "d289e33021071:b13",
+        "d289e33021071:b17",
+        "d289e33021071:b18",
+        "d289e33021071:b20",
+        "d289e33021071:b23",
+        "d289e33021071:b24",
+        "d289e33021071:b27",
+        "d289e33021071:b33",
+        "d289e33021071:b34",
+        "d289e33021071:b35",
+        "d289e33021071:b36"
+      ],
+      "resolved_references": [
+        "d289e33021071:b9",
+        "d289e33021071:b10",
+        "d289e33021071:b11",
+        "d289e33021071:b12",
+        "d289e33021071:b13",
+        "d289e33021071:b17",
+        "d289e33021071:b18",
+        "d289e33021071:b20",
+        "d289e33021071:b23",
+        "d289e33021071:b24",
+        "d289e33021071:b27",
+        "d289e33021071:b33",
+        "d289e33021071:b34",
+        "d289e33021071:b35",
+        "d289e33021071:b36"
+      ],
+      "resolved_records": [
+        {
+          "reference": "d289e33021071:b9",
+          "path": "body.line[9]",
+          "value": "Establish the intended entitlement policy independently from approved documentation, configuration,"
+        },
+        {
+          "reference": "d289e33021071:b10",
+          "path": "body.line[10]",
+          "value": "or an authoritative policy owner. Record why this identity should access object A and should not"
+        },
+        {
+          "reference": "d289e33021071:b11",
+          "path": "body.line[11]",
+          "value": "access object B for the same operation. Account for ownership, sharing, roles and other applicable"
+        },
+        {
+          "reference": "d289e33021071:b12",
+          "path": "body.line[12]",
+          "value": "access grants; different ownership alone does not prove denial. An endpoint response alone does"
+        },
+        {
+          "reference": "d289e33021071:b13",
+          "path": "body.line[13]",
+          "value": "not establish the intended policy. If either entitlement is unknown, establish it before drawing"
+        },
+        {
+          "reference": "d289e33021071:b17",
+          "path": "body.line[17]",
+          "value": "1. Read the API contract to identify the selector header. Record the endpoint, operation, object"
+        },
+        {
+          "reference": "d289e33021071:b18",
+          "path": "body.line[18]",
+          "value": "   identifiers and independently established entitlement evidence. Verify that the request identity"
+        },
+        {
+          "reference": "d289e33021071:b20",
+          "path": "body.line[20]",
+          "value": "2. Request allowed object A and record status, returned object identity and a non-sensitive marker."
+        },
+        {
+          "reference": "d289e33021071:b23",
+          "path": "body.line[23]",
+          "value": "3. Change only the selector to object B while retaining the same identity information, endpoint,"
+        },
+        {
+          "reference": "d289e33021071:b24",
+          "path": "body.line[24]",
+          "value": "   operation and other request context. Verify the returned object identity and marker; a status"
+        },
+        {
+          "reference": "d289e33021071:b27",
+          "path": "body.line[27]",
+          "value": "4. Remove the selector as a request-shape negative control. Its rejection may establish that the"
+        },
+        {
+          "reference": "d289e33021071:b33",
+          "path": "body.line[33]",
+          "value": "Returning a different object after a selector change can be legitimate selection. Suspect an"
+        },
+        {
+          "reference": "d289e33021071:b34",
+          "path": "body.line[34]",
+          "value": "IDOR only if the unchanged identity obtains the controlled object B despite the independently"
+        },
+        {
+          "reference": "d289e33021071:b35",
+          "path": "body.line[35]",
+          "value": "established policy denying that identity the same operation on B, with identity, object binding"
+        },
+        {
+          "reference": "d289e33021071:b36",
+          "path": "body.line[36]",
+          "value": "and policy stability verified. The working A control and the B comparison distinguish service"
+        }
+      ],
+      "correction_number": 0
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "timestamp": "2026-11-06T10:23:02.362829+00:00",
+      "stage": "critique_assessment",
+      "status": "assessed",
+      "snapshot_id": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+      "proposed_decision": true,
+      "assessment": {
+        "interpretation_reviews": [
+          {
+            "interpretation_index": 0,
+            "draft_references": [
+              "d289e33021071:b9",
+              "d289e33021071:b10",
+              "d289e33021071:b11",
+              "d289e33021071:b12",
+              "d289e33021071:b13",
+              "d289e33021071:b17",
+              "d289e33021071:b18",
+              "d289e33021071:b20",
+              "d289e33021071:b23",
+              "d289e33021071:b24",
+              "d289e33021071:b27",
+              "d289e33021071:b33",
+              "d289e33021071:b34",
+              "d289e33021071:b35",
+              "d289e33021071:b36"
+            ],
+            "permitted_counterexample": "No policy-compliant scenario can produce the exact suspicious observation as defined. The observation explicitly requires an independently established policy denying the unchanged identity the same operation on object B, with identity, object binding and policy stability verified, and disclosure of B. A permitted scenario would require the identity to be entitled to B, which contradicts the explicit denial prerequisite. Changing the entitlement condition would change the observation's prerequisites, not preserve the same observation.",
+            "counterexample_matches_check": false,
+            "control_excludes_counterexample": false,
+            "control_references": [
+              "d289e33021071:b9",
+              "d289e33021071:b10",
+              "d289e33021071:b11",
+              "d289e33021071:b12",
+              "d289e33021071:b13",
+              "d289e33021071:b17",
+              "d289e33021071:b18",
+              "d289e33021071:b20",
+              "d289e33021071:b23",
+              "d289e33021071:b24",
+              "d289e33021071:b27",
+              "d289e33021071:b33",
+              "d289e33021071:b34",
+              "d289e33021071:b35",
+              "d289e33021071:b36"
+            ],
+            "actual_discriminator": "The draft requires independent entitlement policy establishment and recording why identity should access A and should not access B, verification that request identity is the declared principal with no other context changing effective entitlement, and re-establishment if changed. Procedure steps: request allowed object A and record status/returned object identity/marker confirming intended object/operation; change only selector to object B while retaining same identity/endpoint/operation/context and verify returned object identity/marker; remove selector as request-shape negative control; repeat allowed-object request to verify identity/policy/object bindings remained stable before interpreting comparison. Interpretation limits IDOR suspicion to unchanged identity obtaining B despite independently established denial policy with stable bindings and confirmed disclosure of B, not merely status/size/error.",
+            "critic_correct": true
+          }
+        ],
+        "critic_supported": true,
+        "reason": "The draft contains explicit prerequisites for independent policy establishment, a baseline allowed-object request, a controlled selector-only variation, a request-shape negative control and repeat verification, and it conditions an authorization-violation conclusion on independently established denial with verified identity/object binding stability and disclosure of B. The critic's interpretation accurately reflects those actual procedural steps and the required distinguishing controls, and no material blocker is present against the frozen acceptance criteria and requirement:method.",
+        "findings": []
+      },
+      "correction_number": 0,
+      "final_disposition": "accepted"
+    }
+  ],
+  "model_inputs": [
+    {
+      "case": "00-network-policy",
+      "role": "technique_critic",
+      "input_tokens": 7128,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "00-network-policy",
+      "role": "technique_critic",
+      "input_tokens": 6777,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "00-network-policy",
+      "role": "technique_critic",
+      "input_tokens": 7975,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "00-network-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 5105,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "00-network-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 8171,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critic",
+      "input_tokens": 7082,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critic",
+      "input_tokens": 6839,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critic",
+      "input_tokens": 8332,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 5052,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "01-filesystem-policy",
+      "role": "technique_critique_assessor",
+      "input_tokens": 8628,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critic",
+      "input_tokens": 7494,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critic",
+      "input_tokens": 7122,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critic",
+      "input_tokens": 8747,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critique_assessor",
+      "input_tokens": 5466,
+      "prompt_limit": 40000
+    },
+    {
+      "case": "02-http-selector-corrected",
+      "role": "technique_critique_assessor",
+      "input_tokens": 8385,
+      "prompt_limit": 40000
+    }
+  ],
+  "request_provenance": [
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/00-network-policy/provider-request-01.json",
+      "sha256": "927f286068890c83993ed08d0e391b39e7beed7abfc6c5f25b799292e069f7b7",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/00-network-policy/provider-request-02.json",
+      "sha256": "de18cd98121b96ef09f015811ba535c73830d62f91404fbb0ced80b25796849a",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/00-network-policy/provider-request-03.json",
+      "sha256": "247ce0d600c1524f6a8026aa5f772a49061b36cb3e67f5f1e86a11b3607eb935",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/00-network-policy/provider-request-04.json",
+      "sha256": "8d77b9c936f0ecfac9bcea1201f03809a0a642370e0fbdb63f47edc904d81504",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/00-network-policy/provider-request-05.json",
+      "sha256": "cbc360705475eddecd8b520a2f9475a3178c2017c36de929b7e4cc855fd39c63",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/01-filesystem-policy/provider-request-06.json",
+      "sha256": "5dbee4819b76ff95ef5037fbc280f5a9f4f249923bfd3936fd15f8a51d65a1d2",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/01-filesystem-policy/provider-request-07.json",
+      "sha256": "e7f100b0cc12ea69d9ab34414b245fe9dd2bd43732c64100203347c93dc5b838",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/01-filesystem-policy/provider-request-08.json",
+      "sha256": "b7ae377a7f9f611bd96c2ce9f79918cb41686652e3749577b75dabbc74137b7f",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/01-filesystem-policy/provider-request-09.json",
+      "sha256": "335201ea299fabb7d4651217a010cc0f8608e48c6b2d310d9770c1c4fa5012cc",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/01-filesystem-policy/provider-request-10.json",
+      "sha256": "85c01d9de010a27e2b24eca8b5082154f74dfc9a57f8bbc35bcba24ddae6bcee",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/02-http-selector-corrected/provider-request-11.json",
+      "sha256": "a43eb4c39f629555f74b0a90c4c56592444b7c735d48feb70db306690857f52b",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/02-http-selector-corrected/provider-request-12.json",
+      "sha256": "fadf08a93137de8c36e7b5ac132241d7578a8fbcc765282474eb1fe2f8a2302a",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/02-http-selector-corrected/provider-request-13.json",
+      "sha256": "8da5fcd317bfd080431e6a86663691ebf96ebc616345fd6212d42a193fa208a2",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/02-http-selector-corrected/provider-request-14.json",
+      "sha256": "02372a2fbb7b8234647fd2ecefc0d656b9465b84db53b6023b49b6676f00a4dc",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    },
+    {
+      "path": "outputs/technique_review_trials/support-scope-acceptance-20261106-1/live/02-http-selector-corrected/provider-request-15.json",
+      "sha256": "6122d8c8042c14e0d83012b9387b6022034a247a729267013fae98cc34d5741a",
+      "model": "muse-glimmer:30b",
+      "options": {
+        "num_ctx": 40000,
+        "num_predict": 4096,
+        "temperature": 0.0
+      },
+      "think": "low"
+    }
+  ],
+  "corrections": 0,
+  "prior_live_requests": 79,
+  "cumulative_live_requests": 94,
+  "remaining_in_this_allowance": 6,
+  "limitations": [
+    "Three fixed positive fixtures, one run per fixture; not a general reliability estimate.",
+    "Original defective HTTP has not been replayed live against this final revision.",
+    "No generation-yield measurement.",
+    "Prior failed trials remain preserved."
+  ]
+}

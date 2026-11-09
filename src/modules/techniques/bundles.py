@@ -30,6 +30,7 @@ class PlannedRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
     description: str = Field(min_length=1, max_length=1000)
     kind: Literal["factual_support", "authored_deliverable", "constraint"]
+    grounding: Literal["knowledge_allowed", "source_required"] = "knowledge_allowed"
     input_references: list[str] = Field(min_length=1, max_length=8)
 
 
@@ -91,7 +92,7 @@ def materialize_plan(output, records):
             request_excerpt="\n".join(records[ref].excerpt for ref in dict.fromkeys(item.input_references)
                                       if ref in records and records[ref].source == "original_request"),
             requirements=[Requirement(
-                id=f"requirement-{number}", description=row.description, kind=row.kind,
+                id=f"requirement-{number}", description=row.description, kind=row.kind, grounding=row.grounding,
                 origins=[RequirementOrigin(source=records[ref].source, excerpt=records[ref].excerpt[:2000])
                          for ref in dict.fromkeys(row.input_references) if ref in records],
             ) for number, row in enumerate(item.requirements, 1)],
@@ -193,6 +194,8 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
         "explicitly requested; they do not create independent methods or unrelated deliverables. Do not import "
         "operation terminal dispositions, completed execution or findings into reusable guidance. "
         "Classify each requirement kind as factual_support, authored_deliverable or constraint. "
+        "Use grounding=knowledge_allowed normally. Use source_required for explicit citation requests, "
+        "affected product versions, vendor statements or quotations, preserving request provenance. "
         "Every component and requirement must include input_references: nonempty lists of supplied "
         "record IDs. Components must reference original_request. References identify provenance, "
         "not semantic justification. Python assigns IDs, purposes and origin excerpts. "
@@ -244,6 +247,9 @@ def resolve_bundle(service, request, context=None, operation="", task="") -> Tec
                 "Check each component request itself preserves its subject, mechanisms and explicit "
                 "deliverables, not only its purpose and requirements. Check requirement classifications: "
                 "facts need factual_support, procedures need authored_deliverable, restrictions need constraint. "
+                "Separately check grounding: source_required must correspond to explicit requested citations "
+                "or source-dependent facts such as affected versions, quotations or vendor statements. "
+                "General knowledge and original procedures use knowledge_allowed. "
                 "Requirements within one component may separately describe preconditions, steps, expectations "
                 "and evidence; this is not method splitting. Not automatically required does not mean "
                 "prohibited. Reject under-splitting independent methods, omitted obligations and requirements "

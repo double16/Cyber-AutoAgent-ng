@@ -17,7 +17,7 @@ from modules.techniques.documents import TechniqueDocument
     ("context_navigator", "read-only-context.md", "reconnaissance", "host", "Configuration declares a dependency"),
     ("ctf", "evidence-hypotheses.md", "hypothesis_generation", "challenge", "An input changes recorded behavior"),
     ("threat_emulation", "marker-emulation.md", "execution", "trace", "Authorized marker and telemetry are defined"),
-    ("web", "jwt-hypotheses.md", "hypothesis_generation", "endpoint", "A captured response contains a token"),
+    ("web", "jwt-verification.md", "hypothesis_generation", "endpoint", "A captured response contains a token"),
 ])
 def test_real_module_guidance_reuses_with_local_context_and_durable_feedback(
     scripted_service, module, filename, phase, kind, observation,

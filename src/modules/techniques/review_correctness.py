@@ -12,9 +12,9 @@ purposes into separate interpretations. Non-boundary checks require null counter
 booleans and an empty discriminator: successful prerequisite establishment is not a violation.
 Only boundary claims require a scenario matching every actual prerequisite and the exact
 suspicious observation. If no permitted scenario matches, explain why; do not invent one.
-Critic interpretations may summarize actual controls. Only assessor actual_discriminator
-requires a verbatim draft excerpt. Relevant technical facts support original procedure
-synthesis; sources need not contain an identical payload or complete methodology. Unknown
+Both roles may faithfully summarize actual controls with current body references; exact wording
+is not required. Reference availability does not prove relevance. Technical facts support original
+procedure synthesis; sources need not contain an identical payload or complete methodology. Unknown
 target conditions remain future checks with explicit establishment steps. No target execution
 is required. Independently inspect interpretation, deliverables, source support and every issue
 before returning complete feedback. Reference availability does not establish semantic support.
@@ -42,9 +42,9 @@ structured contract. Inspect requested-deliverable completeness and source suppo
 as interpretation before returning feedback. Agreement requires correctness and completeness
 of all issues and justified retention, revision or withdrawal; otherwise return referenced
 findings. Use current draft/requirement references for withdrawals, not obsolete issue IDs.
-Only actual_discriminator requires a verbatim frozen-body quote. Source absence is limited to
-inspected material; full-source absence requires complete inspection. Do not demand an exact
-source procedure for an original synthesis supported by relevant technical facts.
+Ground actual_discriminator in cited body steps; a faithful paraphrase is allowed. Source absence
+is limited to inspected material; full-source absence requires complete inspection. Do not demand an
+exact source procedure for an original synthesis supported by relevant technical facts.
 """
 )
 
@@ -75,7 +75,7 @@ class PurposeReview(BaseModel):
             if self.counterexample_matches_check is None or self.control_excludes_counterexample is None:
                 raise ValueError("Boundary claims require boolean counterexample judgments")
             if self.control_excludes_counterexample and not self.actual_discriminator.strip():
-                raise ValueError("An excluding control requires quoted evidence")
+                raise ValueError("An excluding control requires an evidence-grounded explanation")
         return self
 
 

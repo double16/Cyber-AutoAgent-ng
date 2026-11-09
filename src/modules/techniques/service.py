@@ -14,11 +14,11 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictInt, ValidationError, model_validator
 from strands import tool
 
-from modules.techniques.alignment import align_request, phase_guidance
+from modules.techniques.alignment import AUTHORING_ADDITIONS, align_request, phase_guidance
 from modules.techniques.context import LookupDecision, MethodologyContext, methodology_context
 from modules.techniques.coverage import Requirement, review_coverage, select_sources
 from modules.techniques.critique import Critique as Critique
-from modules.techniques.critique import assess, repair_attribution
+from modules.techniques.critique import repair_attribution
 from modules.techniques.documents import (
     Metadata,
     Source,
@@ -27,6 +27,8 @@ from modules.techniques.documents import (
     json_payload,
     optional_records_payload,
 )
+from modules.techniques.publication_review import ReviewUnavailable, assess
+from modules.techniques.review_contract import ReviewContract
 from modules.techniques.storage import TechniqueStore
 
 APPLICABILITY_RULES = (
@@ -85,6 +87,21 @@ class AuthoredOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     metadata: AuthorMetadata
     body: str = Field(min_length=1)
+
+
+def assemble_document(authored, sources, documents, selection, requirements) -> TechniqueDocument:
+    """Shared production/replay framing; source provenance is controller-owned."""
+    authored.metadata.sources = [Source(
+        url=source["url"], title=source["title"], retrieved_at=source.get("retrieved_at", ""),
+        selection_reason=next(row.reason for row in selection.attributions if row.url == source["url"]),
+    ) for source in sources]
+    authored.metadata.source_coverage = (
+        f"Considered {len(documents)} fetched documents; selected {len(sources)}. "
+        + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
+        + selection.summary()
+    )
+    markdown = "---\n" + yaml.safe_dump(authored.metadata.model_dump(), sort_keys=False) + "---\n\n"
+    return TechniqueDocument(markdown + authored.body.strip() + "\n")
 
 
 class Feedback(BaseModel):
@@ -180,6 +197,9 @@ class TechniqueService:
         context = methodology_context(context) or MethodologyContext()
         prompt = (
             "Prepare a reusable methodology request and assess request compatibility independently of the catalog. "
+            "Set grounding=knowledge_allowed for general methodology. Use source_required for explicit "
+            "citation requests, affected product versions, vendor statements or quotations. "
+            "Do not require sources for ordinary knowledge or procedural reasoning. "
             "Abstract incidental target details; preserve languages, protocols, platforms, versions, CVEs, "
             "mechanisms and explicit deliverables. Return the methodology in generic_request, not rewrite "
             "instructions. Never add duties or restrictions. Keep reason and prerequisites generic. "
@@ -429,11 +449,14 @@ class TechniqueService:
             request = decision.generic_request
         # Planning origins remain provenance, never research or document obligations.
         requirements = [row.model_copy(update={"origins": []}) for row in requirements or []]
-        requirements = requirements or [Requirement(id="method", description=request)]
+        requirements = requirements or [Requirement(
+            id="method", description=request, grounding=decision.grounding if decision else "knowledge_allowed",
+        )]
         for requirement in requirements:
             self._validate_request(requirement.description)
         if len({row.id for row in requirements}) != len(requirements):
             raise ValueError("Requirement identifiers must be unique within a component")
+        review_contract = ReviewContract.for_context(requirements, context, self.module_technique_policy)
         selected = self._select(request, context, requirements)
         if decision is not None and on_decision is not None:
             on_decision(decision)
@@ -467,6 +490,7 @@ class TechniqueService:
             ]
             evidence_context = (
                 f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
+                + review_contract.render()
                 + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
                 + phase_guidance(context)
                 + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
@@ -478,7 +502,7 @@ class TechniqueService:
                 + optional_records_payload("existing_examples", examples, 24_000)
             )
             prompt = (
-                evidence_context
+                evidence_context + "\n" + AUTHORING_ADDITIONS
                 + "\nWrite ONE self-contained technique with metadata and a Markdown body."
                 + "\nUse prerequisites, original steps, controls, interpretation, limitations, optional tool choices, "
                 "and phase-aware triggers. Use Python 3.13+ or browser JavaScript for original code examples. "
@@ -511,23 +535,8 @@ class TechniqueService:
                     retain_draft = False
                     previous_draft = response
                     failure_stage = "document_validation"
-                    authored.metadata.sources = [Source(
-                        url=source["url"], title=source["title"], retrieved_at=source.get("retrieved_at", ""),
-                        selection_reason=next(row.reason for row in selection.attributions if row.url == source["url"]),
-                    ) for source in sources]
-                    authored.metadata.source_coverage = (
-                        f"Considered {len(documents)} fetched documents; selected {len(sources)}. "
-                        + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
-                        + selection.summary()
-                    )
-                    markdown = (
-                        "---\n"
-                        + yaml.safe_dump(authored.metadata.model_dump(), sort_keys=False)
-                        + "---\n\n"
-                        + authored.body.strip()
-                        + "\n"
-                    )
-                    document = TechniqueDocument(markdown)
+                    document = assemble_document(authored, sources, documents, selection, requirements)
+                    markdown = document.markdown
                     if not document.metadata.active:
                         raise ValueError("Generated guidance must be active")
                     if context and context.phase_contexts and not set(context.phase_contexts).intersection(
@@ -557,30 +566,33 @@ class TechniqueService:
                     continue
                 failure_stage = "critique"
                 try:
-                    with self.events.stage("critique", attempt):
+                    with self.events.stage("critique", attempt), self.events.scope(**self._review_subject(
+                        markdown, requirements, documents, selection.selected_urls, review_contract,
+                    )):
                         critique = assess(
                             self,
-                            "Independently review grounding, completeness, phase triggers, original code, "
+                            "Independently review correctness, completeness, phase triggers, original code, "
                             "tool independence, target independence, and requested version prerequisites. "
-                            "Do not add CVE validation unless requested. Categorize defects by repair ownership: "
-                            "authored_content for procedure defects, source_attribution for inaccurate or unsupported "
-                            "URL attribution, research_coverage for unsupported requirements, request_coverage for "
-                            "omitted requested mechanisms or deliverables. Similar attribution wording alone is "
-                            "not a defect. Assess the exact assembled document below. "
-                            "A technique provides guidance, never proof. Approve only if all requirements hold.\n"
+                            "Do not add CVE validation unless requested. Use the frozen criteria to identify "
+                            "material defects; Python determines repair ownership. Model knowledge and "
+                            "reasoning are allowed. Sources are required only for explicit source-required "
+                            "obligations and claims attributed to them. "
+                            "A technique provides guidance, never proof. Report only material defects against the criteria.\n"
                             "Unknown prerequisites must remain explicit conditions, not inferred facts. "
                             "Judge phase suitability for source review, network services, system mapping, challenges "
                             "and emulation as well as web assessments. Public protocol metadata alone is not "
                             "information disclosure without an unintended protected information boundary.\n"
                             + evidence_context,
-                            markdown, requirements, documents, selection.selected_urls,
+                            markdown, requirements, documents, selection.selected_urls, review_contract=review_contract,
                         )
                 except ValueError as error:
+                    review_stage = "publication_review" if isinstance(error, ReviewUnavailable) else "critique"
                     diagnostic = self._rejected_attempt(
-                        response, attempt, "critique_assessment", self._safe_feedback(str(error)),
+                        response, attempt, review_stage, self._safe_feedback(str(error)),
                     )
                     self.events.emit(
-                        "technique_build_progress", stage="critique_assessment", status="failed",
+                        "technique_build_progress", stage=review_stage,
+                        status="unavailable" if isinstance(error, ReviewUnavailable) else "failed",
                         attempt=attempt, author_attempts=attempt, research_batches=research_round,
                         attribution_repairs=attribution_repairs, source_selection_round=source_selection_round,
                         reason=self._safe_feedback(str(error)), **diagnostic,
@@ -659,6 +671,7 @@ class TechniqueService:
                     old_evidence = evidence_context
                     evidence_context = (
                         f"Requested technique: {request}\nSource selection: {selection.summary()}\n"
+                        + review_contract.render()
                         + json_payload("requirements", [row.model_dump() for row in requirements]) + "\n"
                         + phase_guidance(context)
                         + (f"Required phase contexts: {json.dumps(context.phase_contexts)}\n" if context else "")
@@ -792,6 +805,20 @@ class TechniqueService:
             return f"Invalid author schema: {details}"
         return str(error)
 
+    def _review_subject(self, markdown, requirements, documents, selected_urls, contract):
+        if self.exports is None:
+            return {}
+        try:
+            snapshot = self.exports.write_review_subject(
+                self.events.current_activity_id(), markdown, [row.model_dump() for row in requirements],
+                {row["url"]: row.get("text", "") for row in documents}, selected_urls,
+                json.loads(contract.payload),
+            )
+            return {"review_subject_path": snapshot.relative_to(self.exports.directory.parent).as_posix()}
+        except Exception:
+            self.events.emit("technique_warning", stage="export", diagnostic="Full review subject export unavailable")
+            return {}
+
     def _rejected_attempt(self, response: str, attempt: int, stage: str, reason: str) -> dict:
         if self.exports is None:
             return {}
@@ -878,20 +905,21 @@ class TechniqueService:
         return get_technique
 
     def evaluate(
-        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None,
+        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None, tools_factory=None,
     ) -> None:
         self.events.private_values = self.private_values
         with self.events.scope(operation_id=operation, task_uid=task):
-            self._evaluate(operation, task, context, tools, task_context=task_context)
+            self._evaluate(operation, task, context, tools, task_context=task_context, tools_factory=tools_factory)
 
     def _evaluate(
-        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None,
+        self, operation: str, task: str, context: str, tools: list | None = None, *, task_context=None, tools_factory=None,
     ) -> None:
         for use in self.repository.pending_uses(operation, task):
             revision = use["revision_id"]
             from modules.techniques.feedback import evaluate_feedback
 
-            feedback = evaluate_feedback(self, use, context, tools, task_context=task_context)
+            decision_tools = tools_factory() if tools_factory is not None else tools
+            feedback = evaluate_feedback(self, use, context, decision_tools, task_context=task_context)
 
             from modules.utils.redaction import redact_text
 

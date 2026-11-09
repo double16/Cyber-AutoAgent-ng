@@ -117,6 +117,7 @@ class LookupDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     generic_request: str = Field(min_length=1, max_length=2000)
+    grounding: Literal["knowledge_allowed", "source_required"] = "knowledge_allowed"
     conflict: ApplicabilityConflict | None = None
     applicability: Applicability = Field(description="Compatibility with the methodology request only")
     unmet_prerequisites: list[str] = Field(max_length=12)

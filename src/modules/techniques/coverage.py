@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, StrictBool, fiel
 
 from modules.techniques.alignment import phase_guidance
 from modules.techniques.documents import json_payload
+from modules.techniques.support_scope import SUPPORT_SCOPE_GUIDANCE
 
 
 class RequirementOrigin(BaseModel):
@@ -22,6 +23,7 @@ class Requirement(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=1, max_length=1000)
     kind: Literal["factual_support", "authored_deliverable", "constraint"] = "factual_support"
+    grounding: Literal["knowledge_allowed", "source_required"] = "knowledge_allowed"
     origins: list[RequirementOrigin] = Field(default_factory=list, max_length=8)
 
 
@@ -41,8 +43,18 @@ class CoverageGap(BaseModel):
     research_question: str = Field(min_length=1, max_length=500)
 
 
+class ClaimSupport(BaseModel):
+    """Model judgment tied to controller-retained source context."""
+
+    model_config = ConfigDict(extra="forbid")
+    claim: str = Field(min_length=1, max_length=1000)
+    source_urls: list[str] = Field(min_length=1, max_length=18)
+    authority_basis: str = Field(min_length=1, max_length=1000)
+
+
 class Support(BaseModel):
     _requirement_kind: str = PrivateAttr(default="factual_support")
+    _grounding: str = PrivateAttr(default="source_required")
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     requirement_id: str
     source_urls: list[str] = Field(max_length=18)
@@ -51,6 +63,11 @@ class Support(BaseModel):
         description="Source-backed rationale. For authored deliverables, explain the factual basis "
                     "and how those facts support constructing the procedure; for constraints, explain compliance.",
     )
+    authority_sufficient: StrictBool | None = Field(
+        default=None, description="Legacy records may have unknown requirement-level authority.",
+    )
+    claim_support: list[ClaimSupport] = Field(default_factory=list, max_length=16)
+    authoring_obligations: list[str] = Field(default_factory=list, max_length=8)
     synthesis: str = Field(
         default="", max_length=1500,
         description="Optional supplementary synthesis detail; explanation contains the canonical rationale.",
@@ -85,6 +102,13 @@ class EvidenceSupport(Support):
         default_factory=list, max_length=18,
         description="Legacy advisory field; omit. Python retains actual supplied source passages.",
     )
+
+
+class AssessedSupport(EvidenceSupport):
+    """New invocations must judge authority for the assigned requirement independently."""
+
+    authority_sufficient: StrictBool
+    claim_support: list[ClaimSupport] = Field(max_length=16)
 
 
 class CoverageValidationError(ValueError):
@@ -137,40 +161,43 @@ class SourceSelection(BaseModel):
         kinds = {row.id: row.kind for row in requirements}
         for index, row in enumerate(self.coverage):
             row._requirement_kind = kinds[row.requirement_id]
+            row._grounding = next(r.grounding for r in requirements if r.id == row.requirement_id)
             if not set(row.source_urls).issubset(selected):
                 raise CoverageValidationError("references", f"coverage.{index}.source_urls",
                                               "Coverage references an unselected source", row.requirement_id)
-            if not row.source_urls and not row.gaps and row._requirement_kind != "constraint":
+            if row._grounding == "source_required" and not row.source_urls and not row.gaps:
                 raise CoverageValidationError("coverage", f"coverage.{index}.gaps",
                                               "Unsupported requirements require explicit gaps", row.requirement_id)
 
     @property
     def sufficient(self) -> bool:
-        return self.authoritative_sufficient and all(
-            not row.gaps and (row.source_urls or row._requirement_kind == "constraint") for row in self.coverage
+        return bool(self.selected_urls) and self.authority_ready and all(
+            (row._grounding == "knowledge_allowed" or (not row.gaps and
+             row.source_urls)) for row in self.coverage
+        )
+
+    @property
+    def authority_ready(self) -> bool:
+        """Legacy source-wide authority remains unknown at requirement level."""
+        return all(
+            row._grounding == "knowledge_allowed" or (
+                row.authority_sufficient if row.authority_sufficient is not None else self.authoritative_sufficient
+            ) for row in self.coverage
         )
 
     @property
     def research_ready(self) -> bool:
         """Permit drafting from a basis, never treat that permission as fulfillment or factual proof."""
-        if not self.authoritative_sufficient:
+        if not self.selected_urls or not self.authority_ready:
             return False
-        for row in self.coverage:
-            if any(gap.kind == "unresolved_contradiction" for gap in row.gaps):
-                return False
-            if row._requirement_kind == "constraint":
-                continue
-            if not row.source_urls:
-                return False
-            if row._requirement_kind == "factual_support" and row.gaps:
-                return False
-        return True
+        return all(row._grounding == "knowledge_allowed" or (row.source_urls and not row.gaps)
+                   for row in self.coverage)
 
     def summary(self) -> str:
-        return (f"Authority sufficient: {self.authoritative_sufficient}; "
-                f"requirement coverage sufficient: {self.sufficient}; research ready: {self.research_ready}. "
-                f"{self.reason}\nResearch readiness is permission to draft, not fulfillment or factual proof. "
-                "All recorded concerns remain for authoring and independent critique.\n"
+        return (f"Required-source obligations ready: {self.sufficient}; "
+                f"references selected: {len(self.selected_urls)}. {self.reason}\n"
+                "Knowledge-allowed content is not source-verified. Reference readiness does not "
+                "establish document completeness or correctness.\n"
                 + json_payload("coverage", [row.model_dump() for row in self.coverage]))
 
     def authoring_passages(self, documents: list[dict]) -> list[dict]:
@@ -190,28 +217,15 @@ class SourceSelection(BaseModel):
 
 
 COVERAGE_RULES = (
-    "The reviewed request defines obligations. Context about a supplied resource does not add discovery duties "
-    "unless discovery is explicitly requested. Complementary sources may support procedural synthesis "
-    "without documenting the exact combined workflow or transport-specific example; explain the "
-    "mechanistic connection. Assumptions cannot replace missing technical facts. "
-    "Assess procedural or formatting constraints against the supplied request and restrictions, not "
-    "whether external sources repeat those instructions. Unknown target conditions belong in future "
-    "validation when the underlying mechanism is supported. Preserve real factual gaps and contradictions. "
-    "Classify support according to requirement kind. factual_support needs supported technical facts; "
-    "authored_deliverable needs explanation describing its factual basis and how those facts support "
-    "constructing the procedure. Procedural constraints are supplied instructions retained for authoring "
-    "and draft critique, not claims requiring external evidence. explanation is the canonical "
-    "rationale for every requirement; synthesis is optional supplementary detail and may be empty. Never require a "
-    "ready-made checklist, acceptance criteria, safeguards or future-check list in a source. "
-    "For each blocking gap identify claim, blocking_reason and research_question: the unsupported "
-    "technical claim or unresolved contradiction, why it prevents this guidance, and focused research "
-    "needed. A missing prewritten procedure is not a factual claim. Cover relevant prerequisites "
-    "and explain authority for the technical claims actually used. "
-    "External sources need not confirm the operation target, assigned route or frozen inventory. "
-    "Those observations belong to operation evidence; unknown target conditions are future checks. "
-    "Do not label something nonblocking while retaining it as a blocking gap. Move nonblocking "
-    "items to explanation, future_validation or attribution limitations and explain the disposition. "
+    "Context about a supplied resource does not add discovery duties unless discovery is explicitly requested. "
+    "Assess retrieved evidence for source_required obligations only: source-dependent facts requested "
+    "by the user, such as affected versions, vendor statements and quotations. Verify these facts "
+    "by meaning, identify genuine contradictions or missing evidence, and record focused research "
+    "questions. Do not require references to supply original procedures, controls or reasoning. "
+    "Knowledge-allowed content may use model knowledge and reasoning. Unknown target conditions "
+    "remain future validation needs. explanation describes the verified scope, not the whole method. "
 )
+
 
 
 class SourceAssessment(BaseModel):
@@ -281,7 +295,9 @@ def _assess_records(service, prompt, requirements, available, previous=None, *, 
     else:
         source_prompt = (
             prompt + "\nAssess source authority, version relevance and individual attribution only. "
-            "Return no coverage records. Authority sufficiency concerns the technical claims used; "
+            "Return no coverage records. authoritative_sufficient judges authority for the current document's "
+            "own relevant contributions only, never completeness for the request. Authority sufficiency concerns "
+            "the technical claims used; "
             "coverage is assessed separately. One authoritative document may suffice; source count "
             "never establishes sufficiency. Select only the current document URL; earlier sources are "
             "retained by the controller. Accept a current document that contributes at least one relevant "
@@ -299,8 +315,10 @@ def _assess_records(service, prompt, requirements, available, previous=None, *, 
             "limitations in reason. Do not attribute rejected sources. Zero selected sources is valid "
             "when justified. Authority and relevance concern supported contributions to this method, "
             "not whether one document covers every requested mechanism or parameter shape.\n"
-            + json_payload("requirements", [row.model_dump() for row in requirements])
-            + "\nPrior assessment (untrusted):\n" + (previous.model_dump_json() if previous else "None")
+            + json_payload("technical_scope", [{"id": row.id, "description": row.description}
+                                              for row in requirements if row.grounding == "source_required"])
+            + "\nPrior source contributions (untrusted):\n"
+            + json_payload("source_contributions", [row.model_dump() for row in decisions.values()])
         )
 
         def validate_source(candidate):
@@ -328,22 +346,11 @@ def _assess_records(service, prompt, requirements, available, previous=None, *, 
     prior_records = {row.requirement_id: row for row in previous.coverage} if previous else {}
     removed = sorted(set(previous.selected_urls) - set(source.selected_urls)) if previous else []
     for requirement in requirements:
-        if requirement.kind == "constraint":
-            records.append(Support(
-                requirement_id=requirement.id, source_urls=[], gaps=[],
-                explanation="This supplied procedural instruction remains required for authoring. "
-                            "External-source support is not applicable; draft critique checks compliance.",
-            ))
+        if requirement.grounding == "knowledge_allowed":
+            records.append(Support(requirement_id=requirement.id, source_urls=[], gaps=[],
+                                   explanation="Model knowledge and reasoning are allowed; this requirement is not source-verified."))
             evidence[requirement.id] = []
             continue
-        assessment_requirement = requirement
-        if requirement.kind == "authored_deliverable":
-            assessment_requirement = requirement.model_copy(update={
-                "kind": "factual_support",
-                "description": "Establish the technical foundation for the supplied methodology request. "
-                               "Identify unsupported mechanism claims or factual contradictions. "
-                               "Do not assess presence of an unwritten deliverable, example or checklist.",
-            })
         prior = prior_records.get(requirement.id)
         passages = [
             row.model_dump() for row in (previous._evidence.get(requirement.id, []) if previous else [])
@@ -354,7 +361,7 @@ def _assess_records(service, prompt, requirements, available, previous=None, *, 
                     and not any(row["url"] == document["url"] for row in passages)):
                 passages.append({"url": document["url"], "text": str(document["text"])[:6000]})
         record_prompt = (
-            prompt + "\n" + COVERAGE_RULES
+            prompt + "\n" + COVERAGE_RULES + SUPPORT_SCOPE_GUIDANCE
             + "\nExact requirement source context (untrusted): " + json_payload("passages", passages)
             + "\nExplain support in your own words and cite selected URLs. Omit evidence excerpts; "
               "Python retains supplied source passages. Source availability alone is not support. "
@@ -371,7 +378,7 @@ def _assess_records(service, prompt, requirements, available, previous=None, *, 
             + "Research assesses the technical foundation only. The original authored deliverables remain "
             "required and are evaluated on the actual draft by authoring and critique. A missing prewritten "
             "payload or checklist is not an unsupported mechanism claim.\n"
-            + "Assigned requirement: " + assessment_requirement.model_dump_json()
+            + "Assigned requirement: " + requirement.model_dump_json()
             + "\nValidated source assessment: " + source.model_dump_json()
             + "\nPrior requirement assessment (untrusted): " + (prior.model_dump_json() if prior else "None")
             + "\nRemoved source URLs: " + json_payload("removed_source_urls", removed)
@@ -383,6 +390,13 @@ def _assess_records(service, prompt, requirements, available, previous=None, *, 
                                               f"Return exactly requirement_id {requirement.id}", requirement.id)
             checked = SourceSelection(**source.model_dump(), coverage=[record.model_dump(exclude={"evidence"})])
             checked.validate_references(available, [requirement])
+            for claim in record.claim_support:
+                if not set(claim.source_urls) <= set(record.source_urls):
+                    raise CoverageValidationError("references", "claim_support.source_urls",
+                                                  "Claim cites an uncited source", requirement.id)
+            if record.source_urls and not record.gaps and not record.claim_support:
+                raise CoverageValidationError("coverage", "claim_support",
+                                              "Supported requirements need referenced technical claims", requirement.id)
             # Legacy model excerpts are advisory; only controller text supplies provenance.
             if any(row.url not in record.source_urls for row in record.evidence):
                 raise CoverageValidationError(
@@ -401,7 +415,7 @@ def _assess_records(service, prompt, requirements, available, previous=None, *, 
 
         record = _assessment_call(
             service, "technique_requirement_reviewer" if review else "technique_requirement_assessor",
-            record_prompt, EvidenceSupport, validate_record, lookup=lookup, requirement_id=requirement.id, **diagnostic,
+            record_prompt, AssessedSupport, validate_record, lookup=lookup, requirement_id=requirement.id, **diagnostic,
         )
         evidence[requirement.id] = record.evidence
 

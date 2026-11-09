@@ -1,0 +1,5 @@
+{
+  "tests/techniques/test_review_corrections.py": "29948bac4c0cbe1307488bbedc299efaa4f9286aa3d6e69766072d8033350cc3",
+  "tests/techniques/test_review_reasoning_contract.py": "09b10f1e200c856dbcfa869befa831a363f1893802e32838d95a7a9b0826b5b7",
+  "tests/techniques/test_structured_roles.py": "ab141c23d7bbec8e3bd2a87b69c5539788df59cc499e300db5558efab6443460"
+}

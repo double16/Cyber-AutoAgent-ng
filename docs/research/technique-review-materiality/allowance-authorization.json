@@ -1,0 +1,8 @@
+{
+  "user_message": "yes",
+  "provider_request_cap": 21,
+  "role_invocation_cap": 21,
+  "execution": "sequential",
+  "prior_live_requests": 147,
+  "unused_prior_allowances_transferred": false
+}

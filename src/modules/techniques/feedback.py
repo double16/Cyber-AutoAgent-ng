@@ -5,6 +5,12 @@ from typing import Literal
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 
+class FeedbackEvidenceGap(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    references: list[str] = Field(min_length=1)
+    missing_input: str = Field(min_length=1)
+
+
 class ContributionFeedback(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -43,6 +49,11 @@ class ContributionFeedback(BaseModel):
         "misleading_or_harmful is true. Otherwise return the empty string.",
     )
     reason: str = Field(min_length=1, max_length=2000)
+    necessary_evidence_gaps: list[FeedbackEvidenceGap] = Field(
+        default_factory=list,
+        description="Only evidence necessary to judge contribution that remains unavailable. Cite controller "
+                    "result references showing the access limitation. This leaves feedback pending, not neutral.",
+    )
     evidence_mappings: list["EvidenceMapping"] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -101,6 +112,11 @@ USEFULNESS_RUBRIC = (
     "guidance_references, result_references and explanation. Copy complete supplied IDs. "
     "IDs appearing only in prose do not constitute a completed mapping. "
     "For neutral judgments supply neutral_basis: not_used or contribution_unestablished. "
+    "A failed or guard-blocked read establishes an access limitation, not non-contribution. "
+    "Reuse retained evidence. If necessary contribution evidence remains unavailable, return "
+    "necessary_evidence_gaps with known result references and the missing input instead of "
+    "claiming that the access failure supports neutrality. Partial available evidence may still "
+    "establish contribution; declare only gaps necessary to decide the score. "
 )
 
 
@@ -153,6 +169,12 @@ class IndependentFeedbackReview(BaseModel):
 
 def resolve_feedback(feedback: ContributionFeedback, references: dict[str, str]) -> list[dict]:
     """Resolve available evidence identically for the evaluator and independent reviewer."""
+    for gap in feedback.necessary_evidence_gaps:
+        if any(key not in references or not key.startswith("result:") for key in gap.references):
+            raise ValueError("Evidence gaps require known controller result references")
+    if feedback.necessary_evidence_gaps:
+        raise ValueError("Necessary contribution evidence unavailable; feedback remains pending: "
+                         + str([gap.model_dump() for gap in feedback.necessary_evidence_gaps]))
     if feedback.score == 0 and feedback.neutral_basis is None:
         raise ValueError("Neutral feedback requires a structured neutral_basis")
     if feedback.score != 0 and not feedback.evidence_mappings:

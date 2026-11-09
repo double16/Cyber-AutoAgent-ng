@@ -1,0 +1,123 @@
+{
+  "status": "offline_verified_live_unverified",
+  "full_repository": {
+    "passed": 7828,
+    "skipped": 46,
+    "deselected": 86,
+    "warnings": 29,
+    "duration_seconds": 624.77,
+    "entry_point": "UV_CACHE_DIR=\"$PWD/.uv-cache\" uv run ./.github/scripts/run-python-coverage.sh",
+    "note": "Followed by the final technique suite for explicit single-mode harness tests."
+  },
+  "final_technique_suite": {
+    "passed": 1190,
+    "skipped": 1,
+    "warnings": 1,
+    "duration_seconds": 20.74
+  },
+  "coverage": {
+    "src/modules/techniques/generation_pilot_offline.py": {
+      "covered_lines": 49,
+      "num_statements": 50,
+      "percent_covered": 95.83333333333333,
+      "percent_covered_display": "96",
+      "missing_lines": 1,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.0,
+      "percent_statements_covered_display": "98",
+      "num_branches": 22,
+      "num_partial_branches": 2,
+      "covered_branches": 20,
+      "missing_branches": 2,
+      "percent_branches_covered": 90.9090909090909,
+      "percent_branches_covered_display": "91"
+    },
+    "src/modules/techniques/publication_review.py": {
+      "covered_lines": 55,
+      "num_statements": 55,
+      "percent_covered": 98.59154929577464,
+      "percent_covered_display": "99",
+      "missing_lines": 0,
+      "excluded_lines": 0,
+      "percent_statements_covered": 100.0,
+      "percent_statements_covered_display": "100",
+      "num_branches": 16,
+      "num_partial_branches": 1,
+      "covered_branches": 15,
+      "missing_branches": 1,
+      "percent_branches_covered": 93.75,
+      "percent_branches_covered_display": "94"
+    },
+    "src/modules/techniques/review_calibration_offline.py": {
+      "covered_lines": 64,
+      "num_statements": 65,
+      "percent_covered": 97.46835443037975,
+      "percent_covered_display": "97",
+      "missing_lines": 1,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.46153846153847,
+      "percent_statements_covered_display": "98",
+      "num_branches": 14,
+      "num_partial_branches": 1,
+      "covered_branches": 13,
+      "missing_branches": 1,
+      "percent_branches_covered": 92.85714285714286,
+      "percent_branches_covered_display": "93"
+    },
+    "src/modules/techniques/review_calibration_worker.py": {
+      "covered_lines": 68,
+      "num_statements": 69,
+      "percent_covered": 97.59036144578313,
+      "percent_covered_display": "98",
+      "missing_lines": 1,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.55072463768116,
+      "percent_statements_covered_display": "99",
+      "num_branches": 14,
+      "num_partial_branches": 1,
+      "covered_branches": 13,
+      "missing_branches": 1,
+      "percent_branches_covered": 92.85714285714286,
+      "percent_branches_covered_display": "93"
+    },
+    "src/modules/techniques/service.py": {
+      "covered_lines": 538,
+      "num_statements": 552,
+      "percent_covered": 95.99447513812154,
+      "percent_covered_display": "96",
+      "missing_lines": 14,
+      "excluded_lines": 2,
+      "percent_statements_covered": 97.46376811594203,
+      "percent_statements_covered_display": "97",
+      "num_branches": 172,
+      "num_partial_branches": 15,
+      "covered_branches": 157,
+      "missing_branches": 15,
+      "percent_branches_covered": 91.27906976744185,
+      "percent_branches_covered_display": "91"
+    }
+  },
+  "coverage_floor": {
+    "line": 80,
+    "branch": 80,
+    "status": "passed"
+  },
+  "ruff": "passed",
+  "live_requests": 0,
+  "cumulative_prior_live_requests": 212,
+  "limitations": [
+    "Scripted SDK tests establish transport and bookkeeping only.",
+    "Single-reviewer live acceptance is pending. No new live allowance.",
+    "Legacy two-review experiments and historical outcomes remain unchanged."
+  ],
+  "preflight": {
+    "passed": 10,
+    "provider_requests": 0,
+    "wire_modes": [
+      "native",
+      "tool"
+    ],
+    "semantic_judgment": "not_performed"
+  },
+  "diff_check": "passed"
+}

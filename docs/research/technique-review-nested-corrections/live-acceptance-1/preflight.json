@@ -1,0 +1,13 @@
+{
+  "candidate_code_identity": "13223f87e76f1e83761277f3ee26d0936546378df227a8c9385af4a2811a6f46",
+  "subjects": {
+    "human-network": "8541967e20efda3e79b9abf985164de66a9294eb1ef3ef033052bc7a376795d8",
+    "human-filesystem": "87312dcd1019a59718315f74c02aa4bdaea7f2e85a22438471e7497d9ae66365",
+    "http-selector": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978"
+  },
+  "wire_modes": [
+    "native",
+    "tool"
+  ],
+  "status": "passed"
+}

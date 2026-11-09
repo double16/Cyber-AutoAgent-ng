@@ -1,0 +1,8 @@
+{
+  "filesystem_delivered_sha256": "78b7b925b8b1faa57d27a9be2da9fb46d67d4381a08d4ad494627d8220ce6ad1",
+  "filesystem_original_review_sha256": "05d8720154079e7a399db35a6b28b1ba4b3abbe74e57e478aebc693793b60ddd",
+  "body_identical": true,
+  "delivery_source_hash_matches": true,
+  "capture_reference": "outputs/technique_review_trials/generation-yield-live-20261106-1/live/01/techniques/builds/8455d45d-d9ab-4b7a-8cd5-fa6de03ca51f/review-a9fdcf2eac237225317e9a8b1ab9d21886126f13bb22a301dd14d9e168494aeb.json",
+  "note": "Use captured pre-publication subject rather than delivery-only database metadata. No authored body changes."
+}

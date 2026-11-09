@@ -362,3 +362,27 @@ def test_feedback_and_independent_review_preserve_complete_serialized_results(sc
         assert payload == {"observed_results": context}
         assert json.loads(payload["observed_results"]) == value
     assert not state.service.repository.pending_uses("op", "task")
+
+
+def test_review_subject_export_is_exact_private_and_idempotent(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    import uuid
+    from pathlib import Path
+
+    exporter = TechniqueExports(str(tmp_path))
+    activity = str(uuid.uuid4())
+    document = "Full document λ\n" * 10000
+    args = (activity, document, [{"id": "method"}], [{"text": "Retained source"}], [], {"criteria": []})
+    destination = exporter.write_review_subject(*args)
+    payload = json.loads(destination.read_text())
+    assert payload["document"] == document
+    assert payload["document_sha256"] == hashlib.sha256(document.encode()).hexdigest()
+    assert destination.stat().st_mode & 0o777 == 0o600
+    assert exporter.write_review_subject(*args) == destination
+    with pytest.raises(ValueError):
+        exporter.write_review_subject("../escape", *args[1:])
+    monkeypatch.setattr(Path, "replace", Mock(side_effect=OSError("Disk failure")))
+    with pytest.raises(OSError, match="Disk failure"):
+        exporter.write_review_subject(activity, "Changed", *args[2:])
+    assert not list(destination.parent.glob("*.tmp"))

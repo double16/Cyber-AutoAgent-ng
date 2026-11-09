@@ -4,55 +4,45 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
+from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
 from modules.techniques.context import MethodologyContext, methodology_context
 from modules.techniques.documents import CONTEXTS, json_payload
 
-AUTHORING_GUIDANCE = (
+AUTHORING_ADDITIONS = (
+    "Use clear section headings, numbered procedural steps and specific technical language. "
+    "Prefer concrete, followable instructions over abstract prose where practical. "
+    "During repair, keep the method's explicit subject, objects and operations visible in headings "
+    "and steps. Make the smallest correction needed; do not generalize away file reads, network "
+    "connections or request operations merely to sound reusable. Future procedure imperatives "
+    "describe what an executor would do; they do not claim execution has occurred. "
     "Include applicable checklists, representative payloads or commands, prerequisites, controls, "
     "expected outcomes and evidence requirements without waiting for an explicit request. "
     "For hypothesis generation, give concrete future validation steps and useful illustrative payloads, "
-    "clearly distinguished from observed results. Synthesize original procedures from supported "
+    "clearly distinguished from observed results. "
+)
+
+REVIEW_GUIDANCE = (
+    "Judge completeness against the supplied request, requirements and applicable restrictions. "
+    "Do not turn author enrichment preferences into additional rejection criteria. "
+    "Use model knowledge and reasoning to synthesize original procedures from "
     "technical facts; identical examples or ready-made checklists need not appear in sources. "
     "A source can contribute one relevant technical fact without covering every mechanism, prerequisite "
     "or example in the request. Combine complementary contributions to construct the requested guidance. "
     "A request to identify unknown prerequisites asks how to establish them, not whether they already "
     "hold. Keep unknown implementation conditions as future checks rather than asserted facts. "
-    "Research evaluates technical foundations; draft critique evaluates actual authored deliverables "
+    "Research verifies source-required obligations; draft critique evaluates actual authored deliverables "
     "and compliance with procedural instructions. Preserve explicit user and module restrictions. "
     "Avoid irrelevant padding and unsupported claims. "
-    "For each future check, identify the expected legitimate behavior, the suspected security-boundary "
-    "violation, comparison controls and evidence to collect. Ordinary intended behavior alone does not "
-    "support a vulnerability hypothesis. Use explicit assumptions for unknown enforcement policies. "
-    "Distinguish establishing prerequisites, legitimate behavior and demonstrated boundary violations. "
-    "Header-based object selection, JavaScript reading browser storage and token reuse alone do not "
-    "establish violations. Explain how unknown policy is established. A distant limitation cannot excuse "
-    "an unconditional violation claim or rejection expectation in a procedure. Such inconsistencies are "
-    "authored_content defects; clarification of conditional checks does not require research. "
-    "Evaluate interpretation at the procedure step that labels an outcome. Calling a check a future "
-    "hypothesis does not excuse misclassifying legitimate behavior. A policy caveat alone is insufficient: "
-    "specify how to establish policy through documentation, configuration or independently known "
-    "authorized and denied baselines. Rejection of credential reuse requires an established revocation, "
-    "expiry or freshness contract; a valid reusable credential can legitimately succeed repeatedly. "
-    "The existence of a time-bound contract alone does not prohibit reuse inside its valid window. "
-    "Require the relevant expiry, revocation, nonce-consumption or freshness-limit event to have "
-    "occurred, and compare the observed acceptance with that actual restriction before labeling a breach. "
-    "Storage reading requires a separate demonstrated untrusted-script or confidentiality boundary, "
-    "and object selection requires an established entitlement restriction before either is a violation. "
-    "A control that merely repeats legitimate access does not distinguish a violation. "
-    "A permitted counterexample must satisfy the procedure's actual prerequisites and the exact "
-    "observation labeled suspicious; changing either does not refute the check. An expected outcome "
-    "does not itself establish a prerequisite or policy. An outcome label is not a procedural control. "
-    "Successful use of currently valid credentials or access through an intended trusted interface "
-    "is not itself a security-boundary violation. Base rejection expectations on a stated policy, "
-    "not assumed single-use properties or client behavior. "
     "Generic placeholders and reserved example domains are appropriate illustrative inputs, not "
     "incidental identifiers from a real operation. "
-)
+) + SECURITY_INTERPRETATION
+
+AUTHORING_GUIDANCE = AUTHORING_ADDITIONS + REVIEW_GUIDANCE
 
 PHASE_OBJECTIVES = {
     "reconnaissance": "Discover and characterize relevant surfaces, components, versions and trust boundaries; "
                       "preserve unknowns rather than require confirmed vulnerabilities.",
-    "hypothesis_generation": "Form plausible source-backed hypotheses with known prerequisites, explicit "
+    "hypothesis_generation": "Form plausible hypotheses with known prerequisites, explicit "
                              "assumptions and concrete future supporting or refuting checks. Include applicable "
                              "illustrative payloads and checklists, distinguished from observed results. "
                              "Unknown target conditions become future checks.",
@@ -165,7 +155,7 @@ def phase_guidance(context: MethodologyContext | None) -> str:
                       {"restriction": value, "origin": "user"} for value in context.methodology_constraints
                   ]))
     return (
-        policy + "\n" + AUTHORING_GUIDANCE + "\n" +
+        policy + "\n" + REVIEW_GUIDANCE + "\n" +
         "Apply supplied module technique policy and user methodology restrictions to reusable guidance. "
         "Guidance purpose: produce reusable methodology, never completed target execution or findings. "
         "Source-backed facts may support original procedural synthesis. Missing target observations are "

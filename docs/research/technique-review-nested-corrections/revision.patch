@@ -1,0 +1,165 @@
+--- a/src/modules/techniques/critique.py
++++ b/src/modules/techniques/critique.py
+@@ -280,7 +280,9 @@
+         "Selector influence, an outcome label, hypothetical missing authorization, or a distant caveat "
+         "does not establish exclusion. True requires cited body control steps and an explanation "
+         "of the distinction; unknown policy cannot default to denial. Use null for classified checks that do "
+-        "not claim a boundary violation; do not require a discriminator against legitimate behavior.",
++        "not claim a boundary violation; do not require a discriminator against legitimate behavior. "
++        "For a boundary claim with no possible matching permitted counterexample, false is valid and "
++        "does not itself establish a defect.",
+     )
+     control_references: list[str] = Field(
+         default_factory=list, max_length=32,
+@@ -298,7 +300,10 @@
+     critic_correct: StrictBool = Field(
+         description="Does the critic accurately identify and judge this distinction in the actual draft? "
+         "False when it silently repairs a missing discriminator or accepts an unconditional violation label "
+-        "despite a permitted counterexample. A distant caveat does not repair the procedural label.",
++        "despite a permitted counterexample. Absence of an excluding control is not a defect when the "
++        "proposed counterexample cannot satisfy established prerequisites and the exact observation. "
++        "Assess missing prerequisite-establishment steps separately. A distant caveat does not repair "
++        "the procedural label.",
+     )
+ 
+ 
+@@ -530,6 +535,7 @@
+         CriticCorrection,
+         merge_assessment,
+         merge_critic,
++        normalize_correction,
+     )
+     from modules.techniques.roles import DeferredReviewPrompt
+ 
+@@ -602,13 +608,16 @@
+             else:
+                 patch = service._json("technique_critic", bind_review_prompt(prompt, required_records),
+                                       CriticCorrection, [])
++                submitted_patch = patch.model_dump()
++                patch = normalize_correction(patch)
+                 candidate = merge_critic(critic_base, patch, independent_findings, disputed_indices)
+                 correction_responses = {"finding_responses": [row.model_dump() for row in patch.finding_responses],
+                                         "interpretation_changes": [row.model_dump() for row in patch.interpretation_changes],
+                                         "added_interpretations": [row.model_dump() for row in patch.added_interpretations],
+                                         "baseline_interpretation_count": len(critic_base.interpretations)}
+                 service.events.emit("technique_build_progress", stage="critique", status="correction_merged",
+-                                    snapshot_id=snapshot.identifier, correction=patch.model_dump(),
++                                    snapshot_id=snapshot.identifier, submitted_correction=submitted_patch,
++                                    correction=patch.model_dump(),
+                                     merged_interpretation_count=len(candidate.interpretations))
+             contract_errors = []
+             if candidate.decision_origin == "controller_findings":
+@@ -902,14 +911,19 @@
+                 prompt = correction_subject + "\n" + json_payload("retained_critic", critic_base.model_dump())
+                 prompt += "\n" + json_payload("independent_findings", independent_findings)
+                 prompt += "\n" + json_payload("disputed_interpretation_indices", disputed_indices)
+-                prompt += ("\nReturn CriticCorrection, not a full critique. Return complete replacement issues, "
++                prompt += ("\nReturn CriticCorrection, not a full critique. Put complete blockers addressing each accepted "
++                           "finding inside that finding_response.issues; Python derives the issue ID links. "
++                           "Root issues holds other retained or new blockers. Return complete "
+                            "issue_dispositions, explicit finding_responses for EVERY finding, and indexed "
+                            "interpretation_changes for EVERY disputed interpretation. Explicit retention needs "
+                            "an evidence-grounded reason; revision needs a replacement; withdrawal needs a reason. "
+                            "Appended check indices begin at the retained table length. Withdrawing all checks "
+                            "requires no_security_checks_reason. Python retains unchanged "
+                            "interpretations on this identical subject and the assessor reviews the merged result. "
+-                           "Do not regenerate the full interpretation table or silently approve a disputed row.")
++                           "Do not regenerate the full interpretation table or silently approve a disputed row. "
++                           "Revise an inaccurate description of an actual check; withdraw a row only if it is "
++                           "absent from the draft or duplicates another covered check. A reviewer objection "
++                           "does not remove the underlying check from the unchanged document.")
+             prompt += "\n" + json_payload("previous_blockers", previous_blockers)
+             prompt += ("\nFor each previous blocker return exactly one issue_dispositions entry: controller "
+                        "previous_issue_reference, retained/revised/withdrawn action, current replacement_issue_ids "
+--- a/src/modules/techniques/review_corrections.py
++++ b/src/modules/techniques/review_corrections.py
+@@ -29,7 +29,14 @@
+     finding_reference: str = Field(description="Copy one exact controller finding:N key from independent_findings")
+     action: Literal["accepted", "rejected"]
+     reason: str = Field(min_length=1)
+-    issue_ids: list[str] = Field(default_factory=list)
++    issues: list[BlockingIssue] = Field(
++        default_factory=list, description="For an accepted finding needing document correction, put complete "
++        "blocking issues HERE. Python derives their issue_ids from this nesting; do not duplicate at the root.",
++    )
++    issue_ids: list[str] = Field(
++        default_factory=list, description="Optional links to issues already supplied elsewhere in this correction. "
++        "Not needed for issues nested in this response. Unknown IDs are rejected.",
++    )
+     interpretation_indices: list[StrictInt] = Field(
+         default_factory=list, description="Baseline interpretation indices explicitly disposed in interpretation_changes, "
+         "or appended indices beginning at the baseline table length. These are not reindexed merged-table positions.",
+@@ -39,7 +46,10 @@
+ class CriticCorrection(BaseModel):
+     model_config = ConfigDict(extra="forbid")
+     reason: str = Field(min_length=1)
+-    issues: list[BlockingIssue]
++    issues: list[BlockingIssue] = Field(
++        description="Retained or new blockers unrelated to a finding response. Put blockers addressing a finding "
++        "inside that response's issues instead. Python combines both lists before independent assessment.",
++    )
+     issue_dispositions: list[IssueDisposition]
+     interpretation_changes: list[InterpretationChange]
+     finding_responses: list[FindingResponse]
+@@ -65,8 +75,29 @@
+     review_changes: list[ReviewChange]
+ 
+ 
++def normalize_correction(patch):
++    """Resolve typed containment only; never match issue prose to independent findings."""
++    result = patch.model_copy(deep=True)
++    issues = {}
++    for issue in result.issues:
++        if issue.id in issues:
++            raise ValueError("Duplicate root correction issue ID")
++        issues[issue.id] = issue
++    for response in result.finding_responses:
++        if response.action == "rejected" and response.issues:
++            raise ValueError("Rejected findings cannot contain accepted blocking issues")
++        for issue in response.issues:
++            if issue.id in issues and issues[issue.id] != issue:
++                raise ValueError("Conflicting correction issue definitions")
++            issues[issue.id] = issue
++        response.issue_ids = list(dict.fromkeys(response.issue_ids + [issue.id for issue in response.issues]))
++    result.issues = list(issues.values())
++    return result
++
++
+ def merge_critic(base, patch, findings, disputed_indices):
+     """Keep untouched interpretations; disputed ones require explicit justified dispositions."""
++    patch = normalize_correction(patch)
+     indices = [row.interpretation_index for row in patch.interpretation_changes]
+     if len(indices) != len(set(indices)) or not set(disputed_indices) <= set(indices):
+         raise ValueError("Every disputed interpretation requires one explicit change or retention")
+--- a/src/modules/prompts/security_interpretation.py
++++ b/src/modules/prompts/security_interpretation.py
+@@ -21,7 +21,12 @@
+     "and object selection requires an established entitlement restriction before either is a violation. "
+     "A control that merely repeats legitimate access does not distinguish a violation. "
+     "A permitted counterexample must satisfy the procedure's actual prerequisites and the exact "
+-    "observation labeled suspicious; changing either does not refute the check. An expected outcome "
++    "observation labeled suspicious; changing either does not refute the check. If no permitted "
++    "counterexample satisfies established prerequisites and the exact observation, explain why and set "
++    "counterexample_matches_check=false. Do not invent a missing control to exclude an impossible "
++    "counterexample or reject the check merely because control_excludes_counterexample=false. "
++    "Separately assess whether the method actually establishes its prerequisites; a circular expected "
++    "outcome or unsupported assumption is not an established policy. An expected outcome "
+     "does not itself establish a prerequisite or policy. An outcome label is not a procedural control. "
+     "Successful use of currently valid credentials or access through an intended trusted interface "
+     "is not itself a security-boundary violation. Base rejection expectations on a stated policy, "
+--- a/src/modules/techniques/support_scope.py
++++ b/src/modules/techniques/support_scope.py
+@@ -15,6 +15,13 @@
+     "needs support. Distinguish asserted facts from declared prerequisites to establish later and "
+     "original comparisons derived from supported facts. Original synthesis does not excuse unsupported "
+     "facts; absence of a matching source workflow alone does not establish a defect. "
++    "Assess support by meaning across the inspected passages, not identical wording. A faithful "
++    "paraphrase or direct logical consequence of supported premises needs no verbatim causal phrase. "
++    "For example, a required permission plus a denial condition may support a permission-denial "
++    "comparison; an allow rule plus a stated default deny may support an excluded-traffic baseline. "
++    "Identify the missing premise, contradiction or unjustified generalization before blocking a "
++    "derived claim. Do not infer unrelated mechanisms, universal guarantees, or causality from "
++    "mere correlation. Source relevance and nearby words alone are insufficient. "
+     "Operational objections must identify an advertised conclusion the existing steps cannot support. "
+     "Do not demand an authorization conclusion from a control explicitly limited to request shape, "
+     "or treat an explicitly inconclusive branch as a false finding. "

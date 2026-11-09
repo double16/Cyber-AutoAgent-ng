@@ -285,7 +285,7 @@ def test_split_component_context_keeps_shared_inputs_without_widening_purpose(sc
 
 @pytest.mark.parametrize("source,excerpt,valid", [
     ("original_request", "HTTP controls", True),
-    ("phase_guidance", "Form plausible source-backed hypotheses", True),
+    ("phase_guidance", "Form plausible hypotheses", True),
     ("methodology_restriction", "Read only", True),
     ("methodology_restriction", "No exploitation", True),
     ("original_request", "Cite excerpts from the ORIGINAL request", False),
@@ -403,7 +403,7 @@ def test_planner_schema_excludes_controller_fields():
     assert set(schema["$defs"]["PlannedComponent"]["properties"]) == {
         "request", "input_references", "requirements"}
     assert set(schema["$defs"]["PlannedRequirement"]["properties"]) == {
-        "description", "kind", "input_references"}
+        "description", "kind", "grounding", "input_references"}
 
 
 def test_correction_contains_complete_findings_and_actual_rejected_output(scripted_service, monkeypatch):

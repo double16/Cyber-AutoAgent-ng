@@ -1,0 +1,25 @@
+{
+  "status": "confirmed",
+  "supersedes": "human-adjudication-1.json",
+  "labels": [
+    {
+      "id": "network-policy",
+      "sha256": "53ce293dceaba102e39f4ede2657dcd39a4223a3f387a53d3ed586f654d2d694",
+      "label": "acceptable",
+      "rationale": "Human reviewed the exact frozen fixture and labeled it acceptable; no further rationale supplied."
+    },
+    {
+      "id": "filesystem-policy",
+      "sha256": "d35b47e91dbcc3b888f1b7e826069cafa097b10c7ec5a069c425b821b26e44f0",
+      "label": "acceptable",
+      "rationale": "Human reviewed the exact frozen fixture and labeled it acceptable; no further rationale supplied."
+    },
+    {
+      "id": "http-selector",
+      "sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+      "label": "needs_correction",
+      "rationale": "Human adjudication: IDOR requires an identity to access an object it should not access by changing the request without changing identity information."
+    }
+  ],
+  "user_correction": "Yes, you are correct. needs_correction, an IDOR occurs when an identity should not have access to an object, but does so because by changing the HTTP request in some fashion without changing identity information."
+}

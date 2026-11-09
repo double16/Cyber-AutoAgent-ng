@@ -1,0 +1,90 @@
+"""Scripted SDK transport preflight. These outputs never represent semantic judgments."""
+
+import json
+from contextlib import contextmanager
+
+from strands import Agent
+from strands.models.model import Model
+
+
+class OfflineReviewModel(Model):
+    def __init__(self, records, reference, mode):
+        self.records = records
+        self.reference = reference
+        self.mode = mode
+        self.calls = 0
+        self.config = {"model_id": "offline-review-contract"}
+        self._cyber_provider = "ollama"
+        self._cyber_native_structured_output = mode == "native"
+
+    def get_config(self):
+        return self.config
+
+    def update_config(self, **kwargs):
+        self.config.update(kwargs)
+
+    def verify(self, messages):
+        texts = [block["text"] for message in messages if message.get("role") == "user"
+                 for block in message.get("content", []) if isinstance(block.get("text"), str)]
+        if any(not any(row in text for text in texts) for row in self.records):
+            raise RuntimeError("Offline model dispatch lost an authoritative document record")
+        self.calls += 1
+
+    def payload(self, properties):
+        reason = "Offline transport/schema test only; no semantic judgment"
+        if "summary" in properties:
+            return {"summary": reason, "issues": [], "suggestions": []}
+        if "critic_supported" in properties:
+            return {"critic_supported": True, "reason": reason, "findings": [], "interpretation_reviews": [{
+                "check_purpose": "boundary_violation", "interpretation_index": 0, "draft_references": [self.reference],
+                "permitted_counterexample": reason, "counterexample_matches_check": False,
+                "control_excludes_counterexample": False, "actual_discriminator": "", "critic_correct": True,
+            }]}
+        result = {"reason": reason, "issues": [], "interpretations": [{
+            "check_purpose": "boundary_violation", "draft_references": [self.reference], "prerequisite_or_policy": reason,
+            "legitimate_outcome": reason, "suspected_violation": reason, "distinguishing_control": reason,
+        }], "no_security_checks_reason": ""}
+        if "approved" in properties:
+            result["approved"] = True
+        return result
+
+    async def structured_output(self, output_model, prompt, system_prompt=None, **kwargs):
+        self.verify(prompt)
+        yield {"output": output_model.model_validate(self.payload(output_model.model_fields))}
+
+    async def stream(self, messages, tool_specs=None, system_prompt=None, tool_choice=None, **kwargs):
+        self.verify(messages)
+        yield {"messageStart": {"role": "assistant"}}
+        outputs = [spec for spec in tool_specs or [] if spec["name"] != "retained_source_lookup"]
+        if not outputs:
+            yield {"contentBlockDelta": {"delta": {"text": "Offline evidence notes; no semantic judgment"},
+                                         "contentBlockIndex": 0}}
+            yield {"contentBlockStop": {"contentBlockIndex": 0}}
+            yield {"messageStop": {"stopReason": "end_turn"}}
+            return
+        spec = outputs[0]
+        payload = self.payload(spec["inputSchema"]["json"]["properties"])
+        yield {"contentBlockStart": {"start": {"toolUse": {"toolUseId": "offline-decision", "name": spec["name"]}},
+                                     "contentBlockIndex": 0}}
+        yield {"contentBlockDelta": {"delta": {"toolUse": {"input": json.dumps(payload)}}, "contentBlockIndex": 0}}
+        yield {"contentBlockStop": {"contentBlockIndex": 0}}
+        yield {"messageStop": {"stopReason": "tool_use"}}
+
+
+@contextmanager
+def configure_offline_roles(roles, records, reference, mode):
+    if mode not in {"native", "tool"}:
+        raise ValueError("Unknown offline wire mode")
+    model = OfflineReviewModel(records, reference, mode)
+    names = ("create_strands_model", "require_prompt_token_limit", "model_uses_server_side_state",
+             "create_agent_with_stateful_retry")
+    original = {name: getattr(roles, name) for name in names}
+    roles.create_strands_model = lambda *_args: model
+    roles.require_prompt_token_limit = lambda *_args: 48_000
+    roles.model_uses_server_side_state = lambda _model: False
+    roles.create_agent_with_stateful_retry = lambda kwargs, _model_id: Agent(**kwargs)
+    try:
+        yield model
+    finally:
+        for name, value in original.items():
+            setattr(roles, name, value)

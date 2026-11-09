@@ -1,0 +1,56 @@
+{
+  "status": "authorized",
+  "scope": "support-scope revision: unchanged three positive fixtures",
+  "candidate_code_identity": "cc1882179374a99b92c44ceec1579d272432d19bb638902ad5b2eb3e22c0f098",
+  "provider": "ollama",
+  "model": "muse-glimmer:30b",
+  "execution": "sequential",
+  "proposed_provider_request_cap": 21,
+  "proposed_role_invocation_cap": 21,
+  "live_requests_made": 0,
+  "plan": "Approximately 15 requests for three reviews, with six reserved for correction; all actual attempts count.",
+  "schedule": [
+    "network-policy",
+    "filesystem-policy",
+    "http-selector-corrected"
+  ],
+  "subjects": [
+    {
+      "id": "network-policy",
+      "sha256": "53ce293dceaba102e39f4ede2657dcd39a4223a3f387a53d3ed586f654d2d694",
+      "adjudication": "acceptable"
+    },
+    {
+      "id": "filesystem-policy",
+      "sha256": "d35b47e91dbcc3b888f1b7e826069cafa097b10c7ec5a069c425b821b26e44f0",
+      "adjudication": "acceptable"
+    },
+    {
+      "id": "http-selector-corrected",
+      "sha256": "ec9e05df99968ebcca58800056a54484ef2f0b728a9bffc68ca42ab869456b06",
+      "adjudication": "acceptable"
+    }
+  ],
+  "ready_conditions": [
+    "Human adjudicates the exact corrected HTTP subject.",
+    "User grants the new bounded request allowance.",
+    "Both scripted transport paths pass for every exact subject and frozen runtime."
+  ],
+  "acceptance": "Every positive fixture receives a controller-valid approval with independent agreement; disagreement or correction exhaustion remains a failure.",
+  "generation_yield_measured": false,
+  "prior_results_preserved": true,
+  "notes": [
+    "Existing network/filesystem adjudications bind unchanged inputs.",
+    "This all-positive suite is separate from the earlier mixed-label matched trial; do not use its fixed balanced-corpus runner.",
+    "No publication or active operation storage is involved."
+  ],
+  "provider_request_cap": 21,
+  "role_invocation_cap": 21,
+  "authorization": "User: yes to up to 21 new sequential requests for three unchanged fixtures",
+  "adjudication_gate": "Each subject requires its own explicit acceptable label before dispatch; other confirmed subjects may proceed.",
+  "prior_run": "control-grounding-revision/results.json",
+  "prior_run_disposition": "failed HTTP semantic disagreement",
+  "prior_live_requests": 79,
+  "prior_allowance_unused": 3,
+  "unused_prior_requests_transferred": false
+}

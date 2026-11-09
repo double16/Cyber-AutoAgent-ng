@@ -1,0 +1,143 @@
+--- a/src/modules/techniques/critique.py
++++ b/src/modules/techniques/critique.py
+@@ -77,6 +77,23 @@
+                 resolved.append(ref)
+         return resolved
+ 
++    def resolve_control(self, explanation, draft_references, control_references):
++        """Resolve available body evidence without judging what that evidence means."""
++        if control_references:
++            if not set(control_references) <= set(self.body_references):
++                raise ValueError("Control references must identify current procedure-body records")
++            return list(dict.fromkeys(control_references))
++        if not explanation:
++            return []
++        # Preserve archived literal excerpts without requiring a duplicate list of IDs.
++        resolved = self.control_references(explanation)
++        if resolved:
++            return resolved
++        resolved = [ref for ref in draft_references if ref in self.body_references]
++        if not resolved:
++            raise ValueError("A discriminator explanation requires current procedure-body references")
++        return list(dict.fromkeys(resolved))
++
+     def render(self, *, research_notes: bool | None = None):
+         return json_payload("draft_references", [
+             {"reference": key, "path": self.paths[key], "value": value} for key, value in self.values.items()
+@@ -246,15 +263,21 @@
+     control_excludes_counterexample: StrictBool = Field(
+         description="Does an actual procedural control exclude this same-observation permitted scenario? "
+         "Selector influence, an outcome label, hypothetical missing authorization, or a distant caveat "
+-        "does not establish exclusion. True requires an actual quoted control step and an explanation "
++        "does not establish exclusion. True requires cited body control steps and an explanation "
+         "of the distinction; unknown policy cannot default to denial.",
+     )
++    control_references: list[str] = Field(
++        default_factory=list, max_length=32,
++        description="Current procedure-body reference IDs for the actual control steps. "
++        "Python supplies their exact text; IDs establish availability, not semantic sufficiency. "
++        "Use [] when the control is missing. Do not cite metadata as a procedural control.",
++    )
+     actual_discriminator: str = Field(
+-        description="Verbatim excerpt of an actual draft control step, "
+-        "copied exactly from the procedure body. Python resolves its exact line references. "
+-        "Return the empty string if missing. No paraphrase, "
+-        "assembled improved procedure, or reviewer instructions. An outcome label is not a control step. "
+-        "Judge whether this step excludes the counterexample separately in control_excludes_counterexample.",
++        description="Explain the actual control steps grounded in control_references or the supplied "
++        "body draft_references. A faithful paraphrase or literal quote is allowed. Return the empty "
++        "string if missing. Do not invent an improved procedure or treat an outcome label as a control. "
++        "Judge whether the cited steps actually exclude the counterexample separately in "
++        "control_excludes_counterexample; valid IDs alone do not establish that conclusion.",
+     )
+     critic_correct: StrictBool = Field(
+         description="Does the critic accurately identify and judge this distinction in the actual draft? "
+@@ -491,7 +514,7 @@
+         "leave that reason empty. Return interpretations for every security-relevant check: draft_references, "
+         "prerequisite_or_policy, legitimate_outcome, suspected_violation and distinguishing_control. "
+         "Interpretation distinguishing_control may summarize actual draft steps with draft references. "
+-        "It need not be verbatim; only the assessor actual_discriminator requires a literal quote. "
++        "Both roles may faithfully summarize actual steps with current body references; do not invent controls. "
+         "Only material defects belong in issues: explain how each defect defeats a supplied requirement "
+         "or the supported, truthful, operationally sufficient method. Optional examples, alternate tools "
+         "and stylistic elaboration belong in suggestions and never require rejection. Approval may include "
+@@ -604,7 +627,7 @@
+                     "if none can satisfy its explicit conditions, explain why and set "
+                     "counterexample_matches_check=false. Never change a missing-entitlement condition into "
+                     "mere lack of ownership to manufacture a permitted scenario. Then "
+-                    "copy the actual draft control excluding it VERBATIM into actual_discriminator; use the "
++                    "cite actual body control steps in control_references and explain them in actual_discriminator; use the "
+                     "empty string if absent. Python resolves this exact excerpt against the frozen body. "
+                     "Paraphrased critic interpretations and reviewer instructions are not draft evidence. "
+                     "For example, own-origin JavaScript can read "
+@@ -696,24 +719,23 @@
+                         for row in reviews:
+                             if not set(row.draft_references) <= snapshot.values.keys():
+                                 raise ValueError("Interpretation review requires valid draft references")
+-                            resolved_control = snapshot.control_references(row.actual_discriminator)
+-                            if row.actual_discriminator and not resolved_control:
+-                                raise ValueError(
+-                                    "actual_discriminator must be a verbatim excerpt from the frozen procedure body; "
+-                                    "return the empty string when the draft has no distinguishing control. "
+-                                    "Do not invent or paraphrase a policy-establishment step"
+-                                )
+-                            if set(resolved_control) - set(row.draft_references):
++                            resolved_control = snapshot.resolve_control(
++                                row.actual_discriminator, row.draft_references, row.control_references,
++                            )
++                            row.control_references = resolved_control
++                            if resolved_control:
+                                 service.events.emit(
+                                     "technique_build_progress", stage="critique_assessment",
+                                     status="control_references_resolved", snapshot_id=snapshot.identifier,
+                                     interpretation_index=row.interpretation_index,
+                                     provided_references=list(row.draft_references), resolved_references=resolved_control,
++                                    resolved_records=[{"reference": ref, "path": snapshot.paths[ref],
++                                                       "value": snapshot.values[ref]} for ref in resolved_control],
+                                     correction_number=int(correction_used),
+                                 )
+                                 row.draft_references = list(dict.fromkeys(row.draft_references + resolved_control))
+-                            if row.control_excludes_counterexample and not row.actual_discriminator:
+-                                raise ValueError("An excluding control requires an actual quoted control step")
++                            if row.control_excludes_counterexample and not (row.actual_discriminator and resolved_control):
++                                raise ValueError("An excluding control requires an explanation and current body references")
+                             if (candidate.approved and assessment.approved and row.counterexample_matches_check
+                                     and not row.control_excludes_counterexample):
+                                 raise ValueError(
+--- a/src/modules/techniques/review_correctness.py
++++ b/src/modules/techniques/review_correctness.py
+@@ -12,9 +12,9 @@
+ booleans and an empty discriminator: successful prerequisite establishment is not a violation.
+ Only boundary claims require a scenario matching every actual prerequisite and the exact
+ suspicious observation. If no permitted scenario matches, explain why; do not invent one.
+-Critic interpretations may summarize actual controls. Only assessor actual_discriminator
+-requires a verbatim draft excerpt. Relevant technical facts support original procedure
+-synthesis; sources need not contain an identical payload or complete methodology. Unknown
++Both roles may faithfully summarize actual controls with current body references; exact wording
++is not required. Reference availability does not prove relevance. Technical facts support original
++procedure synthesis; sources need not contain an identical payload or complete methodology. Unknown
+ target conditions remain future checks with explicit establishment steps. No target execution
+ is required. Independently inspect interpretation, deliverables, source support and every issue
+ before returning complete feedback. Reference availability does not establish semantic support.
+@@ -42,9 +42,9 @@
+ as interpretation before returning feedback. Agreement requires correctness and completeness
+ of all issues and justified retention, revision or withdrawal; otherwise return referenced
+ findings. Use current draft/requirement references for withdrawals, not obsolete issue IDs.
+-Only actual_discriminator requires a verbatim frozen-body quote. Source absence is limited to
+-inspected material; full-source absence requires complete inspection. Do not demand an exact
+-source procedure for an original synthesis supported by relevant technical facts.
++Ground actual_discriminator in cited body steps; a faithful paraphrase is allowed. Source absence
++is limited to inspected material; full-source absence requires complete inspection. Do not demand an
++exact source procedure for an original synthesis supported by relevant technical facts.
+ """
+ )
+ 
+@@ -75,7 +75,7 @@
+             if self.counterexample_matches_check is None or self.control_excludes_counterexample is None:
+                 raise ValueError("Boundary claims require boolean counterexample judgments")
+             if self.control_excludes_counterexample and not self.actual_discriminator.strip():
+-                raise ValueError("An excluding control requires quoted evidence")
++                raise ValueError("An excluding control requires an evidence-grounded explanation")
+         return self
+ 
+ 

@@ -27,6 +27,26 @@ class TechniqueExports:
             temporary.unlink(missing_ok=True)
         return destination
 
+    def write_review_subject(self, activity: str, document: str, requirements, sources, selected_urls, contract) -> Path:
+        """Keep the exact assembled subject separately from bounded author-response diagnostics."""
+        directory = self.directory / "builds" / str(uuid.UUID(activity))
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        payload = {"document": document, "document_sha256": hashlib.sha256(document.encode()).hexdigest(),
+                   "requirements": requirements, "retained_sources": sources, "selected_urls": selected_urls,
+                   "acceptance_contract": contract, "scope": "Exact retained inputs; external source omissions remain unknown"}
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        destination = directory / f"review-{hashlib.sha256(encoded.encode()).hexdigest()}.json"
+        if destination.exists():
+            return destination
+        temporary = directory / f".{uuid.uuid4()}.tmp"
+        try:
+            with open(temporary, "x", encoding="utf-8", opener=lambda name, flags: os.open(name, flags, 0o600)) as stream:
+                stream.write(encoded)
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return destination
+
     def write_rejected(self, activity: str, response: str, *, attempt: int, stage: str, reason: str) -> Path:
         """Keep bounded sensitive diagnostics outside evidence and published guidance."""
         directory = self.directory / "builds" / str(uuid.UUID(activity))

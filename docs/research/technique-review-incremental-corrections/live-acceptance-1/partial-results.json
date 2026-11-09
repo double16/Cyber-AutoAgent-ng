@@ -1,0 +1,331 @@
+{
+  "status": "http_pending",
+  "counts": {
+    "limit": 21,
+    "requests": 12,
+    "roles": 6
+  },
+  "cases": [
+    {
+      "case": "00-human-network",
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": true,
+          "decision_origin": "controller_findings",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft provides a reusable policy-based connectivity comparison methodology with explicit prerequisites, identity binding model, controlled baseline vs variation steps, controls, evidence requirements and interpretation guidance. Asserted factual mechanisms about pf rule precedence and state creation are supported by the retained pf.conf excerpts. The interpretation step conditions violation labeling on established policy and binding, and the limitations section accurately notes generic treatment of identity binding and implementation-specific details. No material unsupported factual claims or missing deliverable elements are identified.",
+          "issues": [],
+          "suggestions": [],
+          "interpretations": [
+            {
+              "check_purpose": "boundary_violation",
+              "draft_references": [
+                "da0191fe62909:b49",
+                "da0191fe62909:b50",
+                "da0191fe62909:b51"
+              ],
+              "prerequisite_or_policy": "Documented intended allow/deny decisions per identity attribute, service and direction expressed as ordered rules where evaluation precedence is defined, with explicit mapping of identity attributes to enforcement points and stated binding trust assumptions.",
+              "legitimate_outcome": "Outcome matches documented policy for the bound identity and state creation follows first-packet pass semantics.",
+              "suspected_violation": "Outcome differs from policy for the bound identity, or state is created/maintained contrary to policy, or identity binding is bypassed.",
+              "distinguishing_control": "Baseline vs controlled variation comparison with identity held constant within each set, recording identity attributes used for binding, policy rule set version and evaluation order, first-packet decision and state entry creation timestamp, subsequent packet handling within established state, and decision outcome allowed/denied/dropped, with comparison table of baseline vs variation."
+            },
+            {
+              "check_purpose": "legitimate_behavior",
+              "draft_references": [
+                "da0191fe62909:b36"
+              ],
+              "prerequisite_or_policy": "Policy definition with ordered rules and identity binding model stating which attribute selects the rule set and how binding is enforced.",
+              "legitimate_outcome": "Different identity maps to a different policy outcome as documented, confirming binding is effective.",
+              "suspected_violation": "Identity binding is ineffective, i.e., different identities produce the same connectivity outcome contrary to policy.",
+              "distinguishing_control": "Repeat test with a different identity that should map to a different policy outcome to verify binding effectiveness."
+            },
+            {
+              "check_purpose": "legitimate_behavior",
+              "draft_references": [
+                "da0191fe62909:b37"
+              ],
+              "prerequisite_or_policy": "Policy evaluation precedence defined as last matching rule decides action.",
+              "legitimate_outcome": "A non-matching rule preceding a matching rule does not override the later matching rule; last-matching-rule precedence holds.",
+              "suspected_violation": "Rule precedence is not last-matching, indicating policy evaluation deviation.",
+              "distinguishing_control": "Test with a non-matching rule preceding a matching rule to confirm last-matching-rule precedence."
+            },
+            {
+              "check_purpose": "legitimate_behavior",
+              "draft_references": [
+                "da0191fe62909:b38"
+              ],
+              "prerequisite_or_policy": "Stateful policy where first packet matching a pass rule creates a state entry and subsequent packets follow state.",
+              "legitimate_outcome": "First-packet state creation on pass and subsequent packets follow state without re-evaluating policy.",
+              "suspected_violation": "State is not created on first pass or subsequent packets are re-evaluated contrary to stateful semantics.",
+              "distinguishing_control": "Observe first-packet state creation on pass and verify subsequent packets follow state, not re-evaluate policy."
+            },
+            {
+              "check_purpose": "legitimate_behavior",
+              "draft_references": [
+                "da0191fe62909:b39"
+              ],
+              "prerequisite_or_policy": "Documented deny decision for a specific identity-service pair.",
+              "legitimate_outcome": "Known denied identity-service pair is observable as denied/dropped.",
+              "suspected_violation": "Denial is not observable, suggesting policy bypass or misconfiguration.",
+              "distinguishing_control": "Test a known denied identity-service pair to confirm denial is observable."
+            }
+          ],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 5,
+          "roles": 2
+        }
+      },
+      "assessments": [
+        {
+          "timestamp": "2026-11-06T16:27:49.646465+00:00",
+          "run_id": "fd3f093c-3176-4813-b04e-37a6cf0187b4",
+          "stage": "critique_assessment",
+          "status": "assessed",
+          "snapshot_id": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+          "proposed_decision": true,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "check_purpose": "boundary_violation",
+                "interpretation_index": 0,
+                "draft_references": [
+                  "da0191fe62909:b49",
+                  "da0191fe62909:b50",
+                  "da0191fe62909:b51",
+                  "da0191fe62909:b42",
+                  "da0191fe62909:b43",
+                  "da0191fe62909:b44",
+                  "da0191fe62909:b45",
+                  "da0191fe62909:b46"
+                ],
+                "permitted_counterexample": "Policy documentation is stale while enforcement has been updated, so the observed connectivity outcome differs from the documented policy but matches the actually enforced policy. The observation of a mismatch with the documented policy is the same, but the behavior is permitted under the true enforced policy.",
+                "counterexample_matches_check": false,
+                "control_excludes_counterexample": true,
+                "control_references": [
+                  "da0191fe62909:b42",
+                  "da0191fe62909:b43",
+                  "da0191fe62909:b44",
+                  "da0191fe62909:b45",
+                  "da0191fe62909:b46",
+                  "da0191fe62909:b51"
+                ],
+                "actual_discriminator": "Interpretation must be conditioned on established policy and binding; do not infer violation from outcome alone. Procedure requires policy artifact with ordered rule list and version identifier, identity binding evidence, decision evidence with matching rule and action, stateful evidence, and a comparison table of baseline vs variation with identity, rule matched, decision, state created yes/no.",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 1,
+                "draft_references": [
+                  "da0191fe62909:b36"
+                ],
+                "permitted_counterexample": "No violation is claimed for this check.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 2,
+                "draft_references": [
+                  "da0191fe62909:b37"
+                ],
+                "permitted_counterexample": "No violation is claimed for this check.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 3,
+                "draft_references": [
+                  "da0191fe62909:b38"
+                ],
+                "permitted_counterexample": "No violation is claimed for this check.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 4,
+                "draft_references": [
+                  "da0191fe62909:b39"
+                ],
+                "permitted_counterexample": "No violation is claimed for this check.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              }
+            ],
+            "critic_supported": true,
+            "reason": "The draft provides a reusable policy-based connectivity comparison methodology with explicit prerequisites, identity binding model, controlled baseline vs variation steps, controls, evidence requirements and interpretation guidance conditioned on established policy and binding. Asserted factual mechanisms about pf rule precedence and state creation are supported by retained pf.conf excerpts. No material unsupported factual claims, missing deliverable elements, or interpretation defects are identified; the critic's approval and interpretation table are correct and complete.",
+            "findings": []
+          },
+          "correction_number": 0,
+          "final_disposition": "accepted",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "outcome_sha256": "529637ba8e05532fa3245ff328d98d638a51893f3e0b06afdeb94cf5d4ae4839"
+    },
+    {
+      "case": "01-human-filesystem",
+      "outcome": {
+        "status": "unresolved",
+        "error_type": "ValueError",
+        "error": "Critique assessment failed after one correction: Accepted findings require an issue or actual interpretation revision/withdrawal",
+        "counts": {
+          "limit": 21,
+          "requests": 11,
+          "roles": 5
+        }
+      },
+      "assessments": [
+        {
+          "timestamp": "2026-11-06T16:37:16.872095+00:00",
+          "run_id": "5464c387-6b12-442c-8475-194fdb3e9de7",
+          "stage": "critique_assessment",
+          "status": "assessed",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "proposed_decision": true,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "check_purpose": "prerequisite",
+                "interpretation_index": 0,
+                "draft_references": [
+                  "d64288cb04697:b8",
+                  "d64288cb04697:b9"
+                ],
+                "permitted_counterexample": "Counterexample analysis is not applicable for a prerequisite establishment check. No boundary violation is claimed.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "prerequisite",
+                "interpretation_index": 1,
+                "draft_references": [
+                  "d64288cb04697:b26",
+                  "d64288cb04697:b27"
+                ],
+                "permitted_counterexample": "Counterexample analysis is not applicable for a prerequisite establishment check. No boundary violation is claimed.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 2,
+                "draft_references": [
+                  "d64288cb04697:b30",
+                  "d64288cb04697:b37"
+                ],
+                "permitted_counterexample": "Counterexample analysis is not applicable for a legitimate-behavior baseline design check. No boundary violation is claimed.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 3,
+                "draft_references": [
+                  "d64288cb04697:b40",
+                  "d64288cb04697:b43"
+                ],
+                "permitted_counterexample": "Counterexample analysis is not applicable for a legitimate-behavior baseline design check. No boundary violation is claimed.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "boundary_violation",
+                "interpretation_index": 4,
+                "draft_references": [
+                  "d64288cb04697:b46",
+                  "d64288cb04697:b51",
+                  "d64288cb04697:b66",
+                  "d64288cb04697:b47",
+                  "d64288cb04697:b48",
+                  "d64288cb04697:b49",
+                  "d64288cb04697:b50"
+                ],
+                "permitted_counterexample": "With the explicit prerequisite that an established policy mapping identities to allowed/denied read access for a specific file object is in place, a policy-compliant scenario producing the exact suspicious observation 'denied identity succeeds or allowed identity is denied' cannot exist. Any scenario where the denied identity succeeds would require the policy to actually permit that identity, which contradicts the prerequisite that the policy prohibits it. No policy-compliant scenario with the same observation satisfies both the prerequisites and the observation.",
+                "counterexample_matches_check": false,
+                "control_excludes_counterexample": false,
+                "control_references": [
+                  "d64288cb04697:b46",
+                  "d64288cb04697:b47",
+                  "d64288cb04697:b48",
+                  "d64288cb04697:b49",
+                  "d64288cb04697:b50",
+                  "d64288cb04697:b51",
+                  "d64288cb04697:b66"
+                ],
+                "actual_discriminator": "Identity variation comparison keeping object and policy constant, with comparison matrix and divergence recording for future validation per body lines 5.1-5.3 and interpretation statement that boundary violation hypothesis requires future validation.",
+                "critic_correct": false
+              }
+            ],
+            "critic_supported": false,
+            "reason": "The critic approves the draft as defect-free. Independent review finds material unsupported factual assertion for denial semantics and a missing explicit identification of file objects being read required by requirement:human_file_subject. The boundary-violation interpretation is accepted by the critic with a distinguishing control that only records divergence for future validation; the draft does not provide an actual procedural control that excludes a permitted counterexample because no permitted counterexample exists under the stated prerequisites, and the critic mischaracterises the control as sufficient. These disagreements require findings.",
+            "findings": [
+              {
+                "criterion_id": "core:technical_support",
+                "material_impact": "The denied outcome design relies on source support for a causal condition not present in retained excerpts, undermining the asserted factual mechanism for denial semantics.",
+                "problem": "Body line 4.4 claims source support: 'Linux open(2) documents that the requested access to the file is not allowed when permission is lacking.' The retained excerpt provides 'The requested access to the file is not allowed' and 'requires that the caller have read permission on the object' but does not contain the condition 'when permission is lacking' linking denial to lacking permission.",
+                "requested_correction": "Remove or revise the unsupported causal wording and limit the source-supported claim to what the retained excerpts actually state, or provide retained support for the permission-lacking condition.",
+                "draft_references": [
+                  "d64288cb04697:b43"
+                ],
+                "requirement_ids": [],
+                "issue_ids": []
+              },
+              {
+                "criterion_id": "requirement:human_file_subject",
+                "material_impact": "The methodology does not make clear that it tests file read access and does not identify the file objects being read, failing the explicit deliverable requirement.",
+                "problem": "Prerequisites and procedure refer generically to 'object' and 'object identifier' without explicitly stating the methodology tests file read access and identifying the file objects being read. Requirement demands clear statement that methodology tests file read access and identification of file objects.",
+                "requested_correction": "Explicitly state that the methodology tests file read access and identify the file objects being read, e.g., by naming file paths/identifiers as the objects under test in the procedure description and evidence requirements.",
+                "draft_references": [
+                  "d64288cb04697:b9",
+                  "d64288cb04697:b30",
+                  "d64288cb04697:b57"
+                ],
+                "requirement_ids": [
+                  "human_file_subject"
+                ],
+                "issue_ids": []
+              }
+            ]
+          },
+          "correction_number": 0,
+          "final_disposition": "disputed",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "outcome_sha256": "558f94c72dad3c582dc087dc86524813e691dd577ed965d70455c400f99eb49e"
+    }
+  ]
+}

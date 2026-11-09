@@ -1,0 +1,68 @@
+[
+  {
+    "id": "generate-network",
+    "family": "network",
+    "request": "Describe a reusable policy-based connectivity comparison with identity binding, controls and evidence requirements. No target execution or particular command syntax is requested.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Describe a reusable policy-based connectivity comparison with identity binding, controls and evidence requirements. No target execution or particular command syntax is requested.",
+        "kind": "authored_deliverable",
+        "origins": []
+      }
+    ],
+    "sources": [
+      {
+        "url": "https://man.openbsd.org/pf.conf",
+        "title": "OpenBSD pf.conf manual",
+        "text": "Retained excerpts: \"the last matching rule decides what action is taken\"; \"the first time a packet matches a pass rule, a state entry is created.\"",
+        "retained_scope": "Bounded excerpt; omitted source text is unknown"
+      }
+    ],
+    "input_sha256": "aa3a6fda4e09235fb8a0e9f03aa082b4f7a151bab08c52c030e8f45f96937aff"
+  },
+  {
+    "id": "generate-filesystem",
+    "family": "filesystem",
+    "request": "Describe a reusable read-access comparison using an established policy, the actual process identity, allowed and denied controls, and evidence requirements. No target execution or particular tool is requested.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Describe a reusable read-access comparison using an established policy, the actual process identity, allowed and denied controls, and evidence requirements. No target execution or particular tool is requested.",
+        "kind": "authored_deliverable",
+        "origins": []
+      }
+    ],
+    "sources": [
+      {
+        "url": "https://man7.org/linux/man-pages/man2/open.2.html",
+        "title": "Linux open system-call manual",
+        "text": "Retained excerpts: \"requires that the caller have read permission on the object\"; \"The requested access to the file is not allowed\".",
+        "retained_scope": "Bounded excerpt; omitted source text is unknown"
+      }
+    ],
+    "input_sha256": "dcff606774882fd7fa35cef07ca1f7ea53f85a8fa641ca80503d5d8b15716fd3"
+  },
+  {
+    "id": "generate-http",
+    "family": "http",
+    "request": "Describe a reusable header-selector test and correctly explain when the comparison establishes an authorization violation. Include controls and evidence requirements. Target execution is not requested.",
+    "requirements": [
+      {
+        "id": "method",
+        "description": "Describe a reusable header-selector test and correctly explain when the comparison establishes an authorization violation. Include controls and evidence requirements. Target execution is not requested.",
+        "kind": "authored_deliverable",
+        "origins": []
+      }
+    ],
+    "sources": [
+      {
+        "url": "https://portswigger.net/web-security/access-control/idor",
+        "title": "IDOR",
+        "text": "Retained excerpts: \"If no other controls are in place\"; \"bypassing access controls to view the records of other customers\".",
+        "retained_scope": "Bounded excerpt; omitted source text is unknown"
+      }
+    ],
+    "input_sha256": "b06fe67be9930b71c37b307fd4e26fa843217a46463619d2fb7bc4c6910e38fc"
+  }
+]

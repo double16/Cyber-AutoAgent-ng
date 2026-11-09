@@ -56,13 +56,13 @@ def test_controller_validates_references_not_semantic_support(mutate, message):
     mutate(payload)
     with pytest.raises(ValueError, match=message):
         SourceSelection.model_validate(payload).validate_references(
-            [{"url": "https://vendor.example/doc"}], [Requirement(id="method", description="Method")],
+            [{"url": "https://vendor.example/doc"}], [Requirement(grounding="source_required", id="method", description="Method")],
         )
 
 
 def test_unsupported_requirements_with_gaps_are_valid_but_insufficient():
     row = SourceSelection.model_validate(selection([], ["No authoritative version support"]))
-    row.validate_references([], [Requirement(id="method", description="Method")])
+    row.validate_references([], [Requirement(grounding="source_required", id="method", description="Method")])
     assert not row.sufficient
 
 
@@ -77,7 +77,7 @@ def test_selection_repairs_invalid_references_once(scripted_service):
         return assessment_output(role, prompt, selection([url]))
 
     state.service.runner = runner
-    selected = select_sources(state.service, "Method", [Requirement(id="method", description="Method")],
+    selected = select_sources(state.service, "Method", [Requirement(grounding="source_required", id="method", description="Method")],
                               [{"url": "https://vendor.example/doc", "text": "support"}])
     assert selected.sufficient
     assert "not fetched" in prompts[-1] and "current output schema" in prompts[-1]
@@ -159,12 +159,12 @@ def test_malformed_coverage_retry_has_parser_location_and_retains_previous_suppo
     documents = [{"url": url, "text": "configuration prerequisites", "title": url} for url in urls]
     if recover:
         result = select_sources(state.service, "Prerequisite methodology",
-                                [Requirement(id="method", description="Prerequisites")], documents)
+                                [Requirement(grounding="source_required", id="method", description="Prerequisites")], documents)
         assert result.selected_urls == urls and len(sources) == 3
     else:
         with pytest.raises(ValueError, match="Source-selection validation failed.*Expecting ',' delimiter"):
             select_sources(state.service, "Prerequisite methodology",
-                           [Requirement(id="method", description="Prerequisites")], documents)
+                           [Requirement(grounding="source_required", id="method", description="Prerequisites")], documents)
         assert len(sources) == 2
     assert len(prompts) == 2 and malformed in prompts[1]
     assert "Expecting ',' delimiter" in prompts[1] and "column" in prompts[1]
@@ -197,8 +197,8 @@ def test_empty_batches_preserve_last_valid_assessment(scripted_service, empty_ro
 
     state.service.research = Research()
     state.service.runner = runner
-    with pytest.raises(ValueError, match="three batches.*Authority sufficient",):
-        state.service._research_coverage("Method", [Requirement(id="method", description="Method")])
+    with pytest.raises(ValueError, match="three batches.*Required-source obligations ready",):
+        state.service._research_coverage("Method", [Requirement(grounding="source_required", id="method", description="Method")])
     assert len(batches) == 3 and len(assessments) == 2
     if empty_round != 1:
         assert "Missing configuration support" in batches[-1][0]
@@ -212,7 +212,7 @@ def test_all_empty_batches_report_no_documents(scripted_service):
     calls = []
     state.service.research = lambda request: calls.append(request) or []
     with pytest.raises(ValueError, match="any usable source documents after three batches"):
-        state.service._research_coverage("Method", [Requirement(id="method", description="Method")])
+        state.service._research_coverage("Method", [Requirement(grounding="source_required", id="method", description="Method")])
     assert len(calls) == 3
     assert not state.calls
 
@@ -223,20 +223,20 @@ def test_complementary_sources_can_have_limitations_without_requirement_gaps():
     row["attributions"][1]["limitations"] = ["Does not enumerate versions"]
     assessed = SourceSelection.model_validate(row)
     assert assessed.sufficient
-    assert "requirement coverage sufficient: True" in assessed.summary()
+    assert "Required-source obligations ready: True" in assessed.summary()
     assessed.coverage[0].gaps = ["Unresolved contradiction about supported configuration"]
     assert not assessed.sufficient
 
 
 def test_empty_source_batch_does_not_rejudge_previous_selection(scripted_service):
     previous = SourceSelection.model_validate(selection(["https://vendor.example/advisory"]))
-    result = select_sources(scripted_service.service, "Method", [Requirement(id="method", description="Method")],
+    result = select_sources(scripted_service.service, "Method", [Requirement(grounding="source_required", id="method", description="Method")],
                             [], previous)
     assert result is previous and not scripted_service.calls
 
 
 def test_complete_selection_reports_missing_unexpected_and_duplicate_identifiers():
-    requirements = [Requirement(id=f"r{index}", description=f"Requirement {index}") for index in range(7)]
+    requirements = [Requirement(grounding="source_required", id=f"r{index}", description=f"Requirement {index}") for index in range(7)]
     payload = selection(["https://vendor.example/advisory"])
     payload["coverage"] = [dict(payload["coverage"][0], requirement_id=key) for key in ["r0", "r0", "unknown"]]
     with pytest.raises(ValueError) as caught:
@@ -246,3 +246,10 @@ def test_complete_selection_reports_missing_unexpected_and_duplicate_identifiers
     assert "Missing IDs: ['r1', 'r2', 'r3', 'r4', 'r5', 'r6']" in str(caught.value)
     assert "unexpected IDs: ['unknown']" in str(caught.value)
     assert "duplicate IDs: ['r0']" in str(caught.value)
+
+
+@pytest.fixture(autouse=True)
+def source_required_fixture_requests(request):
+    # These tests intentionally exercise mandatory retrieved-evidence workflows.
+    if "scripted_service" in request.fixturenames:
+        request.getfixturevalue("scripted_service").grounding = "source_required"

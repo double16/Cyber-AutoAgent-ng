@@ -5,12 +5,14 @@ import re
 from bisect import bisect_right
 from typing import Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, StrictInt
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
 from strands import tool
 
-from modules.techniques.alignment import AUTHORING_GUIDANCE
+from modules.techniques.alignment import REVIEW_GUIDANCE
 from modules.techniques.coverage import Attribution
 from modules.techniques.documents import TechniqueDocument, json_payload
+from modules.techniques.review_contract import ReviewContract
+from modules.techniques.review_integrity import bind_review_prompt
 
 Category = Literal["authored_content", "source_attribution", "research_coverage", "request_coverage"]
 
@@ -75,6 +77,23 @@ class ReviewSnapshot:
                 resolved.append(ref)
         return resolved
 
+    def resolve_control(self, explanation, draft_references, control_references):
+        """Resolve available body evidence without judging what that evidence means."""
+        if control_references:
+            if not set(control_references) <= set(self.body_references):
+                raise ValueError("Control references must identify current procedure-body records")
+            return list(dict.fromkeys(control_references))
+        if not explanation:
+            return []
+        # Preserve archived literal excerpts without requiring a duplicate list of IDs.
+        resolved = self.control_references(explanation)
+        if resolved:
+            return resolved
+        resolved = [ref for ref in draft_references if ref in self.body_references]
+        if not resolved:
+            raise ValueError("A discriminator explanation requires current procedure-body references")
+        return list(dict.fromkeys(resolved))
+
     def render(self, *, research_notes: bool | None = None):
         return json_payload("draft_references", [
             {"reference": key, "path": self.paths[key], "value": value} for key, value in self.values.items()
@@ -89,13 +108,22 @@ class Passage(BaseModel):
     end: StrictInt = Field(gt=0)
 
 
+REQUIREMENT_REFERENCE_DESCRIPTION = (
+    "Exact request requirement IDs from reference_fields.requirement_ids.allowed_values only. "
+    "Acceptance-criterion IDs belong in criterion_id, not this list. Do not add or remove prefixes. "
+    "Use [] for an existing-content defect supported by draft_references when no request requirement is cited."
+)
+
+
 class Issue(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(min_length=1, max_length=80, pattern=r"\S")
     category: Category
+    criterion_id: str | None = None
+    material_impact: str = Field(default="", max_length=2000)
     problem: str = Field(min_length=1, max_length=2000, pattern=r"\S")
     requested_correction: str = Field(min_length=1, max_length=2000, pattern=r"\S")
-    requirement_ids: list[str] = Field(max_length=16)
+    requirement_ids: list[str] = Field(max_length=16, description=REQUIREMENT_REFERENCE_DESCRIPTION)
     source_urls: list[str] = Field(max_length=18)
     draft_references: list[str] = Field(
         default_factory=list, max_length=32,
@@ -109,8 +137,12 @@ class Issue(BaseModel):
     absence_of_support: str = Field(default="", max_length=2000)
 
 
+CheckPurpose = Literal["prerequisite", "legitimate_behavior", "boundary_violation"]
+
+
 class Interpretation(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    check_purpose: CheckPurpose | None = None
     draft_references: list[str] = Field(min_length=1)
     prerequisite_or_policy: str = Field(
         min_length=1, description="Actual draft prerequisite or policy, including how unknown policy is established. "
@@ -130,15 +162,50 @@ class Interpretation(BaseModel):
     )
 
 
+class Suggestion(BaseModel):
+    """Optional elaboration that cannot trigger publication repair."""
+
+    model_config = ConfigDict(extra="forbid")
+    improvement: str = Field(min_length=1, max_length=2000)
+    draft_references: list[str] = Field(default_factory=list, max_length=32)
+    requirement_ids: list[str] = Field(default_factory=list, max_length=16, description=REQUIREMENT_REFERENCE_DESCRIPTION)
+
+
+class IssueDisposition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    previous_issue_reference: str = Field(min_length=1)
+    action: Literal["retained", "revised", "withdrawn"]
+    replacement_issue_ids: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+
+def validate_issue_dispositions(previous, issues, dispositions):
+    """Account for all previous blockers without judging whether their dispositions are justified."""
+    references = [row.previous_issue_reference for row in dispositions]
+    if len(references) != len(set(references)) or set(references) != set(previous):
+        raise ValueError("Account for every previous blocker exactly once with its controller reference")
+    current = {row.id for row in issues}
+    for row in dispositions:
+        if not set(row.replacement_issue_ids) <= current:
+            raise ValueError("Disposition replacement IDs must identify current blockers")
+        if row.action == "withdrawn" and row.replacement_issue_ids:
+            raise ValueError("Withdrawn blockers cannot have replacement blocker IDs")
+        if row.action != "withdrawn" and not row.replacement_issue_ids:
+            raise ValueError("Retained or revised blockers require replacement blocker IDs")
+
+
 class Critique(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
         json_schema_extra={"required": ["approved", "reason", "interpretations", "no_security_checks_reason"]},
     )
     approved: StrictBool = Field(description="True only when the document has no outstanding concrete issues.")
+    decision_origin: Literal["legacy", "controller_findings"] = "legacy"
+    issue_dispositions: list[IssueDisposition] = Field(default_factory=list)
     category: Category = "authored_content"
     reason: str = Field(min_length=1)
     issues: list[Issue] = Field(default_factory=list, max_length=32)
+    suggestions: list[Suggestion] = Field(default_factory=list, max_length=16)
     interpretations: list[Interpretation] = Field(
         default_factory=list, max_length=64,
         description="Assess every security-relevant check actually in the draft, including future hypothesis checks.",
@@ -149,47 +216,110 @@ class Critique(BaseModel):
     )
 
 
+class BlockingIssue(Issue):
+    """New invocations justify materiality against a frozen acceptance criterion."""
+
+    criterion_id: str = Field(min_length=1)
+    material_impact: str = Field(min_length=1, max_length=2000)
+
+
+class ClassifiedInterpretation(Interpretation):
+    check_purpose: CheckPurpose = Field(
+        description="Classify what the draft actually claims. Do not downgrade a misleading violation "
+        "label into legitimate behavior; report that defect. Split mixed checks when needed.",
+    )
+
+
+class CriticFindings(BaseModel):
+    """New model-facing contract; Python owns the publication decision."""
+
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=1)
+    issue_dispositions: list[IssueDisposition] = Field(default_factory=list)
+    category: Category = "authored_content"
+    issues: list[BlockingIssue] = Field(default_factory=list, max_length=32)
+    suggestions: list[Suggestion] = Field(default_factory=list, max_length=16)
+    interpretations: list[ClassifiedInterpretation] = Field(default_factory=list, max_length=64)
+    no_security_checks_reason: str = Field(default="", max_length=2000)
+
+    def critique(self) -> Critique:
+        return Critique(approved=not self.issues, decision_origin="controller_findings", **self.model_dump())
+
+
 class AssessmentFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    criterion_id: str | None = None
+    material_impact: str = Field(default="", max_length=2000)
     problem: str = Field(min_length=1)
     requested_correction: str = Field(min_length=1)
     draft_references: list[str] = Field(default_factory=list)
-    requirement_ids: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list, description=REQUIREMENT_REFERENCE_DESCRIPTION)
     issue_ids: list[str] = Field(default_factory=list)
 
 
 class InterpretationReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    check_purpose: CheckPurpose | None = None
     interpretation_index: StrictInt = Field(ge=0)
     draft_references: list[str] = Field(min_length=1)
     permitted_counterexample: str = Field(
-        min_length=1, description="Construct a concrete policy-compliant scenario producing the exact observation "
-        "the draft labels suspicious. If impossible, explain the established policy that excludes it.",
+        min_length=1, description="For an actual boundary-violation claim, construct a concrete "
+        "policy-compliant scenario producing the exact observation. For prerequisite or legitimate "
+        "behavior checks, explain that no violation is claimed and counterexample analysis is not applicable. "
+        "If impossible for a boundary claim, explain the established policy that excludes it.",
     )
-    counterexample_matches_check: StrictBool = Field(
+    counterexample_matches_check: StrictBool | None = Field(
         description="Does the policy-compliant scenario satisfy BOTH the check's explicit prerequisites "
         "and the exact observation labeled suspicious? Do not infer prerequisites from expected outcomes "
         "or unknown policy. Authorized access is not a counterexample to an observation explicitly "
-        "requiring missing entitlements. Answer this separately from the critic verdict.",
+        "requiring missing entitlements. Use null for classified prerequisite or legitimate-behavior checks. "
+        "Answer this separately from the critic verdict.",
     )
-    control_excludes_counterexample: StrictBool = Field(
+    control_excludes_counterexample: StrictBool | None = Field(
         description="Does an actual procedural control exclude this same-observation permitted scenario? "
         "Selector influence, an outcome label, hypothetical missing authorization, or a distant caveat "
-        "does not establish exclusion. True requires an actual quoted control step and an explanation "
-        "of the distinction; unknown policy cannot default to denial.",
+        "does not establish exclusion. True requires cited body control steps and an explanation "
+        "of the distinction; unknown policy cannot default to denial. Use null for classified checks that do "
+        "not claim a boundary violation; do not require a discriminator against legitimate behavior. "
+        "For a boundary claim with no possible matching permitted counterexample, false is valid and "
+        "does not itself establish a defect.",
+    )
+    control_references: list[str] = Field(
+        default_factory=list, max_length=32,
+        description="Current procedure-body reference IDs for the actual control steps. "
+        "Python supplies their exact text; IDs establish availability, not semantic sufficiency. "
+        "Use [] when the control is missing. Do not cite metadata as a procedural control.",
     )
     actual_discriminator: str = Field(
-        description="Verbatim excerpt of an actual draft control step, "
-        "copied exactly from the procedure body. Python resolves its exact line references. "
-        "Return the empty string if missing. No paraphrase, "
-        "assembled improved procedure, or reviewer instructions. An outcome label is not a control step. "
-        "Judge whether this step excludes the counterexample separately in control_excludes_counterexample.",
+        description="Explain the actual control steps grounded in control_references or the supplied "
+        "body draft_references. A faithful paraphrase or literal quote is allowed. Return the empty "
+        "string if missing. Do not invent an improved procedure or treat an outcome label as a control. "
+        "Judge whether the cited steps actually exclude the counterexample separately in "
+        "control_excludes_counterexample; valid IDs alone do not establish that conclusion.",
     )
     critic_correct: StrictBool = Field(
         description="Does the critic accurately identify and judge this distinction in the actual draft? "
         "False when it silently repairs a missing discriminator or accepts an unconditional violation label "
-        "despite a permitted counterexample. A distant caveat does not repair the procedural label.",
+        "despite a permitted counterexample. Absence of an excluding control is not a defect when the "
+        "proposed counterexample cannot satisfy established prerequisites and the exact observation. "
+        "Assess missing prerequisite-establishment steps separately. A distant caveat does not repair "
+        "the procedural label.",
     )
+
+
+    @model_validator(mode="after")
+    def validate_purpose_fields(self):
+        if self.check_purpose in {"prerequisite", "legitimate_behavior"}:
+            if (self.counterexample_matches_check is not None or self.control_excludes_counterexample is not None
+                    or self.actual_discriminator or self.control_references):
+                raise ValueError("Non-boundary checks require null counterexample judgments and empty control fields")
+        elif self.counterexample_matches_check is None or self.control_excludes_counterexample is None:
+            raise ValueError("Boundary or legacy-unclassified checks require boolean counterexample judgments")
+        return self
+
+
+class ClassifiedInterpretationReview(InterpretationReview):
+    check_purpose: CheckPurpose
 
 
 class IssueAssessment(BaseModel):
@@ -216,6 +346,22 @@ class IssueAssessment(BaseModel):
     @property
     def approved(self) -> bool:
         return self.critic_supported
+
+
+class MaterialAssessmentFinding(AssessmentFinding):
+    criterion_id: str = Field(min_length=1)
+    material_impact: str = Field(min_length=1, max_length=2000)
+
+
+class AssessorFindings(IssueAssessment):
+    interpretation_reviews: list[ClassifiedInterpretationReview] = Field(default_factory=list)
+    findings: list[MaterialAssessmentFinding] = Field(
+        default_factory=list, description="Empty when critic_supported is true; otherwise referenced material "
+        "disagreements tied to the frozen acceptance criteria, not optional elaboration.",
+    )
+
+    def assessment(self) -> IssueAssessment:
+        return IssueAssessment.model_validate(self.model_dump())
 
 
 class AttributionReplacement(BaseModel):
@@ -314,13 +460,23 @@ class RetainedSources:
         for interpretation in critique.interpretations:
             if not set(interpretation.draft_references) <= snapshot.values.keys():
                 raise ValueError("Unknown interpretation draft reference")
+        for suggestion in critique.suggestions:
+            if (not set(suggestion.draft_references) <= snapshot.values.keys()
+                    or not set(suggestion.requirement_ids) <= ids):
+                raise ValueError("Suggestion references must identify the current draft or requirements")
         seen = set()
         for issue in critique.issues:
             if issue.id in seen:
                 raise ValueError("Issue identifiers must be unique")
             seen.add(issue.id)
             if not set(issue.requirement_ids) <= ids:
-                raise ValueError(f"Issue {issue.id} references unknown requirement IDs")
+                raise ValueError(
+                    f"Issue {issue.id} references unknown requirement IDs {sorted(set(issue.requirement_ids) - ids)}. "
+                    f"Allowed requirement_ids values: {sorted(ids)}. Copy these exact values without adding "
+                    "or removing prefixes. Acceptance-criterion IDs belong in criterion_id, not requirement_ids. "
+                    "For an existing-content defect with valid draft_references, requirement_ids=[] is permitted; "
+                    "missing-deliverable issues must identify the relevant request requirements."
+                )
             if not set(issue.source_urls) <= self.texts.keys():
                 raise ValueError(f"Issue {issue.id} references unknown source URLs")
             snapshot = ReviewSnapshot(markdown)
@@ -338,7 +494,12 @@ class RetainedSources:
                             break
                         cursor = max(cursor, end)
                     if cursor < len(self.texts[url]):
-                        raise ValueError("Entire retained source absence requires complete inspection")
+                        raise ValueError(
+                            "Entire retained source absence requires complete inspection. "
+                            "Correct the claim to the inspected passages with their passage IDs and "
+                            "bounded assertion, or withdraw it. Do not infer absence in unread text. "
+                            "Inspection bounds: " + json_payload("source_inspection", self.inspection())
+                        )
             if issue.draft_references:
                 issue.draft_excerpt = "\n".join(str(snapshot.values[key]) for key in issue.draft_references)[:4000]
             elif issue.draft_excerpt:
@@ -368,21 +529,46 @@ class RetainedSources:
                     raise ValueError(f"Issue {issue.id} cites a passage not returned by retained_source_lookup")
 
 
-def assess(service, prompt, markdown, requirements, documents, selected_urls, *, correctness=False):
+def assess(service, prompt, markdown, requirements, documents, selected_urls, *, correctness=False, review_contract=None):
+    from modules.techniques.review_corrections import (
+        AssessmentCorrection,
+        CriticCorrection,
+        merge_assessment,
+        merge_critic,
+        normalize_correction,
+    )
     from modules.techniques.roles import DeferredReviewPrompt
 
     lookup = RetainedSources(documents)
     snapshot = ReviewSnapshot(markdown)
-    prompt += "\n" + AUTHORING_GUIDANCE + "\n" + snapshot.render()
+    contract = review_contract or ReviewContract.legacy(requirements)
+    prompt += "\n" + contract.render()
+    required_records = [
+        {"reference": key, "path": snapshot.paths[key], "value": value}
+        for key, value in snapshot.values.items() if snapshot.paths[key] != "metadata.source_coverage"
+    ]
+    prompt += "\n" + REVIEW_GUIDANCE + "\n" + snapshot.render()
     prompt += "\n" + json_payload("retained_sources", [
         {"url": url, "characters": len(text)} for url, text in lookup.texts.items()
     ])
+    correction_subject = prompt
     prompt += (
         "\nPython has already parsed and validated the metadata schema. Evaluate decoded values and "
         "their meaning, not YAML syntax, escaping, indentation, or serialization.\n"
+        "A reusable methodology that directs policy establishment, identity verification, controlled "
+        "access comparisons or outcome interpretation contains security-relevant checks even without "
+        "target execution or fixed payloads. Assess those actual checks; methodology framing alone "
+        "does not justify omitting interpretations. A prerequisite step need not itself claim a violation. "
         "If there are no security-relevant checks, explain that in no_security_checks_reason; otherwise "
-        "leave that reason empty. Return interpretations for every security-relevant check: draft_references, "
+        "leave that reason empty. Return interpretations for every security-relevant check: check_purpose, "
+        "draft_references, "
         "prerequisite_or_policy, legitimate_outcome, suspected_violation and distinguishing_control. "
+        "Interpretation distinguishing_control may summarize actual draft steps with draft references. "
+        "Both roles may faithfully summarize actual steps with current body references; do not invent controls. "
+        "Only material defects belong in issues: explain how each defect defeats a supplied requirement "
+        "or the supported, truthful, operationally sufficient method. Optional examples, alternate tools "
+        "and stylistic elaboration belong in suggestions and never require rejection. Approval may include "
+        "suggestions when issues is empty. Do not invent missing deliverables from author preferences. "
         "Return structured issues, each with a unique id, category, concrete problem, requested_correction, "
         "requirement_ids, source_urls and draft_references from the supplied snapshot. Do not copy YAML. "
         "Missing content must "
@@ -392,10 +578,10 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
         "establish missing overall support. Set absence_scope explicitly. Cite passage_ids returned by lookup; "
         "legacy offsets must be exact. Similar wording alone is not a defect. "
         "On correction reuse retained passage IDs or withdraw unsupported issues. A reference error does "
-        "not itself invalidate a defect: correct IDs using the supplied current requirements, or omit "
-        "requirement_ids for existing-content issues with valid draft references. "
+        "not itself invalidate a defect: correct IDs using the supplied current requirements, or "
+        "use requirement_ids=[] for existing-content issues with valid draft references. "
         "Judge whether evidence establishes the defect and whether the requested correction resolves it; "
-        "do not return vague feedback. Approve with no issues; reject with at least one concrete issue. "
+        "do not return vague feedback. Return material issues or an empty issues list; Python derives approval. "
         "Do not require target execution, proof or terminal disposition in reusable guidance. "
         "Reject incidental target identifiers in decoded metadata, body and examples. "
         "Unsupported procedure claims belong to authored_content; missing factual support belongs to "
@@ -406,11 +592,42 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
         snapshot_id=snapshot.identifier, draft_reference_count=len(snapshot.values),
     )
     correction_used = False
+    previous_blockers = {}
+    critic_base = None
+    independent_findings = {}
+    disputed_indices = []
+    correction_responses = {}
     for _correction in range(2):
         candidate = None
         try:
-            candidate = service._json("technique_critic", prompt, Critique, [] if correction_used else [lookup.tool()])
+            if critic_base is None:
+                candidate = service._json(
+                    "technique_critic", bind_review_prompt(prompt, required_records), Critique,
+                    [] if correction_used else [lookup.tool()],
+                )
+            else:
+                patch = service._json("technique_critic", bind_review_prompt(prompt, required_records),
+                                      CriticCorrection, [])
+                submitted_patch = patch.model_dump()
+                patch = normalize_correction(patch)
+                candidate = merge_critic(critic_base, patch, independent_findings, disputed_indices)
+                correction_responses = {"finding_responses": [row.model_dump() for row in patch.finding_responses],
+                                        "interpretation_changes": [row.model_dump() for row in patch.interpretation_changes],
+                                        "added_interpretations": [row.model_dump() for row in patch.added_interpretations],
+                                        "baseline_interpretation_count": len(critic_base.interpretations)}
+                service.events.emit("technique_build_progress", stage="critique", status="correction_merged",
+                                    snapshot_id=snapshot.identifier, submitted_correction=submitted_patch,
+                                    correction=patch.model_dump(),
+                                    merged_interpretation_count=len(candidate.interpretations))
             contract_errors = []
+            if candidate.decision_origin == "controller_findings":
+                try:
+                    validate_issue_dispositions(previous_blockers, candidate.issues, candidate.issue_dispositions)
+                except ValueError as error:
+                    contract_errors.append(str(error))
+            if any(issue.criterion_id is not None and issue.criterion_id not in contract.criterion_ids
+                   for issue in candidate.issues):
+                contract_errors.append("Every blocker must reference a frozen acceptance criterion")
             if not candidate.interpretations and not candidate.no_security_checks_reason.strip():
                 contract_errors.append(
                     "Return the structured interpretations table for security-relevant checks, or an explicit "
@@ -437,13 +654,15 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
                 investigation_instructions = (
                     "First derive legitimate and prohibited outcomes from the draft independently of the critic. "
                     "The critic's decision is withheld during investigation and supplied only at finalization. "
-                    "Record your own concrete defects and permitted counterexamples before that handoff. "
+                    "Record concrete defects and, for actual violation claims, permitted counterexamples "
+                    "before that handoff. "
                     "Keep notes concise: one compact row per check with references, observation, permitted "
                     "scenario and discriminator. Do not reproduce the draft or retained source passages. "
                     "Metadata source_coverage contains archived research assessments, not policy or procedure "
                     "steps; research readiness cannot supply a missing discriminator. A violation statement "
                     "is a conclusion, not itself a distinguishing control. "
-                    "Could the described observation occur while the intended security policy is enforced? "
+                    "For an actual violation claim, could the described observation occur while the intended "
+                    "security policy is enforced? "
                     "If so, require a prerequisite or legitimate-outcome interpretation and a separate "
                     "distinguishing control for the violation. Do not treat future-hypothesis framing or a "
                     "policy caveat as repairing an unconditional rejection expectation or violation label. "
@@ -452,8 +671,12 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
                     "notes. Identify the actual control or say it is missing; do not supply an improved "
                     "procedure. Do not judge support for a critic or default to agreement: no critic decision "
                     "is available in this pass. That comparison is a later, separate task.\n"
-                    "For EACH procedure, hold its explicit prerequisites and exact suspicious observation "
-                    "constant. Write that observation, a policy-compliant scenario with the SAME observation, "
+                    "For prerequisite or legitimate-behavior checks, assess accuracy without inventing a "
+                    "violation. Explain that counterexample analysis is not applicable and set both "
+                    "counterexample judgments null with empty discriminator/control references. Classify each check "
+                    "using check_purpose. For an actual boundary-violation claim, hold its explicit "
+                    "prerequisites and exact suspicious observation constant. Write that observation, a "
+                    "policy-compliant scenario with the SAME observation, "
                     "whether the scenario actually satisfies the prerequisites and observation, and the "
                     "specific control step that excludes it (or missing). Do not merely repeat the draft's "
                     "expected legitimate outcome. If no permitted scenario can satisfy both, say so; do not "
@@ -462,21 +685,35 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
                     "remaining security-boundary evidence needed.\n"
                 )
                 comparison_instructions = (
+                    "Assess the publication decision and material blockers. Optional suggestions do not independently "
+                    "justify disagreement or repair. Report a genuine omitted blocker through referenced findings. "
                     "Then compare your findings with the critic, including zero-issue approvals, interpretation "
                     "and requested-deliverable completeness. Verify that interpretations cover every "
                     "security-relevant check and distinguish policy, legitimate behavior, violation and control. "
                     "Review the critic_assessment.interpretations table itself, not just an interpretation "
                     "heading in the document. An empty table requires a credible no_security_checks_reason; "
-                    "reject that reason when the draft has security-relevant checks. For each check consider "
+                    "reject that reason when the draft has security-relevant checks. Reusable policy, identity "
+                    "and controlled-access procedures still contain checks; methodology framing alone cannot "
+                    "justify omitting them. Distinguish prerequisite establishment from violation conclusions. "
+                    "For each actual boundary-violation claim consider "
                     "both policy branches: the behavior is permitted, or the behavior is prohibited. Unknown "
                     "policy cannot default to the prohibited branch. "
+                    "Independently discovered omitted checks belong in findings with current draft or "
+                    "requirement references; never invent interpretation indices for them. "
                     "For EACH critic interpretation return an interpretation_reviews row, indexed from zero. "
-                    "Construct a concrete permitted counterexample to the exact suspicious observation, then "
+                    "Classify check_purpose independently from the actual draft; a classification disagreement "
+                    "requires critic_supported=false and referenced findings. Never downgrade a misleading "
+                    "violation label merely to avoid counterexample analysis. "
+                    "For an actual violation claim: Construct a concrete permitted counterexample to the exact "
+                    "suspicious observation, then "
                     "if none can satisfy its explicit conditions, explain why and set "
                     "counterexample_matches_check=false. Never change a missing-entitlement condition into "
                     "mere lack of ownership to manufacture a permitted scenario. Then "
-                    "copy the actual draft control excluding it VERBATIM into actual_discriminator; use the "
-                    "empty string if absent. Python resolves this exact excerpt against the frozen body. "
+                    "cite actual body control steps in control_references and explain them in actual_discriminator; use the "
+                    "empty string if absent or not applicable. Python resolves cited body records, not exact "
+                    "wording; judge their meaning independently. For prerequisite or legitimate-behavior "
+                    "checks, classify check_purpose, explain no violation is claimed and set both counterexample "
+                    "judgments null with empty discriminator/control references. "
                     "Paraphrased critic interpretations and reviewer instructions are not draft evidence. "
                     "For example, own-origin JavaScript can read "
                     "its own storage, an unexpired bearer credential can authorize multiple requests, and an "
@@ -521,7 +758,7 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
                     investigation_instructions = INVESTIGATION_GUIDANCE
                     comparison_instructions = COMPARISON_GUIDANCE
                 assessment_evidence = (
-                    AUTHORING_GUIDANCE + "\n"
+                    contract.render() + REVIEW_GUIDANCE + "\n"
                     + json_payload(
                         "retained_sources",
                         [{"url": url, "characters": len(text)} for url, text in lookup.texts.items()],
@@ -540,18 +777,34 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
                     "Resolve actual procedural contradictions; do not replace your observations with the "
                     "critic's paraphrased or silently repaired procedure.\n"
                     + json_payload("critic_assessment", candidate.model_dump())
+                    + "\n" + json_payload("previous_blockers", previous_blockers)
+                    + "\nJudge every retained, revised or withdrawn blocker against current evidence and the "
+                      "frozen criteria. New blockers must satisfy existing criteria. Reject unsupported "
+                      "retention as well as unjustified withdrawal; optional suggestions do not require repair."
                     + "\nArchived research receipt, not a procedural control or approval:\n"
                     + snapshot.render(research_notes=True)
                 )
+                comparison += "\n" + json_payload("critic_correction_responses", correction_responses)
+                comparison += ("\nJudge every finding response and interpretation retention or revision semantically. "
+                               "Controller retention establishes continuity only, never support or approval.")
                 assessment_subject = investigation_instructions + assessment_evidence
                 assessment_prompt = DeferredReviewPrompt(assessment_subject, comparison)
+                assessment_base = None
                 for assessor_attempt in range(2):
                     assessment = None
                     try:
-                        assessment = service._json(
-                            "technique_critique_assessor", assessment_prompt, IssueAssessment,
-                            [lookup.tool()] if not assessor_attempt else [],
-                        )
+                        if assessment_base is None:
+                            assessment = service._json(
+                                "technique_critique_assessor", bind_review_prompt(assessment_prompt, required_records),
+                                IssueAssessment, [lookup.tool()] if not assessor_attempt else [],
+                            )
+                        else:
+                            patch = service._json("technique_critique_assessor",
+                                bind_review_prompt(assessment_prompt, required_records), AssessmentCorrection, [])
+                            assessment = merge_assessment(assessment_base, patch)
+                            service.events.emit("technique_build_progress", stage="critique_assessment",
+                                                status="correction_merged", snapshot_id=snapshot.identifier,
+                                                correction=patch.model_dump())
                         if assessment.approved == bool(assessment.findings):
                             raise ValueError("Agreement forbids findings; disagreement needs referenced findings")
                         reviews = assessment.interpretation_reviews
@@ -562,24 +815,26 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
                         for row in reviews:
                             if not set(row.draft_references) <= snapshot.values.keys():
                                 raise ValueError("Interpretation review requires valid draft references")
-                            resolved_control = snapshot.control_references(row.actual_discriminator)
-                            if row.actual_discriminator and not resolved_control:
-                                raise ValueError(
-                                    "actual_discriminator must be a verbatim excerpt from the frozen procedure body; "
-                                    "return the empty string when the draft has no distinguishing control. "
-                                    "Do not invent or paraphrase a policy-establishment step"
-                                )
-                            if set(resolved_control) - set(row.draft_references):
+                            declared = candidate.interpretations[row.interpretation_index].check_purpose
+                            if declared is not None and declared != row.check_purpose and assessment.approved:
+                                raise ValueError("Purpose disagreement requires referenced disagreement findings")
+                            resolved_control = snapshot.resolve_control(
+                                row.actual_discriminator, row.draft_references, row.control_references,
+                            )
+                            row.control_references = resolved_control
+                            if resolved_control:
                                 service.events.emit(
                                     "technique_build_progress", stage="critique_assessment",
                                     status="control_references_resolved", snapshot_id=snapshot.identifier,
                                     interpretation_index=row.interpretation_index,
                                     provided_references=list(row.draft_references), resolved_references=resolved_control,
+                                    resolved_records=[{"reference": ref, "path": snapshot.paths[ref],
+                                                       "value": snapshot.values[ref]} for ref in resolved_control],
                                     correction_number=int(correction_used),
                                 )
                                 row.draft_references = list(dict.fromkeys(row.draft_references + resolved_control))
-                            if row.control_excludes_counterexample and not row.actual_discriminator:
-                                raise ValueError("An excluding control requires an actual quoted control step")
+                            if row.control_excludes_counterexample and not (row.actual_discriminator and resolved_control):
+                                raise ValueError("An excluding control requires an explanation and current body references")
                             if (candidate.approved and assessment.approved and row.counterexample_matches_check
                                     and not row.control_excludes_counterexample):
                                 raise ValueError(
@@ -589,6 +844,8 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
                         if assessment.approved and any(not row.critic_correct for row in reviews):
                             raise ValueError("An incorrect critic interpretation requires disagreement findings")
                         for finding in assessment.findings:
+                            if finding.criterion_id is not None and finding.criterion_id not in contract.criterion_ids:
+                                raise ValueError("Assessment blocker must reference a frozen acceptance criterion")
                             if (not set(finding.draft_references) <= snapshot.values.keys()
                                     or not set(finding.requirement_ids) <= {r.id for r in requirements}
                                     or not set(finding.issue_ids) <= {r.id for r in candidate.issues}
@@ -617,9 +874,27 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
                             error.rejected_response = assessment.model_dump_json()
                         retained = "\n" + json_payload("retained_lookup_passages", lookup.retained_passages())
                         retained += "\n" + json_payload("source_inspection", lookup.inspection())
+                        if (candidate.decision_origin == "controller_findings" and assessment is not None
+                                and not correctness
+                                and sorted(row.interpretation_index for row in assessment.interpretation_reviews)
+                                == list(range(len(candidate.interpretations)))):
+                            assessment_base = assessment.model_copy(deep=True)
+                            comparison = "Correct the retained assessment against the complete unchanged subject. "
+                            comparison += json_payload("critic_assessment", candidate.model_dump())
+                            comparison += "\n" + json_payload("retained_assessment", assessment_base.model_dump())
+                            comparison += "\n" + json_payload("critic_correction_responses", correction_responses)
+                            comparison += ("\nReturn AssessmentCorrection: explicit aggregate critic_supported, reason, "
+                                           "complete findings and indexed review_changes only. Omit unchanged review "
+                                           "rows; Python retains and revalidates them. Do not return a full assessment.")
                         comparison = service._repair_prompt(comparison + retained, error)
                         assessment_prompt = DeferredReviewPrompt(assessment_subject + retained, comparison)
                 if not assessment.approved:
+                    if candidate.decision_origin == "controller_findings" and not correctness:
+                        critic_base = candidate.model_copy(deep=True)
+                        independent_findings = {f"finding:{index}": row.model_dump()
+                                                for index, row in enumerate(assessment.findings, 1)}
+                        disputed_indices = [row.interpretation_index for row in assessment.interpretation_reviews
+                                            if not row.critic_correct]
                     raise ValueError("Critique disagreement: " + assessment.model_dump_json())
             return candidate
         except ValueError as error:
@@ -630,6 +905,30 @@ def assess(service, prompt, markdown, requirements, documents, selected_urls, *,
             correction_used = True
             if candidate is not None:
                 error.rejected_response = candidate.model_dump_json()
+                previous_blockers = {f"previous-blocker:{index}": row.model_dump()
+                                     for index, row in enumerate(candidate.issues, 1)}
+            if critic_base is not None:
+                prompt = correction_subject + "\n" + json_payload("retained_critic", critic_base.model_dump())
+                prompt += "\n" + json_payload("independent_findings", independent_findings)
+                prompt += "\n" + json_payload("disputed_interpretation_indices", disputed_indices)
+                prompt += ("\nReturn CriticCorrection, not a full critique. Put complete blockers addressing each accepted "
+                           "finding inside that finding_response.issues; Python derives the issue ID links. "
+                           "Root issues holds other retained or new blockers. Return complete "
+                           "issue_dispositions, explicit finding_responses for EVERY finding, and indexed "
+                           "interpretation_changes for EVERY disputed interpretation. Explicit retention needs "
+                           "an evidence-grounded reason; revision needs a replacement; withdrawal needs a reason. "
+                           "Appended check indices begin at the retained table length. Withdrawing all checks "
+                           "requires no_security_checks_reason. Python retains unchanged "
+                           "interpretations on this identical subject and the assessor reviews the merged result. "
+                           "Do not regenerate the full interpretation table or silently approve a disputed row. "
+                           "Revise an inaccurate description of an actual check; withdraw a row only if it is "
+                           "absent from the draft or duplicates another covered check. A reviewer objection "
+                           "does not remove the underlying check from the unchanged document.")
+            prompt += "\n" + json_payload("previous_blockers", previous_blockers)
+            prompt += ("\nFor each previous blocker return exactly one issue_dispositions entry: controller "
+                       "previous_issue_reference, retained/revised/withdrawn action, current replacement_issue_ids "
+                       "and a reason grounded in current draft evidence. Do not retain optional suggestions "
+                       "as blockers. New material defects may be reported under existing frozen criteria.")
             prompt += "\n" + json_payload("retained_lookup_passages", lookup.retained_passages())
             prompt += "\n" + json_payload("source_inspection", lookup.inspection())
             prompt = service._repair_prompt(prompt, error)

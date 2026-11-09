@@ -48,8 +48,8 @@ A NULL score is pending evaluation, not negative sentiment. An inactive current 
 triggers for regeneration, but cannot be returned as guidance. Superseded revisions preserve history.
 `use_context` records the first delivery's generic purpose, phase contexts, applicability and observation
 provenance. New receipts also freeze exact `delivered_documents` in this JSON. Missing snapshots
-mean legacy delivery is unknown; later lifecycle rendering must not replace recorded delivery.
-Legacy receipts contain `{}`: their context is unknown, not reconstructed from task prose.
+mean delivery is unknown; later lifecycle rendering must not replace a recorded snapshot or be used
+to reconstruct a missing one from task prose.
 
 ### "Find the operation log"
 
@@ -363,316 +363,50 @@ codex mcp call langfuse get_session_details --session_id "{operation_id}"
 - **No-Finish Operations**: An operation may continue even if health suggests it won't finish, as coverage is prioritized. Recommend budget increases in the report instead of complaining.
 
 
-### Technique bundle investigations
+## Rules for Investigation
 
-Correlate lifecycle events by operation, task, activity and `component_id`; inspect `research_round`
-for targeted follow-up and exhaustion (at most three batches per component). Bundle summaries are
-operation-local; published and produced documents contain individual validated techniques. Partial
-delivery does not establish complete request coverage.
-Inspect `technique_uses.use_context` JSON for `component_purpose`, `requirements`, and `components`
-when multiple purposes reuse a revision. Unresolved components have no receipts. Receipt keys remain
-operation/task/revision; legacy empty context is unknown. Compare individual source attribution to
-overall coverage. Check repair ownership: attribution to dedicated attribution-only repair, missing support to research,
-procedure or omitted requested content to authorship. Applicability disagreement is assessment
-uncertainty. Judge contribution against the component purpose, not final task completion.
+- **Avoid log dumps:** use targeted `rg` and `sed` reads for large reasoning payloads.
+- **Budget neutrality:** do not recommend changing task fan-out due to budget constraints.
+- **Tool failures:** do not treat broken or missing tools as forensic issues by themselves.
+- **Reporting overhead:** do not flag reporting or evaluation time as a budget issue.
+- **Incomplete operations:** distinguish coverage gaps from the termination reason; an operation may continue even when health predicts it will not finish.
 
+### Technique investigations
 
-### Technique structured-output failures
+Techniques are reusable guidance, not operation evidence. A recommendation is only a lookup lead;
+retrieval does not prove applicability, and citation does not prove contribution. Judge applicability
+against the assigned task and phase, then judge usefulness against the delivered guidance and
+observed task behavior. A neutral score means contribution was not established; it does not by itself
+mean the guidance was harmful. A justified exclusion or refutation can still be useful.
 
-In CLI JSONL logs, correlate `model_input`, `model_output`, `model_failed`, and `structured_output`
-by role invocation and model attempt. Inspect `schema_name`, `schema_id`, `structured_mode`, and
-`fallback_reason`. Native unavailability may produce a schema-tool fallback; invalid content or
-schema constraints must remain visible failures. `schema_tool_pending` is not validation success;
-`structured_output` marks successful role-level validation. For failed native content, inspect the
-redacted `rejected_response` and `validation_errors` when available. Compare correction input with
-the failed response and the last valid source assessment. Feedback corrections must retain SDK
-user-message tool results without reopening investigation. Research prose is not a structured
-result: fetched document records remain controller-owned. Valid schema output does not establish
-semantic coverage, applicability, or demonstrated contribution.
+Keep evidence availability separate from semantic support. Readable artifacts, successful tool calls,
+HTTP status codes and satisfied acceptance receipts establish availability or execution only. They
+do not establish a finding, correctness, semantic approval or technique contribution. Missing target
+prerequisites belong in future validation; unsupported methodology claims require an identified
+missing premise, contradiction or unjustified generalization. Do not infer absence from a partial
+search or incomplete source inspection.
 
+For generated technique bundles, judge each component against its assigned methodology and request.
+Partial delivery does not establish complete request coverage; a sibling component's omission is not
+automatically a defect in this component. Distinguish source support, user-requested content and
+authored procedure quality. Treat a review or tool contract failure as unresolved pipeline status, not
+as a semantic rejection. Inspect the current task's phase and provenance when reviewing continuation
+feedback; proposed future tests are not evidence that those tests were executed.
 
-### Technique request preservation and coverage review
+### Technique research references
 
-Read CLI JSONL with physical newline-delimited iteration (`for line in stream: json.loads(line)`).
-Do not use Unicode-aware `str.splitlines()`: source text may contain Unicode line separators within
-valid JSON strings. Check parse failures against physical records before reporting log corruption.
+Use the linked research records for detailed event fields, correction schemas, controller lifecycle
+and calibration evidence. They document specific revisions and experiments; scripted checks and
+model-call completion do not establish semantic acceptance.
 
-Inspect `technique_request_preserved` transitions and original/aligned requests for subject loss or
-invented deliverables. A single methodology keeps its aligned component request. Applicability may
-abstract incidental target details, but changes require independent preservation review.
-
-Requirement kinds distinguish `factual_support`, `authored_deliverable` and `constraint`; legacy
-requirements default to factual support. Required coverage `explanation` gives the factual basis and
-how it supports author-created procedures; `synthesis` is optional supplementary detail. Empty or
-missing synthesis must not be treated as missing research. Inspect field paths and requirement IDs
-in correction diagnostics. Persistent invalid output is a source-selection validation failure, not
-research insufficiency. Inspect schema, reference, attribution and coverage field errors within their
-owning assessment; contract failures must not be treated as missing research.
-Blocking gaps identify `claim`, `blocking_reason` and `research_question`. Compare independent review
-coverage to the preceding assessment before judging exhaustion. A missing ready-made checklist is not
-itself missing factual support. Unknown target conditions belong to `future_validation`. Factual
-contradictions still block publication. Empty research batches retain the reviewed assessment.
-
-### Technique critique and repair ownership
-
-Inspect structured issue IDs, categories, requirement references, exact draft excerpts, affected URLs
-and source passage offsets. `retained_source_lookup` reads retained documents only. Availability alone
-does not establish a defect: the critic and independent critique assessor judge evidence and actionability.
-Absence-of-support complaints identify the disputed claim. Critique assessment failure after one
-correction is distinct from author exhaustion and consumes no author attempt.
-
-Correlate lifecycle `issue_references`, `owning_stage`, `affected_urls`, `source_selection_round`,
-`author_attempts`, `research_batches` and `attribution_repairs`. Repair research coverage first,
-attribution second, authored/request content last. Every repair receives a new exact-document critique;
-new issues replace previous issues. Never apply stale issues to a changed document.
-
-Compare coverage, selected URLs, authority assessment, retrieval metadata, unaffected attribution and
-authored body before and after attribution repair: only affected attribution records may change.
-A one-row coverage response is a contract error, never a replacement validated assessment. Limits are
-three author calls, three research batches, and one attribution repair per source-selection round,
-including one contract correction. Only changed validated research assessments start new rounds;
-empty batches and attribution/schema corrections do not. Attribution repair and final critique may
-follow author call three. Publication requires exact final-document approval. No SQL migration or
-historical-record rewrite is involved.
-
-
-### Per-requirement source-selection diagnostics
-
-Source selection uses `technique_source_assessor` for URLs, attribution and authority, then
-`technique_requirement_assessor` for each assigned requirement. Independent review uses
-`technique_requirement_reviewer` and preserves source and authority decisions. Correlate
-`assessment_substage`, `requirement_id`, `source_url`, `correction_attempt` and
-`retained_assessment`. Each individual call permits one correction; sibling records are not retried.
-Python assembles coverage atomically after every requirement validates. A failed update never
-replaces the previous complete assessment, and an invalid independent review retains that assessment.
-A model-level structured-output success is schema validation, not complete controller validation or
-semantic sufficiency. Source removal and new contradictions require reassessment, not copying prior
-support. These calls do not consume author attempts, add research batches or reset attribution
-allowances. Public interfaces and SQL schemas remain unchanged.
-
-### Critique assessor correction routing
-
-The critique assessor returns one aggregate `IssueAssessment` with `critic_supported`, `reason`,
-`interpretation_reviews` and referenced disagreement `findings`. It reviews every decision,
-including approvals with zero issues, for interpretation and requested deliverables as well as issue
-actionability. `critic_supported=true` means agreement
-with the complete critic decision; it does not independently approve publication.
-Each indexed interpretation review constructs a permitted counterexample and identifies the actual
-draft discriminator. Check that it has not invented a missing control or policy-discovery step.
-`actual_discriminator` is an exact procedure-body excerpt, or empty if missing. Python resolves its
-body-line origins and logs `control_references_resolved` when adding omitted quote IDs. Unknown
-supplied IDs, invented text and metadata-only control quotes remain invalid. Resolution establishes
-availability only; the model still judges correspondence and exclusion.
-Inspect `counterexample_matches_check` and `control_excludes_counterexample`: the permitted scenario
-must satisfy the actual prerequisites and labeled observation. A matching permitted scenario with
-no excluding control contradicts support for an approving critic. Python validates this consistency
-and requires a quoted step when a control is claimed; the model judges matching and exclusion.
-In production, inspect investigation and finalization inputs separately: the critic's decision is
-withheld until the assessor has recorded independent subject notes. The controller-owned archived
-`source_coverage` research receipt is also deferred; its readiness claims cannot supply procedure
-controls. The final call must include the complete decoded draft, critic decision and retained
-investigation. Repairs keep critic/correction material out of the initial
-subject review. Legacy injected text runners receive the complete combined prompt.
-The subject pass must also exclude comparison instructions and the final verdict schema. It must
-record actual procedure observations, not default to agreement because no critic is yet available.
-Python validates review coverage, references and agreement consistency; semantic adequacy remains
-the assessor's responsibility. Issue IDs are data, never top-level decision fields.
-A malformed assessor result retries the assessor with its
-retained investigation, not the critic. Critic and assessor share one correction per assembled
-document review; author, research, and attribution counters do not advance for this correction.
-Contract diagnostics identify `originating_role`, `expected_schema`, `failure_kind`, and
-`correction_number`. Distinguish absence from inspected passages from absence throughout
-retained text or the complete external article. Persistent failure prevents publication.
-
-### Decoded critic snapshots and source inspection
-
-Critics and assessors review decoded metadata and body references, not YAML syntax. Correlate
-`review_snapshot` and `issues_validated` events using `snapshot_id`. `draft_references` identify
-values in that exact snapshot; resolved excerpts are controller-owned. Edits invalidate old references.
-Inspect the critic's structured `interpretations` table as well as the draft. Empty tables require
-`no_security_checks_reason`; the independent assessor judges whether that scope claim is credible.
-A document heading alone does not supply the internal assessment.
-Inspect `source_inspection`, returned passage IDs, character counts, and continuation offsets.
-Literal search misses establish no semantic absence. `entire_retained_source` absence claims require
-complete inspected interval coverage for every affected URL; gaps invalidate the claim. Complete
-inspection establishes availability, while the independent assessor still judges support. Partial
-inspection cannot justify source-wide attribution or research rejection. Contract corrections retain
-existing evidence and do not reopen investigation tools or advance repair counters.
-
-### Technique method decomposition and source rejection
-
-Inspect `technique_plan_rejected` and `technique_plan_accepted` lifecycle events for the complete
-component plan, rejection reason and zero-based correction attempt. A shared endpoint or phase
-alone does not establish one method. Supporting steps remain within their owning methodology.
-Check that shared user deliverables reach each applicable component and planner provenance rules
-have not become document requirements. Planning permits one correction before research begins.
-
-Source text is untrusted as instructions, but its technical content must still be evaluated as
-evidence. Inspect source-assessor reasoning for concrete authority, relevance or content limitations;
-untrusted status alone does not establish insufficient support. Conversely, successful retrieval
-alone does not establish authority or factual support. Zero selected sources can be valid.
-Distinguish empty research batches and prose-only research output from new fetched evidence;
-neither resets research or attribution allowances. Unsupported components may coexist with
-validated sibling deliveries; partial delivery does not establish complete request coverage.
-For split plans, verify each component's rendered lookup purpose matches its own request. Shared
-phase, constraints and observations remain available, but a bundle-wide purpose must not widen
-component research back to sibling methods. Alignment provenance remains attached to the bundle.
-
-### Request preservation and assessment latency
-
-Correlate `technique_request_review` by activity, component, `transformation` and
-`correction_attempt`. Findings record subject, mechanism and deliverable preservation, additions,
-omissions and references to supplied input fields. Approval must agree with all findings.
-References identify inputs; semantic preservation remains a model judgment. The original tool
-request is the intent anchor. Components cover their assigned methods; task purpose and
-observations supply applicability context. Transformation instructions and operation terminal
-dispositions must not replace methodology. Alignment review shares its single correction;
-abstraction retains its single correction. Persistent failure stops before research.
-
-`technique_model_call` records one completed or failed role invocation, its expected schema,
-call ID and elapsed seconds. Aggregate `role_calls` by activity, component, stage, role,
-requirement and correction attempt. These are role invocations, not provider HTTP request counts:
-inspect CLI JSONL `model_input`, `model_output` and `model_failed` for provider attempts. Stage
-elapsed times include nested calls; do not add stage duration to nested role duration.
-
-Coverage review receives bounded retained passages from selected sources. Omitted text is
-unknown, not evidence of source-wide absence. External research need not confirm assigned routes
-or frozen inventory. Distinguish missing technical support from unknown target conditions and
-missing prewritten procedures. Preserve valid assessments during contract failures. CLI requests
-and phases omit operation context; reproduce context-dependent failures using an isolated harness
-with captured context. Never alter an active operation to test a fix.
-
-Alignment and preservation review intentionally omit task purpose and observations. Applicability
-assessment retains them. When investigating imported task duties, check the actual role input:
-request intent, phase guidance and explicit restrictions should remain separate from task execution
-context. Component obligations still come from the independently reviewed methodology plan.
-
-### Technique policy and contribution boundaries
-
-Inspect `technique_policy` events for effective restrictions and defining modules. CLI `--constraint`
-values restrict methodology; operation-plan constraints remain applicability and execution context.
-Component preservation uses the assigned request; bundle planning owns whole-request completeness.
-A sibling omission is not a component defect. Critic corrections retain passage IDs and inspection
-bounds, including native failures. Publication requires decoded metadata and body approval without
-incidental target details.
-
-Usefulness findings identify purpose, observed use, contribution and harmful effects. Python derives
-the existing score: +1 helpful, -1 misleading or harmful (including mixed effects), otherwise 0. Missing
-target proof or disposition alone does not establish non-contribution. Legacy context remains unknown
-and historical scores are unchanged.
-
-Independent technique review covers every critique decision and usefulness score. Inspect
-`critic_supported` as agreement with the proposed critique decision. Historical `feedback_supported`
-records also mean agreement, not document approval or helpfulness. New feedback reviews instead
-return independent contribution findings and material errors; Python derives agreement. A justified
-rejection, neutral score or harmful score can be supported.
-Legacy internal `approved` inputs normalize to these canonical fields; historical traces and scores
-are not rewritten. A false verdict with a reason endorsing the proposed score remains unresolved.
-Inspect `critique_assessment` and `feedback_assessment` diagnostics for snapshot references, proposed
-decisions, findings and correction numbers. Contract errors and semantic disagreement share one
-correction per decision. Unresolved critique blocks publication; unresolved feedback stays pending.
-Feedback compares delivered guidance and observed behavior; citation alone establishes no benefit.
-Neutrality requires non-use or unestablished contribution. Historical scores remain unchanged.
-
-
-### Usefulness evidence and correction ownership
-
-Task-tool reads receive controller-generated `result:` references in their model-facing output.
-Inspect `retained_tool_evidence.calls` for frozen tool inputs and status, and `references` for exact
-text and call provenance. Availability does not establish contribution. Schema-output tools and
-nested helper roles do not supply task evidence. Retained text preserves line endings and Unicode.
-Reviewer inputs and corrections retain this evidence without reopening artifact reads.
-
-Feedback contract failures are corrected in the originating role. A reviewer contract error retries
-the reviewer with its rejected assessment; semantic disagreement corrects evaluator findings and
-then re-reviews them. Both consume the same single allowance. Exhaustion leaves feedback pending;
-no disputed score is committed. Nested diagnostic fields are redacted without altering internal
-model-facing evidence. A failed live replay is not a validated draft or accepted score.
-
-### Isolated critique comparisons
-
-The opt-in `modules.techniques.critique_trial_cli` runner writes to a new system temporary
-`critique-comparison-*` directory. It does not open operation SQLite or publish techniques.
-`corpus.json` freezes model-facing subjects; `configuration.json` records trial order settings.
-Each `trial-*` directory contains an outcome and sensitive internal model evidence. Role diagnostic
-logs record model inputs/outputs; current runner invocations also forward controller lifecycle events.
-Interpret `human_adjudication: pending` literally: neither a completed call nor a matching proposed
-verdict establishes semantic correctness. Inspect omitted defects, unsupported objections and exact
-prerequisites before assigning trial metrics. Do not treat these experimental artifacts as current
-operation evidence or rewrite historical scores from their outcomes.
-
-For critique comparisons, inspect the frozen requirement kinds as well as the draft hash.
-Missing `Requirement.kind` historically defaults to `factual_support`; that is not equivalent
-to `authored_deliverable`. The experimental loader now requires an explicit kind. Do not pool
-partial runs with misclassified requirements into a corrected authored-deliverable comparison.
-
-Output-token exhaustion in an isolated critique trial is unresolved, not neutral or approved.
-The experiment records `error_type: MaxTokensReachedException`, preserves its evidence and
-continues the remaining schedule without retrying or increasing the generation budget. Unexpected
-exceptions record an interrupted outcome and still abort. Distinguish output exhaustion from
-input-context overflow; a small input does not establish sufficient answer-generation capacity.
-If recovering an older aborted run, preserve the original outcome and traceback, identify the
-bookkeeping-only code change, and continue only unattempted jobs in the frozen schedule.
-
-For opt-in correctness comparisons, outcome `review_contract` identifies baseline versus
-correctness. Raw model-evidence records preserve `check_purpose`, null non-boundary fields,
-correction dispositions and per-issue/requirement/disposition assessments. Legacy normalized
-booleans do not encode applicability; use raw records rather than treating null-to-false
-adaptation as a semantic conclusion. Prior-issue references are controller-owned within the
-trial. Check every disposition and independently assessed withdrawal before inferring that a
-repair resolved the original findings. Archived baseline purpose remains unknown. The new
-screen and gate are documented in `docs/techniques.md`; historical study results remain intact.
-
-
-### Independent feedback and controller source context
-
-New feedback reviews return `assessment` (independent contribution findings) and `material_errors`,
-not an agreement boolean. Compare `proposed_decision` and `independent_decision`; Python accepts
-matching scores only when no material errors remain. Inspect referenced evaluator fields, resolved
-error excerpts and independent evidence. Invalid review contracts retry the reviewer; semantic
-score differences or material errors correct the evaluator. Both share one correction allowance.
-Historical boolean verdicts retain their original meaning and historical scores are unchanged.
-
-Requirement-source assessments retain actual controller-supplied and lookup passages for cited
-selected URLs. Legacy model excerpt wording is advisory and cannot replace source text. Inexact
-quotations no longer cause rejection. Unknown URLs or citations without supplied source context
-remain contract failures. Passage availability does not establish semantic support. Distinguish
-unsupported technical mechanisms from author-created procedures and unknown target conditions.
-
-
-### Prose reference recovery
-
-When evaluator effect findings omit mappings, inspect `recovered_inventory` for complete known
-IDs, originating prose fields and resolved excerpts. Python collects an unpaired inventory; it
-does not infer correspondence. Acceptance requires reviewer mappings drawn from that inventory,
-matching scores and no material errors. Inspect `raw_evaluator_findings` and `mapping_origin`;
-`reviewer_confirmed_prose` means reviewer mappings were copied into normalized findings only
-after acceptance. Unknown, shortened or stale references require correction. Explicit invalid
-mappings are never replaced by recovery, and reviewer omissions consume the shared correction
-allowance rather than being recovered. Recovery itself adds no role calls or correction use.
-
-
-### Activity-specific feedback
-
-Inspect `feedback_activity` profile/provenance and the complete `feedback_task_context` in model
-inputs. Frozen hypothesis_set evidence requirements identify producers even when task.kind is
-standard; finding_validation/objective_validation identify verification. These task-level signals
-precede phase activity fallback. Conflicting or missing metadata selects unknown, without implying
-neutrality. Classification must not depend on titles, objectives or filenames.
-
-Both evaluator and reviewer receive the shared rubric plus the same supplement through corrections.
-Hypothesis artifacts are observed task behavior; executing their proposed tests is separate.
-Execution, verification and reconnaissance/analysis evaluate their own methodological contributions.
-Correct exclusions and refutations can be helpful. Check each task's own phase on continuation,
-not the currently active phase. Historical scores and continuation scheduling are unchanged.
-
-
-### Feedback schema-order investigations
-
-The accepted feedback schema places evidence_mappings after reason for evaluator and reviewer.
-When comparing ordering experiments, inspect the assembled schema property sequence, not only a
-schema fingerprint: canonical hashes may ignore object-key order. Normalized tool-output order does
-not independently prove raw provider token order. Check mapping content, resolved references,
-independent scores, correction counts and pending decisions as well as schema validation. The bounded
-seven-control muse-glimmer trial passed without corrections; large contexts and other models remain
-unverified. Existing reference and semantic review guards remain required.
+- [Technique forensics reference](../../../docs/research/technique/forensics-reference.md) summarizes
+  current event fields and points to the detailed contracts and study records.
+- [Current publication and grounding behavior](../../../docs/research/technique-single-reviewer/README.md)
+  and [knowledge-based grounding](../../../docs/research/technique-knowledge-grounding/README.md).
+- [Review purpose](../../../docs/research/technique-review-purpose/README.md),
+  [materiality](../../../docs/research/technique-review-materiality/README.md), and
+  [incremental corrections](../../../docs/research/technique-review-incremental-corrections/README.md).
+- [Review calibration and limitations](../../../docs/research/technique-review-calibration/README.md)
+  and [generation-yield pilot](../../../docs/research/technique-generation-yield-pilot/README.md).
+- [Earlier technique acceptance reports](../../../docs/research/README.md) retain study
+  protocols and outcomes. Do not treat them as current operation evidence.

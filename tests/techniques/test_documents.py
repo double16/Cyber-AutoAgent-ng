@@ -1,9 +1,14 @@
 import hashlib
+import json
+from pathlib import Path
 
 import pytest
 import yaml
 
-from modules.techniques.documents import Metadata, Source, TechniqueDocument, json_payload, revision_id
+from modules.techniques.documents import CONTEXTS, Metadata, Source, TechniqueDocument, json_payload, revision_id
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+WEB_TECHNIQUES = REPOSITORY / "src/modules/operation_plugins/web/techniques"
 
 
 def test_document_is_self_contained_with_separate_source_identity(markdown):
@@ -94,3 +99,43 @@ def test_optional_prompt_fitting_drops_records_without_cutting_nested_json():
     assert json.loads(optional_records_payload("examples", rows, 16)) == {"examples": []}
     with pytest.raises(ValueError, match="cannot fit"):
         optional_records_payload("examples", rows, 1)
+
+
+@pytest.mark.parametrize("path", sorted(WEB_TECHNIQUES.glob("*.md")), ids=lambda p: p.name)
+def test_web_library_phase_and_signal_metadata(path):
+    from modules.operation_plugins.web.technique_signals import PROTOCOL_PATTERNS
+
+    doc = TechniqueDocument(path.read_bytes().decode("utf-8"))
+    phases = doc.metadata.phases
+    assert len(phases) == len(set(phases))
+    assert set(phases) <= set(CONTEXTS)
+    assert doc.metadata.triggers
+    assert {phase for trigger in doc.metadata.triggers for phase in trigger.phases} == set(phases)
+    for trigger in doc.metadata.triggers:
+        assert set(trigger.phases) <= set(phases)
+
+
+def test_web_module_technique_catalog_has_valid_references():
+    paths = sorted(WEB_TECHNIQUES.glob("*.md"))
+    assert paths
+
+    for path in paths:
+        doc = TechniqueDocument(path.read_bytes().decode("utf-8"))
+        assert doc.metadata.sources
+        assert all(source.url.startswith("https://") for source in doc.metadata.sources)
+        assert doc.metadata.title.strip()
+
+
+def test_web_module_technique_documents_are_distinct_and_parseable():
+    paths = sorted(WEB_TECHNIQUES.glob("*.md"))
+    digests = {}
+
+    for path in paths:
+        raw = path.read_bytes()
+        doc = TechniqueDocument(raw.decode("utf-8"))
+        assert doc.sha256 == hashlib.sha256(raw).hexdigest()
+        assert path.stem
+        assert path.stem not in digests, f"duplicate technique filename: {path.stem}"
+        digests[path.stem] = doc.sha256
+
+    assert len(set(digests.values())) == len(digests)

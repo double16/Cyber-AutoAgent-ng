@@ -1,0 +1,117 @@
+{
+  "status": "running",
+  "trial": "outputs/technique_review_trials/live-matched-review-20261105-1",
+  "counts_at_checkpoint": {
+    "limit": 30,
+    "requests": 19,
+    "roles": 8
+  },
+  "completed": [
+    {
+      "case": "network-policy",
+      "arm": "baseline",
+      "status": "completed",
+      "approved": true,
+      "counts_at_completion": {
+        "limit": 30,
+        "requests": 7,
+        "roles": 3
+      }
+    },
+    {
+      "case": "network-policy",
+      "arm": "candidate",
+      "status": "completed",
+      "approved": true,
+      "counts_at_completion": {
+        "limit": 30,
+        "requests": 12,
+        "roles": 5
+      }
+    }
+  ],
+  "assessments": [
+    {
+      "subject": "00-baseline-network-policy",
+      "status": "failed",
+      "failure_kind": "contract",
+      "correction_number": 0
+    },
+    {
+      "subject": "00-baseline-network-policy",
+      "status": "assessed",
+      "assessment": {
+        "interpretation_reviews": [
+          {
+            "interpretation_index": 0,
+            "draft_references": [
+              "d93354ab1ca02:b28",
+              "d93354ab1ca02:b29",
+              "d93354ab1ca02:b30",
+              "d93354ab1ca02:b31",
+              "d93354ab1ca02:b32"
+            ],
+            "permitted_counterexample": "No policy-compliant scenario can produce the exact suspicious observation while satisfying the stated prerequisites. The prerequisites require an approved policy that defines allowed and denied source/service pairs for the declared service, an effective rule-set revision and enforcement point known, and source identity actually visible at the enforcement point including any NAT or proxy mapping established before interpretation. Under those prerequisites the denied identity is defined as not permitted to reach the protected service, so a scenario where the independently established denied identity reaches the protected service under the stated policy with identity mapping and path verified cannot be policy-compliant.",
+            "counterexample_matches_check": false,
+            "control_excludes_counterexample": false,
+            "actual_discriminator": "failure only when the independently established denied identity reaches that protected service",
+            "critic_correct": true
+          }
+        ],
+        "critic_supported": true,
+        "reason": "The draft requires approved policy, effective rule-set revision, enforcement point knowledge and verified identity mapping before interpreting a connection as a violation, and it labels a suspected enforcement failure only when the independently established denied identity reaches the protected service under the stated policy with identity mapping and path verified. The critic\u2019s interpretation matches those actual prerequisites and the exact suspicious observation, and no material blocker against the frozen acceptance criteria is present.",
+        "findings": []
+      },
+      "correction_number": 1,
+      "final_disposition": "accepted"
+    },
+    {
+      "subject": "01-candidate-network-policy",
+      "status": "assessed",
+      "assessment": {
+        "interpretation_reviews": [
+          {
+            "interpretation_index": 0,
+            "draft_references": [
+              "d93354ab1ca02:b5",
+              "d93354ab1ca02:b7",
+              "d93354ab1ca02:b9",
+              "d93354ab1ca02:b13",
+              "d93354ab1ca02:b15",
+              "d93354ab1ca02:b20",
+              "d93354ab1ca02:b28",
+              "d93354ab1ca02:b30",
+              "d93354ab1ca02:b29"
+            ],
+            "permitted_counterexample": "No policy-compliant scenario can produce the exact suspicious observation while satisfying the stated prerequisites. The prerequisites require a declared policy defining allowed and denied source/service pairs, an effective rule-set revision, enforcement interface, and verified source identity mapping including NAT/proxy mapping, with the intended service, destination address/port, protocol and path known before interpretation. Under those prerequisites the denied identity is defined by policy as not permitted to reach the protected service. The observation labeled suspicious is 'the independently verified denied identity reaches that protected service under the stated policy with identity mapping and path verified'. That observation is definitionally inconsistent with the policy prerequisite that the peer is denied. Therefore a permitted, policy-compliant scenario with the same observation cannot exist; any scenario where the denied identity reaches the service would violate the established policy.",
+            "counterexample_matches_check": false,
+            "control_excludes_counterexample": false,
+            "actual_discriminator": "Suspect an enforcement",
+            "critic_correct": true
+          }
+        ],
+        "critic_supported": true,
+        "reason": "The draft establishes policy prerequisites, verifies identity mapping at the enforcement point, uses an allowed-peer baseline and a controlled denied-peer variation, and requires service-side observations and rule/state evidence. Interpretation distinguishes legitimate allowed connectivity from a suspected enforcement failure only when the denied identity is independently verified to reach the protected service under the stated policy with identity mapping and path verified. The retained pf.conf excerpts support rule-evaluation ordering and state creation facts referenced by the draft, and attribution notes the synthesis is original. No material defect against core:technical_support, core:interpretation, core:operational_sufficiency, core:attribution, core:restrictions or requirement:method is identified, and the critic's decision and empty issue set are correct and complete.",
+        "findings": []
+      },
+      "correction_number": 0,
+      "final_disposition": "accepted"
+    },
+    {
+      "subject": "02-candidate-filesystem-policy",
+      "status": "failed",
+      "failure_kind": "contract",
+      "correction_number": 0
+    }
+  ],
+  "observations": [
+    "Both network decisions match the human acceptable label.",
+    "Candidate network completed in five requests with no correction; baseline took seven with one contract correction.",
+    "Candidate filesystem assessor is correcting a contract failure after critic returned no blockers."
+  ],
+  "limitations": [
+    "No demonstrated label improvement; incomplete comparison.",
+    "Short exact discriminator excerpts can pass reference validation without providing a useful standalone control explanation; semantic context still requires review.",
+    "Continue the existing run and cumulative counters."
+  ]
+}

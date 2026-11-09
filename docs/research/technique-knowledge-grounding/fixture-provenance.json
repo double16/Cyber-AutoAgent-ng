@@ -1,0 +1,42 @@
+[
+  {
+    "id": "human-network",
+    "prior_subject_sha256": "8541967e20efda3e79b9abf985164de66a9294eb1ef3ef033052bc7a376795d8",
+    "subject_sha256": "67892aee0da7a4f176a6f5dc93abcd4d4071f02bb8a3a6a49ffb143f1790640e",
+    "document_sha256": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+    "document_unchanged": true,
+    "change": "Explicit knowledge_allowed metadata under the user-authorized policy; inherited human document label."
+  },
+  {
+    "id": "human-filesystem",
+    "prior_subject_sha256": "87312dcd1019a59718315f74c02aa4bdaea7f2e85a22438471e7497d9ae66365",
+    "subject_sha256": "83ed73fa5c630d7dc7371e200b8721f5c8c3602058ad4839abe806b4f0b65a85",
+    "document_sha256": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+    "document_unchanged": true,
+    "change": "Explicit knowledge_allowed metadata under the user-authorized policy; inherited human document label."
+  },
+  {
+    "id": "http-selector",
+    "prior_subject_sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+    "subject_sha256": "3229959bafb3b2dbfb6ad7cb29b0bef8e0a836b40f31401ef359ea8c3440e88c",
+    "document_sha256": "f57d88e905f7cd4a54126bfdec7332a9c68231db147cf73d1b24e2a3bfa46741",
+    "document_unchanged": true,
+    "change": "Explicit knowledge_allowed metadata under the user-authorized policy; inherited human document label."
+  },
+  {
+    "id": "generate-filesystem",
+    "prior_subject_sha256": "430afa83db615c3fd92fc349ff71799a6ac02e66d605a8f523bff80837e1ff07",
+    "subject_sha256": "3e2c413cd9ee4f207f32a51e8f08083f2e5d0847f28d0bd80a1af78e626e8a80",
+    "document_sha256": "05d8720154079e7a399db35a6b28b1ba4b3abbe74e57e478aebc693793b60ddd",
+    "document_unchanged": true,
+    "change": "Explicit knowledge_allowed metadata under the user-authorized policy; inherited human document label."
+  },
+  {
+    "id": "http-selector-corrected",
+    "prior_subject_sha256": "ec9e05df99968ebcca58800056a54484ef2f0b728a9bffc68ca42ab869456b06",
+    "subject_sha256": "d575bfe46ef3cf6caf76a449b0781bfdd429dba89a3fac00578b0093f5bf7fb4",
+    "document_sha256": "289e3302107199089346b84cf20251ff595290ef8da4077ce79e21a069493db3",
+    "document_unchanged": true,
+    "change": "Explicit knowledge_allowed metadata under the user-authorized policy; inherited human document label."
+  }
+]

@@ -1,0 +1,134 @@
+{
+  "status": "offline_verified_live_not_authorized",
+  "preflight": {
+    "candidate_code_identity": "830ebabfa124362d39e3e63a72631d26dbfdc05209eca953b10e8e12241a41cb",
+    "subjects": {
+      "network-policy": "53ce293dceaba102e39f4ede2657dcd39a4223a3f387a53d3ed586f654d2d694",
+      "filesystem-policy": "d35b47e91dbcc3b888f1b7e826069cafa097b10c7ec5a069c425b821b26e44f0",
+      "http-selector-corrected": "ec9e05df99968ebcca58800056a54484ef2f0b728a9bffc68ca42ab869456b06"
+    },
+    "wire_modes": [
+      "native",
+      "tool"
+    ],
+    "status": "passed"
+  },
+  "outcomes": [
+    {
+      "case": "network-policy",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 2
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "filesystem-policy",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 4
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "http-selector-corrected",
+      "wire_mode": "native",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 6
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "network-policy",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 2
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "filesystem-policy",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 4
+      },
+      "scripted_model_dispatches": 4
+    },
+    {
+      "case": "http-selector-corrected",
+      "wire_mode": "tool",
+      "status": "offline_contract_passed",
+      "counts": {
+        "limit": 21,
+        "requests": 0,
+        "roles": 6
+      },
+      "scripted_model_dispatches": 4
+    }
+  ],
+  "regressions": {
+    "passed": 2212,
+    "skipped": 18
+  },
+  "native_wire_regressions": {
+    "passed": 127,
+    "skipped": 6
+  },
+  "coverage": {
+    "src/modules/techniques/critique.py": {
+      "covered_lines": 430,
+      "num_statements": 435,
+      "percent_covered": 98.04878048780488,
+      "percent_covered_display": "98",
+      "missing_lines": 5,
+      "excluded_lines": 0,
+      "percent_statements_covered": 98.85057471264368,
+      "percent_statements_covered_display": "99",
+      "num_branches": 180,
+      "num_partial_branches": 7,
+      "covered_branches": 173,
+      "missing_branches": 7,
+      "percent_branches_covered": 96.11111111111111,
+      "percent_branches_covered_display": "96"
+    },
+    "src/modules/techniques/review_correctness.py": {
+      "covered_lines": 38,
+      "num_statements": 38,
+      "percent_covered": 100.0,
+      "percent_covered_display": "100",
+      "missing_lines": 0,
+      "excluded_lines": 0,
+      "percent_statements_covered": 100.0,
+      "percent_statements_covered_display": "100",
+      "num_branches": 20,
+      "num_partial_branches": 0,
+      "covered_branches": 20,
+      "missing_branches": 0,
+      "percent_branches_covered": 100.0,
+      "percent_branches_covered_display": "100"
+    }
+  },
+  "minimum_line_and_branch": 80,
+  "ruff": "passed",
+  "whitespace": "passed",
+  "new_live_requests": 0,
+  "cumulative_live_requests": 61,
+  "live_gate": "Missing new allowance rejected before dispatch",
+  "patch_sha256": "78067a74ce6559a408decf584153e4f9cb4065484561429b142a1b6894e86083",
+  "limitation": "No live semantic assessment of the reference-grounding revision yet."
+}

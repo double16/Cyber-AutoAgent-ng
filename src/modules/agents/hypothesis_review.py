@@ -20,15 +20,21 @@ from modules.agents.structured_outputs import (
     NoHypothesisBasis,
     TaskReviewDecisionOutput,
 )
+from modules.prompts.security_interpretation import SECURITY_INTERPRETATION
 from modules.tools import memory
 from modules.tools.artifact_journal import ReturnedArtifactJournal
 from modules.tools.hypotheses import HypothesisSet, hypothesis_binding, load_hypothesis_set
 from modules.tools.inventory_inputs import inspection_covers_input
 
-HYPOTHESIS_SEMANTIC_GUIDANCE = """## Hypothesis semantic rubric
+HYPOTHESIS_SEMANTIC_GUIDANCE = SECURITY_INTERPRETATION + "\n" + """## Hypothesis semantic rubric
 Use frozen inventory and retained source artifacts; inspect explicitly linked retained resources when
 needed. Public research may inform future tests. Do not fetch the live target or execute proposed tests.
 Name concrete necessary missing evidence as a prerequisite gap, not as a negative observation.
+Grounding concerns the observed basis, not proof of a proposed outcome. Keep observed facts,
+conditional mechanism assumptions and future outcomes distinct. A source-backed mechanism may be
+proposed conditionally when relevant observations motivate it and future checks establish whether
+it applies; do not demand observed exploitation, protected response content or confirmed server-side
+implementation merely to retain such a proposal. An unrelated or invented observation remains a defect.
 Grounding: connect inspected observations to the assigned subject, proposed mechanism, and intended
 trust boundary. Distinguish observed facts from unresolved preconditions. An explicitly evidenced link
 to a related resource can ground a workflow hypothesis; the tested action need not use the subject's
@@ -127,6 +133,13 @@ def normalize_review(data: dict[str, Any]) -> dict[str, Any]:
     result = review.model_dump()
     result["subject_reviews"] = semantic_review(data)["subject_reviews"]
     changes = review_requires_changes(result)
+    if any(row.no_hypothesis_basis and row.no_hypothesis_basis.kind == "metadata_only"
+           for row in review.subject_reviews) and not review.prerequisite_gaps:
+        raise ValueError(
+            "Metadata-only empty disposition requires explicit prerequisite_gaps identifying necessary "
+            "unreviewed content, or an inspected_evidence assessment citing retained content. "
+            "Reusing an unchanged publication cannot repair missing inspection."
+        )
     gaps = review.prerequisite_gaps
     if any(row.no_hypothesis_basis and row.no_hypothesis_basis.kind == "necessary_evidence_unreviewed"
            for row in review.subject_reviews) and not gaps:
@@ -322,8 +335,10 @@ def validate_review(data: dict[str, Any], task: Any, operation_id: str) -> None:
                     )):
                         raise ValueError("Supported conditional test requires publication repair")
             elif basis.kind == "metadata_only":
-                if review.status == "done" or review.repair is None or review.repair.kind not in {"acceptance", "execution"}:
-                    raise ValueError("Metadata-only empty disposition requires publication repair")
+                if not review.prerequisite_gaps or review.status == "done":
+                    raise ValueError("Metadata-only empty disposition requires explicit prerequisite_gaps")
+                if review.status != "blocked" and (review.repair is None or review.repair.kind != "execution"):
+                    raise ValueError("Metadata-only evidence gap requires prerequisite recovery")
             elif not review.prerequisite_gaps or review.status == "done":
                 raise ValueError("Unreviewed necessary evidence requires prerequisite recovery")
     criteria = {criterion.id for criterion in task.acceptance.criteria}
@@ -356,7 +371,8 @@ def validate_subject_prerequisites(row: HypothesisSubjectReview, payload: dict, 
                 or not set(gap.source_refs) <= set(task.acceptance.basis.source_refs)):
             raise ValueError("Subject prerequisite must identify frozen criteria, subjects, and sources")
         related.append(gap.model_dump())
-    if (row.no_hypothesis_basis and row.no_hypothesis_basis.kind == "necessary_evidence_unreviewed"
+    if (row.no_hypothesis_basis
+            and row.no_hypothesis_basis.kind in {"necessary_evidence_unreviewed", "metadata_only"}
             and not related):
         raise ValueError("Unreviewed necessary evidence requires a prerequisite gap for this subject")
     return related
@@ -406,8 +422,9 @@ class BoundHypothesisReview:
                 f"BoundNoHypothesisBasis{index}", __base__=NoHypothesisBasis,
                 __config__=ConfigDict(json_schema_extra={"oneOf": [
                     {"properties": {"kind": {"const": "inspected_evidence"},
-                                    "inspection_refs": {"minItems": 1},
-                                    explanation_field: {"type": "array", "minItems": 1} if candidate_ids
+                                    "inspection_refs": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                                    explanation_field: {"type": "array", "items": assessment.model_json_schema(),
+                                                        "minItems": 1} if candidate_ids
                                     else {"type": "string", "minLength": 1}},
                      "required": ["inspection_refs", explanation_field]},
                     {"properties": {"kind": {"enum": ["metadata_only", "necessary_evidence_unreviewed"]}}},

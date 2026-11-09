@@ -1,0 +1,28 @@
+{
+  "status": "adjudicated",
+  "documents": [
+    {
+      "family": "network",
+      "case": "generate-network",
+      "author_attempt": 1,
+      "path": "network-draft-1.md",
+      "document_sha256": "a0191fe62909d3ad75eccd6fde2e7a60995e3dd3cd9adca65a4b7c49d0983698",
+      "status": "unpublished_draft_human_quality_pending",
+      "source_snapshot": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/00/techniques/builds/3df79390-6250-4f7b-b30e-47a6f59feecb/review-f89c3ebf96793050518a5a7a2aca81dede785432caa2b88e96fb71cf02890f85.json",
+      "label": "acceptable_and_useful",
+      "reason": "User judged network-draft-1.md acceptable and useful."
+    },
+    {
+      "family": "filesystem",
+      "case": "generate-filesystem",
+      "author_attempt": 2,
+      "path": "filesystem-draft-2.md",
+      "document_sha256": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+      "status": "unpublished_draft_human_quality_pending",
+      "source_snapshot": "outputs/technique_review_trials/generation-yield-upstream-scope-live-20261106-1/live/01/techniques/builds/822a28dc-9d9f-4bfc-b350-af088d42a69c/review-5d746f0bbfb2911ec5243ac5c287365d0bdb4af186027894c9d1e82559e70668.json",
+      "label": "needs_correction",
+      "reason": "User preferred the previous version. The draft rarely identifies file-access testing, making the reader search to determine what is being read."
+    }
+  ],
+  "user_feedback": "The reviewer needs to lighten up; user suspects excessive reviewer demands."
+}

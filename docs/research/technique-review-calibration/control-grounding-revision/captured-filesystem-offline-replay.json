@@ -1,0 +1,84 @@
+{
+  "kind": "offline_reference_resolution_only",
+  "new_live_requests": 0,
+  "subject_sha256": "d35b47e91dbcc3b888f1b7e826069cafa097b10c7ec5a069c425b821b26e44f0",
+  "captured_attempts": [
+    {
+      "critic_supported": true,
+      "reason": "The draft establishes policy independently, records actual process identity and privilege context, uses explicitly selected allowed and denied test files with verified binding, and requires evidence preservation. The suspected violation is conditioned on marker content from a file independently established as denied being returned under verified principal with unchanged policy, and the draft explicitly states reading an owned or deliberately shared file is not a violation. The retained open(2) excerpts support the read-permission basis. No material blocker is identified against the frozen acceptance contract and the critic's interpretation correctly reflects the actual distinguishing control.",
+      "reviews": [
+        {
+          "explanation": "Suspect a boundary violation only if marker content from the file independently established as denied is returned under the verified principal and unchanged policy.",
+          "supplied_draft_references": [
+            "de839ba9c2b56:b25",
+            "de839ba9c2b56:b26",
+            "de839ba9c2b56:b27",
+            "de839ba9c2b56:b28"
+          ],
+          "resolved_body_records": [
+            {
+              "reference": "de839ba9c2b56:b25",
+              "value": "Reading the allowed file is expected. A denied read supports enforcement only with a working"
+            },
+            {
+              "reference": "de839ba9c2b56:b26",
+              "value": "allowed control and verified file/identity binding. Suspect a boundary violation only if marker"
+            },
+            {
+              "reference": "de839ba9c2b56:b27",
+              "value": "content from the file independently established as denied is returned under the verified principal"
+            },
+            {
+              "reference": "de839ba9c2b56:b28",
+              "value": "and unchanged policy. Reading an owned file or a deliberately shared file is not a violation."
+            }
+          ],
+          "semantic_claims": {
+            "critic_correct": true,
+            "counterexample_matches_check": false,
+            "control_excludes_counterexample": true
+          }
+        }
+      ]
+    },
+    {
+      "critic_supported": true,
+      "reason": "The draft establishes policy independently, records actual process identity and privilege context, binds tests to stable object metadata, requires allowed and denied controls with verified policy decisions, and conditions a suspected boundary violation on marker content from a file independently established as denied being returned under verified principal with unchanged policy. Reading an owned or deliberately shared file is explicitly stated not to be a violation. The retained open(2) excerpts support the read-permission basis. No material blocker is identified against the frozen acceptance contract and the critic's interpretation correctly reflects the actual distinguishing control.",
+      "reviews": [
+        {
+          "explanation": "Suspect a boundary violation only if marker content from the file independently established as denied is returned under the verified principal and unchanged policy.",
+          "supplied_draft_references": [
+            "de839ba9c2b56:b25",
+            "de839ba9c2b56:b26",
+            "de839ba9c2b56:b27",
+            "de839ba9c2b56:b28"
+          ],
+          "resolved_body_records": [
+            {
+              "reference": "de839ba9c2b56:b25",
+              "value": "Reading the allowed file is expected. A denied read supports enforcement only with a working"
+            },
+            {
+              "reference": "de839ba9c2b56:b26",
+              "value": "allowed control and verified file/identity binding. Suspect a boundary violation only if marker"
+            },
+            {
+              "reference": "de839ba9c2b56:b27",
+              "value": "content from the file independently established as denied is returned under the verified principal"
+            },
+            {
+              "reference": "de839ba9c2b56:b28",
+              "value": "and unchanged policy. Reading an owned file or a deliberately shared file is not a violation."
+            }
+          ],
+          "semantic_claims": {
+            "critic_correct": true,
+            "counterexample_matches_check": false,
+            "control_excludes_counterexample": true
+          }
+        }
+      ]
+    }
+  ],
+  "limitation": "Reference resolution establishes availability only. No new independent semantic judgment occurred."
+}

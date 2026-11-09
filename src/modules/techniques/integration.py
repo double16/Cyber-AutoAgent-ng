@@ -73,20 +73,21 @@ def evaluate_task_techniques(runtime, task, reason, outcomes, *, plan=None) -> N
                 available.append(reference)
             except (OSError, ValueError):
                 unavailable.append(reference)
-        tools = (
-            [
-                create_bounded_artifact_reader(
-                    max_reads=4,
-                    context_window_tokens=runtime.prompt_token_limit,
-                    allowed_artifact_refs=available,
-                    max_reads_per_artifact=2,
-                    max_lines_per_read=200,
-                    max_output_chars=8000,
-                )
-            ]
-            if available
-            else []
-        )
+        def tools_factory():
+            return (
+                [
+                    create_bounded_artifact_reader(
+                        max_reads=4,
+                        context_window_tokens=runtime.prompt_token_limit,
+                        allowed_artifact_refs=available,
+                        max_reads_per_artifact=2,
+                        max_lines_per_read=200,
+                        max_output_chars=8000,
+                    )
+                ]
+                if available
+                else []
+            )
         context = json.dumps(
             {
                 "available_evidence_refs": available,
@@ -103,8 +104,8 @@ def evaluate_task_techniques(runtime, task, reason, outcomes, *, plan=None) -> N
         from modules.techniques.feedback_activity import select_feedback_activity
 
         phase = next((p for p in plan.phases if p.id == task.phase), None) if plan is not None else None
-        service.evaluate(runtime.operation_id, task.task_uid, context, tools,
-                         task_context=select_feedback_activity(task, phase))
+        service.evaluate(runtime.operation_id, task.task_uid, context,
+                         task_context=select_feedback_activity(task, phase), tools_factory=tools_factory)
     except Exception:
         # Preserve pending receipts for continuation; never fabricate neutral feedback on a model failure.
         service.events.emit(

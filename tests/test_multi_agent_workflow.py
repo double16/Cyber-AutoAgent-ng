@@ -21202,6 +21202,8 @@ def test_evaluator_synthesis_repair_is_closure_only_and_bounded(repair_resolves)
         ["scheduled"] if repair_resolves else ["scheduled", "exhausted"]
     )
     assert state.tasks[0].status == ("done" if repair_resolves else "partial_failure")
+    if not repair_resolves:
+        assert "terminal hypothesis remains unsupported" in state.tasks[0].status_reason
 
 
 def test_phase_cap_extends_immediate_producer_for_candidate_dependent_phase():
@@ -24249,7 +24251,13 @@ def test_hypothesis_schema_correction_preserves_semantic_feedback(worker_flow_ca
     row = {"item_id": "subject", "decision": "revise", "reason": "Unsupported claim needs replacement",
            "hypotheses": []}
     if correction in {"preserve", "reverse"}:
-        row["no_hypothesis_basis"] = {"kind": "metadata_only", "inspection_refs": []}
+        journal = workflow_mod.hypothesis_inspection_journal(
+            task, controller.runtime.operation_id, workflow_mod._operation_output_root(),
+        )
+        ref = journal.record_inspection("read_artifact", "read", {},
+                                        '{"content":"Static markup with no relevant interaction"}', ())
+        row["no_hypothesis_basis"] = {"kind": "inspected_evidence", "inspection_refs": [ref],
+                                      "no_relevant_behavior_reason": "No relevant interaction in inspected markup"}
     initial = {"status": "done", "publication_sha256": binding["sha256"], "subject_reviews": [row],
                "repair": {"kind": "acceptance", "mode": "replace"}}
     corrected = {**initial, "repair": {"kind": "acceptance"}}
@@ -24662,7 +24670,10 @@ def test_bound_hypothesis_contract_repairs_full_envelope(worker_flow_case, monke
             assert "publication_sha256" not in schema["properties"]
             assert "status" in schema["required"]
         valid = {"status": "partial_failure", "reason": "Inspect relevant implementation before accepting emptiness",
-                 "repair": {"kind": "acceptance"}, "subject_reviews": [{
+                 "repair": {"kind": "execution"}, "prerequisite_gaps": [{
+                     "criterion_id": "future-tests", "missing_input": "Inspect linked implementation",
+                     "item_ids": ["subject"], "source_refs": ["artifact:form.html"],
+                 }], "subject_reviews": [{
                      "item_id": "subject", "decision": "revise", "reason": "Metadata alone is insufficient",
                      "hypotheses": [], "no_hypothesis_basis": {"kind": "metadata_only", "inspection_refs": []},
                  }]}
@@ -24682,7 +24693,7 @@ def test_bound_hypothesis_contract_repairs_full_envelope(worker_flow_case, monke
     controller.structured_runner = runner if structured else None
     decision = controller._evaluate_task(_plan(), _plan().phases[0], task, acceptance_results=[])
     assert len(calls) == 2
-    assert decision.status == "partial_failure" and decision.repair_kind == "acceptance"
+    assert decision.status == "partial_failure" and decision.repair_kind == "execution"
     assert "complete object" in calls[1]
     assert "INSIDE subject_reviews[].no_hypothesis_basis" in calls[0]
     stored = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)

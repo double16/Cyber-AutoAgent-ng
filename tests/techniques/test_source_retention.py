@@ -4,10 +4,13 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from conftest import support_record
 
 from modules.techniques.coverage import (
+    AssessedSupport as EvidenceSupport,
+)
+from modules.techniques.coverage import (
     EvidenceExcerpt,
-    EvidenceSupport,
     Requirement,
     SourceAssessment,
     review_coverage,
@@ -15,7 +18,7 @@ from modules.techniques.coverage import (
 )
 from modules.techniques.events import TechniqueEvents
 
-REQUIREMENTS = [Requirement(id="method", description="Discriminate the mechanism")]
+REQUIREMENTS = [Requirement(grounding="source_required", id="method", description="Discriminate the mechanism")]
 
 
 def document(index, text=None):
@@ -39,10 +42,17 @@ def harness():
         assert schema is EvidenceSupport
         source = json.loads(prompt.split("Validated source assessment: ", 1)[1].split("\n", 1)[0])
         urls = source["selected_urls"]
-        return schema(requirement_id="unknown" if state.invalid else "method", source_urls=urls,
-                      explanation="Evidence remains conditional" if state.contradiction else "Combined factual basis",
-                      gaps=["Unresolved contradiction"] if state.contradiction or not urls else [],
-                      evidence=state.evidence or [])
+        return schema(
+            **support_record(
+                dict(
+                    requirement_id="unknown" if state.invalid else "method",
+                    source_urls=urls,
+                    explanation="Evidence remains conditional" if state.contradiction else "Combined factual basis",
+                    gaps=["Unresolved contradiction"] if state.contradiction or not urls else [],
+                    evidence=state.evidence or [],
+                )
+            )
+        )
 
     state.service = SimpleNamespace(_json=generate, events=events, _safe_feedback=str,
                                     _repair_prompt=lambda prompt, error: prompt + "\nCorrection: " + str(error))
@@ -280,19 +290,32 @@ def test_rejected_source_correction_explains_empty_attribution_contract(scripted
     def run(role, prompt, tools):
         if role == "technique_source_assessor":
             prompts.append(prompt)
-            return json.dumps({
-                "selected_urls": [], "attributions": [{"url": url, "reason": "Unrelated mechanism"}]
-                if len(prompts) == 1 else [],
-                "reason": "Unrelated mechanism", "authoritative_sufficient": False,
-            })
+            return json.dumps(
+                support_record(
+                    {
+                        "selected_urls": [],
+                        "attributions": [{"url": url, "reason": "Unrelated mechanism"}] if len(prompts) == 1 else [],
+                        "reason": "Unrelated mechanism",
+                        "authoritative_sufficient": False,
+                    }
+                )
+            )
         if role == "technique_requirement_assessor":
-            return json.dumps({"requirement_id": "method", "source_urls": [],
-                               "explanation": "Restriction preserved without factual source claims", "gaps": []})
+            return json.dumps(
+                support_record(
+                    {
+                        "requirement_id": "method",
+                        "source_urls": [],
+                        "explanation": "Restriction preserved without factual source claims",
+                        "gaps": [],
+                    }
+                )
+            )
         return original(role, prompt, tools)
 
     service.runner = run
     result = select_sources(service, "HTTP controls", [
-        Requirement(id="method", description="Preserve restrictions", kind="constraint"),
+        Requirement(grounding="knowledge_allowed", id="method", description="Preserve restrictions", kind="constraint"),
     ], [{"url": url, "text": "Unrelated mechanism"}])
     assert result.selected_urls == result.attributions == []
     assert len(prompts) == 2
@@ -321,3 +344,10 @@ def test_cited_source_without_supplied_context_exhausts_correction():
     source = {"url": document(1)["url"], "text": ""}
     with pytest.raises(ValueError, match="Cited URL needs supplied source context"):
         select_sources(state.service, "Method", REQUIREMENTS, [source])
+
+
+@pytest.fixture(autouse=True)
+def source_required_fixture_requests(request):
+    # These tests intentionally exercise mandatory retrieved-evidence workflows.
+    if "scripted_service" in request.fixturenames:
+        request.getfixturevalue("scripted_service").grounding = "source_required"

@@ -2,6 +2,11 @@
 
 ### Features
 
+- Add 52 general web techniques and four retained specialized methods, with phase-specific
+  procedures, independently reviewed sources, controlled comparisons and explicit limitations.
+  Preserve the audit, exact review inputs and coverage crosswalk under `docs/research/`.
+- Add web technique lookup signals for OAuth, OIDC, SAML, GraphQL, WebSockets, XML,
+  multipart forms and CORS, alongside compact JWT/JWE recognition.
 - Add a `create-technique` repository skill with collaborative authoring checkpoints, independent
   source selection and critique, and validation against the module technique document contract.
 - Add global, source-backed security techniques with Qdrant retrieval, module Markdown imports,
@@ -14,6 +19,7 @@
 
 ### Fixes
 
+- Streamline the forensics skill around current technique interpretation rules; move detailed technique lifecycle and calibration references into linked research documentation.
 - Allocate generation tokens from each complete request across workflow, executor, report, summary, and
   evaluation calls. Preserve complete-answer space, honor explicit output caps, and isolate retry adjustments
   from shared role profiles.

@@ -120,8 +120,8 @@ def test_missing_technique_runs_separate_research_selection_author_and_critic(sc
     assert state.service.repository.get(revision)["active"]
     assert len(state.research_calls) == 1 and state.research_calls[0].startswith("JWT handling\n")
     assert [role for role, _, _ in state.calls] == [
-        "technique_judge", "technique_source_assessor", "technique_requirement_assessor",
-        "technique_author", "technique_critic", "technique_critique_assessor",
+        "technique_judge", "technique_source_assessor",
+        "technique_author", "technique_critic",
     ]
     assert all(bool(tools) == (role in {"technique_critic", "technique_critique_assessor"}) for role, _, tools in state.calls)
     author_prompt = next(prompt for role, prompt, _ in state.calls if role == "technique_author")
@@ -153,6 +153,7 @@ def test_unknown_revision_and_source_selections_are_rejected(scripted_service):
 
 
 def test_insufficient_source_and_rejected_critique_do_not_publish(scripted_service):
+    scripted_service.grounding = "source_required"
     state = scripted_service
     state.authoritative = False
     with pytest.raises(ValueError, match="coverage exhausted"):
@@ -336,7 +337,7 @@ def test_invalid_author_responses_are_diagnosed_and_never_critiqued(scripted_ser
     assert "internal-target.example" not in str(error.value)
     assert not state.service.repository.revisions()
     assert not any(role == "technique_critic" for role, _, _ in state.calls)
-    paths = sorted((tmp_path / "techniques" / "builds").glob("*/*.json"))
+    paths = sorted((tmp_path / "techniques" / "builds").glob("*/attempt-*.json"))
     assert len(paths) == 3
     record = json.loads(paths[-1].read_text())
     assert record["stage"] == stage
@@ -391,7 +392,7 @@ def test_author_repairs_json_and_preserves_original_markdown(scripted_service, t
     assert "The body is Markdown without YAML frontmatter" in assembled
     assert "Return Markdown only" not in assembled
     assert [role for role, _, _ in state.calls].count("technique_critic") == 1
-    assert len(list((tmp_path / "techniques" / "builds").glob("*/*.json"))) == 1
+    assert len(list((tmp_path / "techniques" / "builds").glob("*/attempt-*.json"))) == 1
 
 
 def test_mixed_failures_report_final_stage_and_redact_critic_reason(scripted_service, tmp_path):
@@ -418,17 +419,22 @@ def test_mixed_failures_report_final_stage_and_redact_critic_reason(scripted_ser
     assert "[operation-specific]" in str(error.value)
     assert "Fix [operation-specific] controls" in attempts[2]
     assert not state.service.repository.revisions()
-    assert len(list((tmp_path / "techniques" / "builds").glob("*/*.json"))) == 3
+    assert len(list((tmp_path / "techniques" / "builds").glob("*/attempt-*.json"))) == 3
 
 
-@pytest.mark.parametrize("category,expected_authors,expected_research", [
-    ("authored_content", 2, 1),
-    ("request_coverage", 2, 1),
-    ("source_attribution", 1, 1),
-    ("research_coverage", 1, 2),
-])
+@pytest.mark.parametrize(
+    "category,expected_authors,expected_research",
+    [
+        ("authored_content", 2, 1),
+        ("request_coverage", 2, 1),
+        ("source_attribution", 1, 1),
+        ("research_coverage", 1, 2),
+    ],
+)
 def test_critique_routes_repairs_to_owning_stage(scripted_service, category, expected_authors, expected_research):
     state = scripted_service
+    if category == "research_coverage":
+        state.grounding = "source_required"
     original = state.service.runner
     critiques = []
     selections = []
@@ -478,12 +484,17 @@ def test_critique_routes_repairs_to_owning_stage(scripted_service, category, exp
         ]
 
 
-@pytest.mark.parametrize("category,message", [
-    ("source_attribution", "after one repair"),
-    ("research_coverage", "Research coverage exhausted"),
-])
+@pytest.mark.parametrize(
+    "category,message",
+    [
+        ("source_attribution", "after one repair"),
+        ("research_coverage", "Research coverage exhausted"),
+    ],
+)
 def test_owned_repair_exhaustion_is_explicit_without_reauthoring(scripted_service, category, message):
     state = scripted_service
+    if category == "research_coverage":
+        state.grounding = "source_required"
     original = state.service.runner
 
     def runner(role, prompt, tools):
@@ -597,3 +608,24 @@ def test_research_readiness_does_not_approve_unfulfilled_draft_obligations(scrip
         assert len(prompts) == 3
         assert all(description in prompt and kind in prompt for prompt in prompts)
     assert not state.service.repository.revisions()
+
+
+@pytest.mark.parametrize("use_factory", [False, True])
+def test_feedback_reader_is_created_per_decision(scripted_service, monkeypatch, use_factory):
+    state = scripted_service
+    uses = [{"revision_id": "first"}, {"revision_id": "second"}]
+    monkeypatch.setattr(state.service.repository, "pending_uses", lambda *args: uses)
+    monkeypatch.setattr(state.service.repository, "feedback", lambda *args: False)
+    seen = []
+    legacy = [object()]
+
+    def evaluate(service, use, context, tools, **kwargs):
+        seen.append(tools)
+        return SimpleNamespace(reason="No demonstrated contribution", score=0)
+
+    monkeypatch.setattr("modules.techniques.feedback.evaluate_feedback", evaluate)
+    state.service.evaluate("op", "task", "context", legacy, tools_factory=(lambda: [object()]) if use_factory else None)
+    assert len(seen) == 2
+    assert (seen[0] is seen[1]) is (not use_factory)
+    if not use_factory:
+        assert seen[0] is legacy

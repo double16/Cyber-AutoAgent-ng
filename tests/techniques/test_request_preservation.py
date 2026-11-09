@@ -51,7 +51,7 @@ def test_applicability_rewrite_is_independently_checked(scripted_service, subjec
     service.runner = run
     if repair:
         result = service._preserve_request(subject, decision, LookupContext(),
-                                          [Requirement(id="method", description=subject)])
+                                          [Requirement(grounding="source_required", id="method", description=subject)])
         assert result.generic_request == subject
         assert result.applicability == decision.applicability
     else:
@@ -70,7 +70,7 @@ def assessment():
 
 
 def test_authored_deliverable_explanation_is_canonical():
-    requirements = [Requirement(id="method", description="Verification checklist", kind="authored_deliverable")]
+    requirements = [Requirement(grounding="source_required", id="method", description="Verification checklist", kind="authored_deliverable")]
     result = SourceSelection.model_validate(assessment())
     documents = [{"url": result.selected_urls[0]}]
     result.coverage[0].explanation = (
@@ -81,7 +81,7 @@ def test_authored_deliverable_explanation_is_canonical():
     result.coverage[0].synthesis = "Derive version checks and controls from documented mechanism and prerequisites"
     result.validate_references(documents, requirements)
     assert result.sufficient
-    assert Requirement(id="legacy", description="Facts").kind == "factual_support"
+    assert Requirement(grounding="source_required", id="legacy", description="Facts").kind == "factual_support"
 
 
 def test_canonical_gap_requires_actionable_factual_question():
@@ -117,9 +117,9 @@ def test_review_removes_synthesis_gap_before_second_research_batch(scripted_serv
 
     state.service.runner = run
     state.service.get("Verification checklist", requirements=[
-        Requirement(id="method", description="Verification checklist", kind="authored_deliverable")])
+        Requirement(grounding="source_required", id="method", description="Verification checklist", kind="authored_deliverable")])
     assert len(state.research_calls) == len(reviewed) == 1
-    assert "missing prewritten procedure is not a factual claim" in reviewed[0]
+    assert "Do not require references to supply original procedures" in reviewed[0]
     author = next(prompt for role, prompt, _ in state.calls if role == "technique_author")
     assert "Construct checklist" in author
 
@@ -213,7 +213,8 @@ def test_alignment_rejects_optional_examples_becoming_prohibitions(scripted_serv
                                "reason": "Examples were not explicitly requested"})
         if role == "technique_request_reviewer":
             assert "converting optional content into forbidden content" in prompt
-            assert "representative payloads or commands" in prompt
+            assert "Do not turn author enrichment preferences" in prompt
+            assert "without waiting for an explicit request" not in prompt
             return json.dumps({"approved": False, "reason": "Invented prohibition",
                                "subject_preserved": True, "mechanisms_preserved": True,
                                "deliverables_preserved": True, "additions": ["Prohibits useful examples"],
@@ -249,12 +250,11 @@ def test_draft_readiness_preserves_concerns_and_requires_factual_basis(kind, gap
     }]
     selection = SourceSelection.model_validate(data)
     documents = [{"url": selection.selected_urls[0]}]
-    requirement = Requirement(id="method", description="Required method", kind=kind)
+    requirement = Requirement(grounding="source_required", id="method", description="Required method", kind=kind)
     selection.validate_references(documents, [requirement])
     frozen = selection.model_dump_json()
     assert not selection.sufficient
-    assert selection.research_ready is (
-        kind in {"constraint", "authored_deliverable"} and gap_kind == "missing_factual_support")
+    assert not selection.research_ready
     assert selection.model_dump_json() == frozen
     if kind != "constraint":
         selection.coverage[0].source_urls = []
@@ -268,11 +268,12 @@ def test_draft_research_repair_requires_complete_support(scripted_service):
     data = assessment()
     data["coverage"][0]["gaps"] = ["Missing underlying mechanism"]
     selection = SourceSelection.model_validate(data)
-    requirement = Requirement(id="method", description="Construct method", kind="authored_deliverable")
+    requirement = Requirement(grounding="source_required", id="method", description="Construct method", kind="authored_deliverable")
     documents = [{"url": selection.selected_urls[0]}]
     selection.validate_references(documents, [requirement])
-    assert selection.research_ready and not selection.sufficient
-    assert service._research_coverage("Method", [requirement], documents, selection, 3)[1] is selection
+    assert not selection.research_ready and not selection.sufficient
+    with pytest.raises(ValueError, match="exhausted after three batches"):
+        service._research_coverage("Method", [requirement], documents, selection, 3)
     with pytest.raises(ValueError, match="exhausted after three batches"):
         service._research_coverage("Method", [requirement], documents, selection, 3,
                                    require_complete_support=True)
@@ -286,18 +287,25 @@ def test_drafting_keeps_research_concerns_for_author_and_independent_critic(scri
         if role in {"technique_source_assessor", "technique_requirement_assessor",
                     "technique_requirement_reviewer"}:
             data = assessment()
-            data["coverage"][0]["gaps"] = ["Specific concern about an unwritten illustrative payload"]
+            data["coverage"][0]["authoring_obligations"] = ["Specific concern about an unwritten illustrative payload"]
             return assessment_output(role, prompt, data)
         return original(role, prompt, tools)
 
     state.service.runner = run
     state.service.get("JWT handling", requirements=[
-        Requirement(id="method", description="Write examples and checklist", kind="authored_deliverable")])
+        Requirement(grounding="source_required", id="method", description="Write examples and checklist", kind="authored_deliverable")])
     assert len(state.research_calls) == 1
     for role in ("technique_author", "technique_critic"):
         prompt = next(prompt for assigned, prompt, _ in state.calls if assigned == role)
         assert "Specific concern about an unwritten illustrative payload" in prompt
         assert "Write examples and checklist" in prompt
-        assert "not fulfillment or factual proof" in prompt
+        assert "does not establish document completeness or correctness" in prompt
         assert "expected legitimate behavior" in prompt
         assert "reserved example domains" in prompt
+
+
+@pytest.fixture(autouse=True)
+def source_required_fixture_requests(request):
+    # Explicitly retain mandatory-evidence semantics for these legacy research tests.
+    if "scripted_service" in request.fixturenames:
+        request.getfixturevalue("scripted_service").grounding = "source_required"

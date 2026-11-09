@@ -42,15 +42,24 @@ def test_policy_branch_inheritance_and_origins():
     assert resolve_policy(loader(rows), "b")[-1]["module"] == "b"
 
 
-@pytest.mark.parametrize("policy", [{"unknown": []}, {"mode": "bad"}, {"restrictions": [" "]},
-                                    {"restrictions": ["x" * 2001]}, {"restrictions": [True]}])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        {"unknown": []},
+        {"mode": "bad"},
+        {"restrictions": [" "]},
+        {"restrictions": ["x" * 2001]},
+        {"restrictions": [True]},
+    ],
+)
 def test_invalid_module_policy(policy):
     with pytest.raises(ValueError, match="Module web: invalid technique_policy"):
         resolve_policy(loader({"web": {"technique_policy": policy}}), "web")
 
 
-@pytest.mark.parametrize("helpful,harmful,score", [(False, False, 0), (True, False, 1),
-                                                   (False, True, -1), (True, True, -1)])
+@pytest.mark.parametrize(
+    "helpful,harmful,score", [(False, False, 0), (True, False, 1), (False, True, -1), (True, True, -1)]
+)
 def test_contribution_score(helpful, harmful, score):
     findings = ContributionFeedback(methodological_purpose="Design controls", observed_use="Compared cases",
                                     helpful_contribution=helpful, contribution="Clarified controls" if helpful else "",
@@ -59,9 +68,16 @@ def test_contribution_score(helpful, harmful, score):
     assert findings.score == score
 
 
-@pytest.mark.parametrize("updates", [{"helpful_contribution": True}, {"contribution": "Unsupported benefit"},
-                                     {"misleading_or_harmful": True}, {"harmful_effect": "Unsupported harm"},
-                                     {"helpful_contribution": True, "contribution": "Benefit", "observed_use": ""}])
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"helpful_contribution": True},
+        {"contribution": "Unsupported benefit"},
+        {"misleading_or_harmful": True},
+        {"harmful_effect": "Unsupported harm"},
+        {"helpful_contribution": True, "contribution": "Benefit", "observed_use": ""},
+    ],
+)
 def test_feedback_rejects_inconsistent_findings(updates):
     fields = dict(methodological_purpose="Design checks", observed_use="", helpful_contribution=False,
                   contribution="", misleading_or_harmful=False, harmful_effect="", reason="Contribution unknown")
@@ -367,14 +383,17 @@ def test_feedback_schema_explains_empty_effect_fields_for_absent_contributions()
     assert "Artifact paths" in mapping["result_references"]["description"]
 
 
-@pytest.mark.parametrize("subject,score", [
-    ("HTTP: authentication role comparison applied to a product route", 1),
-    ("Network: reachability control excluded an unavailable service", 1),
-    ("Filesystem: ownership comparison supplied a next step for one file", 1),
-    ("HTTP: authentication hypothesis only; injection contribution unestablished", 0),
-    ("Network: document cited without demonstrated use", 0),
-    ("Filesystem: observed misleading permission interpretation despite useful controls", -1),
-])
+@pytest.mark.parametrize(
+    "subject,score",
+    [
+        ("HTTP: authentication role comparison applied to a product route", 1),
+        ("Network: reachability control excluded an unavailable service", 1),
+        ("Filesystem: ownership comparison supplied a next step for one file", 1),
+        ("HTTP: authentication hypothesis only; injection contribution unestablished", 0),
+        ("Network: document cited without demonstrated use", 0),
+        ("Filesystem: observed misleading permission interpretation despite useful controls", -1),
+    ],
+)
 def test_application_scope_rules_survive_feedback_disagreement(scripted_service, subject, score):
     """Exercise assembled initial/correction/review inputs, without simulating semantic judgment."""
     from modules.techniques.feedback import USEFULNESS_RUBRIC
@@ -488,15 +507,18 @@ def test_new_review_schema_exposes_independent_findings_without_agreement_verdic
     assert '"feedback_supported"' not in prompt and '"approved"' not in prompt
 
 
-@pytest.mark.parametrize("text,valid", [
-    ("guidance:a:1 maps to result:b:1.", True),
-    ("guidance:a:1 and guidance:a:1 with result:b:1", True),
-    ("guidance:a:10 and result:b:1", False),
-    ("guidance:a:1-extra and result:b:1", False),
-    ("a:1 and result:b:1", False),
-    ("guidance:a:1 and result:unknown:1", False),
-    ("guidance:a:1 alone", False),
-])
+@pytest.mark.parametrize(
+    "text,valid",
+    [
+        ("guidance:a:1 maps to result:b:1.", True),
+        ("guidance:a:1 and guidance:a:1 with result:b:1", True),
+        ("guidance:a:10 and result:b:1", False),
+        ("guidance:a:1-extra and result:b:1", False),
+        ("a:1 and result:b:1", False),
+        ("guidance:a:1 and result:unknown:1", False),
+        ("guidance:a:1 alone", False),
+    ],
+)
 def test_prose_recovery_uses_complete_known_ids_without_pairing(scripted_service, text, valid):
     from modules.techniques.feedback import recover_prose_references
 
@@ -562,3 +584,24 @@ def test_evidence_mapping_schema_follows_contribution_explanation():
     assert list(nested["properties"])[-1] == "evidence_mappings"
     assert nested["properties"]["evidence_mappings"]["type"] == "array"
     assert "anyOf" not in nested
+
+
+@pytest.mark.parametrize(
+    "reference,expected", [("result:known:1", "remains pending"), ("result:unknown:1", "known controller")]
+)
+def test_missing_necessary_evidence_never_becomes_a_neutral_score(reference, expected):
+    from modules.techniques.feedback import resolve_feedback
+
+    feedback = ContributionFeedback(
+        neutral_basis="contribution_unestablished",
+        methodological_purpose="Compare access policies",
+        observed_use="Read was blocked",
+        helpful_contribution=False,
+        contribution="",
+        misleading_or_harmful=False,
+        harmful_effect="",
+        reason="Necessary artifact remains unread",
+        necessary_evidence_gaps=[{"references": [reference], "missing_input": "Recorded task comparison"}],
+    )
+    with pytest.raises(ValueError, match=expected):
+        resolve_feedback(feedback, {"result:known:1": "Artifact read blocked by reader guard"})

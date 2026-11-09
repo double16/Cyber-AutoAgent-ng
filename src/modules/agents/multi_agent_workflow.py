@@ -7171,8 +7171,10 @@ class MultiAgentWorkflowController:
                                             status="partial_failure",
                                             reason=(
                                                 "Evaluator-requested terminal synthesis remained incomplete after "
-                                                "the single bounded synthesis repair."
+                                                "the single bounded synthesis repair. Remaining review: "
+                                                + decision.reason
                                             ),
+                                            instructions=decision.instructions,
                                         )
                                         self._emit_evaluator_synthesis_repair(
                                             task,

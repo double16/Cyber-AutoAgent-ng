@@ -1,106 +1,118 @@
 ---
 schema_version: 1
-title: JWT trust-boundary vulnerability verification
-purpose: Validate a JWT hypothesis using controlled requests and current-operation access evidence.
+title: JWT trust boundaries
+purpose: Distinguish jwt trust boundaries from legitimate behavior using bounded, policy-aware comparisons.
 applicability:
-- An assigned HTTP interaction contains a compact JWT or JWE candidate.
+- A compact token candidate is present in an assigned interaction or a JWT validation hypothesis is assigned.
 phases:
+- reconnaissance
+- hypothesis_generation
 - vulnerability_verification
+- execution
+- analysis
 active: true
 triggers:
 - phases:
-  - vulnerability_verification
-  when: A JWT or JWE candidate appears in an assigned HTTP interaction, or a JWT trust-boundary hypothesis
-    is assigned for finding validation.
+  - reconnaissance
+  when: A compact token candidate is present in an assigned interaction or a JWT validation hypothesis
+    is assigned. while checking prerequisites in an assigned interaction.
+  request: JWT trust boundaries reconnaissance
   signals_any:
   - http.jwt
-  request: JWT trust-boundary vulnerability verification
+- phases:
+  - hypothesis_generation
+  when: A compact token candidate is present in an assigned interaction or a JWT validation hypothesis
+    is assigned. while designing future tests from recorded observations.
+  request: JWT trust boundaries hypothesis generation
+  signals_any:
+  - http.jwt
+- phases:
+  - vulnerability_verification
+  when: A compact token candidate is present in an assigned interaction or a JWT validation hypothesis
+    is assigned. while checking a specific assigned boundary hypothesis.
+  request: JWT trust boundaries vulnerability verification
+  signals_any:
+  - http.jwt
+- phases:
+  - execution
+  when: A compact token candidate is present in an assigned interaction or a JWT validation hypothesis
+    is assigned. after a boundary is verified and a minimal demonstration is authorized.
+  request: JWT trust boundaries execution
+  signals_any:
+  - http.jwt
+- phases:
+  - analysis
+  when: A compact token candidate is present in an assigned interaction or a JWT validation hypothesis
+    is assigned. while interpreting recorded results and competing explanations.
+  request: JWT trust boundaries analysis
+  signals_any:
+  - http.jwt
 sources:
-- url: https://www.rfc-editor.org/rfc/rfc7519.html
-  title: 'RFC 7519: JSON Web Token'
-  retrieved_at: '2026-10-26'
-  selection_reason: Claim semantics and signed, encrypted, and unsecured token distinctions.
-- url: https://www.rfc-editor.org/rfc/rfc8725.html
-  title: 'RFC 8725: JWT Best Current Practices'
-  retrieved_at: '2026-10-26'
-  selection_reason: Algorithm, key, issuer, audience, and token-type trust boundaries.
-- url: https://portswigger.net/web-security/jwt
-  title: JWT attacks | Web Security Academy
-  retrieved_at: '2026-10-26'
-  selection_reason: Practical signature and attacker-controlled key-selection assessment cases.
-- url: https://portswigger.net/web-security/jwt/algorithm-confusion
-  title: Algorithm confusion attacks | Web Security Academy
-  retrieved_at: '2026-10-26'
-  selection_reason: Distinguishes key-format prerequisites from merely observing an asymmetric algorithm.
-source_coverage: RFCs define trust requirements; PortSwigger supplies JWS assessment cases. This is not
-  an exhaustive JWE, library-specific, or CVE verification guide.
+- url: https://www.rfc-editor.org/rfc/rfc8725.txt
+  title: jwt-rfc8725
+  retrieved_at: '2026-11-06T21:29:21.104917+00:00'
+  selection_reason: RFC8725 sections2–3 establish algorithm, key, issuer, audience and cross-JWT substitution
+    threats and validation practices.
+- url: https://raw.githubusercontent.com/OWASP/CheatSheetSeries/master/cheatsheets/REST_Security_Cheat_Sheet.md
+  title: REST Security Cheat Sheet
+  retrieved_at: '2026-11-06T21:29:20.745034+00:00'
+  selection_reason: token verification, key and algorithm trust.
+source_coverage: 'Independently selected retrieved references supply mechanism/control background. RFC8725
+  sections2–3 establish algorithm, key, issuer, audience and cross-JWT substitution threats and validation
+  practices. Limits: Development-oriented guidance supplies mechanism/control background; application
+  policy, live exploitability, negative controls and minimal-impact procedure remain original methodology
+  requiring target-specific verification. token verification, key and algorithm trust. Limits: Development-oriented
+  guidance supplies mechanism/control background; application policy, live exploitability, negative controls
+  and minimal-impact procedure remain original methodology requiring target-specific verification. Numbered
+  procedures and controls are original knowledge-allowed synthesis, not individually source-verified.
+  No completed target execution or affected-version claim is supplied.'
 ---
 
-# JWT trust-boundary vulnerability verification
+# JWT trust boundaries
 
-## Prerequisites and applicability
+## Applicability and prerequisites
 
-Start with an assigned JWT hypothesis, authorized request access, a known protected operation, and
-owned test identities or resources needed for the proposed comparison. Observation may trigger this
-lookup before those prerequisites exist; record missing prerequisites and stop that branch.
-Use local token processing and available equivalent tools. Keep tokens, private keys, and recovered
-secrets in sensitive evidence; redact report and log values. No external token decoders are needed.
-This procedure validates findings during vulnerability_verification, not hypothesis generation.
+A compact token candidate is present in an assigned interaction or a JWT validation hypothesis is assigned. Identify the token producer, consumer, protected operation and expected identity. Obtain owned test identities and policy for issuer, audience, purpose, algorithms, keys and time validity. Missing policy remains unknown. Process tokens locally with an available decoder and HTTP client; decoding never verifies a signature. Keep token/key values in sensitive internal artifacts and redact public outputs.
 
-## Establish attribution and controls
+Choose only the assigned branch and obey the operation's scope, identities, rate and state-change constraints. Missing prerequisites stay explicit; a lookup signal is not proof. Equivalent available tools may replace named capabilities.
 
-1. Preserve the original request and response. Replay an unchanged valid token and verify the actual
-   identity or resource access through a stable application result. Record timestamps and state.
-2. In an isolated request/session, remove competing credentials, session cookies, automatic login,
-   and token refresh. Retain only protocol necessities. Compare token absent, malformed token, and
-   a valid lower-privilege or different owned identity where available. Record redirects and cache
-   behavior. If access is public or alternate authentication explains it, JWT bypass is unproven.
-3. Choose only the assigned branch below. Keep request context stable, change one trust boundary at
-   a time, record generated-token provenance, and repeat the valid baseline after the variant.
-   A baseline that fails or changes state makes the comparison inconclusive.
+## Reconnaissance
 
-## Controlled verification branches
+1. Inspect the assigned capture for where the token travels: header, cookie, URL or body. Distinguish observed authentication use from an untested assumption; a response-only token may lack an identified consumer.
+2. Classify JWS, JWE, unsecured and nested forms. Read available bounded header/claim metadata, noting encrypted or inaccessible claims. Record whether key-selection fields are actually processed rather than assuming from their names.
 
-- **Integrity:** alter one security-relevant claim while retaining the original signature. Separately
-  test `alg: none` with an empty signature segment and trailing dot when relevant.
-- **Weak HMAC key:** only with symmetric signing and an authorized bounded offline candidate set,
-  reproduce the original MAC locally. Then sign one controlled claim change. Stop at the agreed
-  bound; failure to recover a key establishes no strength guarantee.
-- **Untrusted key selection:** change one relevant claim and sign with an owned private key.
-  Embed its public JWK in `jwk`, or publish that public key in a controlled JWKS referenced by
-  `jku`; match `kid` values. Never embed or host private keys. Compare against an unrelated key.
-  Investigate `kid` resolution
-  only where supported; filesystem/database injection requires separately scoped guidance.
-- **Algorithm confusion:** obtain the relevant public verification key, preserve candidate byte
-  encodings including newlines, and sign a controlled HS256 token using those bytes as the HMAC
-  key. Contrast with an unrelated key and the unchanged asymmetric token. An algorithm edit alone
-  is insufficient; failure with one encoding does not exclude other verifier representations.
-- **Claims and purpose:** compare legitimately signed tokens with the relevant wrong issuer,
-  audience, or token purpose where obtainable. For expiry/not-before use known signed values and
-  observed time beyond allowed skew, or an authorized test issuer. Changing a claim without a
-  valid signature tests integrity, not independent claim enforcement. Missing required issuance
-  capability makes that branch untested. Logout/revocation tests require an explicit policy.
+## Hypothesis generation
 
-For hosted key tests, use only approved callback infrastructure; a key fetch alone does not prove
-forged-token acceptance. Do not turn this into unrestricted internal-network probing. Missing
-headers do not prove that injected headers will be ignored or trusted. JWE/nested tokens require
-appropriate decryption and validation knowledge; do not apply JWS mutation recipes blindly.
+1. Using recorded data only, choose plausible branches: integrity, bounded weak-HMAC-key assessment, algorithm/key confusion, untrusted key selection, or issuer/audience/time/purpose enforcement. Do not send requests or search keys in this context.
+2. For each branch specify an accepted token/identity baseline, a single mutation, an unrelated-key or malformed-token negative control and the protected result that would discriminate acceptance from reflection. Identify competing cookies, refresh flows and cache state to isolate later.
+3. For claim policy prefer legitimately signed wrong-purpose/issuer/audience tokens. A tampered claim with a bad signature cannot isolate claim validation. Algorithm confusion requires obtainable public-key bytes and a compatible verifier; note key-format uncertainty and clock-skew policy explicitly.
 
-## Finding decision and evidence handoff
+## Vulnerability verification
 
-Confirm an authentication or authorization bypass only when a controlled invalid/untrusted token reproducibly violates an identified
-trust policy and yields a demonstrated identity, privilege, or protected-resource outcome. Preserve
-baseline, variant, and negative-control request/response references, exact local transformation,
-identity/resource expectations, timing, and repeat result. Explain competing authentication and
-cache controls. Describe only the boundary and impact actually demonstrated.
+1. Replay an unchanged valid token in an isolated session. Verify the actual identity and one owned protected resource. Remove alternate cookies/credentials and automatic refresh; compare absent, malformed and valid other-owned-identity tokens. If the resource is public or another credential explains access, stop the bypass branch.
+2. For integrity, alter one security-relevant claim without regenerating its signature; separately test an unsecured form only where signatures are required by established policy. Re-run the valid baseline afterward.
+3. For untrusted key selection, sign a controlled claim with an owned private key and supply its public JWK or approved hosted JWKS where that field is processed. Contrast an unrelated key. A key-fetch callback is not token acceptance; do not embed or host private keys.
+4. For algorithm confusion, use the relevant public key's exact candidate byte representation as a symmetric key for one controlled token, comparing unrelated-key and unchanged-asymmetric controls. An algorithm edit alone and failure with one encoding are inconclusive. With symmetric signing, an expressly bounded offline candidate set may test weak keys: reproduce the original MAC before generating a variation; no unbounded guessing.
+5. For issuer/audience/purpose compare properly signed tokens from a test issuer or legitimate owned flow. For expiry/not-before use signed times beyond the allowed skew. Without issuance capability, mark that claim branch untested. Confirm only a reproducible prohibited identity/resource effect attributable to the tested token, not an HTTP status or echoed claim.
 
-A status change, HTTP 200, echoed claim, key-fetch callback, local signature match, or library/version
-presence alone cannot prove authorization bypass. A cryptographically weak key demonstrated offline
-may support that narrower weakness; it does not by itself establish live access. Rejection is a
-negative result for the tested variant, not proof every JWT boundary is secure. Unavailable identities,
-keys, stable baselines, or policy evidence mean inconclusive, not confirmed or disproven.
+## Execution
 
-Include source references as methodology, separate from current-operation evidence. Do not infer
-ATT&CK behavior or a CVE solely from token format. Stop after sufficient minimal proof. Certificate,
-content-type injection, full JWE attacks, and implementation-specific CVEs need their own prerequisites
-and verification techniques. No code or payloads from sources are copied into this procedure.
+1. After a verified branch and authorization, use the modified token for one harmless read of a protected owned fixture or identity endpoint that demonstrates the exact prohibited privilege. Do not enumerate unrelated data or chain into key-resolution injection.
+2. Discard generated tokens and hosted test keys, restore the normal credential context and verify the valid baseline. If any offline secret was recovered, handle it as sensitive evidence and coordinate rotation through the authorized owner.
+
+## Analysis
+
+1. Compare baseline, variant, absent/malformed-token and unrelated-key outcomes. Separate offline cryptographic weakness, key retrieval and live authorization effects; each supports a different conclusion.
+2. Explain legitimate unsecured-token contexts, alternate authentication, cache/redirect behavior, clock skew and token-type substitution. Token presence, missing claims or a public key alone prove no bypass. JWE/nested handling needs its own cryptographic prerequisites; do not apply JWS edits blindly.
+
+## Evidence requirements
+
+Retain sensitive exact transformations and token provenance, request/response comparisons, observed identity/resource entitlement, key encoding, time/skew policy and repeat outcomes. Report only the boundary actually demonstrated; methodology sources are separate from runtime evidence.
+
+## Limitations
+
+Rejected variations do not establish all JWT validation is sound. No exhaustive JWE, product-CVE or secondary key-resolution exploit procedure is supplied. Missing stable baselines, keys, test issuers or policy make the relevant branch inconclusive.
+
+## Trigger examples and non-examples
+
+Matching: A compact token candidate is present in an assigned interaction or a JWT validation hypothesis is assigned. Select the section corresponding to the current structured phase. Non-matching: a vulnerability name in unrelated prose, an unassigned surface or a result with no relevant processing path. Signals and semantic conditions recommend this method; they never establish its prerequisites or conclusion.

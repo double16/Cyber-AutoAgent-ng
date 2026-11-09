@@ -206,7 +206,7 @@ def test_new_screen_is_eight_explicit_paired_families():
 
 
 @pytest.mark.parametrize("bad_quote", ["never", "once", "always"])
-def test_correctness_quote_correction_uses_single_shared_allowance(tmp_path, bad_quote):
+def test_correctness_control_reference_correction_uses_single_shared_allowance(tmp_path, bad_quote):
     from modules.techniques.correctness_trials import CorrectnessCritique
     from modules.techniques.critique import ReviewSnapshot
 
@@ -229,6 +229,7 @@ def test_correctness_quote_correction_uses_single_shared_allowance(tmp_path, bad
                 permitted_counterexample="None satisfies independently established denial and access",
                 counterexample_matches_check=False, control_excludes_counterexample=True,
                 actual_discriminator="Invented replacement control" if wrong else frozen.draft,
+                control_references=["stale-control-reference"] if wrong else [reference],
                 critic_correct=True)])
 
     outcome = cli.run_trial(frozen, Variant.A, SimpleNamespace(structured=structured),

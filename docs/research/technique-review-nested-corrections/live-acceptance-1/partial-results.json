@@ -1,0 +1,203 @@
+{
+  "status": "http_pending",
+  "counts": {
+    "limit": 21,
+    "requests": 12,
+    "roles": 6
+  },
+  "cases": [
+    {
+      "case": "00-human-network",
+      "outcome": {
+        "status": "unresolved",
+        "error_type": "ValueError",
+        "error": "Critique assessment failed after one correction: IssueAssessment contract failed for technique_critique_assessor after one correction: Failed to parse or validate native structured content: review_changes.0.replacement: Value error, Boundary or legacy-unclassified checks require boolean counterexample judgments [value_error]; review_changes.1.replacement: Value error, Boundary or legacy-unclassified checks require boolean counterexample judgments [value_error]; review_changes.2.replacement: Value error, Boundary or legacy-unclassified checks require boolean counterexample judgments [value_error]; review_changes.3.replacement: Value error, Boundary or legacy-unclassified checks require boolean counterexample judgments [value_error]",
+        "counts": {
+          "limit": 21,
+          "requests": 7,
+          "roles": 3
+        }
+      },
+      "assessments": [],
+      "outcome_sha256": "806fc52e7414ba4ea289b3a9d566442e549adab9578adbefa09e8e17fa17e029"
+    },
+    {
+      "case": "01-human-filesystem",
+      "outcome": {
+        "status": "completed",
+        "review": {
+          "approved": true,
+          "decision_origin": "controller_findings",
+          "issue_dispositions": [],
+          "category": "authored_content",
+          "reason": "The draft provides a reusable, source-grounded read-access comparison methodology that establishes policy, process identity, allowed/denied controls and evidence requirements, with source support for Linux open(2) permission and denial semantics. The methodology is framed as advisory design without target execution. The request to make clear that the methodology tests file read access and identifies the file objects being read is satisfied by the applicability statement for Linux file read access evaluation and by explicit prerequisites and evidence requirements referencing object identifier/path/permission state. No material unsupported factual claims or missing deliverables are identified.",
+          "issues": [],
+          "suggestions": [],
+          "interpretations": [
+            {
+              "check_purpose": "prerequisite",
+              "draft_references": [
+                "d64288cb04697:b8",
+                "d64288cb04697:b21",
+                "d64288cb04697:b22"
+              ],
+              "prerequisite_or_policy": "Established policy source identified and documented specifying which process identities are authorized to read which objects under which conditions; policy reference and version recorded.",
+              "legitimate_outcome": "Policy is documented and the explicit read permission requirement for the object and mapping of identities to allowed/denied is recorded.",
+              "suspected_violation": "Not applicable; prerequisite establishment step.",
+              "distinguishing_control": "Retrieve authoritative policy documentation/configuration or independently known authorization baseline for the object and record explicit read permission requirement and identity mapping."
+            },
+            {
+              "check_purpose": "prerequisite",
+              "draft_references": [
+                "d64288cb04697:b26",
+                "d64288cb04697:b27"
+              ],
+              "prerequisite_or_policy": "Actual process identity resolution method known in principle, e.g., UID/GID, capabilities, SELinux/AppArmor context.",
+              "legitimate_outcome": "Identity attributes that will be used for comparison are recorded.",
+              "suspected_violation": "Not applicable; prerequisite establishment step.",
+              "distinguishing_control": "Determine how actual process identity is resolved in the target environment and record the identity attributes used for comparison."
+            },
+            {
+              "check_purpose": "legitimate_behavior",
+              "draft_references": [
+                "d64288cb04697:b30",
+                "d64288cb04697:b37"
+              ],
+              "prerequisite_or_policy": "Policy states read is permitted for the test process identity for the identified object.",
+              "legitimate_outcome": "Access succeeds if policy permits and caller has read permission on the object. Source support: Linux open(2) requires caller have read permission on the object for read access.",
+              "suspected_violation": "No violation expected under allowed control.",
+              "distinguishing_control": "Allowed control configuration where policy permits read for chosen identity; evidence set includes process identity attributes, requested access mode, kernel return code/error message, timestamp and object identifier."
+            },
+            {
+              "check_purpose": "legitimate_behavior",
+              "draft_references": [
+                "d64288cb04697:b40",
+                "d64288cb04697:b43"
+              ],
+              "prerequisite_or_policy": "Policy states read is prohibited for the test process identity for the identified object.",
+              "legitimate_outcome": "Access is denied. Source support: Linux open(2) documents that requested access to the file is not allowed when permission is lacking.",
+              "suspected_violation": "No violation expected under denied control.",
+              "distinguishing_control": "Denied control configuration where policy prohibits read for chosen identity; same evidence set as allowed control collected for comparison."
+            },
+            {
+              "check_purpose": "boundary_violation",
+              "draft_references": [
+                "d64288cb04697:b46",
+                "d64288cb04697:b51",
+                "d64288cb04697:b66"
+              ],
+              "prerequisite_or_policy": "Established policy with allowed and denied identities for a constant object.",
+              "legitimate_outcome": "Allowed identity + allowed control \u2192 success expected; denied identity + denied control \u2192 denial expected; cross combinations verify identity binding.",
+              "suspected_violation": "Outcome contradicts established policy for observed identity, e.g., denied identity succeeds or allowed identity is denied.",
+              "distinguishing_control": "Keep object and policy constant, vary process identity between allowed and denied identities; record divergence from expected outcomes as design artifact for future validation with evidence requirements."
+            }
+          ],
+          "no_security_checks_reason": ""
+        },
+        "counts": {
+          "limit": 21,
+          "requests": 11,
+          "roles": 5
+        }
+      },
+      "assessments": [
+        {
+          "timestamp": "2026-11-06T17:43:03.217227+00:00",
+          "run_id": "8f696352-481c-4e04-9cd7-cb54549e2778",
+          "stage": "critique_assessment",
+          "status": "assessed",
+          "snapshot_id": "64288cb0469771ccec102314ac93c998c2beb44a91ea2ebc8b1df9e2761a4b1d",
+          "proposed_decision": true,
+          "assessment": {
+            "interpretation_reviews": [
+              {
+                "check_purpose": "prerequisite",
+                "interpretation_index": 0,
+                "draft_references": [
+                  "d64288cb04697:b8",
+                  "d64288cb04697:b21",
+                  "d64288cb04697:b22"
+                ],
+                "permitted_counterexample": "For a prerequisite establishment check no boundary violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "prerequisite",
+                "interpretation_index": 1,
+                "draft_references": [
+                  "d64288cb04697:b26",
+                  "d64288cb04697:b27"
+                ],
+                "permitted_counterexample": "For a prerequisite establishment check no boundary violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 2,
+                "draft_references": [
+                  "d64288cb04697:b30",
+                  "d64288cb04697:b37"
+                ],
+                "permitted_counterexample": "For a legitimate-behavior check no violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "legitimate_behavior",
+                "interpretation_index": 3,
+                "draft_references": [
+                  "d64288cb04697:b40",
+                  "d64288cb04697:b43"
+                ],
+                "permitted_counterexample": "For a legitimate-behavior check no violation is claimed; counterexample analysis is not applicable.",
+                "counterexample_matches_check": null,
+                "control_excludes_counterexample": null,
+                "control_references": [],
+                "actual_discriminator": "",
+                "critic_correct": true
+              },
+              {
+                "check_purpose": "boundary_violation",
+                "interpretation_index": 4,
+                "draft_references": [
+                  "d64288cb04697:b46",
+                  "d64288cb04697:b51",
+                  "d64288cb04697:b66"
+                ],
+                "permitted_counterexample": "Observation held constant: outcome contradicts established policy for observed identity, e.g., denied identity succeeds. A policy-compliant scenario with the same observation would require the established policy to actually permit the denied identity to succeed, which contradicts the explicit prerequisite that policy states read is prohibited for that identity. No permitted scenario can satisfy both the prerequisite of an established prohibited identity and the exact suspicious observation of success.",
+                "counterexample_matches_check": false,
+                "control_excludes_counterexample": false,
+                "control_references": [
+                  "d64288cb04697:b46",
+                  "d64288cb04697:b51",
+                  "d64288cb04697:b66"
+                ],
+                "actual_discriminator": "Keep object and policy constant, vary process identity between allowed and denied identities; record divergence from expected outcomes as a design artifact for future validation.",
+                "critic_correct": true
+              }
+            ],
+            "critic_supported": true,
+            "reason": "The draft provides a reusable read-access comparison methodology with established policy, process identity, allowed/denied controls and evidence requirements. Applicability states Linux file read access evaluation and prerequisites/evidence reference object identifier/path/permission state, satisfying the human_file_subject deliverable. Interpretation reviews show prerequisite and legitimate-behavior checks are correctly classified with no violation claimed, and the boundary-violation check is framed as a hypothesis requiring future validation with the stated identity-variation control. No material unsupported factual claim or missing requested deliverable is identified under the frozen acceptance criteria.",
+            "findings": []
+          },
+          "correction_number": 0,
+          "final_disposition": "accepted",
+          "type": "technique_build_progress",
+          "level": "info"
+        }
+      ],
+      "outcome_sha256": "53770b738b4064311a8e69ebd6f636b40988bd5d141920e30eff711773f0a0ef"
+    }
+  ]
+}

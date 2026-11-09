@@ -1,0 +1,14 @@
+{
+  "status": "running",
+  "trial": "outputs/technique_review_trials/candidate-http-supplement-20261105-1",
+  "counts_at_checkpoint": {
+    "limit": 10,
+    "requests": 2,
+    "roles": 1
+  },
+  "prior_live_requests": 35,
+  "current_stage": "candidate HTTP critic investigation",
+  "scope": "candidate HTTP only",
+  "original_trial_preserved": true,
+  "baseline_supplement_result": "baseline-http-supplement-results.json"
+}

@@ -1,0 +1,14 @@
+{
+  "status": "prepared",
+  "scope": "revised candidate HTTP only",
+  "authorization": "Continuation of user-requested candidate HTTP test within its original 10-request allowance",
+  "provider_request_cap": 6,
+  "role_invocation_cap": 6,
+  "prior_candidate_http_requests": 4,
+  "cumulative_candidate_http_cap": 10,
+  "execution": "sequential",
+  "candidate_code_identity": "598761fad61761b3d61bbadbc3bcc0bd93c83525c4bfa6502d4ac5346567c4ad",
+  "subject_sha256": "8256461295337490dd96397b11569debd5dc46d372e616e7ae92502219197978",
+  "revision": "reference-catalog-revision.patch",
+  "prior_failed_trial_preserved": true
+}

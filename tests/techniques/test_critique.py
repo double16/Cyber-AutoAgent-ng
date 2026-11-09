@@ -273,6 +273,7 @@ def test_attribution_contract_correction_then_success(scripted_service):
 
 def test_mixed_issues_replace_stale_author_and_attribution_requests(scripted_service):
     state = scripted_service
+    state.grounding = "source_required"
     original = state.service.runner
     critics = []
     events = []
@@ -378,6 +379,7 @@ def test_research_only_resets_attribution_allowance_on_changed_validated_assessm
     scripted_service, monkeypatch, changed
 ):
     state = scripted_service
+    state.grounding = "source_required"
     original = state.service.runner
     critics, repairs = [], []
     original_research = state.service._research_coverage
@@ -504,9 +506,9 @@ def test_persistent_invalid_critique_retains_authored_draft_diagnostic(scripted_
         if role == "technique_critic"
         else original(role, prompt, tools)
     )
-    with pytest.raises(ValueError, match="Critique assessment failed"):
+    with pytest.raises(ValueError, match="Publication review unavailable"):
         state.service.get("Boundary guidance")
-    event = next(row for row in events if row.get("stage") == "critique_assessment")
+    event = next(row for row in events if row.get("stage") == "publication_review")
     assert event["author_attempts"] == 1
     snapshot = json.loads((tmp_path / event["snapshot_path"]).read_text())
     assert "Check assumptions and controls" in snapshot["response"]
@@ -788,17 +790,17 @@ def test_grounding_complaint_without_evidence_cannot_trigger_repair(scripted_ser
 
     state.service.runner = runner
     if persistent:
-        with pytest.raises(ValueError, match="needs passages or an explanation of absent support"):
+        with pytest.raises(ValueError, match="needs inspected source passages"):
             state.service.get("Boundary controls")
         assert not state.service.repository.revisions()
     else:
         state.service.get("Boundary controls")
-    assert len(critics) == 2 and "needs passages" in critics[1]
+    assert len(critics) == 2 and "needs inspected source passages" in critics[1]
     assert [role for role, _, _ in state.calls].count("technique_author") == 1
     assert not any(role == "technique_attribution_repair" for role, _, _ in state.calls)
     assert len(state.research_calls) == 1
     if persistent:
-        failed = next(row for row in events if row.get("stage") == "critique_assessment")
+        failed = next(row for row in events if row.get("stage") == "publication_review")
         assert failed["author_attempts"] == 1
 
 
@@ -1224,6 +1226,8 @@ def test_independent_counterexample_review_validates_coverage_references_and_agr
                "counterexample_matches_check": defect in {"counterexample_conflict", "excluded_counterexample"},
                "control_excludes_counterexample": defect != "counterexample_conflict",
                "critic_correct": defect != "contradiction"}
+        if defect == "invented" or (defect == "repaired" and len(assessor_calls) == 1):
+            row["control_references"] = ["invented-control-reference"]
         return json.dumps({"approved": True, "reason": "Reviewed actual procedure", "findings": [],
                            "interpretation_reviews": [] if defect == "missing" else
                            [row, row] if defect == "duplicate" else [row]})
@@ -1233,7 +1237,7 @@ def test_independent_counterexample_review_validates_coverage_references_and_agr
         assert assess(scripted_service.service, "Review", text, REQS, DOCS, [URL]).approved
         assert len(assessor_calls) == (2 if defect == "repaired" else 1)
         if defect == "repaired":
-            assert "verbatim excerpt" in assessor_calls[1]
+            assert "current procedure-body records" in assessor_calls[1]
             assert "Invented policy-establishment step" in assessor_calls[1]
     else:
         with pytest.raises(ValueError, match="after one correction"):
@@ -1254,6 +1258,10 @@ def test_native_assessor_schema_requires_counterexample_reviews():
     )
     schema = IssueAssessment.model_json_schema()
     assert next(iter(schema["properties"])) == "interpretation_reviews"
+    review = schema["$defs"]["InterpretationReview"]["properties"]
+    assert review["control_references"]["maxItems"] == 32
+    assert "faithful paraphrase" in review["actual_discriminator"]["description"]
+    assert "cited body control steps" in review["control_excludes_counterexample"]["description"]
     assert {"counterexample_matches_check", "control_excludes_counterexample"} <= set(
         schema["$defs"]["InterpretationReview"]["required"]
     )
@@ -1279,12 +1287,14 @@ def test_control_excerpts_resolve_only_text_from_mixed_decoded_metadata(scripted
                            "interpretation_reviews": [{"interpretation_index": 0,
                                "draft_references": references, "permitted_counterexample": "Allowed outcome",
                                "actual_discriminator": literal, "critic_correct": True,
+                               "control_references": [ref for ref in references if ref not in snapshot.body_references]
+                               if literal == "True" else [],
                                "counterexample_matches_check": False,
                                "control_excludes_counterexample": True}]})
 
     scripted_service.service.runner = runner
     if literal == "True":
-        with pytest.raises(ValueError, match="verbatim excerpt"):
+        with pytest.raises(ValueError, match="procedure-body records"):
             assess(scripted_service.service, "Review", text, REQS, DOCS, [URL])
     else:
         assert assess(scripted_service.service, "Review", text, REQS, DOCS, [URL]).approved
@@ -1428,3 +1438,162 @@ def test_quote_resolution_preserves_the_shared_allowance_for_semantic_critic_cor
     scripted_service.service.runner = runner
     assert not assess(scripted_service.service, "Review", text, REQS, DOCS, [URL]).approved
     assert calls == ["technique_critic", "technique_critique_assessor"] * 2
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_suggestions_do_not_change_blocking_decision(approved):
+    review = Critique(approved=approved, reason="Reviewed material defects", issues=[] if approved else [
+        issue(category="authored_content", source_urls=[])
+    ], suggestions=[{"improvement": "An additional example could help", "requirement_ids": ["method"]}])
+    RetainedSources([]).validate(review, "Boundary guidance", REQS, [])
+    assert review.approved is approved
+    assert len(review.suggestions) == 1
+
+
+def test_unknown_suggestion_reference_is_rejected():
+    review = Critique(approved=True, reason="No blockers", suggestions=[
+        {"improvement": "Consider an example", "draft_references": ["stale:reference"]}
+    ])
+    with pytest.raises(ValueError, match="Suggestion references"):
+        RetainedSources([]).validate(review, "Boundary guidance", REQS, [])
+
+
+def test_new_findings_contract_derives_decision_without_a_model_vote():
+    from modules.techniques.critique import CriticFindings
+
+    schema = CriticFindings.model_json_schema()
+    assert "approved" not in schema["properties"]
+    findings = CriticFindings(reason="Only optional elaboration", suggestions=[{"improvement": "Add an example"}])
+    assert findings.critique().approved
+    findings.issues = [issue()]
+    assert not findings.critique().approved
+    assert len(findings.critique().suggestions) == 1
+
+
+@pytest.mark.parametrize(
+    "subject", ["HTTP access comparison", "Network access comparison", "Filesystem access comparison"],
+)
+def test_reference_correction_has_exact_catalog_and_preserves_defect(scripted_service, markdown, subject):
+    from modules.techniques.critique import ReviewSnapshot
+
+    document = markdown(title=subject)
+    reference = next(iter(ReviewSnapshot(document).body_references))
+    prompts = []
+    original = scripted_service.service.runner
+
+    def runner(role, prompt, tools):
+        if role != "technique_critic":
+            return original(role, prompt, tools)
+        prompts.append(str(prompt))
+        requirement_ids = ["method", "core:interpretation"] if len(prompts) == 1 else ["method"]
+        return Critique(approved=False, reason="A material interpretation defect", issues=[issue(
+            category="authored_content", source_urls=[], draft_references=[reference], draft_excerpt="",
+            criterion_id="core:interpretation", requirement_ids=requirement_ids,
+        )], no_security_checks_reason="No separately enumerated checks in this scripted example").model_dump_json()
+
+    scripted_service.service.runner = runner
+    result = assess(scripted_service.service, subject, document, REQS, DOCS, [URL])
+    assert not result.approved
+    assert result.issues[0].requirement_ids == ["method"]
+    assert len(prompts) == 2
+    assert '"allowed_values": ["method"]' in prompts[0]
+    assert "Allowed requirement_ids values: ['method']" in prompts[1]
+    assert "Acceptance-criterion IDs belong in criterion_id" in prompts[1]
+    assert "requirement_ids=[]" in prompts[1]
+    assert "Attribution overstates scope" in prompts[1]
+
+
+def test_requirement_catalog_validates_values_without_prefix_heuristics(markdown):
+    for identifier in ("core:custom-request", "requirement:original"):
+        candidate = Critique(approved=False, reason="Scripted defect", issues=[issue(requirement_ids=[identifier])])
+        RetainedSources(DOCS).validate(
+            candidate, markdown()+"Boundary guidance", [Requirement(id=identifier, description="Method")], [URL],
+        )
+
+
+@pytest.mark.parametrize("subject", ["HTTP comparison", "network comparison", "filesystem comparison"])
+@pytest.mark.parametrize("explicit_controls", [False, True])
+def test_grounded_paraphrase_does_not_consume_correction(scripted_service, subject, explicit_controls):
+    from modules.techniques.critique import Interpretation, ReviewSnapshot
+
+    text = "Observe the result.\nEstablish independent policy and compare allowed and denied cases."
+    snapshot = ReviewSnapshot(text)
+    observation, control = snapshot.body_references
+    events, calls = [], []
+    scripted_service.service.events.callback = events.append
+
+    def runner(role, prompt, tools):
+        calls.append((role, prompt))
+        if role == "technique_critic":
+            return Critique(approved=True, reason="Conditional comparison", interpretations=[Interpretation(
+                draft_references=[observation, control], prerequisite_or_policy="Independent access policy",
+                legitimate_outcome="Allowed access", suspected_violation="Denied access succeeds",
+                distinguishing_control="Use independent policy to compare two controls",
+            )]).model_dump_json()
+        assert "control_references" in str(prompt)
+        assert "VERBATIM" not in str(prompt)
+        return json.dumps({"critic_supported": True, "reason": "Actual cited comparison", "findings": [],
+                           "interpretation_reviews": [{"interpretation_index": 0,
+                               "draft_references": [observation, control],
+                               "control_references": [control] if explicit_controls else [],
+                               "permitted_counterexample": "No permitted scenario satisfies denied access",
+                               "actual_discriminator": "Independent policy defines the allowed/denied comparison.",
+                               "counterexample_matches_check": False, "control_excludes_counterexample": True,
+                               "critic_correct": True}]})
+
+    scripted_service.service.runner = runner
+    assert assess(scripted_service.service, subject, text, REQS, DOCS, [URL]).approved
+    assert len(calls) == 2
+    event = next(row for row in events if row.get("status") == "control_references_resolved")
+    assert any(row["reference"] == control and row["value"] == snapshot.values[control]
+               for row in event["resolved_records"])
+    assessed = next(row for row in events if row.get("status") == "assessed")
+    assert assessed["correction_number"] == 0
+
+
+def test_control_grounding_validates_availability_without_semantic_scoring(markdown):
+    from modules.techniques.critique import ReviewSnapshot
+
+    snapshot = ReviewSnapshot(markdown())
+    body = snapshot.body_references[-1]
+    metadata = next(ref for ref in snapshot.values if ref not in snapshot.body_references)
+    assert snapshot.resolve_control("Faithful paraphrase", [body], []) == [body]
+    assert snapshot.resolve_control("", [body], []) == []
+    assert snapshot.resolve_control("", [], [body, body]) == [body]
+    # Available but irrelevant references still require semantic assessment by the model.
+    assert snapshot.resolve_control("A claim the cited text does not establish", [body], [body]) == [body]
+    for invalid in (metadata, "stale-reference"):
+        with pytest.raises(ValueError, match="procedure-body records"):
+            snapshot.resolve_control("Control summary", [body], [invalid])
+    with pytest.raises(ValueError, match="requires current procedure-body references"):
+        snapshot.resolve_control("Unreferenced paraphrase", [metadata], [])
+
+
+@pytest.mark.parametrize("purpose", ["prerequisite establishment", "legitimate allowed observation"])
+def test_nonviolation_checks_need_no_invented_counterexample(scripted_service, purpose):
+    from modules.techniques.critique import Interpretation, ReviewSnapshot
+
+    text = "Establish file read policy and record allowed read outcomes."
+    reference = ReviewSnapshot(text).body_references[0]
+    prompts = []
+
+    def runner(role, prompt, tools):
+        prompts.append(str(prompt))
+        if role == "technique_critic":
+            return Critique(approved=True, reason="Accurate nonviolation check", interpretations=[Interpretation(
+                draft_references=[reference], prerequisite_or_policy="Establish intended policy",
+                legitimate_outcome=purpose, suspected_violation="No violation claimed by this step",
+                distinguishing_control="Not applicable to this nonviolation step",
+            )]).model_dump_json()
+        return json.dumps({"critic_supported": True, "reason": "No boundary claim to refute", "findings": [],
+            "interpretation_reviews": [{"interpretation_index": 0, "draft_references": [reference],
+                "permitted_counterexample": "Not applicable; this step does not claim a violation",
+                "counterexample_matches_check": False, "control_excludes_counterexample": False,
+                "actual_discriminator": "", "critic_correct": True}]})
+
+    scripted_service.service.runner = runner
+    assert assess(scripted_service.service, "Review future file method", text, REQS, DOCS, [URL]).approved
+    assert len(prompts) == 2
+    assert "For prerequisite or legitimate-behavior checks" in prompts[1]
+    assert "For EACH procedure" not in prompts[1]
+    assert "counterexample judgments null" in prompts[1]

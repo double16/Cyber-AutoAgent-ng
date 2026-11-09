@@ -122,7 +122,7 @@ def test_independent_review_reclassifies_future_checks_and_preserves_sources(scr
         role, prompt, corrected.model_dump(),
     )
     result = review_coverage(scripted_service.service, "CVE hypothesis guidance",
-                             [Requirement(id="method", description="Applicability hypotheses")], selection,
+                             [Requirement(grounding="source_required", id="method", description="Applicability hypotheses")], selection,
                              LookupContext(phase_contexts=["hypothesis_generation"]))
     assert result.sufficient and result.coverage[0].future_validation
     assert result.attributions == selection.attributions
@@ -139,7 +139,7 @@ def test_invalid_coverage_review_retains_valid_progress(scripted_service, bad):
     calls = []
     scripted_service.service.runner = lambda *args: calls.append(args) or (
         bad if bad == "invalid JSON" else revised.model_dump_json())
-    assert review_coverage(scripted_service.service, "Method", [Requirement(id="method", description="Method")],
+    assert review_coverage(scripted_service.service, "Method", [Requirement(grounding="source_required", id="method", description="Method")],
                            selection) is selection
     assert len(calls) == 2 and "Validation failure" in calls[1][1]
 
@@ -196,9 +196,9 @@ def test_alignment_reaches_full_workflow_and_stays_out_of_published_document(
         assert phase_guidance(context) in prompt
         assert "Applicability hypotheses and future checks" in prompt if entrypoint != "direct" else adjusted in prompt
     assert phase_guidance(context) in state.research_calls[0]
-    source_prompt = next(prompt for role, prompt, _ in state.calls
-                         if role == "technique_requirement_assessor")
-    assert "future_validation" in source_prompt and "ready-made checklist" in source_prompt
+    # Phase alignment does not make ordinary methodology source-dependent.
+    assert any(role == "technique_source_assessor" for role, _, _ in state.calls)
+    assert not any(role == "technique_requirement_assessor" for role, _, _ in state.calls)
 
 
 def test_targeted_batches_report_repeated_queries_and_independent_review_can_finish(scripted_service):
@@ -235,7 +235,7 @@ def test_targeted_batches_report_repeated_queries_and_independent_review_can_fin
     state.service.research = Research()
     state.service.runner = runner
     documents, selected, rounds = state.service._research_coverage(
-        "Develop CVE applicability hypotheses", [Requirement(id="method", description="Applicability hypotheses")],
+        "Develop CVE applicability hypotheses", [Requirement(grounding="source_required", id="method", description="Applicability hypotheses")],
         context=LookupContext(phase_contexts=["hypothesis_generation"]),
     )
     assert rounds == len(documents) == 1 and selected.sufficient
@@ -250,7 +250,7 @@ def test_independent_review_does_not_clear_unresolved_contradictions(scripted_se
                           "claim": "Fixed version", "blocking_reason": "Cannot select version",
                           "research_question": "Which version fixes the defect?"}])
     state.service.runner = lambda *_: selected.model_dump_json()
-    result = review_coverage(state.service, "Verify versions", [Requirement(id="method", description="Versions")],
+    result = review_coverage(state.service, "Verify versions", [Requirement(grounding="source_required", id="method", description="Versions")],
                              selected, LookupContext(phase_contexts=["vulnerability_verification"]))
     assert not result.sufficient and result.coverage[0].gaps[0].kind == "unresolved_contradiction"
 
@@ -281,7 +281,7 @@ def test_alignment_diagnostics_and_feedback_keep_delivery_purpose(scripted_servi
     feedback = next(prompt for role, prompt, _ in state.calls if role == "technique_evaluator")
     assert "recorded original and phase-aligned request" in feedback
     assert '"original_request": "JWT handling"' in feedback
-    assert "Form plausible source-backed hypotheses" in feedback
+    assert "Form plausible hypotheses" in feedback
 
 
 @pytest.mark.parametrize("approved,subject,additions", [(True, False, []), (True, True, ["Invented"]),
@@ -343,7 +343,7 @@ def test_coverage_review_receives_bounded_selected_evidence(scripted_service):
 
     state.service.runner = runner
     result = review_coverage(
-        state.service, "Method", [Requirement(id="method", description="Method")], selection, documents=[
+        state.service, "Method", [Requirement(grounding="source_required", id="method", description="Method")], selection, documents=[
         {"url": "https://example.com/a", "text": "selected evidence" + "x" * 7000},
         {"url": "https://example.com/b", "text": "unselected evidence"},
     ])
@@ -392,3 +392,10 @@ def test_preservation_reference_enum_is_generation_constrained():
         PreservationReview(approved=True, reason="Preserved", subject_preserved=True,
                            mechanisms_preserved=True, deliverables_preserved=True,
                            additions=[], omissions=[], references=["phase_objectives[1]"])
+
+
+@pytest.fixture(autouse=True)
+def source_required_fixture_requests(request):
+    # Explicitly retain mandatory-evidence semantics for these legacy research tests.
+    if "scripted_service" in request.fixturenames:
+        request.getfixturevalue("scripted_service").grounding = "source_required"

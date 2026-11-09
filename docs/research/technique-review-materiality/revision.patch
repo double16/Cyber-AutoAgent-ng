@@ -1,0 +1,120 @@
+--- a/src/modules/techniques/alignment.py
++++ b/src/modules/techniques/alignment.py
+@@ -11,6 +11,10 @@
+ AUTHORING_ADDITIONS = (
+     "Use clear section headings, numbered procedural steps and specific technical language. "
+     "Prefer concrete, followable instructions over abstract prose where practical. "
++    "During repair, keep the method's explicit subject, objects and operations visible in headings "
++    "and steps. Make the smallest correction needed; do not generalize away file reads, network "
++    "connections or request operations merely to sound reusable. Future procedure imperatives "
++    "describe what an executor would do; they do not claim execution has occurred. "
+     "Include applicable checklists, representative payloads or commands, prerequisites, controls, "
+     "expected outcomes and evidence requirements without waiting for an explicit request. "
+     "For hypothesis generation, give concrete future validation steps and useful illustrative payloads, "
+--- a/src/modules/techniques/critique.py
++++ b/src/modules/techniques/critique.py
+@@ -251,20 +251,24 @@
+     interpretation_index: StrictInt = Field(ge=0)
+     draft_references: list[str] = Field(min_length=1)
+     permitted_counterexample: str = Field(
+-        min_length=1, description="Construct a concrete policy-compliant scenario producing the exact observation "
+-        "the draft labels suspicious. If impossible, explain the established policy that excludes it.",
++        min_length=1, description="For an actual boundary-violation claim, construct a concrete "
++        "policy-compliant scenario producing the exact observation. For prerequisite or legitimate "
++        "behavior checks, explain that no violation is claimed and counterexample analysis is not applicable. "
++        "If impossible for a boundary claim, explain the established policy that excludes it.",
+     )
+     counterexample_matches_check: StrictBool = Field(
+         description="Does the policy-compliant scenario satisfy BOTH the check's explicit prerequisites "
+         "and the exact observation labeled suspicious? Do not infer prerequisites from expected outcomes "
+         "or unknown policy. Authorized access is not a counterexample to an observation explicitly "
+-        "requiring missing entitlements. Answer this separately from the critic verdict.",
++        "requiring missing entitlements. Use false for prerequisite or legitimate-behavior checks. "
++        "Answer this separately from the critic verdict.",
+     )
+     control_excludes_counterexample: StrictBool = Field(
+         description="Does an actual procedural control exclude this same-observation permitted scenario? "
+         "Selector influence, an outcome label, hypothetical missing authorization, or a distant caveat "
+         "does not establish exclusion. True requires cited body control steps and an explanation "
+-        "of the distinction; unknown policy cannot default to denial.",
++        "of the distinction; unknown policy cannot default to denial. Use false for checks that do "
++        "not claim a boundary violation; do not require a discriminator against legitimate behavior.",
+     )
+     control_references: list[str] = Field(
+         default_factory=list, max_length=32,
+@@ -589,13 +593,15 @@
+                 investigation_instructions = (
+                     "First derive legitimate and prohibited outcomes from the draft independently of the critic. "
+                     "The critic's decision is withheld during investigation and supplied only at finalization. "
+-                    "Record your own concrete defects and permitted counterexamples before that handoff. "
++                    "Record concrete defects and, for actual violation claims, permitted counterexamples "
++                    "before that handoff. "
+                     "Keep notes concise: one compact row per check with references, observation, permitted "
+                     "scenario and discriminator. Do not reproduce the draft or retained source passages. "
+                     "Metadata source_coverage contains archived research assessments, not policy or procedure "
+                     "steps; research readiness cannot supply a missing discriminator. A violation statement "
+                     "is a conclusion, not itself a distinguishing control. "
+-                    "Could the described observation occur while the intended security policy is enforced? "
++                    "For an actual violation claim, could the described observation occur while the intended "
++                    "security policy is enforced? "
+                     "If so, require a prerequisite or legitimate-outcome interpretation and a separate "
+                     "distinguishing control for the violation. Do not treat future-hypothesis framing or a "
+                     "policy caveat as repairing an unconditional rejection expectation or violation label. "
+@@ -604,8 +610,11 @@
+                     "notes. Identify the actual control or say it is missing; do not supply an improved "
+                     "procedure. Do not judge support for a critic or default to agreement: no critic decision "
+                     "is available in this pass. That comparison is a later, separate task.\n"
+-                    "For EACH procedure, hold its explicit prerequisites and exact suspicious observation "
+-                    "constant. Write that observation, a policy-compliant scenario with the SAME observation, "
++                    "For prerequisite or legitimate-behavior checks, assess accuracy without inventing a "
++                    "violation. Explain that counterexample analysis is not applicable and set both "
++                    "counterexample booleans false. For an actual boundary-violation claim, hold its explicit "
++                    "prerequisites and exact suspicious observation constant. Write that observation, a "
++                    "policy-compliant scenario with the SAME observation, "
+                     "whether the scenario actually satisfies the prerequisites and observation, and the "
+                     "specific control step that excludes it (or missing). Do not merely repeat the draft's "
+                     "expected legitimate outcome. If no permitted scenario can satisfy both, say so; do not "
+@@ -624,18 +633,21 @@
+                     "reject that reason when the draft has security-relevant checks. Reusable policy, identity "
+                     "and controlled-access procedures still contain checks; methodology framing alone cannot "
+                     "justify omitting them. Distinguish prerequisite establishment from violation conclusions. "
+-                    "For each check consider "
++                    "For each actual boundary-violation claim consider "
+                     "both policy branches: the behavior is permitted, or the behavior is prohibited. Unknown "
+                     "policy cannot default to the prohibited branch. "
+                     "Independently discovered omitted checks belong in findings with current draft or "
+                     "requirement references; never invent interpretation indices for them. "
+                     "For EACH critic interpretation return an interpretation_reviews row, indexed from zero. "
+-                    "Construct a concrete permitted counterexample to the exact suspicious observation, then "
++                    "For an actual violation claim: Construct a concrete permitted counterexample to the exact "
++                    "suspicious observation, then "
+                     "if none can satisfy its explicit conditions, explain why and set "
+                     "counterexample_matches_check=false. Never change a missing-entitlement condition into "
+                     "mere lack of ownership to manufacture a permitted scenario. Then "
+                     "cite actual body control steps in control_references and explain them in actual_discriminator; use the "
+-                    "empty string if absent. Python resolves this exact excerpt against the frozen body. "
++                    "empty string if absent or not applicable. Python resolves cited body records, not exact "
++                    "wording; judge their meaning independently. For prerequisite or legitimate-behavior "
++                    "checks, explain no violation is claimed and set both counterexample booleans false. "
+                     "Paraphrased critic interpretations and reviewer instructions are not draft evidence. "
+                     "For example, own-origin JavaScript can read "
+                     "its own storage, an unexpired bearer credential can authorize multiple requests, and an "
+--- a/src/modules/techniques/support_scope.py
++++ b/src/modules/techniques/support_scope.py
+@@ -1,6 +1,16 @@
+ """Shared semantic scope for source-support assessment and document review."""
+ 
+ SUPPORT_SCOPE_GUIDANCE = (
++    "Block only a concrete material error, unsupported material assertion or missing requested "
++    "deliverable. Identify the existing advertised conclusion it defeats and request the smallest "
++    "necessary correction. Optional detail, alternate controls and presentation elaboration belong "
++    "in suggestions. Missing retrieval dates alone are advisory unless an explicit requirement "
++    "or version-dependent claim makes them material; never fabricate unavailable provenance. "
++    "Writing instructions for future testing is not performing a target assessment. Imperative "
++    "procedural steps are valid reusable guidance. A request for no target execution means do not "
++    "execute now, unless it explicitly forbids describing execution steps. Preserve concrete "
++    "subjects, objects, identities and operations when requesting repairs; do not replace a "
++    "followable method with abstract procedure-design prose. "
+     "For technical-support findings, identify the exact asserted factual mechanism and explain why it "
+     "needs support. Distinguish asserted facts from declared prerequisites to establish later and "
+     "original comparisons derived from supported facts. Original synthesis does not excuse unsupported "

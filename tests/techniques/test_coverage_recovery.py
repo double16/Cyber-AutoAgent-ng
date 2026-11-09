@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from modules.techniques.coverage import Requirement, SourceSelection, select_sources
 
 URL = "https://vendor.example/advisory"
-REQUIREMENTS = [Requirement(id="method", description="Verification methodology", kind="authored_deliverable")]
+REQUIREMENTS = [Requirement(grounding="source_required", id="method", description="Verification methodology", kind="authored_deliverable")]
 DOCUMENTS = [{"url": URL, "title": "Advisory", "text": "Mechanism, fixed versions and prerequisites"}]
 
 
@@ -113,7 +113,9 @@ def test_error_specific_correction_retains_context_and_is_bounded(scripted_servi
             select_sources(service, "Requested method", REQUIREMENTS, DOCUMENTS, previous)
     assert len(prompts) == 2
     repair = prompts[-1]
-    assert "Prior validated synthesis" in repair and "Requested method" in repair
+    assert "Requested method" in repair
+    if kind != "attribution":
+        assert "Prior validated synthesis" in repair
     assert "Mechanism, fixed versions and prerequisites" in repair
     assert previous.model_dump_json() == original
     assert "Return only the current output schema" in repair
@@ -157,3 +159,10 @@ def test_later_source_cannot_remove_prior_source(scripted_service):
                             [{"url": new_url, "text": "Configuration evidence"}], previous)
     assert result.selected_urls == [URL, new_url]
     assert previous.selected_urls == [URL]
+
+
+@pytest.fixture(autouse=True)
+def source_required_fixture_requests(request):
+    # These tests intentionally exercise mandatory retrieved-evidence workflows.
+    if "scripted_service" in request.fixturenames:
+        request.getfixturevalue("scripted_service").grounding = "source_required"
