@@ -362,15 +362,6 @@ codex mcp call langfuse get_session_details --session_id "{operation_id}"
 - **Reporting Overhead**: Do not flag reporting or evaluation time as a budget issue.
 - **No-Finish Operations**: An operation may continue even if health suggests it won't finish, as coverage is prioritized. Recommend budget increases in the report instead of complaining.
 
-
-## Rules for Investigation
-
-- **Avoid log dumps:** use targeted `rg` and `sed` reads for large reasoning payloads.
-- **Budget neutrality:** do not recommend changing task fan-out due to budget constraints.
-- **Tool failures:** do not treat broken or missing tools as forensic issues by themselves.
-- **Reporting overhead:** do not flag reporting or evaluation time as a budget issue.
-- **Incomplete operations:** distinguish coverage gaps from the termination reason; an operation may continue even when health predicts it will not finish.
-
 ### Technique investigations
 
 Techniques are reusable guidance, not operation evidence. A recommendation is only a lookup lead;
@@ -401,12 +392,5 @@ model-call completion do not establish semantic acceptance.
 
 - [Technique forensics reference](../../../docs/research/technique/forensics-reference.md) summarizes
   current event fields and points to the detailed contracts and study records.
-- [Current publication and grounding behavior](../../../docs/research/technique-single-reviewer/README.md)
-  and [knowledge-based grounding](../../../docs/research/technique-knowledge-grounding/README.md).
-- [Review purpose](../../../docs/research/technique-review-purpose/README.md),
-  [materiality](../../../docs/research/technique-review-materiality/README.md), and
-  [incremental corrections](../../../docs/research/technique-review-incremental-corrections/README.md).
-- [Review calibration and limitations](../../../docs/research/technique-review-calibration/README.md)
-  and [generation-yield pilot](../../../docs/research/technique-generation-yield-pilot/README.md).
 - [Earlier technique acceptance reports](../../../docs/research/README.md) retain study
   protocols and outcomes. Do not treat them as current operation evidence.
