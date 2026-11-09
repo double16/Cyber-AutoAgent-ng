@@ -1,5 +1,4 @@
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -103,8 +102,6 @@ def test_optional_prompt_fitting_drops_records_without_cutting_nested_json():
 
 @pytest.mark.parametrize("path", sorted(WEB_TECHNIQUES.glob("*.md")), ids=lambda p: p.name)
 def test_web_library_phase_and_signal_metadata(path):
-    from modules.operation_plugins.web.technique_signals import PROTOCOL_PATTERNS
-
     doc = TechniqueDocument(path.read_bytes().decode("utf-8"))
     phases = doc.metadata.phases
     assert len(phases) == len(set(phases))
@@ -139,3 +136,54 @@ def test_web_module_technique_documents_are_distinct_and_parseable():
         digests[path.stem] = doc.sha256
 
     assert len(set(digests.values())) == len(digests)
+
+
+def test_brokencrystals_readme_coverage_crosswalk_is_complete_and_resolvable():
+    crosswalk = REPOSITORY / "docs/research/brokencrystals-web-technique-coverage.md"
+    rows = [
+        line
+        for line in crosswalk.read_text(encoding="utf-8").splitlines()
+        if line.startswith("|") and not line.startswith("| ---") and "README behavior" not in line
+    ]
+    ids = set()
+    assert rows
+
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip("|").split("|")]
+        assert len(cells) == 3
+        coverage_id, _behavior, documents = cells
+        assert coverage_id and coverage_id not in ids
+        ids.add(coverage_id)
+        slugs = [item.strip(" `") for item in documents.split(";")]
+        assert slugs
+        assert all((WEB_TECHNIQUES / slug).is_file() for slug in slugs)
+
+    assert ids == {
+        "jwt-authentication",
+        "weak-login",
+        "common-files",
+        "cookie-security",
+        "csrf-cors",
+        "xss-reflected",
+        "xss-stored",
+        "xss-dom",
+        "directory-listing",
+        "file-upload",
+        "path-disclosure",
+        "security-headers",
+        "html-injection",
+        "css-injection",
+        "http-methods",
+        "ldap-injection",
+        "file-inclusion",
+        "mass-assignment",
+        "exposed-config-secrets",
+        "command-injection",
+        "ssti",
+        "ssrf",
+        "sql-injection",
+        "open-redirect",
+        "source-control-files",
+        "xxe",
+        "hidden-upload",
+    }

@@ -66,8 +66,8 @@ source_coverage: 'Selected retrieved references supply mechanism/control backgro
 
 ## Applicability and prerequisites
 
-A mapped response or assigned candidate URL suggests a backup, configuration, archive or source
-artifact.
+A mapped response or assigned candidate URL suggests a backup, configuration, archive, source-control
+metadata, directory listing, or other nonpublic artifact.
 
 Use only assigned candidate locations and the resolved network scope. Establish expected audience
 and a minimal-content retrieval limit. Prefer a planted synthetic marker or owner-confirmed
@@ -99,9 +99,10 @@ application's normal missing-resource behavior.
 
 1. Use recorded observations only in this section; do not send new target requests or execute the
    future tests.
-2. Interpret recorded candidate metadata and previews. Design a future minimal read comparing
-   content identity and access context; a filename, extension, status 200 or download header alone
-   does not establish sensitive exposure.
+2. Interpret recorded candidate metadata and previews. Include only assigned candidates such as
+   backup/configuration files, source-control metadata, or a directory listing. Design a future
+   minimal read comparing content identity and access context; a filename, extension, status 200 or
+   download header alone does not establish sensitive exposure.
 3. Write the expected permitted, prohibited and inconclusive outcomes and the evidence needed to
    distinguish them. State unresolved prerequisites explicitly; absent evidence does not confirm
    either security or vulnerability.
@@ -112,9 +113,10 @@ application's normal missing-resource behavior.
    status, redirects, media type and bounded content.
 2. Compare against a nonexistent sibling and the public application shell to distinguish soft-404,
    default route and generic denial content.
-3. Identify concrete nonpublic content such as synthetic configuration markers, source fragments or
-   backup record structure. If range requests are ignored, enforce a client-side byte limit instead
-   of downloading a large archive.
+3. Identify concrete nonpublic content such as synthetic configuration markers, source fragments,
+   repository metadata, or backup record structure. A listing is an exposure only when it reveals
+   resources whose audience is restricted. If range requests are ignored, enforce a client-side byte
+   limit instead of downloading a large archive.
 4. Confirm the candidate's audience excludes the tested actor and compare an authorized view or
    owner-confirmed fixture when available. Stop immediately after sufficient classification; do not
    validate discovered secrets by using them.
@@ -140,9 +142,11 @@ application's normal missing-resource behavior.
 
 ### False positives and competing explanations
 
-Public example configuration, documentation archives, source-distributed projects and SPA shells can
-look like backups without disclosing protected data. An expired or dummy credential string needs
-classification rather than a claim of active compromise.
+Public example configuration, documentation archives, intentionally public source-control metadata,
+directory listings of public assets and SPA shells can look like sensitive artifacts without
+disclosing protected data. An expired or dummy credential string needs classification rather than a
+claim of active compromise. Public configuration exposing database details or secrets is also an
+excessive-data-exposure question; classify the exact data and do not attempt to use it.
 
 ## Evidence requirements
 

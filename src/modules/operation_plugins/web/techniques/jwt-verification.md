@@ -79,7 +79,7 @@ Choose only the assigned branch and obey the operation's scope, identities, rate
 ## Reconnaissance
 
 1. Inspect the assigned capture for where the token travels: header, cookie, URL or body. Distinguish observed authentication use from an untested assumption; a response-only token may lack an identified consumer.
-2. Classify JWS, JWE, unsecured and nested forms. Read available bounded header/claim metadata, noting encrypted or inaccessible claims. Record whether key-selection fields are actually processed rather than assuming from their names.
+2. Classify JWS, JWE, unsecured and nested forms. Read available bounded header/claim metadata, noting encrypted or inaccessible claims. Record whether key-selection fields are actually processed rather than assuming from their names. Include `alg`, `kid`, `jku`, `jwk`, `x5u`, and `x5c` only when observed or documented by the assigned flow.
 
 ## Hypothesis generation
 
@@ -91,8 +91,8 @@ Choose only the assigned branch and obey the operation's scope, identities, rate
 
 1. Replay an unchanged valid token in an isolated session. Verify the actual identity and one owned protected resource. Remove alternate cookies/credentials and automatic refresh; compare absent, malformed and valid other-owned-identity tokens. If the resource is public or another credential explains access, stop the bypass branch.
 2. For integrity, alter one security-relevant claim without regenerating its signature; separately test an unsecured form only where signatures are required by established policy. Re-run the valid baseline afterward.
-3. For untrusted key selection, sign a controlled claim with an owned private key and supply its public JWK or approved hosted JWKS where that field is processed. Contrast an unrelated key. A key-fetch callback is not token acceptance; do not embed or host private keys.
-4. For algorithm confusion, use the relevant public key's exact candidate byte representation as a symmetric key for one controlled token, comparing unrelated-key and unchanged-asymmetric controls. An algorithm edit alone and failure with one encoding are inconclusive. With symmetric signing, an expressly bounded offline candidate set may test weak keys: reproduce the original MAC before generating a variation; no unbounded guessing.
+3. For untrusted key selection, sign a controlled claim with an owned private key and supply its public JWK, certificate chain, or approved hosted JWKS where the corresponding `jwk`, `x5c`, `jku`, or `x5u` field is actually processed. Contrast an unrelated key and an ordinary trusted-key token. A key-fetch callback is not token acceptance; do not embed or host private keys.
+4. For `kid`, vary only the key identifier against a known valid baseline. Where the application contract documents a lookup namespace, compare a known existing test key with a nonexistent identifier and a harmless owned test key. Treat path traversal, SQL, or command interpretation as a separate injection hypothesis and use its corresponding technique; do not read arbitrary files, execute commands, or alter production keys. For algorithm confusion, use the relevant public key's exact candidate byte representation as a symmetric key for one controlled token, comparing unrelated-key and unchanged-asymmetric controls. An algorithm edit alone and failure with one encoding are inconclusive. With symmetric signing, an expressly bounded offline candidate set may test weak keys: reproduce the original MAC before generating a variation; no unbounded guessing.
 5. For issuer/audience/purpose compare properly signed tokens from a test issuer or legitimate owned flow. For expiry/not-before use signed times beyond the allowed skew. Without issuance capability, mark that claim branch untested. Confirm only a reproducible prohibited identity/resource effect attributable to the tested token, not an HTTP status or echoed claim.
 
 ## Execution
