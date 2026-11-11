@@ -114,3 +114,20 @@ it('shows individual source decisions while preserving older count-only events',
     status: 'completed', fetched_count: 7, selected_count: 1}))
     .toContain('7 unique documents fetched total, 1 source retained');
 });
+
+it('reports embedding work separately from unchanged source documents', () => {
+  const message = formatTechniqueEvent({
+    type: 'technique_sync_complete', added: 0, updated: 0, unchanged: 60,
+    embedding_documents: 65, embedding_model: 'example-model', embedding_representation: 'full',
+  } as any);
+  expect(message).toContain('60 unchanged');
+  expect(message).toContain('65 documents embedded this session');
+  expect(message).toContain('example-model, full');
+});
+
+it('reports reuse when startup does not embed any documents', () => {
+  expect(formatTechniqueEvent({
+    type: 'technique_sync_complete', embedding_documents: 0,
+    embedding_model: 'example-model', embedding_representation: 'summary',
+  } as any)).toContain('existing vectors reused');
+});

@@ -302,7 +302,10 @@ def test_semantic_cache_isolates_phase_catalog_excerpt_and_operation(scripted_se
     other_phase.observe("Evidence", "source")
     other_catalog = RecommendationContext(state.service, contexts, [], tmp_path / "op1" / "catalog.json")
     other_catalog.triggers = [{**first.triggers[0], "when": "Changed condition"}]
+    original_search = state.service.store.search_triggers
+    state.service.store.search_triggers = lambda *args: other_catalog.triggers
     other_catalog.observe("Evidence", "source")
+    state.service.store.search_triggers = original_search
     other_operation = RecommendationContext(state.service, contexts, [], tmp_path / "op2" / "first.json")
     other_operation.observe("Evidence", "source")
     first.observe("Different evidence", "source")
@@ -577,3 +580,18 @@ def test_library_documents_assemble_phase_specific_signal_recommendations(
         )
         assert unrelated.observe("A plain unrelated response", "artifact:negative", semantic=False) == ""
     assert not state.research_calls
+
+
+def test_render_ranks_and_deduplicates_revisions(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "rank.json")
+    context.state["recommendations"] = [
+        {"trigger_id": str(index), "revision_id": f"revision-{index}", "score": index / 100,
+         "request": f"method-{index}"}
+        for index in range(12)
+    ] + [{"trigger_id": "duplicate", "revision_id": "revision-11", "score": 0.1, "request": "duplicate"}]
+    rendered = context.render()
+    assert "method-11" in rendered
+    assert "method-0" not in rendered
+    assert "duplicate" not in rendered

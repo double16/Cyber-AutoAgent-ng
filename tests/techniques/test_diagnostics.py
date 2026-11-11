@@ -455,3 +455,17 @@ def test_alignment_diagnostic_displays_adjustment_and_preserves_original(tmp_pat
     assert "Aligned request: Develop applicability hypotheses" in stderr.getvalue()
     record = json.loads(session.path.read_text().splitlines()[-1])
     assert record["original_request"] == "Validate applicability"
+
+
+def test_embedding_sync_details_visible_in_cli_progress(tmp_path):
+    stderr = io.StringIO()
+    session = DiagnosticSession(stderr=stderr)
+    session.lifecycle({
+        "type": "technique_sync_complete", "unchanged": 60, "embedding_documents": 65,
+        "embedding_model": "example-model", "embedding_representation": "summary",
+    })
+    output = stderr.getvalue()
+    assert "unchanged=60" in output
+    assert "embedding_documents=65" in output
+    assert "embedding_model=example-model" in output
+    assert "embedding_representation=summary" in output

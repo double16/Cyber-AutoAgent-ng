@@ -118,3 +118,44 @@ def test_lease_ownership_expiry_and_concurrency(store):
     assert repo.lease("key", "new")
     repo.lease("expired", "first", seconds=-1)
     assert repo.lease("expired", "second")
+
+
+def test_search_filters_phase_before_limit_and_returns_scores(store, markdown):
+    from modules.techniques.documents import TechniqueDocument
+
+    for index in range(300):
+        store.publish(
+            TechniqueDocument(markdown(title=f"Unrelated {index}").replace(
+                "- hypothesis_generation", "- analysis",
+            )), f"decoy:{index}", "test",
+        )
+    revision = store.publish(TechniqueDocument(markdown()), "relevant", "test")
+    results = store.search("JWT", active=True, contexts=["hypothesis_generation"], limit=1)
+    assert results[0]["revision_id"] == revision
+    assert isinstance(results[0]["score"], float)
+    triggers = store.search_triggers("JWT", ["hypothesis_generation"], limit=1)
+    assert triggers[0]["revision_id"] == revision
+    assert not store.search_triggers("", ["hypothesis_generation"])
+    assert not store.search_triggers("JWT", [])
+    assert not store.search("JWT", active=True, contexts=["execution"])
+
+
+def test_embedding_status_distinguishes_rebuild_and_reuse(store, markdown):
+    assert store.embedding_status()["embedding_documents"] == 0
+    revision = store.publish(TechniqueDocument(markdown()), "module:web:jwt.md", "module:web")
+    status = store.embedding_status()
+    assert status["embedding_documents"] == 1
+    assert status["embedding_model"] == "test"
+    assert status["embedding_representation"] == "full"
+    assert status["embedding_index"] == store.index
+    store.reconcile()
+    assert store.embedding_status() == status
+    reused = TechniqueStore(
+        store.qdrant, store.embeddings, {"embedding_dimensions": 3, "embedding_model": "test"}, store.repository,
+    )
+    assert reused.embedding_status()["embedding_documents"] == 0
+    rebuilt = TechniqueStore(
+        store.qdrant, store.embeddings, {"embedding_dimensions": 3, "embedding_model": "new-model"}, store.repository,
+    )
+    assert rebuilt.embedding_status()["embedding_documents"] == 1
+    assert rebuilt.render(revision) == store.render(revision)

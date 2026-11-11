@@ -9,6 +9,7 @@ from qdrant_client import QdrantClient, models
 from modules.storage.qdrant import QDRANT_WRITE_LOCK
 from modules.techniques.documents import NAMESPACE, TechniqueDocument
 from modules.techniques.repository import TechniqueRepository
+from modules.techniques.retrieval import RetrievalSettings, search_text
 
 DOCUMENTS = "cyber_autoagent_technique_documents"
 WRITE_LOCK = QDRANT_WRITE_LOCK
@@ -17,12 +18,18 @@ WRITE_LOCK = QDRANT_WRITE_LOCK
 class TechniqueStore:
     """Share the operation's physical Qdrant client without inheriting its scope."""
 
-    def __init__(self, qdrant: QdrantClient, embeddings: Any, config: dict, repository: TechniqueRepository) -> None:
+    def __init__(
+        self, qdrant: QdrantClient, embeddings: Any, config: dict, repository: TechniqueRepository,
+        *, retrieval: RetrievalSettings | None = None,
+    ) -> None:
         self.qdrant = qdrant
         self.embeddings = embeddings
         self.repository = repository
+        self.retrieval = retrieval if retrieval is not None else RetrievalSettings.from_environment()
+        self.embedding_model = str(config.get("embedding_model") or "unknown")
+        self._embedded_revisions: set[str] = set()
         self.dimensions = int(config["embedding_dimensions"])
-        identity = f"{config.get('embedding_provider')}:{config.get('embedding_model')}:{self.dimensions}"
+        identity = f"phase-index-v3:{self.retrieval.representation}:{config.get('embedding_provider')}:{config.get('embedding_model')}:{self.dimensions}"
         self.index = f"cyber_autoagent_technique_index_{hashlib.sha256(identity.encode()).hexdigest()[:16]}"
         self._indexed: set[str] = set()
         with WRITE_LOCK:
@@ -101,8 +108,9 @@ class TechniqueStore:
         points = [
             models.PointStruct(
                 id=revision,
-                vector=self._vector(document.markdown),
-                payload={"kind": "document", "revision_id": revision, "active": active, "current": current},
+                vector=self._vector(search_text(document, self.retrieval.representation)),
+                payload={"kind": "document", "revision_id": revision, "active": active,
+                         "current": current, "phases": document.metadata.phases},
             )
         ]
         for number, trigger in enumerate(document.metadata.triggers):
@@ -121,6 +129,16 @@ class TechniqueStore:
             )
         self.qdrant.upsert(self.index, points=points, wait=True)
         self._indexed.add(revision)
+        self._embedded_revisions.add(revision)
+
+    def embedding_status(self) -> dict:
+        """Report successful embedding writes since this store was opened."""
+        return {
+            "embedding_documents": len(self._embedded_revisions),
+            "embedding_model": self.embedding_model,
+            "embedding_representation": self.retrieval.representation,
+            "embedding_index": self.index,
+        }
 
     def reconcile(self) -> None:
         """Repair interrupted lifecycle writes and rebuild indexes after embedding changes."""
@@ -145,7 +163,7 @@ class TechniqueStore:
             )
             self.repository.synced(revision, DOCUMENTS)
 
-    def search(self, request: str, *, active: bool, limit: int = 5) -> list[dict]:
+    def search(self, request: str, *, active: bool, limit: int | None = None, contexts: list[str] | None = None) -> list[dict]:
         with WRITE_LOCK:
             self.reconcile()
             result = self.qdrant.query_points(
@@ -155,9 +173,11 @@ class TechniqueStore:
                     must=[
                         models.FieldCondition(key="kind", match=models.MatchValue(value="document")),
                         models.FieldCondition(key="active", match=models.MatchValue(value=active)),
+                        *([models.FieldCondition(key="current", match=models.MatchValue(value=True))] if active else []),
+                        *([models.FieldCondition(key="phases", match=models.MatchAny(any=contexts))] if contexts else []),
                     ]
                 ),
-                limit=limit,
+                limit=limit if limit is not None else self.retrieval.document_limit,
                 with_payload=True,
             )
             rows = []
@@ -165,8 +185,30 @@ class TechniqueStore:
                 revision = point.payload["revision_id"]
                 row = self.repository.get(revision)
                 if row is not None and bool(row["active"]) == active:
-                    rows.append({"revision_id": revision, "document": self.render(revision, require_active=False)})
+                    rows.append({"revision_id": revision, "score": point.score,
+                                 "document": self.render(revision, require_active=False)})
             return rows
+
+    def search_triggers(self, request: str, contexts: list[str], limit: int | None = None) -> list[dict]:
+        """Rank current advertisements across the entire phase-compatible catalog."""
+        if not contexts or not request.strip():
+            return []
+        with WRITE_LOCK:
+            self.reconcile()
+            result = self.qdrant.query_points(
+                self.index, query=self._vector(request),
+                query_filter=models.Filter(must=[
+                    models.FieldCondition(key="kind", match=models.MatchValue(value="trigger")),
+                    models.FieldCondition(key="current", match=models.MatchValue(value=True)),
+                    models.FieldCondition(key="phases", match=models.MatchAny(any=contexts)),
+                ]),
+                limit=limit if limit is not None else self.retrieval.trigger_limit, with_payload=True,
+            )
+            return [
+                {"trigger_id": str(point.id), **point.payload, "score": point.score}
+                for point in result.points
+                if (row := self.repository.get(point.payload["revision_id"])) and row["current_revision"]
+            ]
 
     def triggers(self, contexts: list[str]) -> list[dict]:
         """Include inactive current advertisements so a lookup can regenerate guidance."""

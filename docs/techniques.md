@@ -247,7 +247,7 @@ vulnerability name. Technique triggers must still declare compatible phases and 
 
 The controller scans assigned inventory records, referenced captures, and task tool results. Matching
 recommendations include source references and digests, never actual token values. A separate semantic
-matcher considers up to 20 phase-compatible candidates and a 12,000-character observed excerpt, with
+matcher considers a Qdrant-ranked shortlist (20 phase-compatible candidates by default) and a 12,000-character observed excerpt, with
 six semantic passes per task. Deterministic detection continues after that allowance. Source captures
 over 16 MB, unavailable captures, and exhausted semantic allowances remain explicit limitations.
 Only captured content can be inspected; missing browser/network bodies are not assumed observed.
@@ -1158,3 +1158,90 @@ enforce the staged handoff. Prompt fitting counts both parts before investigatio
 Disagreement includes referenced findings and requested corrections. Approval with issues and rejection
 without issues are invalid.
 Each assembled-document review allows one critique correction, consuming no author or research call.
+
+
+### Similarity-ranked candidate retrieval
+
+Requested guidance uses Qdrant document similarity with active, current-revision and phase
+filters applied before the nearest-neighbor limit (10 documents). Passive recommendations query
+the existing trigger vectors across the full current, phase-compatible catalog (20 candidates),
+then use semantic review alongside deterministic module signals. Catalog order does not determine
+which triggers reach semantic review. Inactive current advertisements remain regeneration leads.
+Scores describe similarity, not applicability or evidence support. The embedding index version
+changes when its payload contract changes; source documents remain in the global document collection.
+
+Retrieval settings apply to operation and standalone lookup:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `TECHNIQUE_DOCUMENT_LIMIT` | `10` | Eligible document shortlist, integer 1–50. |
+| `TECHNIQUE_TRIGGER_LIMIT` | `20` | Eligible trigger shortlist, integer 1–50. |
+| `TECHNIQUE_SEARCH_REPRESENTATION` | `full` | `full` Markdown or `summary` metadata and trigger descriptions. |
+
+Changing representation creates a separate rebuildable index. Full Markdown remains authoritative
+for review and delivery in both modes. Invalid settings fail initialization.
+
+For labeled embedding comparisons, call `modules.techniques.benchmark.evaluate(store, cases)`
+with `RetrievalCase(request=..., phases=[...], relevant_lineages=[...])` records and the same
+catalog and embedding provider for both representations. Compare limits 10 and 20; results
+include recall, precision, reciprocal rank, latency and explicit catalog-miss labels. An empty
+relevance list tests a catalog miss. Retrieval may still return neighbors for such a case;
+semantic review must abstain. These metrics measure retrieval, not recommendation correctness
+or validated security outcomes. Full-document embeddings remain the default until representative
+provider-backed results justify changing them.
+
+The regression benchmark uses 300 distractors plus HTTP command-injection, network inspection,
+and filesystem traversal guidance. Fixed concept vectors exercise Qdrant routing and paraphrase
+handling for both representations at limits 10 and 20; they are not evidence of production embedding
+quality. Run provider-backed comparisons against independently labeled requests before changing the
+default representation or introducing similarity cutoffs.
+
+The selection judge receives compact candidate descriptions, then reviews the selected complete
+document against the same request, phase restrictions and requirements. Both stages can abstain.
+The complete-document review must confirm the same revision ID. Retrieval and selection events
+contain query fingerprints, candidate ranks/scores and selected/rejected IDs without raw observations.
+Rendered recommendations prioritize deterministic signals, then similarity, and deduplicate revisions.
+
+### Provider-backed retrieval and workflow benchmarks
+
+Run the comparison against disposable stores, using the configured embedding provider:
+
+```bash
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python -m modules.techniques.benchmark \
+  --cases tests/fixtures/techniques/retrieval_cases.json \
+  --provider ollama --output /private/tmp/technique-comparison.json
+```
+
+The JSON case file supplies a methodology request, structured phase contexts, relevant catalog
+lineages, an optional source observation and expected recommendation lineages. Empty relevance
+labels describe a catalog miss. Labels must reference the supplied catalog. The bundled cases are
+a small, manually authored regression baseline, not an independently reviewed evaluation set.
+
+Add `--workflow` to execute actual LLM alignment, recommendation, selection, confirmation and
+research/generation. This can incur model and research usage. Each workflow case gets an isolated
+catalog, so generated guidance cannot affect later cases. The report includes:
+
+- Precision and recall for the ranked, deduplicated recommendations actually advertised to workers.
+- Whether a reused technique belongs to the labeled relevant set.
+- Whether generation occurred despite labeled suitable existing guidance.
+- Actual technique model-call events and elapsed time.
+
+A generated technique's semantic correctness remains unevaluated by this benchmark. Generated
+content is not classified as correct merely because generation succeeded. The benchmark does not
+measure target security findings or downstream technique contribution. Empty recommendation sets
+have undefined precision (`null`), and empty expected sets have undefined recall.
+
+Both representations are tested at shortlist sizes 10 and 20. Catalog indexing vectors are reused
+within the comparison to reduce provider traffic; request embeddings are not cached, so retrieval
+timings include request embedding calls. The report records the embedding identity and catalog/case
+fingerprints. Source operation stores and module files are untouched, and existing report files are
+never overwritten. Recommendation observations must be public or synthetic benchmark fixtures.
+
+The initial provider-backed results are retained in
+[the retrieval baseline](research/technique/retrieval-baseline/README.md). They do not justify
+changing the default representation or imposing a global similarity threshold.
+
+Startup library counts describe Markdown revisions. The same summary separately reports successful
+embedding writes since the store was opened, including index rebuilding before module synchronization,
+or reuse of existing vectors. It includes the embedding model and search representation. The embedding
+document count is global to the technique store and may exceed the selected module's document count.

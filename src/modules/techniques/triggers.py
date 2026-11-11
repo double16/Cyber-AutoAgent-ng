@@ -129,16 +129,35 @@ class RecommendationContext:
         self.state["seen"].append(key)
         signals = {signal for adapter in self.adapters for signal in adapter.detect(text)}
         matched = {trigger["trigger_id"] for trigger in self.triggers if signals.intersection(trigger["signals_any"])}
-        candidates = [trigger for trigger in self.triggers if trigger["trigger_id"] not in matched]
-        if len(candidates) > 20:
-            self.state["limitations"].append("Semantic trigger candidates exceed the per-pass limit of 20.")
+        candidates = []
+        if semantic and text.strip() and not source.startswith("tool_input:"):
+            sanitized = redact(text)
+            for adapter in self.adapters:
+                sanitized = adapter.sanitize(sanitized)
+            candidates = [
+                trigger for trigger in self.service.store.search_triggers(sanitized[:12_000], self.contexts)
+                if trigger["trigger_id"] not in matched
+            ]
+        if candidates and hasattr(self.service, "events"):
+            self.service.events.emit(
+                "technique_retrieval", **self.event_context, stage="recommendation",
+                query_sha256=hashlib.sha256(sanitized[:12_000].encode()).hexdigest(),
+                phase_contexts=self.contexts,
+                candidates=[{"trigger_id": row["trigger_id"], "revision_id": row.get("revision_id"),
+                             "rank": rank, "score": row.get("score")}
+                            for rank, row in enumerate(candidates, 1)],
+            )
         if candidates and text.strip() and semantic and not source.startswith("tool_input:"):
             self._semantic_match(text, key, candidates, matched)
+        scores = {row["trigger_id"]: row.get("score", 0.0) for row in candidates}
         for trigger in self.triggers:
             if trigger["trigger_id"] not in matched:
                 continue
             recommendation = {
                 "trigger_id": trigger["trigger_id"],
+                "revision_id": trigger.get("revision_id"),
+                "score": scores.get(trigger["trigger_id"]),
+                "match_kind": ("deterministic" if signals.intersection(trigger["signals_any"]) else "semantic"),
                 "condition": trigger["when"],
                 "phase_contexts": self.contexts,
                 "request": trigger["request"],
@@ -174,9 +193,9 @@ class RecommendationContext:
         # Serialize read/build/write so concurrent task bindings reuse a completed decision.
         with _SEMANTIC_CACHE_LOCK:
             missing, paths = [], {}
-            for item in candidates[:20]:
+            for item in candidates:
                 cache_key = hashlib.sha256(json.dumps(
-                    [2, self.contexts, self._fingerprint(item), excerpt], sort_keys=True,
+                    [3, self.service.store.index, self.contexts, self._fingerprint(item), excerpt], sort_keys=True,
                 ).encode()).hexdigest()
                 path = self.path.parent / "semantic_cache" / f"{cache_key}.json"
                 paths[item["trigger_id"]] = path
@@ -296,8 +315,22 @@ class RecommendationContext:
                 self.inspect(reference, origin=origin, scope=scope)
         self._save()
 
+    def recommended(self) -> list[dict]:
+        """Return the same ranked, deduplicated leads advertised to the worker."""
+        rows = []
+        seen = set()
+        for row in sorted(self.state["recommendations"], key=lambda item: (item.get("match_kind") == "deterministic", item.get("score") or 0.0),
+                          reverse=True):
+            identity = row.get("revision_id") or row["trigger_id"]
+            if identity not in seen:
+                rows.append(row)
+                seen.add(identity)
+            if len(rows) == 10:
+                break
+        return rows
+
     def render(self) -> str:
-        rows = self.state["recommendations"][-10:]
+        rows = self.recommended()
         if not rows and not self.state["limitations"]:
             return ""
         return (

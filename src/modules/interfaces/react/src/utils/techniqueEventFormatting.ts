@@ -45,6 +45,11 @@ export const formatTechniqueEvent = (input: { type?: unknown }): string | null =
   switch (event.type) {
     case 'technique_sync_complete':
       message = `Technique library: ${event.added ?? 0} added, ${event.updated ?? 0} updated, ${event.unchanged ?? 0} unchanged`;
+      if (typeof event.embedding_documents === 'number') {
+        const status = event.embedding_documents > 0
+          ? `${event.embedding_documents} documents embedded this session` : 'existing vectors reused';
+        message += `; embedding index: ${status} (${text(event.embedding_model)}, ${text(event.embedding_representation)})`;
+      }
       break;
     case 'technique_recommended':
       message = `Technique lookup recommended (${text(event.match_kind)}): ${text(event.title) || text(event.trigger_id)}`;
