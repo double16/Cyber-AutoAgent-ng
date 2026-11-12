@@ -31,7 +31,9 @@ def test_workflow_actual_reuse_generation_and_feedback(scripted_service, tmp_pat
 
     def runner(role, prompt, tools):
         if role == "technique_trigger_matcher":
-            return json.dumps({"trigger_ids": [trigger], "reason": "Observed token handling"})
+            return json.dumps({"trigger_ids": [trigger], "reason": "Observed token handling", "support": [
+                {"trigger_id": trigger, "subject_ids": ["assigned"],
+                 "observation_references": ["benchmark:source"]}]})
         return original(role, prompt, tools)
 
     state.service.runner = runner
@@ -39,7 +41,7 @@ def test_workflow_actual_reuse_generation_and_feedback(scripted_service, tmp_pat
     state.service.events.callback = captured.append
     rows = evaluate_workflow(state.service, [
         RetrievalCase(request="JWT handling", phases=["hypothesis_generation"],
-                      relevant_lineages=[lineage], observation="A JWT is observed",
+                      relevant_lineages=[lineage], observation="A JWT is observed", subjects=[{"id": "assigned"}],
                       recommendation_lineages=[lineage]),
     ], tmp_path)
     result = rows[0]
@@ -47,6 +49,10 @@ def test_workflow_actual_reuse_generation_and_feedback(scripted_service, tmp_pat
     assert result["unnecessary_generation"] is generate
     assert result["selection_correct"] is (None if generate else True)
     assert result["recommendation_precision"] == result["recommendation_recall"] == 1
+    assert result["complete_document_reviews"] == 1
+    assert result["justified_catalog_miss"] is generate
+    assert result["unresolved_reviews"] == 0
+    assert result["subject_relevance"]
     assert result["model_calls"] > 0 and result["elapsed_seconds"] >= 0
     assert captured
     assert state.service.events.callback == captured.append
@@ -130,3 +136,18 @@ def test_cli_creates_report_and_refuses_overwrite(
         main(args)
     with pytest.raises(SystemExit):
         main(["--cases", str(cases), "--catalog", str(tmp_path / "empty"), "--output", str(tmp_path / "new")])
+
+
+def test_workflow_unresolved_review_is_reported_without_generation(scripted_service, tmp_path):
+    state = scripted_service
+    state.publish()
+    original = state.service.runner
+    state.service.runner = lambda role, prompt, tools: (
+        "invalid" if role == "technique_judge" and "COMPLETE" in prompt else original(role, prompt, tools)
+    )
+    result = evaluate_workflow(state.service, [RetrievalCase(
+        request="JWT handling", phases=["hypothesis_generation"], relevant_lineages=[],
+    )], tmp_path)[0]
+    assert result["unresolved_reviews"] == 1
+    assert result["complete_document_reviews"] == 0
+    assert not result["generated"] and not result["justified_catalog_miss"]

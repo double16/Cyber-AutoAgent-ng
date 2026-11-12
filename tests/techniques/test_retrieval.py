@@ -1,9 +1,18 @@
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
 from modules.techniques.benchmark import RetrievalCase, evaluate
 from modules.techniques.documents import TechniqueDocument
 from modules.techniques.retrieval import RetrievalSettings, search_text
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_blank_retrieval_overrides_preserve_defaults(monkeypatch, value):
+    for name in ("TECHNIQUE_DOCUMENT_LIMIT", "TECHNIQUE_TRIGGER_LIMIT", "TECHNIQUE_SEARCH_REPRESENTATION"):
+        monkeypatch.setenv(name, value)
+    assert RetrievalSettings.from_environment() == RetrievalSettings()
 
 
 def test_settings_and_search_representations(markdown, monkeypatch):
@@ -113,18 +122,21 @@ def test_selection_reviews_complete_document_and_can_abstain(scripted_service, c
 
     def judge(role, prompt, schema):
         prompts.append(prompt)
-        selected = revision
-        if len(prompts) == 2:
-            selected = {"accept": revision, "reject": None, "invalid": "unknown"}[confirmation]
+        selected = {"accept": revision, "reject": None, "invalid": "unknown"}[confirmation]
         return Decision(selected_id=selected, reason="Review complete")
 
     state.service._json = judge
     if confirmation == "invalid":
-        with pytest.raises(ValueError, match="confirmation selected an unknown"):
+        with pytest.raises(ValueError, match="reviewer selected an unknown"):
             state.service._select("JWT")
     else:
         assert state.service._select("JWT") == (revision if confirmation == "accept" else None)
         assert events[-1]["type"] == "technique_selection"
         assert events[-1]["rejected_ids"] == ([] if confirmation == "accept" else [revision])
-    assert "Check assumptions and controls" not in prompts[0]
-    assert "Check assumptions and controls" in prompts[1]
+    assert len(prompts) == 1
+    assert "Check assumptions and controls" in prompts[0]
+    from modules.techniques.review_integrity import ReviewInputIntegrityHook
+
+    ReviewInputIntegrityHook(prompts[0].required_review_records).before_model(SimpleNamespace(
+        agent=SimpleNamespace(messages=[{"role": "user", "content": [{"text": prompts[0]}]}]),
+    ))

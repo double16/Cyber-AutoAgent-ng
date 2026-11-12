@@ -11,6 +11,7 @@ class RetrievalCase(BaseModel):
     phases: list[str] = Field(min_length=1)
     relevant_lineages: list[str]
     observation: str = ""
+    subjects: list[dict] = Field(default_factory=list)
     recommendation_lineages: list[str] = Field(default_factory=list)
     # Empty relevance labels intentionally test catalog misses.
 
@@ -46,6 +47,7 @@ def evaluate_workflow(service, cases: list[RetrievalCase], directory) -> list[di
     from pathlib import Path
 
     from modules.techniques.context import MethodologyContext
+    from modules.techniques.publication_review import ReviewUnavailable
     from modules.techniques.triggers import RecommendationContext
 
     if not cases:
@@ -66,11 +68,18 @@ def evaluate_workflow(service, cases: list[RetrievalCase], directory) -> list[di
             context = RecommendationContext(
                 service, case.phases, [], Path(directory) / str(number) / "recommendations.json",
             )
+            context.lookup.subjects = case.subjects
             if case.observation:
                 context.observe(case.observation, "benchmark:source", origin="source")
             # Use the actual public alignment, selection, confirmation and generation pipeline.
-            revision, _ = service.get(case.request, MethodologyContext(phase_contexts=case.phases))
-            selected = service.repository.get(revision)["lineage"]
+            selected = None
+            try:
+                revision, _ = service.get(case.request, MethodologyContext(phase_contexts=case.phases))
+                selected = service.repository.get(revision)["lineage"]
+            except ReviewUnavailable:
+                pass
+            selections = [event for event in events if event["type"] == "technique_selection"]
+            reviewed = {row["revision_id"] for event in selections for row in event.get("reviewed", [])}
             resolved = [event for event in events if event["type"] == "technique_resolved"]
             generated = any(event.get("outcome") == "generated" for event in resolved)
             recommended = {
@@ -80,6 +89,11 @@ def evaluate_workflow(service, cases: list[RetrievalCase], directory) -> list[di
             expected = set(case.recommendation_lineages)
             results.append({
                 "request": case.request, "selected_lineage": selected, "generated": generated,
+                "complete_document_reviews": len(reviewed),
+                "justified_catalog_miss": any(event.get("catalog_miss", False) for event in selections),
+                "unresolved_reviews": sum(bool(event.get("unresolved")) for event in selections),
+                "subject_relevance": all(bool(row.get("supporting_subject_ids"))
+                                         for row in context.recommended()),
                 "selection_correct": selected in case.relevant_lineages if not generated else None,
                 "unnecessary_generation": generated and bool(case.relevant_lineages),
                 "recommendation_precision": len(recommended & expected) / len(recommended) if recommended else None,

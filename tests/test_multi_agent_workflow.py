@@ -24011,7 +24011,8 @@ def test_partial_publication_recovers_only_missing_subjects(worker_flow_case, mo
     task = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
     if inspection_required:
         controller.state.patch_task(task.task_uid, recovery_context_updates={"hypothesis_checkpoint": {
-            "status": "partial_failure", "repair": {"kind": "execution"}, "prerequisite_gaps": [{
+            "status": "partial_failure", "reason": "Required source inspection",
+            "repair": {"kind": "execution"}, "prerequisite_gaps": [{
                 "criterion_id": task.acceptance.criteria[0].id, "item_ids": ["parameter-a", "parameter-b"],
                 "source_refs": list(task.acceptance.basis.source_refs), "missing_input": "Inspect supplied source",
             }],
@@ -25075,3 +25076,54 @@ def test_consumer_review_rejects_inconsistent_assignment_ids(worker_flow_case, i
     })
     with pytest.raises(WorkflowInvariantError, match="IDs do not match"):
         controller._hypothesis_consumer_review_context(task)
+
+
+@pytest.mark.parametrize("persisted", [True, False])
+def test_invalid_hypothesis_checkpoint_is_task_failure_and_preserves_evidence(worker_flow_case, monkeypatch, persisted):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    task = replace(task, evidence=["artifact:retained-player-observations.json"])
+    malformed = {"status": "partial_failure", "reason": "Evaluator exhausted schema retries", "instructions": ""}
+    if persisted:
+        task = replace(task, recovery_context={"hypothesis_checkpoint": malformed})
+    controller.state.store_task(task)
+    controller.state.acceptance_results[task.task_uid] = []
+    monkeypatch.setattr(controller, "_build_task_prompt", lambda *_args: {"prompt": "Derive", "tools": []})
+    monkeypatch.setattr(controller, "_run_json_text_agent", lambda *_args, **_kwargs: malformed)
+    calls = []
+
+    def actor(*args):
+        calls.append(args)
+        return workflow_mod.TaskExecutorCycleResult(
+            text="Retained /player evidence", outcomes=[], reason="publication_checkpoint" if len(calls) == 1 else "",
+        )
+
+    monkeypatch.setattr(controller, "_run_worker_agent", actor)
+    controller._run_task(_plan(), _plan().phases[0], task)
+    current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert current.status == "partial_failure"
+    assert current.evidence == task.evidence
+    assert current.recovery_context["hypothesis_checkpoint"] is None
+    assert current.recovery_context["hypothesis_checkpoint_contract_failure"]
+    assert len(calls) == (0 if persisted else 2)
+    events = controller.runtime.callback_handler.events
+    assert any(row["type"] == "hypothesis_checkpoint_contract_failure" and row["task_uid"] == task.task_uid
+               for row in events)
+    # A separate task still reaches its executor after the checkpoint failure.
+    following = workflow_mod.hypothesis_contract(_hypothesis_task(uid="following", status="active"))
+    controller.state.store_task(following)
+    controller.state.acceptance_results[following.task_uid] = []
+    previous_calls = len(calls)
+    controller._run_task(_plan(), _plan().phases[0], following)
+    assert len(calls) > previous_calls
+
+
+@pytest.mark.parametrize("malformed", [{}, [], "invalid", {"status": "done", "prerequisite_gaps": []}])
+def test_legacy_checkpoint_shapes_fail_closed(worker_flow_case, malformed):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    controller.state.store_task(task)
+    assert controller._validated_checkpoint(task, malformed, "persisted_checkpoint") is None
+    current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert current.recovery_context["hypothesis_checkpoint_contract_failure"]
+    assert current.evidence == task.evidence

@@ -386,3 +386,22 @@ def test_review_subject_export_is_exact_private_and_idempotent(tmp_path, monkeyp
     with pytest.raises(OSError, match="Disk failure"):
         exporter.write_review_subject(activity, "Changed", *args[2:])
     assert not list(destination.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("kind,value", [
+    ("web", "https://assigned.invalid"), ("network", "192.0.2.2"), ("filesystem", "/workspace/source"),
+])
+def test_target_subject_fallback_has_valid_assigned_identity(scripted_service, tmp_path, monkeypatch, kind, value):
+    runtime = SimpleNamespace(technique_service=scripted_service.service,
+                              config=SimpleNamespace(module="web"), operation_id="op")
+    phase = SimpleNamespace(id=1, technique_contexts=(), produces_hypotheses=True)
+    task = SimpleNamespace(task_uid="task", kind="standard", phase=1, target_ids=["assigned"], evidence=[],
+                           objective="Review", acceptance=SimpleNamespace(basis=SimpleNamespace(
+                               snapshot_hash="", source_refs=[], item_ids=[],
+                           )))
+    targets = [SimpleNamespace(target_id="assigned", type=kind, value=value),
+               SimpleNamespace(target_id="decoy", type=kind, value="unassigned")]
+    monkeypatch.setattr("modules.tools.memory._operation_output_root", lambda: str(tmp_path))
+    tools = bind_task_techniques(runtime, SimpleNamespace(phases=[phase], targets=targets), task, [])
+    context = tools[0]._cyber_technique_context
+    assert context.lookup.subjects == [{"id": "assigned", "target_id": "assigned", "kind": kind, "value": value}]

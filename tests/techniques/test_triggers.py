@@ -10,6 +10,24 @@ from modules.operation_plugins.web.technique_signals import detect, sanitize
 from modules.techniques.triggers import RecommendationContext, TechniqueObservationHook, phase_contexts, signal_adapters
 
 
+def bind_subject(context):
+    """Supply an explicit semantic connection for positive capture fixtures."""
+    context.lookup.subjects = [{"id": "assigned", "kind": "service", "value": "fixture"}]
+    original = context.service.runner
+
+    def runner(role, prompt, tools):
+        if role != "technique_trigger_matcher":
+            return original(role, prompt, tools)
+        selected = [row["trigger_id"] for row in context.triggers]
+        return json.dumps({"trigger_ids": selected, "reason": "Fixture subject connection",
+                           "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                                        "observation_references": [context.lookup.observations[0].source]}
+                                       for trigger in selected]})
+
+    context.service.runner = runner
+    return context
+
+
 def token(header=None, payload=None):
     def encode(value):
         return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
@@ -66,6 +84,7 @@ def test_deterministic_recommendation_persists_and_never_exposes_token(scripted_
 
     path = tmp_path / "recommendations.json"
     context = RecommendationContext(state.service, ["hypothesis_generation"], [technique_signals], path)
+    bind_subject(context)
     text = context.observe("Response cookie: " + token(), "artifact:response.txt")
     assert "JWT handling" in text
     assert "Lookup is your decision" in text
@@ -83,8 +102,7 @@ def test_semantic_matcher_can_match_network_and_source_observations(scripted_ser
     state = scripted_service
     state.publish()
     context = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "semantic.json")
-    trigger = context.triggers[0]["trigger_id"]
-    state.service.runner = lambda *args: json.dumps({"trigger_ids": [trigger], "reason": "Observed matching behavior"})
+    bind_subject(context)
     for content in (
         "TCP service presents application authentication metadata",
         "Source passes token into signature verifier",
@@ -114,6 +132,7 @@ def test_capture_hook_appends_new_recommendations_and_skips_guidance(scripted_se
     context = RecommendationContext(
         state.service, ["hypothesis_generation"], [technique_signals], tmp_path / "hooks.json"
     )
+    bind_subject(context)
     hook = TechniqueObservationHook(context)
     registry = SimpleNamespace(add_callback=lambda *args, **kwargs: None)
     hook.register_hooks(registry)
@@ -189,6 +208,7 @@ def test_seed_is_scoped_to_assigned_and_same_target_linked_inventory(scripted_se
             )
         ),
     )
+    bind_subject(context)
     context.seed(task)
     assert "JWT handling" in context.render()
     task.acceptance.basis.snapshot_hash = "changed"
@@ -209,6 +229,7 @@ def test_referenced_capture_can_trigger_after_large_inline_result_is_offloaded(s
         [technique_signals],
         tmp_path / "capture.json",
     )
+    bind_subject(context)
     event = SimpleNamespace(
         tool_use={"name": "new_runtime_capture_tool", "toolUseId": "capture", "input": {}},
         result={"content": [{"text": "Full response: artifact:response.txt"}]},
@@ -242,6 +263,7 @@ def test_production_sdk_hooks_detect_jwt_and_preserve_original_outcome(scripted_
         [technique_signals],
         tmp_path / "sdk.json",
     )
+    bind_subject(context)
     selected = scripted_service.service.tool("op", "task")
     selected._cyber_technique_context = context
     agent = create_outcome_agent(monkeypatch, "task_executor", [selected])
@@ -266,24 +288,29 @@ def test_semantic_cache_shared_across_tasks_and_continuation(scripted_service, t
     state = scripted_service
     state.publish()
     first = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "first.json")
+    first.lookup.subjects = [{"id": "assigned"}]
     selected = [first.triggers[0]["trigger_id"]] if positive else []
     calls = []
 
     def runner(*args):
         calls.append(args)
-        return json.dumps({"trigger_ids": selected, "reason": "PRIVATE observation reason"})
+        return json.dumps({"trigger_ids": selected, "reason": "PRIVATE observation reason",
+                           "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                                        "observation_references": ["artifact:first"]} for trigger in selected]})
 
     state.service.runner = runner
     first.observe("Equivalent evidence", "artifact:first")
     second = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "second.json")
-    second.observe("Equivalent evidence", "artifact:second")
+    second.lookup.subjects = [{"id": "assigned"}]
+    second.observe("Equivalent evidence", "artifact:first")
     assert len(calls) == 1
     assert second.state["semantic_calls"] == 0
     assert bool(second.state["recommendations"]) is positive
     if positive:
-        assert second.state["recommendations"][0]["source"] == "artifact:second"
+        assert second.state["recommendations"][0]["source"] == "artifact:first"
     resumed = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "second.json")
-    resumed.observe("Equivalent evidence", "artifact:third")
+    resumed.lookup.subjects = [{"id": "assigned"}]
+    resumed.observe("Equivalent evidence", "artifact:first")
     assert len(calls) == 1
     cached = next((tmp_path / "semantic_cache").glob("*.json")).read_text()
     assert "Equivalent evidence" not in cached
@@ -341,7 +368,7 @@ def test_inputs_empty_outputs_and_exhaustion_preserve_deterministic_detection(sc
     for number in range(7):
         context.observe(f"Evidence {number}", "tool_output:2")
     assert context.state["semantic_calls"] == 6
-    assert "JWT handling" in context.observe(token(), "tool_input:jwt")
+    assert "JWT handling" not in context.observe(token(), "tool_input:jwt")
 
 
 def test_bad_cache_is_replaced_and_cached_decisions_work_after_exhaustion(scripted_service, tmp_path):
@@ -376,7 +403,7 @@ def test_concurrent_task_bindings_share_one_semantic_decision(scripted_service, 
     assert sum(context.state["semantic_calls"] for context in contexts) == 1
 
 
-def test_cache_identity_uses_only_the_sanitized_submitted_excerpt(scripted_service, tmp_path):
+def test_cache_identity_includes_observation_provenance(scripted_service, tmp_path):
     state = scripted_service
     state.publish()
     adapter = SimpleNamespace(detect=lambda text: [], sanitize=lambda text: text.replace("private detail", "MASK"))
@@ -385,7 +412,7 @@ def test_cache_identity_uses_only_the_sanitized_submitted_excerpt(scripted_servi
     first.observe("private detail" + "a" * 12_000 + "tail one", "source")
     second.observe("MASK" + "a" * 12_000 + "tail two", "source")
     assert first.state["semantic_calls"] == 1
-    assert second.state["semantic_calls"] == 0
+    assert second.state["semantic_calls"] == 1
 
 
 def test_added_trigger_reuses_old_decisions_and_preserves_task_allowance(scripted_service, markdown, tmp_path):
@@ -395,32 +422,36 @@ def test_added_trigger_reuses_old_decisions_and_preserves_task_allowance(scripte
     state.publish()
     path = tmp_path / "first.json"
     first = RecommendationContext(state.service, ["hypothesis_generation"], [], path)
+    first.lookup.subjects = [{"id": "assigned"}]
     old = first.triggers[0]["trigger_id"]
     calls = []
 
     def runner(_role, prompt, _tools):
         calls.append(prompt)
         trigger = old if len(calls) == 1 else new
-        return json.dumps({"trigger_ids": [trigger], "reason": "Observed conditions"})
+        return json.dumps({"trigger_ids": [trigger], "reason": "Observed conditions", "support": [
+            {"trigger_id": trigger, "subject_ids": ["assigned"], "observation_references": ["source:first"]}]})
 
     state.service.runner = runner
     first.observe("Shared evidence", "source:first")
     # A newly published technique changes the catalog without invalidating the old trigger.
     state.service.store.publish(TechniqueDocument(markdown(title="New method")), "module:new", "module:source")
     second = RecommendationContext(state.service, ["hypothesis_generation"], [], tmp_path / "second.json")
+    second.lookup.subjects = [{"id": "assigned"}]
     new = next(row["trigger_id"] for row in second.triggers if row["trigger_id"] != old)
-    second.observe("Shared evidence", "source:second")
+    second.observe("Shared evidence", "source:first")
     assert len(calls) == 2
     assert old not in calls[1] and new in calls[1]
     assert {row["trigger_id"] for row in second.state["recommendations"]} == {old, new}
-    assert all(row["source"] == "source:second" for row in second.state["recommendations"])
+    assert all(row["source"] == "source:first" for row in second.state["recommendations"])
     # Resuming the first task retains its allowance and recommendations across the catalog change.
     first.state["semantic_calls"] = 6
     first._save()
     resumed = RecommendationContext(state.service, ["hypothesis_generation"], [], path)
     assert resumed.state["semantic_calls"] == 6
     assert resumed.state["recommendations"][0]["trigger_id"] == old
-    resumed.observe("Shared evidence", "source:resumed")
+    resumed.lookup.subjects = [{"id": "assigned"}]
+    resumed.observe("Shared evidence", "source:first")
     assert len(calls) == 2  # cached new-trigger decisions also remain usable after exhaustion
     assert RecommendationContext._fingerprint(first.triggers[0]) == RecommendationContext._fingerprint({
         **first.triggers[0], "active": False,
@@ -568,7 +599,8 @@ def test_library_documents_assemble_phase_specific_signal_recommendations(
     for phase in ("hypothesis_generation", "vulnerability_verification"):
         assert phase in doc.metadata.phases
         context = RecommendationContext(state.service, [phase], [technique_signals], tmp_path / f"{phase}.json")
-        context.observe(observation, "artifact:synthetic-capture", semantic=False)
+        bind_subject(context)
+        context.observe(observation, "artifact:synthetic-capture")
         recommendations = context.state["recommendations"]
         assert recommendations
         assert all(row["phase_contexts"] == [phase] for row in recommendations)
@@ -595,3 +627,34 @@ def test_render_ranks_and_deduplicates_revisions(scripted_service, tmp_path):
     assert "method-11" in rendered
     assert "method-0" not in rendered
     assert "duplicate" not in rendered
+
+
+@pytest.mark.parametrize("kind,value", [
+    ("endpoint", "https://example.invalid/assigned"),
+    ("service", "tcp://example.invalid:22"),
+    ("file", "/workspace/assigned.py"),
+])
+@pytest.mark.parametrize("connected", [True, False])
+def test_shared_decoys_require_semantic_assigned_subject_support(scripted_service, tmp_path, kind, value, connected):
+    state = scripted_service
+    state.publish()
+    adapter = SimpleNamespace(detect=lambda text: ["http.jwt"], sanitize=lambda text: text)
+    context = RecommendationContext(state.service, ["hypothesis_generation"], [adapter], tmp_path / "subjects.json")
+    context.lookup.subjects = [{"id": "assigned", "kind": kind, "value": value}]
+    trigger = context.triggers[0]["trigger_id"]
+
+    def runner(role, prompt, tools):
+        assert value in prompt and "incidental content" in prompt
+        return json.dumps({"trigger_ids": [trigger] if connected else [], "reason": "Subject relevance reviewed",
+                           "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                                        "observation_references": ["artifact:bundle"]}] if connected else []})
+
+    state.service.runner = runner
+    context.observe("Shared bundle includes unrelated token material", "artifact:bundle", scope="shared")
+    assert bool(context.recommended()) is connected
+    if connected:
+        assert context.recommended()[0]["supporting_subject_ids"] == ["assigned"]
+        assert context.recommended()[0]["observation_references"] == ["artifact:bundle"]
+    context.lookup.subjects = [{"id": "different", "kind": kind, "value": value}]
+    context.observe("Shared bundle includes unrelated token material", "artifact:bundle", scope="shared")
+    assert not context.recommended()

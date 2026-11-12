@@ -22,7 +22,7 @@ class RetrievalSettings(BaseModel):
                 "document_limit": "TECHNIQUE_DOCUMENT_LIMIT",
                 "trigger_limit": "TECHNIQUE_TRIGGER_LIMIT",
                 "representation": "TECHNIQUE_SEARCH_REPRESENTATION",
-            }.items() if name in os.environ
+            }.items() if name in os.environ and os.environ[name].strip()
         })
 
 

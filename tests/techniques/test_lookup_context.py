@@ -239,7 +239,9 @@ def test_binding_non_inventory_task_preserves_constraints_and_declared_origins(s
     tools = bind_task_techniques(runtime, plan, task, [source_reader])
     bound = tools[-1]._cyber_technique_context
     assert bound.adapters == []
-    assert bound.lookup.subjects == [{"target_id": "source", "kind": "filesystem", "value": "/assigned/repository"}]
+    assert bound.lookup.subjects == [{
+        "id": "source", "target_id": "source", "kind": "filesystem", "value": "/assigned/repository",
+    }]
     assert bound.lookup.constraints == ["Inspect source without executing it"]
     assert bound.tool_origins["source_reader"] == "source"
     assert "Inspect source without executing it" in bound.lookup.render()
@@ -359,7 +361,7 @@ def test_catalog_filled_after_lease_reuses_without_research(scripted_service, mo
     state = scripted_service
     revision = state.publish()
     selections = iter([None, revision])
-    monkeypatch.setattr(state.service, "_select", lambda *_: next(selections))
+    monkeypatch.setattr(state.service, "_select", lambda *_, **_kwargs: next(selections))
     result = state.service.tool("op", "task", LookupContext())(request="JWT handling")
     assert "Assessment: conditional" in result
     assert not state.research_calls

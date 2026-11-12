@@ -5930,7 +5930,14 @@ class MultiAgentWorkflowController:
                             task_policy=self._task_policy_guidance(task),
                         )
                     )
-                prior_checkpoint = task.recovery_context.get("hypothesis_checkpoint", {})
+                prior_checkpoint = task.recovery_context.get("hypothesis_checkpoint")
+                if prior_checkpoint is not None:
+                    validated = self._validated_checkpoint(task, prior_checkpoint, "persisted_checkpoint")
+                    if validated is None:
+                        return TaskExecutorCycleResult(text="Checkpoint contract failed; evidence preserved.", outcomes=[])
+                    prior_checkpoint = validated.model_dump()
+                if task.recovery_context.get("hypothesis_checkpoint_contract_failure"):
+                    return TaskExecutorCycleResult(text="Checkpoint contract failed; evidence preserved.", outcomes=[])
                 retained_review = task.recovery_context.get("hypothesis_review", {})
                 inspection_review = (
                     retained_review if retained_review.get("publication_sha256") == hypothesis_binding(task).get("sha256")
@@ -6119,9 +6126,12 @@ class MultiAgentWorkflowController:
                                 data_validator=lambda data: validate_checkpoint(data, task),
                                 output_model_override=HypothesisCheckpointDecisionOutput,
                             )
-                            task = self.state.patch_task(task.task_uid, recovery_context_updates={
-                                "hypothesis_checkpoint": review,
-                            })
+                            validated = self._validated_checkpoint(task, review, "publication_checkpoint")
+                            if validated is not None:
+                                task = self.state.patch_task(task.task_uid, recovery_context_updates={
+                                    "hypothesis_checkpoint": validated.model_dump(),
+                                    "hypothesis_checkpoint_contract_failure": False,
+                                })
                         return publication_result
                 finally:
                     active_live_outcomes_reader = None
@@ -7009,14 +7019,25 @@ class MultiAgentWorkflowController:
                     missing_criteria = self._missing_acceptance_criteria(task, acceptance_results)
                     validation_missing = not self._validation_submitted(task)
                     max_acceptance_attempts = 1 + self._task_acceptance_correction_count()
-                    checkpoint_review = task.recovery_context.get("hypothesis_checkpoint", {})
-                    if missing_criteria and self._is_hypothesis_producer(task) and checkpoint_review:
+                    checkpoint_review = task.recovery_context.get("hypothesis_checkpoint")
+                    if checkpoint_review is not None:
+                        validated = self._validated_checkpoint(task, checkpoint_review, "checkpoint_consumption")
+                        checkpoint_review = validated.model_dump() if validated else {}
+                    checkpoint_failed = next(
+                        item for item in self.state.list_tasks() if item.task_uid == task.task_uid
+                    ).recovery_context.get("hypothesis_checkpoint_contract_failure")
+                    if checkpoint_failed:
+                        decision = WorkflowDecision(
+                            status="partial_failure",
+                            reason="Hypothesis checkpoint contract failed; existing evidence preserved.",
+                        )
+                    elif missing_criteria and self._is_hypothesis_producer(task) and checkpoint_review:
                         decision = self._decision_from_data(
                             checkpoint_review, allowed=("partial_failure", "blocked"),
                         )
-                        decision.repair_kind = (checkpoint_review.get("repair") or {}).get("kind", "none")
+                        decision.repair_kind = validated.repair.kind if validated.repair else "none"
                         decision.unresolved_evidence_gaps = tuple(
-                            gap["missing_input"] for gap in checkpoint_review["prerequisite_gaps"]
+                            gap.missing_input for gap in validated.prerequisite_gaps
                         )
                     elif validation_missing:
                         validation_label = "Finding validation" if task.kind == "finding_validation" else "Objective validation"
@@ -7736,6 +7757,12 @@ class MultiAgentWorkflowController:
                             missing_text,
                             len(acceptance_recovery_evidence),
                         )
+                if self._is_hypothesis_producer(task) and any(
+                    item.task_uid == task.task_uid
+                    and item.recovery_context.get("hypothesis_checkpoint_contract_failure")
+                    for item in self.state.list_tasks()
+                ):
+                    break
                 if (self._is_hypothesis_producer(task) and task.recovery_context.get("hypothesis_checkpoint")
                         and decision.status != "done" and decision.repair_kind == "none"):
                     break
@@ -17604,6 +17631,22 @@ criterion. Return the JSON decision immediately.
                 f"{compact[:1000]}"
             ),
         }
+
+    def _validated_checkpoint(self, task, data, stage):
+        """Contain legacy and exhausted evaluator contracts without granting another retry."""
+        try:
+            validate_checkpoint(data, task)
+            return HypothesisCheckpointDecisionOutput.model_validate(data)
+        except (ValueError, TypeError) as error:
+            self._emit_workflow_event({
+                "type": "hypothesis_checkpoint_contract_failure", "task_uid": task.task_uid,
+                "stage": stage, "status": "partial_failure", "error_type": type(error).__name__,
+            })
+            self.state.patch_task(task.task_uid, recovery_context_updates={
+                "hypothesis_checkpoint": None,
+                "hypothesis_checkpoint_contract_failure": True,
+            })
+            return None
 
     @staticmethod
     def _evaluator_schema_fallback(

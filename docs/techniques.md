@@ -248,7 +248,10 @@ vulnerability name. Technique triggers must still declare compatible phases and 
 The controller scans assigned inventory records, referenced captures, and task tool results. Matching
 recommendations include source references and digests, never actual token values. A separate semantic
 matcher considers a Qdrant-ranked shortlist (20 phase-compatible candidates by default) and a 12,000-character observed excerpt, with
-six semantic passes per task. Deterministic detection continues after that allowance. Source captures
+six semantic passes per task. Deterministic signals supply candidate leads for that same semantic
+review; they never independently endorse a recommendation. Review must connect each recommendation
+to assigned subject IDs and observation references. Shared-bundle decoys are insufficient. After the
+allowance is exhausted, only valid cached reviews can endorse leads. Source captures
 over 16 MB, unavailable captures, and exhausted semantic allowances remain explicit limitations.
 Only captured content can be inspected; missing browser/network bodies are not assumed observed.
 
@@ -313,13 +316,13 @@ Certificate verification remains enabled. A certificate-verification failure sto
 fetches for that research attempt and returns a trust-configuration diagnostic through tool events.
 
 Semantic trigger decisions are cached within the operation for the same phase contexts, trigger
-fingerprint and sanitized excerpt. Each trigger has its own cached decision; adding guidance preserves
-decisions for unchanged triggers and never resets a task's six-call allowance. The cache stores only selected trigger IDs, never source
+fingerprint, assigned subjects, observation provenance, and submitted excerpt. Each trigger has its own cached decision; adding guidance preserves
+decisions for unchanged triggers and never resets a task's six-call allowance. The cache stores selected trigger IDs and supporting subject/observation references, never source
 excerpts or model reasons. Both positive and negative valid decisions can be reused across tasks and
 continuations; each task retains its own recommendation provenance. Failed decisions remain retryable.
 Only actual model calls consume the six-call per-task allowance. Seeded evidence and non-empty tool
 outputs receive semantic matching; tool inputs receive deterministic detection only. Deterministic
-signals continue to be checked after the semantic allowance is exhausted.
+signals remain unendorsed after the semantic allowance is exhausted unless a valid cached review exists.
 
 Assigned subject observations precede shared artifact excerpts. Recommendations retain source/unknown
 origin and subject/shared scope. Trusted tool declarations use `_cyber_technique_observation_origin`
@@ -1167,10 +1170,18 @@ filters applied before the nearest-neighbor limit (10 documents). Passive recomm
 the existing trigger vectors across the full current, phase-compatible catalog (20 candidates),
 then use semantic review alongside deterministic module signals. Catalog order does not determine
 which triggers reach semantic review. Inactive current advertisements remain regeneration leads.
-Scores describe similarity, not applicability or evidence support. The embedding index version
+Lookup reviews the entire retrieved document shortlist in ranking order, one complete document at a
+time, and reuses the first procedure covering every requirement. Generation requires valid semantic
+rejection of every retrieved revision. Missing documents, oversized complete inputs and invalid
+reviews leave selection unresolved and do not authorize generation. Completed reviews are reused
+within the lookup's generation lease only when request, requirements, phase, restrictions and complete
+revision fingerprints match. Selection events separate reviewed revisions and rejection reasons from
+unreviewed candidates. Scores describe similarity, not applicability or evidence support. The embedding index version
 changes when its payload contract changes; source documents remain in the global document collection.
 
 Retrieval settings apply to operation and standalone lookup:
+
+Unset or blank retrieval overrides preserve the defaults below.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -1196,10 +1207,10 @@ handling for both representations at limits 10 and 20; they are not evidence of 
 quality. Run provider-backed comparisons against independently labeled requests before changing the
 default representation or introducing similarity cutoffs.
 
-The selection judge receives compact candidate descriptions, then reviews the selected complete
-document against the same request, phase restrictions and requirements. Both stages can abstain.
-The complete-document review must confirm the same revision ID. Retrieval and selection events
-contain query fingerprints, candidate ranks/scores and selected/rejected IDs without raw observations.
+Each selection judgment receives one complete document against the same request, phase restrictions
+and requirements. A rejection advances to the next ranked candidate; an approval names that revision.
+Retrieval and selection events contain query fingerprints, candidate ranks/scores, reviewed revision IDs,
+rejection reasons, unreviewed IDs, and explicit unresolved/catalog-miss flags without raw observations.
 Rendered recommendations prioritize deterministic signals, then similarity, and deduplicate revisions.
 
 ### Provider-backed retrieval and workflow benchmarks
@@ -1245,3 +1256,23 @@ Startup library counts describe Markdown revisions. The same summary separately 
 embedding writes since the store was opened, including index rebuilding before module synchronization,
 or reuse of existing vectors. It includes the embedding model and search representation. The embedding
 document count is global to the technique store and may exceed the selected module's document count.
+
+### Contribution and checkpoint integrity
+
+Future usefulness reviews require correspondence to a specific delivered procedure, control, exclusion
+criterion or justified next step. Exclusions require evidence mappings establishing the delivered
+criterion; successful work, citations, matching words and absent observed inputs are insufficient.
+Unestablished contribution remains neutral; unavailable necessary evidence remains pending. Negative
+feedback requires demonstrated misleading guidance or harm. Historical evaluations are preserved.
+
+Malformed hypothesis checkpoints, including exhausted evaluator fallbacks and legacy persisted values,
+produce a correlated task-level contract diagnostic and partial failure. Evidence remains available
+and other tasks can continue. Invalid checkpoints cannot authorize prerequisite inspection, acceptance
+or extra retries. No database migration is needed.
+
+Workflow benchmark cases can supply structured `subjects` alongside `observation`. Reports include
+`complete_document_reviews`, `justified_catalog_miss`, `unresolved_reviews`, `subject_relevance`,
+and `unnecessary_generation`, in addition to ranked retrieval and recommendation metrics.
+The offline [continuation calibration fixture](../tests/techniques/fixtures/continuation_usefulness.json)
+records the static-JavaScript mismatch and contrasting exclusions/controls. Its scripted tests validate
+contract propagation and reference handling; they do not establish live model calibration accuracy.

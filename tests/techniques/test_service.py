@@ -629,3 +629,93 @@ def test_feedback_reader_is_created_per_decision(scripted_service, monkeypatch, 
     assert (seen[0] is seen[1]) is (not use_factory)
     if not use_factory:
         assert seen[0] is legacy
+
+
+@pytest.mark.parametrize("matching_rank", [1, 2, None])
+def test_complete_shortlist_review_is_sequential_and_lookup_cached(scripted_service, markdown, monkeypatch,
+                                                                  matching_rank):
+    from modules.techniques.service import Decision
+
+    service = scripted_service.service
+    revisions = [scripted_service.publish(), service.store.publish(
+        TechniqueDocument(markdown(title="Later candidate")), "module:later", "module:later",
+    )]
+    # Use actual stored revision identities, independently of publication return shape.
+    candidates = service.store.search("JWT", active=True)
+    monkeypatch.setattr(service, "_candidates", lambda *args: candidates)
+    calls = []
+
+    def review(role, prompt, schema):
+        index = len(calls)
+        calls.append(prompt)
+        assert "Check assumptions and controls." in prompt
+        assert "COMPLETE" in prompt
+        selected = candidates[index]["revision_id"] if matching_rank == index + 1 else None
+        return Decision(selected_id=selected, reason="Covered procedure" if selected else "Missing required control")
+
+    monkeypatch.setattr(service, "_json", review)
+    cache = {}
+    expected = candidates[matching_rank - 1]["revision_id"] if matching_rank else None
+    assert service._select("JWT", reviews=cache) == expected
+    assert len(calls) == (matching_rank or len(revisions))
+    assert service._select("JWT", reviews=cache) == expected
+    assert len(calls) == (matching_rank or len(revisions))
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "invalid", "oversized"])
+def test_unresolved_complete_review_never_authorizes_generation(scripted_service, monkeypatch, failure):
+    from modules.techniques.publication_review import ReviewUnavailable
+
+    state = scripted_service
+    state.publish()
+    if failure == "unavailable":
+        monkeypatch.setattr(state.service.store, "document", lambda *args: (_ for _ in ()).throw(OSError("missing")))
+    elif failure == "oversized":
+        monkeypatch.setattr(state.service, "_json", lambda *args: (_ for _ in ()).throw(
+            ValueError("Complete review input exceeds configured prompt limit"),
+        ))
+    else:
+        original = state.service.runner
+        state.service.runner = lambda role, prompt, tools: (
+            "invalid JSON" if role == "technique_judge" and "COMPLETE" in prompt
+            else original(role, prompt, tools)
+        )
+    with pytest.raises(ReviewUnavailable):
+        state.service._get("JWT")
+    assert not state.research_calls
+
+
+@pytest.mark.parametrize("change", ["revision", "document", "request", "requirements", "phase", "restrictions"])
+def test_lookup_review_cache_invalidates_changed_inputs(scripted_service, monkeypatch, change):
+    from modules.techniques.context import MethodologyContext
+    from modules.techniques.coverage import Requirement
+    from modules.techniques.service import Decision
+
+    service = scripted_service.service
+    candidates = [{"revision_id": "first"}]
+    document = SimpleNamespace(markdown="Complete procedure")
+    monkeypatch.setattr(service, "_candidates", lambda *args: candidates)
+    monkeypatch.setattr(service.store, "document", lambda *args: document)
+    calls = []
+    monkeypatch.setattr(service, "_json", lambda *args: (
+        calls.append(args) or Decision(selected_id=None, reason="Required comparison absent")
+    ))
+    cache = {}
+    context = MethodologyContext(phase_contexts=["hypothesis_generation"])
+    request = "Method"
+    requirements = [Requirement(id="method", description="Compare controls")]
+    service._select(request, context, requirements, reviews=cache)
+    if change == "revision":
+        candidates[0]["revision_id"] = "second"
+    elif change == "document":
+        document.markdown += "\nNew procedure"
+    elif change == "request":
+        request = "Other method"
+    elif change == "requirements":
+        requirements[0].description = "Compare identities"
+    elif change == "phase":
+        context.phase_contexts = ["vulnerability_verification"]
+    else:
+        context.methodology_constraints = ["Passive only"]
+    service._select(request, context, requirements, reviews=cache)
+    assert len(calls) == 2

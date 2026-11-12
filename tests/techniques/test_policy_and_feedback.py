@@ -605,3 +605,41 @@ def test_missing_necessary_evidence_never_becomes_a_neutral_score(reference, exp
     )
     with pytest.raises(ValueError, match=expected):
         resolve_feedback(feedback, {"result:known:1": "Artifact read blocked by reader guard"})
+
+
+def test_continuation_calibration_rubric_reaches_evaluator_and_reviewer(scripted_service):
+    """Check assembled contracts offline; scripted labels do not claim live model calibration."""
+    from pathlib import Path
+
+    from modules.techniques.feedback import USEFULNESS_RUBRIC, evaluate_feedback
+
+    fixture = json.loads((Path(__file__).parent / "fixtures/continuation_usefulness.json").read_text())
+    state = scripted_service
+    original = state.service.runner
+    for case in fixture["cases"]:
+        state.score = case["expected_score"] or 0
+        seen = []
+
+        def runner(role, prompt, tools):
+            seen.append((role, prompt))
+            assert USEFULNESS_RUBRIC in prompt
+            assert case["guidance"] in prompt and case["result"] in prompt
+            response = json.loads(original(role, prompt, tools))
+            if role == "technique_evaluator" and case["expected_score"] is None:
+                import re
+
+                reference = re.search(r"result:[a-f0-9]+:[0-9]+", prompt)[0]
+                response["necessary_evidence_gaps"] = [{
+                    "references": [reference], "missing_input": "Paired recorded control outputs",
+                }]
+            return json.dumps(response)
+
+        state.service.runner = runner
+        use = {"revision_id": "offline", "use_context": json.dumps({"delivered_documents": [case["guidance"]]})}
+        if case["expected_score"] is None:
+            with pytest.raises(ValueError, match="pending"):
+                evaluate_feedback(state.service, use, case["result"], [])
+        else:
+            feedback = evaluate_feedback(state.service, use, case["result"], [])
+            assert feedback.score == case["expected_score"]
+            assert [role for role, _ in seen] == ["technique_evaluator", "technique_feedback_reviewer"]

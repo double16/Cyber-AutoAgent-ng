@@ -184,16 +184,26 @@ def test_recommendations_and_warnings_are_not_replayed(scripted_service, tmp_pat
     path = tmp_path / "recommendations.json"
     context = RecommendationContext(service, ["hypothesis_generation"], [adapter], path)
     context.event_context = {"operation_id": "op", "task_uid": "task"}
+    context.lookup.subjects = [{"id": "assigned"}]
+    trigger = context.triggers[0]["trigger_id"]
+    service.runner = lambda *args: json.dumps({
+        "trigger_ids": [trigger], "reason": "Connected subject",
+        "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                     "observation_references": ["capture"]}],
+    })
     context.observe("first", "capture")
     context.observe("second", "capture")
-    assert len(events) == 1
-    assert events[0]["match_kind"] == "deterministic"
+    recommendations = [row for row in events if row["type"] == "technique_recommended"]
+    assert len(recommendations) == 1
+    assert recommendations[0]["match_kind"] == "deterministic"
     context.state["limitations"].append("Matching unavailable")
     context.observe("third", "capture")
     assert events[-1]["type"] == "technique_warning"
     restored = RecommendationContext(service, ["hypothesis_generation"], [adapter], path)
+    restored.lookup.subjects = [{"id": "assigned"}]
     restored.observe("fourth", "capture")
-    assert len(events) == 2
+    assert len([row for row in events if row["type"] == "technique_recommended"]) == 1
+    assert len([row for row in events if row["type"] == "technique_warning"]) == 1
     assert "first" not in json.dumps(events)
 
 
@@ -233,9 +243,12 @@ def test_semantic_recommendation_event_omits_observations(scripted_service, tmp_
     context = RecommendationContext(service, ["hypothesis_generation"], [], tmp_path / "task.json")
     events = []
     service.events.callback = events.append
+    context.lookup.subjects = [{"id": "assigned"}]
     service.runner = lambda *args: json.dumps(
         {
             "trigger_ids": [context.triggers[0]["trigger_id"]],
+            "support": [{"trigger_id": context.triggers[0]["trigger_id"], "subject_ids": ["assigned"],
+                         "observation_references": ["capture"]}],
             "reason": "PRIVATE OBSERVATION",
         }
     )

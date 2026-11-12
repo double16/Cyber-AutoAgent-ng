@@ -45,7 +45,8 @@ def bind_task_techniques(runtime, plan, task, tools):
         if origin not in {"source", "analysis", "guidance", "unknown"}:
             raise ValueError("Unknown technique observation origin")
         context.tool_origins[get_tool_name(item)] = origin
-    context.lookup.subjects = [{"target_id": item.target_id, "kind": item.type, "value": item.value}
+    context.lookup.subjects = [{"id": item.target_id, "target_id": item.target_id,
+                                "kind": item.type, "value": item.value}
                                for item in getattr(plan, "targets", [])
                                if not getattr(task, "target_ids", []) or item.target_id in task.target_ids]
     context.seed(task)
