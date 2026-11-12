@@ -146,6 +146,11 @@ def scripted_service(store, markdown):
                         "authoritative_sufficient": state.authoritative,
                     }
                 )
+            if "COMPLETE" in prompt:
+                review = review_response(prompt, state.selection is not None)
+                if state.selection == "not-a-candidate":
+                    review.judgments[0].passages[0].passage_id = -1
+                return review.model_dump_json()
             return json.dumps({"selected_id": state.selection, "reason": "Applicability decision"})
         if role == "technique_author":
             document = TechniqueDocument(markdown())
@@ -332,3 +337,43 @@ def migrate_legacy_publication_fixtures(monkeypatch):
             raise
 
     monkeypatch.setattr(TechniqueService, "_json_output", output)
+
+
+def review_response(prompt, selected=True, reason="Scripted procedure mapping"):
+    """Explicit mapped judgments for the scripted lookup reviewer."""
+    from modules.techniques.selection_review import SelectionReview
+
+    records = []
+    for line in prompt.splitlines():
+        try:
+            value = json.JSONDecoder().raw_decode(line)[0]
+            if isinstance(value, dict):
+                records.append(value)
+        except ValueError:
+            pass
+    candidate = next(row["candidate"] for row in records if "candidate" in row)
+    requirements = next(row["requirements"] for row in records if "requirements" in row)
+    return SelectionReview(reason=reason, judgments=[{
+        "requirement_id": row["id"], "verdict": "covered" if selected else "unmet",
+        "passages": [{"passage_id": candidate["passages"][0]["id"],
+                      "quote": candidate["passages"][0]["text"][:60]}],
+        "explanation": reason,
+        "missing_capability": "" if selected else "Requested comparison absent",
+    } for row in requirements])
+
+
+def connection_records(prompt, references):
+    """Build explicit quote bindings from the observations actually submitted."""
+    records = []
+    for line in prompt.splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            records.extend(value.get("observations", []))
+    return [{
+        "subject_id": "assigned", "observation_reference": reference,
+        "observation_sha256": row["sha256"], "quote": row["excerpt"][:30],
+        "explanation": "Scripted fixture connects the observed condition to the assigned subject",
+    } for reference in references for row in records if row["source"] == reference][:len(references)]

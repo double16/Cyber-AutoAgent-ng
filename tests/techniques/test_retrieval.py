@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from conftest import review_response
 from pydantic import ValidationError
 
 from modules.techniques.benchmark import RetrievalCase, evaluate
@@ -112,7 +113,6 @@ def test_configured_limits_and_separate_representation_indexes(store, markdown, 
 
 @pytest.mark.parametrize("confirmation", ["accept", "reject", "invalid"])
 def test_selection_reviews_complete_document_and_can_abstain(scripted_service, confirmation):
-    from modules.techniques.service import Decision
 
     state = scripted_service
     revision = state.publish()
@@ -123,11 +123,14 @@ def test_selection_reviews_complete_document_and_can_abstain(scripted_service, c
     def judge(role, prompt, schema):
         prompts.append(prompt)
         selected = {"accept": revision, "reject": None, "invalid": "unknown"}[confirmation]
-        return Decision(selected_id=selected, reason="Review complete")
+        result = review_response(prompt, selected is not None)
+        if confirmation == "invalid":
+            result.judgments[0].passages[0].passage_id = -1
+        return result
 
     state.service._json = judge
     if confirmation == "invalid":
-        with pytest.raises(ValueError, match="reviewer selected an unknown"):
+        with pytest.raises(ValueError, match="quote the submitted revision"):
             state.service._select("JWT")
     else:
         assert state.service._select("JWT") == (revision if confirmation == "accept" else None)

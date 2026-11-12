@@ -25127,3 +25127,23 @@ def test_legacy_checkpoint_shapes_fail_closed(worker_flow_case, malformed):
     current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
     assert current.recovery_context["hypothesis_checkpoint_contract_failure"]
     assert current.evidence == task.evidence
+
+
+@pytest.mark.parametrize("recovery", [
+    {"hypothesis_checkpoint": {}},
+    {"hypothesis_checkpoint_contract_failure": True},
+    {"hypothesis_checkpoint_contract_failure": True,
+     "hypothesis_checkpoint": {"status": "blocked", "reason": "Retained gap", "prerequisite_gaps": []}},
+])
+def test_checkpoint_entry_failure_skips_task_preparation(worker_flow_case, monkeypatch, recovery):
+    controller, *_ = worker_flow_case
+    task = workflow_mod.hypothesis_contract(_hypothesis_task(status="active"))
+    task = replace(task, recovery_context=recovery, evidence=["artifact:retained.json"])
+    controller.state.store_task(task)
+    preparation = Mock(side_effect=AssertionError("Preparation must not run"))
+    monkeypatch.setattr(controller, "_replace_missing_procedure_methods", preparation)
+    controller._run_task_in_trace(_plan(), _plan().phases[0], task)
+    preparation.assert_not_called()
+    current = next(item for item in controller.state.list_tasks() if item.task_uid == task.task_uid)
+    assert current.status == "partial_failure"
+    assert current.evidence == task.evidence

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from urllib.parse import quote
 
 import pytest
+from conftest import connection_records
 
 from modules.operation_plugins.web.technique_signals import detect, sanitize
 from modules.techniques.triggers import RecommendationContext, TechniqueObservationHook, phase_contexts, signal_adapters
@@ -21,6 +22,9 @@ def bind_subject(context):
         selected = [row["trigger_id"] for row in context.triggers]
         return json.dumps({"trigger_ids": selected, "reason": "Fixture subject connection",
                            "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                                        "connections": connection_records(
+                                            prompt, [context.lookup.observations[0].source],
+                                        ),
                                         "observation_references": [context.lookup.observations[0].source]}
                                        for trigger in selected]})
 
@@ -296,6 +300,7 @@ def test_semantic_cache_shared_across_tasks_and_continuation(scripted_service, t
         calls.append(args)
         return json.dumps({"trigger_ids": selected, "reason": "PRIVATE observation reason",
                            "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                                        "connections": connection_records(args[1], ["artifact:first"]),
                                         "observation_references": ["artifact:first"]} for trigger in selected]})
 
     state.service.runner = runner
@@ -313,7 +318,7 @@ def test_semantic_cache_shared_across_tasks_and_continuation(scripted_service, t
     resumed.observe("Equivalent evidence", "artifact:first")
     assert len(calls) == 1
     cached = next((tmp_path / "semantic_cache").glob("*.json")).read_text()
-    assert "Equivalent evidence" not in cached
+    assert ("Equivalent evidence" in cached) is positive
     assert "PRIVATE" not in cached
 
 
@@ -430,7 +435,9 @@ def test_added_trigger_reuses_old_decisions_and_preserves_task_allowance(scripte
         calls.append(prompt)
         trigger = old if len(calls) == 1 else new
         return json.dumps({"trigger_ids": [trigger], "reason": "Observed conditions", "support": [
-            {"trigger_id": trigger, "subject_ids": ["assigned"], "observation_references": ["source:first"]}]})
+            {"trigger_id": trigger, "subject_ids": ["assigned"],
+            "connections": connection_records(prompt, ["source:first"]),
+            "observation_references": ["source:first"]}]})
 
     state.service.runner = runner
     first.observe("Shared evidence", "source:first")
@@ -647,6 +654,7 @@ def test_shared_decoys_require_semantic_assigned_subject_support(scripted_servic
         assert value in prompt and "incidental content" in prompt
         return json.dumps({"trigger_ids": [trigger] if connected else [], "reason": "Subject relevance reviewed",
                            "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
+                                        "connections": connection_records(prompt, ["artifact:bundle"]),
                                         "observation_references": ["artifact:bundle"]}] if connected else []})
 
     state.service.runner = runner
@@ -658,3 +666,59 @@ def test_shared_decoys_require_semantic_assigned_subject_support(scripted_servic
     context.lookup.subjects = [{"id": "different", "kind": kind, "value": value}]
     context.observe("Shared bundle includes unrelated token material", "artifact:bundle", scope="shared")
     assert not context.recommended()
+
+
+@pytest.mark.parametrize("change", ["subject", "reference", "digest", "quote", "missing", "legacy"])
+def test_subject_connections_reject_invalid_bindings(scripted_service, tmp_path, change):
+    from modules.techniques.triggers import TriggerSelection
+
+    context = RecommendationContext(scripted_service.service, [], [], tmp_path / "review.json")
+    context.lookup.subjects = [{"id": "assigned", "kind": "filesystem", "value": "/repo"}]
+    context.lookup.observe("Assigned source imports the dependency", "artifact:source", "source", "subject")
+    observation = context.lookup.observations[0]
+    connection = {
+        "subject_id": "assigned", "observation_reference": observation.source,
+        "observation_sha256": observation.sha256, "quote": "imports the dependency",
+        "explanation": "The assigned source imports the dependency named by the trigger",
+    }
+    support = {"trigger_id": "trigger", "subject_ids": ["assigned"],
+               "observation_references": [observation.source], "connections": [connection]}
+    if change == "legacy":
+        del support["connections"]
+    elif change == "missing":
+        support["subject_ids"].append("second")
+        context.lookup.subjects.append({"id": "second"})
+    else:
+        field = {"subject": "subject_id", "reference": "observation_reference",
+                 "digest": "observation_sha256", "quote": "quote"}[change]
+        connection[field] = "invented"
+    with pytest.raises(ValueError):
+        context._validate_support(TriggerSelection(trigger_ids=["trigger"], reason="Review", support=[support]))
+
+
+def test_subject_connection_accepts_current_quote(scripted_service, tmp_path):
+    from modules.techniques.triggers import TriggerSelection
+
+    context = RecommendationContext(scripted_service.service, [], [], tmp_path / "review.json")
+    context.lookup.subjects = [{"id": "assigned"}]
+    context.lookup.observe("Assigned source imports the dependency", "artifact:source", "source", "subject")
+    prompt = context.lookup.render()
+    context._validate_support(TriggerSelection(trigger_ids=["trigger"], reason="Review", support=[{
+        "trigger_id": "trigger", "subject_ids": ["assigned"], "observation_references": ["artifact:source"],
+        "connections": connection_records(prompt, ["artifact:source"]),
+    }]))
+
+
+def test_legacy_recommendations_are_invalidated_without_new_allowance(scripted_service, tmp_path):
+    scripted_service.publish()
+    path = tmp_path / "legacy.json"
+    context = RecommendationContext(scripted_service.service, ["hypothesis_generation"], [], path)
+    path.write_text(json.dumps({
+        "trigger_identity": "previous-contract",
+        "trigger_fingerprints": context.state["trigger_fingerprints"],
+        "recommendations": [{"trigger_id": context.triggers[0]["trigger_id"]}],
+        "seen": ["previous-review"], "semantic_calls": 6, "limitations": [],
+    }))
+    resumed = RecommendationContext(scripted_service.service, ["hypothesis_generation"], [], path)
+    assert resumed.state["recommendations"] == []
+    assert resumed.state["semantic_calls"] == 6

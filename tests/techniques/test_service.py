@@ -6,7 +6,7 @@ from threading import Barrier, Event
 from types import SimpleNamespace
 
 import pytest
-from conftest import critique_result
+from conftest import critique_result, review_response
 from pydantic import ValidationError
 
 from modules.techniques.documents import TechniqueDocument
@@ -144,7 +144,7 @@ def test_unknown_revision_and_source_selections_are_rejected(scripted_service):
     state = scripted_service
     state.publish()
     state.selection = "not-a-candidate"
-    with pytest.raises(ValueError, match="unknown revision"):
+    with pytest.raises(ValueError, match="quote the submitted revision"):
         state.service.get("JWT")
     state.selection = None
     state.source_urls = ["https://unfetched.example/advisory"]
@@ -634,7 +634,6 @@ def test_feedback_reader_is_created_per_decision(scripted_service, monkeypatch, 
 @pytest.mark.parametrize("matching_rank", [1, 2, None])
 def test_complete_shortlist_review_is_sequential_and_lookup_cached(scripted_service, markdown, monkeypatch,
                                                                   matching_rank):
-    from modules.techniques.service import Decision
 
     service = scripted_service.service
     revisions = [scripted_service.publish(), service.store.publish(
@@ -651,7 +650,7 @@ def test_complete_shortlist_review_is_sequential_and_lookup_cached(scripted_serv
         assert "Check assumptions and controls." in prompt
         assert "COMPLETE" in prompt
         selected = candidates[index]["revision_id"] if matching_rank == index + 1 else None
-        return Decision(selected_id=selected, reason="Covered procedure" if selected else "Missing required control")
+        return review_response(prompt, selected is not None)
 
     monkeypatch.setattr(service, "_json", review)
     cache = {}
@@ -689,7 +688,6 @@ def test_unresolved_complete_review_never_authorizes_generation(scripted_service
 def test_lookup_review_cache_invalidates_changed_inputs(scripted_service, monkeypatch, change):
     from modules.techniques.context import MethodologyContext
     from modules.techniques.coverage import Requirement
-    from modules.techniques.service import Decision
 
     service = scripted_service.service
     candidates = [{"revision_id": "first"}]
@@ -698,7 +696,7 @@ def test_lookup_review_cache_invalidates_changed_inputs(scripted_service, monkey
     monkeypatch.setattr(service.store, "document", lambda *args: document)
     calls = []
     monkeypatch.setattr(service, "_json", lambda *args: (
-        calls.append(args) or Decision(selected_id=None, reason="Required comparison absent")
+        calls.append(args) or review_response(args[1], False)
     ))
     cache = {}
     context = MethodologyContext(phase_contexts=["hypothesis_generation"])

@@ -317,8 +317,12 @@ fetches for that research attempt and returns a trust-configuration diagnostic t
 
 Semantic trigger decisions are cached within the operation for the same phase contexts, trigger
 fingerprint, assigned subjects, observation provenance, and submitted excerpt. Each trigger has its own cached decision; adding guidance preserves
-decisions for unchanged triggers and never resets a task's six-call allowance. The cache stores selected trigger IDs and supporting subject/observation references, never source
-excerpts or model reasons. Both positive and negative valid decisions can be reused across tasks and
+decisions for unchanged triggers and never resets a task's six-call allowance. The sensitive internal cache
+stores selected trigger IDs, subject/observation references, exact supporting excerpts and connection
+explanations. Observation identity is the source reference plus its content digest; quotes must occur
+in that revision's submitted excerpt. Shared origin or bundle co-occurrence does not establish relevance.
+Older decisions lacking these connections are invalidated without resetting call allowances.
+Both positive and negative valid decisions can be reused across tasks and
 continuations; each task retains its own recommendation provenance. Failed decisions remain retryable.
 Only actual model calls consume the six-call per-task allowance. Seeded evidence and non-empty tool
 outputs receive semantic matching; tool inputs receive deterministic detection only. Deterministic
@@ -1258,6 +1262,25 @@ or reuse of existing vectors. It includes the embedding model and search represe
 document count is global to the technique store and may exceed the selected module's document count.
 
 ### Contribution and checkpoint integrity
+
+Selection reviews map each requirement exactly once to covered, conditional or unmet, with numbered
+complete-document passages and exact quotations. Unmet judgments identify the missing requested
+capability. Equivalent procedures count regardless of headings or terminology; reviewers must not add
+stricter requirements. Python validates references and derives reuse eligibility; semantic coverage and
+subject relevance remain model judgments. Invalid mappings are unresolved, not catalog misses.
+When an exact quote is absent from its declared, known passage, Python resolves it only if exactly
+one other submitted passage contains it. Unknown passage IDs and absent or ambiguous quotes remain
+invalid. This corrects numbering without inventing evidence or adding a semantic retry.
+
+Benchmark `support_contract_valid` measures reference completeness, while `subject_relevance` compares
+recommendations against supplied lineage labels. `catalog_rejection_correct` compares a declared miss
+against those labels. A validated contract alone does not establish semantic correctness.
+The [continuation calibration record](research/technique/continuation-review-calibration-20261112.md)
+documents a three-case provider smoke check and its limitations.
+
+Persisted hypothesis checkpoints are validated at task entry before recommendation seeding,
+authentication preparation or prompt construction. A retained checkpoint contract failure ends
+that task without repeating preparation; existing evidence and subsequent scheduling are preserved.
 
 Future usefulness reviews require correspondence to a specific delivered procedure, control, exclusion
 criterion or justified next step. Exclusions require evidence mappings establishing the delivered

@@ -5226,6 +5226,19 @@ class MultiAgentWorkflowController:
             })
 
     def _run_task_in_trace(self, plan: OperationPlan, phase: PlanPhase, task: Task) -> None:
+        if self._is_hypothesis_producer(task):
+            checkpoint = task.recovery_context.get("hypothesis_checkpoint")
+            failed = task.recovery_context.get("hypothesis_checkpoint_contract_failure")
+            if checkpoint is not None:
+                failed = self._validated_checkpoint(task, checkpoint, "task_entry") is None or failed
+            if failed:
+                task = next(item for item in self.state.list_tasks() if item.task_uid == task.task_uid)
+                self._emit_task_started(task)
+                updated = self.state.mark_task(
+                    task, "partial_failure", "Hypothesis checkpoint contract failed; existing evidence preserved.",
+                )
+                self._emit_task_done(updated)
+                return
         if self._replace_missing_procedure_methods(plan, phase, task):
             return
         if phase.task_creation_mode == "hypothesis_dependent":

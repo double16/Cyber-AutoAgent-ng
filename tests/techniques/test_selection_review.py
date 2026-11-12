@@ -1,0 +1,59 @@
+import pytest
+
+from modules.techniques.selection_review import SelectionReview, document_passages
+
+
+def review(verdict="covered", **changes):
+    row = {
+        "requirement_id": "method", "verdict": verdict,
+        "passages": [{"passage_id": 1, "quote": "Compare versions"}],
+        "explanation": "The procedure supplies a version comparison",
+        "missing_capability": "Requested control absent" if verdict == "unmet" else "",
+    }
+    row.update(changes)
+    return SelectionReview(reason="Mapped procedure", judgments=[row])
+
+
+@pytest.mark.parametrize("verdict,reusable", [("covered", True), ("conditional", True), ("unmet", False)])
+def test_requirement_mapping_controls_reuse(verdict, reusable):
+    result = review(verdict)
+    result.validate_references([{"id": "method"}], {1: "Compare versions before inferring risk"})
+    assert result.reusable is reusable
+
+
+@pytest.mark.parametrize("change", [
+    {"requirement_id": "foreign"},
+    {"passages": [{"passage_id": 2, "quote": "Compare versions"}]},
+    {"passages": [{"passage_id": 1, "quote": "Invented procedure"}]},
+    {"missing_capability": ""},
+])
+def test_invalid_mapping_is_unresolved(change):
+    with pytest.raises(ValueError):
+        review("unmet", **change).validate_references([{"id": "method"}], {1: "Compare versions"})
+
+
+def test_duplicate_requirements_are_invalid():
+    result = review()
+    result.judgments.append(result.judgments[0])
+    with pytest.raises(ValueError, match="exactly once"):
+        result.validate_references([{"id": "method"}], {1: "Compare versions"})
+
+
+def test_unique_exact_quote_resolves_mistaken_known_passage_number():
+    result = review()
+    result.validate_references([{"id": "method"}], {1: "Introduction", 2: "Compare versions"})
+    assert result.judgments[0].passages[0].passage_id == 2
+
+
+def test_ambiguous_quote_cannot_repair_a_passage_number():
+    with pytest.raises(ValueError, match="quote the submitted revision"):
+        review().validate_references([{"id": "method"}], {
+            1: "Introduction", 2: "Compare versions", 3: "Compare versions again",
+        })
+
+
+def test_numbered_passages_preserve_single_line_and_unicode():
+    text = "## H3: Version prerequisites\n" + "λ" * 3400
+    passages = document_passages(text)
+    assert "".join(passages.values()) == text
+    assert list(passages) == [1, 2, 3]

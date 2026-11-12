@@ -1,3 +1,5 @@
+from conftest import connection_records
+
 """Technique milestones describe committed lifecycle state without replacing tool events."""
 
 import json
@@ -189,7 +191,7 @@ def test_recommendations_and_warnings_are_not_replayed(scripted_service, tmp_pat
     service.runner = lambda *args: json.dumps({
         "trigger_ids": [trigger], "reason": "Connected subject",
         "support": [{"trigger_id": trigger, "subject_ids": ["assigned"],
-                     "observation_references": ["capture"]}],
+                     "connections": connection_records(args[1], ["capture"]), "observation_references": ["capture"]}],
     })
     context.observe("first", "capture")
     context.observe("second", "capture")
@@ -248,6 +250,7 @@ def test_semantic_recommendation_event_omits_observations(scripted_service, tmp_
         {
             "trigger_ids": [context.triggers[0]["trigger_id"]],
             "support": [{"trigger_id": context.triggers[0]["trigger_id"], "subject_ids": ["assigned"],
+                         "connections": connection_records(args[1], ["capture"]),
                          "observation_references": ["capture"]}],
             "reason": "PRIVATE OBSERVATION",
         }

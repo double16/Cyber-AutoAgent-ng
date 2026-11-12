@@ -92,8 +92,12 @@ def evaluate_workflow(service, cases: list[RetrievalCase], directory) -> list[di
                 "complete_document_reviews": len(reviewed),
                 "justified_catalog_miss": any(event.get("catalog_miss", False) for event in selections),
                 "unresolved_reviews": sum(bool(event.get("unresolved")) for event in selections),
-                "subject_relevance": all(bool(row.get("supporting_subject_ids"))
-                                         for row in context.recommended()),
+                "support_contract_valid": all(bool(row.get("connections")) for row in context.recommended()),
+                "subject_relevance": not bool(recommended - expected) if recommended else None,
+                "catalog_rejection_correct": (
+                    not bool(case.relevant_lineages)
+                    if any(event.get("catalog_miss", False) for event in selections) else None
+                ),
                 "selection_correct": selected in case.relevant_lineages if not generated else None,
                 "unnecessary_generation": generated and bool(case.relevant_lineages),
                 "recommendation_precision": len(recommended & expected) / len(recommended) if recommended else None,

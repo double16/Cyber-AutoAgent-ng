@@ -1,0 +1,678 @@
+{
+  "document": "src/modules/operation_plugins/web/techniques/oauth-oidc.md",
+  "sha256": "99c97b90c4c5ffd7b7d0b99eae761573781e97029b76f2ec7cedf2c36baa67d7",
+  "requirements": [
+    {
+      "id": "method",
+      "description": "Preserve existing OAuth/OIDC flow binding guidance and expand all phases for discovery/JWKS issuer provenance, actual fetch location, isolated controlled destination/redirect/key trust/credential forwarding tests and cleanup. Public metadata, cross-host endpoints and legitimate rotation are controls, not vulnerabilities. Establish actor-controlled input and violated trust policy. Preserve existing path and signals.",
+      "kind": "authored_deliverable",
+      "grounding": "knowledge_allowed",
+      "origins": []
+    }
+  ],
+  "restrictions": [],
+  "contract": {
+    "acceptance_criteria": [
+      {
+        "id": "core:correctness",
+        "obligation": "Identify concrete technical errors, contradictions or consequential procedural flaws; model knowledge and reasoning are allowed without retrieved support.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:interpretation",
+        "obligation": "Outcome interpretations distinguish legitimate behavior from boundary violations.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:operational_sufficiency",
+        "obligation": "The requested method can be followed with explicit necessary prerequisites and controls.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:attribution",
+        "obligation": "Attribution accurately describes retained sources and limitations in the document, including metadata; body placement is required only when explicitly requested.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "id": "core:restrictions",
+        "obligation": "The method complies with supplied restrictions and document policies.",
+        "origin": "shared_review_policy"
+      },
+      {
+        "grounding": "knowledge_allowed",
+        "id": "requirement:method",
+        "kind": "authored_deliverable",
+        "obligation": "Preserve existing OAuth/OIDC flow binding guidance and expand all phases for discovery/JWKS issuer provenance, actual fetch location, isolated controlled destination/redirect/key trust/credential forwarding tests and cleanup. Public metadata, cross-host endpoints and legitimate rotation are controls, not vulnerabilities. Establish actor-controlled input and violated trust policy. Preserve existing path and signals.",
+        "origin": "validated_request",
+        "requirement_id": "method"
+      }
+    ],
+    "reference_fields": {
+      "criterion_id": {
+        "allowed_values": [
+          "core:correctness",
+          "core:interpretation",
+          "core:operational_sufficiency",
+          "core:attribution",
+          "core:restrictions",
+          "requirement:method"
+        ]
+      },
+      "requirement_ids": {
+        "allowed_values": [
+          "method"
+        ],
+        "empty_list_allowed": true
+      }
+    }
+  },
+  "snapshot": {
+    "draft_references": [
+      {
+        "reference": "d99c97b90c4c5:m1",
+        "path": "metadata.schema_version",
+        "value": 1
+      },
+      {
+        "reference": "d99c97b90c4c5:m2",
+        "path": "metadata.title",
+        "value": "OAuth and OpenID Connect flow boundaries"
+      },
+      {
+        "reference": "d99c97b90c4c5:m3",
+        "path": "metadata.purpose",
+        "value": "Assess OAuth/OIDC flow binding and discovery/key-fetch trust using policy-aware controlled comparisons."
+      },
+      {
+        "reference": "d99c97b90c4c5:m4",
+        "path": "metadata.applicability[0]",
+        "value": "An assigned authorization, callback, token or federated-login interaction uses OAuth or OIDC."
+      },
+      {
+        "reference": "d99c97b90c4c5:m5",
+        "path": "metadata.applicability[1]",
+        "value": "An assigned relying-party interaction retrieves OIDC discovery metadata or signing keys."
+      },
+      {
+        "reference": "d99c97b90c4c5:m6",
+        "path": "metadata.phases[0]",
+        "value": "reconnaissance"
+      },
+      {
+        "reference": "d99c97b90c4c5:m7",
+        "path": "metadata.phases[1]",
+        "value": "hypothesis_generation"
+      },
+      {
+        "reference": "d99c97b90c4c5:m8",
+        "path": "metadata.phases[2]",
+        "value": "vulnerability_verification"
+      },
+      {
+        "reference": "d99c97b90c4c5:m9",
+        "path": "metadata.phases[3]",
+        "value": "execution"
+      },
+      {
+        "reference": "d99c97b90c4c5:m10",
+        "path": "metadata.phases[4]",
+        "value": "analysis"
+      },
+      {
+        "reference": "d99c97b90c4c5:m11",
+        "path": "metadata.triggers[0].phases[0]",
+        "value": "reconnaissance"
+      },
+      {
+        "reference": "d99c97b90c4c5:m12",
+        "path": "metadata.triggers[0].when",
+        "value": "An assigned OAuth/OIDC flow or discovery/signing-key fetch requires prerequisite mapping."
+      },
+      {
+        "reference": "d99c97b90c4c5:m13",
+        "path": "metadata.triggers[0].request",
+        "value": "OAuth and OpenID Connect flow boundaries reconnaissance"
+      },
+      {
+        "reference": "d99c97b90c4c5:m14",
+        "path": "metadata.triggers[0].signals_any[0]",
+        "value": "http.oauth"
+      },
+      {
+        "reference": "d99c97b90c4c5:m15",
+        "path": "metadata.triggers[0].signals_any[1]",
+        "value": "http.oidc"
+      },
+      {
+        "reference": "d99c97b90c4c5:m16",
+        "path": "metadata.triggers[1].phases[0]",
+        "value": "hypothesis_generation"
+      },
+      {
+        "reference": "d99c97b90c4c5:m17",
+        "path": "metadata.triggers[1].when",
+        "value": "An assigned OAuth/OIDC flow or discovery/signing-key fetch requires future test design from recorded observations."
+      },
+      {
+        "reference": "d99c97b90c4c5:m18",
+        "path": "metadata.triggers[1].request",
+        "value": "OAuth and OpenID Connect flow boundaries hypothesis generation"
+      },
+      {
+        "reference": "d99c97b90c4c5:m19",
+        "path": "metadata.triggers[1].signals_any[0]",
+        "value": "http.oauth"
+      },
+      {
+        "reference": "d99c97b90c4c5:m20",
+        "path": "metadata.triggers[1].signals_any[1]",
+        "value": "http.oidc"
+      },
+      {
+        "reference": "d99c97b90c4c5:m21",
+        "path": "metadata.triggers[2].phases[0]",
+        "value": "vulnerability_verification"
+      },
+      {
+        "reference": "d99c97b90c4c5:m22",
+        "path": "metadata.triggers[2].when",
+        "value": "An assigned OAuth/OIDC flow or discovery/signing-key fetch requires controlled verification of an explicit boundary hypothesis."
+      },
+      {
+        "reference": "d99c97b90c4c5:m23",
+        "path": "metadata.triggers[2].request",
+        "value": "OAuth and OpenID Connect flow boundaries vulnerability verification"
+      },
+      {
+        "reference": "d99c97b90c4c5:m24",
+        "path": "metadata.triggers[2].signals_any[0]",
+        "value": "http.oauth"
+      },
+      {
+        "reference": "d99c97b90c4c5:m25",
+        "path": "metadata.triggers[2].signals_any[1]",
+        "value": "http.oidc"
+      },
+      {
+        "reference": "d99c97b90c4c5:m26",
+        "path": "metadata.triggers[3].phases[0]",
+        "value": "execution"
+      },
+      {
+        "reference": "d99c97b90c4c5:m27",
+        "path": "metadata.triggers[3].when",
+        "value": "An assigned OAuth/OIDC flow or discovery/signing-key fetch requires a minimal demonstration of a verified boundary violation."
+      },
+      {
+        "reference": "d99c97b90c4c5:m28",
+        "path": "metadata.triggers[3].request",
+        "value": "OAuth and OpenID Connect flow boundaries execution"
+      },
+      {
+        "reference": "d99c97b90c4c5:m29",
+        "path": "metadata.triggers[3].signals_any[0]",
+        "value": "http.oauth"
+      },
+      {
+        "reference": "d99c97b90c4c5:m30",
+        "path": "metadata.triggers[3].signals_any[1]",
+        "value": "http.oidc"
+      },
+      {
+        "reference": "d99c97b90c4c5:m31",
+        "path": "metadata.triggers[4].phases[0]",
+        "value": "analysis"
+      },
+      {
+        "reference": "d99c97b90c4c5:m32",
+        "path": "metadata.triggers[4].when",
+        "value": "An assigned OAuth/OIDC flow or discovery/signing-key fetch requires interpretation of recorded comparisons."
+      },
+      {
+        "reference": "d99c97b90c4c5:m33",
+        "path": "metadata.triggers[4].request",
+        "value": "OAuth and OpenID Connect flow boundaries analysis"
+      },
+      {
+        "reference": "d99c97b90c4c5:m34",
+        "path": "metadata.triggers[4].signals_any[0]",
+        "value": "http.oauth"
+      },
+      {
+        "reference": "d99c97b90c4c5:m35",
+        "path": "metadata.triggers[4].signals_any[1]",
+        "value": "http.oidc"
+      },
+      {
+        "reference": "d99c97b90c4c5:m36",
+        "path": "metadata.sources[0].url",
+        "value": "https://raw.githubusercontent.com/OWASP/CheatSheetSeries/master/cheatsheets/OAuth2_Cheat_Sheet.md"
+      },
+      {
+        "reference": "d99c97b90c4c5:m37",
+        "path": "metadata.sources[0].title",
+        "value": "OAuth 2.0 Protocol Cheatsheet"
+      },
+      {
+        "reference": "d99c97b90c4c5:m38",
+        "path": "metadata.sources[0].retrieved_at",
+        "value": "2026-11-06T21:29:20.227793+00:00"
+      },
+      {
+        "reference": "d99c97b90c4c5:m39",
+        "path": "metadata.sources[0].selection_reason",
+        "value": "authorization code flow, PKCE and redirect binding."
+      },
+      {
+        "reference": "d99c97b90c4c5:m40",
+        "path": "metadata.sources[1].url",
+        "value": "https://www.rfc-editor.org/rfc/rfc9700.txt"
+      },
+      {
+        "reference": "d99c97b90c4c5:m41",
+        "path": "metadata.sources[1].title",
+        "value": "oauth-rfc9700"
+      },
+      {
+        "reference": "d99c97b90c4c5:m42",
+        "path": "metadata.sources[1].retrieved_at",
+        "value": "2026-11-06T21:29:21.136006+00:00"
+      },
+      {
+        "reference": "d99c97b90c4c5:m43",
+        "path": "metadata.sources[1].selection_reason",
+        "value": "OAuth2 security best current practice specifies redirect matching, PKCE, mix-up prevention and token replay controls."
+      },
+      {
+        "reference": "d99c97b90c4c5:m44",
+        "path": "metadata.sources[2].url",
+        "value": "https://openid.net/specs/openid-connect-core-1_0.html"
+      },
+      {
+        "reference": "d99c97b90c4c5:m45",
+        "path": "metadata.sources[2].title",
+        "value": "Final: OpenID Connect Core 1.0 incorporating errata set 2"
+      },
+      {
+        "reference": "d99c97b90c4c5:m46",
+        "path": "metadata.sources[2].retrieved_at",
+        "value": "2026-11-07T10:32:59.154688+00:00"
+      },
+      {
+        "reference": "d99c97b90c4c5:m47",
+        "path": "metadata.sources[2].selection_reason",
+        "value": "OpenID Connect Core specifies ID-token issuer/audience/signature validation and nonce binding; it is not an OAuth access-token profile."
+      },
+      {
+        "reference": "d99c97b90c4c5:m48",
+        "path": "metadata.sources[3].url",
+        "value": "https://openid.net/specs/openid-connect-discovery-1_0.html"
+      },
+      {
+        "reference": "d99c97b90c4c5:m49",
+        "path": "metadata.sources[3].title",
+        "value": "OpenID Connect Discovery 1.0 incorporating errata set 2"
+      },
+      {
+        "reference": "d99c97b90c4c5:m50",
+        "path": "metadata.sources[3].retrieved_at",
+        "value": "2026-11-12"
+      },
+      {
+        "reference": "d99c97b90c4c5:m51",
+        "path": "metadata.sources[3].selection_reason",
+        "value": "Issuer consistency, provider configuration and HTTPS signing-key metadata; public discovery and cross-host endpoints can be legitimate."
+      },
+      {
+        "reference": "d99c97b90c4c5:m52",
+        "path": "metadata.active",
+        "value": true
+      },
+      {
+        "reference": "d99c97b90c4c5:m53",
+        "path": "metadata.source_coverage",
+        "value": "Independently selected retrieved references supply mechanism/control background. authorization code flow, PKCE and redirect binding. Limits: Development-oriented guidance supplies mechanism/control background; application policy, live exploitability, negative controls and minimal-impact procedure remain original methodology requiring target-specific verification. OAuth2 security best current practice specifies redirect matching, PKCE, mix-up prevention and token replay controls. Limits: Development-oriented guidance supplies mechanism/control background; application policy, live exploitability, negative controls and minimal-impact procedure remain original methodology requiring target-specific verification. OpenID Connect Core specifies ID-token issuer/audience/signature validation and nonce binding; it is not an OAuth access-token profile. Limits: Must be read alongside current OAuth BCP; legacy optional flows in Core do not override newer recommendations. Numbered procedures and controls are original knowledge-allowed synthesis, not individually source-verified. No completed target execution or affected-version claim is supplied. Discovery supplies issuer and metadata requirements, not a universal same-host fetch rule. Controlled redirect, destination and credential-forwarding comparisons are original knowledge-allowed methodology, not source-proven SSRF. Public metadata and public signing keys are expected. No affected-version assertions are made."
+      },
+      {
+        "reference": "d99c97b90c4c5:b1",
+        "path": "body.line[1]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b2",
+        "path": "body.line[2]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b3",
+        "path": "body.line[3]",
+        "value": "# OAuth and OpenID Connect flow boundaries"
+      },
+      {
+        "reference": "d99c97b90c4c5:b4",
+        "path": "body.line[4]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b5",
+        "path": "body.line[5]",
+        "value": "## Applicability and prerequisites"
+      },
+      {
+        "reference": "d99c97b90c4c5:b6",
+        "path": "body.line[6]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b7",
+        "path": "body.line[7]",
+        "value": "An assigned authorization, callback, token or federated-login interaction uses OAuth or OIDC. Use an authorized test client and two isolated owned browser sessions, test accounts, registered callback details and the expected client/issuer/resource policy. Identify which endpoints belong to the assessed party; third-party identity-provider testing needs separate scope. Use a browser, capture/replay capability and local token inspection or equivalents."
+      },
+      {
+        "reference": "d99c97b90c4c5:b8",
+        "path": "body.line[8]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b9",
+        "path": "body.line[9]",
+        "value": "For discovery-only work, browser sessions and test accounts are needed only when the chosen comparison requires login. Establish the configured issuer, relying-party owner, trust policy, metadata provenance and whether fetches occur in the browser or server. A public discovery URL alone does not establish a server-side fetch. Controlled metadata, redirect and key responses require an authorized test issuer or equivalent owned configuration; do not modify a shared production issuer."
+      },
+      {
+        "reference": "d99c97b90c4c5:b10",
+        "path": "body.line[10]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b11",
+        "path": "body.line[11]",
+        "value": "Preserve configured HTTP/HTTPS proxies where supported. Choose only the assigned branch and obey the operation's scope, identities, rate and state-change constraints. Missing prerequisites stay explicit; a lookup signal is not proof. Equivalent available tools may replace named capabilities."
+      },
+      {
+        "reference": "d99c97b90c4c5:b12",
+        "path": "body.line[12]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b13",
+        "path": "body.line[13]",
+        "value": "## Reconnaissance"
+      },
+      {
+        "reference": "d99c97b90c4c5:b14",
+        "path": "body.line[14]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b15",
+        "path": "body.line[15]",
+        "value": "1. From assigned captures identify client, authorization server, redirect URI, response/grant type, scopes and resource server. Distinguish authorization via access tokens from authentication via ID tokens; do not treat token names as proof of consumers."
+      },
+      {
+        "reference": "d99c97b90c4c5:b16",
+        "path": "body.line[16]",
+        "value": "2. Record transaction/session binding mechanisms: state, PKCE challenge/method/verifier, OIDC nonce, issuer and callback routing. Inspect only observed flow metadata; unknown provider configuration remains a prerequisite, not a reason to probe unrelated issuers."
+      },
+      {
+        "reference": "d99c97b90c4c5:b17",
+        "path": "body.line[17]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b18",
+        "path": "body.line[18]",
+        "value": "3. For an assigned discovery interaction, map the configured issuer, returned issuer, metadata URL, JWKS URI and observed redirect chain. Distinguish public configuration retrieval from sensitive information disclosure; record actual internal information and its audience policy rather than labeling all endpoint URLs sensitive. Do not guess additional discovery hosts."
+      },
+      {
+        "reference": "d99c97b90c4c5:b19",
+        "path": "body.line[19]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b20",
+        "path": "body.line[20]",
+        "value": "## Hypothesis generation"
+      },
+      {
+        "reference": "d99c97b90c4c5:b21",
+        "path": "body.line[21]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b22",
+        "path": "body.line[22]",
+        "value": "1. From recorded flows design separate tests for redirect binding, authorization-code transaction/client binding, login CSRF/mix-up and ID-token validation. Specify which owned session and actor each value came from and which protected effect would establish a violation."
+      },
+      {
+        "reference": "d99c97b90c4c5:b23",
+        "path": "body.line[23]",
+        "value": "2. Plan accepted fresh flows and negative controls such as an unrelated verifier, invalid code and wrong-session callback. Missing state alone is not a login-CSRF finding: another transaction-bound mechanism may supply protection."
+      },
+      {
+        "reference": "d99c97b90c4c5:b24",
+        "path": "body.line[24]",
+        "value": "3. Plan legitimate signed wrong-audience/issuer/nonce ID-token comparisons only when a test issuer or owned issuance flow permits them. Editing a signed claim primarily tests integrity; leave impossible claim branches untested. Do not redeem codes during hypothesis generation."
+      },
+      {
+        "reference": "d99c97b90c4c5:b25",
+        "path": "body.line[25]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b26",
+        "path": "body.line[26]",
+        "value": "4. From recorded discovery evidence, plan separate issuer-consistency, destination-policy, key-source and outbound-credential tests. Specify the input the excluded actor controls and the actual relying party making the fetch. A legitimate cross-host JWKS URL is not a violation. Define an accepted issuer/key baseline, an invalid or mismatched issuer control, and the observable prohibited effect. Missing control of a test issuer leaves that branch unresolved."
+      },
+      {
+        "reference": "d99c97b90c4c5:b27",
+        "path": "body.line[27]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b28",
+        "path": "body.line[28]",
+        "value": "## Vulnerability verification"
+      },
+      {
+        "reference": "d99c97b90c4c5:b29",
+        "path": "body.line[29]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b30",
+        "path": "body.line[30]",
+        "value": "1. Complete a fresh normal flow for account A, observing final application identity and one authorized API response. Keep account B in a separate cookie jar. Preserve the exact initial transaction and avoid accidental automatic login."
+      },
+      {
+        "reference": "d99c97b90c4c5:b31",
+        "path": "body.line[31]",
+        "value": "2. Test redirect handling with one approved controlled callback variation, such as a changed path or a distinct controlled origin, while holding the client fixed. Observe actual authorization response destination; rejection, normalization and an error-page link differ from code/token delivery. Do not follow redirects to unapproved hosts."
+      },
+      {
+        "reference": "d99c97b90c4c5:b32",
+        "path": "body.line[32]",
+        "value": "3. Start fresh transactions for each code test. Change only the verifier or swap a code between the two owned sessions/clients as appropriate, with invalid-code and correct-session controls. A consumed/expired code failure is not evidence of correct binding. Check the resulting application identity, not just token endpoint status."
+      },
+      {
+        "reference": "d99c97b90c4c5:b33",
+        "path": "body.line[33]",
+        "value": "4. For OIDC, compare the token accepted by the relying party against the established issuer, client audience, signature/key and transaction nonce rules. Use a correctly signed wrong-context token where possible; isolate each rule. An access token accepted at its intended API is not an ID-token validation bypass."
+      },
+      {
+        "reference": "d99c97b90c4c5:b34",
+        "path": "body.line[34]",
+        "value": "5. Re-run a normal flow and classify the exact violated binding. A successful replay of a valid bearer access token may be intended; sender constraint, revocation or one-time policy must be established before calling replay a defect."
+      },
+      {
+        "reference": "d99c97b90c4c5:b35",
+        "path": "body.line[35]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b36",
+        "path": "body.line[36]",
+        "value": "### Discovery and key-fetch branch"
+      },
+      {
+        "reference": "d99c97b90c4c5:b37",
+        "path": "body.line[37]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b38",
+        "path": "body.line[38]",
+        "value": "1. Capture a successful normal discovery/key-fetch sequence through the actual relying party. Record configured and returned issuer, TLS destinations, cache state and accepted keys. Discovery issuer consistency and ID-token issuer validation are distinct checks."
+      },
+      {
+        "reference": "d99c97b90c4c5:b39",
+        "path": "body.line[39]",
+        "value": "2. On the owned test issuer, vary one field or one redirect at a time. Compare issuer mismatch rejection separately from a policy-permitted cross-host destination and a controlled policy-excluded destination. Use only approved collectors; do not probe internal addresses or unrelated hosts. A collector request proves reachability, not arbitrary SSRF or token acceptance."
+      },
+      {
+        "reference": "d99c97b90c4c5:b40",
+        "path": "body.line[40]",
+        "value": "3. To test credential forwarding, use a disposable synthetic credential marker configured through an authorized test transport, or an equivalently isolated test identity. Inspect only the controlled receiving endpoint. Hold the original request constant while changing one redirect destination; compare an accepted destination and a destination excluded by the established credential-audience policy. Do not solicit real service credentials. If marker injection is unavailable, preserve the limitation rather than forwarding real tokens."
+      },
+      {
+        "reference": "d99c97b90c4c5:b41",
+        "path": "body.line[41]",
+        "value": "4. For key-source trust, use owned keys and synthetic identities. Compare a legitimate rotation within the trusted issuer with a key source or issuer context the actor is not allowed to select. Check the resulting relying-party identity and authorization, not merely a downloaded JWKS or cache entry. A key identifier alone is not a trust anchor, and identical key IDs across issuers do not establish equivalence."
+      },
+      {
+        "reference": "d99c97b90c4c5:b42",
+        "path": "body.line[42]",
+        "value": "5. Isolate cached from fresh behavior with disposable client configuration or supported cache controls. Do not flush shared caches. Repeat the normal flow after each variation; failed tests caused by stale keys, expiry or an unavailable issuer are inconclusive."
+      },
+      {
+        "reference": "d99c97b90c4c5:b43",
+        "path": "body.line[43]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b44",
+        "path": "body.line[44]",
+        "value": "## Execution"
+      },
+      {
+        "reference": "d99c97b90c4c5:b45",
+        "path": "body.line[45]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b46",
+        "path": "body.line[46]",
+        "value": "1. Demonstrate the verified flow error with a harmless identity display or one owned protected resource, using only the two test accounts. Prove which account the browser acquired without touching other users or collecting real tokens through a third-party destination."
+      },
+      {
+        "reference": "d99c97b90c4c5:b47",
+        "path": "body.line[47]",
+        "value": "2. Revoke test grants/tokens where the owned flow supports it, remove temporary callbacks and test clients, and end both sessions. Verify the ordinary flow still works and controlled callback content is removed."
+      },
+      {
+        "reference": "d99c97b90c4c5:b48",
+        "path": "body.line[48]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b49",
+        "path": "body.line[49]",
+        "value": "3. For a verified discovery violation, retain one synthetic outbound marker or harmless test-account effect. Restore test metadata, redirect handlers, client configuration and disposable cache state; revoke synthetic credentials and verify the normal issuer/key flow."
+      },
+      {
+        "reference": "d99c97b90c4c5:b50",
+        "path": "body.line[50]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b51",
+        "path": "body.line[51]",
+        "value": "## Analysis"
+      },
+      {
+        "reference": "d99c97b90c4c5:b52",
+        "path": "body.line[52]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b53",
+        "path": "body.line[53]",
+        "value": "1. Separate authorization-server acceptance, code delivery, token redemption and relying-party login; a failure in one does not establish the others. Evaluate PKCE, nonce and state in the complete flow, not as isolated missing parameters."
+      },
+      {
+        "reference": "d99c97b90c4c5:b54",
+        "path": "body.line[54]",
+        "value": "2. Explain expected public-client behavior, valid multi-audience rules, code expiry/reuse, cross-site cookie policy and deliberate account switching. A weak-looking response type or absent state is context, not standalone proof of account takeover."
+      },
+      {
+        "reference": "d99c97b90c4c5:b55",
+        "path": "body.line[55]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b56",
+        "path": "body.line[56]",
+        "value": "3. Public discovery and signing keys are expected; cross-host endpoints and legitimate key rotation can be valid. Distinguish a metadata fetch, a policy-excluded network request, leaked credentials and actual wrong-context token acceptance. Require evidence of the specific actor-controlled input and violated destination, credential-audience or issuer/key trust rule for the corresponding claim."
+      },
+      {
+        "reference": "d99c97b90c4c5:b57",
+        "path": "body.line[57]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b58",
+        "path": "body.line[58]",
+        "value": "## Evidence requirements"
+      },
+      {
+        "reference": "d99c97b90c4c5:b59",
+        "path": "body.line[59]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b60",
+        "path": "body.line[60]",
+        "value": "Preserve full redirect chain and transaction timeline, browser-session labels, code/token provenance, verifier/nonce relationships, accepted and rejected comparisons and final identity/resource effects. For discovery branches retain issuer configuration provenance, metadata/key hashes, redirect and receiver records, cache context, isolated variations and restoration evidence. Keep secret values internal; public explanations use placeholders."
+      },
+      {
+        "reference": "d99c97b90c4c5:b61",
+        "path": "body.line[61]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b62",
+        "path": "body.line[62]",
+        "value": "## Limitations"
+      },
+      {
+        "reference": "d99c97b90c4c5:b63",
+        "path": "body.line[63]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b64",
+        "path": "body.line[64]",
+        "value": "External observations cannot establish all client registrations or issuer trust settings. Unsupported grants, third-party providers and unsigned claim mutations remain untested rather than disproven. No token theft or broad provider assessment is authorized."
+      },
+      {
+        "reference": "d99c97b90c4c5:b65",
+        "path": "body.line[65]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b66",
+        "path": "body.line[66]",
+        "value": "## Trigger examples and non-examples"
+      },
+      {
+        "reference": "d99c97b90c4c5:b67",
+        "path": "body.line[67]",
+        "value": ""
+      },
+      {
+        "reference": "d99c97b90c4c5:b68",
+        "path": "body.line[68]",
+        "value": "Matching: An assigned OAuth/OIDC flow or relying-party discovery/key-fetch interaction has a relevant binding or trust question. Select the section corresponding to the current structured phase. Non-matching: a vulnerability name in unrelated prose, an unassigned surface or a result with no relevant processing path. Signals and semantic conditions recommend this method; they never establish its prerequisites or conclusion."
+      }
+    ]
+  }
+}
