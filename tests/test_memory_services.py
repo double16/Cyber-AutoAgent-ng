@@ -6840,3 +6840,52 @@ def test_hypothesis_generation_requires_prior_inventory_phase(hypothesis_generat
     controller.state.store_plan(plan)
     with pytest.raises(ValueError, match="requires a completed prior inventory manifest"):
         controller._create_tasks(plan, phase)
+
+
+@pytest.mark.parametrize("fresh", [
+    'password="synthetic-secret-123"',
+    '\n\nconst config = {\n password: "synthetic-secret-123"\n};',
+    'other=1;password="synthetic-secret-123";token="another-secret-456"',
+])
+def test_secret_comparison_ignores_transformation_and_locations(fake_memory_client, fresh):
+    root = Path(mod._operation_output_root()) / "artifacts"
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / "source.txt"
+    source.write_text('password="synthetic-secret-123"')
+    exposure = mod.detect_secret_exposures(str(source))[0]
+    candidate = {"evidence_assertions": [
+        {"type": "secret_exposure", "kind": exposure.kind, "digest": exposure.digest,
+         "artifact": str(source), "source_location": {"line_number": 99}},
+    ]}
+    target = root / "fresh.txt"
+    target.write_text(fresh)
+    result = mod._compare_secret_exposure(candidate, str(target))
+    assert result["available"] and result["all_predicates_reproduced"]
+    assert result["matching_predicates"][0]["source_location"]["line_number"] != 99
+    assert "synthetic-secret-123" not in str(result)
+    for negative in [exposure.digest, 'password="different-secret-456"', "no credentials"]:
+        target.write_text(negative)
+        result = mod._compare_secret_exposure(candidate, str(target))
+        assert result["available"] and not result["all_predicates_reproduced"]
+        assert result["matching_predicates"] == []
+
+
+def test_secret_comparison_multiple_predicates_and_unavailable(fake_memory_client, monkeypatch):
+    artifact = Path(mod._operation_output_root()) / "artifacts" / "multiple.txt"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text('password="synthetic-secret-123"\ntoken="another-secret-456"')
+    assertions = [{"type": "secret_exposure", "kind": item.kind, "digest": item.digest}
+                  for item in mod.detect_secret_exposures(str(artifact))]
+    assert len(assertions) == 2
+    candidate = {"verification_packet": {"evidence_assertions": assertions}}
+    assert mod._compare_secret_exposure(candidate, str(artifact))["all_predicates_reproduced"]
+    artifact.write_text('password="synthetic-secret-123"')
+    result = mod._compare_secret_exposure(candidate, str(artifact))
+    assert result["available"] and not result["all_predicates_reproduced"]
+    assert len(result["matching_predicates"]) == 1
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(PermissionError()))
+    result = mod._compare_secret_exposure(candidate, str(artifact))
+    assert result["available"] is False
+    assert result["matching_predicates"] == []
+    with pytest.raises(ValueError):
+        mod._compare_secret_exposure(candidate, "artifact:missing.txt")

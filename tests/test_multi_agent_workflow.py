@@ -9833,7 +9833,10 @@ def test_task_execution_does_not_retry_evaluator_feedback_when_corrections_are_d
     assert state.tasks[0].status_reason == "remaining endpoint lacks evidence"
 
 
-def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch):
+@pytest.mark.parametrize("eligible", [False, True])
+def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch, eligible):
+    comparison = _tool("compare_secret_exposure") if eligible else None
+    monkeypatch.setattr(workflow_mod, "build_compare_secret_exposure_tool", lambda task: comparison)
     runtime = _runtime()
     task = Task(
         task_uid="verify-1",
@@ -9852,6 +9855,8 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
     monkeypatch.setattr(workflow_mod, "finding_validation_submitted", Mock(return_value=True))
 
     def text_runner(role, prompt, tools, system_prompt):
+        assert "compare_secret_exposure" not in {getattr(item, "__name__", "") for item in tools}
+        assert "Use compare_secret_exposure" not in prompt
         if role == "task_prompt_builder":
             return '{"prompt":"verify","tools":[]}'
         if role == "task_evaluator":
@@ -9863,6 +9868,7 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
         tool_names.update(tool.__name__ for tool in tools)
 
         def run(prompt, policy):
+            assert ("Use compare_secret_exposure" in prompt) == eligible
             policies.append(policy)
             return "validation submitted"
 
@@ -9880,6 +9886,7 @@ def test_finding_validation_task_requires_record_tool_and_finalizes(monkeypatch)
 
     assert policies[0].required_tool_names == {"record_finding_validation"}
     assert "record_finding_validation" in tool_names
+    assert ("compare_secret_exposure" in tool_names) == eligible
     assert "store_finding" not in tool_names
     assert "record_task_acceptance" not in tool_names
     finalize.assert_called_once_with(task, "done", "evidence approved")

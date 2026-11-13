@@ -916,7 +916,7 @@ def test_bounded_reader_rejects_overlapping_line_and_byte_pages(tmp_path: Path):
         )
         assert "one" in line_reader("artifact:artifacts/lines.txt", max_lines=2)
         with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
-            line_reader("artifact:artifacts/lines.txt", start_line=2, max_lines=2)
+            line_reader("artifact:artifacts/lines.txt", start_line=1, max_lines=3)
         with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
             line_reader("artifact:artifacts/lines.txt", start_line=3, max_lines=2)
 
@@ -1310,3 +1310,34 @@ def test_metadata_only_budget_cannot_return_stalled_page(tmp_path):
         constrained_reader = create_artifact_reader(40000, max_output_chars=len(str(metadata)))
         with pytest.raises(ValueError, match="one complete character"):
             constrained_reader(path.name, start_byte=0, max_bytes=1000)
+
+
+@pytest.mark.parametrize(
+    ("pages", "rejected"),
+    [
+        ([(1, 138), (138, 30)], False),
+        ([(1, 138), (139, 30)], False),
+        ([(1, 3), (3, 3), (5, 3)], False),
+        ([(1, 3), (2, 3)], True),
+        ([(1, 3), (1, 3)], True),
+        ([(1, 3), (3, 1)], True),
+        ([(1, 3), (3, 3), (3, 4)], True),
+        ([(3, 3), (1, 3)], False),
+        ([(1, 1), (1, 2), (2, 2)], False),
+    ],
+)
+def test_bounded_reader_one_line_buffer(tmp_path: Path, pages, rejected):
+    artifact = tmp_path / "lines.txt"
+    artifact.write_text("\n".join(str(i) for i in range(1, 167)), encoding="utf-8")
+    with patch("modules.tools.artifact._operation_output_root", return_value=str(tmp_path)):
+        reader = create_bounded_artifact_reader(max_reads=10, context_window_tokens=48_000)
+        for index, (start, count) in enumerate(pages):
+            if rejected and index == len(pages) - 1:
+                with pytest.raises(RuntimeError, match=ARTIFACT_READ_OVERLAP_GUARD_MARKER):
+                    reader(str(artifact), start_line=start, max_lines=count)
+            else:
+                payload = ast.literal_eval(reader(str(artifact), start_line=start, max_lines=count))
+                assert payload["start_line"] == start
+                assert payload["content"].splitlines() == [
+                    str(i) for i in range(start, min(167, start + count))
+                ]

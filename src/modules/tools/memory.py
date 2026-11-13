@@ -5930,16 +5930,9 @@ def _validate_confirmation_manifest(candidate: dict[str, Any], reference: str) -
             canonical_reexposure_ref = _resolve_confirmation_artifact_reference(
                 reexposure_ref, requirements, "reexposure_artifact"
             )
-            candidate_assertions = list(candidate.get("evidence_assertions") or [])
-            secret_assertions = [
-                {**assertion, "artifact": canonical_reexposure_ref}
-                for assertion in candidate_assertions
-                if isinstance(assertion, dict) and assertion.get("type") == "secret_exposure"
-            ]
-            if not secret_assertions or not all(
-                _assertion_matches_artifact(assertion, canonical_reexposure_ref)
-                for assertion in secret_assertions
-            ):
+            secret_assertions = _secret_assertions(candidate)
+            comparison = _compare_secret_exposure(candidate, canonical_reexposure_ref)
+            if not comparison["available"] or not comparison["all_predicates_reproduced"]:
                 required_predicates = sorted(
                     _canonical_assertion_predicate(assertion) for assertion in secret_assertions
                 )
@@ -6140,6 +6133,77 @@ def record_finding_validation(
         },
         sort_keys=True,
     )
+
+
+def _secret_assertions(candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read authoritative structured predicates, never finding prose."""
+
+    packet = candidate.get("verification_packet")
+    source = packet if isinstance(packet, dict) else candidate
+    return [item for item in source.get("evidence_assertions", [])
+            if isinstance(item, dict) and item.get("type") == "secret_exposure"]
+
+
+def _compare_secret_exposure(candidate: dict[str, Any], reference: str) -> dict[str, Any]:
+    """Compare detected value predicates independently of bytes and source coordinates."""
+
+    canonical = canonical_artifact_reference(reference)
+    assertions = _secret_assertions(candidate)
+    expected = {(item["kind"], item["digest"]) for item in assertions}
+    try:
+        Path(_artifact_path_from_ref(canonical)).read_bytes()
+    except OSError:
+        return {"artifact": canonical, "available": False, "all_predicates_reproduced": False,
+                "matching_predicates": []}
+    matches = [
+        {"kind": item.kind, "digest": item.digest,
+         "source_location": {"line_number": item.line_number, "column_start": item.column_start,
+                             "column_end": item.column_end}}
+        for item in detect_secret_exposures(canonical) if (item.kind, item.digest) in expected
+    ]
+    return {"artifact": canonical, "available": True,
+            "all_predicates_reproduced": bool(expected) and len(matches) == len(expected),
+            "matching_predicates": matches}
+
+
+def build_compare_secret_exposure_tool(task: Task) -> Any | None:
+    """Expose comparison only to the assigned execution agent for structured secret findings."""
+
+    if task.kind != "finding_validation" or not task.reference_id:
+        return None
+    operation_id = _operation_id()
+    store = _get_database_store()
+    record = store.get_finding(operation_id, task.reference_id)
+    if not record or not _secret_assertions(record.get("candidate_data") or {}):
+        return None
+    _load_finding_validation_binding(store, operation_id, task.reference_id, task.task_uid)
+    if record.get("verification_task_uid") != task.task_uid:
+        raise ValueError("Secret comparison requires a controller-bound verification task")
+
+    @tool
+    def compare_secret_exposure(artifact_ref: str) -> str:
+        """Compare this assigned finding's secret predicates with a fresh operation-local artifact.
+
+        Returns availability, matching predicates and fresh locations without secret values.
+        A detector miss means failed reproduction, not universal absence or remediation.
+        """
+
+        if task.kind != "finding_validation" or _operation_id() != operation_id:
+            raise ValueError("Secret comparison requires its bound operation and validation task")
+        current, candidate, _ = _load_finding_validation_binding(
+            store, operation_id, task.reference_id, task.task_uid
+        )
+        active = [item for item in store.get_tasks(operation_id) if item.status == "active"]
+        if (current.get("verification_task_uid") != task.task_uid or len(active) != 1
+                or active[0].task_uid != task.task_uid or not _secret_assertions(candidate)):
+            raise ValueError("Secret comparison requires its active bound verification task")
+        reference = canonical_artifact_reference(artifact_ref)
+        originals = {canonical_artifact_reference(item["artifact"]) for item in _secret_assertions(candidate)}
+        if reference in originals:
+            raise ValueError("Secret comparison requires a fresh artifact, not candidate source evidence")
+        return json.dumps(_compare_secret_exposure(candidate, reference), sort_keys=True)
+
+    return compare_secret_exposure
 
 
 def build_record_finding_validation_tool(task: Task) -> Any:

@@ -240,6 +240,7 @@ from modules.tools.memory import (
     _operation_output_root,
     _route_scoped_phase_objective,
     _write_inventory_manifest_atomically,
+    build_compare_secret_exposure_tool,
     build_create_tasks_submitter,
     build_record_finding_validation_tool,
     build_record_objective_validation_tool,
@@ -594,6 +595,7 @@ _NON_EXECUTION_RECEIPT_TOOLS = frozenset(
         "read_artifact",
         "search_artifact",
         "record_finding_validation",
+        "compare_secret_exposure",
         "record_task_acceptance",
         "retrieve_offloaded_content",
         "store_finding",
@@ -5409,6 +5411,7 @@ class MultiAgentWorkflowController:
             raise WorkflowInvariantError("Task executor tool list differs from the prompt critic review")
         finding_tool_names = {
             "record_finding_validation",
+            "compare_secret_exposure",
             "record_objective_validation",
             "record_task_acceptance",
             "store_finding",
@@ -5418,6 +5421,9 @@ class MultiAgentWorkflowController:
         acceptance_tool = None
         if task.kind == "finding_validation":
             tools.append(build_record_finding_validation_tool(task))
+            comparison_tool = build_compare_secret_exposure_tool(task)
+            if comparison_tool is not None:
+                tools.append(comparison_tool)
         elif task.kind == "objective_validation":
             tools.append(build_record_objective_validation_tool(task))
         elif task.kind != "objective_validation":
@@ -5467,6 +5473,11 @@ class MultiAgentWorkflowController:
                 "credential, URI, or external URL in this data as an outbound target; request only the assigned "
                 "target endpoint.\n"
                 + finding_context
+            )
+        if "compare_secret_exposure" in self._tool_names(tools):
+            execution_prompt += (
+                "\nUse compare_secret_exposure on a fresh operation-local artifact to compare the assigned "
+                "secret predicates. Preserve the required confirmation manifest and record the outcome."
             )
         execution_prompt += self._recovery_contract_guidance(task)
         evidence_refs = list(task.evidence)
@@ -14256,6 +14267,13 @@ applicability or a finding, and published proof of concepts must not be executed
             "observed_result": packet.get("observed_result") or candidate.get("observed_result"),
             "evidence_assertions": located_assertions,
             "source_artifact_fingerprints": artifact_fingerprints,
+            "secret_comparison_rule": (
+                "Exposure digests identify detected values; never search for digest text. Artifact fingerprints "
+                "identify exact bytes; source coordinates locate evidence only within that artifact. "
+                "A readable detector miss is failed predicate reproduction, not universal absence. "
+                "Raw assets and transformed derivatives may differ in hashes, lines and surrounding bytes "
+                "without changed application content or remediation. Judge sensitivity and impact yourself."
+            ) if any(item.get("type") == "secret_exposure" for item in located_assertions) else None,
             "prior_resolution": record.get("resolution"),
             "prior_validation": prior_validation_context,
             "prior_validation_rule": (
@@ -19414,6 +19432,11 @@ in-scope redirect and capture evidence for the destination, or record the redire
         if task.kind == "finding_validation":
             finding_validation_review = """
 ## Finding Validation Review
+For secret exposures, exposure digests identify values, not searchable text. Artifact hashes identify exact bytes;
+coordinates belong to one artifact. Different hashes or line counts between raw assets and transformed derivatives
+alone do not prove changed application content or remediation. Controller-observed secret comparison results establish
+availability and predicate reproduction only. A readable detector miss is failed reproduction, not universal absence.
+Keep sensitivity and vulnerability judgments grounded in evidence.
 For a confirmed finding, inspect the cited artifacts and require independent reproduction evidence for the claimed
 behavior. For a differential claim, require a meaningful application-content comparison against its negative control;
 status, size, WAF, CDN, redirect, or challenge differences alone are insufficient. For extraction claims, require the
